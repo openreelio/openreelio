@@ -384,16 +384,102 @@ fn test_timeline_insert_clip() {
 
 #[test]
 fn test_timeline_undo_redo() {
-    // Note: undo/redo state persists across CLI invocations because the
-    // CommandExecutor is reconstructed from the ops log on each open.
-    // However, undo stack requires the executor to track reversible ops.
-    // In the current architecture, undo stack is in-memory only and resets
-    // between CLI invocations. So we test that the commands parse and execute
-    // without errors when there IS something to undo (within a single plan).
     let dir = create_temp_project("undo_redo_test");
     let path = project_path(&dir, "undo_redo_test");
 
-    // Undo with nothing to undo should fail gracefully
+    let dummy_file = dir.path().join("undo_redo_clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    let clips_after_insert = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips_after_insert["count"], 1);
+
+    run_cli_ok(&["timeline", "undo", "--path", &path]);
+    let clips_after_undo = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips_after_undo["count"], 0);
+
+    run_cli_ok(&["timeline", "redo", "--path", &path]);
+    let clips_after_redo = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips_after_redo["count"], 1);
+}
+
+#[test]
+fn test_timeline_new_edit_clears_redo_branch() {
+    let dir = create_temp_project("undo_branch_test");
+    let path = project_path(&dir, "undo_branch_test");
+
+    let dummy_file = dir.path().join("undo_branch_clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    run_cli_ok(&["timeline", "undo", "--path", &path]);
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "1.0",
+    ]);
+
+    let (_stdout, stderr) = run_cli_err(&["timeline", "redo", "--path", &path]);
+    assert!(
+        stderr.contains("Redo failed") || stderr.contains("Nothing to redo"),
+        "Expected redo branch to be cleared, got: {}",
+        stderr
+    );
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips["count"], 1);
+    assert_eq!(clips["clips"][0]["timelineInSec"], 1.0);
+}
+
+#[test]
+fn test_timeline_undo_without_history_should_fail() {
+    let dir = create_temp_project("undo_empty_test");
+    let path = project_path(&dir, "undo_empty_test");
+
     let (_stdout, stderr) = run_cli_err(&["timeline", "undo", "--path", &path]);
     assert!(
         stderr.contains("Undo failed") || stderr.contains("Nothing to undo"),
