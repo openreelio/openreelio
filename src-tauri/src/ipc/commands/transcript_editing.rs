@@ -7,6 +7,7 @@ use specta::Type;
 use tauri::State;
 
 use crate::core::analysis::cleanup::{self, DetectedRegion};
+use crate::core::analysis::speaker_turns::infer_speaker_turns;
 use crate::core::analysis::AnalysisJobRunner;
 use crate::core::annotations::models::{
     adjust_insert_target_after_removal, estimate_word_timings, source_to_timeline, TranscriptWord,
@@ -84,7 +85,11 @@ pub async fn get_transcript_words(
 
     // Try loading transcript from analysis bundle
     let runner = AnalysisJobRunner::new(&project_path);
+    let mut bundle_speech_regions = Vec::new();
     if let Ok(Some(bundle)) = runner.load_bundle_optional(&asset_id) {
+        if let Some(audio_profile) = bundle.audio_profile.as_ref() {
+            bundle_speech_regions = audio_profile.speech_regions.clone();
+        }
         if let Some(ref segments) = bundle.transcript {
             if !segments.is_empty() {
                 return Ok(estimate_word_timings(segments));
@@ -110,7 +115,8 @@ pub async fn get_transcript_words(
                                 )
                             })
                             .collect();
-                    return Ok(estimate_word_timings(&converted));
+                    let inferred = infer_speaker_turns(&converted, &bundle_speech_regions);
+                    return Ok(estimate_word_timings(&inferred));
                 }
             }
         }

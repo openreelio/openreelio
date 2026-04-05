@@ -11,8 +11,12 @@ use std::process::Stdio;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use uuid::Uuid;
+use webrtc_vad::{SampleRate as VadSampleRate, Vad, VadMode};
 
-use super::types::{AudioProfile, SilenceRegion, SILENCE_FLOOR_DB};
+use super::ducking::invert_silence_to_speech;
+use super::types::{AudioProfile, SilenceRegion, SpeechRegion, SILENCE_FLOOR_DB};
+use crate::core::captions::audio::{extract_audio_for_transcription_async, load_audio_samples_i16};
 use crate::core::process::configure_tokio_command;
 use crate::core::{CoreError, CoreResult};
 
@@ -44,6 +48,18 @@ const MAX_BPM: f64 = 300.0;
 
 /// Number of tail lines to keep from FFmpeg stderr for error reporting.
 const STDERR_TAIL_SIZE: usize = 20;
+
+/// VAD frame size in milliseconds.
+const VAD_FRAME_MS: usize = 30;
+
+/// VAD frame size in samples at 16 kHz.
+const VAD_FRAME_SAMPLES: usize = 480;
+
+/// Merge adjacent voiced regions separated by short gaps.
+const VAD_MAX_GAP_SEC: f64 = 0.25;
+
+/// Drop very short speech regions that are likely false positives.
+const VAD_MIN_SPEECH_SEC: f64 = 0.18;
 
 // =============================================================================
 // AudioProfiler
@@ -101,6 +117,19 @@ impl AudioProfiler {
 
         let bpm = Self::estimate_bpm_from_samples(&momentary_samples, LOUDNESS_SAMPLES_PER_SECOND)
             .or_else(|| Self::estimate_bpm(&loudness_profile));
+        let speech_regions = match self
+            .detect_speech_regions_vad(video_path, duration_sec)
+            .await
+        {
+            Ok(regions) => regions,
+            Err(err) => {
+                tracing::debug!(
+                    "Speech VAD failed, falling back to silence inversion: {}",
+                    err
+                );
+                derive_speech_regions_from_silence(&silence_regions, duration_sec)
+            }
+        };
 
         Ok(AudioProfile {
             bpm,
@@ -108,6 +137,7 @@ impl AudioProfiler {
             loudness_profile,
             peak_db,
             silence_regions,
+            speech_regions,
         })
     }
 
@@ -148,6 +178,39 @@ impl AudioProfiler {
         let filter = format!("silencedetect=n={}:d={}", threshold, duration);
         let stderr = self.run_ffmpeg_filter(video_path, &filter).await?;
         Ok(parse_silence_regions(&stderr))
+    }
+
+    /// Detect speech regions using a lightweight WebRTC VAD pass.
+    async fn detect_speech_regions_vad(
+        &self,
+        video_path: &Path,
+        duration_sec: f64,
+    ) -> CoreResult<Vec<SpeechRegion>> {
+        let temp_audio_path =
+            std::env::temp_dir().join(format!("openreelio-vad-{}.wav", Uuid::new_v4()));
+        let temp_audio_path_for_cleanup = temp_audio_path.clone();
+        let ffmpeg_path = self.ffmpeg_path.to_string_lossy().to_string();
+
+        let result = async {
+            extract_audio_for_transcription_async(video_path, &temp_audio_path, Some(&ffmpeg_path))
+                .await
+                .map_err(map_audio_extraction_error)?;
+
+            let audio_path_for_task = temp_audio_path.clone();
+            tokio::task::spawn_blocking(move || {
+                let samples = load_audio_samples_i16(&audio_path_for_task)
+                    .map_err(map_audio_extraction_error)?;
+                detect_speech_regions_from_pcm(&samples, duration_sec)
+            })
+            .await
+            .map_err(|error| {
+                CoreError::AnalysisFailed(format!("Speech VAD task panicked: {}", error))
+            })?
+        }
+        .await;
+
+        let _ = tokio::fs::remove_file(&temp_audio_path_for_cleanup).await;
+        result
     }
 
     // =========================================================================
@@ -354,6 +417,113 @@ fn is_no_audio_error<T>(result: &Result<T, CoreError>) -> bool {
         }
         _ => false,
     }
+}
+
+fn map_audio_extraction_error(
+    error: crate::core::captions::audio::AudioExtractionError,
+) -> CoreError {
+    let message = error.to_string();
+    if has_no_audio_indicator(&message) {
+        CoreError::Internal("No audio stream found in input".to_string())
+    } else {
+        CoreError::AnalysisFailed(format!("Speech VAD audio extraction failed: {}", message))
+    }
+}
+
+fn detect_speech_regions_from_pcm(
+    samples: &[i16],
+    duration_sec: f64,
+) -> CoreResult<Vec<SpeechRegion>> {
+    if samples.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut vad = Vad::new_with_rate_and_mode(VadSampleRate::Rate16kHz, VadMode::LowBitrate);
+    let mut voiced_frames = Vec::with_capacity(samples.len() / VAD_FRAME_SAMPLES);
+
+    for frame in samples.chunks(VAD_FRAME_SAMPLES) {
+        if frame.len() != VAD_FRAME_SAMPLES {
+            break;
+        }
+
+        let is_voiced = vad.is_voice_segment(frame).map_err(|_| {
+            CoreError::AnalysisFailed("Speech VAD received an invalid frame length".to_string())
+        })?;
+        voiced_frames.push(is_voiced);
+    }
+
+    Ok(speech_regions_from_voiced_flags(
+        &voiced_frames,
+        duration_sec,
+        VAD_FRAME_MS as f64 / 1000.0,
+    ))
+}
+
+fn speech_regions_from_voiced_flags(
+    voiced_frames: &[bool],
+    duration_sec: f64,
+    frame_duration_sec: f64,
+) -> Vec<SpeechRegion> {
+    if voiced_frames.is_empty() || duration_sec <= 0.0 || frame_duration_sec <= 0.0 {
+        return Vec::new();
+    }
+
+    let mut regions = Vec::new();
+    let mut active_start: Option<usize> = None;
+
+    for (index, is_voiced) in voiced_frames.iter().copied().enumerate() {
+        match (active_start, is_voiced) {
+            (None, true) => active_start = Some(index),
+            (Some(start_index), false) => {
+                regions.push(SpeechRegion::new(
+                    start_index as f64 * frame_duration_sec,
+                    index as f64 * frame_duration_sec,
+                ));
+                active_start = None;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(start_index) = active_start {
+        regions.push(SpeechRegion::new(
+            start_index as f64 * frame_duration_sec,
+            voiced_frames.len() as f64 * frame_duration_sec,
+        ));
+    }
+
+    let mut merged: Vec<SpeechRegion> = Vec::new();
+    for region in regions {
+        let start_sec = region.start_sec.clamp(0.0, duration_sec);
+        let end_sec = region.end_sec.clamp(start_sec, duration_sec);
+        if end_sec <= start_sec {
+            continue;
+        }
+
+        let region = SpeechRegion::new(start_sec, end_sec);
+        if let Some(last) = merged.last_mut() {
+            if region.start_sec <= last.end_sec + VAD_MAX_GAP_SEC {
+                last.end_sec = last.end_sec.max(region.end_sec);
+                continue;
+            }
+        }
+        merged.push(region);
+    }
+
+    merged
+        .into_iter()
+        .filter(|region| region.duration() >= VAD_MIN_SPEECH_SEC)
+        .collect()
+}
+
+fn derive_speech_regions_from_silence(
+    silence_regions: &[SilenceRegion],
+    duration_sec: f64,
+) -> Vec<SpeechRegion> {
+    invert_silence_to_speech(silence_regions, duration_sec)
+        .into_iter()
+        .map(|region| SpeechRegion::new(region.start_sec, region.end_sec))
+        .collect()
 }
 
 /// Parses silence regions from FFmpeg `silencedetect` filter stderr output.
@@ -785,12 +955,46 @@ lavfi.aspectralstats.1.centroid=2800.0
         assert_eq!(profile.silence_regions.len(), 1);
         assert_eq!(profile.silence_regions[0].start_sec, 0.0);
         assert_eq!(profile.silence_regions[0].end_sec, 10.0);
+        assert!(profile.speech_regions.is_empty());
     }
 
     #[test]
     fn should_return_empty_silent_profile_for_zero_duration() {
         let profile = AudioProfile::silent(0.0);
         assert!(profile.silence_regions.is_empty());
+        assert!(profile.speech_regions.is_empty());
+    }
+
+    #[test]
+    fn should_derive_speech_regions_from_silence_regions() {
+        let silence = vec![SilenceRegion::new(1.0, 2.0), SilenceRegion::new(4.0, 5.0)];
+
+        let speech = derive_speech_regions_from_silence(&silence, 6.0);
+
+        assert_eq!(speech.len(), 3);
+        assert_eq!(speech[0], SpeechRegion::new(0.0, 1.0));
+        assert_eq!(speech[1], SpeechRegion::new(2.0, 4.0));
+        assert_eq!(speech[2], SpeechRegion::new(5.0, 6.0));
+    }
+
+    #[test]
+    fn should_merge_short_unvoiced_gaps_between_voiced_frames() {
+        let voiced_frames = vec![true, true, false, false, true, true];
+
+        let speech = speech_regions_from_voiced_flags(&voiced_frames, 0.18, 0.03);
+
+        assert_eq!(speech.len(), 1);
+        assert!((speech[0].start_sec - 0.0).abs() < f64::EPSILON);
+        assert!((speech[0].end_sec - 0.18).abs() < 1e-6);
+    }
+
+    #[test]
+    fn should_filter_short_voiced_blips_from_vad_regions() {
+        let voiced_frames = vec![false, true, false, false];
+
+        let speech = speech_regions_from_voiced_flags(&voiced_frames, 0.12, 0.03);
+
+        assert!(speech.is_empty());
     }
 
     // -------------------------------------------------------------------------
