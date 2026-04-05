@@ -84,6 +84,42 @@ fn project_path(dir: &tempfile::TempDir, name: &str) -> String {
     dir.path().join(name).to_string_lossy().to_string()
 }
 
+fn system_ffmpeg_path() -> Option<PathBuf> {
+    openreelio_core::ffmpeg::detect_system_ffmpeg()
+        .ok()
+        .map(|info| info.ffmpeg_path)
+}
+
+fn create_sample_video(path: &std::path::Path) {
+    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+        return;
+    };
+
+    let status = Command::new(ffmpeg_path)
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=320x240:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=stereo",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+        ])
+        .arg(path)
+        .status()
+        .expect("Failed to generate sample video with ffmpeg");
+
+    assert!(status.success(), "Failed to generate sample video");
+}
 
 // =============================================================================
 // Project Commands
@@ -492,13 +528,13 @@ fn test_validation_caption_inverted_range() {
 fn test_render_presets() {
     let result = run_cli_ok(&["render", "presets"]);
     let presets = result["presets"].as_array().unwrap();
-    assert_eq!(presets.len(), 7);
+    assert_eq!(presets.len(), 6);
     // Verify first preset structure
     assert_eq!(presets[0]["id"], "mp4_h264_1080p");
 }
 
 #[test]
-fn test_render_start_returns_error() {
+fn test_render_start_validates_sequence_before_initializing_ffmpeg() {
     let dir = create_temp_project("render_test");
     let path = project_path(&dir, "render_test");
     let (_stdout, stderr) = run_cli_err(&[
@@ -510,8 +546,9 @@ fn test_render_start_returns_error() {
         "/tmp/output.mp4",
     ]);
     assert!(
-        stderr.contains("not yet implemented"),
-        "Expected not implemented error, got: {}",
+        stderr.contains("Render validation failed")
+            && stderr.contains("Sequence has no clips to export"),
+        "Expected render validation error, got: {}",
         stderr
     );
 }
@@ -534,6 +571,65 @@ fn test_render_start_invalid_preset() {
         stderr.contains("Unknown preset"),
         "Expected unknown preset error, got: {}",
         stderr
+    );
+}
+
+#[test]
+fn test_render_start_exports_video_when_ffmpeg_is_available() {
+    if system_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_export_test");
+    let path = project_path(&dir, "render_export_test");
+
+    let source_path = dir.path().join("render_source.mp4");
+    create_sample_video(&source_path);
+
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source_path.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    let output_path = dir.path().join("rendered-output.mp4");
+    let result = run_cli_ok(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        result["sequenceId"],
+        run_cli_ok(&["project", "info", "--path", &path])["activeSequenceId"]
+    );
+    assert!(output_path.exists(), "Expected rendered output to exist");
+    assert!(
+        output_path.metadata().unwrap().len() > 0,
+        "Expected rendered output to be non-empty"
     );
 }
 

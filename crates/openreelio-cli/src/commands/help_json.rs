@@ -375,11 +375,11 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli render presets"
             },
             "render.start": {
-                "description": "Start a render job (not yet implemented in CLI — returns error with validation)",
+                "description": "Render a sequence to a final output file using the shared FFmpeg export engine",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "output": { "type": "string", "required": true, "desc": "Output file path" },
-                    "preset": { "type": "string", "required": false, "desc": "Render preset name (default: mp4_h264_1080p)" },
+                    "preset": { "type": "string", "required": false, "desc": "Render preset name (default: mp4_h264_1080p). Use render.presets for the supported list." },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
                 "example": "openreelio-cli render start --path ./project --output output.mp4"

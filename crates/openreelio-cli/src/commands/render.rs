@@ -2,6 +2,11 @@
 
 use crate::output;
 use clap::Subcommand;
+use openreelio_core::ffmpeg::{detect_bundled_at_path, detect_system_ffmpeg, FFmpegRunner};
+use openreelio_core::render::{
+    validate_export_settings, AudioCodec, ExportEngine, ExportPreset, ExportSettings, HdrMode,
+    VideoCodec,
+};
 use std::path::PathBuf;
 
 /// Canonical list of render presets. Single source of truth for both
@@ -13,7 +18,6 @@ const RENDER_PRESETS: &[(&str, &str, &str)] = &[
     ("webm_vp9_1080p", "WebM VP9 1080p", "webm"),
     ("prores_422", "ProRes 422", "mov"),
     ("prores_4444", "ProRes 4444", "mov"),
-    ("gif", "GIF Animation", "gif"),
 ];
 
 #[derive(Subcommand)]
@@ -61,32 +65,137 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
         } => {
             let project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
+            let sequence = project
+                .state
+                .sequences
+                .get(&seq_id)
+                .ok_or_else(|| anyhow::anyhow!("Sequence '{}' not found", seq_id))?
+                .clone();
+            let assets = project.state.assets.clone();
+            let effects = project.state.effects.clone();
+            let settings = build_export_settings(&preset, output_path.clone())?;
 
-            // Validate the preset name against the canonical list
-            if !RENDER_PRESETS
-                .iter()
-                .any(|(id, _, _)| *id == preset.as_str())
-            {
+            let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
+            if !validation.is_valid {
                 return Err(anyhow::anyhow!(
-                    "Unknown preset '{}'. Use 'render presets' to list available presets.",
-                    preset
+                    "Render validation failed: {}",
+                    validation.errors.join("; ")
                 ));
             }
 
-            // Validate sequence exists
-            if !project.state.sequences.contains_key(&seq_id) {
-                return Err(anyhow::anyhow!("Sequence '{}' not found", seq_id));
-            }
+            let ffmpeg_info = detect_cli_ffmpeg()?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| anyhow::anyhow!("Failed to create Tokio runtime: {error}"))?;
+            let result = runtime.block_on(async move {
+                let engine = ExportEngine::new(FFmpegRunner::new(ffmpeg_info));
+                engine
+                    .export_sequence_with_effects(
+                        &sequence, &assets, &effects, &settings, None, None,
+                    )
+                    .await
+            })?;
 
-            Err(anyhow::anyhow!(
-                "Render is not yet implemented in CLI mode. \
-                 Sequence '{}' with preset '{}' to '{}' validated successfully, \
-                 but FFmpeg render pipeline requires runtime initialization. \
-                 This feature is planned for a future release.",
-                seq_id,
-                preset,
-                output_path.display()
-            ))
+            output::print_json_pretty(&serde_json::json!({
+                "status": "ok",
+                "sequenceId": seq_id,
+                "preset": preset,
+                "outputPath": result.output_path.display().to_string(),
+                "durationSec": result.duration_sec,
+                "fileSize": result.file_size,
+                "encodingTimeSec": result.encoding_time_sec,
+                "warnings": validation.warnings,
+            }))
         }
     }
+}
+
+fn build_export_settings(preset: &str, output_path: PathBuf) -> anyhow::Result<ExportSettings> {
+    let normalized = preset.trim().to_lowercase();
+    let settings = match normalized.as_str() {
+        "mp4_h264_1080p" | "youtube_1080p" | "youtube1080p" => {
+            ExportSettings::from_preset(ExportPreset::Youtube1080p, output_path)
+        }
+        "mp4_h264_4k" | "youtube_4k" | "youtube4k" => {
+            ExportSettings::from_preset(ExportPreset::Youtube4k, output_path)
+        }
+        "mp4_h265_1080p" => ExportSettings {
+            preset: ExportPreset::Custom,
+            output_path,
+            video_codec: VideoCodec::H265,
+            audio_codec: AudioCodec::Aac,
+            width: Some(1920),
+            height: Some(1080),
+            video_bitrate: Some("6M".to_string()),
+            audio_bitrate: Some("192k".to_string()),
+            fps: Some(30.0),
+            crf: Some(28),
+            two_pass: false,
+            start_time: None,
+            end_time: None,
+            hdr_mode: HdrMode::Sdr,
+            max_cll: None,
+            max_fall: None,
+            bit_depth: None,
+            tonemap_mode: None,
+            hardware_accel: Default::default(),
+            resolved_encoder_name: None,
+        },
+        "webm_vp9_1080p" | "webm_vp9" | "webm" => {
+            ExportSettings::from_preset(ExportPreset::WebmVp9, output_path)
+        }
+        "prores_422" | "prores" => ExportSettings::from_preset(ExportPreset::ProRes, output_path),
+        "prores_4444" => ExportSettings {
+            preset: ExportPreset::Custom,
+            output_path,
+            video_codec: VideoCodec::ProRes,
+            audio_codec: AudioCodec::Pcm,
+            width: Some(1920),
+            height: Some(1080),
+            video_bitrate: Some("220M".to_string()),
+            audio_bitrate: None,
+            fps: Some(30.0),
+            crf: None,
+            two_pass: false,
+            start_time: None,
+            end_time: None,
+            hdr_mode: HdrMode::Sdr,
+            max_cll: None,
+            max_fall: None,
+            bit_depth: Some(10),
+            tonemap_mode: None,
+            hardware_accel: Default::default(),
+            resolved_encoder_name: None,
+        },
+        other => {
+            return Err(anyhow::anyhow!(
+                "Unknown preset '{}'. Use 'render presets' to list available presets.",
+                other
+            ));
+        }
+    };
+
+    Ok(settings)
+}
+
+fn detect_cli_ffmpeg() -> anyhow::Result<openreelio_core::ffmpeg::FFmpegInfo> {
+    let candidate_roots = [
+        std::env::current_dir()
+            .ok()
+            .map(|path| path.join("src-tauri")),
+        std::env::current_dir().ok(),
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf())),
+    ];
+
+    for root in candidate_roots.into_iter().flatten() {
+        if let Ok(info) = detect_bundled_at_path(&root) {
+            return Ok(info);
+        }
+    }
+
+    detect_system_ffmpeg()
+        .map_err(|error| anyhow::anyhow!("FFmpeg initialization failed: {}", error))
 }
