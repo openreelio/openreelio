@@ -565,25 +565,26 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
 
         TimelineAction::Undo { path } => {
             let mut project = super::load_project(&path)?;
-            project
-                .executor
-                .undo(&mut project.state)
+            let op_id = project
+                .undo_persisted()
                 .map_err(|e| anyhow::anyhow!("Undo failed: {}", e))?;
             super::save_project(&mut project)?;
-            output::print_success("Undo successful")
+            output::print_json(&serde_json::json!({
+                "status": "ok",
+                "opId": op_id,
+            }))
         }
 
         TimelineAction::Redo { path } => {
             let mut project = super::load_project(&path)?;
-            let result = project
-                .executor
-                .redo(&mut project.state)
+            let op_id = project
+                .redo_persisted()
                 .map_err(|e| anyhow::anyhow!("Redo failed: {}", e))?;
             super::save_project(&mut project)?;
 
             output::print_json(&serde_json::json!({
                 "status": "ok",
-                "opId": result.op_id,
+                "opId": op_id,
             }))
         }
     }
