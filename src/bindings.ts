@@ -3643,7 +3643,7 @@ export type CreateResumeCheckpointInput = { id: string | null; sessionId: string
 /**
  * Status of credentials for each provider
  */
-export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google: boolean; seedance: boolean }
+export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google: boolean; seedance: boolean; freesound: boolean }
 /**
  * Persisted delegation DTO aligned with the frontend session kernel vocabulary.
  */
@@ -5881,7 +5881,15 @@ sizeBytes: number | null;
 /**
  * Tags for categorization.
  */
-tags: string[] }
+tags: string[]; 
+/**
+ * Provider that returned the asset.
+ */
+provider: string; 
+/**
+ * Additional provider-specific metadata such as preview URLs and license.
+ */
+metadata: JsonValue }
 /**
  * A single message in the conversation history for streaming requests.
  * 

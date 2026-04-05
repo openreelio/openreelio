@@ -470,6 +470,7 @@ pub struct CredentialStatusDto {
     pub anthropic: bool,
     pub google: bool,
     pub seedance: bool,
+    pub freesound: bool,
 }
 
 // =============================================================================
@@ -887,6 +888,7 @@ pub async fn get_credential_status(app: tauri::AppHandle) -> Result<CredentialSt
             anthropic: false,
             google: false,
             seedance: false,
+            freesound: false,
         });
     }
 
@@ -907,6 +909,7 @@ pub async fn get_credential_status(app: tauri::AppHandle) -> Result<CredentialSt
         anthropic: vault.exists(CredentialType::AnthropicApiKey).await,
         google: vault.exists(CredentialType::GoogleApiKey).await,
         seedance: vault.exists(CredentialType::SeedanceApiKey).await,
+        freesound: vault.exists(CredentialType::FreesoundApiKey).await,
     })
 }
 

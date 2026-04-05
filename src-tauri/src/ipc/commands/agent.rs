@@ -16,9 +16,11 @@ use tauri::Emitter;
 use crate::core::ai::agent_plan::{AgentPlan, AgentPlanResult, StepResult};
 use crate::core::ai::memory::{AgentMemoryDb, MemoryEntry};
 use crate::core::ai::plan_executor::{resolve_step_references, PlanExecutor};
+use crate::core::credentials::{CredentialType, CredentialVault};
 use crate::core::plugin::api::{
     AssetProviderPlugin, PluginAssetRef, PluginAssetType, PluginSearchQuery,
 };
+use crate::core::plugin::providers::freesound::{FreesoundConfig, FreesoundProvider};
 use crate::core::plugin::providers::stock::{StockMediaConfig, StockMediaProvider};
 use crate::core::CoreError;
 use crate::ipc::payloads::CommandPayload;
@@ -772,6 +774,39 @@ pub struct StockMediaSearchResult {
     pub size_bytes: Option<u64>,
     /// Tags for categorization.
     pub tags: Vec<String>,
+    /// Provider that returned the asset.
+    pub provider: String,
+    /// Additional provider-specific metadata such as preview URLs and license.
+    pub metadata: serde_json::Value,
+}
+
+async fn get_freesound_api_key(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    let app_data_dir = super::system::get_app_data_dir(app)?;
+    let vault_path = app_data_dir.join("credentials.vault");
+
+    if vault_path.exists() {
+        match CredentialVault::new(vault_path) {
+            Ok(vault) => {
+                if vault.exists(CredentialType::FreesoundApiKey).await {
+                    if let Ok(key) = vault.retrieve(CredentialType::FreesoundApiKey).await {
+                        let trimmed = key.trim();
+                        if !trimmed.is_empty() {
+                            return Ok(Some(trimmed.to_string()));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to open credential vault for Freesound: {}", e);
+            }
+        }
+    }
+
+    Ok(std::env::var("OPENREELIO_FREESOUND_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("FREESOUND_API_KEY").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
 }
 
 /// Search stock media providers for assets matching a query.
@@ -783,18 +818,11 @@ pub struct StockMediaSearchResult {
 #[specta::specta]
 #[tracing::instrument(fields(query = %query, asset_type = ?asset_type, limit = ?limit))]
 pub async fn search_stock_media(
+    app: tauri::AppHandle,
     query: String,
     asset_type: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<StockMediaSearchResult>, String> {
-    let config = StockMediaConfig {
-        // Use a placeholder key so the provider doesn't reject the request.
-        // In production, this would be fetched from credential storage.
-        api_key: Some("stock-media-key".to_string()),
-        ..Default::default()
-    };
-    let provider = StockMediaProvider::new("stock-media", config);
-
     let plugin_asset_type = asset_type.as_deref().and_then(|t| match t {
         "video" => Some(PluginAssetType::Video),
         "image" => Some(PluginAssetType::Image),
@@ -809,10 +837,34 @@ pub async fn search_stock_media(
         ..Default::default()
     };
 
-    let refs: Vec<PluginAssetRef> = provider
-        .search(&search_query)
-        .await
-        .map_err(|e| format!("Stock media search failed: {e}"))?;
+    let refs: Vec<PluginAssetRef> = if plugin_asset_type == Some(PluginAssetType::Audio) {
+        let api_key = get_freesound_api_key(&app).await?;
+        let provider = FreesoundProvider::new(
+            "freesound",
+            FreesoundConfig {
+                api_key,
+                ..Default::default()
+            },
+        );
+        provider.search(&search_query).await.map_err(|e| {
+            format!(
+                "Audio stock search failed: {e}. Configure a Freesound API key via credential storage (provider: 'freesound') or OPENREELIO_FREESOUND_API_KEY."
+            )
+        })?
+    } else {
+        let config = StockMediaConfig {
+            // Use a placeholder key so the provider doesn't reject the request.
+            // In production, this would be fetched from credential storage.
+            api_key: Some("stock-media-key".to_string()),
+            ..Default::default()
+        };
+        let provider = StockMediaProvider::new("stock-media", config);
+
+        provider
+            .search(&search_query)
+            .await
+            .map_err(|e| format!("Stock media search failed: {e}"))?
+    };
 
     let results: Vec<StockMediaSearchResult> = refs
         .into_iter()
@@ -824,6 +876,16 @@ pub async fn search_stock_media(
             duration_sec: r.duration_sec,
             size_bytes: r.size_bytes,
             tags: r.tags,
+            provider: r
+                .metadata
+                .get("provider")
+                .and_then(|value| value.as_str())
+                .unwrap_or(match r.asset_type {
+                    PluginAssetType::Audio => "freesound",
+                    _ => "stock-media",
+                })
+                .to_string(),
+            metadata: r.metadata,
         })
         .collect();
 

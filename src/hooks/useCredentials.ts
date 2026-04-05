@@ -20,12 +20,14 @@ import { useAIStore } from '@/stores/aiStore';
 const logger = createLogger('useCredentials');
 
 /** Supported credential provider types */
-export type CredentialProvider = 'openai' | 'anthropic' | 'google' | 'seedance';
+export type CredentialProvider = 'openai' | 'anthropic' | 'google' | 'seedance' | 'freesound';
 
 /**
  * Maps credential provider to AI provider type for cache invalidation
  */
-function mapProviderToAIProvider(provider: CredentialProvider): 'openai' | 'anthropic' | 'gemini' | undefined {
+function mapProviderToAIProvider(
+  provider: CredentialProvider,
+): 'openai' | 'anthropic' | 'gemini' | undefined {
   switch (provider) {
     case 'openai':
       return 'openai';
@@ -34,6 +36,7 @@ function mapProviderToAIProvider(provider: CredentialProvider): 'openai' | 'anth
     case 'google':
       return 'gemini';
     case 'seedance':
+    case 'freesound':
       // Seedance is a video generation provider, not an AI chat provider.
       // No model cache invalidation needed.
       return undefined;
@@ -46,6 +49,7 @@ export interface CredentialStatus {
   anthropic: boolean;
   google: boolean;
   seedance: boolean;
+  freesound: boolean;
 }
 
 /** Hook state */
@@ -102,6 +106,7 @@ export function useCredentials(): UseCredentialsReturn {
     anthropic: false,
     google: false,
     seedance: false,
+    freesound: false,
   });
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -176,27 +181,24 @@ export function useCredentials(): UseCredentialsReturn {
         setIsSaving(false);
       }
     },
-    [refreshStatus]
+    [refreshStatus],
   );
 
   /**
    * Checks if a credential exists without retrieving it
    */
-  const hasCredential = useCallback(
-    async (provider: CredentialProvider): Promise<boolean> => {
-      try {
-        const exists = await invoke<boolean>('has_credential', { provider });
-        return exists;
-      } catch (err) {
-        logger.warn('Failed to check credential existence', {
-          provider,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        return false;
-      }
-    },
-    []
-  );
+  const hasCredential = useCallback(async (provider: CredentialProvider): Promise<boolean> => {
+    try {
+      const exists = await invoke<boolean>('has_credential', { provider });
+      return exists;
+    } catch (err) {
+      logger.warn('Failed to check credential existence', {
+        provider,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }, []);
 
   /**
    * Deletes a credential from the vault
@@ -225,7 +227,7 @@ export function useCredentials(): UseCredentialsReturn {
         setIsSaving(false);
       }
     },
-    [refreshStatus]
+    [refreshStatus],
   );
 
   /**
