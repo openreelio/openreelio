@@ -42,6 +42,7 @@ describe('SessionList', () => {
           createSessionSummary({
             id: 'session-2',
             title: 'Planner Session',
+            agent: 'planner',
             updatedAt: 200,
           }),
         ],
@@ -58,6 +59,8 @@ describe('SessionList', () => {
   it('does not show persistence badges for healthy sessions', () => {
     render(<SessionList />);
 
+    expect(screen.getByTestId('session-agent-badge-session-1')).toHaveTextContent('Editor');
+    expect(screen.getByTestId('session-agent-badge-session-2')).toHaveTextContent('Planner');
     expect(screen.queryByTestId('session-persistence-badge-session-1')).not.toBeInTheDocument();
     expect(screen.queryByTestId('session-persistence-badge-session-2')).not.toBeInTheDocument();
   });
@@ -80,9 +83,7 @@ describe('SessionList', () => {
 
     render(<SessionList />);
 
-    expect(screen.getByTestId('session-persistence-badge-session-1')).toHaveTextContent(
-      'Degraded',
-    );
+    expect(screen.getByTestId('session-persistence-badge-session-1')).toHaveTextContent('Degraded');
     expect(screen.getByTestId('session-persistence-badge-session-2')).toHaveTextContent(
       'Ephemeral',
     );
@@ -105,12 +106,28 @@ describe('SessionList', () => {
 
     render(<SessionList />);
 
-    expect(screen.getByTestId('session-persistence-badge-session-1')).toHaveTextContent(
-      'Degraded',
-    );
+    expect(screen.getByTestId('session-persistence-badge-session-1')).toHaveTextContent('Degraded');
     expect(screen.getByTestId('session-persistence-badge-session-1')).toHaveAttribute(
       'title',
       expect.stringMatching(/persistence recovered for the active run/i),
     );
+  });
+
+  it('shows the resolved experimental agent label when the session uses a specialist profile', () => {
+    act(() => {
+      useConversationStore.setState((state) => ({
+        ...state,
+        sessions: [
+          createSessionSummary({
+            id: 'session-1',
+            agent: 'planner',
+          }),
+        ],
+      }));
+    });
+
+    render(<SessionList />);
+
+    expect(screen.getByTestId('session-agent-badge-session-1')).toHaveTextContent('Planner');
   });
 });

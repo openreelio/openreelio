@@ -17,6 +17,7 @@ import type { ILLMClient, LLMMessage } from '../ports/ILLMClient';
 import type { AgentContext, Thought } from '../core/types';
 import { ThinkingTimeoutError, UnderstandingError } from '../core/errors';
 import { assembleSystemPrompt } from '../prompts/system';
+import type { AgentRole } from '../prompts/agentRoles';
 
 // =============================================================================
 // Types
@@ -32,6 +33,8 @@ export interface ThinkerConfig {
   systemPromptOverride?: string;
   /** Additional project prompt sections appended to the base phase prompt */
   projectPromptAddendum?: string;
+  /** Agent role used for system prompt assembly */
+  role?: AgentRole;
   /** Maximum retries on transient errors */
   maxRetries?: number;
 }
@@ -43,6 +46,7 @@ const DEFAULT_CONFIG: Required<ThinkerConfig> = {
   timeout: 60000, // 60 seconds (structured output is slow)
   systemPromptOverride: '',
   projectPromptAddendum: '',
+  role: 'editor',
   maxRetries: 2,
 };
 
@@ -211,7 +215,7 @@ export class Thinker {
 
     const sections = [
       assembleSystemPrompt({
-        role: 'editor',
+        role: this.config.role,
         context,
       }),
     ];

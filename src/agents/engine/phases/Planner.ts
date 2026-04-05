@@ -19,6 +19,7 @@ import type { AgentContext, Thought, Plan, PlanStep, RiskLevel } from '../core/t
 import { PlanningTimeoutError, PlanValidationError } from '../core/errors';
 import { createLogger } from '@/services/logger';
 import { assembleSystemPrompt } from '../prompts/system';
+import type { AgentRole } from '../prompts/agentRoles';
 import {
   collectStepValueReferences,
   normalizeReferencesForValidation,
@@ -45,6 +46,8 @@ export interface PlannerConfig {
   systemPromptOverride?: string;
   /** Additional project prompt sections appended to the base phase prompt */
   projectPromptAddendum?: string;
+  /** Agent role used for system prompt assembly */
+  role?: AgentRole;
   /** Number of retries after initial planning attempt */
   maxRetries?: number;
   /** Backoff in milliseconds between retries */
@@ -64,6 +67,7 @@ const DEFAULT_CONFIG: Required<PlannerConfig> = {
   approvalRequiredRisks: ['high', 'critical'],
   systemPromptOverride: '',
   projectPromptAddendum: '',
+  role: 'editor',
   maxRetries: 1,
   retryBackoffMs: 400,
   compactPromptToolLimit: 24,
@@ -347,7 +351,7 @@ export class Planner {
 
     const sections = [
       assembleSystemPrompt({
-        role: 'editor',
+        role: this.config.role,
         context,
       }),
     ];

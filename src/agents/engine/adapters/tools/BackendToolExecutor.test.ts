@@ -25,12 +25,7 @@ import type {
 } from '../../ports/IToolExecutor';
 import type { RiskLevel, ValidationResult } from '../../core/types';
 import { useProjectStore } from '@/stores/projectStore';
-import {
-  createMockAsset,
-  createMockClip,
-  createMockSequence,
-  createMockTrack,
-} from '@/test/mocks';
+import { createMockAsset, createMockClip, createMockSequence, createMockTrack } from '@/test/mocks';
 
 // Disable meta-tool filtering in unit tests (mock tools don't match meta-tool names)
 vi.mock('@/config/featureFlags', async (importOriginal) => {
@@ -220,26 +215,29 @@ const CONTEXT: ExecutionContext = {
   sessionId: 'session-1',
 };
 
-function seedActiveProjectState(options: {
-  activeSequenceId?: string | null;
-  sequenceId?: string;
-  stateVersion?: number;
-  clipIds?: string[];
-} = {}): void {
+function seedActiveProjectState(
+  options: {
+    activeSequenceId?: string | null;
+    sequenceId?: string;
+    stateVersion?: number;
+    clipIds?: string[];
+  } = {},
+): void {
   const sequenceId = options.sequenceId ?? 'seq-1';
-  const activeSequenceId = options.activeSequenceId === undefined
-    ? sequenceId
-    : options.activeSequenceId;
+  const activeSequenceId =
+    options.activeSequenceId === undefined ? sequenceId : options.activeSequenceId;
   const clipIds = options.clipIds ?? ['clip-1', 'clip-2', 'clip-3', 'clip-5', 'c1', 'c2'];
 
-  const clips = clipIds.map((clipId, index) => createMockClip({
-    id: clipId,
-    assetId: `asset-${clipId}`,
-    place: {
-      timelineInSec: index * 5,
-      durationSec: 5,
-    },
-  }));
+  const clips = clipIds.map((clipId, index) =>
+    createMockClip({
+      id: clipId,
+      assetId: `asset-${clipId}`,
+      place: {
+        timelineInSec: index * 5,
+        durationSec: 5,
+      },
+    }),
+  );
   const track = createMockTrack({
     id: 'track-1',
     kind: 'video',
@@ -454,7 +452,7 @@ describe('BackendToolExecutor', () => {
       });
     });
 
-    it('should fail fast when an edit meta-tool action is not backend-safe', async () => {
+    it('should fall back to frontend execution when an edit meta-tool action is not backend-safe', async () => {
       const extendedTools = [
         ...TOOL_DEFS,
         { name: 'edit', description: 'Editing meta-tool', category: 'timeline', parameters: {} },
@@ -468,31 +466,44 @@ describe('BackendToolExecutor', () => {
         CONTEXT,
       );
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('not approved for backend-safe agent execution');
-      expect(extendedFrontend.execute).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      expect(extendedFrontend.execute).toHaveBeenCalledWith(
+        'edit',
+        { action: 'rename_track', sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+        CONTEXT,
+      );
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
-    it('should fail fast for mutating transition tools that are not backend-safe', async () => {
-      const result = await backend.execute('add_transition', { type: 'dissolve' }, CONTEXT);
+    it('should fall back to frontend execution for mutating transition tools that are not backend-safe', async () => {
+      const result = await backend.execute(
+        'add_transition',
+        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', transitionType: 'dissolve' },
+        CONTEXT,
+      );
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('not approved for backend-safe agent execution');
-      expect(frontend.execute).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      expect(frontend.execute).toHaveBeenCalledWith(
+        'add_transition',
+        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', transitionType: 'dissolve' },
+        CONTEXT,
+      );
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
-    it('should fail fast for mutating track tools that are not backend-safe', async () => {
+    it('should fall back to frontend execution for mutating track tools that are not backend-safe', async () => {
       const result = await backend.execute(
         'rename_track',
         { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
         CONTEXT,
       );
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('not approved for backend-safe agent execution');
-      expect(frontend.execute).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      expect(frontend.execute).toHaveBeenCalledWith(
+        'rename_track',
+        { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+        CONTEXT,
+      );
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
@@ -524,11 +535,7 @@ describe('BackendToolExecutor', () => {
     });
 
     it('should route generation status tools to the frontend executor', async () => {
-      const result = await backend.execute(
-        'check_generation_status',
-        { jobId: 'job-1' },
-        CONTEXT,
-      );
+      const result = await backend.execute('check_generation_status', { jobId: 'job-1' }, CONTEXT);
 
       expect(result.success).toBe(true);
       expect(frontend.execute).toHaveBeenCalledWith(
@@ -539,16 +546,19 @@ describe('BackendToolExecutor', () => {
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
-    it('should fail fast for mutating compound tools that are not backend-safe', async () => {
+    it('should fall back to frontend execution for mutating compound tools that are not backend-safe', async () => {
       const result = await backend.execute(
         'freeze_frame',
-        { clipId: 'clip-1', frameTime: 4, freezeDuration: 2 },
+        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', frameTime: 4, duration: 2 },
         CONTEXT,
       );
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('not approved for backend-safe agent execution');
-      expect(frontend.execute).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      expect(frontend.execute).toHaveBeenCalledWith(
+        'freeze_frame',
+        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', frameTime: 4, duration: 2 },
+        CONTEXT,
+      );
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
@@ -614,7 +624,9 @@ describe('BackendToolExecutor', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain("context sequence 'seq-stale' does not match active sequence 'seq-active'");
+      expect(result.error).toContain(
+        "context sequence 'seq-stale' does not match active sequence 'seq-active'",
+      );
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
@@ -831,7 +843,11 @@ describe('BackendToolExecutor', () => {
         'execute_plan',
         {
           steps: [
-            { id: 'step-a', toolName: 'split_clip', params: { clipId: 'clip-1', atTimelineSec: 5 } },
+            {
+              id: 'step-a',
+              toolName: 'split_clip',
+              params: { clipId: 'clip-1', atTimelineSec: 5 },
+            },
             { id: 'step-b', toolName: 'move_clip', params: { clipId: 'clip-2', newTimelineIn: 8 } },
           ],
         },
@@ -904,9 +920,7 @@ describe('BackendToolExecutor', () => {
         success: true,
         totalSteps: 1,
         stepsCompleted: 1,
-        stepResults: [
-          { stepId: 'step-1', success: true, data: { ok: true }, durationMs: 5 },
-        ],
+        stepResults: [{ stepId: 'step-1', success: true, data: { ok: true }, durationMs: 5 }],
         operationIds: ['op-1'],
         executionTimeMs: 5,
       });
@@ -915,9 +929,7 @@ describe('BackendToolExecutor', () => {
         success: true,
         totalSteps: 1,
         stepsCompleted: 1,
-        stepResults: [
-          { stepId: 'step-1', success: true, data: { ok: true }, durationMs: 5 },
-        ],
+        stepResults: [{ stepId: 'step-1', success: true, data: { ok: true }, durationMs: 5 }],
         operationIds: ['op-2'],
         executionTimeMs: 5,
       });

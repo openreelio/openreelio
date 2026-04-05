@@ -150,7 +150,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function parseLegacyExecutePlanSteps(args: Record<string, unknown>): LegacyExecutePlanStep[] | null {
+function parseLegacyExecutePlanSteps(
+  args: Record<string, unknown>,
+): LegacyExecutePlanStep[] | null {
   const rawSteps = args.steps;
   if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
     return null;
@@ -208,22 +210,16 @@ function normalizeBackendSingleStepData(
         typeof data.sourceClipId === 'string'
           ? data.sourceClipId
           : typeof params.clipId === 'string'
-          ? params.clipId
-          : undefined,
-      newClipId:
-        typeof data.newClipId === 'string'
-          ? data.newClipId
-          : createdIds[0] ?? null,
+            ? params.clipId
+            : undefined,
+      newClipId: typeof data.newClipId === 'string' ? data.newClipId : (createdIds[0] ?? null),
     };
   }
 
   if (toolName === 'insert_clip') {
     return {
       ...data,
-      clipId:
-        typeof data.clipId === 'string'
-          ? data.clipId
-          : createdIds[0] ?? null,
+      clipId: typeof data.clipId === 'string' ? data.clipId : (createdIds[0] ?? null),
     };
   }
 
@@ -391,9 +387,7 @@ export class BackendToolExecutor implements IToolExecutor {
         const generatedIds: string[] = [];
         expanded.forEach((subStep, index) => {
           const backendStepId = `${step.id}__${index + 1}`;
-          const dependsOn = index === 0
-            ? firstStepDependsOn
-            : [generatedIds[index - 1]];
+          const dependsOn = index === 0 ? firstStepDependsOn : [generatedIds[index - 1]];
 
           backendSteps.push({
             id: backendStepId,
@@ -527,7 +521,10 @@ export class BackendToolExecutor implements IToolExecutor {
         });
 
         if (!execution.ok) {
-          return createFailureResult(`Backend execution error: ${execution.error}`, execution.duration);
+          return createFailureResult(
+            `Backend execution error: ${execution.error}`,
+            execution.duration,
+          );
         }
 
         const stepResultById = new Map(
@@ -536,10 +533,12 @@ export class BackendToolExecutor implements IToolExecutor {
         const stepResults = legacyRoute.stepMappings.map((mapping) => {
           const slice = mapping.backendStepIds
             .map((stepId) => stepResultById.get(stepId))
-            .filter((stepResult): stepResult is NonNullable<typeof stepResult> => Boolean(stepResult));
+            .filter((stepResult): stepResult is NonNullable<typeof stepResult> =>
+              Boolean(stepResult),
+            );
           const allSucceeded =
-            slice.length === mapping.backendStepIds.length
-            && slice.every((stepResult) => stepResult.success);
+            slice.length === mapping.backendStepIds.length &&
+            slice.every((stepResult) => stepResult.success);
           const failedStep = slice.find((stepResult) => !stepResult.success);
 
           return {
@@ -563,9 +562,9 @@ export class BackendToolExecutor implements IToolExecutor {
           return {
             success: false,
             error:
-              execution.result.errorMessage
-              ?? execution.result.rollbackReport?.rollbackErrors?.join('; ')
-              ?? 'Legacy execute_plan backend promotion failed',
+              execution.result.errorMessage ??
+              execution.result.rollbackReport?.rollbackErrors?.join('; ') ??
+              'Legacy execute_plan backend promotion failed',
             data: {
               stepResults,
               rollbackReport: execution.result.rollbackReport ?? null,
@@ -596,7 +595,10 @@ export class BackendToolExecutor implements IToolExecutor {
     const executionTarget = this.resolveBackendExecutionTarget(toolName, args);
     if (!executionTarget) {
       if (this.isUnsafeMutatingFallback(toolName)) {
-        return this.buildUnsupportedMutationFailure(toolName);
+        const preflightFailure = this.getMutationPreflightFailure(toolName, args, context);
+        if (preflightFailure) {
+          return createFailureResult(preflightFailure, 0);
+        }
       }
       return this.frontendExecutor.execute(toolName, args, context);
     }
@@ -698,9 +700,9 @@ export class BackendToolExecutor implements IToolExecutor {
     }
 
     const errorMsg =
-      execution.result.errorMessage
-      ?? execution.result.stepResults[0]?.error
-      ?? 'Unknown backend execution error';
+      execution.result.errorMessage ??
+      execution.result.stepResults[0]?.error ??
+      'Unknown backend execution error';
     return createFailureResult(errorMsg, execution.duration);
   }
 
@@ -725,10 +727,12 @@ export class BackendToolExecutor implements IToolExecutor {
     if (unsupportedMutation) {
       return {
         success: false,
-        results: [{
-          tool: unsupportedMutation.requestTool.name,
-          result: this.buildUnsupportedMutationFailure(unsupportedMutation.requestTool.name),
-        }],
+        results: [
+          {
+            tool: unsupportedMutation.requestTool.name,
+            result: this.buildUnsupportedMutationFailure(unsupportedMutation.requestTool.name),
+          },
+        ],
         totalDuration: performance.now() - start,
         successCount: 0,
         failureCount: 1,
@@ -791,10 +795,12 @@ export class BackendToolExecutor implements IToolExecutor {
         if (preflightFailure) {
           return {
             success: false,
-            results: [{
-              tool: requestTool.name,
-              result: createFailureResult(preflightFailure, performance.now() - start),
-            }],
+            results: [
+              {
+                tool: requestTool.name,
+                result: createFailureResult(preflightFailure, performance.now() - start),
+              },
+            ],
             totalDuration: performance.now() - start,
             successCount: 0,
             failureCount: 1,
@@ -962,8 +968,12 @@ export class BackendToolExecutor implements IToolExecutor {
   }
 
   canExecuteBatchAtomically(request: BatchExecutionRequest): boolean {
-    return request.tools.length > 1
-      && request.tools.every((tool) => this.resolveBackendExecutionTarget(tool.name, tool.args) !== null);
+    return (
+      request.tools.length > 1 &&
+      request.tools.every(
+        (tool) => this.resolveBackendExecutionTarget(tool.name, tool.args) !== null,
+      )
+    );
   }
 
   // Delegate all metadata methods to the frontend executor

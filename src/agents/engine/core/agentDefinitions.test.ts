@@ -22,17 +22,22 @@ describe('agentDefinitions', () => {
     const experimentalDefinitions = listExperimentalAgentDefinitions();
     const subAgents = listExperimentalSubAgentDefinitions();
 
-    expect(experimentalDefinitions.map((definition) => definition.id)).toEqual([
-      'editor',
-      'analyst',
-      'colorist',
-      'audio',
-    ]);
+    expect(new Set(experimentalDefinitions.map((definition) => definition.id)).size).toBe(
+      experimentalDefinitions.length,
+    );
+    expect(experimentalDefinitions.every((definition) => definition.tools.length > 0)).toBe(true);
+    expect(
+      experimentalDefinitions.every((definition) => definition.promptPlaceholder?.length),
+    ).toBe(true);
+    expect(subAgents.every((definition) => definition.mode === 'subagent')).toBe(true);
     expect(subAgents.map((definition) => definition.id)).toEqual([
+      'planner',
       'analyst',
       'colorist',
       'audio',
+      'captioner',
     ]);
     expect(getExperimentalAgentDefinition('analyst')?.mode).toBe('subagent');
+    expect(getExperimentalAgentDefinition('planner')?.role).toBe('planner');
   });
 });

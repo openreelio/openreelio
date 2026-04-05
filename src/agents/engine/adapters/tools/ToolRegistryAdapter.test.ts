@@ -497,6 +497,55 @@ describe('ToolRegistryAdapter', () => {
       expect(result.valid).toBe(false);
       expect(result.errors[0]).toContain('not found');
     });
+
+    it('should validate meta-tool calls against the underlying action schema', () => {
+      const metaRegistry = new ToolRegistry();
+      metaRegistry.registerMany([
+        {
+          name: 'edit',
+          description: 'Editing meta-tool',
+          category: 'timeline',
+          parameters: {
+            type: 'object',
+            properties: {
+              action: { type: 'string', description: 'Edit action' },
+            },
+            required: ['action'],
+          },
+          handler: vi.fn().mockResolvedValue({ success: true }),
+        },
+        {
+          name: 'split_clip',
+          description: 'Split a clip at a specific time',
+          category: 'clip',
+          parameters: {
+            type: 'object',
+            properties: {
+              clipId: { type: 'string', description: 'Clip ID' },
+              splitTime: { type: 'number', description: 'Split position in seconds' },
+            },
+            required: ['clipId', 'splitTime'],
+          },
+          handler: vi.fn().mockResolvedValue({ success: true }),
+        },
+      ]);
+
+      const metaAdapter = createToolRegistryAdapter(metaRegistry);
+
+      const valid = metaAdapter.validateArgs('edit', {
+        action: 'split_clip',
+        clipId: 'clip-1',
+        atTimelineSec: 5,
+      });
+      expect(valid.valid).toBe(true);
+
+      const invalid = metaAdapter.validateArgs('edit', {
+        action: 'split_clip',
+        clipId: 'clip-1',
+      });
+      expect(invalid.valid).toBe(false);
+      expect(invalid.errors.some((error) => error.includes('splitTime'))).toBe(true);
+    });
   });
 
   describe('hasTool', () => {

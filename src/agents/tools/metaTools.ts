@@ -1,5 +1,5 @@
 /**
- * Meta-Tools: Consolidated tool set (56+ tools -> 6 meta-tools)
+ * Meta-Tools: Consolidated tool set exposed to the runtime prompt surface
  *
  * Reduces LLM context overhead from ~15K tokens to ~2K tokens while
  * maintaining full editing capability. Each meta-tool dispatches to
@@ -10,7 +10,7 @@
  * 2. edit     - editing tools (20 tools)
  * 3. audio    - audio tools (6 tools)
  * 4. effects  - effect + transition tools (8 tools)
- * 5. text     - caption tools (4 tools)
+ * 5. text     - caption tools
  *
  * Legacy compatibility:
  * - execute_plan remains registered for transitional callers, but should not
@@ -84,37 +84,52 @@ function normalizeMetaToolArgs(
   action: string,
   toolArgs: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (metaToolName !== 'edit') {
-    return toolArgs;
-  }
-
   const normalized = { ...toolArgs };
 
-  if (
-    (action === 'insert_clip' || action === 'insert_clip_from_file') &&
-    normalized.timelineStart === undefined &&
-    typeof normalized.timelineIn === 'number'
-  ) {
-    normalized.timelineStart = normalized.timelineIn;
+  if (metaToolName === 'edit') {
+    if (
+      (action === 'insert_clip' || action === 'insert_clip_from_file') &&
+      normalized.timelineStart === undefined &&
+      typeof normalized.timelineIn === 'number'
+    ) {
+      normalized.timelineStart = normalized.timelineIn;
+    }
+
+    if (
+      action === 'split_clip' &&
+      normalized.splitTime === undefined &&
+      typeof normalized.atTimelineSec === 'number'
+    ) {
+      normalized.splitTime = normalized.atTimelineSec;
+    }
+
+    if (
+      action === 'insert_clip_from_file' &&
+      typeof normalized.file !== 'string' &&
+      typeof normalized.filePath === 'string'
+    ) {
+      normalized.file = normalized.filePath;
+    }
   }
 
   if (
-    action === 'split_clip' &&
-    normalized.splitTime === undefined &&
-    typeof normalized.atTimelineSec === 'number'
+    metaToolName === 'audio' &&
+    action === 'normalize_audio' &&
+    normalized.targetLevel === undefined &&
+    typeof normalized.targetLufs === 'number'
   ) {
-    normalized.splitTime = normalized.atTimelineSec;
-  }
-
-  if (
-    action === 'insert_clip_from_file' &&
-    typeof normalized.file !== 'string' &&
-    typeof normalized.filePath === 'string'
-  ) {
-    normalized.file = normalized.filePath;
+    normalized.targetLevel = normalized.targetLufs;
   }
 
   return normalized;
+}
+
+export function normalizeMetaToolArgsForValidation(
+  metaToolName: string,
+  action: string,
+  toolArgs: Record<string, unknown>,
+): Record<string, unknown> {
+  return normalizeMetaToolArgs(metaToolName, action, toolArgs);
 }
 
 // =============================================================================
@@ -266,6 +281,13 @@ const META_TOOLS: ToolDefinition[] = [
         sourceAssetId: { type: 'string', description: 'Source asset ID for style transfer' },
         time: { type: 'number', description: 'Timeline position in seconds' },
         color: { type: 'string', description: 'Marker color' },
+        markerId: { type: 'string', description: 'Marker ID' },
+        fromTime: { type: 'number', description: 'Marker/query range start in seconds' },
+        toTime: { type: 'number', description: 'Marker/query range end in seconds' },
+        frameRate: {
+          type: 'number',
+          description: 'Frame rate used for freeze-frame extraction when relevant',
+        },
         file: {
           type: 'string',
           description: 'Workspace-relative file name/path for insert_clip_from_file',
@@ -301,7 +323,11 @@ const META_TOOLS: ToolDefinition[] = [
         volume: { type: 'number', description: 'Volume level (0-200%)' },
         duration: { type: 'number', description: 'Fade duration in seconds' },
         muted: { type: 'boolean', description: 'Mute state' },
-        targetLufs: { type: 'number', description: 'Target loudness in LUFS' },
+        targetLevel: { type: 'number', description: 'Target normalization level in dB' },
+        targetLufs: {
+          type: 'number',
+          description: 'Legacy alias for targetLevel. Prefer targetLevel.',
+        },
       },
       required: ['action', 'sequenceId', 'trackId'],
     },
@@ -328,11 +354,15 @@ const META_TOOLS: ToolDefinition[] = [
         clipId: { type: 'string', description: 'Clip ID' },
         effectId: { type: 'string', description: 'Effect ID' },
         effectType: { type: 'string', description: 'Effect type (e.g. blur, brightness)' },
+        parameters: { type: 'object', description: 'Initial effect parameter object' },
         paramName: { type: 'string', description: 'Effect parameter name' },
         paramValue: { type: 'number', description: 'Effect parameter value' },
         sourceClipId: { type: 'string', description: 'Source clip for copy_effects' },
+        sourceTrackId: { type: 'string', description: 'Track containing sourceClipId' },
         targetClipId: { type: 'string', description: 'Target clip for copy_effects' },
+        targetTrackId: { type: 'string', description: 'Track containing targetClipId' },
         transitionType: { type: 'string', description: 'Transition type (e.g. dissolve, wipe)' },
+        transitionId: { type: 'string', description: 'Transition ID' },
         duration: { type: 'number', description: 'Transition duration in seconds' },
       },
       required: ['action'],

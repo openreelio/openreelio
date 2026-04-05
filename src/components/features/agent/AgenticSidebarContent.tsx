@@ -13,14 +13,21 @@ import { AgentSessionRecoveryPanel } from './AgentSessionRecoveryPanel';
 import { AgentSessionResumeHistoryPanel } from './AgentSessionResumeHistoryPanel';
 import { AgentSessionRecoveryStatus } from './AgentSessionRecoveryStatus';
 import { SessionList } from './SessionList';
+import { DEFAULT_AGENT_PROFILE_ID } from '@/agents/engine';
 import { createTauriLLMAdapter } from '@/agents/engine/adapters/llm/TauriLLMAdapter';
 import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
 import { createBackendToolExecutor } from '@/agents/engine/adapters/tools/BackendToolExecutor';
+import {
+  getAgentPromptPlaceholder,
+  listSelectableAgentDefinitions,
+} from '@/agents/engine/core/agentCatalog';
 import { globalToolRegistry } from '@/agents';
-import { loadProjectPromptContext, type ProjectPromptContext } from '@/agents/engine/core/projectPromptContext';
+import {
+  loadProjectPromptContext,
+  type ProjectPromptContext,
+} from '@/agents/engine/core/projectPromptContext';
 import { resolveSidebarRuntimePolicy, isBackendToolsEnabled } from '@/config/featureFlags';
-import { useNewChat } from '@/hooks/useNewChat';
-import { useProjectStore } from '@/stores';
+import { useConversationStore, useProjectStore } from '@/stores';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AgenticSidebarContent');
@@ -51,6 +58,7 @@ export function AgenticSidebarContent({
   className = '',
 }: AgenticSidebarContentProps) {
   const [showSessionList, setShowSessionList] = useState(false);
+  const [nextAgentProfileId, setNextAgentProfileId] = useState<string>(DEFAULT_AGENT_PROFILE_ID);
   const [projectPromptContext, setProjectPromptContext] = useState<ProjectPromptContext>({
     knowledge: [],
   });
@@ -81,6 +89,19 @@ export function AgenticSidebarContent({
   const runtimePolicy = resolveSidebarRuntimePolicy();
   const currentProjectId = useProjectStore((state) => state.meta?.id ?? null);
   const currentProjectPath = useProjectStore((state) => state.meta?.path ?? null);
+  const activeSessionId = useConversationStore((state) => state.activeSessionId);
+  const sessions = useConversationStore((state) => state.sessions);
+  const clearConversation = useConversationStore((state) => state.clearConversation);
+  const createSession = useConversationStore((state) => state.createSession);
+  const activeAgentProfileId = useMemo(
+    () => sessions.find((session) => session.id === activeSessionId)?.agent ?? null,
+    [activeSessionId, sessions],
+  );
+  const availableAgentDefinitions = useMemo(() => listSelectableAgentDefinitions(), []);
+  const promptPlaceholder = useMemo(
+    () => getAgentPromptPlaceholder(activeAgentProfileId ?? nextAgentProfileId),
+    [activeAgentProfileId, nextAgentProfileId],
+  );
 
   const abortCurrentSession = useCallback(() => {
     chatHandleRef.current?.abort();
@@ -90,14 +111,26 @@ export function AgenticSidebarContent({
   // New Chat Hook
   // ===========================================================================
 
-  const { newChat, canCreateNew } = useNewChat({
-    abort: abortCurrentSession,
-  });
+  const createNewSession = useCallback(
+    (agentProfileId = nextAgentProfileId) => {
+      abortCurrentSession();
+      clearConversation();
+      void createSession(agentProfileId);
+    },
+    [abortCurrentSession, clearConversation, createSession, nextAgentProfileId],
+  );
+  const canCreateNew = Boolean(currentProjectId);
 
   // Register new chat handler with parent (AISidebar)
   useEffect(() => {
-    onRegisterNewChat?.(newChat, canCreateNew);
-  }, [onRegisterNewChat, newChat, canCreateNew]);
+    onRegisterNewChat?.(() => createNewSession(), canCreateNew);
+  }, [canCreateNew, createNewSession, onRegisterNewChat]);
+
+  useEffect(() => {
+    if (activeAgentProfileId) {
+      setNextAgentProfileId(activeAgentProfileId);
+    }
+  }, [activeAgentProfileId]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -130,10 +163,13 @@ export function AgenticSidebarContent({
     };
   }, [currentProjectId, currentProjectPath]);
 
-  const chatPromptConfig = useMemo(() => ({
-    knowledge: projectPromptContext.knowledge,
-    customInstructions: projectPromptContext.customInstructions,
-  }), [projectPromptContext.customInstructions, projectPromptContext.knowledge]);
+  const chatPromptConfig = useMemo(
+    () => ({
+      knowledge: projectPromptContext.knowledge,
+      customInstructions: projectPromptContext.customInstructions,
+    }),
+    [projectPromptContext.customInstructions, projectPromptContext.knowledge],
+  );
 
   // ===========================================================================
   // Handlers
@@ -171,7 +207,7 @@ export function AgenticSidebarContent({
       {/* Session List Panel */}
       {showSessionList && (
         <div className="w-48 flex-shrink-0 border-r border-border-subtle bg-surface-base">
-          <SessionList onNewSession={newChat} />
+          <SessionList onNewSession={createNewSession} />
         </div>
       )}
 
@@ -193,6 +229,29 @@ export function AgenticSidebarContent({
             )}
           </button>
           <span className="text-xs text-text-tertiary ml-2">AI Chat</span>
+          <div className="ml-3 flex items-center gap-2">
+            <label
+              htmlFor="agent-profile-select"
+              className="text-[10px] uppercase tracking-[0.08em] text-text-tertiary"
+            >
+              Profile
+            </label>
+            <select
+              id="agent-profile-select"
+              value={nextAgentProfileId}
+              onChange={(event) => setNextAgentProfileId(event.target.value)}
+              className="rounded border border-border-subtle bg-surface-elevated px-2 py-1 text-[11px] text-text-primary outline-none transition-colors focus:border-primary-500"
+              data-testid="agent-profile-select"
+            >
+              {availableAgentDefinitions.map((definition) => (
+                <option key={definition.id} value={definition.id}>
+                  {definition.mode === 'subagent'
+                    ? `${definition.name} (Experimental)`
+                    : definition.name}
+                </option>
+              ))}
+            </select>
+          </div>
           <AgentSessionRecoveryStatus />
         </div>
         <AgentSessionRecoveryPanel />
@@ -219,7 +278,7 @@ export function AgenticSidebarContent({
             onSubmit={handleSubmit}
             onComplete={handleComplete}
             onError={handleError}
-            placeholder="Describe what you want to edit..."
+            placeholder={promptPlaceholder}
             className="flex-1"
           />
         )}

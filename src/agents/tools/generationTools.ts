@@ -25,7 +25,7 @@ const GENERATION_TOOLS: ToolDefinition[] = [
   {
     name: 'search_stock_media',
     description:
-      'Search stock media providers (Pexels, Pixabay) for royalty-free images, videos, and audio clips. Returns provider asset references that must be imported before timeline insertion.',
+      'Search stock media providers for royalty-free media. Image/video search uses stock providers such as Pexels/Pixabay, and audio search uses Freesound when configured. Returns provider asset references that must be imported before timeline insertion.',
     category: 'generation',
     parameters: {
       type: 'object',
@@ -65,6 +65,8 @@ const GENERATION_TOOLS: ToolDefinition[] = [
             durationSec: number | null;
             sizeBytes: number | null;
             tags: string[];
+            provider: string;
+            metadata: Record<string, unknown>;
           }>
         >('search_stock_media', {
           query,

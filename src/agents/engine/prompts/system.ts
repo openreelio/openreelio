@@ -14,14 +14,20 @@
 
 import type { AgentContext } from '../core/types';
 import { buildFullEnvironmentPrompt } from './environment';
-import { EDITOR_PROMPT, ANALYST_PROMPT, COLORIST_PROMPT, AUDIO_PROMPT } from './agentPrompts';
+import {
+  EDITOR_PROMPT,
+  PLANNER_PROMPT,
+  ANALYST_PROMPT,
+  COLORIST_PROMPT,
+  AUDIO_PROMPT,
+  CAPTIONER_PROMPT,
+} from './agentPrompts';
 import { buildToolReference } from './toolReference';
+import type { AgentRole } from './agentRoles';
 
 // =============================================================================
 // Types
 // =============================================================================
-
-export type AgentRole = 'editor' | 'analyst' | 'colorist' | 'audio';
 
 export interface SystemPromptOptions {
   /** Agent role (determines base prompt) */
@@ -45,9 +51,11 @@ export interface ProjectPromptAddendumOptions {
 
 const BASE_PROMPTS: Record<AgentRole, string> = {
   editor: EDITOR_PROMPT,
+  planner: PLANNER_PROMPT,
   analyst: ANALYST_PROMPT,
   colorist: COLORIST_PROMPT,
   audio: AUDIO_PROMPT,
+  captioner: CAPTIONER_PROMPT,
 };
 
 // =============================================================================
@@ -62,7 +70,7 @@ function buildLanguageSection(context: AgentContext): string | null {
     '<language_policy>',
     `Output Language: ${policy.outputLanguage}`,
     policy.detectInputLanguage
-      ? 'Detect the user\'s language from their latest message and respond in that language.'
+      ? "Detect the user's language from their latest message and respond in that language."
       : `Always respond in ${policy.outputLanguage}.`,
     'IMPORTANT: Never translate command names, tool names, IDs, JSON keys, or parameter names.',
     '</language_policy>',
@@ -81,10 +89,7 @@ function sanitizePromptText(value: string): string {
     .filter(Boolean)
     .join(' ');
 
-  return normalized
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return normalized.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function buildKnowledgeSection(knowledge: string[]): string | null {
