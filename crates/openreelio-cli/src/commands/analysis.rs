@@ -394,7 +394,7 @@ pub fn execute(action: AnalysisAction) -> anyhow::Result<()> {
             let mut skipped_asset_count = 0usize;
 
             for (asset, timeline_clip_count, on_timeline) in
-                assets.into_iter().take(asset_limit.max(1).min(100))
+                assets.into_iter().take(asset_limit.clamp(1, 100))
             {
                 searched_asset_count += 1;
                 match build_source_analysis_report(&project, &project_dir, asset.id.as_str()) {
@@ -428,7 +428,7 @@ pub fn execute(action: AnalysisAction) -> anyhow::Result<()> {
                 let right_score = right.get("score").and_then(Value::as_f64).unwrap_or(0.0);
                 right_score.total_cmp(&left_score)
             });
-            matches.truncate(limit.max(1).min(50));
+            matches.truncate(limit.clamp(1, 50));
 
             output::print_json_pretty(&json!({
                 "query": query,
@@ -480,7 +480,7 @@ pub fn execute(action: AnalysisAction) -> anyhow::Result<()> {
                 &search_result.matches,
                 padding_sec.max(0.0),
                 gap_sec.max(0.0),
-                limit.max(1).min(24),
+                limit.clamp(1, 24),
             );
 
             let resolved_sequence_id = super::resolve_sequence_id(&project, sequence)?;
@@ -523,6 +523,7 @@ pub fn execute(action: AnalysisAction) -> anyhow::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn search_source_library_matches(
     project: &openreelio_core::ActiveProject,
     project_dir: &Path,
@@ -568,7 +569,7 @@ fn search_source_library_matches(
     let mut skipped_asset_count = 0usize;
 
     for (asset, timeline_clip_count, on_timeline) in
-        assets.into_iter().take(asset_limit.max(1).min(100))
+        assets.into_iter().take(asset_limit.clamp(1, 100))
     {
         searched_asset_count += 1;
         match build_source_analysis_report(project, project_dir, asset.id.as_str()) {
@@ -592,7 +593,7 @@ fn search_source_library_matches(
     }
 
     matches.sort_by(|left, right| value_score(right).total_cmp(&value_score(left)));
-    matches.truncate(limit.max(1).min(50));
+    matches.truncate(limit.clamp(1, 50));
 
     SourceLibrarySearchResult {
         query: query.to_string(),
@@ -646,7 +647,7 @@ fn build_source_selects_from_matches(
 
     deduped
         .into_iter()
-        .take(limit.max(1).min(24))
+        .take(limit.clamp(1, 24))
         .enumerate()
         .filter_map(|(index, entry)| {
             let asset_id = entry.get("assetId").and_then(Value::as_str)?;
@@ -1909,7 +1910,7 @@ fn search_source_analysis_report_value(
 
     rerank_source_library_matches(matches, query)
         .into_iter()
-        .take(limit.max(1).min(50))
+        .take(limit.clamp(1, 50))
         .collect()
 }
 
@@ -2118,7 +2119,7 @@ fn build_audio_cue(
 fn ends_sentence(text: &str) -> bool {
     let trimmed = text
         .trim_end()
-        .trim_end_matches(|ch: char| matches!(ch, '"' | '\'' | ')' | ']' | '}' | '”' | '’'));
+        .trim_end_matches(&['"', '\'', ')', ']', '}', '”', '’'][..]);
     trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?')
 }
 
@@ -2572,6 +2573,7 @@ fn build_report_highlights(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_report_moments(
     shots: &[CachedShotResult],
     transcript: &[CachedTranscriptSegment],

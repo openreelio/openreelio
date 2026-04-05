@@ -176,11 +176,10 @@ impl FreesoundProvider {
 
     #[allow(dead_code)]
     fn matches_query(sound: &FreesoundSound, query: &PluginSearchQuery) -> bool {
-        if query
+        if !query
             .asset_type
             .map(|asset_type| asset_type == PluginAssetType::Audio)
             .unwrap_or(true)
-            == false
         {
             return false;
         }
