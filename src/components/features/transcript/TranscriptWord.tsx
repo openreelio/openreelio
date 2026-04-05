@@ -21,8 +21,12 @@ export interface TranscriptWordProps {
   isSegmentStart: boolean;
   /** Speaker ID for this word (shows speaker change marker) */
   speakerId?: string | null;
+  /** Speaker turn ID for this word (heuristic turn grouping marker) */
+  speakerTurnId?: string | null;
   /** Previous word's speaker ID (to detect speaker changes) */
   prevSpeakerId?: string | null;
+  /** Previous word's speaker turn ID */
+  prevSpeakerTurnId?: string | null;
   /** Click handler for seeking */
   onClick: (index: number) => void;
   /** Mouse down handler for selection start */
@@ -44,24 +48,33 @@ export const TranscriptWord: React.FC<TranscriptWordProps> = React.memo(
     isSelected,
     isSegmentStart,
     speakerId,
+    speakerTurnId,
     prevSpeakerId,
+    prevSpeakerTurnId,
     onClick,
     onMouseDown,
     onMouseEnter,
     readOnly,
     isMarkedForRemoval,
   }) => {
-    const showSpeakerChange =
-      speakerId && prevSpeakerId && speakerId !== prevSpeakerId;
+    const showSpeakerChange = speakerId && prevSpeakerId && speakerId !== prevSpeakerId;
+    const showTurnChange =
+      !showSpeakerChange &&
+      speakerTurnId &&
+      prevSpeakerTurnId &&
+      speakerTurnId !== prevSpeakerTurnId;
+    const turnLabel = showSpeakerChange
+      ? speakerId
+      : showTurnChange
+        ? `Turn ${Number.parseInt(speakerTurnId.replace(/^turn_/, ''), 10) || speakerTurnId}`
+        : null;
 
     return (
       <>
-        {isSegmentStart && index > 0 && (
-          <span className="inline-block w-0.5" />
-        )}
-        {showSpeakerChange && (
+        {isSegmentStart && index > 0 && <span className="inline-block w-0.5" />}
+        {turnLabel && (
           <span className="block w-full mt-2 mb-1 text-xs text-neutral-500 font-medium">
-            [{speakerId}]
+            [{turnLabel}]
           </span>
         )}
         <span
@@ -72,7 +85,10 @@ export const TranscriptWord: React.FC<TranscriptWordProps> = React.memo(
             'inline cursor-pointer rounded-sm px-0.5 py-px transition-colors',
             isActive && 'bg-primary-500/40 text-white font-medium',
             isSelected && !isActive && 'bg-primary-600/30',
-            isMarkedForRemoval && !isActive && !isSelected && 'bg-red-600/25 text-red-300 line-through',
+            isMarkedForRemoval &&
+              !isActive &&
+              !isSelected &&
+              'bg-red-600/25 text-red-300 line-through',
             !isActive && !isSelected && !isMarkedForRemoval && 'hover:bg-neutral-700/50',
           ]
             .filter(Boolean)
@@ -96,11 +112,10 @@ export const TranscriptWord: React.FC<TranscriptWordProps> = React.memo(
           aria-label={`Word: ${text}, click to seek`}
         >
           {text}
-        </span>
-        {' '}
+        </span>{' '}
       </>
     );
-  }
+  },
 );
 
 TranscriptWord.displayName = 'TranscriptWord';

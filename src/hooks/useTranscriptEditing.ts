@@ -28,6 +28,7 @@ export interface TranscriptWord {
   wordIndex: number;
   confidence: number;
   speakerId?: string | null;
+  speakerTurnId?: string | null;
 }
 
 /** Word selection range for editing operations */
