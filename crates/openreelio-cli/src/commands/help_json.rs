@@ -257,13 +257,15 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "description": "Add a caption to the timeline",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
-                    "track": { "type": "string", "required": true, "desc": "Track ID" },
+                    "track": { "type": "string", "required": false, "desc": "Caption track ID (auto-created when omitted)" },
                     "text": { "type": "string", "required": true, "desc": "Caption text" },
                     "start": { "type": "number", "required": true, "desc": "Start time in seconds" },
                     "end": { "type": "number", "required": true, "desc": "End time in seconds" },
+                    "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object" },
+                    "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
-                "example": "openreelio-cli caption add --path ./project --track track_v1 --text \"Hello\" --start 0.0 --end 3.0"
+                "example": "openreelio-cli caption add --path ./project --text \"Hello\" --start 0.0 --end 3.0"
             },
             "caption.list": {
                 "description": "List all captions in the sequence",
@@ -283,26 +285,43 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 },
                 "example": "openreelio-cli caption export --path ./project --format srt --output captions.srt"
             },
+            "caption.import": {
+                "description": "Import captions from an SRT or VTT file",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "file": { "type": "string", "required": true, "desc": "Subtitle file path" },
+                    "track": { "type": "string", "required": false, "desc": "Caption track ID (auto-created when omitted)" },
+                    "format": { "type": "string", "required": false, "desc": "Subtitle format: srt or vtt (auto-detected when omitted)" },
+                    "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object applied to all cues" },
+                    "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                },
+                "example": "openreelio-cli caption import --path ./project --file captions.srt"
+            },
             "caption.update": {
-                "description": "Update a caption's text",
+                "description": "Update a caption's text, timing, and style",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Caption ID to update" },
-                    "track": { "type": "string", "required": true, "desc": "Track ID containing the caption" },
+                    "track": { "type": "string", "required": false, "desc": "Caption track ID containing the caption (auto-resolved when omitted)" },
                     "text": { "type": "string", "required": false, "desc": "New caption text" },
+                    "start": { "type": "number", "required": false, "desc": "New caption start time in seconds" },
+                    "end": { "type": "number", "required": false, "desc": "New caption end time in seconds" },
+                    "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object" },
+                    "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
-                "example": "openreelio-cli caption update --path ./project --id cap_001 --track track_c1 --text \"Updated text\""
+                "example": "openreelio-cli caption update --path ./project --id cap_001 --text \"Updated text\""
             },
             "caption.remove": {
                 "description": "Remove a caption from the timeline",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Caption ID to remove" },
-                    "track": { "type": "string", "required": true, "desc": "Track ID containing the caption" },
+                    "track": { "type": "string", "required": false, "desc": "Caption track ID containing the caption (auto-resolved when omitted)" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
-                "example": "openreelio-cli caption remove --path ./project --id cap_001 --track track_c1"
+                "example": "openreelio-cli caption remove --path ./project --id cap_001"
             },
             "plan.execute": {
                 "description": "Execute a plan file atomically (rollback on failure)",
@@ -412,4 +431,20 @@ mod tests {
         assert_eq!(schema_paths, clap_paths);
     }
 
+    #[test]
+    fn build_schema_documents_richer_caption_surface() {
+        let schema = build_schema();
+        let commands = schema["commands"]
+            .as_object()
+            .expect("schema commands must be an object");
+
+        assert!(commands.contains_key("caption.import"));
+        assert!(commands["caption.update"]["params"]["start"].is_object());
+        assert!(commands["caption.update"]["params"]["style-json"].is_object());
+        assert!(commands["caption.add"]["params"]["track"]["required"] == false);
+        assert!(commands.contains_key("analysis.report"));
+        assert!(commands.contains_key("analysis.search"));
+        assert!(commands.contains_key("analysis.search-library"));
+        assert!(commands.contains_key("analysis.build-selects"));
+    }
 }

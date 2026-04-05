@@ -713,6 +713,8 @@ fn is_text_document_path(path: &Path) -> bool {
         ext.to_lowercase().as_str(),
         "md" | "markdown"
             | "txt"
+            | "srt"
+            | "vtt"
             | "json"
             | "jsonc"
             | "yaml"
@@ -987,6 +989,8 @@ mod tests {
         assert!(is_text_document_path(Path::new("AGENTS.md")));
         assert!(is_text_document_path(Path::new("CLAUDE.md")));
         assert!(is_text_document_path(Path::new("src/main.ts")));
+        assert!(is_text_document_path(Path::new("captions/subtitles.srt")));
+        assert!(is_text_document_path(Path::new("captions/subtitles.vtt")));
         assert!(!is_text_document_path(Path::new("video/movie.mp4")));
     }
 

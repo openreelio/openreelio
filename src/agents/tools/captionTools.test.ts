@@ -2,12 +2,17 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import { globalToolRegistry, type AgentContext } from '@/agents';
 import { registerCaptionTools, unregisterCaptionTools } from './captionTools';
 import { useProjectStore } from '@/stores/projectStore';
+import { readWorkspaceDocumentFromBackend } from '@/services/workspaceGateway';
 import type { Clip, Sequence, Track } from '@/types';
 
 vi.mock('@/stores/projectStore', () => ({
   useProjectStore: {
     getState: vi.fn(),
   },
+}));
+
+vi.mock('@/services/workspaceGateway', () => ({
+  readWorkspaceDocumentFromBackend: vi.fn(),
 }));
 
 const CTX: AgentContext = {
@@ -89,6 +94,12 @@ describe('captionTools', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(readWorkspaceDocumentFromBackend).mockResolvedValue({
+      relativePath: 'captions/example.srt',
+      content: '1\n00:00:00,000 --> 00:00:02,000\nHello world\n',
+      sizeBytes: 42,
+      modifiedAtUnixSec: 1,
+    });
     executeCommandMock.mockResolvedValue({
       opId: 'op-caption',
       success: true,
@@ -293,6 +304,52 @@ describe('captionTools', () => {
         trackId: 'track-caption-1',
         captionId: 'cap-rolled-back',
       },
+    });
+  });
+
+  it('should import captions from a workspace subtitle file', async () => {
+    const tool = globalToolRegistry.get('import_captions_from_file');
+    expect(tool).toBeDefined();
+
+    executeCommandMock
+      .mockResolvedValueOnce({
+        opId: 'op-caption-1',
+        success: true,
+        createdIds: ['cap-101'],
+        deletedIds: [],
+        changes: [],
+      })
+      .mockResolvedValueOnce({
+        opId: 'op-caption-2',
+        success: true,
+        createdIds: ['cap-102'],
+        deletedIds: [],
+        changes: [],
+      });
+
+    vi.mocked(readWorkspaceDocumentFromBackend).mockResolvedValueOnce({
+      relativePath: 'captions/example.vtt',
+      content:
+        'WEBVTT\n\n00:00:00.000 --> 00:00:01.500\nFirst line\n\n00:00:02.000 --> 00:00:03.000\nSecond line\n',
+      sizeBytes: 96,
+      modifiedAtUnixSec: 1,
+    });
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        relativePath: 'captions/example.vtt',
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(readWorkspaceDocumentFromBackend).toHaveBeenCalledWith('captions/example.vtt');
+    expect(result.result).toMatchObject({
+      format: 'vtt',
+      relativePath: 'captions/example.vtt',
+      trackId: 'track-caption-1',
+      captionCount: 2,
     });
   });
 });

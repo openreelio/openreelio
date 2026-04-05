@@ -84,6 +84,7 @@ fn project_path(dir: &tempfile::TempDir, name: &str) -> String {
     dir.path().join(name).to_string_lossy().to_string()
 }
 
+
 // =============================================================================
 // Project Commands
 // =============================================================================
@@ -679,7 +680,7 @@ fn test_help_json_contains_all_commands() {
     let result = run_cli_ok(&["help-json"]);
     let commands = result["commands"].as_object().unwrap();
 
-    // Verify all 32 commands are present
+    // Verify all leaf commands are present
     let expected_commands = vec![
         "project.create",
         "project.open",
@@ -706,6 +707,7 @@ fn test_help_json_contains_all_commands() {
         "caption.update",
         "caption.remove",
         "caption.list",
+        "caption.import",
         "caption.export",
         "plan.execute",
         "plan.validate",
@@ -737,6 +739,104 @@ fn test_caption_list_empty() {
     let path = project_path(&dir, "caption_list_test");
     let result = run_cli_ok(&["caption", "list", "--path", &path]);
     assert_eq!(result["count"], 0);
+}
+
+#[test]
+fn test_caption_add_auto_creates_track() {
+    let dir = create_temp_project("caption_add_test");
+    let path = project_path(&dir, "caption_add_test");
+
+    let result = run_cli_ok(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Hello world",
+        "--start",
+        "0",
+        "--end",
+        "2",
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert!(result["trackId"].is_string());
+
+    let list = run_cli_ok(&["caption", "list", "--path", &path]);
+    assert_eq!(list["count"], 1);
+}
+
+#[test]
+fn test_caption_update_resolves_track_and_updates_timing() {
+    let dir = create_temp_project("caption_update_test");
+    let path = project_path(&dir, "caption_update_test");
+
+    run_cli_ok(&[
+        "caption", "add", "--path", &path, "--text", "Original", "--start", "0", "--end", "2",
+    ]);
+    let list_after_add = run_cli_ok(&["caption", "list", "--path", &path]);
+    let caption_id = list_after_add["captions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let result = run_cli_ok(&[
+        "caption",
+        "update",
+        "--path",
+        &path,
+        "--id",
+        &caption_id,
+        "--text",
+        "Updated",
+        "--start",
+        "1",
+        "--end",
+        "3",
+        "--position",
+        "top",
+    ]);
+
+    assert_eq!(result["status"], "ok");
+
+    let list = run_cli_ok(&["caption", "list", "--path", &path]);
+    let caption = list["captions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|caption| caption["id"].as_str() == Some(&caption_id))
+        .expect("updated caption should exist");
+
+    assert_eq!(caption["startSec"], 1.0);
+    assert_eq!(caption["durationSec"], 2.0);
+}
+
+#[test]
+fn test_caption_import_srt_file() {
+    let dir = create_temp_project("caption_import_test");
+    let path = project_path(&dir, "caption_import_test");
+
+    let subtitle_file = dir.path().join("captions.srt");
+    std::fs::write(
+        &subtitle_file,
+        "1\n00:00:00,000 --> 00:00:01,500\nFirst line\n\n2\n00:00:02,000 --> 00:00:03,000\nSecond line\n",
+    )
+    .unwrap();
+
+    let result = run_cli_ok(&[
+        "caption",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        subtitle_file.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["importedCount"], 2);
+
+    let list = run_cli_ok(&["caption", "list", "--path", &path]);
+    assert_eq!(list["count"], 2);
 }
 
 // =============================================================================
