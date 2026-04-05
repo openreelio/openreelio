@@ -31,7 +31,8 @@ import { parseFastPathPlan, type FastPathMatch } from './core/fastPathParser';
 import { DoomLoopDetector } from './core/DoomLoopDetector';
 import { Compaction } from './core/compaction';
 import { resolveMaxOutputTokens, resolveContextLimit } from './core/modelRegistry';
-import { assembleSystemPrompt, type AgentRole } from './prompts/system';
+import { assembleSystemPrompt } from './prompts/system';
+import type { AgentRole } from './prompts/agentRoles';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AgentLoop');

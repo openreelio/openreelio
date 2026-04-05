@@ -7,6 +7,7 @@
 
 import { useCallback } from 'react';
 import { Plus, Trash2, Archive, MessageSquare } from 'lucide-react';
+import { getAgentDisplayName } from '@/agents/engine/core/agentCatalog';
 import {
   summarizeAgentSessionPersistenceView,
   useAgentSessionStore,
@@ -47,7 +48,9 @@ export function SessionList({ onNewSession, className = '' }: SessionListProps) 
   const sessions = useConversationStore((s) => s.sessions);
   const activeSessionId = useConversationStore((s) => s.activeSessionId);
   const persistenceIssuesBySessionId = useAgentSessionStore((s) => s.persistenceIssuesBySessionId);
-  const persistenceLatchesBySessionId = useAgentSessionStore((s) => s.persistenceLatchesBySessionId);
+  const persistenceLatchesBySessionId = useAgentSessionStore(
+    (s) => s.persistenceLatchesBySessionId,
+  );
   const switchSession = useConversationStore((s) => s.switchSession);
   const deleteSession = useConversationStore((s) => s.deleteSession);
   const archiveSession = useConversationStore((s) => s.archiveSession);
@@ -109,9 +112,10 @@ export function SessionList({ onNewSession, className = '' }: SessionListProps) 
               persistenceIssuesBySessionId[session.id],
               persistenceLatchesBySessionId[session.id],
             );
-            const badgeClass = persistence.status === 'ephemeral'
-              ? 'border-status-error/30 bg-status-error/10 text-status-error'
-              : 'border-status-warning/30 bg-status-warning/10 text-status-warning';
+            const badgeClass =
+              persistence.status === 'ephemeral'
+                ? 'border-status-error/30 bg-status-error/10 text-status-error'
+                : 'border-status-warning/30 bg-status-warning/10 text-status-warning';
             return (
               <div
                 key={session.id}
@@ -134,11 +138,19 @@ export function SessionList({ onNewSession, className = '' }: SessionListProps) 
                 <div className="flex items-start gap-2">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <p className={`min-w-0 flex-1 truncate text-xs font-medium ${
-                        isActive ? 'text-primary-400' : 'text-text-primary'
-                      }`}>
+                      <p
+                        className={`min-w-0 flex-1 truncate text-xs font-medium ${
+                          isActive ? 'text-primary-400' : 'text-text-primary'
+                        }`}
+                      >
                         {session.title || 'Untitled Session'}
                       </p>
+                      <span
+                        data-testid={`session-agent-badge-${session.id}`}
+                        className="rounded-full border border-border-subtle bg-surface-elevated px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-[0.08em] text-text-tertiary"
+                      >
+                        {getAgentDisplayName(session.agent)}
+                      </span>
                       {persistence.status !== 'healthy' && (
                         <span
                           data-testid={`session-persistence-badge-${session.id}`}

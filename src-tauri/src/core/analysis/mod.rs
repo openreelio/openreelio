@@ -29,6 +29,7 @@ pub mod dtw;
 pub mod ducking;
 pub mod esd;
 pub mod segmentation;
+pub mod speaker_turns;
 pub mod style_planner;
 pub mod types;
 pub mod visual;
@@ -49,6 +50,7 @@ use crate::core::{CoreError, CoreResult};
 
 use audio::AudioProfiler;
 use segmentation::ContentSegmenter;
+use speaker_turns::infer_speaker_turns;
 use visual::VisualAnalyzer;
 
 /// Directory name within .openreelio for analysis artifacts
@@ -234,6 +236,13 @@ impl AnalysisJobRunner {
 
         let transcript = match transcript_result {
             Ok(Some(transcript)) => {
+                let transcript = infer_speaker_turns(
+                    &transcript,
+                    audio_profile
+                        .as_ref()
+                        .map(|profile| profile.speech_regions.as_slice())
+                        .unwrap_or(&[]),
+                );
                 bundle.transcript = Some(transcript.clone());
                 emit_progress(
                     "transcript",
@@ -652,6 +661,7 @@ mod tests {
             loudness_profile: vec![-18.0, -16.5],
             peak_db: -0.5,
             silence_regions: vec![],
+            speech_regions: vec![],
         });
 
         runner.save_bundle(&bundle).unwrap();

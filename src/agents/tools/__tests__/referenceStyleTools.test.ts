@@ -44,6 +44,7 @@ function makeAnalysisBundle(overrides: Partial<AnalysisBundle> = {}): AnalysisBu
       loudnessProfile: [-18, -20, -15, -18, -22, -19, -17, -20],
       peakDb: -3,
       silenceRegions: [],
+      speechRegions: [{ startSec: 0, endSec: 8 }],
     },
     segments: [
       { startSec: 0, endSec: 5, segmentType: 'talk' as const, confidence: 0.85, features: null },

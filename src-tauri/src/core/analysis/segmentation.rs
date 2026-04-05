@@ -526,6 +526,7 @@ impl Default for ContentSegmenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::analysis::types::SpeechRegion;
 
     /// Helper: create a simple audio profile with uniform loudness
     fn make_audio_profile(
@@ -539,6 +540,11 @@ mod tests {
             loudness_profile: vec![loudness_db; duration_sec],
             peak_db: loudness_db,
             silence_regions: Vec::new(),
+            speech_regions: if duration_sec > 0 {
+                vec![SpeechRegion::new(0.0, duration_sec as f64)]
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -589,6 +595,7 @@ mod tests {
             loudness_profile,
             peak_db: -5.0,
             silence_regions: Vec::new(),
+            speech_regions: vec![SpeechRegion::new(0.0, 20.0)],
         };
 
         let segmenter = ContentSegmenter::new();
@@ -855,6 +862,7 @@ mod tests {
             loudness_profile: Vec::new(),
             peak_db: f64::NEG_INFINITY,
             silence_regions: Vec::new(),
+            speech_regions: vec![SpeechRegion::new(0.0, 10.0)],
         };
 
         let segmenter = ContentSegmenter::new();

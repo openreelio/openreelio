@@ -6,7 +6,11 @@
 use crate::output;
 
 pub fn execute() -> anyhow::Result<()> {
-    output::print_json_pretty(&serde_json::json!({
+    output::print_json_pretty(&build_schema())
+}
+
+pub(crate) fn build_schema() -> serde_json::Value {
+    serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "description": "OpenReelio CLI — Headless AI agent-driven video editing",
         "commands": {
@@ -51,7 +55,8 @@ pub fn execute() -> anyhow::Result<()> {
             "asset.list": {
                 "description": "List all assets in the project",
                 "params": {
-                    "path": { "type": "string", "required": true, "desc": "Project directory path" }
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "format": { "type": "string", "required": false, "desc": "Output format (currently json only)" }
                 },
                 "example": "openreelio-cli asset list --path ./project"
             },
@@ -70,6 +75,58 @@ pub fn execute() -> anyhow::Result<()> {
                     "id": { "type": "string", "required": true, "desc": "Asset ID to remove" }
                 },
                 "example": "openreelio-cli asset remove --path ./project --id asset_001"
+            },
+            "analysis.report": {
+                "description": "Build a cached source analysis report for one asset as structured JSON plus embedded Markdown, including moments, chapters, and candidate highlights",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Asset ID" }
+                },
+                "example": "openreelio-cli analysis report --path ./project --id asset_001"
+            },
+            "analysis.search": {
+                "description": "Search source-analysis moments, chapters, highlights, and speaker turns for one asset and return ranked matches",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Asset ID" },
+                    "query": { "type": "string", "required": true, "desc": "Search query" },
+                    "sections": { "type": "array", "required": false, "desc": "Optional comma-separated sections: moments, chapters, highlights, speakerTurns" },
+                    "limit": { "type": "number", "required": false, "desc": "Maximum matches to return (default: 5)" }
+                },
+                "example": "openreelio-cli analysis search --path ./project --id asset_001 --query \"host question\" --sections speakerTurns,moments --limit 5"
+            },
+            "analysis.search-library": {
+                "description": "Search source-analysis moments, chapters, highlights, and speaker turns across multiple video assets and return ranked matches",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "query": { "type": "string", "required": true, "desc": "Search query" },
+                    "ids": { "type": "array", "required": false, "desc": "Optional comma-separated asset IDs to restrict search scope" },
+                    "unused-only": { "type": "boolean", "required": false, "desc": "Restrict search to assets not currently used on any timeline" },
+                    "sections": { "type": "array", "required": false, "desc": "Optional comma-separated sections: moments, chapters, highlights, speakerTurns" },
+                    "limit": { "type": "number", "required": false, "desc": "Maximum matches to return (default: 8)" },
+                    "asset-limit": { "type": "number", "required": false, "desc": "Maximum candidate assets to inspect (default: 20)" }
+                },
+                "example": "openreelio-cli analysis search-library --path ./project --query \"interviewer question\" --sections speakerTurns,moments --limit 8 --asset-limit 20"
+            },
+            "analysis.build-selects": {
+                "description": "Build a selects stringout plan from ranked source matches, including speaker-turn matches when relevant, with optional direct apply to a target video track",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "query": { "type": "string", "required": true, "desc": "Search query" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active sequence)" },
+                    "track": { "type": "string", "required": false, "desc": "Optional target video track ID" },
+                    "track-name": { "type": "string", "required": false, "desc": "Target track name when creating or reusing a selects track" },
+                    "timeline-start": { "type": "number", "required": false, "desc": "Optional timeline start position for the first selects clip" },
+                    "ids": { "type": "array", "required": false, "desc": "Optional comma-separated asset IDs to restrict search scope" },
+                    "unused-only": { "type": "boolean", "required": false, "desc": "Restrict search to assets not currently used on any timeline" },
+                    "sections": { "type": "array", "required": false, "desc": "Optional comma-separated sections: moments, chapters, highlights, speakerTurns" },
+                    "limit": { "type": "number", "required": false, "desc": "Maximum final selects to keep (default: 6)" },
+                    "asset-limit": { "type": "number", "required": false, "desc": "Maximum candidate assets to inspect (default: 20)" },
+                    "padding-sec": { "type": "number", "required": false, "desc": "Extra padding before and after each source range" },
+                    "gap-sec": { "type": "number", "required": false, "desc": "Gap between selects on the timeline" },
+                    "apply": { "type": "boolean", "required": false, "desc": "Apply the generated selects directly to the target track" }
+                },
+                "example": "openreelio-cli analysis build-selects --path ./project --query \"crowd cheer\" --track-name \"Source Selects\" --limit 6 --padding-sec 0.25 --gap-sec 0.25 --apply"
             },
             "timeline.info": {
                 "description": "Display timeline structure (tracks, clip counts)",
@@ -168,7 +225,7 @@ pub fn execute() -> anyhow::Result<()> {
                 "description": "Add a new track to the timeline",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
-                    "kind": { "type": "string", "required": true, "desc": "Track type: video or audio" },
+                    "kind": { "type": "string", "required": true, "desc": "Track type: video, audio, caption, or overlay" },
                     "name": { "type": "string", "required": true, "desc": "Track name" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
@@ -201,13 +258,15 @@ pub fn execute() -> anyhow::Result<()> {
                 "description": "Add a caption to the timeline",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
-                    "track": { "type": "string", "required": true, "desc": "Track ID" },
+                    "track": { "type": "string", "required": false, "desc": "Caption track ID (auto-created when omitted)" },
                     "text": { "type": "string", "required": true, "desc": "Caption text" },
                     "start": { "type": "number", "required": true, "desc": "Start time in seconds" },
                     "end": { "type": "number", "required": true, "desc": "End time in seconds" },
+                    "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object" },
+                    "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
-                "example": "openreelio-cli caption add --path ./project --track track_v1 --text \"Hello\" --start 0.0 --end 3.0"
+                "example": "openreelio-cli caption add --path ./project --text \"Hello\" --start 0.0 --end 3.0"
             },
             "caption.list": {
                 "description": "List all captions in the sequence",
@@ -227,26 +286,43 @@ pub fn execute() -> anyhow::Result<()> {
                 },
                 "example": "openreelio-cli caption export --path ./project --format srt --output captions.srt"
             },
+            "caption.import": {
+                "description": "Import captions from an SRT or VTT file",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "file": { "type": "string", "required": true, "desc": "Subtitle file path" },
+                    "track": { "type": "string", "required": false, "desc": "Caption track ID (auto-created when omitted)" },
+                    "format": { "type": "string", "required": false, "desc": "Subtitle format: srt or vtt (auto-detected when omitted)" },
+                    "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object applied to all cues" },
+                    "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                },
+                "example": "openreelio-cli caption import --path ./project --file captions.srt"
+            },
             "caption.update": {
-                "description": "Update a caption's text",
+                "description": "Update a caption's text, timing, and style",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Caption ID to update" },
-                    "track": { "type": "string", "required": true, "desc": "Track ID containing the caption" },
+                    "track": { "type": "string", "required": false, "desc": "Caption track ID containing the caption (auto-resolved when omitted)" },
                     "text": { "type": "string", "required": false, "desc": "New caption text" },
+                    "start": { "type": "number", "required": false, "desc": "New caption start time in seconds" },
+                    "end": { "type": "number", "required": false, "desc": "New caption end time in seconds" },
+                    "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object" },
+                    "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
-                "example": "openreelio-cli caption update --path ./project --id cap_001 --track track_c1 --text \"Updated text\""
+                "example": "openreelio-cli caption update --path ./project --id cap_001 --text \"Updated text\""
             },
             "caption.remove": {
                 "description": "Remove a caption from the timeline",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Caption ID to remove" },
-                    "track": { "type": "string", "required": true, "desc": "Track ID containing the caption" },
+                    "track": { "type": "string", "required": false, "desc": "Caption track ID containing the caption (auto-resolved when omitted)" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
-                "example": "openreelio-cli caption remove --path ./project --id cap_001 --track track_c1"
+                "example": "openreelio-cli caption remove --path ./project --id cap_001"
             },
             "plan.execute": {
                 "description": "Execute a plan file atomically (rollback on failure)",
@@ -300,11 +376,11 @@ pub fn execute() -> anyhow::Result<()> {
                 "example": "openreelio-cli render presets"
             },
             "render.start": {
-                "description": "Start a render job (not yet implemented in CLI — returns error with validation)",
+                "description": "Render a sequence to a final output file using the shared FFmpeg export engine",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "output": { "type": "string", "required": true, "desc": "Output file path" },
-                    "preset": { "type": "string", "required": false, "desc": "Render preset name (default: mp4_h264_1080p)" },
+                    "preset": { "type": "string", "required": false, "desc": "Render preset name (default: mp4_h264_1080p). Use render.presets for the supported list." },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
                 "example": "openreelio-cli render start --path ./project --output output.mp4"
@@ -315,5 +391,61 @@ pub fn execute() -> anyhow::Result<()> {
                 "example": "openreelio-cli help-json"
             }
         }
-    }))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_schema;
+    use crate::commands::Cli;
+    use clap::{Command, CommandFactory};
+
+    fn collect_leaf_paths(command: &Command, prefix: &[String], acc: &mut Vec<String>) {
+        let mut has_subcommands = false;
+
+        for subcommand in command.get_subcommands() {
+            has_subcommands = true;
+            let mut next_prefix = prefix.to_vec();
+            next_prefix.push(subcommand.get_name().to_string());
+            collect_leaf_paths(subcommand, &next_prefix, acc);
+        }
+
+        if !has_subcommands && !prefix.is_empty() {
+            acc.push(prefix.join("."));
+        }
+    }
+
+    #[test]
+    fn build_schema_covers_all_clap_leaf_commands() {
+        let schema = build_schema();
+        let schema_commands = schema["commands"]
+            .as_object()
+            .expect("schema commands must be an object");
+
+        let mut clap_paths = Vec::new();
+        collect_leaf_paths(&Cli::command(), &[], &mut clap_paths);
+        clap_paths.sort();
+
+        let mut schema_paths: Vec<String> = schema_commands.keys().cloned().collect();
+        schema_paths.sort();
+
+        assert_eq!(schema_paths, clap_paths);
+    }
+
+    #[test]
+    fn build_schema_documents_richer_caption_surface() {
+        let schema = build_schema();
+        let commands = schema["commands"]
+            .as_object()
+            .expect("schema commands must be an object");
+
+        assert!(commands.contains_key("caption.import"));
+        assert!(commands["caption.update"]["params"]["start"].is_object());
+        assert!(commands["caption.update"]["params"]["style-json"].is_object());
+        assert!(commands["caption.add"]["params"]["track"]["required"] == false);
+        assert!(commands.contains_key("analysis.report"));
+        assert!(commands.contains_key("analysis.search"));
+        assert!(commands.contains_key("analysis.search-library"));
+        assert!(commands.contains_key("analysis.build-selects"));
+    }
 }

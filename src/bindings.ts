@@ -1766,7 +1766,8 @@ async getSystemMetrics() : Promise<Result<SystemMetricsDto, string>> {
 }
 },
 /**
- * Scan the project workspace for media files and auto-register them as assets
+ * Scan the project workspace for media files and auto-register them as assets.
+ * Also starts (or restarts) the live filesystem watcher for this project.
  */
 async scanWorkspace() : Promise<Result<WorkspaceScanResultDto, string>> {
     try {
@@ -2983,7 +2984,11 @@ peakDb: number;
 /**
  * Regions where audio is below -40 dB for > 0.5s
  */
-silenceRegions: SilenceRegion[] }
+silenceRegions: SilenceRegion[]; 
+/**
+ * Regions where audio is above the silence threshold (derived speech / non-silence)
+ */
+speechRegions?: SpeechRegion[] }
 /**
  * Audio settings for clips
  */
@@ -3643,7 +3648,7 @@ export type CreateResumeCheckpointInput = { id: string | null; sessionId: string
 /**
  * Status of credentials for each provider
  */
-export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google: boolean; seedance: boolean }
+export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google: boolean; seedance: boolean; freesound: boolean }
 /**
  * Persisted delegation DTO aligned with the frontend session kernel vocabulary.
  */
@@ -5703,6 +5708,18 @@ playheadSec: number;
  */
 markedDuration: number | null }
 /**
+ * A detected region of speech / non-silence in the audio track.
+ */
+export type SpeechRegion = { 
+/**
+ * Start time in seconds
+ */
+startSec: number; 
+/**
+ * End time in seconds
+ */
+endSec: number }
+/**
  * Arguments for the stabilize_clip command.
  */
 export type StabilizeClipArgs = { sequenceId: string; trackId: string; clipId: string; smoothing: number; cropMode: string; zoom: number }
@@ -5881,7 +5898,15 @@ sizeBytes: number | null;
 /**
  * Tags for categorization.
  */
-tags: string[] }
+tags: string[]; 
+/**
+ * Provider that returned the asset.
+ */
+provider: string; 
+/**
+ * Additional provider-specific metadata such as preview URLs and license.
+ */
+metadata: JsonValue }
 /**
  * A single message in the conversation history for streaming requests.
  * 
@@ -6535,7 +6560,11 @@ language?: string | null;
 /**
  * Speaker ID (if speaker diarization is enabled)
  */
-speakerId?: string | null }
+speakerId?: string | null; 
+/**
+ * Inferred speaker turn ID (heuristic turn grouping, not a true speaker identity)
+ */
+speakerTurnId?: string | null }
 /**
  * A single word with estimated timing derived from transcript segments.
  * 
@@ -6570,7 +6599,11 @@ confidence: number;
 /**
  * Speaker ID inherited from parent segment
  */
-speakerId?: string | null }
+speakerId?: string | null; 
+/**
+ * Inferred speaker turn ID inherited from parent segment
+ */
+speakerTurnId?: string | null }
 /**
  * Options for transcription request.
  */

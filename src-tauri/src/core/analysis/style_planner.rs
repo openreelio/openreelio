@@ -580,7 +580,9 @@ mod tests {
     use crate::core::analysis::esd::{
         AudioFingerprint, EsdGenerator, TransitionEntry, TransitionInventory,
     };
-    use crate::core::analysis::types::{AudioProfile, ContentSegment, SegmentType, VideoMetadata};
+    use crate::core::analysis::types::{
+        AudioProfile, ContentSegment, SegmentType, SpeechRegion, VideoMetadata,
+    };
     use crate::core::annotations::models::ShotResult;
     use std::collections::HashMap;
 
@@ -669,6 +671,7 @@ mod tests {
             loudness_profile: vec![-20.0; total_duration as usize],
             peak_db: -10.0,
             silence_regions: vec![],
+            speech_regions: vec![SpeechRegion::new(0.0, total_duration)],
         });
 
         bundle

@@ -6,6 +6,7 @@
  */
 
 import type { IMemoryStore } from '../ports/IMemoryStore';
+import type { AgentRole } from '../prompts/agentRoles';
 
 // =============================================================================
 // Agent State
@@ -661,6 +662,9 @@ export interface AgenticEngineConfig {
 
   /** Optional project-specific instructions appended to phase prompts */
   customInstructions?: string;
+
+  /** Agent role used for system prompt assembly */
+  role?: AgentRole;
 
   /** Maximum recent operations loaded into context (default: 20) */
   memoryRecentOperationsLimit: number;

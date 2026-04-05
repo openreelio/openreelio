@@ -596,7 +596,7 @@ fn compute_std_dev(values: &[f64], mean: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::analysis::types::{AudioProfile, VideoMetadata};
+    use crate::core::analysis::types::{AudioProfile, SpeechRegion, VideoMetadata};
     use crate::core::annotations::models::ShotResult;
     use tempfile::TempDir;
 
@@ -809,6 +809,7 @@ mod tests {
             loudness_profile: vec![-30.0, -5.0, -30.0, -5.0, -30.0],
             peak_db: -5.0,
             silence_regions: vec![],
+            speech_regions: vec![SpeechRegion::new(0.0, 5.0)],
         };
 
         let sync = EsdGenerator::detect_sync_points(&shots, &audio);
@@ -834,6 +835,7 @@ mod tests {
             loudness_profile: vec![-30.0, -30.0, -5.0, -30.0, -30.0, -30.0],
             peak_db: -5.0,
             silence_regions: vec![],
+            speech_regions: vec![SpeechRegion::new(0.0, 10.0)],
         };
 
         let sync = EsdGenerator::detect_sync_points(&shots, &audio);
@@ -850,6 +852,7 @@ mod tests {
             loudness_profile: vec![-20.0; 10],
             peak_db: -20.0,
             silence_regions: vec![],
+            speech_regions: vec![SpeechRegion::new(0.0, 10.0)],
         };
 
         let sync = EsdGenerator::detect_sync_points(&shots, &audio);
@@ -905,6 +908,7 @@ mod tests {
             ],
             peak_db: -8.0,
             silence_regions: vec![],
+            speech_regions: vec![SpeechRegion::new(0.0, 12.0)],
         });
         bundle
     }

@@ -84,6 +84,69 @@ fn project_path(dir: &tempfile::TempDir, name: &str) -> String {
     dir.path().join(name).to_string_lossy().to_string()
 }
 
+fn system_ffmpeg_path() -> Option<PathBuf> {
+    openreelio_core::ffmpeg::detect_system_ffmpeg()
+        .ok()
+        .map(|info| info.ffmpeg_path)
+}
+
+fn ffmpeg_supports_encoder(ffmpeg_path: &std::path::Path, encoder: &str) -> bool {
+    let Ok(output) = Command::new(ffmpeg_path)
+        .args(["-hide_banner", "-encoders"])
+        .output()
+    else {
+        return false;
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.split_whitespace().any(|token| token == encoder))
+}
+
+fn create_sample_video(path: &std::path::Path) -> bool {
+    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+        return false;
+    };
+
+    let video_encoder = if ffmpeg_supports_encoder(&ffmpeg_path, "libx264") {
+        "libx264"
+    } else if ffmpeg_supports_encoder(&ffmpeg_path, "mpeg4") {
+        "mpeg4"
+    } else {
+        eprintln!("Skipping render export test: ffmpeg lacks a supported video encoder");
+        return false;
+    };
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=320x240:d=1",
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p"]);
+    }
+
+    let status = command
+        .arg(path)
+        .status()
+        .expect("Failed to generate sample video with ffmpeg");
+
+    if !status.success() {
+        eprintln!("Skipping render export test: ffmpeg could not generate the sample video");
+    }
+
+    status.success()
+}
+
 // =============================================================================
 // Project Commands
 // =============================================================================
@@ -347,16 +410,102 @@ fn test_timeline_insert_clip() {
 
 #[test]
 fn test_timeline_undo_redo() {
-    // Note: undo/redo state persists across CLI invocations because the
-    // CommandExecutor is reconstructed from the ops log on each open.
-    // However, undo stack requires the executor to track reversible ops.
-    // In the current architecture, undo stack is in-memory only and resets
-    // between CLI invocations. So we test that the commands parse and execute
-    // without errors when there IS something to undo (within a single plan).
     let dir = create_temp_project("undo_redo_test");
     let path = project_path(&dir, "undo_redo_test");
 
-    // Undo with nothing to undo should fail gracefully
+    let dummy_file = dir.path().join("undo_redo_clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    let clips_after_insert = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips_after_insert["count"], 1);
+
+    run_cli_ok(&["timeline", "undo", "--path", &path]);
+    let clips_after_undo = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips_after_undo["count"], 0);
+
+    run_cli_ok(&["timeline", "redo", "--path", &path]);
+    let clips_after_redo = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips_after_redo["count"], 1);
+}
+
+#[test]
+fn test_timeline_new_edit_clears_redo_branch() {
+    let dir = create_temp_project("undo_branch_test");
+    let path = project_path(&dir, "undo_branch_test");
+
+    let dummy_file = dir.path().join("undo_branch_clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    run_cli_ok(&["timeline", "undo", "--path", &path]);
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "1.0",
+    ]);
+
+    let (_stdout, stderr) = run_cli_err(&["timeline", "redo", "--path", &path]);
+    assert!(
+        stderr.contains("Redo failed") || stderr.contains("Nothing to redo"),
+        "Expected redo branch to be cleared, got: {}",
+        stderr
+    );
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips["count"], 1);
+    assert_eq!(clips["clips"][0]["timelineInSec"], 1.0);
+}
+
+#[test]
+fn test_timeline_undo_without_history_should_fail() {
+    let dir = create_temp_project("undo_empty_test");
+    let path = project_path(&dir, "undo_empty_test");
+
     let (_stdout, stderr) = run_cli_err(&["timeline", "undo", "--path", &path]);
     assert!(
         stderr.contains("Undo failed") || stderr.contains("Nothing to undo"),
@@ -491,13 +640,13 @@ fn test_validation_caption_inverted_range() {
 fn test_render_presets() {
     let result = run_cli_ok(&["render", "presets"]);
     let presets = result["presets"].as_array().unwrap();
-    assert_eq!(presets.len(), 7);
+    assert_eq!(presets.len(), 5);
     // Verify first preset structure
     assert_eq!(presets[0]["id"], "mp4_h264_1080p");
 }
 
 #[test]
-fn test_render_start_returns_error() {
+fn test_render_start_validates_sequence_before_initializing_ffmpeg() {
     let dir = create_temp_project("render_test");
     let path = project_path(&dir, "render_test");
     let (_stdout, stderr) = run_cli_err(&[
@@ -509,8 +658,9 @@ fn test_render_start_returns_error() {
         "/tmp/output.mp4",
     ]);
     assert!(
-        stderr.contains("not yet implemented"),
-        "Expected not implemented error, got: {}",
+        stderr.contains("Render validation failed")
+            && stderr.contains("Sequence has no clips to export"),
+        "Expected render validation error, got: {}",
         stderr
     );
 }
@@ -533,6 +683,67 @@ fn test_render_start_invalid_preset() {
         stderr.contains("Unknown preset"),
         "Expected unknown preset error, got: {}",
         stderr
+    );
+}
+
+#[test]
+fn test_render_start_exports_video_when_ffmpeg_is_available() {
+    if system_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_export_test");
+    let path = project_path(&dir, "render_export_test");
+
+    let source_path = dir.path().join("render_source.mp4");
+    if !create_sample_video(&source_path) {
+        return;
+    }
+
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source_path.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    let output_path = dir.path().join("rendered-output.mp4");
+    let result = run_cli_ok(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        result["sequenceId"],
+        run_cli_ok(&["project", "info", "--path", &path])["activeSequenceId"]
+    );
+    assert!(output_path.exists(), "Expected rendered output to exist");
+    assert!(
+        output_path.metadata().unwrap().len() > 0,
+        "Expected rendered output to be non-empty"
     );
 }
 
@@ -679,7 +890,7 @@ fn test_help_json_contains_all_commands() {
     let result = run_cli_ok(&["help-json"]);
     let commands = result["commands"].as_object().unwrap();
 
-    // Verify all 32 commands are present
+    // Verify all leaf commands are present
     let expected_commands = vec![
         "project.create",
         "project.open",
@@ -706,6 +917,7 @@ fn test_help_json_contains_all_commands() {
         "caption.update",
         "caption.remove",
         "caption.list",
+        "caption.import",
         "caption.export",
         "plan.execute",
         "plan.validate",
@@ -737,6 +949,104 @@ fn test_caption_list_empty() {
     let path = project_path(&dir, "caption_list_test");
     let result = run_cli_ok(&["caption", "list", "--path", &path]);
     assert_eq!(result["count"], 0);
+}
+
+#[test]
+fn test_caption_add_auto_creates_track() {
+    let dir = create_temp_project("caption_add_test");
+    let path = project_path(&dir, "caption_add_test");
+
+    let result = run_cli_ok(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Hello world",
+        "--start",
+        "0",
+        "--end",
+        "2",
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert!(result["trackId"].is_string());
+
+    let list = run_cli_ok(&["caption", "list", "--path", &path]);
+    assert_eq!(list["count"], 1);
+}
+
+#[test]
+fn test_caption_update_resolves_track_and_updates_timing() {
+    let dir = create_temp_project("caption_update_test");
+    let path = project_path(&dir, "caption_update_test");
+
+    run_cli_ok(&[
+        "caption", "add", "--path", &path, "--text", "Original", "--start", "0", "--end", "2",
+    ]);
+    let list_after_add = run_cli_ok(&["caption", "list", "--path", &path]);
+    let caption_id = list_after_add["captions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let result = run_cli_ok(&[
+        "caption",
+        "update",
+        "--path",
+        &path,
+        "--id",
+        &caption_id,
+        "--text",
+        "Updated",
+        "--start",
+        "1",
+        "--end",
+        "3",
+        "--position",
+        "top",
+    ]);
+
+    assert_eq!(result["status"], "ok");
+
+    let list = run_cli_ok(&["caption", "list", "--path", &path]);
+    let caption = list["captions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|caption| caption["id"].as_str() == Some(&caption_id))
+        .expect("updated caption should exist");
+
+    assert_eq!(caption["startSec"], 1.0);
+    assert_eq!(caption["durationSec"], 2.0);
+}
+
+#[test]
+fn test_caption_import_srt_file() {
+    let dir = create_temp_project("caption_import_test");
+    let path = project_path(&dir, "caption_import_test");
+
+    let subtitle_file = dir.path().join("captions.srt");
+    std::fs::write(
+        &subtitle_file,
+        "1\n00:00:00,000 --> 00:00:01,500\nFirst line\n\n2\n00:00:02,000 --> 00:00:03,000\nSecond line\n",
+    )
+    .unwrap();
+
+    let result = run_cli_ok(&[
+        "caption",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        subtitle_file.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["importedCount"], 2);
+
+    let list = run_cli_ok(&["caption", "list", "--path", &path]);
+    assert_eq!(list["count"], 2);
 }
 
 // =============================================================================

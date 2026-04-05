@@ -2,12 +2,17 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import { globalToolRegistry, type AgentContext } from '@/agents';
 import { registerCaptionTools, unregisterCaptionTools } from './captionTools';
 import { useProjectStore } from '@/stores/projectStore';
+import { readWorkspaceDocumentFromBackend } from '@/services/workspaceGateway';
 import type { Clip, Sequence, Track } from '@/types';
 
 vi.mock('@/stores/projectStore', () => ({
   useProjectStore: {
     getState: vi.fn(),
   },
+}));
+
+vi.mock('@/services/workspaceGateway', () => ({
+  readWorkspaceDocumentFromBackend: vi.fn(),
 }));
 
 const CTX: AgentContext = {
@@ -89,6 +94,12 @@ describe('captionTools', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(readWorkspaceDocumentFromBackend).mockResolvedValue({
+      relativePath: 'captions/example.srt',
+      content: '1\n00:00:00,000 --> 00:00:02,000\nHello world\n',
+      sizeBytes: 42,
+      modifiedAtUnixSec: 1,
+    });
     executeCommandMock.mockResolvedValue({
       opId: 'op-caption',
       success: true,
@@ -292,6 +303,140 @@ describe('captionTools', () => {
         sequenceId: 'seq-1',
         trackId: 'track-caption-1',
         captionId: 'cap-rolled-back',
+      },
+    });
+  });
+
+  it('should import captions from a workspace subtitle file', async () => {
+    const tool = globalToolRegistry.get('import_captions_from_file');
+    expect(tool).toBeDefined();
+
+    executeCommandMock
+      .mockResolvedValueOnce({
+        opId: 'op-caption-1',
+        success: true,
+        createdIds: ['cap-101'],
+        deletedIds: [],
+        changes: [],
+      })
+      .mockResolvedValueOnce({
+        opId: 'op-caption-2',
+        success: true,
+        createdIds: ['cap-102'],
+        deletedIds: [],
+        changes: [],
+      });
+
+    vi.mocked(readWorkspaceDocumentFromBackend).mockResolvedValueOnce({
+      relativePath: 'captions/example.vtt',
+      content:
+        'WEBVTT\n\n00:00:00.000 --> 00:00:01.500\nFirst line\n\n00:00:02.000 --> 00:00:03.000\nSecond line\n',
+      sizeBytes: 96,
+      modifiedAtUnixSec: 1,
+    });
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        relativePath: 'captions/example.vtt',
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(readWorkspaceDocumentFromBackend).toHaveBeenCalledWith('captions/example.vtt');
+    expect(result.result).toMatchObject({
+      format: 'vtt',
+      relativePath: 'captions/example.vtt',
+      trackId: 'track-caption-1',
+      captionCount: 2,
+    });
+  });
+
+  it('should remove a newly created caption track when batch creation fails', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    const sequenceWithoutCaptionTrack = createSequence({
+      tracks: [
+        createTrack({
+          id: 'track-video-1',
+          kind: 'video',
+          clips: [createClip({ id: 'clip-video-1', assetId: 'asset-video-1' })],
+        }),
+      ],
+    });
+    vi.mocked(useProjectStore.getState).mockReturnValue({
+      isLoaded: true,
+      meta: {
+        id: 'project-1',
+        name: 'Test Project',
+      },
+      sequences: new Map([[sequenceWithoutCaptionTrack.id, sequenceWithoutCaptionTrack]]),
+      executeCommand: executeCommandMock,
+    } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+    executeCommandMock
+      .mockResolvedValueOnce({
+        opId: 'op-track-create',
+        success: true,
+        createdIds: ['track-caption-created'],
+        deletedIds: [],
+        changes: [],
+      })
+      .mockResolvedValueOnce({
+        opId: 'op-caption-1',
+        success: true,
+        createdIds: ['cap-created-1'],
+        deletedIds: [],
+        changes: [],
+      })
+      .mockRejectedValueOnce(new Error('caption create failed'))
+      .mockResolvedValueOnce({
+        opId: 'op-caption-rollback',
+        success: true,
+        createdIds: [],
+        deletedIds: ['cap-created-1'],
+        changes: [],
+      })
+      .mockResolvedValueOnce({
+        opId: 'op-track-rollback',
+        success: true,
+        createdIds: [],
+        deletedIds: ['track-caption-created'],
+        changes: [],
+      });
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        segments: [
+          { startTime: 0, endTime: 1, text: 'First line' },
+          { startTime: 1, endTime: 2, text: 'Second line' },
+        ],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Rolled back 1 caption');
+    expect(executeCommandMock).toHaveBeenCalledTimes(5);
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({ type: 'CreateTrack' });
+    expect(executeCommandMock.mock.calls[1][0]).toMatchObject({ type: 'CreateCaption' });
+    expect(executeCommandMock.mock.calls[2][0]).toMatchObject({ type: 'CreateCaption' });
+    expect(executeCommandMock.mock.calls[3][0]).toMatchObject({
+      type: 'DeleteCaption',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-caption-created',
+        captionId: 'cap-created-1',
+      },
+    });
+    expect(executeCommandMock.mock.calls[4][0]).toMatchObject({
+      type: 'DeleteTrack',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-caption-created',
       },
     });
   });

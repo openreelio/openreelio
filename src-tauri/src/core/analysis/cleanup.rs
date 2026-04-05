@@ -359,6 +359,7 @@ mod tests {
             word_index: idx,
             confidence: 0.9,
             speaker_id: None,
+            speaker_turn_id: None,
         }
     }
 

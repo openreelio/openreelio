@@ -41,8 +41,14 @@ import {
   type Thought,
   type Plan,
   createMemoryManagerAdapter,
+  DEFAULT_AGENT_PROFILE_ID,
   generateId,
 } from '@/agents/engine';
+import { createScopedToolExecutor } from '@/agents/engine/adapters/tools/ScopedToolExecutor';
+import {
+  getAllowedToolNamesForAgent,
+  resolveAgentDefinition,
+} from '@/agents/engine/core/agentCatalog';
 import { isAgenticEngineEnabled } from '@/config/featureFlags';
 import { useConversationStore } from '@/stores/conversationStore';
 import { usePermissionStore } from '@/stores/permissionStore';
@@ -335,6 +341,26 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       }
 
       const projectId = convStore.activeProjectId ?? context.projectId;
+      const activeSessionSummary = convStore.sessions.find(
+        (session) => session.id === storeSessionId,
+      );
+      const activeAgentDefinition =
+        resolveAgentDefinition(activeSessionSummary?.agent) ??
+        resolveAgentDefinition(DEFAULT_AGENT_PROFILE_ID);
+      if (!activeAgentDefinition) {
+        const definitionError = new Error('Default agent definition is not registered');
+        setError(definitionError);
+        setPhase('failed');
+        setIsRunning(false);
+        optionsRef.current.onError?.(definitionError);
+        logger.error('Failed to start agentic loop without a registered default agent');
+        runGuardRef.current = false;
+        return null;
+      }
+      const scopedToolExecutor = createScopedToolExecutor(
+        toolExecutor,
+        getAllowedToolNamesForAgent(activeAgentDefinition, toolExecutor.getAvailableTools()),
+      );
       const persistedTraceId = config?.enableTracing === false ? null : generateId('trace');
       const runtimeTraceRecorder = persistedTraceId ? new TraceRecorder() : null;
       runtimeTraceRecorder?.startRun({
@@ -358,6 +384,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         projectId,
         sequenceId: context.sequenceId ?? null,
         runtimeKind: 'tpao',
+        agentProfileId: activeAgentDefinition?.id,
         modelProvider: config?.activeProvider ?? null,
         modelId: config?.activeModel ?? null,
         logger,
@@ -391,7 +418,10 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       let traceToWrite: AgentTrace | null = null;
       let finalizedRuntimeTrace: AgentTrace | null = null;
 
-      const finalizeRuntimeTrace = (success: boolean, errorMessage?: string | null): AgentTrace | null => {
+      const finalizeRuntimeTrace = (
+        success: boolean,
+        errorMessage?: string | null,
+      ): AgentTrace | null => {
         if (!runtimeTraceRecorder) {
           return null;
         }
@@ -500,8 +530,9 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
           });
 
         // Create engine
-        const engine = createAgenticEngine(llmClient, toolExecutor, {
+        const engine = createAgenticEngine(llmClient, scopedToolExecutor, {
           ...config,
+          role: activeAgentDefinition?.role ?? 'editor',
           writeTraceOnComplete: false,
           memoryStore: config?.memoryStore ?? memoryStoreRef.current ?? undefined,
           approvalHandler: async (plan) => {
@@ -557,7 +588,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
             }
 
             try {
-              return autoDecision ?? await decisionPromise;
+              return autoDecision ?? (await decisionPromise);
             } finally {
               await checkpointController.consumeCheckpoint(checkpointId);
             }
@@ -595,17 +626,18 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
           (count, executionResult) => count + executionResult.completedSteps.length,
           0,
         );
-        persistedPlannedStepCount = result.pendingPlan?.steps.length
-          ?? result.finalState.plan?.steps.length;
+        persistedPlannedStepCount =
+          result.pendingPlan?.steps.length ?? result.finalState.plan?.steps.length;
         persistedRollbackReportJson = result.rollbackReport
           ? JSON.stringify(result.rollbackReport)
           : null;
         const runtimeTrace = finalizeRuntimeTrace(result.success, result.error?.message ?? null);
-        const enrichedResult = runtimeTrace && result.trace
-          ? { ...result, trace: mergeTraceArtifacts(result.trace, runtimeTrace) }
-          : runtimeTrace
-            ? { ...result, trace: runtimeTrace }
-            : result;
+        const enrichedResult =
+          runtimeTrace && result.trace
+            ? { ...result, trace: mergeTraceArtifacts(result.trace, runtimeTrace) }
+            : runtimeTrace
+              ? { ...result, trace: runtimeTrace }
+              : result;
         traceToWrite = enrichedResult.trace ?? null;
 
         if (!abortedRef.current) {

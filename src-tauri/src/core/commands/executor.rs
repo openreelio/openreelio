@@ -1404,6 +1404,50 @@ impl CommandExecutor {
                 }))
             }
 
+            OpKind::CaptionAdd => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("CaptionAdd payload missing sequenceId".to_string())
+                })?;
+                let caption_id = result.created_ids.first().ok_or_else(|| {
+                    CoreError::Internal("CaptionAdd missing createdId".to_string())
+                })?;
+
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!("CaptionAdd could not find sequence: {seq_id}"))
+                })?;
+                let requested_track_id = get_str(&command_json, "trackId");
+                let resolved_track = requested_track_id
+                    .and_then(|track_id| sequence.tracks.iter().find(|track| track.id == track_id))
+                    .or_else(|| {
+                        sequence
+                            .tracks
+                            .iter()
+                            .find(|track| track.clips.iter().any(|clip| clip.id == *caption_id))
+                    })
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "CaptionAdd could not find caption clip: {caption_id}"
+                        ))
+                    })?;
+                let clip = resolved_track
+                    .clips
+                    .iter()
+                    .find(|clip| clip.id == *caption_id)
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "CaptionAdd could not find caption clip: {caption_id}"
+                        ))
+                    })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": resolved_track.id,
+                    "clip": to_value(clip)?,
+                }))
+            }
+
+            OpKind::CaptionRemove | OpKind::CaptionUpdate => Ok(command_json),
+
             OpKind::Batch => match type_name {
                 "InsertEdit" => Self::build_insert_edit_batch_payload(&command_json, result, state),
                 "OverwriteEdit" => {

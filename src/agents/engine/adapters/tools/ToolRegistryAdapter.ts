@@ -17,11 +17,12 @@ import type {
 import type { RiskLevel, ValidationResult, SideEffect } from '../../core/types';
 import { ToolRegistry, type ToolDefinition as LegacyToolDef } from '@/agents/ToolRegistry';
 import { isMetaToolsEnabled } from '@/config/featureFlags';
-import { getVisibleMetaToolNames } from '@/agents/tools/metaTools';
-import { getWorkspaceToolNames } from '@/agents/tools/workspaceTools';
 import {
-  getSelectionContext,
-} from '@/agents/tools/storeAccessor';
+  getVisibleMetaToolNames,
+  normalizeMetaToolArgsForValidation,
+} from '@/agents/tools/metaTools';
+import { getWorkspaceToolNames } from '@/agents/tools/workspaceTools';
+import { getSelectionContext } from '@/agents/tools/storeAccessor';
 import { useProjectStore } from '@/stores/projectStore';
 import {
   requiresProjectMutationPreflight,
@@ -272,6 +273,33 @@ export class ToolRegistryAdapter implements IToolExecutor {
     return this.toToolDefinition(tool);
   }
 
+  private collectSchemaErrors(
+    schema: LegacyToolDef['parameters'],
+    args: Record<string, unknown>,
+  ): string[] {
+    const errors: string[] = [];
+
+    if (schema.required) {
+      for (const required of schema.required) {
+        if (!(required in args) || args[required] === undefined) {
+          errors.push(`Missing required parameter: '${required}'`);
+        }
+      }
+    }
+
+    if (schema.properties) {
+      for (const [key, value] of Object.entries(args)) {
+        const propSchema = schema.properties[key];
+        if (!propSchema) continue;
+
+        const typeError = this.validateType(key, value, propSchema);
+        if (typeError) errors.push(typeError);
+      }
+    }
+
+    return errors;
+  }
+
   /**
    * Validate tool arguments
    */
@@ -285,32 +313,22 @@ export class ToolRegistryAdapter implements IToolExecutor {
       };
     }
 
-    const errors: string[] = [];
+    const errors = this.collectSchemaErrors(tool.parameters, args);
 
-    // Check required parameters
-    const schema = tool.parameters;
-    if (schema.required) {
-      for (const required of schema.required) {
-        if (!(required in args) || args[required] === undefined) {
-          errors.push(`Missing required parameter: '${required}'`);
-        }
-      }
-    }
-
-    // Check parameter types
-    if (schema.properties) {
-      for (const [key, value] of Object.entries(args)) {
-        const propSchema = schema.properties[key];
-        if (!propSchema) continue;
-
-        const typeError = this.validateType(key, value, propSchema);
-        if (typeError) errors.push(typeError);
+    const action = typeof args.action === 'string' ? args.action.trim() : '';
+    if (action && ['query', 'edit', 'audio', 'effects', 'text'].includes(toolName)) {
+      const actionTool = this.registry.get(action);
+      if (actionTool) {
+        const toolArgs = { ...args };
+        delete toolArgs.action;
+        const normalizedArgs = normalizeMetaToolArgsForValidation(toolName, action, toolArgs);
+        errors.push(...this.collectSchemaErrors(actionTool.parameters, normalizedArgs));
       }
     }
 
     return {
       valid: errors.length === 0,
-      errors,
+      errors: Array.from(new Set(errors)),
     };
   }
 

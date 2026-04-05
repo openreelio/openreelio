@@ -221,6 +221,43 @@ pub fn load_audio_samples(wav_path: &Path) -> AudioResult<Vec<f32>> {
     Ok(samples)
 }
 
+/// Loads audio samples from a WAV file as raw signed 16-bit PCM.
+pub fn load_audio_samples_i16(wav_path: &Path) -> AudioResult<Vec<i16>> {
+    let reader = hound::WavReader::open(wav_path).map_err(|e| {
+        AudioExtractionError::FFmpegFailed(format!("Failed to open WAV file: {}", e))
+    })?;
+
+    let spec = reader.spec();
+
+    if spec.sample_rate != 16000 {
+        return Err(AudioExtractionError::FFmpegFailed(format!(
+            "Expected 16kHz sample rate, got {} Hz",
+            spec.sample_rate
+        )));
+    }
+
+    if spec.channels != 1 {
+        return Err(AudioExtractionError::FFmpegFailed(format!(
+            "Expected mono audio, got {} channels",
+            spec.channels
+        )));
+    }
+
+    if spec.bits_per_sample != 16 {
+        return Err(AudioExtractionError::FFmpegFailed(format!(
+            "Expected 16-bit PCM audio, got {} bits per sample",
+            spec.bits_per_sample
+        )));
+    }
+
+    reader
+        .into_samples::<i16>()
+        .collect::<Result<Vec<i16>, _>>()
+        .map_err(|e| {
+            AudioExtractionError::FFmpegFailed(format!("Failed to read audio samples: {}", e))
+        })
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -303,6 +340,30 @@ mod tests {
         let samples = load_audio_samples(&wav_path).unwrap();
         assert_eq!(samples.len(), 1600);
         assert!(samples.iter().all(|&s| (-1.0..=1.0).contains(&s)));
+    }
+
+    #[test]
+    fn test_load_audio_samples_i16_valid_wav() {
+        let temp_dir = TempDir::new().unwrap();
+        let wav_path = temp_dir.path().join("test_i16.wav");
+
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+
+        let mut writer = hound::WavWriter::create(&wav_path, spec).unwrap();
+        for i in 0..320 {
+            writer.write_sample((i as i16) - 160).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let samples = load_audio_samples_i16(&wav_path).unwrap();
+        assert_eq!(samples.len(), 320);
+        assert_eq!(samples[0], -160);
+        assert_eq!(samples[319], 159);
     }
 
     #[test]

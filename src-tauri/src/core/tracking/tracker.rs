@@ -627,10 +627,7 @@ mod tests {
         assert_eq!(y0, 45);
         assert_eq!(tpl.len(), 100);
         // And it should contain the bright dot pixels
-        assert!(
-            tpl.iter().any(|&v| v == 220),
-            "Template should contain bright pixels"
-        );
+        assert!(tpl.contains(&220), "Template should contain bright pixels");
     }
 
     #[test]

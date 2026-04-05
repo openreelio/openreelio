@@ -170,15 +170,12 @@ pub async fn undo(state: State<'_, AppState>) -> Result<UndoRedoResult, String> 
         .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    project
-        .executor
-        .undo(&mut project.state)
-        .map_err(|e| e.to_ipc_error())?;
+    project.undo_persisted().map_err(|e| e.to_ipc_error())?;
 
     Ok(UndoRedoResult {
         success: true,
-        can_undo: project.executor.can_undo(),
-        can_redo: project.executor.can_redo(),
+        can_undo: project.can_undo_persisted().map_err(|e| e.to_ipc_error())?,
+        can_redo: project.can_redo_persisted().map_err(|e| e.to_ipc_error())?,
     })
 }
 
@@ -192,15 +189,12 @@ pub async fn redo(state: State<'_, AppState>) -> Result<UndoRedoResult, String> 
         .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    project
-        .executor
-        .redo(&mut project.state)
-        .map_err(|e| e.to_ipc_error())?;
+    project.redo_persisted().map_err(|e| e.to_ipc_error())?;
 
     Ok(UndoRedoResult {
         success: true,
-        can_undo: project.executor.can_undo(),
-        can_redo: project.executor.can_redo(),
+        can_undo: project.can_undo_persisted().map_err(|e| e.to_ipc_error())?,
+        can_redo: project.can_redo_persisted().map_err(|e| e.to_ipc_error())?,
     })
 }
 
@@ -208,12 +202,12 @@ pub async fn redo(state: State<'_, AppState>) -> Result<UndoRedoResult, String> 
 #[tauri::command]
 #[specta::specta]
 pub async fn can_undo(state: State<'_, AppState>) -> Result<bool, String> {
-    let guard = state.project.lock().await;
+    let mut guard = state.project.lock().await;
 
-    Ok(guard
-        .as_ref()
-        .map(|p| p.executor.can_undo())
-        .unwrap_or(false))
+    match guard.as_mut() {
+        Some(project) => project.can_undo_persisted().map_err(|e| e.to_ipc_error()),
+        None => Ok(false),
+    }
 }
 
 /// Finds all gaps between clips on a specific track.
@@ -252,12 +246,12 @@ pub async fn find_gaps(
 #[tauri::command]
 #[specta::specta]
 pub async fn can_redo(state: State<'_, AppState>) -> Result<bool, String> {
-    let guard = state.project.lock().await;
+    let mut guard = state.project.lock().await;
 
-    Ok(guard
-        .as_ref()
-        .map(|p| p.executor.can_redo())
-        .unwrap_or(false))
+    match guard.as_mut() {
+        Some(project) => project.can_redo_persisted().map_err(|e| e.to_ipc_error()),
+        None => Ok(false),
+    }
 }
 
 // =============================================================================
@@ -294,15 +288,17 @@ pub struct UndoHistoryEntry {
 #[tauri::command]
 #[specta::specta]
 pub async fn get_undo_history(state: State<'_, AppState>) -> Result<UndoHistoryInfo, String> {
-    let guard = state.project.lock().await;
+    let mut guard = state.project.lock().await;
 
     let project = guard
-        .as_ref()
+        .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    let undo_entries: Vec<UndoHistoryEntry> = project
-        .executor
-        .undo_history_entries()
+    let (undo_history_entries, redo_history_entries, current_index) = project
+        .persisted_history_entries()
+        .map_err(|e| e.to_ipc_error())?;
+
+    let undo_entries: Vec<UndoHistoryEntry> = undo_history_entries
         .into_iter()
         .map(|e| UndoHistoryEntry {
             op_id: e.op_id,
@@ -312,11 +308,7 @@ pub async fn get_undo_history(state: State<'_, AppState>) -> Result<UndoHistoryI
         })
         .collect();
 
-    let undo_len = undo_entries.len();
-
-    let redo_entries: Vec<UndoHistoryEntry> = project
-        .executor
-        .redo_history_entries()
+    let redo_entries: Vec<UndoHistoryEntry> = redo_history_entries
         .into_iter()
         .map(|e| UndoHistoryEntry {
             op_id: e.op_id,
@@ -329,7 +321,7 @@ pub async fn get_undo_history(state: State<'_, AppState>) -> Result<UndoHistoryI
     Ok(UndoHistoryInfo {
         undo_entries,
         redo_entries,
-        current_index: undo_len as i32 - 1,
+        current_index,
     })
 }
 
@@ -348,14 +340,13 @@ pub async fn jump_to_history_state(
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
     project
-        .executor
-        .jump_to_history_index(target_index, &mut project.state)
+        .jump_to_history_index_persisted(target_index)
         .map_err(|e| e.to_ipc_error())?;
 
     Ok(UndoRedoResult {
         success: true,
-        can_undo: project.executor.can_undo(),
-        can_redo: project.executor.can_redo(),
+        can_undo: project.can_undo_persisted().map_err(|e| e.to_ipc_error())?,
+        can_redo: project.can_redo_persisted().map_err(|e| e.to_ipc_error())?,
     })
 }
 

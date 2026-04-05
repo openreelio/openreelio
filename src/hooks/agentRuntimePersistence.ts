@@ -43,18 +43,18 @@ type CheckpointIdRef = {
 };
 
 type RecoveryBootstrapBoundary =
-  {
-    boundaryId: string;
-    message: string;
-    kind: 'checkpoint';
-    traceRecord: CheckpointTraceRecord;
-  }
   | {
-    boundaryId: string;
-    message: string;
-    kind: 'summary';
-    traceRecord: CompactionTraceRecord;
-  };
+      boundaryId: string;
+      message: string;
+      kind: 'checkpoint';
+      traceRecord: CheckpointTraceRecord;
+    }
+  | {
+      boundaryId: string;
+      message: string;
+      kind: 'summary';
+      traceRecord: CompactionTraceRecord;
+    };
 
 export async function ensureConfiguredProvider(
   llmClient: ILLMClient,
@@ -85,7 +85,7 @@ export async function ensureConfiguredProvider(
 export async function ensureConversationSessionId(
   store: Pick<ConversationStore, 'activeSessionId' | 'ensureSession'>,
 ): Promise<string | null> {
-  return store.activeSessionId ?? await store.ensureSession();
+  return store.activeSessionId ?? (await store.ensureSession());
 }
 
 export function createResumeCheckpointController(input: {
@@ -188,6 +188,7 @@ export async function bootstrapPersistedAgentSession(input: {
   projectId: string | null | undefined;
   sequenceId: string | null;
   runtimeKind: ShippingAgentRuntimeKind;
+  agentProfileId?: string;
   modelProvider?: string | null;
   modelId?: string | null;
   logger: WarnLogger;
@@ -198,6 +199,7 @@ export async function bootstrapPersistedAgentSession(input: {
     projectId,
     sequenceId,
     runtimeKind,
+    agentProfileId = 'editor',
     modelProvider = null,
     modelId = null,
     logger,
@@ -218,7 +220,7 @@ export async function bootstrapPersistedAgentSession(input: {
       sequenceId,
       runtimeKind,
       sessionMode: 'primary',
-      agentProfileId: 'editor',
+      agentProfileId,
       modelProvider,
       modelId,
     });
@@ -313,11 +315,7 @@ export async function finalizePersistedRun(input: {
   errorMessage: string | null;
   logger: WarnLogger;
   loggerLabel: string;
-  reportIssue?: (input: {
-    sessionId: string;
-    stage: 'run_finalize';
-    error: unknown;
-  }) => void;
+  reportIssue?: (input: { sessionId: string; stage: 'run_finalize'; error: unknown }) => void;
 }): Promise<void> {
   const {
     sessionId,
@@ -409,8 +407,8 @@ export async function bootstrapRecoveredContextFromCheckpoint(input: {
   );
 
   if (
-    !bootstrapBoundary
-    || bootstrapBoundary.boundaryId === lastBootstrappedCheckpointIdRef.current
+    !bootstrapBoundary ||
+    bootstrapBoundary.boundaryId === lastBootstrappedCheckpointIdRef.current
   ) {
     return;
   }
@@ -502,12 +500,13 @@ function resolveRecoveryBootstrapBoundary(
       tier: latestSummaryCompaction.tier,
       trigger: latestSummaryCompaction.trigger,
       summary:
-        stringValue(parseJson<Record<string, unknown>>(
-          latestSummaryCompaction.continuationSummaryJson,
-        )?.summary)
-        ?? stringValue(parseJson<Record<string, unknown>>(
-          latestSummaryCompaction.stateRehydrationJson,
-        )?.summary),
+        stringValue(
+          parseJson<Record<string, unknown>>(latestSummaryCompaction.continuationSummaryJson)
+            ?.summary,
+        ) ??
+        stringValue(
+          parseJson<Record<string, unknown>>(latestSummaryCompaction.stateRehydrationJson)?.summary,
+        ),
       sourceMessageCount: latestSummaryCompaction.sourceMessageCount,
       retainedMessageCount: latestSummaryCompaction.retainedMessageCount,
       estimatedTokensSaved: latestSummaryCompaction.estimatedTokensSaved,
@@ -568,15 +567,20 @@ function buildRecoveredCheckpointMessage(checkpoint: ResumeCheckpoint): string |
     lines.push(`- Recovered summary: ${truncate(summary, 280)}`);
   }
 
-  lines.push('Use this recovered context when continuing the conversation. Execution did not automatically resume.');
+  lines.push(
+    'Use this recovered context when continuing the conversation. Execution did not automatically resume.',
+  );
 
   return lines.join('\n');
 }
 
 function buildRecoveredCompactionMessage(compaction: CompactionRecord): string | null {
-  const continuationSummary = parseJson<Record<string, unknown>>(compaction.continuationSummaryJson);
+  const continuationSummary = parseJson<Record<string, unknown>>(
+    compaction.continuationSummaryJson,
+  );
   const stateRehydration = parseJson<Record<string, unknown>>(compaction.stateRehydrationJson);
-  const summary = stringValue(continuationSummary?.summary) ?? stringValue(stateRehydration?.summary);
+  const summary =
+    stringValue(continuationSummary?.summary) ?? stringValue(stateRehydration?.summary);
 
   if (!summary) {
     return null;
@@ -595,19 +599,23 @@ function buildRecoveredCompactionMessage(compaction: CompactionRecord): string |
 
   lines.push(`- Recovered summary: ${truncate(summary, 280)}`);
 
-  const sourceMessageCount = numberValue(continuationSummary?.sourceMessageCount)
-    ?? numberValue(stateRehydration?.sourceMessageCount);
+  const sourceMessageCount =
+    numberValue(continuationSummary?.sourceMessageCount) ??
+    numberValue(stateRehydration?.sourceMessageCount);
   if (sourceMessageCount !== null) {
     lines.push(`- Source messages compacted: ${sourceMessageCount}`);
   }
 
-  const retainedMessageCount = numberValue(continuationSummary?.retainedMessageCount)
-    ?? numberValue(stateRehydration?.retainedMessageCount);
+  const retainedMessageCount =
+    numberValue(continuationSummary?.retainedMessageCount) ??
+    numberValue(stateRehydration?.retainedMessageCount);
   if (retainedMessageCount !== null) {
     lines.push(`- Retained messages after compaction: ${retainedMessageCount}`);
   }
 
-  lines.push('Use this recovered summary when continuing the conversation. Execution did not automatically resume.');
+  lines.push(
+    'Use this recovered summary when continuing the conversation. Execution did not automatically resume.',
+  );
 
   return lines.join('\n');
 }

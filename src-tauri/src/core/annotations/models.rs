@@ -189,6 +189,9 @@ pub struct TranscriptSegment {
     /// Speaker ID (if speaker diarization is enabled)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker_id: Option<String>,
+    /// Inferred speaker turn ID (heuristic turn grouping, not a true speaker identity)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker_turn_id: Option<String>,
 }
 
 impl TranscriptSegment {
@@ -201,6 +204,7 @@ impl TranscriptSegment {
             confidence,
             language: None,
             speaker_id: None,
+            speaker_turn_id: None,
         }
     }
 
@@ -213,6 +217,12 @@ impl TranscriptSegment {
     /// Sets the speaker ID
     pub fn with_speaker(mut self, speaker_id: &str) -> Self {
         self.speaker_id = Some(speaker_id.to_string());
+        self
+    }
+
+    /// Sets the inferred speaker turn ID
+    pub fn with_speaker_turn(mut self, speaker_turn_id: &str) -> Self {
+        self.speaker_turn_id = Some(speaker_turn_id.to_string());
         self
     }
 
@@ -248,6 +258,9 @@ pub struct TranscriptWord {
     /// Speaker ID inherited from parent segment
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker_id: Option<String>,
+    /// Inferred speaker turn ID inherited from parent segment
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker_turn_id: Option<String>,
 }
 
 /// Estimate per-word timing from transcript segments using linear interpolation.
@@ -275,6 +288,7 @@ pub fn estimate_word_timings(segments: &[TranscriptSegment]) -> Vec<TranscriptWo
                 word_index: word_idx,
                 confidence: segment.confidence,
                 speaker_id: segment.speaker_id.clone(),
+                speaker_turn_id: segment.speaker_turn_id.clone(),
             });
         }
     }
@@ -1265,6 +1279,15 @@ mod tests {
     }
 
     #[test]
+    fn should_preserve_speaker_turn_in_word_timing() {
+        let segments =
+            vec![TranscriptSegment::new(0.0, 1.0, "hello", 0.99).with_speaker_turn("turn_001")];
+        let words = estimate_word_timings(&segments);
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].speaker_turn_id, Some("turn_001".to_string()));
+    }
+
+    #[test]
     fn should_handle_single_word_in_word_timing() {
         let segments = vec![TranscriptSegment::new(5.0, 6.5, "word", 0.8)];
         let words = estimate_word_timings(&segments);
@@ -1283,12 +1306,14 @@ mod tests {
             word_index: 0,
             confidence: 0.95,
             speaker_id: Some("s1".to_string()),
+            speaker_turn_id: Some("turn_001".to_string()),
         };
         let json = serde_json::to_string(&word).unwrap();
         let parsed: TranscriptWord = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.text, "hello");
         assert!((parsed.start_sec - 1.5).abs() < 0.001);
         assert_eq!(parsed.speaker_id, Some("s1".to_string()));
+        assert_eq!(parsed.speaker_turn_id, Some("turn_001".to_string()));
     }
 
     // -------------------------------------------------------------------------

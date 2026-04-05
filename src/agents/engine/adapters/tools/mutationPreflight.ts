@@ -42,6 +42,7 @@ const PROJECT_MUTATION_UTILITY_TOOLS = new Set([
   'delete_caption',
   'style_caption',
   'add_captions_from_transcription',
+  'import_captions_from_file',
 ]);
 
 const READ_ONLY_EXACT_TOOL_NAMES = new Set([

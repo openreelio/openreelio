@@ -5,13 +5,14 @@
  * Experimental multi-agent definitions live in `agentDefinitions.experimental.ts`.
  */
 
-import type { AgentRole } from '../prompts/system';
+import type { AgentRole } from '../prompts/agentRoles';
 
 // =============================================================================
 // Types
 // =============================================================================
 
 export type AgentMode = 'primary' | 'subagent';
+export type AgentToolScope = '*' | 'query' | 'edit' | 'audio' | 'effects' | 'text' | 'workspace';
 
 export interface AgentDefinition {
   /** Unique agent identifier */
@@ -22,14 +23,16 @@ export interface AgentDefinition {
   description: string;
   /** Primary or sub-agent */
   mode: AgentMode;
-  /** Allowed tool categories (* for all) */
-  tools: string[];
+  /** Allowed tool scopes (* for all) */
+  tools: AgentToolScope[];
   /** Agent role for system prompt selection */
   role: AgentRole;
   /** Temperature for LLM calls */
   temperature: number;
   /** Maximum iterations per run */
   maxIterations?: number;
+  /** Optional input placeholder used by UI surfaces */
+  promptPlaceholder?: string;
 }
 
 // =============================================================================
@@ -47,6 +50,7 @@ export const EDITOR_AGENT_DEFINITION: AgentDefinition = {
   role: 'editor',
   temperature: 0.3,
   maxIterations: 20,
+  promptPlaceholder: 'Describe what you want to edit...',
 };
 
 export const SHIPPING_AGENT_DEFINITIONS: Record<string, AgentDefinition> = {

@@ -191,11 +191,7 @@ export {
   InvalidPhaseTransitionError,
 } from './core/sessionGuard';
 
-export {
-  registerAgentAbort,
-  unregisterAgentAbort,
-  abortRunningAgent,
-} from './core/agentCleanup';
+export { registerAgentAbort, unregisterAgentAbort, abortRunningAgent } from './core/agentCleanup';
 
 // =============================================================================
 // Port Interfaces
@@ -409,9 +405,9 @@ export {
 export {
   assembleSystemPrompt,
   buildCompactionPrompt,
-  type AgentRole,
   type SystemPromptOptions,
 } from './prompts/system';
+export { type AgentRole } from './prompts/agentRoles';
 
 export {
   buildEnvironmentContext,
@@ -424,9 +420,11 @@ export {
 
 export {
   EDITOR_PROMPT,
+  PLANNER_PROMPT,
   ANALYST_PROMPT,
   COLORIST_PROMPT,
   AUDIO_PROMPT,
+  CAPTIONER_PROMPT,
 } from './prompts/agentPrompts';
 
 // =============================================================================
@@ -440,4 +438,5 @@ export {
   listShippingAgentDefinitions,
   type AgentDefinition,
   type AgentMode,
+  type AgentToolScope,
 } from './core/agentDefinitions';

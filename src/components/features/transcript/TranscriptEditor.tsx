@@ -10,9 +10,7 @@ import { CleanupControls } from './CleanupControls';
 export interface TranscriptEditorProps {
   readOnly?: boolean;
 }
-export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
-  readOnly = false,
-}) => {
+export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({ readOnly = false }) => {
   const {
     words,
     isLoading,
@@ -37,15 +35,18 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
     (index: number) => {
       if (!isDragging) seekToWord(index);
     },
-    [seekToWord, isDragging]
+    [seekToWord, isDragging],
   );
 
   // Mouse down → start selection (also creates single-word selection)
-  const handleMouseDown = useCallback((index: number) => {
-    dragStartRef.current = index;
-    setIsDragging(true);
-    setSelection({ startIndex: index, endIndex: index });
-  }, [setSelection]);
+  const handleMouseDown = useCallback(
+    (index: number) => {
+      dragStartRef.current = index;
+      setIsDragging(true);
+      setSelection({ startIndex: index, endIndex: index });
+    },
+    [setSelection],
+  );
 
   // Mouse enter during drag → extend selection
   const handleMouseEnter = useCallback(
@@ -55,7 +56,7 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
       const end = Math.max(dragStartRef.current, index);
       setSelection({ startIndex: start, endIndex: end });
     },
-    [isDragging, setSelection]
+    [isDragging, setSelection],
   );
 
   // Mouse up → finalize selection
@@ -78,7 +79,7 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
         setSelection(null);
       }
     },
-    [selection, deleteSelection, setSelection, readOnly]
+    [selection, deleteSelection, setSelection, readOnly],
   );
 
   // Check if a word is in the selection range
@@ -87,38 +88,45 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
       if (!selection) return false;
       return index >= selection.startIndex && index <= selection.endIndex;
     },
-    [selection]
+    [selection],
   );
 
-  if (!assetId) return (
-    <div className="flex flex-col items-center justify-center h-full text-neutral-500 gap-2 p-4">
-      <FileText className="w-8 h-8 opacity-50" />
-      <p className="text-sm">Select a clip to view its transcript</p>
-    </div>
-  );
-  if (isLoading) return (
-    <div className="flex items-center justify-center h-full gap-2 text-neutral-400">
-      <Loader2 className="w-4 h-4 animate-spin" />
-      <span className="text-sm">Loading transcript...</span>
-    </div>
-  );
-  if (error) return (
-    <div className="flex flex-col items-center justify-center h-full text-neutral-500 gap-2 p-4">
-      <AlertCircle className="w-6 h-6 text-yellow-500" />
-      <p className="text-sm text-center">{error}</p>
-      <button onClick={reload} className="text-xs text-primary-400 hover:text-primary-300 underline">Retry</button>
-    </div>
-  );
-  if (words.length === 0) return (
-    <div className="flex flex-col items-center justify-center h-full text-neutral-500 gap-2 p-4">
-      <FileText className="w-6 h-6 opacity-50" />
-      <p className="text-sm">No transcript available. Run transcription first.</p>
-    </div>
-  );
+  if (!assetId)
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-neutral-500 gap-2 p-4">
+        <FileText className="w-8 h-8 opacity-50" />
+        <p className="text-sm">Select a clip to view its transcript</p>
+      </div>
+    );
+  if (isLoading)
+    return (
+      <div className="flex items-center justify-center h-full gap-2 text-neutral-400">
+        <Loader2 className="w-4 h-4 animate-spin" />
+        <span className="text-sm">Loading transcript...</span>
+      </div>
+    );
+  if (error)
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-neutral-500 gap-2 p-4">
+        <AlertCircle className="w-6 h-6 text-yellow-500" />
+        <p className="text-sm text-center">{error}</p>
+        <button
+          onClick={reload}
+          className="text-xs text-primary-400 hover:text-primary-300 underline"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  if (words.length === 0)
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-neutral-500 gap-2 p-4">
+        <FileText className="w-6 h-6 opacity-50" />
+        <p className="text-sm">No transcript available. Run transcription first.</p>
+      </div>
+    );
 
-  const selectionLength = selection
-    ? selection.endIndex - selection.startIndex + 1
-    : 0;
+  const selectionLength = selection ? selection.endIndex - selection.startIndex + 1 : 0;
 
   return (
     <div
@@ -134,7 +142,19 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
     >
       {/* Cleanup controls */}
       {!readOnly && words.length > 0 && (
-        <CleanupControls detectedRegions={cleanup.detectedRegions} isDetecting={cleanup.isDetecting} isRemoving={cleanup.isRemoving} mode={cleanup.mode} totalDurationSec={cleanup.totalDurationSec} error={cleanup.error} onDetectSilence={cleanup.detectSilence} onDetectFillers={cleanup.detectFillers} onRemoveDetected={cleanup.removeDetected} onClearDetection={cleanup.clearDetection} readOnly={readOnly} />
+        <CleanupControls
+          detectedRegions={cleanup.detectedRegions}
+          isDetecting={cleanup.isDetecting}
+          isRemoving={cleanup.isRemoving}
+          mode={cleanup.mode}
+          totalDurationSec={cleanup.totalDurationSec}
+          error={cleanup.error}
+          onDetectSilence={cleanup.detectSilence}
+          onDetectFillers={cleanup.detectFillers}
+          onRemoveDetected={cleanup.removeDetected}
+          onClearDetection={cleanup.clearDetection}
+          readOnly={readOnly}
+        />
       )}
 
       {/* Selection toolbar */}
@@ -173,11 +193,11 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
             index={i}
             isActive={i === activeWordIndex}
             isSelected={isWordSelected(i)}
-            isSegmentStart={
-              i > 0 && word.segmentIndex !== words[i - 1].segmentIndex
-            }
+            isSegmentStart={i > 0 && word.segmentIndex !== words[i - 1].segmentIndex}
             speakerId={word.speakerId}
+            speakerTurnId={word.speakerTurnId}
             prevSpeakerId={i > 0 ? words[i - 1].speakerId : null}
+            prevSpeakerTurnId={i > 0 ? words[i - 1].speakerTurnId : null}
             onClick={handleWordClick}
             onMouseDown={handleMouseDown}
             onMouseEnter={handleMouseEnter}

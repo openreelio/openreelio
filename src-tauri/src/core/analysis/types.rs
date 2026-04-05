@@ -27,6 +27,28 @@ pub struct SilenceRegion {
     pub end_sec: f64,
 }
 
+/// A detected region of speech / non-silence in the audio track.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechRegion {
+    /// Start time in seconds
+    pub start_sec: f64,
+    /// End time in seconds
+    pub end_sec: f64,
+}
+
+impl SpeechRegion {
+    /// Creates a new speech region
+    pub fn new(start_sec: f64, end_sec: f64) -> Self {
+        Self { start_sec, end_sec }
+    }
+
+    /// Returns the duration in seconds
+    pub fn duration(&self) -> f64 {
+        self.end_sec - self.start_sec
+    }
+}
+
 impl SilenceRegion {
     /// Creates a new silence region
     pub fn new(start_sec: f64, end_sec: f64) -> Self {
@@ -63,6 +85,9 @@ pub struct AudioProfile {
     pub peak_db: f64,
     /// Regions where audio is below -40 dB for > 0.5s
     pub silence_regions: Vec<SilenceRegion>,
+    /// Regions where audio is above the silence threshold (derived speech / non-silence)
+    #[serde(default)]
+    pub speech_regions: Vec<SpeechRegion>,
 }
 
 impl AudioProfile {
@@ -79,6 +104,7 @@ impl AudioProfile {
             loudness_profile: Vec::new(),
             peak_db: SILENCE_FLOOR_DB,
             silence_regions: silence,
+            speech_regions: Vec::new(),
         }
     }
 }
@@ -474,6 +500,7 @@ mod tests {
             loudness_profile: vec![-20.0, -18.5, -22.0],
             peak_db: -0.5,
             silence_regions: vec![SilenceRegion::new(5.0, 6.5)],
+            speech_regions: vec![SpeechRegion::new(0.0, 5.0), SpeechRegion::new(6.5, 10.0)],
         };
 
         let json = serde_json::to_string(&profile).unwrap();
@@ -686,6 +713,7 @@ mod tests {
             loudness_profile: vec![-18.0, -16.5, -20.0],
             peak_db: -0.3,
             silence_regions: vec![SilenceRegion::new(10.0, 11.5)],
+            speech_regions: vec![SpeechRegion::new(0.0, 10.0), SpeechRegion::new(11.5, 12.0)],
         });
 
         bundle.segments = Some(vec![

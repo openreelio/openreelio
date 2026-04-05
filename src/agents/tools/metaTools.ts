@@ -1,5 +1,5 @@
 /**
- * Meta-Tools: Consolidated tool set (56+ tools -> 6 meta-tools)
+ * Meta-Tools: Consolidated tool set exposed to the runtime prompt surface
  *
  * Reduces LLM context overhead from ~15K tokens to ~2K tokens while
  * maintaining full editing capability. Each meta-tool dispatches to
@@ -10,7 +10,7 @@
  * 2. edit     - editing tools (20 tools)
  * 3. audio    - audio tools (6 tools)
  * 4. effects  - effect + transition tools (8 tools)
- * 5. text     - caption tools (4 tools)
+ * 5. text     - caption tools
  *
  * Legacy compatibility:
  * - execute_plan remains registered for transitional callers, but should not
@@ -84,37 +84,52 @@ function normalizeMetaToolArgs(
   action: string,
   toolArgs: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (metaToolName !== 'edit') {
-    return toolArgs;
-  }
-
   const normalized = { ...toolArgs };
 
-  if (
-    (action === 'insert_clip' || action === 'insert_clip_from_file') &&
-    normalized.timelineStart === undefined &&
-    typeof normalized.timelineIn === 'number'
-  ) {
-    normalized.timelineStart = normalized.timelineIn;
+  if (metaToolName === 'edit') {
+    if (
+      (action === 'insert_clip' || action === 'insert_clip_from_file') &&
+      normalized.timelineStart === undefined &&
+      typeof normalized.timelineIn === 'number'
+    ) {
+      normalized.timelineStart = normalized.timelineIn;
+    }
+
+    if (
+      action === 'split_clip' &&
+      normalized.splitTime === undefined &&
+      typeof normalized.atTimelineSec === 'number'
+    ) {
+      normalized.splitTime = normalized.atTimelineSec;
+    }
+
+    if (
+      action === 'insert_clip_from_file' &&
+      typeof normalized.file !== 'string' &&
+      typeof normalized.filePath === 'string'
+    ) {
+      normalized.file = normalized.filePath;
+    }
   }
 
   if (
-    action === 'split_clip' &&
-    normalized.splitTime === undefined &&
-    typeof normalized.atTimelineSec === 'number'
+    metaToolName === 'audio' &&
+    action === 'normalize_audio' &&
+    normalized.targetLevel === undefined &&
+    typeof normalized.targetLufs === 'number'
   ) {
-    normalized.splitTime = normalized.atTimelineSec;
-  }
-
-  if (
-    action === 'insert_clip_from_file' &&
-    typeof normalized.file !== 'string' &&
-    typeof normalized.filePath === 'string'
-  ) {
-    normalized.file = normalized.filePath;
+    normalized.targetLevel = normalized.targetLufs;
   }
 
   return normalized;
+}
+
+export function normalizeMetaToolArgsForValidation(
+  metaToolName: string,
+  action: string,
+  toolArgs: Record<string, unknown>,
+): Record<string, unknown> {
+  return normalizeMetaToolArgs(metaToolName, action, toolArgs);
 }
 
 // =============================================================================
@@ -162,6 +177,40 @@ const META_TOOLS: ToolDefinition[] = [
         esdId: { type: 'string', description: 'Editing Style Document ID' },
         name: { type: 'string', description: 'Optional display name or label' },
         options: { type: 'object', description: 'Optional nested tool-specific options' },
+        limit: { type: 'number', description: 'Maximum number of results or selects to return' },
+        assetLimit: {
+          type: 'number',
+          description: 'Maximum number of candidate assets to inspect',
+        },
+        sections: {
+          type: 'array',
+          description: 'Optional source-analysis sections such as moments, chapters, highlights',
+          items: { type: 'string' },
+        },
+        assetIds: {
+          type: 'array',
+          description: 'Optional source asset IDs to restrict search scope',
+          items: { type: 'string' },
+        },
+        unusedOnly: {
+          type: 'boolean',
+          description: 'Restrict source search to currently unused assets',
+        },
+        analyzeMissing: {
+          type: 'boolean',
+          description: 'Generate missing source analysis on demand when supported',
+        },
+        apply: { type: 'boolean', description: 'Apply the generated plan directly when supported' },
+        trackName: {
+          type: 'string',
+          description: 'Target selects track name when building source selects',
+        },
+        paddingSec: { type: 'number', description: 'Extra source padding for matched ranges' },
+        gapSec: { type: 'number', description: 'Gap between generated selects on the timeline' },
+        timelineStart: {
+          type: 'number',
+          description: 'Timeline start position for generated selects',
+        },
         shots: { type: 'boolean', description: 'Run shot detection' },
         transcript: { type: 'boolean', description: 'Run transcript analysis' },
         audio: { type: 'boolean', description: 'Run audio profiling' },
@@ -170,6 +219,15 @@ const META_TOOLS: ToolDefinition[] = [
         localOnly: { type: 'boolean', description: 'Use local-only analysis where supported' },
         time: { type: 'number', description: 'Timeline position in seconds' },
         path: { type: 'string', description: 'File path or search pattern' },
+        file: { type: 'string', description: 'Workspace-relative media file path' },
+        kind: { type: 'string', description: 'Asset kind filter or media kind selector' },
+        query: { type: 'string', description: 'Search query or filename substring' },
+        provider: { type: 'string', description: 'Preferred analysis provider when supported' },
+        analysisTypes: {
+          type: 'array',
+          description: 'Requested analysis passes such as transcript, shots, textOcr, faces',
+          items: { type: 'string' },
+        },
       },
       required: ['action'],
     },
@@ -223,6 +281,13 @@ const META_TOOLS: ToolDefinition[] = [
         sourceAssetId: { type: 'string', description: 'Source asset ID for style transfer' },
         time: { type: 'number', description: 'Timeline position in seconds' },
         color: { type: 'string', description: 'Marker color' },
+        markerId: { type: 'string', description: 'Marker ID' },
+        fromTime: { type: 'number', description: 'Marker/query range start in seconds' },
+        toTime: { type: 'number', description: 'Marker/query range end in seconds' },
+        frameRate: {
+          type: 'number',
+          description: 'Frame rate used for freeze-frame extraction when relevant',
+        },
         file: {
           type: 'string',
           description: 'Workspace-relative file name/path for insert_clip_from_file',
@@ -258,7 +323,11 @@ const META_TOOLS: ToolDefinition[] = [
         volume: { type: 'number', description: 'Volume level (0-200%)' },
         duration: { type: 'number', description: 'Fade duration in seconds' },
         muted: { type: 'boolean', description: 'Mute state' },
-        targetLufs: { type: 'number', description: 'Target loudness in LUFS' },
+        targetLevel: { type: 'number', description: 'Target normalization level in dB' },
+        targetLufs: {
+          type: 'number',
+          description: 'Legacy alias for targetLevel. Prefer targetLevel.',
+        },
       },
       required: ['action', 'sequenceId', 'trackId'],
     },
@@ -285,11 +354,15 @@ const META_TOOLS: ToolDefinition[] = [
         clipId: { type: 'string', description: 'Clip ID' },
         effectId: { type: 'string', description: 'Effect ID' },
         effectType: { type: 'string', description: 'Effect type (e.g. blur, brightness)' },
+        parameters: { type: 'object', description: 'Initial effect parameter object' },
         paramName: { type: 'string', description: 'Effect parameter name' },
         paramValue: { type: 'number', description: 'Effect parameter value' },
         sourceClipId: { type: 'string', description: 'Source clip for copy_effects' },
+        sourceTrackId: { type: 'string', description: 'Track containing sourceClipId' },
         targetClipId: { type: 'string', description: 'Target clip for copy_effects' },
+        targetTrackId: { type: 'string', description: 'Track containing targetClipId' },
         transitionType: { type: 'string', description: 'Transition type (e.g. dissolve, wipe)' },
+        transitionId: { type: 'string', description: 'Transition ID' },
         duration: { type: 'number', description: 'Transition duration in seconds' },
       },
       required: ['action'],
@@ -315,15 +388,38 @@ const META_TOOLS: ToolDefinition[] = [
         sequenceId: { type: 'string', description: 'Sequence ID' },
         trackId: { type: 'string', description: 'Track ID' },
         captionId: { type: 'string', description: 'Caption ID' },
+        assetId: { type: 'string', description: 'Asset ID for transcription' },
         text: { type: 'string', description: 'Caption text content' },
         startTime: { type: 'number', description: 'Start time in seconds' },
         endTime: { type: 'number', description: 'End time in seconds' },
+        segments: {
+          type: 'array',
+          description: 'Timed text segments for batch caption creation',
+          items: {
+            type: 'object',
+            properties: {
+              startTime: { type: 'number' },
+              endTime: { type: 'number' },
+              text: { type: 'string' },
+            },
+            required: ['startTime', 'endTime', 'text'],
+          },
+        },
         fontSize: { type: 'number', description: 'Font size' },
         fontFamily: { type: 'string', description: 'Font family' },
         color: { type: 'string', description: 'Text color (hex)' },
+        backgroundColor: { type: 'string', description: 'Background color (hex)' },
         position: { type: 'string', description: 'Position: top, center, bottom' },
+        language: { type: 'string', description: 'Language code for transcription' },
+        model: { type: 'string', description: 'Transcription model name' },
+        async: { type: 'boolean', description: 'Run transcription as a background job' },
+        relativePath: {
+          type: 'string',
+          description: 'Workspace-relative subtitle document path (.srt or .vtt)',
+        },
+        format: { type: 'string', description: 'Subtitle format: srt or vtt' },
       },
-      required: ['action', 'sequenceId'],
+      required: ['action'],
     },
     handler: async (args) => dispatchToTool('text', args, TEXT_ACTIONS),
   },

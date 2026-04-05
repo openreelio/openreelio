@@ -153,12 +153,14 @@ export class AgenticEngine {
     this.thinker = createThinker(llm, {
       timeout: this.config.thinkingTimeout,
       projectPromptAddendum: projectPromptAddendum ?? undefined,
+      role: this.config.role,
     });
     this.planner = createPlanner(llm, toolExecutor, {
       timeout: this.config.planningTimeout,
       approvalRequiredRisks,
       maxOutputTokens: plannerMaxOutputTokens,
       projectPromptAddendum: projectPromptAddendum ?? undefined,
+      role: this.config.role,
     });
     this.executor = createExecutor(toolExecutor, {
       stopOnError: this.config.stopOnError ?? true,
@@ -721,8 +723,7 @@ export class AgenticEngine {
 
         if (!executionResult.success) {
           const failureReason =
-            executionResult.failedSteps[0]?.result.error
-            ?? 'Execution failed before observation';
+            executionResult.failedSteps[0]?.result.error ?? 'Execution failed before observation';
           const rollbackReport = await this.attemptRollback(executionResults, executionContext);
           const observation = terminalFailureGuard
             ? this.applyTerminalFailureGuard(

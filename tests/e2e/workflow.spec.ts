@@ -43,7 +43,7 @@ function videoFixtureExists(): boolean {
 }
 
 async function waitForAppReady(page: Page): Promise<void> {
-  await page.goto('/');
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
   await page.waitForLoadState('domcontentloaded');
 
   // Wait for either setup wizard, welcome screen, or timeline editor

@@ -8,6 +8,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
 import { executeAgentCommand } from './commandExecutor';
+import {
+  parseCaptionDocument,
+  detectCaptionDocumentFormat,
+  type CaptionDocumentFormat,
+} from './captionParsers';
+import { readWorkspaceDocumentFromBackend } from '@/services/workspaceGateway';
 import { useProjectStore } from '@/stores/projectStore';
 import type { CaptionColor, CaptionPosition, Sequence } from '@/types';
 
@@ -102,7 +108,10 @@ function parseAgentCaptionPosition(value: unknown): CaptionPosition | undefined 
   return undefined;
 }
 
-async function ensureCaptionTrack(sequenceId: string, explicitTrackId?: string): Promise<string> {
+async function ensureCaptionTrack(
+  sequenceId: string,
+  explicitTrackId?: string,
+): Promise<{ trackId: string; createdTrack: boolean }> {
   const sequence = getSequence(sequenceId);
   if (!sequence) {
     throw new Error(`Sequence '${sequenceId}' not found`);
@@ -118,12 +127,12 @@ async function ensureCaptionTrack(sequenceId: string, explicitTrackId?: string):
       throw new Error(`Track '${explicitTrackId}' is not a caption track`);
     }
 
-    return explicitTrackId;
+    return { trackId: explicitTrackId, createdTrack: false };
   }
 
   const existingCaptionTrack = sequence.tracks.find((track) => track.kind === 'caption');
   if (existingCaptionTrack) {
-    return existingCaptionTrack.id;
+    return { trackId: existingCaptionTrack.id, createdTrack: false };
   }
 
   const createTrackResult = await executeAgentCommand('CreateTrack', {
@@ -137,7 +146,7 @@ async function ensureCaptionTrack(sequenceId: string, explicitTrackId?: string):
     throw new Error('Failed to create caption track');
   }
 
-  return createdTrackId;
+  return { trackId: createdTrackId, createdTrack: true };
 }
 
 function normalizeTranscriptionSegments(
@@ -195,6 +204,113 @@ async function rollbackCreatedCaptions(
   return rollbackFailures;
 }
 
+async function rollbackCreatedCaptionTrack(
+  sequenceId: string,
+  trackId: string,
+): Promise<string | null> {
+  try {
+    await executeAgentCommand('DeleteTrack', {
+      sequenceId,
+      trackId,
+    });
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function createCaptionsFromSegments(
+  sequenceId: string,
+  segments: TranscriptionSegmentInput[],
+  explicitTrackId?: string,
+): Promise<{
+  trackId: string;
+  createdTrack: boolean;
+  captionCount: number;
+  captions: Array<{ captionId: string; text: string }>;
+  skippedSegmentCount: number;
+}> {
+  if (!Array.isArray(segments) || segments.length === 0) {
+    throw new Error('No segments provided');
+  }
+
+  const normalizedSegments = normalizeTranscriptionSegments(segments);
+  if (normalizedSegments.segments.length === 0) {
+    throw new Error('No valid segments provided');
+  }
+
+  const { trackId, createdTrack } = await ensureCaptionTrack(sequenceId, explicitTrackId);
+  const createdCaptions: Array<{ captionId: string; text: string }> = [];
+
+  for (const segment of normalizedSegments.segments) {
+    try {
+      const result = await executeAgentCommand('CreateCaption', {
+        sequenceId,
+        trackId,
+        text: segment.text,
+        startSec: segment.startTime,
+        endSec: segment.endTime,
+      });
+
+      const captionId = result.createdIds[0];
+      if (!captionId) {
+        throw new Error('CreateCaption did not return a caption id');
+      }
+
+      createdCaptions.push({
+        captionId,
+        text: segment.text,
+      });
+    } catch (error) {
+      const rollbackFailures = await rollbackCreatedCaptions(sequenceId, trackId, createdCaptions);
+      if (createdTrack) {
+        const trackRollbackFailure = await rollbackCreatedCaptionTrack(sequenceId, trackId);
+        if (trackRollbackFailure) {
+          rollbackFailures.push(trackRollbackFailure);
+        }
+      }
+      const message = error instanceof Error ? error.message : String(error);
+
+      if (rollbackFailures.length > 0) {
+        throw new Error(
+          `Failed to create captions: ${message}. Rollback failed for ${rollbackFailures.length} operation(s).`,
+        );
+      }
+
+      throw new Error(
+        `Failed to create captions: ${message}. Rolled back ${createdCaptions.length} caption(s).`,
+      );
+    }
+  }
+
+  return {
+    trackId,
+    createdTrack,
+    captionCount: createdCaptions.length,
+    captions: createdCaptions,
+    skippedSegmentCount: normalizedSegments.skippedCount,
+  };
+}
+
+function resolveCaptionDocumentFormat(
+  relativePath: string,
+  explicitFormat: unknown,
+  content: string,
+): CaptionDocumentFormat {
+  if (explicitFormat === 'srt' || explicitFormat === 'vtt') {
+    return explicitFormat;
+  }
+
+  const detectedFormat = detectCaptionDocumentFormat(relativePath, content);
+  if (!detectedFormat) {
+    throw new Error(
+      `Could not determine caption format for '${relativePath}'. Provide format: 'srt' or 'vtt'.`,
+    );
+  }
+
+  return detectedFormat;
+}
+
 const CAPTION_TOOLS: ToolDefinition[] = [
   {
     name: 'add_caption',
@@ -233,7 +349,10 @@ const CAPTION_TOOLS: ToolDefinition[] = [
     handler: async (args) => {
       try {
         const sequenceId = args.sequenceId as string;
-        const trackId = await ensureCaptionTrack(sequenceId, args.trackId as string | undefined);
+        const { trackId } = await ensureCaptionTrack(
+          sequenceId,
+          args.trackId as string | undefined,
+        );
 
         const result = await executeAgentCommand('CreateCaption', {
           sequenceId,
@@ -566,7 +685,9 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         }
 
         if (!whisperAvailable) {
-          logger.warn('auto_transcribe: whisper not available, returning alternatives', { assetId });
+          logger.warn('auto_transcribe: whisper not available, returning alternatives', {
+            assetId,
+          });
           return {
             success: false,
             error:
@@ -633,6 +754,70 @@ const CAPTION_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'import_captions_from_file',
+    description:
+      'Import SRT or WebVTT captions from a workspace subtitle file and create caption clips on the timeline.',
+    category: 'utility',
+    parameters: {
+      type: 'object',
+      properties: {
+        sequenceId: {
+          type: 'string',
+          description: 'The ID of the sequence',
+        },
+        trackId: {
+          type: 'string',
+          description: 'Optional caption track ID (auto-created when omitted)',
+        },
+        relativePath: {
+          type: 'string',
+          description: 'Workspace-relative subtitle file path (.srt or .vtt)',
+        },
+        format: {
+          type: 'string',
+          enum: ['srt', 'vtt'],
+          description: 'Optional explicit subtitle format. Auto-detected from file path/content.',
+        },
+      },
+      required: ['sequenceId', 'relativePath'],
+    },
+    handler: async (args) => {
+      try {
+        const relativePath = args.relativePath as string;
+        const document = await readWorkspaceDocumentFromBackend(relativePath);
+        const format = resolveCaptionDocumentFormat(relativePath, args.format, document.content);
+        const segments = parseCaptionDocument(document.content, format);
+
+        const result = await createCaptionsFromSegments(
+          args.sequenceId as string,
+          segments,
+          args.trackId as string | undefined,
+        );
+
+        logger.info('Captions imported from workspace file', {
+          sequenceId: args.sequenceId,
+          trackId: result.trackId,
+          relativePath,
+          format,
+          count: result.captionCount,
+        });
+
+        return {
+          success: true,
+          result: {
+            ...result,
+            relativePath,
+            format,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('import_captions_from_file failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+  {
     name: 'add_captions_from_transcription',
     description:
       'Create caption clips from transcription segments. Takes an array of timed text segments and adds them as captions on a caption track.',
@@ -666,94 +851,22 @@ const CAPTION_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const sequenceId = args.sequenceId as string;
-        const segments = args.segments as Array<{
-          startTime: number;
-          endTime: number;
-          text: string;
-        }>;
-
-        if (!Array.isArray(segments) || segments.length === 0) {
-          return { success: false, error: 'No segments provided' };
-        }
-
-        const normalizedSegments = normalizeTranscriptionSegments(segments);
-        if (normalizedSegments.segments.length === 0) {
-          return { success: false, error: 'No valid segments provided' };
-        }
-
-        const trackId = await ensureCaptionTrack(sequenceId, args.trackId as string | undefined);
-
-        const createdCaptions: Array<{ captionId: string; text: string }> = [];
-
-        for (const segment of normalizedSegments.segments) {
-          try {
-            const result = await executeAgentCommand('CreateCaption', {
-              sequenceId,
-              trackId,
-              text: segment.text,
-              startSec: segment.startTime,
-              endSec: segment.endTime,
-            });
-
-            const captionId = result.createdIds[0];
-            if (!captionId) {
-              throw new Error('CreateCaption did not return a caption id');
-            }
-
-            createdCaptions.push({
-              captionId,
-              text: segment.text,
-            });
-          } catch (error) {
-            const rollbackFailures = await rollbackCreatedCaptions(
-              sequenceId,
-              trackId,
-              createdCaptions,
-            );
-
-            const message = error instanceof Error ? error.message : String(error);
-            if (rollbackFailures.length > 0) {
-              logger.error('add_captions_from_transcription rollback failed', {
-                error: message,
-                rollbackFailures,
-                sequenceId,
-                trackId,
-              });
-              return {
-                success: false,
-                error: `Failed to create captions from transcription: ${message}. Rollback failed for ${rollbackFailures.length} caption(s).`,
-              };
-            }
-
-            logger.warn('add_captions_from_transcription rolled back partial batch', {
-              error: message,
-              rolledBackCount: createdCaptions.length,
-              sequenceId,
-              trackId,
-            });
-            return {
-              success: false,
-              error: `Failed to create captions from transcription: ${message}. Rolled back ${createdCaptions.length} caption(s).`,
-            };
-          }
-        }
+        const result = await createCaptionsFromSegments(
+          args.sequenceId as string,
+          args.segments as TranscriptionSegmentInput[],
+          args.trackId as string | undefined,
+        );
 
         logger.info('Captions created from transcription', {
-          sequenceId,
-          trackId,
-          count: createdCaptions.length,
-          skippedCount: normalizedSegments.skippedCount,
+          sequenceId: args.sequenceId,
+          trackId: result.trackId,
+          count: result.captionCount,
+          skippedCount: result.skippedSegmentCount,
         });
 
         return {
           success: true,
-          result: {
-            trackId,
-            captionCount: createdCaptions.length,
-            captions: createdCaptions,
-            skippedSegmentCount: normalizedSegments.skippedCount,
-          },
+          result,
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

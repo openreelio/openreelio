@@ -172,6 +172,29 @@ impl ProjectState {
         Ok(state)
     }
 
+    /// Creates a project state by replaying an explicit ordered operation list.
+    pub fn from_operations<I>(operations: I, meta: ProjectMeta) -> CoreResult<Self>
+    where
+        I: IntoIterator<Item = Operation>,
+    {
+        let mut state = Self {
+            meta,
+            assets: HashMap::new(),
+            sequences: HashMap::new(),
+            effects: HashMap::new(),
+            active_sequence_id: None,
+            last_op_id: None,
+            op_count: 0,
+            is_dirty: false,
+        };
+
+        for op in operations {
+            state.apply_operation(&op)?;
+        }
+
+        Ok(state)
+    }
+
     /// Applies a single operation to the state
     pub fn apply_operation(&mut self, op: &Operation) -> CoreResult<()> {
         match op.kind {

@@ -7,7 +7,7 @@ use openreelio_lib::core::analysis::dtw::dtw_align;
 use openreelio_lib::core::analysis::esd::{EsdGenerator, TempoClassification};
 use openreelio_lib::core::analysis::style_planner::{StylePlanner, StylePlanningContext};
 use openreelio_lib::core::analysis::types::{
-    AnalysisBundle, AudioProfile, ContentSegment, SegmentType, VideoMetadata,
+    AnalysisBundle, AudioProfile, ContentSegment, SegmentType, SpeechRegion, VideoMetadata,
 };
 use openreelio_lib::core::annotations::models::ShotResult;
 
@@ -26,6 +26,7 @@ fn create_mock_audio_profile() -> AudioProfile {
         loudness_profile: vec![-20.0; 12],
         peak_db: -3.0,
         silence_regions: vec![],
+        speech_regions: vec![SpeechRegion::new(0.0, 12.0)],
     }
 }
 
@@ -305,6 +306,7 @@ async fn test_compatibility_score_dissimilar_content() {
         loudness_profile: vec![-10.0; 3],
         peak_db: -3.0,
         silence_regions: vec![],
+        speech_regions: vec![SpeechRegion::new(0.0, 2.6)],
     });
     let esd = EsdGenerator::generate(&ref_bundle).unwrap();
 
@@ -323,6 +325,7 @@ async fn test_compatibility_score_dissimilar_content() {
         loudness_profile: vec![-30.0; 120],
         peak_db: -20.0,
         silence_regions: vec![],
+        speech_regions: vec![SpeechRegion::new(0.0, 120.0)],
     });
 
     let score = StylePlanner::compute_compatibility_score(&esd, &source_bundle);
