@@ -55,6 +55,11 @@ function createTestPlan(): Plan {
   };
 }
 
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 // =============================================================================
 // Setup
 // =============================================================================
@@ -211,6 +216,116 @@ describe('ConversationStore', () => {
         content: 'Hello first turn',
       });
     });
+
+    it('should not auto-restore an older session over a first-turn draft while session creation is pending', async () => {
+      let resolveListSessions!: (value: unknown) => void;
+      let resolveCreateSession!: (value: unknown) => void;
+      const now = Date.now();
+
+      mockInvoke.mockImplementation(async (command: string, payload?: { sessionId?: string }) => {
+        if (command === 'list_ai_sessions') {
+          return new Promise((resolve) => {
+            resolveListSessions = resolve;
+          });
+        }
+
+        if (command === 'create_ai_session') {
+          return new Promise((resolve) => {
+            resolveCreateSession = resolve;
+          });
+        }
+
+        if (command === 'get_ai_session' && payload?.sessionId === 'session-existing') {
+          return {
+            session: {
+              id: 'session-existing',
+              projectId: 'project-1',
+              title: 'Existing session',
+              agent: 'editor',
+              modelProvider: null,
+              modelId: null,
+              createdAt: now - 1000,
+              updatedAt: now - 500,
+              archived: false,
+              messageCount: 1,
+              lastMessagePreview: 'Older context',
+            },
+            messages: [
+              {
+                id: 'existing-message-1',
+                sessionId: 'session-existing',
+                role: 'assistant',
+                timestamp: now - 500,
+                parts: [{ partType: 'text', dataJson: JSON.stringify({ type: 'text', content: 'Older context' }) }],
+                usageJson: null,
+              },
+            ],
+          };
+        }
+
+        return undefined;
+      });
+
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+
+      const firstMessageId = store.addUserMessage('Hello first turn');
+      const ensuredSessionPromise = store.ensureSession();
+
+      resolveListSessions([
+        {
+          id: 'session-existing',
+          projectId: 'project-1',
+          title: 'Existing session',
+          agent: 'editor',
+          modelProvider: null,
+          modelId: null,
+          createdAt: now - 1000,
+          updatedAt: now - 500,
+          archived: false,
+          messageCount: 1,
+          lastMessagePreview: 'Older context',
+        },
+      ]);
+      await flushMicrotasks();
+
+      resolveCreateSession({
+        id: 'session-new',
+        projectId: 'project-1',
+        title: 'New conversation',
+        agent: 'editor',
+        modelProvider: null,
+        modelId: null,
+        createdAt: now,
+        updatedAt: now,
+        archived: false,
+        messageCount: 0,
+        lastMessagePreview: null,
+      });
+
+      await ensuredSessionPromise;
+      await flushMicrotasks();
+
+      const state = useConversationStore.getState();
+      expect(state.activeSessionId).toBe('session-new');
+      expect(state.activeConversation?.id).toBe('session-new');
+      expect(state.activeConversation?.messages).toHaveLength(1);
+      expect(state.activeConversation?.messages[0]?.id).toBe(firstMessageId);
+      expect(state.activeConversation?.messages[0]?.parts[0]).toEqual({
+        type: 'text',
+        content: 'Hello first turn',
+      });
+
+      const restoredSessionCalls = mockInvoke.mock.calls.filter(
+        ([command, args]) =>
+          command === 'get_ai_session' &&
+          typeof args === 'object' &&
+          args !== null &&
+          'sessionId' in args &&
+          args.sessionId === 'session-existing',
+      );
+      expect(restoredSessionCalls).toHaveLength(0);
+    });
   });
 
   describe('ensureSession', () => {
@@ -248,7 +363,113 @@ describe('ConversationStore', () => {
     });
   });
 
+  describe('createSession', () => {
+    it('should start a new session with a fresh conversation transcript', async () => {
+      const now = Date.now();
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === 'create_ai_session') {
+          return {
+            id: 'session-new',
+            projectId: 'project-1',
+            title: 'New conversation',
+            agent: 'editor',
+            modelProvider: null,
+            modelId: null,
+            createdAt: now,
+            updatedAt: now,
+            archived: false,
+            messageCount: 0,
+            lastMessagePreview: null,
+          };
+        }
+        return [];
+      });
+
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+      store.addUserMessage('old transcript');
+
+      await store.createSession('editor');
+
+      const state = useConversationStore.getState();
+      expect(state.activeSessionId).toBe('session-new');
+      expect(state.activeConversation?.id).toBe('session-new');
+      expect(state.activeConversation?.messages).toEqual([]);
+    });
+  });
+
   describe('switchSession', () => {
+    it('should ignore stale switchSession responses that resolve out of order', async () => {
+      let resolveFirst!: (value: unknown) => void;
+      let resolveSecond!: (value: unknown) => void;
+
+      mockInvoke.mockImplementation(async (command: string, payload?: { sessionId?: string }) => {
+        if (command === 'list_ai_sessions') {
+          return [];
+        }
+
+        if (command === 'get_ai_session' && payload?.sessionId === 'session-1') {
+          return new Promise((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+
+        if (command === 'get_ai_session' && payload?.sessionId === 'session-2') {
+          return new Promise((resolve) => {
+            resolveSecond = resolve;
+          });
+        }
+
+        return undefined;
+      });
+
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+
+      const firstSwitch = store.switchSession('session-1');
+      const secondSwitch = store.switchSession('session-2');
+
+      resolveSecond({
+        session: {
+          id: 'session-2',
+          projectId: 'project-1',
+          title: 'Second session',
+          agent: 'editor',
+          modelProvider: null,
+          modelId: null,
+          createdAt: 100,
+          updatedAt: 200,
+          archived: false,
+          messageCount: 0,
+          lastMessagePreview: null,
+        },
+        messages: [],
+      });
+
+      resolveFirst({
+        session: {
+          id: 'session-1',
+          projectId: 'project-1',
+          title: 'First session',
+          agent: 'editor',
+          modelProvider: null,
+          modelId: null,
+          createdAt: 50,
+          updatedAt: 150,
+          archived: false,
+          messageCount: 0,
+          lastMessagePreview: null,
+        },
+        messages: [],
+      });
+
+      await Promise.all([firstSwitch, secondSwitch]);
+
+      const state = useConversationStore.getState();
+      expect(state.activeSessionId).toBe('session-2');
+      expect(state.activeConversation?.id).toBe('session-2');
+    });
+
     it('should reset stale permission rules and hydrate the activated session rules', async () => {
       mockInvoke.mockImplementation(async (command: string) => {
         if (command === 'list_ai_sessions') {
@@ -288,15 +509,14 @@ describe('ConversationStore', () => {
             return;
           }
 
-          usePermissionStore.getState().hydrateSessionRulesFromPersistedDecisions(
-            sessionId!,
-            [{
+          usePermissionStore.getState().hydrateSessionRulesFromPersistedDecisions(sessionId!, [
+            {
               id: 'decision-1',
               subject: 'timeline.clip.delete#clip:clip-7',
               action: 'allow_always',
               createdAt: 10,
-            }],
-          );
+            },
+          ]);
         });
 
       const store = useConversationStore.getState();
@@ -781,9 +1001,9 @@ describe('ConversationStore', () => {
       store.finalizeMessage(msgId);
 
       await vi.waitFor(() => {
-        const msg = useConversationStore.getState().activeConversation!.messages.find(
-          (m) => m.id === msgId,
-        );
+        const msg = useConversationStore
+          .getState()
+          .activeConversation!.messages.find((m) => m.id === msgId);
         expect(msg?.persistenceStatus).toBe('saved');
       });
     });
@@ -796,9 +1016,7 @@ describe('ConversationStore', () => {
 
       // First call: fail, second call: succeed
       mockInvoke.mockReset();
-      mockInvoke
-        .mockRejectedValueOnce(new Error('IPC failure'))
-        .mockResolvedValueOnce(undefined);
+      mockInvoke.mockRejectedValueOnce(new Error('IPC failure')).mockResolvedValueOnce(undefined);
 
       const msgId = store.startAssistantMessage();
       store.appendPart(msgId, createTextPart('response'));
@@ -813,9 +1031,9 @@ describe('ConversationStore', () => {
       // Second attempt should succeed
       await vi.advanceTimersByTimeAsync(100);
 
-      const msg = useConversationStore.getState().activeConversation!.messages.find(
-        (m) => m.id === msgId,
-      );
+      const msg = useConversationStore
+        .getState()
+        .activeConversation!.messages.find((m) => m.id === msgId);
       expect(msg?.persistenceStatus).toBe('saved');
 
       const saveCalls = mockInvoke.mock.calls.filter(([cmd]) => cmd === 'save_ai_message');
@@ -852,9 +1070,9 @@ describe('ConversationStore', () => {
       // Attempt 3 fails
       await vi.advanceTimersByTimeAsync(100);
 
-      const msg = useConversationStore.getState().activeConversation!.messages.find(
-        (m) => m.id === msgId,
-      );
+      const msg = useConversationStore
+        .getState()
+        .activeConversation!.messages.find((m) => m.id === msgId);
       expect(msg?.persistenceStatus).toBe('failed');
 
       const saveCalls = mockInvoke.mock.calls.filter(([cmd]) => cmd === 'save_ai_message');
@@ -872,9 +1090,9 @@ describe('ConversationStore', () => {
       store.appendPart(msgId, createTextPart('response'));
       store.finalizeMessage(msgId);
 
-      const msg = useConversationStore.getState().activeConversation!.messages.find(
-        (m) => m.id === msgId,
-      );
+      const msg = useConversationStore
+        .getState()
+        .activeConversation!.messages.find((m) => m.id === msgId);
       expect(msg?.persistenceStatus).toBe('pending');
     });
   });
