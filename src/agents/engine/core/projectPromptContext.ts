@@ -42,7 +42,9 @@ async function loadKnowledgeEntries(projectId: string): Promise<string[]> {
 async function loadInstructionDocument(): Promise<string | null> {
   for (const relativePath of INSTRUCTION_DOCUMENT_CANDIDATES) {
     try {
-      const document = await readWorkspaceDocumentFromBackend(relativePath);
+      const document = await readWorkspaceDocumentFromBackend(relativePath, {
+        failureLogLevel: 'debug',
+      });
       const normalized = normalizeInstructionContent(document.content);
       if (normalized) {
         return normalized;
