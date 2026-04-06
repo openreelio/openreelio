@@ -4,9 +4,9 @@
 //! Enables full conversation history, context replay, and compaction for the
 //! agentic engine.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::core::{CoreError, CoreResult};
@@ -568,15 +568,13 @@ impl ConversationDb {
                     ON ai_compactions(session_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_ai_resume_checkpoints_session
                     ON ai_resume_checkpoints(session_id, created_at DESC);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_resume_checkpoints_single_active
-                    ON ai_resume_checkpoints(session_id)
-                    WHERE status = 'active';
                 "#,
             )
             .map_err(|e| CoreError::Internal(format!("Failed to initialize schema: {}", e)))?;
 
         self.ensure_ai_session_columns()?;
         self.backfill_ai_session_kernel_fields()?;
+        self.reconcile_resume_checkpoint_active_state()?;
         self.conn
             .execute_batch(
                 r#"
@@ -584,6 +582,9 @@ impl ConversationDb {
                     ON ai_sessions(root_session_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_ai_sessions_parent
                     ON ai_sessions(parent_session_id, updated_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_resume_checkpoints_single_active
+                    ON ai_resume_checkpoints(session_id)
+                    WHERE status = 'active';
                 "#,
             )
             .map_err(|e| {
@@ -696,6 +697,136 @@ impl ConversationDb {
                     e
                 ))
             })?;
+
+        Ok(())
+    }
+
+    fn invalidate_other_active_resume_checkpoints(
+        tx: &Transaction<'_>,
+        session_id: &str,
+        keep_checkpoint_id: &str,
+        invalidated_at: i64,
+    ) -> CoreResult<()> {
+        tx.execute(
+            r#"UPDATE ai_resume_checkpoints
+                  SET status = 'invalidated',
+                      consumed_at = COALESCE(consumed_at, ?3)
+                WHERE session_id = ?1
+                  AND status = 'active'
+                  AND id != ?2"#,
+            params![session_id, keep_checkpoint_id, invalidated_at],
+        )
+        .map_err(|e| {
+            CoreError::Internal(format!(
+                "Failed to invalidate stale resume checkpoints for session {}: {}",
+                session_id, e
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    fn reconcile_resume_checkpoint_active_state(&self) -> CoreResult<()> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"SELECT id, session_id, status, created_at
+                     FROM ai_resume_checkpoints
+                    ORDER BY session_id ASC, created_at DESC, id DESC"#,
+            )
+            .map_err(|e| {
+                CoreError::Internal(format!(
+                    "Failed to inspect resume checkpoint active state: {}",
+                    e
+                ))
+            })?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|e| {
+                CoreError::Internal(format!(
+                    "Failed to inspect resume checkpoint active state: {}",
+                    e
+                ))
+            })?;
+
+        let mut active_checkpoint_by_session = HashMap::<String, String>::new();
+        let mut sessions_with_checkpoints = HashSet::<String>::new();
+        let mut stale_active_checkpoint_ids = Vec::<String>::new();
+
+        for row in rows {
+            let (checkpoint_id, session_id, status, _created_at) = row.map_err(|e| {
+                CoreError::Internal(format!(
+                    "Failed to read resume checkpoint active state: {}",
+                    e
+                ))
+            })?;
+
+            sessions_with_checkpoints.insert(session_id.clone());
+
+            if status != "active" {
+                continue;
+            }
+
+            if active_checkpoint_by_session.contains_key(&session_id) {
+                stale_active_checkpoint_ids.push(checkpoint_id);
+            } else {
+                active_checkpoint_by_session.insert(session_id, checkpoint_id);
+            }
+        }
+
+        if stale_active_checkpoint_ids.is_empty() && sessions_with_checkpoints.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| CoreError::Internal(format!("Failed to begin transaction: {}", e)))?;
+
+        let reconciled_at = now_millis();
+
+        for checkpoint_id in stale_active_checkpoint_ids {
+            tx.execute(
+                r#"UPDATE ai_resume_checkpoints
+                      SET status = 'invalidated',
+                          consumed_at = COALESCE(consumed_at, ?2)
+                    WHERE id = ?1"#,
+                params![checkpoint_id, reconciled_at],
+            )
+            .map_err(|e| {
+                CoreError::Internal(format!(
+                    "Failed to reconcile stale active resume checkpoint: {}",
+                    e
+                ))
+            })?;
+        }
+
+        for session_id in sessions_with_checkpoints {
+            let active_checkpoint_id = active_checkpoint_by_session.get(&session_id);
+            tx.execute(
+                r#"UPDATE ai_sessions
+                      SET active_checkpoint_id = ?2
+                    WHERE id = ?1"#,
+                params![session_id, active_checkpoint_id],
+            )
+            .map_err(|e| {
+                CoreError::Internal(format!(
+                    "Failed to reconcile active checkpoint pointer for session {}: {}",
+                    session_id, e
+                ))
+            })?;
+        }
+
+        tx.commit()
+            .map_err(|e| CoreError::Internal(format!("Failed to commit transaction: {}", e)))?;
 
         Ok(())
     }
@@ -1946,6 +2077,15 @@ impl ConversationDb {
             .unchecked_transaction()
             .map_err(|e| CoreError::Internal(format!("Failed to begin transaction: {}", e)))?;
 
+        if checkpoint.status == "active" {
+            Self::invalidate_other_active_resume_checkpoints(
+                &tx,
+                &checkpoint.session_id,
+                &checkpoint.id,
+                checkpoint.created_at,
+            )?;
+        }
+
         tx.execute(
             r#"INSERT INTO ai_resume_checkpoints
                 (id, session_id, run_id, checkpoint_kind, status, resume_cursor_json,
@@ -2051,6 +2191,15 @@ impl ConversationDb {
             .conn
             .unchecked_transaction()
             .map_err(|e| CoreError::Internal(format!("Failed to begin transaction: {}", e)))?;
+
+        if checkpoint.status == "active" {
+            Self::invalidate_other_active_resume_checkpoints(
+                &tx,
+                &checkpoint.session_id,
+                &checkpoint.id,
+                checkpoint.consumed_at.unwrap_or(checkpoint.created_at),
+            )?;
+        }
 
         let checkpoint_affected = tx
             .execute(
@@ -2427,6 +2576,147 @@ mod tests {
     }
 
     #[test]
+    fn test_open_existing_database_reconciles_duplicate_active_resume_checkpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-duplicate-active-checkpoints.db");
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            r#"
+            PRAGMA foreign_keys=ON;
+
+            CREATE TABLE ai_sessions (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT 'New Chat',
+                agent TEXT NOT NULL DEFAULT 'editor',
+                model_provider TEXT,
+                model_id TEXT,
+                runtime_kind TEXT NOT NULL DEFAULT 'tpao',
+                session_mode TEXT NOT NULL DEFAULT 'primary',
+                status TEXT NOT NULL DEFAULT 'idle',
+                parent_session_id TEXT,
+                branch_from_session_id TEXT,
+                root_session_id TEXT,
+                sequence_id TEXT,
+                current_run_id TEXT,
+                current_plan_id TEXT,
+                pending_approval_id TEXT,
+                active_checkpoint_id TEXT,
+                permission_state_version INTEGER NOT NULL DEFAULT 0,
+                compaction_version INTEGER NOT NULL DEFAULT 0,
+                resume_cursor_version INTEGER NOT NULL DEFAULT 0,
+                last_compacted_at INTEGER,
+                last_resumed_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                completed_at INTEGER,
+                archived INTEGER NOT NULL DEFAULT 0,
+                summary_message_id TEXT
+            );
+
+            CREATE TABLE ai_resume_checkpoints (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                run_id TEXT,
+                checkpoint_kind TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                resume_cursor_json TEXT NOT NULL,
+                session_state_json TEXT NOT NULL,
+                pending_work_json TEXT,
+                created_at INTEGER NOT NULL,
+                consumed_at INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+
+        conn.execute(
+            r#"INSERT INTO ai_sessions
+                (id, project_id, title, agent, model_provider, model_id, runtime_kind,
+                 session_mode, status, parent_session_id, branch_from_session_id,
+                 root_session_id, sequence_id, current_run_id, current_plan_id,
+                 pending_approval_id, active_checkpoint_id, permission_state_version,
+                 compaction_version, resume_cursor_version, last_compacted_at,
+                 last_resumed_at, created_at, updated_at, completed_at, archived,
+                 summary_message_id)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                       ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
+                       ?27)"#,
+            params![
+                "legacy-session",
+                "proj-legacy",
+                "Legacy Chat",
+                "editor",
+                Option::<String>::None,
+                Option::<String>::None,
+                "tpao",
+                "primary",
+                "idle",
+                Option::<String>::None,
+                Option::<String>::None,
+                "legacy-session",
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                0_i64,
+                0_i64,
+                2_i64,
+                Option::<i64>::None,
+                Option::<i64>::None,
+                100_i64,
+                200_i64,
+                Option::<i64>::None,
+                0_i32,
+                Option::<String>::None,
+            ],
+        )
+        .unwrap();
+
+        for (id, created_at) in [("checkpoint-old", 100_i64), ("checkpoint-new", 200_i64)] {
+            conn.execute(
+                r#"INSERT INTO ai_resume_checkpoints
+                    (id, session_id, run_id, checkpoint_kind, status, resume_cursor_json,
+                     session_state_json, pending_work_json, created_at, consumed_at)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+                params![
+                    id,
+                    "legacy-session",
+                    Option::<String>::None,
+                    "safe_resume_point",
+                    "active",
+                    r#"{"cursor":1}"#,
+                    r#"{"phase":"executing"}"#,
+                    Option::<String>::None,
+                    created_at,
+                    Option::<i64>::None,
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let db = ConversationDb::open(&path).unwrap();
+        let session = db.get_session("legacy-session").unwrap();
+        let checkpoints = db
+            .list_resume_checkpoints_for_session("legacy-session")
+            .unwrap();
+
+        assert_eq!(
+            session.active_checkpoint_id.as_deref(),
+            Some("checkpoint-new")
+        );
+        assert_eq!(checkpoints.len(), 2);
+        assert_eq!(checkpoints[0].id, "checkpoint-new");
+        assert_eq!(checkpoints[0].status, "active");
+        assert_eq!(checkpoints[1].id, "checkpoint-old");
+        assert_eq!(checkpoints[1].status, "invalidated");
+        assert!(checkpoints[1].consumed_at.is_some());
+    }
+
+    #[test]
     fn test_start_run_and_complete_run_syncs_session_state() {
         let db = ConversationDb::in_memory().unwrap();
         db.create_session("s1", "proj-1", "editor", Some("openai"), Some("gpt-4o"))
@@ -2700,6 +2990,66 @@ mod tests {
         assert_eq!(session.resume_cursor_version, 2);
         assert_eq!(checkpoints[0].status, "consumed");
         assert_eq!(checkpoints[0].consumed_at, Some(4000));
+    }
+
+    #[test]
+    fn test_inserting_active_resume_checkpoint_invalidates_previous_active_checkpoint() {
+        let db = ConversationDb::in_memory().unwrap();
+        db.create_session("s1", "proj-1", "editor", None, None)
+            .unwrap();
+
+        let mut session = db.get_session("s1").unwrap();
+        session.active_checkpoint_id = Some("checkpoint-1".to_string());
+        session.resume_cursor_version = 1;
+        session.updated_at = 1000;
+
+        let checkpoint_1 = ResumeCheckpointRow {
+            id: "checkpoint-1".to_string(),
+            session_id: "s1".to_string(),
+            run_id: None,
+            checkpoint_kind: "safe_resume_point".to_string(),
+            status: "active".to_string(),
+            resume_cursor_json: r#"{"cursor":1}"#.to_string(),
+            session_state_json: r#"{"phase":"executing"}"#.to_string(),
+            pending_work_json: None,
+            created_at: 1000,
+            consumed_at: None,
+        };
+        db.insert_resume_checkpoint_and_update_session(&session, &checkpoint_1)
+            .unwrap();
+
+        session.active_checkpoint_id = Some("checkpoint-2".to_string());
+        session.resume_cursor_version = 2;
+        session.updated_at = 2000;
+
+        let checkpoint_2 = ResumeCheckpointRow {
+            id: "checkpoint-2".to_string(),
+            session_id: "s1".to_string(),
+            run_id: None,
+            checkpoint_kind: "tool_wait".to_string(),
+            status: "active".to_string(),
+            resume_cursor_json: r#"{"cursor":2}"#.to_string(),
+            session_state_json: r#"{"phase":"awaiting_tool"}"#.to_string(),
+            pending_work_json: None,
+            created_at: 2000,
+            consumed_at: None,
+        };
+        db.insert_resume_checkpoint_and_update_session(&session, &checkpoint_2)
+            .unwrap();
+
+        let session = db.get_session("s1").unwrap();
+        let checkpoints = db.list_resume_checkpoints_for_session("s1").unwrap();
+
+        assert_eq!(
+            session.active_checkpoint_id.as_deref(),
+            Some("checkpoint-2")
+        );
+        assert_eq!(checkpoints.len(), 2);
+        assert_eq!(checkpoints[0].id, "checkpoint-2");
+        assert_eq!(checkpoints[0].status, "active");
+        assert_eq!(checkpoints[1].id, "checkpoint-1");
+        assert_eq!(checkpoints[1].status, "invalidated");
+        assert_eq!(checkpoints[1].consumed_at, Some(2000));
     }
 
     #[test]
