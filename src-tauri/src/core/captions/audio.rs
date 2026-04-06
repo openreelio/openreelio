@@ -7,6 +7,8 @@ use std::path::Path;
 use std::process::Command;
 use thiserror::Error;
 
+use crate::core::process::configure_std_command;
+
 // =============================================================================
 // Error Types
 // =============================================================================
@@ -88,7 +90,9 @@ pub fn extract_audio_for_transcription(
 
     // Build FFmpeg command
     let ffmpeg = ffmpeg_path.unwrap_or("ffmpeg");
-    let output = Command::new(ffmpeg)
+    let mut cmd = Command::new(ffmpeg);
+    configure_std_command(&mut cmd);
+    let output = cmd
         .args([
             "-i",
             input_path.to_str().unwrap_or_default(),
