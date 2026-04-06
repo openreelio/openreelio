@@ -775,10 +775,13 @@ impl ConversationDb {
                 continue;
             }
 
-            if active_checkpoint_by_session.contains_key(&session_id) {
-                stale_active_checkpoint_ids.push(checkpoint_id);
-            } else {
-                active_checkpoint_by_session.insert(session_id, checkpoint_id);
+            match active_checkpoint_by_session.entry(session_id) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(checkpoint_id);
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    stale_active_checkpoint_ids.push(checkpoint_id);
+                }
             }
         }
 

@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn save_and_search_report_chunks() {
         let db = IndexDb::in_memory().unwrap();
-        let chunks = vec![
+        let chunks = [
             ReportChunk {
                 id: "chunk-1".to_string(),
                 asset_id: "asset-1".to_string(),
