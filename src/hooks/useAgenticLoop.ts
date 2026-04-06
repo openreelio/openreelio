@@ -40,6 +40,7 @@ import {
   type LLMMessage,
   type Thought,
   type Plan,
+  type PlanStep,
   createMemoryManagerAdapter,
   DEFAULT_AGENT_PROFILE_ID,
   generateId,
@@ -76,6 +77,7 @@ import {
 } from './agentRuntimePersistence';
 import { useAgentRuntimeStoreContext } from './agentRuntimeStoreContext';
 import { createLogger } from '@/services/logger';
+import { useProjectStore } from '@/stores';
 
 const logger = createLogger('useAgenticLoop');
 const CONTEXT_HISTORY_LIMIT = 30;
@@ -127,6 +129,10 @@ export interface UseAgenticLoopReturn {
   thought: Thought | null;
   /** Current plan (if available) */
   plan: Plan | null;
+  /** Pending clarification question awaiting a follow-up user reply */
+  pendingClarificationQuestion: string | null;
+  /** Pending per-tool permission request awaiting a user decision */
+  pendingToolPermissionStep: PlanStep | null;
   /** Session ID */
   sessionId: string | null;
 
@@ -168,6 +174,10 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   const [error, setError] = useState<Error | null>(null);
   const [thought, setThought] = useState<Thought | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
+  const [pendingClarificationQuestion, setPendingClarificationQuestion] = useState<string | null>(
+    null,
+  );
+  const [pendingToolPermissionStep, setPendingToolPermissionStep] = useState<PlanStep | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
 
   // Refs
@@ -236,6 +246,18 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         optionsRef.current.onApprovalRequired?.(event.plan);
         break;
 
+      case 'clarification_required':
+        setPendingClarificationQuestion(event.question);
+        break;
+
+      case 'tool_permission_request':
+        setPendingToolPermissionStep(event.step);
+        break;
+
+      case 'tool_permission_response':
+        setPendingToolPermissionStep(null);
+        break;
+
       case 'thinking_complete':
         setThought(event.thought);
         break;
@@ -255,17 +277,22 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       case 'session_complete':
         setIsRunning(false);
         setPhase('completed');
+        setPendingToolPermissionStep(null);
         break;
 
       case 'session_aborted':
         setIsRunning(false);
         setPhase('aborted');
+        setPendingClarificationQuestion(null);
+        setPendingToolPermissionStep(null);
         break;
 
       case 'session_failed':
         setError(event.error);
         setPhase('failed');
         setIsRunning(false);
+        setPendingClarificationQuestion(null);
+        setPendingToolPermissionStep(null);
         optionsRef.current.onError?.(event.error);
         break;
     }
@@ -301,6 +328,8 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       setError(null);
       setThought(null);
       setPlan(null);
+      setPendingClarificationQuestion(null);
+      setPendingToolPermissionStep(null);
       setPhase('thinking');
       abortedRef.current = false;
 
@@ -326,7 +355,16 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
 
       // Ensure a conversation session exists before running
       const convStore = useConversationStore.getState();
-      const storeSessionId = await ensureConversationSessionId(convStore);
+      const contextProjectId =
+        context.projectId && context.projectId !== 'current' && context.projectId !== 'unknown'
+          ? context.projectId
+          : null;
+      const bootstrapProjectId = useProjectStore.getState().meta?.id ?? contextProjectId;
+      if (!convStore.activeProjectId && bootstrapProjectId) {
+        convStore.loadForProject(bootstrapProjectId);
+      }
+
+      const storeSessionId = await ensureConversationSessionId(useConversationStore.getState());
       if (!storeSessionId) {
         const sessionError = new Error(
           'Conversation session is required before starting agentic loop',
@@ -711,7 +749,6 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   const abort = useCallback(() => {
     cleanupAbort();
     setPhase('aborted');
-    setIsRunning(false);
     optionsRef.current.onAbort?.();
     logger.info('Engine aborted by user');
   }, [cleanupAbort]);
@@ -730,6 +767,8 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     setError(null);
     setThought(null);
     setPlan(null);
+    setPendingClarificationQuestion(null);
+    setPendingToolPermissionStep(null);
     setSessionId(null);
   }, []);
 
@@ -789,6 +828,8 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     error,
     thought,
     plan,
+    pendingClarificationQuestion,
+    pendingToolPermissionStep,
     sessionId,
 
     // Actions

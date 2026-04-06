@@ -5,15 +5,13 @@
  * `AgentRuntimeChatShell`.
  */
 
-import { useCallback, forwardRef } from 'react';
+import { useCallback, useMemo, forwardRef } from 'react';
 import { useAgenticLoopWithStores, type UseAgenticLoopOptions } from '@/hooks/useAgenticLoop';
 import { useAgentEventHandler } from '@/hooks/useAgentEventHandler';
 import { useConversationStore } from '@/stores/conversationStore';
 import type { ILLMClient, IToolExecutor, AgentContext, AgenticEngineConfig } from '@/agents/engine';
-import {
-  AgentRuntimeChatShell,
-  type AgentRuntimeChatHandle,
-} from './AgentRuntimeChatShell';
+import type { AgentDefinition } from '@/agents/engine/core/agentDefinitions';
+import { AgentRuntimeChatShell, type AgentRuntimeChatHandle } from './AgentRuntimeChatShell';
 
 // =============================================================================
 // Types
@@ -38,6 +36,16 @@ export interface AgenticChatProps {
   placeholder?: string;
   /** Whether the chat is disabled */
   disabled?: boolean;
+  /** Current session agent label shown in the composer tray */
+  currentAgentName?: string;
+  /** Current session agent description shown in the composer tray */
+  currentAgentDescription?: string;
+  /** Whether the current session is using an experimental specialist */
+  isExperimentalSession?: boolean;
+  /** Experimental specialist entry points for starting new sessions */
+  specialistDefinitions?: Array<Pick<AgentDefinition, 'id' | 'name' | 'description'>>;
+  /** Starts a new session with the requested agent profile */
+  onStartSession?: (agentProfileId?: string) => void;
   /** Optional className */
   className?: string;
 }
@@ -60,6 +68,11 @@ export const AgenticChat = forwardRef<AgenticChatHandle, AgenticChatProps>(funct
     onError,
     placeholder = 'Ask the AI to edit your video...',
     disabled = false,
+    currentAgentName = 'Editor',
+    currentAgentDescription,
+    isExperimentalSession = false,
+    specialistDefinitions = [],
+    onStartSession,
     className = '',
   },
   ref,
@@ -77,7 +90,11 @@ export const AgenticChat = forwardRef<AgenticChatHandle, AgenticChatProps>(funct
     retry,
     phase,
     isRunning,
+    events,
     error,
+    plan,
+    pendingClarificationQuestion,
+    pendingToolPermissionStep,
     isEnabled,
   } = useAgenticLoopWithStores({
     llmClient,
@@ -118,6 +135,35 @@ export const AgenticChat = forwardRef<AgenticChatHandle, AgenticChatProps>(funct
   );
   const handleToolDeny = useCallback(() => approveToolPermission('deny'), [approveToolPermission]);
 
+  const runtimeSummary = useMemo(
+    () => ({
+      startedTools: events.filter((event) => event.type === 'execution_start').length,
+      completedTools: events.filter((event) => event.type === 'execution_complete').length,
+      latestIteration:
+        events
+          .filter(
+            (event): event is Extract<(typeof events)[number], { type: 'iteration_complete' }> =>
+              event.type === 'iteration_complete',
+          )
+          .at(-1)?.iteration ?? 0,
+    }),
+    [events],
+  );
+
+  const pendingToolPermissionRequest = useMemo(
+    () =>
+      pendingToolPermissionStep
+        ? {
+            id: pendingToolPermissionStep.id,
+            tool: pendingToolPermissionStep.tool,
+            args: pendingToolPermissionStep.args,
+            description: pendingToolPermissionStep.description,
+            riskLevel: pendingToolPermissionStep.riskLevel,
+          }
+        : null,
+    [pendingToolPermissionStep],
+  );
+
   return (
     <AgentRuntimeChatShell
       ref={ref}
@@ -133,10 +179,19 @@ export const AgenticChat = forwardRef<AgenticChatHandle, AgenticChatProps>(funct
       phase={phase}
       isRunning={isRunning}
       isEnabled={isEnabled}
-        error={error}
+      error={error}
+      runtimeSummary={runtimeSummary}
+      plan={phase === 'awaiting_approval' ? plan : null}
+      pendingClarificationQuestion={pendingClarificationQuestion}
+      pendingToolPermissionRequest={pendingToolPermissionRequest}
       onSubmit={onSubmit}
       placeholder={placeholder}
       disabled={disabled}
+      currentAgentName={currentAgentName}
+      currentAgentDescription={currentAgentDescription}
+      isExperimentalSession={isExperimentalSession}
+      specialistDefinitions={specialistDefinitions}
+      onStartSession={onStartSession}
       className={className}
       onApprove={handleApprove}
       onReject={handleReject}

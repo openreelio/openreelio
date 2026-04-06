@@ -288,7 +288,8 @@ describe('useAgentLoop', () => {
       };
       sessionState = {
         ...sessionState,
-        activeCheckpointId: checkpoint.status === 'active' ? checkpoint.id : sessionState.activeCheckpointId,
+        activeCheckpointId:
+          checkpoint.status === 'active' ? checkpoint.id : sessionState.activeCheckpointId,
         resumeCursorVersion: sessionState.resumeCursorVersion + 1,
         updatedAt: createdAt,
       };
@@ -434,10 +435,12 @@ describe('useAgentLoop', () => {
     expect(
       useAgentSessionStore.getState().persistenceIssuesBySessionId['conversation-session-1'],
     ).toBeUndefined();
-    expect(sessionRules.some((rule) => rule.pattern === 'workspace.document.write#path:docs/ROADMAP.md')).toBe(true);
-    expect(sessionRules.some((rule) => rule.pattern.includes('timeline.clip.delete#clip:clip-1'))).toBe(
-      true,
-    );
+    expect(
+      sessionRules.some((rule) => rule.pattern === 'workspace.document.write#path:docs/ROADMAP.md'),
+    ).toBe(true);
+    expect(
+      sessionRules.some((rule) => rule.pattern.includes('timeline.clip.delete#clip:clip-1')),
+    ).toBe(true);
 
     expect(vi.mocked(commands.listAgentPermissionDecisions)).toHaveBeenCalledWith(
       'conversation-session-1',
@@ -533,8 +536,7 @@ describe('useAgentLoop', () => {
 
     const systemMessages = useConversationStore
       .getState()
-      .activeConversation?.messages
-      .filter((message) => message.role === 'system')
+      .activeConversation?.messages.filter((message) => message.role === 'system')
       .map((message) => message.parts.find((part) => part.type === 'text'))
       .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
       .map((part) => part.content);
@@ -581,14 +583,13 @@ describe('useAgentLoop', () => {
       expect(result.current.phase).toBe('completed');
     });
 
-    const systemMessages = useConversationStore
-      .getState()
-      .activeConversation?.messages
-      .filter((message) => message.role === 'system')
-      .map((message) => message.parts.find((part) => part.type === 'text'))
-      .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
-      .map((part) => part.content)
-      ?? [];
+    const systemMessages =
+      useConversationStore
+        .getState()
+        .activeConversation?.messages.filter((message) => message.role === 'system')
+        .map((message) => message.parts.find((part) => part.type === 'text'))
+        .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
+        .map((part) => part.content) ?? [];
 
     expect(
       systemMessages.some((message) =>
@@ -636,14 +637,13 @@ describe('useAgentLoop', () => {
       expect(result.current.phase).toBe('completed');
     });
 
-    const systemMessages = useConversationStore
-      .getState()
-      .activeConversation?.messages
-      .filter((message) => message.role === 'system')
-      .map((message) => message.parts.find((part) => part.type === 'text'))
-      .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
-      .map((part) => part.content)
-      ?? [];
+    const systemMessages =
+      useConversationStore
+        .getState()
+        .activeConversation?.messages.filter((message) => message.role === 'system')
+        .map((message) => message.parts.find((part) => part.type === 'text'))
+        .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
+        .map((part) => part.content) ?? [];
 
     expect(
       systemMessages.some((message) =>
@@ -651,7 +651,9 @@ describe('useAgentLoop', () => {
       ),
     ).toBe(true);
     expect(
-      systemMessages.some((message) => message.includes('Recovered summary: Recovered fast runtime summary')),
+      systemMessages.some((message) =>
+        message.includes('Recovered summary: Recovered fast runtime summary'),
+      ),
     ).toBe(true);
   });
 
@@ -726,6 +728,8 @@ describe('useAgentLoop', () => {
     act(() => {
       result.current.abort();
     });
+
+    expect(result.current.isRunning).toBe(true);
 
     await act(async () => {
       await runPromise;
@@ -961,14 +965,16 @@ describe('useAgentLoop', () => {
     expect(vi.mocked(commands.updateAgentRunPhase)).not.toHaveBeenCalled();
     expect(
       useAgentSessionStore.getState().persistenceIssuesBySessionId['conversation-session-1'],
-    ).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        sessionId: 'conversation-session-1',
-        stage: 'run_start',
-        message: 'run start failed',
-        occurredAt: expect.any(Number),
-      }),
-    ]));
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId: 'conversation-session-1',
+          stage: 'run_start',
+          message: 'run start failed',
+          occurredAt: expect.any(Number),
+        }),
+      ]),
+    );
   });
 
   it('should report degraded persistence state when fast run finalization fails', async () => {
@@ -1010,14 +1016,16 @@ describe('useAgentLoop', () => {
 
     expect(
       useAgentSessionStore.getState().persistenceIssuesBySessionId['conversation-session-1'],
-    ).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        sessionId: 'conversation-session-1',
-        stage: 'run_finalize',
-        message: 'fast run finalize failed',
-        occurredAt: expect.any(Number),
-      }),
-    ]));
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId: 'conversation-session-1',
+          stage: 'run_finalize',
+          message: 'fast run finalize failed',
+          occurredAt: expect.any(Number),
+        }),
+      ]),
+    );
   });
 
   it('should persist compaction artifacts when the fast loop compacts context', async () => {
@@ -1205,13 +1213,15 @@ describe('useAgentLoop', () => {
     );
     expect(
       useAgentSessionStore.getState().persistenceIssuesBySessionId['conversation-session-1'],
-    ).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        sessionId: 'conversation-session-1',
-        stage: 'compaction_record',
-        message: 'compaction persist failed',
-        occurredAt: expect.any(Number),
-      }),
-    ]));
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId: 'conversation-session-1',
+          stage: 'compaction_record',
+          message: 'compaction persist failed',
+          occurredAt: expect.any(Number),
+        }),
+      ]),
+    );
   });
 });

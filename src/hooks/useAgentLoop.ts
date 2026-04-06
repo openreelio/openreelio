@@ -21,7 +21,7 @@ import {
 } from '@/agents/engine/AgentLoop';
 import type { ILLMClient } from '@/agents/engine/ports/ILLMClient';
 import type { IToolExecutor } from '@/agents/engine/ports/IToolExecutor';
-import type { AgentContext } from '@/agents/engine/core/types';
+import type { AgentContext, RiskLevel } from '@/agents/engine/core/types';
 import type { TokenUsage, ConversationMessage } from '@/agents/engine/core/conversation';
 import { createEmptyContext, generateId } from '@/agents/engine/core/types';
 import {
@@ -50,6 +50,7 @@ import {
 } from './agentRuntimePersistence';
 import { useAgentRuntimeStoreContext } from './agentRuntimeStoreContext';
 import { createLogger } from '@/services/logger';
+import { useProjectStore } from '@/stores';
 
 const logger = createLogger('useAgentLoop');
 const CONTEXT_HISTORY_LIMIT = 30;
@@ -89,6 +90,13 @@ export interface UseAgentLoopReturn {
   events: AgentLoopEvent[];
   error: Error | null;
   toolResults: ToolCallResult[];
+  pendingToolPermissionRequest: {
+    id: string;
+    tool: string;
+    args: Record<string, unknown>;
+    description: string;
+    riskLevel: RiskLevel;
+  } | null;
   isEnabled: boolean;
 
   run: (input: string) => Promise<void>;
@@ -112,6 +120,13 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
   const [events, setEvents] = useState<AgentLoopEvent[]>([]);
   const [error, setError] = useState<Error | null>(null);
   const [toolResults, setToolResults] = useState<ToolCallResult[]>([]);
+  const [pendingToolPermissionRequest, setPendingToolPermissionRequest] = useState<{
+    id: string;
+    tool: string;
+    args: Record<string, unknown>;
+    description: string;
+    riskLevel: RiskLevel;
+  } | null>(null);
 
   // Refs
   const loopRef = useRef<AgentLoop | null>(null);
@@ -169,6 +184,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
       setEvents([]);
       setError(null);
       setToolResults([]);
+      setPendingToolPermissionRequest(null);
       setPhase('streaming');
       abortNotifiedRef.current = false;
 
@@ -188,9 +204,20 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
 
       const context = buildContext();
       const store = useConversationStore.getState();
-      const storeSessionId = await ensureConversationSessionId(store);
+      const contextProjectId =
+        context.projectId && context.projectId !== 'current' && context.projectId !== 'unknown'
+          ? context.projectId
+          : null;
+      const bootstrapProjectId = useProjectStore.getState().meta?.id ?? contextProjectId;
+      if (!store.activeProjectId && bootstrapProjectId) {
+        store.loadForProject(bootstrapProjectId);
+      }
+
+      const storeSessionId = await ensureConversationSessionId(useConversationStore.getState());
       if (!storeSessionId) {
-        const sessionError = new Error('Conversation session is required before starting agent loop');
+        const sessionError = new Error(
+          'Conversation session is required before starting agent loop',
+        );
         setError(sessionError);
         setPhase('failed');
         setIsRunning(false);
@@ -219,7 +246,9 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
         onCheckpointPersisted: (record) => runtimeTraceRecorder?.recordCheckpointEvent(record),
         onCheckpointConsumed: (record) => runtimeTraceRecorder?.recordCheckpointEvent(record),
       });
-      const persistCompactionBoundary = async (event: Extract<AgentLoopEvent, { type: 'compacted' }>): Promise<void> => {
+      const persistCompactionBoundary = async (
+        event: Extract<AgentLoopEvent, { type: 'compacted' }>,
+      ): Promise<void> => {
         const compactionPayload = buildCompactionPayload({
           sessionId: storeSessionId,
           runId: persistedRunIdRef.current,
@@ -316,7 +345,10 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
       let traceIterations = 1;
       let currentTracePhase: 'planning' | 'executing' = 'planning';
 
-      const finalizeRuntimeTrace = (success: boolean, errorMessage?: string | null): AgentTrace | null => {
+      const finalizeRuntimeTrace = (
+        success: boolean,
+        errorMessage?: string | null,
+      ): AgentTrace | null => {
         if (!runtimeTraceRecorder) {
           return null;
         }
@@ -351,9 +383,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
         config?.toolPermissionHandler ??
         (async (toolName, args, riskLevel) => {
           void riskLevel;
-          const resolution = usePermissionStore
-            .getState()
-            .resolvePermissionDetails(toolName, args);
+          const resolution = usePermissionStore.getState().resolvePermissionDetails(toolName, args);
 
           if (resolution.permission === 'allow' || resolution.permission === 'deny') {
             runtimeTraceRecorder?.recordPermissionEvent(
@@ -435,6 +465,13 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
           let checkpointId: string | null = null;
           if (!autoResolved) {
             permissionRequestId = `tool-permission-${toolName}-${Date.now()}`;
+            setPendingToolPermissionRequest({
+              id: permissionRequestId,
+              tool: toolName,
+              args,
+              description: `Permission required for ${toolName}`,
+              riskLevel,
+            });
             emitSyntheticEvent({
               type: 'tool_permission_request',
               id: permissionRequestId,
@@ -458,8 +495,9 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
           }
 
           try {
-            const decision = autoDecision ?? await decisionPromise;
+            const decision = autoDecision ?? (await decisionPromise);
             if (permissionRequestId) {
+              setPendingToolPermissionRequest(null);
               emitSyntheticEvent({
                 type: 'tool_permission_response',
                 id: permissionRequestId,
@@ -480,12 +518,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
       const historySlice = rawHistory.slice(-CONTEXT_HISTORY_LIMIT);
 
       try {
-        const gen = loop.run(
-          storeSessionId,
-          input,
-          context,
-          historySlice,
-        );
+        const gen = loop.run(storeSessionId, input, context, historySlice);
 
         for await (const event of gen) {
           // Dispatch to state
@@ -530,6 +563,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
               persistedErrorMessage = event.error.message;
               setError(event.error);
               setPhase('failed');
+              setPendingToolPermissionRequest(null);
               optionsRef.current.onError?.(event.error);
               break;
 
@@ -548,6 +582,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
               );
               // Only mark completed if no prior error/doom-loop occurred
               setPhase((prev) => (prev === 'failed' ? 'failed' : 'completed'));
+              setPendingToolPermissionRequest(null);
               optionsRef.current.onComplete?.(event.usage);
               break;
 
@@ -560,6 +595,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
               traceToWrite = finalizeRuntimeTrace(false, doomErr.message);
               setError(doomErr);
               setPhase('failed');
+              setPendingToolPermissionRequest(null);
               optionsRef.current.onError?.(doomErr);
               break;
             }
@@ -573,6 +609,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
           persistedFinalPhase = 'aborted';
           traceToWrite = finalizeRuntimeTrace(false, 'Aborted by user');
           setPhase('aborted');
+          setPendingToolPermissionRequest(null);
           if (!abortNotifiedRef.current) {
             abortNotifiedRef.current = true;
             optionsRef.current.onAbort?.();
@@ -584,6 +621,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
           traceToWrite = finalizeRuntimeTrace(false, loopError.message);
           setError(loopError);
           setPhase('failed');
+          setPendingToolPermissionRequest(null);
           optionsRef.current.onError?.(loopError);
         }
       } finally {
@@ -609,7 +647,10 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
           });
         }
         if (!traceToWrite) {
-          traceToWrite = finalizeRuntimeTrace(persistedFinalPhase === 'completed', persistedErrorMessage);
+          traceToWrite = finalizeRuntimeTrace(
+            persistedFinalPhase === 'completed',
+            persistedErrorMessage,
+          );
         }
         if (traceToWrite) {
           traceToWrite = {
@@ -637,8 +678,8 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
     // Unblock pending permission
     toolPermissionResolverRef.current?.resolve('deny');
     toolPermissionResolverRef.current = null;
+    setPendingToolPermissionRequest(null);
     setPhase('aborted');
-    setIsRunning(false);
     if (!abortNotifiedRef.current) {
       abortNotifiedRef.current = true;
       optionsRef.current.onAbort?.();
@@ -657,22 +698,22 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
     setEvents([]);
     setError(null);
     setToolResults([]);
+    setPendingToolPermissionRequest(null);
   }, []);
 
   // Tool permission
-  const approveToolPermission = useCallback(
-    (decision: 'allow' | 'deny' | 'allow_always') => {
-      if (decision === 'allow_always' && toolPermissionResolverRef.current?.tool) {
-        usePermissionStore.getState().allowAlways(
+  const approveToolPermission = useCallback((decision: 'allow' | 'deny' | 'allow_always') => {
+    if (decision === 'allow_always' && toolPermissionResolverRef.current?.tool) {
+      usePermissionStore
+        .getState()
+        .allowAlways(
           toolPermissionResolverRef.current.tool,
           toolPermissionResolverRef.current.args,
         );
-      }
-      toolPermissionResolverRef.current?.resolve(decision);
-      toolPermissionResolverRef.current = null;
-    },
-    [],
-  );
+    }
+    toolPermissionResolverRef.current?.resolve(decision);
+    toolPermissionResolverRef.current = null;
+  }, []);
 
   // Retry
   const retry = useCallback(async () => {
@@ -700,6 +741,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
     events,
     error,
     toolResults,
+    pendingToolPermissionRequest,
     isEnabled,
     run,
     abort,
@@ -724,15 +766,15 @@ export function useAgentLoopWithStores(
 
   return useAgentLoop({
     ...options,
-      context,
-      config: {
-        ...options.config,
-        contextRefresher,
-        activeModel: options.config?.activeModel ?? aiPrimaryModel ?? undefined,
-        activeProvider: options.config?.activeProvider ?? aiPrimaryProvider ?? undefined,
-        generateOptions: {
-          ...options.config?.generateOptions,
-          maxTokens: options.config?.generateOptions?.maxTokens ?? aiMaxTokens,
+    context,
+    config: {
+      ...options.config,
+      contextRefresher,
+      activeModel: options.config?.activeModel ?? aiPrimaryModel ?? undefined,
+      activeProvider: options.config?.activeProvider ?? aiPrimaryProvider ?? undefined,
+      generateOptions: {
+        ...options.config?.generateOptions,
+        maxTokens: options.config?.generateOptions?.maxTokens ?? aiMaxTokens,
       },
     },
   });
