@@ -1,11 +1,25 @@
 import { forwardRef } from 'react';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetFeatureFlags, setFeatureFlag } from '@/config/featureFlags';
+import { useConversationStore } from '@/stores/conversationStore';
+import { useProjectStore } from '@/stores';
+import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
+import { useAgentSessionStore } from '@/stores/agentSessionStore';
+import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
+import { createDefaultLayout, useWorkspaceLayoutStore } from '@/stores/workspaceLayoutStore';
+import { loadProjectPromptContext } from '@/agents/engine/core/projectPromptContext';
 import { AgenticSidebarContent } from './AgenticSidebarContent';
 
+let latestSessionListProps: Record<string, unknown> | null = null;
+let latestAgenticChatProps: Record<string, unknown> | null = null;
+
 vi.mock('./AgenticChat', () => ({
-  AgenticChat: forwardRef(() => <div data-testid="agentic-chat">TPAO Runtime</div>),
+  AgenticChat: forwardRef((props) => {
+    latestAgenticChatProps = props as Record<string, unknown>;
+    return <div data-testid="agentic-chat">TPAO Runtime</div>;
+  }),
 }));
 
 vi.mock('./AgentSessionRecoveryPanel', () => ({
@@ -21,7 +35,24 @@ vi.mock('./AgentSessionRecoveryStatus', () => ({
 }));
 
 vi.mock('./SessionList', () => ({
-  SessionList: vi.fn(() => <div data-testid="session-list" />),
+  SessionList: vi.fn((props) => {
+    latestSessionListProps = props as Record<string, unknown>;
+    return (
+      <div data-testid="session-list">
+        <button
+          type="button"
+          data-testid="mock-session-switch-btn"
+          onClick={() =>
+            (props as { onSwitchSession?: (sessionId: string) => void }).onSwitchSession?.(
+              'session-2',
+            )
+          }
+        >
+          switch
+        </button>
+      </div>
+    );
+  }),
 }));
 
 vi.mock('@/agents/engine/adapters/llm/TauriLLMAdapter', () => ({
@@ -45,7 +76,19 @@ vi.mock('@/hooks/useNewChat', () => ({
   })),
 }));
 
+vi.mock('@/agents/engine/core/projectPromptContext', () => ({
+  loadProjectPromptContext: vi.fn().mockResolvedValue({ knowledge: [] }),
+}));
+
 describe('AgenticSidebarContent', () => {
+  function createDeferred<T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    const promise = new Promise<T>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
   const localStorageMock = (() => {
     let store: Record<string, string> = {};
     return {
@@ -66,6 +109,149 @@ describe('AgenticSidebarContent', () => {
     vi.stubGlobal('localStorage', localStorageMock);
     localStorageMock.clear();
     resetFeatureFlags();
+    latestSessionListProps = null;
+    latestAgenticChatProps = null;
+    vi.mocked(loadProjectPromptContext).mockResolvedValue({ knowledge: [] });
+
+    useProjectStore.setState((state) => ({
+      ...state,
+      meta: null,
+    }));
+    useAgentArtifactReviewStore.setState((state) => ({
+      ...state,
+      selection: {
+        focus: null,
+        projectId: null,
+        conversationId: null,
+        sourceLabel: null,
+        sourceAgentProfileId: null,
+      },
+      sourcesByConversationId: {},
+      isLoadingByConversationId: {},
+      lastErrorByConversationId: {},
+    }));
+    useWorkspaceLayoutStore.setState((state) => ({
+      ...state,
+      layout: createDefaultLayout(),
+    }));
+
+    useConversationStore.setState((state) => ({
+      ...state,
+      activeConversation: {
+        id: 'session-1',
+        projectId: 'project-1',
+        messages: [
+          { id: 'm1', role: 'user', parts: [{ type: 'text', content: 'old' }], timestamp: 1 },
+        ],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      activeProjectId: 'project-1',
+      activeSessionId: 'session-1',
+      sessions: [
+        {
+          id: 'session-1',
+          projectId: 'project-1',
+          title: 'Editor Session',
+          agent: 'editor',
+          modelProvider: null,
+          modelId: null,
+          createdAt: 1,
+          updatedAt: 1,
+          archived: false,
+          messageCount: 1,
+          lastMessagePreview: 'old',
+        },
+        {
+          id: 'session-2',
+          projectId: 'project-1',
+          title: 'Planner Session',
+          agent: 'planner',
+          modelProvider: null,
+          modelId: null,
+          createdAt: 2,
+          updatedAt: 2,
+          archived: false,
+          messageCount: 0,
+          lastMessagePreview: null,
+        },
+      ],
+    }));
+
+    useAgentSessionStore.setState((state) => ({
+      ...state,
+      snapshotsById: {
+        'session-1': {
+          session: {
+            id: 'session-1',
+            projectId: 'project-1',
+            sequenceId: null,
+            title: 'Editor Session',
+            status: 'idle',
+            runtimeKind: 'tpao',
+            agentProfileId: 'editor',
+            sessionMode: 'primary',
+            lineage: {
+              parentSessionId: null,
+              branchFromSessionId: null,
+              rootSessionId: 'session-1',
+            },
+            currentRunId: 'run-parent',
+            currentPlanId: null,
+            pendingApprovalId: null,
+            activeCheckpointId: null,
+            permissionStateVersion: 0,
+            compactionVersion: 0,
+            resumeCursorVersion: 0,
+            latestSummaryMessageId: null,
+            lastCompactedAt: null,
+            lastResumedAt: null,
+            modelProvider: null,
+            modelId: null,
+            createdAt: 1,
+            updatedAt: 1,
+            completedAt: null,
+          },
+          runs: [
+            {
+              id: 'run-parent',
+              sessionId: 'session-1',
+              runtimeKind: 'tpao',
+              trigger: 'user',
+              inputMessageId: null,
+              outputMessageId: null,
+              phase: 'completed',
+              iteration: 1,
+              maxIterations: 20,
+              toolCallsUsed: 0,
+              maxToolCalls: 50,
+              plannedStepCount: 0,
+              completedStepCount: 0,
+              traceId: null,
+              rollbackReportJson: null,
+              errorCode: null,
+              errorMessage: null,
+              startedAt: 1,
+              updatedAt: 1,
+              endedAt: 1,
+            },
+          ],
+        },
+      },
+      activeSessionId: 'session-1',
+      activeProjectId: 'project-1',
+    }));
+
+    useAgentDelegationStore.setState({
+      recordsBySessionId: {},
+      isLoadingBySessionId: {},
+      lastErrorBySessionId: {},
+      loadDelegations: vi.fn().mockResolvedValue([]),
+      createDelegatedSession: vi.fn(),
+      updateDelegationRecord: vi.fn(),
+      clearForSession: vi.fn(),
+      clear: vi.fn(),
+    });
   });
 
   afterEach(() => {
@@ -100,5 +286,392 @@ describe('AgenticSidebarContent', () => {
       screen.getByText('Enable `USE_AGENTIC_ENGINE` to restore the canonical TPAO runtime.'),
     ).toBeInTheDocument();
     expect(screen.queryByTestId('agentic-chat')).not.toBeInTheDocument();
+  });
+
+  it('shows a transition state while a new session is starting', async () => {
+    const deferred = createDeferred<string | null>();
+    const createSession = vi.fn().mockReturnValue(deferred.promise);
+    useConversationStore.setState({ createSession });
+
+    let registeredNewChat: (() => void) | null = null;
+    render(
+      <AgenticSidebarContent
+        onRegisterNewChat={(handler) => {
+          registeredNewChat = handler;
+        }}
+      />,
+    );
+
+    expect(registeredNewChat).not.toBeNull();
+
+    act(() => {
+      registeredNewChat?.();
+    });
+
+    expect(screen.getByTestId('agent-session-transition-state')).toBeInTheDocument();
+    expect(screen.queryByTestId('agentic-chat')).not.toBeInTheDocument();
+    expect(createSession).toHaveBeenCalledWith('editor', { preserveDraftConversation: false });
+
+    await act(async () => {
+      deferred.resolve('session-2');
+      await deferred.promise;
+    });
+
+    expect(screen.getByTestId('agentic-chat')).toBeInTheDocument();
+  });
+
+  it('shows a transition state while switching sessions', async () => {
+    const user = userEvent.setup();
+    const deferred = createDeferred<void>();
+    const switchSession = vi.fn().mockReturnValue(deferred.promise);
+    useConversationStore.setState({ switchSession });
+
+    render(<AgenticSidebarContent />);
+
+    await user.click(screen.getByTestId('toggle-sessions-btn'));
+    await user.click(screen.getByTestId('mock-session-switch-btn'));
+
+    expect(screen.getByTestId('agent-session-transition-state')).toBeInTheDocument();
+    expect(screen.queryByTestId('agentic-chat')).not.toBeInTheDocument();
+    expect(switchSession).toHaveBeenCalledWith('session-2');
+    expect(latestSessionListProps).not.toBeNull();
+
+    await act(async () => {
+      deferred.resolve();
+      await deferred.promise;
+    });
+
+    expect(screen.getByTestId('agentic-chat')).toBeInTheDocument();
+  });
+
+  it('delegates a specialist from the current editor session', async () => {
+    const createDelegatedSession = vi.fn().mockResolvedValue({
+      childSession: {
+        id: 'session-child',
+        projectId: 'project-1',
+        sequenceId: null,
+        title: 'Planner: Analyze this cut',
+        status: 'idle',
+        runtimeKind: 'subagent',
+        agentProfileId: 'planner',
+        sessionMode: 'child',
+        lineage: {
+          parentSessionId: 'session-1',
+          branchFromSessionId: null,
+          rootSessionId: 'session-1',
+        },
+        currentRunId: null,
+        currentPlanId: null,
+        pendingApprovalId: null,
+        activeCheckpointId: null,
+        permissionStateVersion: 0,
+        compactionVersion: 0,
+        resumeCursorVersion: 0,
+        latestSummaryMessageId: null,
+        lastCompactedAt: null,
+        lastResumedAt: null,
+        modelProvider: null,
+        modelId: null,
+        createdAt: 2,
+        updatedAt: 2,
+        completedAt: null,
+      },
+      delegationRecord: {
+        id: 'delegation-1',
+        parentSessionId: 'session-1',
+        childSessionId: 'session-child',
+        parentRunId: 'run-parent',
+        agentProfileId: 'planner',
+        delegatedGoal: 'old',
+        contextPacketJson: '{}',
+        allowedToolsDeltaJson: null,
+        permissionSnapshotJson: null,
+        status: 'requested',
+        mergeStatus: 'pending',
+        summaryMessageId: null,
+        resultJson: null,
+        errorMessage: null,
+        createdAt: 2,
+        updatedAt: 2,
+        completedAt: null,
+      },
+      delegationErrorMessage: null,
+    });
+    const loadSessions = vi.fn().mockResolvedValue(undefined);
+    const switchSession = vi.fn().mockResolvedValue(undefined);
+    const loadAgentSession = vi
+      .fn()
+      .mockResolvedValue(useAgentSessionStore.getState().snapshotsById['session-1']);
+
+    useConversationStore.setState({ loadSessions, switchSession });
+    useAgentSessionStore.setState({ loadSession: loadAgentSession });
+    useAgentDelegationStore.setState((state) => ({
+      ...state,
+      createDelegatedSession,
+    }));
+    useProjectStore.setState((state) => ({
+      ...state,
+      meta: {
+        id: 'project-1',
+        name: 'Test Project',
+        path: '/tmp/project',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        modifiedAt: '2026-01-01T00:00:00.000Z',
+      },
+    }));
+
+    render(<AgenticSidebarContent />);
+
+    expect(latestAgenticChatProps).not.toBeNull();
+
+    await act(async () => {
+      await (
+        latestAgenticChatProps as { onStartSession?: (agentProfileId?: string) => void }
+      ).onStartSession?.('planner');
+    });
+
+    expect(createDelegatedSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        parentSessionId: 'session-1',
+        parentRunId: 'run-parent',
+        projectId: 'project-1',
+        agentProfileId: 'planner',
+      }),
+    );
+    expect(loadSessions).toHaveBeenCalledWith('project-1');
+    expect(switchSession).toHaveBeenCalledWith('session-child');
+  });
+
+  it('stores a delegation result summary when a child specialist session completes', async () => {
+    const updateDelegationRecord = vi.fn().mockResolvedValue({});
+
+    useConversationStore.setState((state) => ({
+      ...state,
+      activeSessionId: 'session-child',
+      activeConversation: {
+        id: 'session-child',
+        projectId: 'project-1',
+        messages: [
+          {
+            id: 'assistant-msg-1',
+            role: 'assistant',
+            parts: [{ type: 'text', content: 'Suggested a faster cold open.' }],
+            timestamp: 2,
+          },
+        ],
+        createdAt: 2,
+        updatedAt: 2,
+      },
+      sessions: [
+        ...state.sessions,
+        {
+          id: 'session-child',
+          projectId: 'project-1',
+          title: 'Planner Session',
+          agent: 'planner',
+          modelProvider: null,
+          modelId: null,
+          createdAt: 2,
+          updatedAt: 2,
+          archived: false,
+          messageCount: 1,
+          lastMessagePreview: 'Suggested a faster cold open.',
+        },
+      ],
+    }));
+    useAgentSessionStore.setState((state) => ({
+      ...state,
+      snapshotsById: {
+        ...state.snapshotsById,
+        'session-child': {
+          session: {
+            id: 'session-child',
+            projectId: 'project-1',
+            sequenceId: null,
+            title: 'Planner Session',
+            status: 'idle',
+            runtimeKind: 'subagent',
+            agentProfileId: 'planner',
+            sessionMode: 'child',
+            lineage: {
+              parentSessionId: 'session-1',
+              branchFromSessionId: null,
+              rootSessionId: 'session-1',
+            },
+            currentRunId: 'run-child',
+            currentPlanId: null,
+            pendingApprovalId: null,
+            activeCheckpointId: null,
+            permissionStateVersion: 0,
+            compactionVersion: 0,
+            resumeCursorVersion: 0,
+            latestSummaryMessageId: null,
+            lastCompactedAt: null,
+            lastResumedAt: null,
+            modelProvider: null,
+            modelId: null,
+            createdAt: 2,
+            updatedAt: 2,
+            completedAt: null,
+          },
+          runs: [],
+        },
+      },
+      activeSessionId: 'session-child',
+    }));
+    useAgentDelegationStore.setState((state) => ({
+      ...state,
+      recordsBySessionId: {
+        'session-child': [
+          {
+            id: 'delegation-1',
+            parentSessionId: 'session-1',
+            childSessionId: 'session-child',
+            parentRunId: 'run-parent',
+            agentProfileId: 'planner',
+            delegatedGoal: 'Review pacing',
+            contextPacketJson: '{}',
+            allowedToolsDeltaJson: null,
+            permissionSnapshotJson: null,
+            status: 'running',
+            mergeStatus: 'pending',
+            summaryMessageId: null,
+            resultJson: null,
+            errorMessage: null,
+            createdAt: 2,
+            updatedAt: 2,
+            completedAt: null,
+          },
+        ],
+      },
+      updateDelegationRecord,
+    }));
+
+    render(<AgenticSidebarContent />);
+
+    await act(async () => {
+      await (latestAgenticChatProps as { onComplete?: (result: any) => void }).onComplete?.({
+        success: true,
+        executionResults: [],
+        iterations: 1,
+        totalDuration: 1200,
+        aborted: false,
+        finalState: {},
+        summary: {
+          sessionId: 'session-child',
+          input: 'Review pacing',
+          totalIterations: 1,
+          executedSteps: 1,
+          successfulSteps: 1,
+          failedSteps: 0,
+          duration: 1200,
+          finalState: 'Suggested a faster cold open.',
+        },
+      });
+    });
+
+    expect(updateDelegationRecord).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'delegation-1',
+        status: 'completed',
+        summaryMessageId: 'assistant-msg-1',
+      }),
+    );
+    expect(updateDelegationRecord.mock.calls[0][0].resultJson).toContain(
+      'Suggested a faster cold open.',
+    );
+  });
+
+  it('opens agent review for a delegated child result from the parent session', async () => {
+    const user = userEvent.setup();
+
+    useProjectStore.setState((state) => ({
+      ...state,
+      meta: {
+        id: 'project-1',
+        name: 'Test Project',
+        path: '/tmp/project',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        modifiedAt: '2026-01-01T00:00:00.000Z',
+      },
+    }));
+    useConversationStore.setState((state) => ({
+      ...state,
+      activeSessionId: 'session-1',
+      sessions: [
+        ...state.sessions,
+        {
+          id: 'session-child',
+          projectId: 'project-1',
+          title: 'Planner Session',
+          agent: 'planner',
+          modelProvider: null,
+          modelId: null,
+          createdAt: 2,
+          updatedAt: 2,
+          archived: false,
+          messageCount: 1,
+          lastMessagePreview: 'Suggested a tighter intro.',
+        },
+      ],
+    }));
+    useAgentDelegationStore.setState((state) => ({
+      ...state,
+      recordsBySessionId: {
+        'session-1': [
+          {
+            id: 'delegation-1',
+            parentSessionId: 'session-1',
+            childSessionId: 'session-child',
+            parentRunId: 'run-parent',
+            agentProfileId: 'planner',
+            delegatedGoal: 'Review pacing',
+            contextPacketJson: '{}',
+            allowedToolsDeltaJson: null,
+            permissionSnapshotJson: null,
+            status: 'completed',
+            mergeStatus: 'pending',
+            summaryMessageId: 'assistant-msg-1',
+            resultJson: JSON.stringify({
+              success: true,
+              aborted: false,
+              totalDuration: 800,
+              iterations: 1,
+              finalState: 'Suggested a tighter intro.',
+              executedSteps: 1,
+              successfulSteps: 1,
+              failedSteps: 0,
+              preview: 'Suggested a tighter intro.',
+              recentTools: [],
+              recentFiles: ['src/foo.ts'],
+            }),
+            errorMessage: null,
+            createdAt: 2,
+            updatedAt: 2,
+            completedAt: 2,
+          },
+        ],
+      },
+    }));
+
+    render(<AgenticSidebarContent />);
+
+    await user.click(screen.getByTestId('agent-delegated-child-review-delegation-1'));
+
+    expect(useAgentArtifactReviewStore.getState().selection).toEqual(
+      expect.objectContaining({
+        projectId: 'project-1',
+        conversationId: 'session-child',
+        sourceLabel: 'Planner Session',
+        sourceAgentProfileId: 'planner',
+        focus: { kind: 'file', value: 'src/foo.ts' },
+      }),
+    );
+    expect(useWorkspaceLayoutStore.getState().layout.zones.bottom.panelIds).toContain(
+      'agent-review',
+    );
+    expect(useWorkspaceLayoutStore.getState().layout.zones.bottom.activePanelId).toBe(
+      'agent-review',
+    );
   });
 });

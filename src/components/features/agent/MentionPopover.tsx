@@ -207,7 +207,7 @@ export function MentionPopover({
 
   return (
     <div
-      className="absolute z-50 w-72 max-h-64 overflow-y-auto rounded-lg border border-border-subtle bg-surface-elevated shadow-xl"
+      className="absolute z-50 w-64 max-h-48 overflow-y-auto rounded-lg border border-border-subtle bg-surface-elevated shadow-xl"
       style={{ top: position.top, left: position.left }}
       data-testid="mention-popover"
     >

@@ -1,6 +1,8 @@
 import { act, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useConversationStore, type SessionSummary } from '@/stores/conversationStore';
+import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { SessionList } from './SessionList';
 
@@ -25,6 +27,16 @@ describe('SessionList', () => {
   beforeEach(() => {
     act(() => {
       useAgentSessionStore.getState().clear();
+      useAgentDelegationStore.setState({
+        recordsBySessionId: {},
+        isLoadingBySessionId: {},
+        lastErrorBySessionId: {},
+        loadDelegations: vi.fn().mockResolvedValue([]),
+        createDelegatedSession: vi.fn(),
+        updateDelegationRecord: vi.fn(),
+        clearForSession: vi.fn(),
+        clear: vi.fn(),
+      });
       useConversationStore.setState({
         activeConversation: {
           id: 'session-1',
@@ -129,5 +141,77 @@ describe('SessionList', () => {
     render(<SessionList />);
 
     expect(screen.getByTestId('session-agent-badge-session-1')).toHaveTextContent('Planner');
+  });
+
+  it('uses the injected switch handler when provided', async () => {
+    const user = userEvent.setup();
+    const onSwitchSession = vi.fn();
+
+    render(<SessionList onSwitchSession={onSwitchSession} />);
+
+    await user.click(screen.getByTestId('session-item-session-2'));
+
+    expect(onSwitchSession).toHaveBeenCalledWith('session-2');
+  });
+
+  it('shows delegated parent and child session badges when delegation records exist', () => {
+    act(() => {
+      useAgentDelegationStore.setState((state) => ({
+        ...state,
+        recordsBySessionId: {
+          'session-1': [
+            {
+              id: 'delegation-1',
+              parentSessionId: 'session-1',
+              childSessionId: 'session-2',
+              parentRunId: 'run-parent',
+              agentProfileId: 'planner',
+              delegatedGoal: 'Review pacing',
+              contextPacketJson: '{}',
+              allowedToolsDeltaJson: null,
+              permissionSnapshotJson: null,
+              status: 'running',
+              mergeStatus: 'pending',
+              summaryMessageId: null,
+              resultJson: null,
+              errorMessage: null,
+              createdAt: 1,
+              updatedAt: 1,
+              completedAt: null,
+            },
+          ],
+          'session-2': [
+            {
+              id: 'delegation-1',
+              parentSessionId: 'session-1',
+              childSessionId: 'session-2',
+              parentRunId: 'run-parent',
+              agentProfileId: 'planner',
+              delegatedGoal: 'Review pacing',
+              contextPacketJson: '{}',
+              allowedToolsDeltaJson: null,
+              permissionSnapshotJson: null,
+              status: 'running',
+              mergeStatus: 'pending',
+              summaryMessageId: null,
+              resultJson: null,
+              errorMessage: null,
+              createdAt: 1,
+              updatedAt: 1,
+              completedAt: null,
+            },
+          ],
+        },
+      }));
+    });
+
+    render(<SessionList />);
+
+    expect(screen.getByTestId('session-delegation-mode-session-1')).toHaveTextContent(
+      '1 delegated',
+    );
+    expect(screen.getByTestId('session-delegation-status-session-1')).toHaveTextContent('1 active');
+    expect(screen.getByTestId('session-delegation-mode-session-2')).toHaveTextContent('Child');
+    expect(screen.getByTestId('session-delegation-status-session-2')).toHaveTextContent('Running');
   });
 });

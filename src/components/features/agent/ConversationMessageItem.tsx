@@ -12,6 +12,7 @@
 import type { ConversationMessage, MessagePart } from '@/agents/engine/core/conversation';
 import { TextPartRenderer } from './parts/TextPartRenderer';
 import { ThinkingPartRenderer } from './parts/ThinkingPartRenderer';
+import { ClarificationPartRenderer } from './parts/ClarificationPartRenderer';
 import { PlanPartRenderer } from './parts/PlanPartRenderer';
 import { ToolCallPartRenderer } from './parts/ToolCallPartRenderer';
 import { ToolResultPartRenderer } from './parts/ToolResultPartRenderer';
@@ -21,6 +22,7 @@ import { ToolApprovalPartRenderer } from './parts/ToolApprovalPartRenderer';
 import { ReasoningPartRenderer } from './parts/ReasoningPartRenderer';
 import { CompactionPartRenderer } from './parts/CompactionPartRenderer';
 import { PatchPartRenderer } from './parts/PatchPartRenderer';
+import { AssistantArtifactGroup } from './AssistantArtifactGroup';
 
 // =============================================================================
 // Types
@@ -28,6 +30,7 @@ import { PatchPartRenderer } from './parts/PatchPartRenderer';
 
 interface ConversationMessageItemProps {
   message: ConversationMessage;
+  highlightArtifacts?: boolean;
   onApprove?: () => void;
   onReject?: (reason?: string) => void;
   onRetry?: () => void;
@@ -50,11 +53,7 @@ interface PartCallbacks {
   onToolDeny?: () => void;
 }
 
-function renderPart(
-  part: MessagePart,
-  index: number,
-  callbacks: PartCallbacks,
-): React.ReactNode {
+function renderPart(part: MessagePart, index: number, callbacks: PartCallbacks): React.ReactNode {
   const key = `${part.type}-${index}`;
 
   switch (part.type) {
@@ -62,6 +61,8 @@ function renderPart(
       return <TextPartRenderer key={key} part={part} />;
     case 'thinking':
       return <ThinkingPartRenderer key={key} part={part} />;
+    case 'clarification':
+      return <ClarificationPartRenderer key={key} part={part} />;
     case 'plan':
       return (
         <PlanPartRenderer
@@ -107,12 +108,22 @@ function renderPart(
   }
 }
 
+function isArtifactPart(part: MessagePart): boolean {
+  return (
+    part.type === 'tool_call' ||
+    part.type === 'tool_result' ||
+    part.type === 'patch' ||
+    part.type === 'compaction'
+  );
+}
+
 // =============================================================================
 // Component
 // =============================================================================
 
 export function ConversationMessageItem({
   message,
+  highlightArtifacts = false,
   onApprove,
   onReject,
   onRetry,
@@ -132,11 +143,8 @@ export function ConversationMessageItem({
       .join('\n');
 
     return (
-      <div
-        className={`flex justify-end ${className}`}
-        data-testid="conversation-message-user"
-      >
-        <div className="max-w-[80%] px-4 py-2 rounded-lg bg-primary-600 text-white">
+      <div className={`flex justify-end ${className}`} data-testid="conversation-message-user">
+        <div className="w-full px-4 py-2 rounded-md bg-primary-600/15 border border-primary-500/20 text-text-primary">
           <p className="text-sm whitespace-pre-wrap">{textContent}</p>
           <div className="flex items-center gap-2 mt-1">
             <span className="text-xs opacity-60 block">
@@ -165,11 +173,8 @@ export function ConversationMessageItem({
       .join('\n');
 
     return (
-      <div
-        className={`flex justify-center ${className}`}
-        data-testid="conversation-message-system"
-      >
-        <div className="max-w-[80%] px-4 py-2 rounded-lg bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">
+      <div className={`flex justify-center ${className}`} data-testid="conversation-message-system">
+        <div className="w-full max-w-sm mx-auto text-center px-4 py-2 rounded-md bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">
           <p className="text-sm whitespace-pre-wrap">{textContent}</p>
         </div>
       </div>
@@ -177,21 +182,69 @@ export function ConversationMessageItem({
   }
 
   // Assistant messages: left-aligned, multi-part layout
+  const inlineParts = message.parts
+    .map((part, index) => ({ part, index }))
+    .filter(({ part }) => !isArtifactPart(part));
+  const artifactParts = message.parts
+    .map((part, index) => ({ part, index }))
+    .filter(({ part }) => isArtifactPart(part));
+  const toolCallCount = artifactParts.filter(({ part }) => part.type === 'tool_call').length;
+  const toolResultCount = artifactParts.filter(({ part }) => part.type === 'tool_result').length;
+  const patchParts = artifactParts.filter(
+    (entry): entry is { part: Extract<MessagePart, { type: 'patch' }>; index: number } =>
+      entry.part.type === 'patch',
+  );
+  const patchPartCount = patchParts.length;
+  const patchFileCount = patchParts.reduce((count, entry) => count + entry.part.files.length, 0);
+  const hasCompaction = artifactParts.some(({ part }) => part.type === 'compaction');
+  const hasRunningArtifacts = artifactParts.some(
+    ({ part }) =>
+      part.type === 'tool_call' && (part.status === 'pending' || part.status === 'running'),
+  );
+  const hasFailedArtifacts = artifactParts.some(
+    ({ part }) =>
+      (part.type === 'tool_call' && part.status === 'failed') ||
+      (part.type === 'tool_result' && !part.success),
+  );
+  const shouldOpenArtifactsByDefault =
+    inlineParts.length === 0 || hasRunningArtifacts || hasFailedArtifacts || highlightArtifacts;
+
   return (
-    <div
-      className={`flex justify-start ${className}`}
-      data-testid="conversation-message-assistant"
-    >
-      <div className="max-w-[85%] space-y-2">
-        {message.parts.map((part, i) =>
-          renderPart(part, i, {
+    <div className={`flex justify-start ${className}`} data-testid="conversation-message-assistant">
+      <div className="w-full min-w-0 space-y-2">
+        {inlineParts.map(({ part, index }) =>
+          renderPart(part, index, {
             onApprove,
             onReject,
             onRetry,
             onToolAllow,
             onToolAllowAlways,
             onToolDeny,
-          })
+          }),
+        )}
+        {artifactParts.length > 0 && (
+          <AssistantArtifactGroup
+            toolCallCount={toolCallCount}
+            toolResultCount={toolResultCount}
+            patchPartCount={patchPartCount}
+            patchFileCount={patchFileCount}
+            hasCompaction={hasCompaction}
+            hasRunningArtifacts={hasRunningArtifacts}
+            hasFailedArtifacts={hasFailedArtifacts}
+            defaultOpen={shouldOpenArtifactsByDefault}
+            highlighted={highlightArtifacts}
+          >
+            {artifactParts.map(({ part, index }) =>
+              renderPart(part, index, {
+                onApprove,
+                onReject,
+                onRetry,
+                onToolAllow,
+                onToolAllowAlways,
+                onToolDeny,
+              }),
+            )}
+          </AssistantArtifactGroup>
         )}
         <div className="flex items-center gap-2">
           <span className="text-xs text-text-tertiary block">

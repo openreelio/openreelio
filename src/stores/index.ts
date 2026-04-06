@@ -140,6 +140,8 @@ export type {
   ConversationActions,
   ConversationStore,
 } from './conversationStore';
+export { useAgentArtifactReviewStore } from './agentArtifactReviewStore';
+export { useAgentDelegationStore } from './agentDelegationStore';
 
 export { usePreviewStore, MIN_ZOOM, MAX_ZOOM, ZOOM_STEP, ZOOM_PRESETS } from './previewStore';
 export type { ZoomMode, PreviewState, PreviewActions, PreviewStore } from './previewStore';
@@ -198,6 +200,8 @@ import { useAudioMixerStore } from './audioMixerStore';
 import { useModalStore } from './modalStore';
 import { useRenderQueueStore } from './renderQueueStore';
 import { useConversationStore } from './conversationStore';
+import { useAgentArtifactReviewStore } from './agentArtifactReviewStore';
+import { useAgentDelegationStore } from './agentDelegationStore';
 import { usePreviewStore } from './previewStore';
 import { useAgentStore } from './agentStore';
 import { useWorkspaceStore, cleanupWorkspaceEventListeners } from './workspaceStore';
@@ -222,6 +226,8 @@ export function resetProjectStores(): void {
   useModalStore.getState().closeModal();
   useRenderQueueStore.getState().clearAll();
   useConversationStore.getState().clearConversation();
+  useAgentArtifactReviewStore.getState().clearSelection();
+  useAgentDelegationStore.getState().clear();
   usePreviewStore.getState().resetView();
   useAgentStore.getState().reset();
   useWorkspaceStore.getState().reset();

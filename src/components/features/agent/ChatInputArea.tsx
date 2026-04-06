@@ -1,13 +1,24 @@
 /**
  * ChatInputArea
  *
- * Input area for the agentic chat, including the PromptInput,
- * stop button, queue indicator, and phase indicator.
- * Extracted from AgenticChat to keep components under 200 lines.
+ * Composer workspace for the agentic chat.
+ *
+ * Combines blocking request docks, session tray controls,
+ * the prompt input, and stop/queue controls.
  */
 
 import { Square } from 'lucide-react';
+import type { Plan } from '@/agents/engine';
+import type { AgentDefinition } from '@/agents/engine/core/agentDefinitions';
+import { AgentClarificationDock } from './AgentClarificationDock';
+import {
+  AgentComposerTray,
+  type AgentRuntimePermissionRequest,
+  type AgentRuntimeSummary,
+} from './AgentComposerTray';
 import { PromptInput } from './PromptInput';
+import { ApprovalPartRenderer } from './parts/ApprovalPartRenderer';
+import { ToolApprovalPartRenderer } from './parts/ToolApprovalPartRenderer';
 
 // =============================================================================
 // Types
@@ -18,41 +29,27 @@ export interface ChatInputAreaProps {
   onInputChange: (value: string) => void;
   onSubmit: () => void;
   onStop: () => void;
+  onApprove: () => void;
+  onReject: (reason?: string) => void;
+  onToolAllow: () => void;
+  onToolAllowAlways: () => void;
+  onToolDeny: () => void;
   placeholder: string;
   disabled: boolean;
   isRunning: boolean;
   stopState: 'idle' | 'stopping';
+  currentAgentName: string;
+  currentAgentDescription?: string;
+  isExperimentalSession: boolean;
+  specialistDefinitions: Array<Pick<AgentDefinition, 'id' | 'name' | 'description'>>;
+  onStartSession?: (agentProfileId?: string) => void;
   /** Phase label from either the TPAO or agent loop hook */
   phase: string;
+  runtimeSummary: AgentRuntimeSummary;
+  pendingPlan: Plan | null;
+  pendingClarificationQuestion: string | null;
+  pendingToolPermissionRequest: AgentRuntimePermissionRequest | null;
   queueSize: number;
-}
-
-// =============================================================================
-// Helpers
-// =============================================================================
-
-function getPhaseLabel(phase: string, stopState: 'idle' | 'stopping'): string {
-  if (stopState === 'stopping') return 'Stopping...';
-  switch (phase) {
-    case 'streaming':
-      return 'Responding...';
-    case 'thinking':
-      return 'Thinking...';
-    case 'planning':
-      return 'Planning...';
-    case 'awaiting_approval':
-      return 'Awaiting approval';
-    case 'awaiting_tool_permission':
-      return 'Awaiting tool permission';
-    case 'executing':
-      return 'Executing...';
-    case 'executing_tools':
-      return 'Executing tools...';
-    case 'observing':
-      return 'Observing results...';
-    default:
-      return phase.replace(/_/g, ' ');
-  }
 }
 
 // =============================================================================
@@ -64,66 +61,117 @@ export function ChatInputArea({
   onInputChange,
   onSubmit,
   onStop,
+  onApprove,
+  onReject,
+  onToolAllow,
+  onToolAllowAlways,
+  onToolDeny,
   placeholder,
   disabled,
   isRunning,
   stopState,
+  currentAgentName,
+  currentAgentDescription,
+  isExperimentalSession,
+  specialistDefinitions,
+  onStartSession,
   phase,
+  runtimeSummary,
+  pendingPlan,
+  pendingClarificationQuestion,
+  pendingToolPermissionRequest,
   queueSize,
 }: ChatInputAreaProps) {
   return (
-    <div className="border-t border-border-subtle p-4">
-      {/* Queue indicator */}
-      {queueSize > 0 && (
-        <div className="mb-2 flex items-center gap-2">
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-primary-500/10 text-primary-400 rounded-full">
-            {queueSize} queued
-          </span>
-        </div>
-      )}
+    <div className="border-t border-border-subtle px-3 py-2">
+      <div className="overflow-hidden rounded-lg border border-border-subtle bg-surface-elevated/60">
+        <div className="space-y-2 px-3 pt-2">
+          {pendingClarificationQuestion && (
+            <AgentClarificationDock question={pendingClarificationQuestion} />
+          )}
 
-      <div className="flex gap-2 items-end">
-        <PromptInput
-          value={input}
-          onChange={onInputChange}
-          onSubmit={onSubmit}
-          placeholder={placeholder}
-          disabled={disabled}
-          className="flex-1"
+          {phase === 'awaiting_approval' && pendingPlan && (
+            <ApprovalPartRenderer
+              part={{
+                type: 'approval',
+                plan: pendingPlan,
+                status: 'pending',
+              }}
+              onApprove={onApprove}
+              onReject={onReject}
+            />
+          )}
+
+          {pendingToolPermissionRequest && (
+            <ToolApprovalPartRenderer
+              part={{
+                type: 'tool_approval',
+                stepId: pendingToolPermissionRequest.id,
+                tool: pendingToolPermissionRequest.tool,
+                args: pendingToolPermissionRequest.args,
+                description: pendingToolPermissionRequest.description,
+                riskLevel: pendingToolPermissionRequest.riskLevel,
+                status: 'pending',
+              }}
+              onAllow={onToolAllow}
+              onAllowAlways={onToolAllowAlways}
+              onDeny={onToolDeny}
+            />
+          )}
+        </div>
+
+        <AgentComposerTray
+          currentAgentName={currentAgentName}
+          currentAgentDescription={currentAgentDescription}
+          isExperimentalSession={isExperimentalSession}
+          isRunning={isRunning}
+          stopState={stopState}
+          phase={phase}
+          queueSize={queueSize}
+          runtimeSummary={runtimeSummary}
+          pendingClarificationQuestion={pendingClarificationQuestion}
+          pendingToolPermissionRequest={pendingToolPermissionRequest}
+          specialistDefinitions={specialistDefinitions}
+          onStartSession={onStartSession}
         />
 
-        {isRunning && (
-          <button
-            onClick={onStop}
-            className={`p-2 rounded-lg transition-colors flex-shrink-0 ${
-              stopState === 'stopping'
-                ? 'bg-orange-600 hover:bg-red-600 text-white'
-                : 'bg-red-600 hover:bg-red-500 text-white'
-            }`}
-            aria-label={
-              stopState === 'stopping' ? 'Force stop' : 'Stop'
-            }
-            title={
-              stopState === 'stopping'
-                ? 'Click again to force stop'
-                : 'Stop execution'
-            }
-            data-testid="stop-btn"
-          >
-            <Square className="w-4 h-4" />
-          </button>
-        )}
-      </div>
+        <div className="px-3 py-2">
+          <div className="flex items-end gap-2">
+            <PromptInput
+              value={input}
+              onChange={onInputChange}
+              onSubmit={onSubmit}
+              placeholder={placeholder}
+              disabled={disabled}
+              className="flex-1"
+            />
 
-      {/* Phase indicator */}
-      {isRunning && (
-        <div className="mt-2 flex items-center gap-2">
-          <div className="w-2 h-2 bg-primary-500 rounded-full animate-pulse" />
-          <span className="text-xs text-text-tertiary">
-            {getPhaseLabel(phase, stopState)}
-          </span>
+            {isRunning && (
+              <button
+                onClick={onStop}
+                className={`flex-shrink-0 rounded-lg p-2 transition-colors ${
+                  stopState === 'stopping'
+                    ? 'bg-orange-600 text-white hover:bg-red-600'
+                    : 'bg-red-600 text-white hover:bg-red-500'
+                }`}
+                aria-label={stopState === 'stopping' ? 'Stopping execution' : 'Stop'}
+                title={stopState === 'stopping' ? 'Stopping execution' : 'Stop execution'}
+                data-testid="stop-btn"
+              >
+                <Square className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+
+          {queueSize > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 px-1">
+              <span className="rounded-full bg-primary-500/10 px-2 py-0.5 text-[10px] text-primary-300">
+                {queueSize} queued
+              </span>
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }

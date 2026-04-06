@@ -158,10 +158,10 @@ export function PromptInput({
           disabled={disabled}
           rows={1}
           className={`
-            flex-1 px-4 py-2 rounded-lg resize-none
-            bg-surface-elevated border border-border-subtle
+            flex-1 px-3 py-2 rounded-md resize-none
+            bg-surface-base border border-border-subtle
             text-text-primary placeholder-text-tertiary
-            focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500
+            focus:outline-none focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500
             disabled:opacity-50 disabled:cursor-not-allowed
             transition-colors
           `}
@@ -177,11 +177,11 @@ export function PromptInput({
           onClick={onSubmit}
           disabled={!value.trim() || disabled}
           className={`
-            p-2 rounded-lg transition-colors
+            p-1.5 rounded-md transition-colors
             ${
               !value.trim() || disabled
-                ? 'bg-surface-active text-text-tertiary cursor-not-allowed'
-                : 'bg-primary-600 hover:bg-primary-500 text-white'
+                ? 'text-text-muted cursor-not-allowed'
+                : 'text-primary-400 hover:text-primary-300'
             }
           `}
           aria-label="Send"
@@ -192,19 +192,6 @@ export function PromptInput({
         </button>
       </div>
 
-      {/* Hints */}
-      <div className="flex gap-3 mt-1 px-1">
-        <span className="text-[10px] text-text-tertiary">
-          @ mention assets
-        </span>
-        <span className="text-[10px] text-text-tertiary">
-          / commands
-        </span>
-        <span className="flex-1" />
-        <span className="text-[10px] text-text-tertiary">
-          Shift+Enter for newline
-        </span>
-      </div>
     </div>
   );
 }

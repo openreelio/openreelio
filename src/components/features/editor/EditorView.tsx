@@ -6,7 +6,16 @@
  * and AI sidebar in a multi-panel layout.
  */
 
-import { lazy, Suspense, useCallback, useRef, useState, useEffect, useMemo, type ReactNode } from 'react';
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useRef,
+  useState,
+  useEffect,
+  useMemo,
+  type ReactNode,
+} from 'react';
 import {
   Header,
   HeaderPopoverAction,
@@ -111,6 +120,11 @@ const VideoGenerationPanel = lazy(async () => {
 const ReferenceComparisonPanel = lazy(async () => {
   const module = await import('@/components/features/comparison/ReferenceComparisonPanel');
   return { default: module.ReferenceComparisonPanel };
+});
+
+const AgentArtifactReviewPanelLazy = lazy(async () => {
+  const module = await import('@/components/features/agent/AgentArtifactReviewPanel');
+  return { default: module.AgentArtifactReviewPanel };
 });
 
 const UndoHistoryPanel = lazy(async () => {
@@ -910,7 +924,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
 
       // Determine format from extension
       const ext = outputPath.split('.').pop()?.toLowerCase() ?? 'png';
-      const format = ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'tif' || ext === 'tiff' ? 'tiff' : 'png';
+      const format =
+        ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'tif' || ext === 'tiff' ? 'tiff' : 'png';
 
       const result = await commands.exportFrame(
         sequence.id,
@@ -960,13 +975,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       const ext = outputPath.split('.').pop()?.toLowerCase() ?? 'wav';
       const format = ext === 'mp3' ? 'mp3' : ext === 'flac' ? 'flac' : 'wav';
 
-      const result = await commands.exportAudioOnly(
-        sequence.id,
-        format,
-        outputPath,
-        null,
-        null,
-      );
+      const result = await commands.exportAudioOnly(sequence.id, format, outputPath, null, null);
 
       if (result.status === 'ok') {
         useToastStore.getState().addToast({
@@ -1069,336 +1078,398 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   // Dockable Layout — Panel Content Registry
   // =========================================================================
 
-  const panelContent = useMemo<Partial<Record<PanelId, ReactNode>>>(() => ({
-    'explorer': (
-      <ExplorerErrorBoundary
-        onError={(error) => logger.error('ProjectExplorer error', { error })}
-      >
-        <div className="h-full overflow-auto p-4">
-          <ProjectExplorer />
-        </div>
-      </ExplorerErrorBoundary>
-    ),
-
-    'source-monitor': (
-      <PreviewErrorBoundary
-        onError={(error) => logger.error('SourceMonitor error', { error })}
-      >
-        <SourceMonitor className="h-full w-full" />
-      </PreviewErrorBoundary>
-    ),
-
-    'program-monitor': (
-      <div
-        ref={previewContainerRef}
-        className={`h-full w-full relative ${isFullscreen ? 'bg-black' : ''}`}
-      >
-        <PreviewErrorBoundary
-          onError={(error) => logger.error('UnifiedPreviewPlayer error', { error })}
+  const panelContent = useMemo<Partial<Record<PanelId, ReactNode>>>(
+    () => ({
+      explorer: (
+        <ExplorerErrorBoundary
+          onError={(error) => logger.error('ProjectExplorer error', { error })}
         >
-          <UnifiedPreviewPlayer
-            className="h-full w-full"
-            showControls
-            showTimecode
-            showStats={import.meta.env.DEV}
-          />
+          <div className="h-full overflow-auto p-4">
+            <ProjectExplorer />
+          </div>
+        </ExplorerErrorBoundary>
+      ),
+
+      'source-monitor': (
+        <PreviewErrorBoundary onError={(error) => logger.error('SourceMonitor error', { error })}>
+          <SourceMonitor className="h-full w-full" />
         </PreviewErrorBoundary>
-        <button
-          type="button"
-          data-testid="snapshot-button"
-          className="absolute top-2 right-2 p-1.5 rounded bg-black/40 hover:bg-black/60 text-white/70 hover:text-white transition-colors z-10"
-          onClick={captureSnapshot}
-          title="Capture Snapshot (Ctrl+Shift+S)"
-          aria-label="Capture preview snapshot"
+      ),
+
+      'program-monitor': (
+        <div
+          ref={previewContainerRef}
+          className={`h-full w-full relative ${isFullscreen ? 'bg-black' : ''}`}
         >
-          <Camera className="w-4 h-4" />
-        </button>
-      </div>
-    ),
-
-    'timeline': (
-      <div className="h-full min-h-0 p-3">
-        <section className="flex h-full flex-col overflow-hidden rounded-xl border border-editor-border bg-editor-panel">
-          <div className="flex items-center justify-between border-b border-editor-border px-3 py-2">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-editor-text-muted">
-              Timeline
-            </h2>
-            <button
-              type="button"
-              onClick={handleToggleMixer}
-              className={`rounded p-1 transition-colors ${
-                showMixer
-                  ? 'bg-editor-border text-editor-text'
-                  : 'text-editor-text-muted hover:text-editor-text hover:bg-editor-border/50'
-              }`}
-              title={showMixer ? 'Hide Mixer' : 'Show Mixer'}
-              aria-label={showMixer ? 'Hide Mixer' : 'Show Mixer'}
-              aria-pressed={showMixer}
-            >
-              <Sliders className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          {sequenceNavigationStack.length > 0 && (
-            <div className="flex items-center gap-1 px-3 py-1 bg-gray-800 border-b border-gray-700 text-xs text-gray-300">
-              <button
-                className="hover:text-white transition-colors"
-                onClick={popSequence}
-                title="Back to parent sequence"
-              >
-                &larr; Back
-              </button>
-              <span className="text-gray-500">/</span>
-              {sequenceNavigationStack.map((seqId) => {
-                const seq = sequences.get(seqId);
-                return (
-                  <span key={seqId} className="text-gray-400">
-                    {seq?.name ?? seqId}
-                    <span className="text-gray-500 mx-1">/</span>
-                  </span>
-                );
-              })}
-              <span className="text-white font-medium">
-                {sequence?.name ?? 'Inner Sequence'}
-              </span>
-            </div>
-          )}
-          <div className="min-h-0 flex-1">
-            <TimelineErrorBoundary
-              onError={(error) => logger.error('Timeline error', { error })}
-            >
-              <Timeline
-                sequence={sequence}
-                onClipMove={handleClipMove}
-                onClipTrim={handleClipTrim}
-                onClipSplit={handleClipSplit}
-                onClipDuplicate={handleClipDuplicate}
-                onClipPaste={handleClipPaste}
-                onClipAudioUpdate={handleClipAudioUpdate}
-                onAssetDrop={handleAssetDrop}
-                pendingAssetDrops={pendingWorkspaceDrops}
-                onDeleteClips={handleDeleteClips}
-                onTrackCreate={handleTrackCreate}
-                onTrackDelete={handleTrackDelete}
-                onTrackMuteToggle={handleTrackMuteToggle}
-                onTrackLockToggle={handleTrackLockToggle}
-                onTrackVisibilityToggle={handleTrackVisibilityToggle}
-                onTrackReorder={handleTrackReorder}
-                onAddText={handleOpenAddText}
-                getTextClipData={(clipId) => textClipDataById.get(clipId)}
-                onCloseGap={handleCloseGap}
-                onCloseAllGaps={handleCloseAllGaps}
-                onRippleDeleteClips={handleRippleDeleteClips}
-                onLiftClips={handleLiftClips}
-                onInsertEditFromSource={handleInsertEditFromSource}
-                onOverwriteEditFromSource={handleOverwriteEditFromSource}
-                onClipSpeedChange={handleSetClipSpeed}
-                onClipReverse={handleReverseClip}
-                onClipFreezeFrame={handleCreateFreezeFrame}
-                onClipToggleEnabled={handleToggleClipEnabled}
-                onClipLink={handleLinkClips}
-                onClipUnlink={handleUnlinkClips}
-                onClipDetachAudio={handleDetachAudio}
-                onCreateCompoundClip={handleCreateCompoundClip}
-                onUnnestCompoundClip={handleUnnestCompoundClip}
-                onCreateAdjustmentLayer={handleCreateAdjustmentLayer}
-                onClipGroup={handleGroupClips}
-                onClipUngroup={handleUngroupClips}
-                onCopyEffects={handleCopyEffects}
-                onPasteEffects={handlePasteEffects}
-                onPasteAttributes={handlePasteAttributes}
-                onRemoveAttributes={handleRemoveAttributes}
-                onClipDoubleClick={handleClipDoubleClick}
-              />
-            </TimelineErrorBoundary>
-          </div>
-          {showMixer && (
-            <div
-              className="shrink-0 border-t border-editor-border bg-editor-sidebar"
-              style={{ height: '220px' }}
-            >
-              <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
-                <AudioMixerPanel
-                  tracks={sequence?.tracks ?? []}
-                  trackLevels={trackLevels}
-                  trackPans={trackPans}
-                  soloedTrackIds={soloedTrackIds}
-                  masterVolume={masterVolume}
-                  masterMuted={masterMuted}
-                  masterLevels={masterLevels}
-                  onVolumeChange={handleMixerVolumeChange}
-                  onPanChange={handleMixerPanChange}
-                  onMuteToggle={handleMixerMuteToggle}
-                  onSoloToggle={handleMixerSoloToggle}
-                  onMasterVolumeChange={handleMasterVolumeChange}
-                  onMasterMuteToggle={handleMasterMuteToggle}
-                  onAutoDuck={handleAutoDuck}
-                  isAutoDucking={isAutoDucking}
-                  compact
-                  className="h-full"
-                />
-              </Suspense>
-            </div>
-          )}
-        </section>
-      </div>
-    ),
-
-    'inspector': (
-      <InspectorErrorBoundary
-        onError={(error) => logger.error('Inspector error', { error })}
-      >
-        <div className="h-full overflow-auto p-4">
-          <Inspector
-            selectedClip={inspectorClip}
-            selectedAsset={inspectorAsset}
-            selectedTextClip={selectedTextClip}
-            selectedCaption={selectedCaption}
-            onClipBlendModeChange={handleClipBlendModeChange}
-            onClipSpeedChange={handleSetClipSpeed}
-            onClipReverseToggle={handleReverseClip}
-            onFreezeFrame={handleCreateFreezeFrame}
-            onTextDataChange={onTextDataChange}
-            onCaptionChange={onCaptionChange}
-            onEffectChange={handleEffectChange}
-            onEffectToggle={handleEffectToggle}
-            onEffectRemove={handleEffectRemove}
-          />
-        </div>
-      </InspectorErrorBoundary>
-    ),
-
-    'audio-mixer': (
-      <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
-        <AudioMixerPanel
-          tracks={sequence?.tracks ?? []}
-          trackLevels={trackLevels}
-          trackPans={trackPans}
-          soloedTrackIds={soloedTrackIds}
-          masterVolume={masterVolume}
-          masterMuted={masterMuted}
-          masterLevels={masterLevels}
-          onVolumeChange={handleMixerVolumeChange}
-          onPanChange={handleMixerPanChange}
-          onMuteToggle={handleMixerMuteToggle}
-          onSoloToggle={handleMixerSoloToggle}
-          onMasterVolumeChange={handleMasterVolumeChange}
-          onMasterMuteToggle={handleMasterMuteToggle}
-          onAutoDuck={handleAutoDuck}
-          isAutoDucking={isAutoDucking}
-          className="h-full"
-        />
-      </Suspense>
-    ),
-
-    'ai-assistant': (
-      <AIErrorBoundary onError={(error) => logger.error('AISidebar error', { error })}>
-        <AISidebar
-          collapsed={false}
-          onToggle={toggleAiSidebar}
-          width={aiSidebarLayoutMode === 'sidebar' ? aiSidebarWidth : undefined}
-          onWidthChange={aiSidebarLayoutMode === 'sidebar' ? setAiSidebarWidth : undefined}
-          layoutMode={aiSidebarLayoutMode}
-        />
-      </AIErrorBoundary>
-    ),
-
-    'comparison': (
-      <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
-        <ReferenceComparisonPanel />
-      </Suspense>
-    ),
-
-    'history': (
-      <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
-        <UndoHistoryPanel />
-      </Suspense>
-    ),
-
-    'transcript': (
-      <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
-        <TranscriptEditorPanel />
-      </Suspense>
-    ),
-
-    'generation': videoGenEnabled ? (
-      <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
-        <VideoGenerationPanel compact className="h-full" />
-      </Suspense>
-    ) : undefined,
-
-    'performance': (
-      <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
-        <PerformancePanelLazy />
-      </Suspense>
-    ),
-  }), [
-    sequence, inspectorClip, inspectorAsset, selectedTextClip, selectedCaption,
-    showMixer, isFullscreen, aiSidebarWidth, aiSidebarLayoutMode, sequenceNavigationStack, sequences,
-    videoGenEnabled, trackLevels, trackPans, soloedTrackIds,
-    masterVolume, masterMuted, masterLevels, isAutoDucking, textClipDataById,
-    pendingWorkspaceDrops,
-    handleToggleMixer, handleClipMove, handleClipTrim, handleClipSplit,
-    handleClipDuplicate, handleClipPaste, handleClipAudioUpdate, handleAssetDrop,
-    handleDeleteClips, handleTrackCreate, handleTrackDelete, handleTrackMuteToggle,
-    handleTrackLockToggle, handleTrackVisibilityToggle, handleTrackReorder,
-    handleOpenAddText, handleCloseGap, handleCloseAllGaps,
-    handleRippleDeleteClips, handleLiftClips, handleInsertEditFromSource,
-    handleOverwriteEditFromSource, handleSetClipSpeed, handleReverseClip,
-    handleCreateFreezeFrame, handleToggleClipEnabled, handleLinkClips,
-    handleUnlinkClips, handleDetachAudio, handleCreateCompoundClip,
-    handleUnnestCompoundClip, handleCreateAdjustmentLayer,
-    handleGroupClips, handleUngroupClips, handleCopyEffects,
-    handlePasteEffects, handlePasteAttributes, handleRemoveAttributes,
-    handleClipDoubleClick, handleClipBlendModeChange,
-    onTextDataChange, onCaptionChange, handleEffectChange,
-    handleEffectToggle, handleEffectRemove, captureSnapshot,
-    toggleAiSidebar, setAiSidebarWidth, popSequence,
-    handleMixerVolumeChange, handleMixerPanChange, handleMixerMuteToggle,
-    handleMixerSoloToggle, handleMasterVolumeChange, handleMasterMuteToggle,
-    handleAutoDuck,
-  ]);
-
-  const headerElement = useMemo(() => (
-    <Header
-      onExport={handleOpenExport}
-      onExportEdl={handleExportEdl}
-      onExportFcpxml={handleExportFcpxml}
-      onExportFrame={() => void handleExportFrame()}
-      onExportAudio={() => void handleExportAudio()}
-      version={appVersion}
-      utilityActions={
-        <>
-          <WorkspacePresetSelector />
-          <HeaderPopoverAction
-            label="Console"
-            icon={<Terminal className="h-4 w-4" />}
-            panelClassName="w-[340px] max-w-[90vw] p-0"
+          <PreviewErrorBoundary
+            onError={(error) => logger.error('UnifiedPreviewPlayer error', { error })}
           >
-            <div className="border-b border-editor-border px-3 py-2">
-              <div className="text-xs font-semibold uppercase tracking-wider text-editor-text-muted">
-                Console
+            <UnifiedPreviewPlayer
+              className="h-full w-full"
+              showControls
+              showTimecode
+              showStats={import.meta.env.DEV}
+            />
+          </PreviewErrorBoundary>
+          <button
+            type="button"
+            data-testid="snapshot-button"
+            className="absolute top-2 right-2 p-1.5 rounded bg-black/40 hover:bg-black/60 text-white/70 hover:text-white transition-colors z-10"
+            onClick={captureSnapshot}
+            title="Capture Snapshot (Ctrl+Shift+S)"
+            aria-label="Capture preview snapshot"
+          >
+            <Camera className="w-4 h-4" />
+          </button>
+        </div>
+      ),
+
+      timeline: (
+        <div className="h-full min-h-0 p-3">
+          <section className="flex h-full flex-col overflow-hidden rounded-xl border border-editor-border bg-editor-panel">
+            <div className="flex items-center justify-between border-b border-editor-border px-3 py-2">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-editor-text-muted">
+                Timeline
+              </h2>
+              <button
+                type="button"
+                onClick={handleToggleMixer}
+                className={`rounded p-1 transition-colors ${
+                  showMixer
+                    ? 'bg-editor-border text-editor-text'
+                    : 'text-editor-text-muted hover:text-editor-text hover:bg-editor-border/50'
+                }`}
+                title={showMixer ? 'Hide Mixer' : 'Show Mixer'}
+                aria-label={showMixer ? 'Hide Mixer' : 'Show Mixer'}
+                aria-pressed={showMixer}
+              >
+                <Sliders className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            {sequenceNavigationStack.length > 0 && (
+              <div className="flex items-center gap-1 px-3 py-1 bg-gray-800 border-b border-gray-700 text-xs text-gray-300">
+                <button
+                  className="hover:text-white transition-colors"
+                  onClick={popSequence}
+                  title="Back to parent sequence"
+                >
+                  &larr; Back
+                </button>
+                <span className="text-gray-500">/</span>
+                {sequenceNavigationStack.map((seqId) => {
+                  const seq = sequences.get(seqId);
+                  return (
+                    <span key={seqId} className="text-gray-400">
+                      {seq?.name ?? seqId}
+                      <span className="text-gray-500 mx-1">/</span>
+                    </span>
+                  );
+                })}
+                <span className="text-white font-medium">{sequence?.name ?? 'Inner Sequence'}</span>
               </div>
-              <p className="mt-1 text-xs text-editor-text-muted">
-                Hidden by default to keep the editing workspace focused.
-              </p>
+            )}
+            <div className="min-h-0 flex-1">
+              <TimelineErrorBoundary onError={(error) => logger.error('Timeline error', { error })}>
+                <Timeline
+                  sequence={sequence}
+                  onClipMove={handleClipMove}
+                  onClipTrim={handleClipTrim}
+                  onClipSplit={handleClipSplit}
+                  onClipDuplicate={handleClipDuplicate}
+                  onClipPaste={handleClipPaste}
+                  onClipAudioUpdate={handleClipAudioUpdate}
+                  onAssetDrop={handleAssetDrop}
+                  pendingAssetDrops={pendingWorkspaceDrops}
+                  onDeleteClips={handleDeleteClips}
+                  onTrackCreate={handleTrackCreate}
+                  onTrackDelete={handleTrackDelete}
+                  onTrackMuteToggle={handleTrackMuteToggle}
+                  onTrackLockToggle={handleTrackLockToggle}
+                  onTrackVisibilityToggle={handleTrackVisibilityToggle}
+                  onTrackReorder={handleTrackReorder}
+                  onAddText={handleOpenAddText}
+                  getTextClipData={(clipId) => textClipDataById.get(clipId)}
+                  onCloseGap={handleCloseGap}
+                  onCloseAllGaps={handleCloseAllGaps}
+                  onRippleDeleteClips={handleRippleDeleteClips}
+                  onLiftClips={handleLiftClips}
+                  onInsertEditFromSource={handleInsertEditFromSource}
+                  onOverwriteEditFromSource={handleOverwriteEditFromSource}
+                  onClipSpeedChange={handleSetClipSpeed}
+                  onClipReverse={handleReverseClip}
+                  onClipFreezeFrame={handleCreateFreezeFrame}
+                  onClipToggleEnabled={handleToggleClipEnabled}
+                  onClipLink={handleLinkClips}
+                  onClipUnlink={handleUnlinkClips}
+                  onClipDetachAudio={handleDetachAudio}
+                  onCreateCompoundClip={handleCreateCompoundClip}
+                  onUnnestCompoundClip={handleUnnestCompoundClip}
+                  onCreateAdjustmentLayer={handleCreateAdjustmentLayer}
+                  onClipGroup={handleGroupClips}
+                  onClipUngroup={handleUngroupClips}
+                  onCopyEffects={handleCopyEffects}
+                  onPasteEffects={handlePasteEffects}
+                  onPasteAttributes={handlePasteAttributes}
+                  onRemoveAttributes={handleRemoveAttributes}
+                  onClipDoubleClick={handleClipDoubleClick}
+                />
+              </TimelineErrorBoundary>
             </div>
-            <div className="max-h-48 overflow-auto bg-editor-bg px-3 py-2 font-mono text-[11px] text-editor-text-muted">
-              <p>[ready] OpenReelio initialized.</p>
-              <p>[layout] Workspace ready.</p>
-              <p>[sequence] {sequence?.name ?? 'No active sequence'}</p>
-            </div>
-          </HeaderPopoverAction>
-        </>
-      }
-    />
-  ), [sequence?.name, appVersion, handleOpenExport, handleExportEdl, handleExportFcpxml, handleExportFrame, handleExportAudio]);
+            {showMixer && (
+              <div
+                className="shrink-0 border-t border-editor-border bg-editor-sidebar"
+                style={{ height: '220px' }}
+              >
+                <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+                  <AudioMixerPanel
+                    tracks={sequence?.tracks ?? []}
+                    trackLevels={trackLevels}
+                    trackPans={trackPans}
+                    soloedTrackIds={soloedTrackIds}
+                    masterVolume={masterVolume}
+                    masterMuted={masterMuted}
+                    masterLevels={masterLevels}
+                    onVolumeChange={handleMixerVolumeChange}
+                    onPanChange={handleMixerPanChange}
+                    onMuteToggle={handleMixerMuteToggle}
+                    onSoloToggle={handleMixerSoloToggle}
+                    onMasterVolumeChange={handleMasterVolumeChange}
+                    onMasterMuteToggle={handleMasterMuteToggle}
+                    onAutoDuck={handleAutoDuck}
+                    isAutoDucking={isAutoDucking}
+                    compact
+                    className="h-full"
+                  />
+                </Suspense>
+              </div>
+            )}
+          </section>
+        </div>
+      ),
+
+      inspector: (
+        <InspectorErrorBoundary onError={(error) => logger.error('Inspector error', { error })}>
+          <div className="h-full overflow-auto p-4">
+            <Inspector
+              selectedClip={inspectorClip}
+              selectedAsset={inspectorAsset}
+              selectedTextClip={selectedTextClip}
+              selectedCaption={selectedCaption}
+              onClipBlendModeChange={handleClipBlendModeChange}
+              onClipSpeedChange={handleSetClipSpeed}
+              onClipReverseToggle={handleReverseClip}
+              onFreezeFrame={handleCreateFreezeFrame}
+              onTextDataChange={onTextDataChange}
+              onCaptionChange={onCaptionChange}
+              onEffectChange={handleEffectChange}
+              onEffectToggle={handleEffectToggle}
+              onEffectRemove={handleEffectRemove}
+            />
+          </div>
+        </InspectorErrorBoundary>
+      ),
+
+      'audio-mixer': (
+        <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+          <AudioMixerPanel
+            tracks={sequence?.tracks ?? []}
+            trackLevels={trackLevels}
+            trackPans={trackPans}
+            soloedTrackIds={soloedTrackIds}
+            masterVolume={masterVolume}
+            masterMuted={masterMuted}
+            masterLevels={masterLevels}
+            onVolumeChange={handleMixerVolumeChange}
+            onPanChange={handleMixerPanChange}
+            onMuteToggle={handleMixerMuteToggle}
+            onSoloToggle={handleMixerSoloToggle}
+            onMasterVolumeChange={handleMasterVolumeChange}
+            onMasterMuteToggle={handleMasterMuteToggle}
+            onAutoDuck={handleAutoDuck}
+            isAutoDucking={isAutoDucking}
+            className="h-full"
+          />
+        </Suspense>
+      ),
+
+      'ai-assistant': (
+        <AIErrorBoundary onError={(error) => logger.error('AISidebar error', { error })}>
+          <AISidebar
+            collapsed={false}
+            onToggle={toggleAiSidebar}
+            width={aiSidebarLayoutMode === 'sidebar' ? aiSidebarWidth : undefined}
+            onWidthChange={aiSidebarLayoutMode === 'sidebar' ? setAiSidebarWidth : undefined}
+            layoutMode={aiSidebarLayoutMode}
+          />
+        </AIErrorBoundary>
+      ),
+
+      comparison: (
+        <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+          <ReferenceComparisonPanel />
+        </Suspense>
+      ),
+
+      'agent-review': (
+        <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+          <AgentArtifactReviewPanelLazy />
+        </Suspense>
+      ),
+
+      history: (
+        <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+          <UndoHistoryPanel />
+        </Suspense>
+      ),
+
+      transcript: (
+        <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+          <TranscriptEditorPanel />
+        </Suspense>
+      ),
+
+      generation: videoGenEnabled ? (
+        <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+          <VideoGenerationPanel compact className="h-full" />
+        </Suspense>
+      ) : undefined,
+
+      performance: (
+        <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+          <PerformancePanelLazy />
+        </Suspense>
+      ),
+    }),
+    [
+      sequence,
+      inspectorClip,
+      inspectorAsset,
+      selectedTextClip,
+      selectedCaption,
+      showMixer,
+      isFullscreen,
+      aiSidebarWidth,
+      aiSidebarLayoutMode,
+      sequenceNavigationStack,
+      sequences,
+      videoGenEnabled,
+      trackLevels,
+      trackPans,
+      soloedTrackIds,
+      masterVolume,
+      masterMuted,
+      masterLevels,
+      isAutoDucking,
+      textClipDataById,
+      pendingWorkspaceDrops,
+      handleToggleMixer,
+      handleClipMove,
+      handleClipTrim,
+      handleClipSplit,
+      handleClipDuplicate,
+      handleClipPaste,
+      handleClipAudioUpdate,
+      handleAssetDrop,
+      handleDeleteClips,
+      handleTrackCreate,
+      handleTrackDelete,
+      handleTrackMuteToggle,
+      handleTrackLockToggle,
+      handleTrackVisibilityToggle,
+      handleTrackReorder,
+      handleOpenAddText,
+      handleCloseGap,
+      handleCloseAllGaps,
+      handleRippleDeleteClips,
+      handleLiftClips,
+      handleInsertEditFromSource,
+      handleOverwriteEditFromSource,
+      handleSetClipSpeed,
+      handleReverseClip,
+      handleCreateFreezeFrame,
+      handleToggleClipEnabled,
+      handleLinkClips,
+      handleUnlinkClips,
+      handleDetachAudio,
+      handleCreateCompoundClip,
+      handleUnnestCompoundClip,
+      handleCreateAdjustmentLayer,
+      handleGroupClips,
+      handleUngroupClips,
+      handleCopyEffects,
+      handlePasteEffects,
+      handlePasteAttributes,
+      handleRemoveAttributes,
+      handleClipDoubleClick,
+      handleClipBlendModeChange,
+      onTextDataChange,
+      onCaptionChange,
+      handleEffectChange,
+      handleEffectToggle,
+      handleEffectRemove,
+      captureSnapshot,
+      toggleAiSidebar,
+      setAiSidebarWidth,
+      popSequence,
+      handleMixerVolumeChange,
+      handleMixerPanChange,
+      handleMixerMuteToggle,
+      handleMixerSoloToggle,
+      handleMasterVolumeChange,
+      handleMasterMuteToggle,
+      handleAutoDuck,
+    ],
+  );
+
+  const headerElement = useMemo(
+    () => (
+      <Header
+        onExport={handleOpenExport}
+        onExportEdl={handleExportEdl}
+        onExportFcpxml={handleExportFcpxml}
+        onExportFrame={() => void handleExportFrame()}
+        onExportAudio={() => void handleExportAudio()}
+        version={appVersion}
+        utilityActions={
+          <>
+            <WorkspacePresetSelector />
+            <HeaderPopoverAction
+              label="Console"
+              icon={<Terminal className="h-4 w-4" />}
+              panelClassName="w-[340px] max-w-[90vw] p-0"
+            >
+              <div className="border-b border-editor-border px-3 py-2">
+                <div className="text-xs font-semibold uppercase tracking-wider text-editor-text-muted">
+                  Console
+                </div>
+                <p className="mt-1 text-xs text-editor-text-muted">
+                  Hidden by default to keep the editing workspace focused.
+                </p>
+              </div>
+              <div className="max-h-48 overflow-auto bg-editor-bg px-3 py-2 font-mono text-[11px] text-editor-text-muted">
+                <p>[ready] OpenReelio initialized.</p>
+                <p>[layout] Workspace ready.</p>
+                <p>[sequence] {sequence?.name ?? 'No active sequence'}</p>
+              </div>
+            </HeaderPopoverAction>
+          </>
+        }
+      />
+    ),
+    [
+      sequence?.name,
+      appVersion,
+      handleOpenExport,
+      handleExportEdl,
+      handleExportFcpxml,
+      handleExportFrame,
+      handleExportAudio,
+    ],
+  );
 
   return (
     <>
-      <DockableEditorLayout
-        header={headerElement}
-        panelContent={panelContent}
-      />
+      <DockableEditorLayout header={headerElement} panelContent={panelContent} />
 
       {/* Export Dialog */}
       <Suspense fallback={null}>
