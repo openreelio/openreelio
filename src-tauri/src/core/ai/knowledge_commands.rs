@@ -17,22 +17,34 @@ const ALLOWED_CATEGORIES: &[&str] = &["convention", "preference", "correction", 
 // Database Singleton
 // =============================================================================
 
-static KNOWLEDGE_DB: OnceLock<Result<Mutex<KnowledgeDb>, String>> = OnceLock::new();
+static KNOWLEDGE_DB: OnceLock<Mutex<KnowledgeDb>> = OnceLock::new();
+static KNOWLEDGE_DB_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn get_or_init_knowledge_db(app: &tauri::AppHandle) -> Result<&'static Mutex<KnowledgeDb>, String> {
-    let result = KNOWLEDGE_DB.get_or_init(|| {
-        let init = || -> Result<Mutex<KnowledgeDb>, String> {
-            let app_data = super::get_app_data_dir(app)?;
-            std::fs::create_dir_all(&app_data)
-                .map_err(|e| format!("Failed to create app data dir: {e}"))?;
-            let db_path = app_data.join("ai_knowledge.db");
-            let db = KnowledgeDb::create(&db_path)
-                .map_err(|e| format!("Failed to open knowledge database: {e}"))?;
-            Ok(Mutex::new(db))
-        };
-        init()
-    });
-    result.as_ref().map_err(|e| e.clone())
+    if let Some(db) = KNOWLEDGE_DB.get() {
+        return Ok(db);
+    }
+
+    let _guard = KNOWLEDGE_DB_INIT_LOCK
+        .lock()
+        .map_err(|_| "Failed to lock knowledge database initializer".to_string())?;
+
+    if let Some(db) = KNOWLEDGE_DB.get() {
+        return Ok(db);
+    }
+
+    let app_data = super::get_app_data_dir(app)?;
+    std::fs::create_dir_all(&app_data)
+        .map_err(|e| format!("Failed to create app data dir: {e}"))?;
+    let db_path = app_data.join("ai_knowledge.db");
+    let db = KnowledgeDb::create(&db_path)
+        .map_err(|e| format!("Failed to open knowledge database: {e}"))?;
+
+    let _ = KNOWLEDGE_DB.set(Mutex::new(db));
+
+    KNOWLEDGE_DB
+        .get()
+        .ok_or_else(|| "Failed to initialize knowledge database".to_string())
 }
 
 // =============================================================================
