@@ -9,6 +9,7 @@
 import { useCallback, useRef } from 'react';
 import { useConversationStore } from '@/stores/conversationStore';
 import {
+  createClarificationPart,
   createTextPart,
   createThinkingPart,
   createPlanPart,
@@ -68,7 +69,7 @@ export function useAgentEventHandler() {
 
       case 'clarification_required': {
         if (messageIdRef.current) {
-          store.appendPart(messageIdRef.current, createTextPart(event.question));
+          store.appendPart(messageIdRef.current, createClarificationPart(event.question));
         }
         break;
       }

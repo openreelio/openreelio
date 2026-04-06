@@ -126,7 +126,7 @@ describe('useAgentEventHandler', () => {
     expect(msg.parts[0].type).toBe('thinking');
   });
 
-  it('should append clarification text on clarification_required', () => {
+  it('should append clarification part on clarification_required', () => {
     const { result } = renderHook(() => useAgentEventHandler());
 
     act(() => {
@@ -148,10 +148,10 @@ describe('useAgentEventHandler', () => {
     });
 
     const msg = useConversationStore.getState().activeConversation!.messages[0];
-    const textPart = msg.parts.find((p) => p.type === 'text');
-    expect(textPart).toBeDefined();
-    if (textPart?.type === 'text') {
-      expect(textPart.content).toBe('Which clip should I use as the background?');
+    const clarificationPart = msg.parts.find((p) => p.type === 'clarification');
+    expect(clarificationPart).toBeDefined();
+    if (clarificationPart?.type === 'clarification') {
+      expect(clarificationPart.question).toBe('Which clip should I use as the background?');
     }
   });
 
