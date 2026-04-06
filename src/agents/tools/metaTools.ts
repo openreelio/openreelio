@@ -184,7 +184,8 @@ const META_TOOLS: ToolDefinition[] = [
         },
         sections: {
           type: 'array',
-          description: 'Optional source-analysis sections such as moments, chapters, highlights',
+          description:
+            'Optional source-analysis sections such as moments, chapters, highlights, speakerTurns',
           items: { type: 'string' },
         },
         assetIds: {
@@ -199,6 +200,14 @@ const META_TOOLS: ToolDefinition[] = [
         analyzeMissing: {
           type: 'boolean',
           description: 'Generate missing source analysis on demand when supported',
+        },
+        useIndexedSearch: {
+          type: 'boolean',
+          description: 'Use indexed report-chunk retrieval when supported',
+        },
+        useSemantic: {
+          type: 'boolean',
+          description: 'Use embedding-backed hybrid reranking when supported',
         },
         apply: { type: 'boolean', description: 'Apply the generated plan directly when supported' },
         trackName: {

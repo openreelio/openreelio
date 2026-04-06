@@ -24,7 +24,7 @@ pub enum AnalysisAction {
         id: String,
     },
 
-    /// Search moments, chapters, and highlights inside a cached source analysis report
+    /// Search moments, chapters, highlights, and speaker turns inside a cached source analysis report
     Search {
         /// Project directory path
         #[arg(long)]
@@ -38,7 +38,7 @@ pub enum AnalysisAction {
         #[arg(long)]
         query: String,
 
-        /// Sections to search: moments, chapters, highlights
+        /// Sections to search: moments, chapters, highlights, speakerTurns
         #[arg(long, value_delimiter = ',')]
         sections: Vec<String>,
 
@@ -65,7 +65,7 @@ pub enum AnalysisAction {
         #[arg(long, default_value_t = false)]
         unused_only: bool,
 
-        /// Sections to search: moments, chapters, highlights
+        /// Sections to search: moments, chapters, highlights, speakerTurns
         #[arg(long, value_delimiter = ',')]
         sections: Vec<String>,
 
@@ -112,7 +112,7 @@ pub enum AnalysisAction {
         #[arg(long, default_value_t = false)]
         unused_only: bool,
 
-        /// Sections to search: moments, chapters, highlights
+        /// Sections to search: moments, chapters, highlights, speakerTurns
         #[arg(long, value_delimiter = ',')]
         sections: Vec<String>,
 
@@ -143,6 +143,7 @@ struct SourceLibrarySearchResult {
     sections: Vec<String>,
     searched_asset_count: usize,
     skipped_asset_count: usize,
+    skipped_assets: Vec<Value>,
     matches: Vec<Value>,
 }
 
@@ -208,6 +209,8 @@ struct CachedShotResult {
     end_sec: f64,
     confidence: f64,
     keyframe_path: Option<String>,
+    #[serde(default)]
+    keyframe_selection_method: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -267,6 +270,15 @@ struct CachedFrameAnalysis {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CachedContactSheet {
+    path: String,
+    frame_count: usize,
+    columns: usize,
+    rows: usize,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CachedObjectDetection {
     time_sec: f64,
     labels: Vec<String>,
@@ -304,6 +316,8 @@ struct CachedAnalysisBundle {
     audio_profile: Option<CachedAudioProfile>,
     segments: Option<Vec<CachedContentSegment>>,
     frame_analysis: Option<Vec<CachedFrameAnalysis>>,
+    #[serde(default)]
+    contact_sheet: Option<CachedContactSheet>,
     metadata: CachedVideoMetadata,
     #[serde(default)]
     errors: BTreeMap<String, String>,
@@ -361,82 +375,27 @@ pub fn execute(action: AnalysisAction) -> anyhow::Result<()> {
             let requested_ids = if ids.is_empty() {
                 None
             } else {
-                Some(ids.into_iter().collect::<std::collections::BTreeSet<_>>())
+                Some(ids.into_iter().collect::<BTreeSet<_>>())
             };
-            let mut assets = project
-                .state
-                .assets
-                .values()
-                .filter(|asset| asset.kind == AssetKind::Video && asset.video.is_some())
-                .filter(|asset| {
-                    requested_ids
-                        .as_ref()
-                        .map(|ids| ids.contains(asset.id.as_str()))
-                        .unwrap_or(true)
-                })
-                .map(|asset| {
-                    let timeline_clip_count = count_asset_usage(&project, asset.id.as_str());
-                    let on_timeline = timeline_clip_count > 0;
-                    (asset, timeline_clip_count, on_timeline)
-                })
-                .filter(|(_, _, on_timeline)| !unused_only || !*on_timeline)
-                .collect::<Vec<_>>();
-            assets.sort_by(|left, right| {
-                if left.2 != right.2 {
-                    return left.2.cmp(&right.2);
-                }
-
-                left.0.name.cmp(&right.0.name)
-            });
-
-            let mut matches = Vec::new();
-            let mut searched_asset_count = 0usize;
-            let mut skipped_asset_count = 0usize;
-
-            for (asset, timeline_clip_count, on_timeline) in
-                assets.into_iter().take(asset_limit.clamp(1, 100))
-            {
-                searched_asset_count += 1;
-                match build_source_analysis_report(&project, &project_dir, asset.id.as_str()) {
-                    Ok(report) => {
-                        let asset_matches = search_source_analysis_report_value(
-                            &report,
-                            &query,
-                            &normalized_sections,
-                            limit,
-                        );
-                        for entry in asset_matches {
-                            let mut entry_object = entry.as_object().cloned().unwrap_or_default();
-                            entry_object.insert("assetId".to_string(), json!(asset.id));
-                            entry_object.insert("assetName".to_string(), json!(asset.name));
-                            entry_object.insert("onTimeline".to_string(), json!(on_timeline));
-                            entry_object.insert(
-                                "timelineClipCount".to_string(),
-                                json!(timeline_clip_count),
-                            );
-                            matches.push(Value::Object(entry_object));
-                        }
-                    }
-                    Err(_) => {
-                        skipped_asset_count += 1;
-                    }
-                }
-            }
-
-            matches.sort_by(|left, right| {
-                let left_score = left.get("score").and_then(Value::as_f64).unwrap_or(0.0);
-                let right_score = right.get("score").and_then(Value::as_f64).unwrap_or(0.0);
-                right_score.total_cmp(&left_score)
-            });
-            matches.truncate(limit.clamp(1, 50));
+            let result = search_source_library_matches(
+                &project,
+                &project_dir,
+                &query,
+                requested_ids.as_ref(),
+                unused_only,
+                &normalized_sections,
+                limit,
+                asset_limit,
+            );
 
             output::print_json_pretty(&json!({
-                "query": query,
-                "sections": normalized_sections,
-                "searchedAssetCount": searched_asset_count,
-                "skippedAssetCount": skipped_asset_count,
-                "count": matches.len(),
-                "matches": matches,
+                "query": result.query,
+                "sections": result.sections,
+                "searchedAssetCount": result.searched_asset_count,
+                "skippedAssetCount": result.skipped_asset_count,
+                "skippedAssets": result.skipped_assets,
+                "count": result.matches.len(),
+                "matches": result.matches,
             }))
         }
         AnalysisAction::BuildSelects {
@@ -514,6 +473,7 @@ pub fn execute(action: AnalysisAction) -> anyhow::Result<()> {
                 "sections": search_result.sections,
                 "searchedAssetCount": search_result.searched_asset_count,
                 "skippedAssetCount": search_result.skipped_asset_count,
+                "skippedAssets": search_result.skipped_assets,
                 "count": selects.len(),
                 "selects": selects,
                 "timelinePlan": timeline_plan,
@@ -567,6 +527,7 @@ fn search_source_library_matches(
     let mut matches = Vec::new();
     let mut searched_asset_count = 0usize;
     let mut skipped_asset_count = 0usize;
+    let mut skipped_assets = Vec::new();
 
     for (asset, timeline_clip_count, on_timeline) in
         assets.into_iter().take(asset_limit.clamp(1, 100))
@@ -586,20 +547,28 @@ fn search_source_library_matches(
                     matches.push(Value::Object(entry_object));
                 }
             }
-            Err(_) => {
+            Err(error) => {
                 skipped_asset_count += 1;
+                skipped_assets.push(json!({
+                    "assetId": asset.id,
+                    "assetName": asset.name,
+                    "reason": error.to_string(),
+                }));
             }
         }
     }
 
-    matches.sort_by(|left, right| value_score(right).total_cmp(&value_score(left)));
-    matches.truncate(limit.clamp(1, 50));
+    let matches = rerank_source_library_matches(matches, query)
+        .into_iter()
+        .take(limit.clamp(1, 50))
+        .collect();
 
     SourceLibrarySearchResult {
         query: query.to_string(),
         sections: sections.to_vec(),
         searched_asset_count,
         skipped_asset_count,
+        skipped_assets,
         matches,
     }
 }
@@ -662,12 +631,15 @@ fn build_source_selects_from_matches(
                 "assetId": asset_id,
                 "assetName": entry.get("assetName").and_then(Value::as_str).unwrap_or(asset.name.as_str()),
                 "sectionType": entry.get("sectionType").and_then(Value::as_str).unwrap_or("moments"),
+                "rawScore": entry.get("rawScore").cloned().unwrap_or_else(|| json!(value_score(&entry))),
                 "score": value_score(&entry),
+                "rankingNotes": entry.get("rankingNotes").cloned().unwrap_or_else(|| json!([])),
                 "whyMatched": entry.get("whyMatched").cloned().unwrap_or_else(|| json!([])),
                 "preview": entry.get("preview").and_then(Value::as_str).unwrap_or_default(),
                 "keyframePath": entry.get("keyframePath").cloned().unwrap_or(Value::Null),
                 "onTimeline": entry.get("onTimeline").and_then(Value::as_bool).unwrap_or(false),
                 "timelineClipCount": entry.get("timelineClipCount").and_then(Value::as_u64).unwrap_or(0),
+                "metadata": entry.get("metadata").cloned().unwrap_or(Value::Null),
                 "sourceInSec": source_in_sec,
                 "sourceOutSec": source_out_sec,
                 "durationSec": duration_sec,
@@ -907,6 +879,9 @@ fn build_source_analysis_report(
         .as_ref()
         .and_then(|cached| cached.frame_analysis.clone())
         .unwrap_or_default();
+    let contact_sheet = bundle
+        .as_ref()
+        .and_then(|cached| cached.contact_sheet.clone());
     let duration_sec = bundle
         .as_ref()
         .map(|cached| cached.metadata.duration_sec)
@@ -1163,6 +1138,7 @@ fn build_source_analysis_report(
                 "durationSec": round_to((shot.end_sec - shot.start_sec).max(0.0)),
                 "confidence": round_to(shot.confidence),
                 "keyframePath": shot.keyframe_path,
+                "keyframeSelectionMethod": shot.keyframe_selection_method,
             })).collect::<Vec<_>>(),
         },
         "transcript": {
@@ -1220,6 +1196,12 @@ fn build_source_analysis_report(
             "averageComplexity": if frame_analysis.is_empty() { None } else { Some(round_to(frame_analysis.iter().map(|entry| entry.visual_complexity).sum::<f64>() / frame_analysis.len() as f64)) },
             "topCameraAngles": top_camera_angles_json,
             "topMotionDirections": top_motion_directions_json,
+            "contactSheet": contact_sheet.as_ref().map(|sheet| json!({
+                "path": sheet.path,
+                "frameCount": sheet.frame_count,
+                "columns": sheet.columns,
+                "rows": sheet.rows,
+            })),
         },
         "moments": {
             "count": moments_count,
@@ -1289,6 +1271,7 @@ fn build_source_analysis_report(
             if frame_analysis.is_empty() { None } else { Some(round_to(frame_analysis.iter().map(|entry| entry.visual_complexity).sum::<f64>() / frame_analysis.len() as f64)) },
             &top_camera_angles,
             &top_motion_directions,
+            contact_sheet.as_ref(),
             &moments,
             &chapters,
             &highlights,
@@ -2887,6 +2870,7 @@ fn build_markdown(
     average_complexity: Option<f64>,
     top_camera_angles: &[(String, usize)],
     top_motion_directions: &[(String, usize)],
+    contact_sheet: Option<&CachedContactSheet>,
     moments: &[Value],
     chapters: &[Value],
     highlights: &[Value],
@@ -3185,6 +3169,19 @@ fn build_markdown(
         }
     }
 
+    if let Some(contact_sheet) = contact_sheet {
+        lines.extend([
+            String::new(),
+            "## Visual Artifacts".to_string(),
+            String::new(),
+            format!("- Contact sheet: {}", contact_sheet.path),
+            format!(
+                "- Layout: {} frames in {}x{} grid",
+                contact_sheet.frame_count, contact_sheet.columns, contact_sheet.rows
+            ),
+        ]);
+    }
+
     if !chapters.is_empty() {
         lines.extend([String::new(), "## Chapters".to_string(), String::new()]);
         for chapter in chapters {
@@ -3411,12 +3408,14 @@ mod tests {
                 end_sec: 3.0,
                 confidence: 0.9,
                 keyframe_path: Some("shots/0001.jpg".to_string()),
+                keyframe_selection_method: Some("thumbnail".to_string()),
             },
             CachedShotResult {
                 start_sec: 3.0,
                 end_sec: 8.0,
                 confidence: 0.88,
                 keyframe_path: Some("shots/0002.jpg".to_string()),
+                keyframe_selection_method: Some("thumbnail".to_string()),
             },
         ];
         let transcript = vec![
@@ -3469,6 +3468,7 @@ mod tests {
                 end_sec: 4.0,
                 confidence: 0.9,
                 keyframe_path: Some("shots/0001.jpg".to_string()),
+                keyframe_selection_method: Some("thumbnail".to_string()),
             }],
             &[CachedTranscriptSegment {
                 start_sec: 0.5,

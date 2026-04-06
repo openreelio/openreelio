@@ -349,6 +349,237 @@ function buildAudioCue(
   return null;
 }
 
+function buildSourceReportChunks(report: SourceAnalysisReport): SourceReportChunk[] {
+  return [
+    ...report.moments.items.map((moment) => ({
+      id: `${report.assetId}:moments:${moment.index}`,
+      sectionType: 'moments' as const,
+      sectionIndex: moment.index,
+      startSec: moment.startSec,
+      endSec: moment.endSec,
+      searchText: [
+        moment.summary,
+        moment.transcriptExcerpt,
+        moment.audioCue,
+        moment.dominantSegmentType,
+        moment.topObjectLabels.join(' '),
+        moment.ocrTextPreview.join(' '),
+      ]
+        .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        .join(' '),
+      metadata: {
+        preview: moment.summary,
+        keyframePath: moment.keyframePath,
+        audioCue: moment.audioCue,
+        durationSec: moment.durationSec,
+        dominantSegmentType: moment.dominantSegmentType,
+        topObjectLabels: moment.topObjectLabels,
+        ocrTextPreview: moment.ocrTextPreview,
+      },
+    })),
+    ...report.chapters.items.map((chapter) => ({
+      id: `${report.assetId}:chapters:${chapter.index}`,
+      sectionType: 'chapters' as const,
+      sectionIndex: chapter.index,
+      startSec: chapter.startSec,
+      endSec: chapter.endSec,
+      searchText: [chapter.title, chapter.summary, chapter.dominantSegmentType]
+        .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        .join(' '),
+      metadata: {
+        preview: `${chapter.title} - ${chapter.summary}`,
+        durationSec: chapter.durationSec,
+        dominantSegmentType: chapter.dominantSegmentType,
+      },
+    })),
+    ...report.highlights.items.map((highlight) => ({
+      id: `${report.assetId}:highlights:${highlight.index}`,
+      sectionType: 'highlights' as const,
+      sectionIndex: highlight.index,
+      startSec: highlight.startSec,
+      endSec: highlight.endSec,
+      searchText: [highlight.reason, highlight.quote]
+        .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        .join(' '),
+      metadata: {
+        preview: highlight.quote ?? highlight.reason,
+        durationSec: roundTo(highlight.endSec - highlight.startSec) ?? 0,
+      },
+    })),
+    ...report.speakerTurns.items.map((turn) => ({
+      id: `${report.assetId}:speakerTurns:${turn.index}`,
+      sectionType: 'speakerTurns' as const,
+      sectionIndex: turn.index,
+      startSec: turn.startSec,
+      endSec: turn.endSec,
+      searchText: [
+        turn.label,
+        turn.speakerId,
+        turn.excerpt,
+        turn.audioCue,
+        turn.dominantSegmentType,
+      ]
+        .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        .join(' '),
+      metadata: {
+        preview: `${turn.label} - ${turn.excerpt}`,
+        audioCue: turn.audioCue,
+        durationSec: turn.durationSec,
+        speakerId: turn.speakerId,
+        wordCount: turn.wordCount,
+        segmentCount: turn.segmentCount,
+        dominantSegmentType: turn.dominantSegmentType,
+      },
+    })),
+  ];
+}
+
+async function indexSourceReportChunks(report: SourceAnalysisReport): Promise<void> {
+  const chunks = buildSourceReportChunks(report);
+  if (chunks.length === 0) {
+    return;
+  }
+
+  await invoke('index_source_report_chunks', {
+    assetId: report.assetId,
+    chunks,
+  });
+}
+
+function getCurrentProjectId(): string | null {
+  const meta = useProjectStore.getState().meta;
+  return meta?.id ?? meta?.path ?? 'current-project';
+}
+
+async function loadRetrievalMemoryEntries(): Promise<RetrievalMemoryEntry[]> {
+  const projectId = getCurrentProjectId();
+  if (!projectId) {
+    return [];
+  }
+
+  try {
+    const entries = await invoke<Array<{ key: string; value: string; updatedAt: number | string }>>(
+      'get_agent_memory',
+      {
+        projectId,
+        category: 'source_retrieval',
+      },
+    );
+
+    return entries
+      .map((entry) => {
+        try {
+          return JSON.parse(entry.value) as RetrievalMemoryEntry;
+        } catch {
+          return null;
+        }
+      })
+      .filter((entry): entry is RetrievalMemoryEntry => entry !== null);
+  } catch (error) {
+    logger.warn('Failed to load retrieval memory', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
+}
+
+async function saveRetrievalMemoryEntries(
+  query: string,
+  selects: Array<{
+    assetId: string;
+    sectionType: SourceAnalysisSection;
+    index: number;
+    sourceInSec: number;
+    sourceOutSec: number;
+  }>,
+): Promise<void> {
+  const projectId = getCurrentProjectId();
+  if (!projectId) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  await Promise.all(
+    selects.map((select) => {
+      const key = `${select.assetId}:${select.sectionType}:${select.index}`;
+      const value: RetrievalMemoryEntry = {
+        assetId: select.assetId,
+        sectionType: select.sectionType,
+        sectionIndex: select.index,
+        startSec: select.sourceInSec,
+        endSec: select.sourceOutSec,
+        query,
+        selectedAt: now,
+      };
+
+      return invoke('save_agent_memory', {
+        id: `source-retrieval:${key}`,
+        projectId,
+        category: 'source_retrieval',
+        key,
+        value: JSON.stringify(value),
+        ttlSeconds: 60 * 60 * 24 * 30,
+      });
+    }),
+  ).catch((error) => {
+    logger.warn('Failed to persist retrieval memory entries', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+}
+
+function applyRetrievalMemoryBoosts(
+  matches: SourceLibraryMatch[],
+  memoryEntries: RetrievalMemoryEntry[],
+): SourceLibraryMatch[] {
+  if (memoryEntries.length === 0) {
+    return matches;
+  }
+
+  const nowMs = Date.now();
+
+  return matches
+    .map((match) => {
+      const relevantEntries = memoryEntries.filter(
+        (entry) => entry.assetId === match.assetId && entry.sectionType === match.sectionType,
+      );
+      if (relevantEntries.length === 0) {
+        return match;
+      }
+
+      let score = match.score;
+      const rankingNotes = [...(match.rankingNotes ?? [])];
+
+      for (const entry of relevantEntries) {
+        const ageDays = Math.max(
+          0,
+          (nowMs - new Date(entry.selectedAt).getTime()) / (1000 * 60 * 60 * 24),
+        );
+        const freshness = Math.max(0.15, 1 - ageDays / 30);
+        const exactChunkMatch = entry.sectionIndex === match.index;
+        const overlap = overlapDuration(entry.startSec, entry.endSec, match.startSec, match.endSec);
+
+        if (exactChunkMatch) {
+          score += 1.5 * freshness;
+          rankingNotes.push('memory boost: exact chunk selected before');
+        } else if (overlap > 0.5) {
+          score += 1.0 * freshness;
+          rankingNotes.push('memory boost: overlapping chunk selected before');
+        } else {
+          score += 0.35 * freshness;
+          rankingNotes.push('memory boost: same asset/section used before');
+        }
+      }
+
+      return {
+        ...match,
+        score: roundTo(score, 3) ?? score,
+        rankingNotes: Array.from(new Set(rankingNotes)),
+      };
+    })
+    .sort((left, right) => right.score - left.score);
+}
+
 function endsSentence(text: string): boolean {
   return /[.!?]["')\]\u201d\u2019}]*$/.test(text.trimEnd());
 }
@@ -963,6 +1194,40 @@ function bundleSatisfiesOptions(bundle: AnalysisBundle, options: AnalysisOptions
 
 type SourceAnalysisReport = ReturnType<typeof buildSourceAnalysisReportPayload>;
 type SourceAnalysisSection = 'moments' | 'chapters' | 'highlights' | 'speakerTurns';
+type SourceReportChunk = {
+  id: string;
+  sectionType: SourceAnalysisSection;
+  sectionIndex: number;
+  startSec: number;
+  endSec: number;
+  searchText: string;
+  metadata: Record<string, unknown>;
+};
+type IndexedSourceReportChunkResult = {
+  chunkId: string;
+  assetId: string;
+  sectionType: SourceAnalysisSection;
+  sectionIndex: number;
+  startSec: number;
+  endSec: number;
+  score: number;
+  searchText: string;
+  metadata: Record<string, unknown>;
+};
+type IndexedSourceReportSearchResponse = {
+  results: IndexedSourceReportChunkResult[];
+  total: number;
+  processingTimeMs: number;
+};
+type RetrievalMemoryEntry = {
+  assetId: string;
+  sectionType: SourceAnalysisSection;
+  sectionIndex: number;
+  startSec: number;
+  endSec: number;
+  query: string;
+  selectedAt: string;
+};
 type SourceLibraryMatch = {
   assetId: string;
   assetName: string;
@@ -986,6 +1251,12 @@ type SourceLibraryMatch = {
     segmentCount?: number;
     dominantSegmentType?: string | null;
   };
+};
+
+type SourceLibrarySkip = {
+  assetId: string;
+  assetName: string;
+  reason: string;
 };
 
 function normalizeSearchQuery(text: string): string {
@@ -1221,6 +1492,7 @@ async function generateSourceAnalysisReportPayloadFromArgsWithOptions(
     audioProfile: null,
     segments: null,
     frameAnalysis: null,
+    contactSheet: null,
     metadata: {
       durationSec: asset.durationSec ?? 0,
       width: asset.videoWidth ?? null,
@@ -1291,15 +1563,9 @@ async function searchSourceLibraryMatches(args: Record<string, unknown>) {
       ? Math.min(Math.floor(args.assetLimit), 100)
       : 20;
   const analyzeMissing = args.analyzeMissing === true;
-  const requestedAssetIds = Array.isArray(args.assetIds)
-    ? new Set(args.assetIds.filter((value): value is string => typeof value === 'string'))
-    : null;
-  const candidateAssets = getAssetCatalogSnapshot()
-    .assets.filter((asset) => asset.kind === 'video' && asset.hasVideoStream)
-    .filter((asset) => (requestedAssetIds ? requestedAssetIds.has(asset.id) : true))
-    .filter((asset) => (args.unusedOnly === true ? !asset.onTimeline : true))
-    .slice(0, assetLimit);
+  const candidateAssets = getCandidateSourceAssets(args, assetLimit);
   let skippedAssetCount = 0;
+  const skippedAssets: SourceLibrarySkip[] = [];
 
   const allMatches: SourceLibraryMatch[] = [];
 
@@ -1325,9 +1591,15 @@ async function searchSourceLibraryMatches(args: Record<string, unknown>) {
       }
     } catch (error) {
       skippedAssetCount += 1;
+      const reason = error instanceof Error ? error.message : String(error);
+      skippedAssets.push({
+        assetId: asset.id,
+        assetName: asset.name,
+        reason,
+      });
       logger.warn('search_source_library skipped asset', {
         assetId: asset.id,
-        error: error instanceof Error ? error.message : String(error),
+        error: reason,
       });
     }
   }
@@ -1339,8 +1611,135 @@ async function searchSourceLibraryMatches(args: Record<string, unknown>) {
     sections,
     searchedAssetCount: candidateAssets.length,
     skippedAssetCount,
+    skippedAssets,
     count: matches.length,
     matches,
+  };
+}
+
+function getCandidateSourceAssets(args: Record<string, unknown>, assetLimit: number) {
+  const requestedAssetIds = Array.isArray(args.assetIds)
+    ? new Set(args.assetIds.filter((value): value is string => typeof value === 'string'))
+    : null;
+
+  return getAssetCatalogSnapshot()
+    .assets.filter((asset) => asset.kind === 'video' && asset.hasVideoStream)
+    .filter((asset) => (requestedAssetIds ? requestedAssetIds.has(asset.id) : true))
+    .filter((asset) => (args.unusedOnly === true ? !asset.onTimeline : true))
+    .slice(0, assetLimit);
+}
+
+async function searchIndexedSourceLibraryMatches(args: Record<string, unknown>) {
+  const query = typeof args.query === 'string' ? args.query.trim() : '';
+  if (!query) {
+    throw new Error('query is required');
+  }
+
+  const rawSections = Array.isArray(args.sections)
+    ? args.sections.filter(
+        (value): value is SourceAnalysisSection =>
+          value === 'moments' ||
+          value === 'chapters' ||
+          value === 'highlights' ||
+          value === 'speakerTurns',
+      )
+    : [];
+  const sections: SourceAnalysisSection[] =
+    rawSections.length > 0 ? rawSections : ['moments', 'chapters', 'highlights', 'speakerTurns'];
+  const limit =
+    typeof args.limit === 'number' && Number.isFinite(args.limit) && args.limit > 0
+      ? Math.min(Math.floor(args.limit), 50)
+      : 8;
+  const assetLimit =
+    typeof args.assetLimit === 'number' && Number.isFinite(args.assetLimit) && args.assetLimit > 0
+      ? Math.min(Math.floor(args.assetLimit), 100)
+      : 20;
+  const analyzeMissing = args.analyzeMissing === true;
+  const useSemantic = args.useSemantic === true;
+  const candidateAssets = getCandidateSourceAssets(args, assetLimit);
+  const skippedAssets: SourceLibrarySkip[] = [];
+
+  for (const asset of candidateAssets) {
+    try {
+      const report = await generateSourceAnalysisReportPayloadFromArgsWithOptions(
+        {
+          ...args,
+          assetId: asset.id,
+          refresh: analyzeMissing ? args.refresh : false,
+        } as Record<string, unknown>,
+        { allowAnalyze: analyzeMissing },
+      );
+      await indexSourceReportChunks(report);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      skippedAssets.push({ assetId: asset.id, assetName: asset.name, reason });
+      logger.warn('search_indexed_source_library skipped asset', {
+        assetId: asset.id,
+        error: reason,
+      });
+    }
+  }
+
+  const searchResponse = await invoke<IndexedSourceReportSearchResponse>(
+    'search_source_report_chunks',
+    {
+      query: {
+        query,
+        assetIds: candidateAssets
+          .map((asset) => asset.id)
+          .filter((assetId) => !skippedAssets.some((skipped) => skipped.assetId === assetId)),
+        sections,
+        limit: Math.min(limit * 5, 100),
+        useSemantic,
+      },
+    },
+  );
+
+  const catalogById = new Map(getAssetCatalogSnapshot().assets.map((asset) => [asset.id, asset]));
+  const rawMatches: SourceLibraryMatch[] = searchResponse.results
+    .map((result) => {
+      const asset = catalogById.get(result.assetId);
+      return {
+        assetId: result.assetId,
+        assetName: asset?.name ?? result.assetId,
+        onTimeline: asset?.onTimeline ?? false,
+        timelineClipCount: asset?.timelineClipCount ?? 0,
+        sectionType: result.sectionType,
+        index: result.sectionIndex,
+        startSec: result.startSec,
+        endSec: result.endSec,
+        score: result.score,
+        whyMatched: ['indexed report chunk match'],
+        preview:
+          typeof result.metadata.preview === 'string' && result.metadata.preview.length > 0
+            ? result.metadata.preview
+            : result.searchText,
+        keyframePath:
+          typeof result.metadata.keyframePath === 'string' ? result.metadata.keyframePath : null,
+        metadata: result.metadata,
+      };
+    })
+    .filter((match) => match.assetId.length > 0);
+
+  const memoryEntries = await loadRetrievalMemoryEntries();
+  const matches = applyRetrievalMemoryBoosts(
+    rerankSourceLibraryMatches(rawMatches, query),
+    memoryEntries,
+  ).slice(0, limit);
+
+  return {
+    query,
+    sections,
+    searchedAssetCount: candidateAssets.length,
+    skippedAssetCount: skippedAssets.length,
+    skippedAssets,
+    totalIndexedMatches: searchResponse.total,
+    memoryEntryCount: memoryEntries.length,
+    count: matches.length,
+    matches,
+    retrievalMode: (useSemantic ? 'indexedChunksHybrid' : 'indexedChunks') as
+      | 'indexedChunks'
+      | 'indexedChunksHybrid',
   };
 }
 
@@ -1529,6 +1928,9 @@ function buildSourceSelectSegments(
       keyframePath: match.keyframePath,
       onTimeline: match.onTimeline,
       timelineClipCount: match.timelineClipCount,
+      rawScore: match.rawScore ?? match.score,
+      rankingNotes: match.rankingNotes ?? [],
+      metadata: match.metadata,
       sourceInSec: clampedRange.sourceInSec,
       sourceOutSec: clampedRange.sourceOutSec,
       durationSec: clampedRange.durationSec,
@@ -1866,6 +2268,7 @@ function buildSourceAnalysisReportPayload({
         durationSec: roundTo(shot.endSec - shot.startSec),
         confidence: roundTo(shot.confidence, 3),
         keyframePath: shot.keyframePath ?? null,
+        keyframeSelectionMethod: shot.keyframeSelectionMethod ?? null,
       })),
     },
     transcript: {
@@ -1937,6 +2340,7 @@ function buildSourceAnalysisReportPayload({
           : null,
       topCameraAngles,
       topMotionDirections,
+      contactSheet: bundle.contactSheet ?? null,
     },
     moments: {
       count: moments.length,
@@ -2088,6 +2492,14 @@ function buildSourceAnalysisMarkdown(
         `- Dominant motion: ${report.visual.topMotionDirections.map((entry) => `${entry.label} (${entry.count})`).join(', ')}`,
       );
     }
+  }
+
+  if (report.visual.contactSheet) {
+    lines.push('', '## Visual Artifacts', '');
+    lines.push(`- Contact sheet: ${report.visual.contactSheet.path}`);
+    lines.push(
+      `- Layout: ${report.visual.contactSheet.frameCount} frames in ${report.visual.contactSheet.columns}x${report.visual.contactSheet.rows} grid`,
+    );
   }
 
   if (report.chapters.count > 0) {
@@ -2835,6 +3247,15 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
           args as Record<string, unknown>,
         );
 
+        try {
+          await indexSourceReportChunks(report);
+        } catch (error) {
+          logger.warn('generate_source_analysis_report could not index report chunks', {
+            assetId: report.assetId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+
         logger.debug('generate_source_analysis_report completed', {
           assetId: report.assetId,
           bundleSource: report.bundleSource,
@@ -2858,12 +3279,142 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
   },
 
   // ---------------------------------------------------------------------------
+  // Import External Diarization
+  // ---------------------------------------------------------------------------
+  {
+    name: 'import_external_diarization',
+    description:
+      'Import external diarization JSON for a source asset and merge speaker IDs into the cached transcript bundle',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {
+        assetId: { type: 'string', description: 'Asset ID of the source video to update' },
+        inputPath: {
+          type: 'string',
+          description: 'Path to the diarization JSON file (absolute or project-relative)',
+        },
+      },
+      required: ['assetId', 'inputPath'],
+    },
+    handler: async (args) => {
+      try {
+        const assetId = args.assetId as string;
+        const inputPath = args.inputPath as string;
+        if (!assetId) {
+          return { success: false, error: 'assetId is required' };
+        }
+        if (!inputPath) {
+          return { success: false, error: 'inputPath is required' };
+        }
+
+        const result = await invoke<{
+          assetId: string;
+          transcriptSegmentCount: number;
+          speakerCount: number;
+          speakerTurnCount: number;
+        }>('import_diarization_json', {
+          assetId,
+          inputPath,
+        });
+
+        logger.debug('import_external_diarization completed', {
+          assetId: result.assetId,
+          speakerCount: result.speakerCount,
+          speakerTurnCount: result.speakerTurnCount,
+        });
+
+        return {
+          success: true,
+          result,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('import_external_diarization failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // Run External Diarization
+  // ---------------------------------------------------------------------------
+  {
+    name: 'run_external_diarization',
+    description:
+      'Run an external diarization executable against normalized source audio, then import the resulting diarization JSON into the cached transcript bundle',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {
+        assetId: { type: 'string', description: 'Asset ID of the source video to update' },
+        executable: {
+          type: 'string',
+          description: 'Executable path for the external diarization runner',
+        },
+        args: {
+          type: 'array',
+          description: 'Runner arguments. Supported placeholders: {audioPath} and {outputPath}',
+          items: { type: 'string' },
+        },
+      },
+      required: ['assetId', 'executable', 'args'],
+    },
+    handler: async (args) => {
+      try {
+        const assetId = args.assetId as string;
+        const executable = args.executable as string;
+        const runnerArgs = Array.isArray(args.args)
+          ? args.args.filter((value): value is string => typeof value === 'string')
+          : [];
+        if (!assetId) {
+          return { success: false, error: 'assetId is required' };
+        }
+        if (!executable) {
+          return { success: false, error: 'executable is required' };
+        }
+        if (runnerArgs.length === 0) {
+          return { success: false, error: 'args is required' };
+        }
+
+        const result = await invoke<{
+          assetId: string;
+          inputAudioPath: string;
+          outputJsonPath: string;
+          transcriptSegmentCount: number;
+          speakerCount: number;
+          speakerTurnCount: number;
+        }>('run_external_diarization', {
+          assetId,
+          executable,
+          args: runnerArgs,
+        });
+
+        logger.debug('run_external_diarization completed', {
+          assetId: result.assetId,
+          speakerCount: result.speakerCount,
+          speakerTurnCount: result.speakerTurnCount,
+        });
+
+        return {
+          success: true,
+          result,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('run_external_diarization failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
   // Search Source Analysis Report
   // ---------------------------------------------------------------------------
   {
     name: 'search_source_analysis_report',
     description:
-      'Search moments, chapters, and highlights within a source analysis report to find the most relevant time ranges for a query',
+      'Search moments, chapters, highlights, and speaker turns within a source analysis report to find the most relevant time ranges for a query',
     category: 'analysis',
     parameters: {
       type: 'object',
@@ -2962,7 +3513,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
   {
     name: 'search_source_library',
     description:
-      'Search moments, chapters, and highlights across multiple video assets to find the best source ranges for a query',
+      'Search moments, chapters, highlights, and speaker turns across multiple video assets to find the best source ranges for a query',
     category: 'analysis',
     parameters: {
       type: 'object',
@@ -2994,6 +3545,10 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
           type: 'boolean',
           description:
             'Generate fresh analysis for assets without cached bundle data (default: false)',
+        },
+        useSemantic: {
+          type: 'boolean',
+          description: 'Use embedding-backed hybrid reranking on top of indexed report chunks',
         },
         includeAnnotation: {
           type: 'boolean',
@@ -3040,12 +3595,83 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
   },
 
   // ---------------------------------------------------------------------------
+  // Search Indexed Source Library
+  // ---------------------------------------------------------------------------
+  {
+    name: 'search_indexed_source_library',
+    description:
+      'Index source report chunks and search them through a backend hybrid lexical retrieval layer for faster library-wide source discovery',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search text to match against indexed source report chunks',
+        },
+        assetIds: {
+          type: 'array',
+          description: 'Optional asset IDs to restrict search scope',
+          items: { type: 'string' },
+        },
+        unusedOnly: {
+          type: 'boolean',
+          description: 'Restrict search to assets not currently used on any timeline',
+        },
+        sections: {
+          type: 'array',
+          description: 'Optional sections to search: moments, chapters, highlights, speakerTurns',
+          items: { type: 'string' },
+        },
+        limit: { type: 'number', description: 'Maximum number of matches to return (default: 8)' },
+        assetLimit: {
+          type: 'number',
+          description: 'Maximum number of candidate assets to inspect (default: 20)',
+        },
+        analyzeMissing: {
+          type: 'boolean',
+          description:
+            'Generate fresh analysis for assets without cached bundle data (default: false)',
+        },
+        useSemantic: {
+          type: 'boolean',
+          description: 'Use embedding-backed hybrid reranking on top of indexed report chunks',
+        },
+        includeAnnotation: {
+          type: 'boolean',
+          description:
+            'Include stored annotation/OCR/object summaries when available (default: true)',
+        },
+      },
+      required: ['query'],
+    },
+    handler: async (args) => {
+      try {
+        const result = await searchIndexedSourceLibraryMatches(args as Record<string, unknown>);
+
+        logger.debug('search_indexed_source_library completed', {
+          query: result.query,
+          sections: result.sections,
+          candidateAssetCount: result.searchedAssetCount,
+          matchCount: result.count,
+        });
+
+        return { success: true, result };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('search_indexed_source_library failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
   // Build Source Selects
   // ---------------------------------------------------------------------------
   {
     name: 'build_source_selects',
     description:
-      'Turn ranked source matches into a timeline-ready selects stringout plan, and optionally apply it to a video track',
+      'Turn ranked source matches, including speaker turns when relevant, into a timeline-ready selects stringout plan, and optionally apply it to a video track',
     category: 'analysis',
     parameters: {
       type: 'object',
@@ -3081,7 +3707,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
         },
         sections: {
           type: 'array',
-          description: 'Optional sections to search: moments, chapters, highlights',
+          description: 'Optional sections to search: moments, chapters, highlights, speakerTurns',
           items: { type: 'string' },
         },
         limit: {
@@ -3105,6 +3731,10 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
           type: 'boolean',
           description:
             'Generate fresh analysis for assets without cached bundle data (default: false)',
+        },
+        useIndexedSearch: {
+          type: 'boolean',
+          description: 'Use indexed report-chunk retrieval instead of direct report scanning',
         },
         includeAnnotation: {
           type: 'boolean',
@@ -3134,10 +3764,16 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
           typeof args.gapSec === 'number' && Number.isFinite(args.gapSec) && args.gapSec >= 0
             ? args.gapSec
             : 0.25;
-        const searchResult = await searchSourceLibraryMatches({
-          ...args,
-          limit: Math.min(requestedSelectCount * 3, 50),
-        } as Record<string, unknown>);
+        const searchResult =
+          args.useIndexedSearch === true
+            ? await searchIndexedSourceLibraryMatches({
+                ...args,
+                limit: Math.min(requestedSelectCount * 3, 50),
+              } as Record<string, unknown>)
+            : await searchSourceLibraryMatches({
+                ...args,
+                limit: Math.min(requestedSelectCount * 3, 50),
+              } as Record<string, unknown>);
         const selects = buildSourceSelectSegments(searchResult.matches, {
           paddingSec,
           gapSec,
@@ -3215,6 +3851,17 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
           createdTrack: boolean;
           insertedClipCount: number;
         } | null = null;
+
+        await saveRetrievalMemoryEntries(
+          searchResult.query,
+          selects.map((select) => ({
+            assetId: select.assetId,
+            sectionType: select.sectionType,
+            index: select.index,
+            sourceInSec: select.sourceInSec,
+            sourceOutSec: select.sourceOutSec,
+          })),
+        );
 
         if (args.apply === true) {
           const { sequence } = resolveSelectsSequence(
@@ -3311,6 +3958,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
             sections: searchResult.sections,
             searchedAssetCount: searchResult.searchedAssetCount,
             skippedAssetCount: searchResult.skippedAssetCount,
+            skippedAssets: searchResult.skippedAssets,
             count: selects.length,
             selects,
             timelinePlan,

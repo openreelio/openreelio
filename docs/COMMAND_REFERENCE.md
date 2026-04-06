@@ -663,10 +663,23 @@ The current source-analysis workflow is layered on top of `analyze_asset` / `get
 Key capabilities now available:
 
 - unified source analysis report with `moments`, `chapters`, `highlights`, and `speakerTurns`
+- generated contact-sheet artifact from shot keyframes
+- smarter representative keyframe selection (`thumbnail` with midpoint fallback)
 - report search for one asset
 - library-wide search across many assets
+- indexed source-report chunk retrieval for faster library-wide lexical search
+- optional embedding-backed semantic reranking on top of indexed source-report chunks
 - selects stringout planning and optional direct apply
 - VAD-backed `speechRegions` and heuristic `speakerTurnId`
+- import-only external diarization merge for true `speakerId` assignment when external JSON is available
+- executable+args based external diarization runner integration (`{audioPath}`, `{outputPath}` placeholders)
+
+Representative report payload additions include:
+
+- `visual.contactSheet.path`
+- `visual.contactSheet.frameCount`
+- `visual.contactSheet.columns`
+- `visual.contactSheet.rows`
 
 Representative command surfaces:
 
@@ -676,6 +689,8 @@ generate_source_analysis_report(assetId)
 search_source_analysis_report(assetId, query)
 search_source_library(query)
 build_source_selects(query)
+import_external_diarization(assetId, inputPath)
+run_external_diarization(assetId, executable, args)
 
 // CLI surfaces
 openreelio-cli analysis report --path ./project --id asset_001

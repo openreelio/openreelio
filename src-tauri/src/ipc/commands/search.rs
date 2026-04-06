@@ -66,6 +66,54 @@ pub struct SearchResponseDto {
     pub processing_time_ms: u64,
 }
 
+/// A single source report chunk to be indexed.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportChunkDto {
+    pub id: String,
+    pub section_type: String,
+    pub section_index: usize,
+    pub start_sec: f64,
+    pub end_sec: f64,
+    pub search_text: String,
+    pub metadata: serde_json::Value,
+}
+
+/// Search query for indexed source report chunks.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportChunkSearchQueryDto {
+    pub query: String,
+    pub asset_ids: Option<Vec<String>>,
+    pub sections: Option<Vec<String>>,
+    pub limit: Option<usize>,
+    pub use_semantic: Option<bool>,
+}
+
+/// Indexed source report chunk search result.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportChunkSearchResultDto {
+    pub chunk_id: String,
+    pub asset_id: String,
+    pub section_type: String,
+    pub section_index: usize,
+    pub start_sec: f64,
+    pub end_sec: f64,
+    pub score: f64,
+    pub search_text: String,
+    pub metadata: serde_json::Value,
+}
+
+/// Response payload for indexed source report chunk search.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportChunkSearchResponseDto {
+    pub results: Vec<ReportChunkSearchResultDto>,
+    pub total: usize,
+    pub processing_time_ms: u64,
+}
+
 // =============================================================================
 // Meilisearch DTOs
 // =============================================================================
@@ -225,6 +273,253 @@ pub async fn search_assets(
         results: result_dtos,
         total,
         processing_time_ms,
+    })
+}
+
+/// Indexes source report chunks for lexical retrieval.
+#[tauri::command]
+#[specta::specta]
+pub async fn index_source_report_chunks(
+    asset_id: String,
+    chunks: Vec<ReportChunkDto>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use crate::core::indexing::{report_chunks::save_report_chunks, IndexDb, ReportChunk};
+
+    let guard = state.project.lock().await;
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let index_db_path = project.path.join("index.db");
+    let index_db = (if index_db_path.exists() {
+        IndexDb::open(&index_db_path)
+    } else {
+        IndexDb::create(&index_db_path)
+    })
+    .map_err(|e| e.to_ipc_error())?;
+
+    let chunks = chunks
+        .into_iter()
+        .map(|chunk| ReportChunk {
+            id: chunk.id,
+            asset_id: asset_id.clone(),
+            section_type: chunk.section_type,
+            section_index: chunk.section_index,
+            start_sec: chunk.start_sec,
+            end_sec: chunk.end_sec,
+            search_text: chunk.search_text,
+            metadata_json: chunk.metadata,
+        })
+        .collect::<Vec<_>>();
+
+    save_report_chunks(&index_db, &asset_id, &chunks).map_err(|e| e.to_ipc_error())
+}
+
+/// Searches indexed source report chunks.
+#[tauri::command]
+#[specta::specta]
+pub async fn search_source_report_chunks(
+    query: ReportChunkSearchQueryDto,
+    state: State<'_, AppState>,
+) -> Result<ReportChunkSearchResponseDto, String> {
+    use crate::core::indexing::{
+        report_chunks::{
+            cosine_similarity, list_report_chunks, load_report_chunk_embeddings,
+            save_report_chunk_embeddings, search_report_chunks,
+        },
+        IndexDb,
+    };
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let guard = state.project.lock().await;
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let index_db_path = project.path.join("index.db");
+    let index_db = (if index_db_path.exists() {
+        IndexDb::open(&index_db_path)
+    } else {
+        IndexDb::create(&index_db_path)
+    })
+    .map_err(|e| e.to_ipc_error())?;
+
+    let lexical_limit =
+        query
+            .limit
+            .unwrap_or(20)
+            .saturating_mul(if query.use_semantic == Some(true) {
+                5
+            } else {
+                1
+            });
+    let lexical_results = search_report_chunks(
+        &index_db,
+        &query.query,
+        query.asset_ids.as_deref(),
+        query.sections.as_deref(),
+        lexical_limit,
+    )
+    .map_err(|e| e.to_ipc_error())?;
+
+    let results = if query.use_semantic == Some(true) {
+        let provider_status = {
+            let gateway = state.ai_gateway.lock().await;
+            gateway.provider_status().await
+        };
+
+        if provider_status.is_configured && provider_status.is_available {
+            let model_key = format!(
+                "{}:{}",
+                provider_status
+                    .provider_type
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                provider_status
+                    .current_model
+                    .as_deref()
+                    .unwrap_or("default")
+            );
+
+            let candidate_chunks = list_report_chunks(
+                &index_db,
+                query.asset_ids.as_deref(),
+                query.sections.as_deref(),
+                lexical_limit.max(50),
+            )
+            .map_err(|e| e.to_ipc_error())?;
+
+            let chunk_ids = candidate_chunks
+                .iter()
+                .map(|chunk| chunk.id.clone())
+                .collect::<Vec<_>>();
+            let existing_embeddings =
+                load_report_chunk_embeddings(&index_db, &model_key, &chunk_ids)
+                    .map_err(|e| e.to_ipc_error())?;
+            let missing_chunks = candidate_chunks
+                .iter()
+                .filter(|chunk| !existing_embeddings.contains_key(&chunk.id))
+                .cloned()
+                .collect::<Vec<_>>();
+
+            if !missing_chunks.is_empty() {
+                let embeddings = {
+                    let gateway = state.ai_gateway.lock().await;
+                    gateway
+                        .embed_texts(
+                            missing_chunks
+                                .iter()
+                                .map(|chunk| chunk.search_text.clone())
+                                .collect(),
+                        )
+                        .await
+                }
+                .map_err(|e| e.to_ipc_error())?;
+
+                let pairs = missing_chunks
+                    .iter()
+                    .map(|chunk| chunk.id.clone())
+                    .zip(embeddings.into_iter())
+                    .collect::<Vec<_>>();
+                save_report_chunk_embeddings(&index_db, &model_key, &pairs)
+                    .map_err(|e| e.to_ipc_error())?;
+            }
+
+            let all_embeddings = load_report_chunk_embeddings(&index_db, &model_key, &chunk_ids)
+                .map_err(|e| e.to_ipc_error())?;
+            let query_embedding = {
+                let gateway = state.ai_gateway.lock().await;
+                gateway.embed_texts(vec![query.query.clone()]).await
+            }
+            .map_err(|e| e.to_ipc_error())?
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+
+            let lexical_scores = lexical_results
+                .iter()
+                .map(|result| (result.chunk_id.clone(), result.score))
+                .collect::<std::collections::HashMap<_, _>>();
+
+            let mut reranked = candidate_chunks
+                .into_iter()
+                .filter_map(|chunk| {
+                    let semantic_score = all_embeddings
+                        .get(&chunk.id)
+                        .map(|embedding| cosine_similarity(&query_embedding, embedding))
+                        .unwrap_or(0.0);
+                    let lexical_score = lexical_scores.get(&chunk.id).copied().unwrap_or(0.0);
+                    let combined_score = if lexical_score > 0.0 {
+                        (lexical_score * 0.45) + (semantic_score * 0.55)
+                    } else {
+                        semantic_score * 0.85
+                    };
+
+                    if combined_score <= 0.0 {
+                        return None;
+                    }
+
+                    Some(ReportChunkSearchResultDto {
+                        chunk_id: chunk.id,
+                        asset_id: chunk.asset_id,
+                        section_type: chunk.section_type,
+                        section_index: chunk.section_index,
+                        start_sec: chunk.start_sec,
+                        end_sec: chunk.end_sec,
+                        score: combined_score,
+                        search_text: chunk.search_text,
+                        metadata: chunk.metadata_json,
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            reranked.sort_by(|left, right| {
+                right
+                    .score
+                    .partial_cmp(&left.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            reranked.truncate(query.limit.unwrap_or(20));
+            reranked
+        } else {
+            lexical_results
+                .into_iter()
+                .map(|result| ReportChunkSearchResultDto {
+                    chunk_id: result.chunk_id,
+                    asset_id: result.asset_id,
+                    section_type: result.section_type,
+                    section_index: result.section_index,
+                    start_sec: result.start_sec,
+                    end_sec: result.end_sec,
+                    score: result.score,
+                    search_text: result.search_text,
+                    metadata: result.metadata_json,
+                })
+                .collect::<Vec<_>>()
+        }
+    } else {
+        lexical_results
+            .into_iter()
+            .map(|result| ReportChunkSearchResultDto {
+                chunk_id: result.chunk_id,
+                asset_id: result.asset_id,
+                section_type: result.section_type,
+                section_index: result.section_index,
+                start_sec: result.start_sec,
+                end_sec: result.end_sec,
+                score: result.score,
+                search_text: result.search_text,
+                metadata: result.metadata_json,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    Ok(ReportChunkSearchResponseDto {
+        total: results.len(),
+        processing_time_ms: start.elapsed().as_millis() as u64,
+        results,
     })
 }
 

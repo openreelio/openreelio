@@ -1258,6 +1258,8 @@ mod tauri_app {
                 $crate::ipc::search_content,
                 $crate::ipc::index_asset_for_search,
                 $crate::ipc::index_transcripts_for_search,
+                $crate::ipc::index_source_report_chunks,
+                $crate::ipc::search_source_report_chunks,
                 $crate::ipc::remove_asset_from_search,
                 // Annotation commands
                 $crate::ipc::get_annotation,
@@ -1272,6 +1274,8 @@ mod tauri_app {
                 // Analysis pipeline commands (ADR-048)
                 $crate::ipc::analyze_video_full,
                 $crate::ipc::get_analysis_bundle,
+                $crate::ipc::import_diarization_json,
+                $crate::ipc::run_external_diarization,
                 // ESD commands (ADR-049)
                 $crate::ipc::generate_esd,
                 $crate::ipc::get_esd,
@@ -1689,6 +1693,8 @@ mod tauri_app {
             ipc::search_content,
             ipc::index_asset_for_search,
             ipc::index_transcripts_for_search,
+            ipc::index_source_report_chunks,
+            ipc::search_source_report_chunks,
             ipc::remove_asset_from_search,
             // Shot Detection
             ipc::detect_shots,
@@ -1708,6 +1714,8 @@ mod tauri_app {
             // Analysis pipeline commands (ADR-048)
             ipc::analyze_video_full,
             ipc::get_analysis_bundle,
+            ipc::import_diarization_json,
+            ipc::run_external_diarization,
             // ESD commands (ADR-049)
             ipc::generate_esd,
             ipc::get_esd,
