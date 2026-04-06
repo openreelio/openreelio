@@ -32,7 +32,9 @@ impl IndexDb {
         let conn = Connection::open(path)
             .map_err(|e| CoreError::Internal(format!("Failed to open index database: {}", e)))?;
 
-        Ok(Self { conn })
+        let db = Self { conn };
+        db.init_schema()?;
+        Ok(db)
     }
 
     /// Creates an in-memory database (for testing)
@@ -152,6 +154,20 @@ impl IndexDb {
                 [asset_id, asset_id],
             )
             .map_err(|e| CoreError::Internal(format!("Failed to delete embeddings: {}", e)))?;
+
+        // Delete report chunk embeddings before removing the chunks they reference.
+        self.conn
+            .execute(
+                r#"
+                DELETE FROM embeddings
+                WHERE ref_type = 'report_chunk'
+                  AND ref_id IN (SELECT id FROM report_chunks WHERE asset_id = ?)
+                "#,
+                [asset_id],
+            )
+            .map_err(|e| {
+                CoreError::Internal(format!("Failed to delete report chunk embeddings: {}", e))
+            })?;
 
         self.conn
             .execute(

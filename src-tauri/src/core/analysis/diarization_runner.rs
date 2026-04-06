@@ -56,13 +56,25 @@ pub async fn run_external_diarization_runner(
         })?;
     }
 
+    // Remove any stale output from a previous run so we can confirm this run produced it.
+    if output_path.exists() {
+        tokio::fs::remove_file(output_path).await.map_err(|e| {
+            CoreError::Internal(format!(
+                "Failed to remove stale diarization output {}: {}",
+                output_path.display(),
+                e
+            ))
+        })?;
+    }
+
     let expanded_args = expand_runner_args(args, audio_path, output_path);
     let mut cmd = Command::new(executable);
     configure_tokio_command(&mut cmd);
     cmd.args(&expanded_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
     let output = tokio::time::timeout(
         timeout.unwrap_or_else(|| Duration::from_secs(DEFAULT_DIARIZATION_TIMEOUT_SEC)),

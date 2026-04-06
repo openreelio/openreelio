@@ -82,6 +82,12 @@ export function ChatInputArea({
   pendingToolPermissionRequest,
   queueSize,
 }: ChatInputAreaProps) {
+  // Block new prompt submission while the user needs to resolve an approval or
+  // tool-permission decision — sending a fresh prompt in these states would
+  // desync the agent.
+  const hasBlockingDecision =
+    (phase === 'awaiting_approval' && !!pendingPlan) || !!pendingToolPermissionRequest;
+
   return (
     <div className="border-t border-border-subtle px-3 py-2">
       <div className="overflow-hidden rounded-lg border border-border-subtle bg-surface-elevated/60">
@@ -142,7 +148,7 @@ export function ChatInputArea({
               onChange={onInputChange}
               onSubmit={onSubmit}
               placeholder={placeholder}
-              disabled={disabled}
+              disabled={disabled || hasBlockingDecision}
               className="flex-1"
             />
 

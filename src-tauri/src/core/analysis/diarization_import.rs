@@ -79,6 +79,12 @@ pub fn apply_imported_diarization(
 ) -> Vec<TranscriptSegment> {
     let mut updated = transcript.to_vec();
 
+    // Clear any previously imported speaker IDs so a re-import starts from a clean slate.
+    // Without this, unmatched segments keep stale IDs from the previous import.
+    for segment in &mut updated {
+        segment.speaker_id = None;
+    }
+
     for segment in &mut updated {
         let segment_duration = (segment.end_sec - segment.start_sec).max(0.0);
         let best_match = diarization_segments

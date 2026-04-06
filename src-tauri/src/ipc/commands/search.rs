@@ -325,8 +325,8 @@ pub async fn search_source_report_chunks(
 ) -> Result<ReportChunkSearchResponseDto, String> {
     use crate::core::indexing::{
         report_chunks::{
-            cosine_similarity, list_report_chunks, load_report_chunk_embeddings,
-            save_report_chunk_embeddings, search_report_chunks,
+            cosine_similarity, load_report_chunk_embeddings, save_report_chunk_embeddings,
+            search_report_chunks,
         },
         IndexDb,
     };
@@ -346,15 +346,12 @@ pub async fn search_source_report_chunks(
     })
     .map_err(|e| e.to_ipc_error())?;
 
-    let lexical_limit =
-        query
-            .limit
-            .unwrap_or(20)
-            .saturating_mul(if query.use_semantic == Some(true) {
-                5
-            } else {
-                1
-            });
+    let requested_limit = query.limit.unwrap_or(20);
+    let lexical_limit = requested_limit.saturating_mul(if query.use_semantic == Some(true) {
+        5
+    } else {
+        1
+    });
     let lexical_results = search_report_chunks(
         &index_db,
         &query.query,
@@ -383,44 +380,39 @@ pub async fn search_source_report_chunks(
                     .unwrap_or("default")
             );
 
-            let candidate_chunks = list_report_chunks(
-                &index_db,
-                query.asset_ids.as_deref(),
-                query.sections.as_deref(),
-                lexical_limit.max(50),
-            )
-            .map_err(|e| e.to_ipc_error())?;
-
-            let chunk_ids = candidate_chunks
+            // Use the FTS lexical hits as the candidate pool for semantic reranking.
+            // This ensures only query-relevant chunks are reranked rather than an
+            // arbitrary slice of all stored chunks.
+            let chunk_ids = lexical_results
                 .iter()
-                .map(|chunk| chunk.id.clone())
+                .map(|result| result.chunk_id.clone())
                 .collect::<Vec<_>>();
+
             let existing_embeddings =
                 load_report_chunk_embeddings(&index_db, &model_key, &chunk_ids)
                     .map_err(|e| e.to_ipc_error())?;
-            let missing_chunks = candidate_chunks
+            let missing_results = lexical_results
                 .iter()
-                .filter(|chunk| !existing_embeddings.contains_key(&chunk.id))
-                .cloned()
+                .filter(|result| !existing_embeddings.contains_key(&result.chunk_id))
                 .collect::<Vec<_>>();
 
-            if !missing_chunks.is_empty() {
+            if !missing_results.is_empty() {
                 let embeddings = {
                     let gateway = state.ai_gateway.lock().await;
                     gateway
                         .embed_texts(
-                            missing_chunks
+                            missing_results
                                 .iter()
-                                .map(|chunk| chunk.search_text.clone())
+                                .map(|result| result.search_text.clone())
                                 .collect(),
                         )
                         .await
                 }
                 .map_err(|e| e.to_ipc_error())?;
 
-                let pairs = missing_chunks
+                let pairs = missing_results
                     .iter()
-                    .map(|chunk| chunk.id.clone())
+                    .map(|result| result.chunk_id.clone())
                     .zip(embeddings.into_iter())
                     .collect::<Vec<_>>();
                 save_report_chunk_embeddings(&index_db, &model_key, &pairs)
@@ -438,21 +430,15 @@ pub async fn search_source_report_chunks(
             .next()
             .unwrap_or_default();
 
-            let lexical_scores = lexical_results
-                .iter()
-                .map(|result| (result.chunk_id.clone(), result.score))
-                .collect::<std::collections::HashMap<_, _>>();
-
-            let mut reranked = candidate_chunks
+            let mut reranked = lexical_results
                 .into_iter()
-                .filter_map(|chunk| {
+                .filter_map(|result| {
                     let semantic_score = all_embeddings
-                        .get(&chunk.id)
+                        .get(&result.chunk_id)
                         .map(|embedding| cosine_similarity(&query_embedding, embedding))
                         .unwrap_or(0.0);
-                    let lexical_score = lexical_scores.get(&chunk.id).copied().unwrap_or(0.0);
-                    let combined_score = if lexical_score > 0.0 {
-                        (lexical_score * 0.45) + (semantic_score * 0.55)
+                    let combined_score = if result.score > 0.0 {
+                        (result.score * 0.45) + (semantic_score * 0.55)
                     } else {
                         semantic_score * 0.85
                     };
@@ -462,15 +448,15 @@ pub async fn search_source_report_chunks(
                     }
 
                     Some(ReportChunkSearchResultDto {
-                        chunk_id: chunk.id,
-                        asset_id: chunk.asset_id,
-                        section_type: chunk.section_type,
-                        section_index: chunk.section_index,
-                        start_sec: chunk.start_sec,
-                        end_sec: chunk.end_sec,
+                        chunk_id: result.chunk_id,
+                        asset_id: result.asset_id,
+                        section_type: result.section_type,
+                        section_index: result.section_index,
+                        start_sec: result.start_sec,
+                        end_sec: result.end_sec,
                         score: combined_score,
-                        search_text: chunk.search_text,
-                        metadata: chunk.metadata_json,
+                        search_text: result.search_text,
+                        metadata: result.metadata_json,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -481,11 +467,13 @@ pub async fn search_source_report_chunks(
                     .partial_cmp(&left.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            reranked.truncate(query.limit.unwrap_or(20));
+            reranked.truncate(requested_limit);
             reranked
         } else {
+            // No AI provider: return lexical results respecting the requested limit.
             lexical_results
                 .into_iter()
+                .take(requested_limit)
                 .map(|result| ReportChunkSearchResultDto {
                     chunk_id: result.chunk_id,
                     asset_id: result.asset_id,

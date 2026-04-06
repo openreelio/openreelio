@@ -145,7 +145,8 @@ describe('AgentRuntimeChatShell', () => {
 
     expect(abort).toHaveBeenCalledTimes(1);
     expect(executeMessage).not.toHaveBeenCalled();
-    expect(useMessageQueueStore.getState().queue).toHaveLength(0);
+    // Queued prompts must survive a user-initiated stop — they should not be discarded.
+    expect(useMessageQueueStore.getState().queue).toEqual(['queued prompt']);
   });
 
   it('dequeues the next prompt after normal completion', () => {

@@ -38,59 +38,81 @@ pub struct ReportChunkSearchResult {
 }
 
 /// Saves all chunks for an asset, replacing any prior indexed chunks.
+///
+/// Executes inside a single transaction so the index is never left half-refreshed if
+/// any individual INSERT fails.
 pub fn save_report_chunks(db: &IndexDb, asset_id: &str, chunks: &[ReportChunk]) -> CoreResult<()> {
     let conn = db.connection();
-    conn.execute(
-        "DELETE FROM report_chunks_fts WHERE asset_id = ?1",
-        params![asset_id],
-    )
-    .map_err(|e| CoreError::Internal(format!("Failed to clear report chunk FTS rows: {}", e)))?;
-    conn.execute(
-        "DELETE FROM report_chunks WHERE asset_id = ?1",
-        params![asset_id],
-    )
-    .map_err(|e| CoreError::Internal(format!("Failed to clear report chunks: {}", e)))?;
 
-    for chunk in chunks {
-        let metadata_json = serde_json::to_string(&chunk.metadata_json).map_err(|e| {
-            CoreError::Internal(format!("Failed to serialize report chunk metadata: {}", e))
+    conn.execute_batch("BEGIN")
+        .map_err(|e| CoreError::Internal(format!("Failed to begin transaction: {}", e)))?;
+
+    let result: CoreResult<()> = (|| {
+        conn.execute(
+            "DELETE FROM report_chunks_fts WHERE asset_id = ?1",
+            params![asset_id],
+        )
+        .map_err(|e| {
+            CoreError::Internal(format!("Failed to clear report chunk FTS rows: {}", e))
         })?;
-
         conn.execute(
-            r#"
-            INSERT INTO report_chunks
-                (id, asset_id, section_type, section_index, start_sec, end_sec, search_text, metadata_json)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            "#,
-            params![
-                chunk.id,
-                chunk.asset_id,
-                chunk.section_type,
-                chunk.section_index as i64,
-                chunk.start_sec,
-                chunk.end_sec,
-                chunk.search_text,
-                metadata_json,
-            ],
+            "DELETE FROM report_chunks WHERE asset_id = ?1",
+            params![asset_id],
         )
-        .map_err(|e| CoreError::Internal(format!("Failed to save report chunk: {}", e)))?;
+        .map_err(|e| CoreError::Internal(format!("Failed to clear report chunks: {}", e)))?;
 
-        conn.execute(
-            r#"
-            INSERT INTO report_chunks_fts (id, asset_id, section_type, search_text)
-            VALUES (?1, ?2, ?3, ?4)
-            "#,
-            params![
-                chunk.id,
-                chunk.asset_id,
-                chunk.section_type,
-                chunk.search_text
-            ],
-        )
-        .map_err(|e| CoreError::Internal(format!("Failed to index report chunk FTS row: {}", e)))?;
+        for chunk in chunks {
+            let metadata_json = serde_json::to_string(&chunk.metadata_json).map_err(|e| {
+                CoreError::Internal(format!("Failed to serialize report chunk metadata: {}", e))
+            })?;
+
+            conn.execute(
+                r#"
+                INSERT INTO report_chunks
+                    (id, asset_id, section_type, section_index, start_sec, end_sec, search_text, metadata_json)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "#,
+                params![
+                    chunk.id,
+                    chunk.asset_id,
+                    chunk.section_type,
+                    chunk.section_index as i64,
+                    chunk.start_sec,
+                    chunk.end_sec,
+                    chunk.search_text,
+                    metadata_json,
+                ],
+            )
+            .map_err(|e| CoreError::Internal(format!("Failed to save report chunk: {}", e)))?;
+
+            conn.execute(
+                r#"
+                INSERT INTO report_chunks_fts (id, asset_id, section_type, search_text)
+                VALUES (?1, ?2, ?3, ?4)
+                "#,
+                params![
+                    chunk.id,
+                    chunk.asset_id,
+                    chunk.section_type,
+                    chunk.search_text
+                ],
+            )
+            .map_err(|e| {
+                CoreError::Internal(format!("Failed to index report chunk FTS row: {}", e))
+            })?;
+        }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .map_err(|e| CoreError::Internal(format!("Failed to commit transaction: {}", e))),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-
-    Ok(())
 }
 
 /// Searches indexed report chunks using FTS5 lexical retrieval.
@@ -279,32 +301,52 @@ pub fn list_report_chunks(
 }
 
 /// Saves report chunk embeddings for a given model key.
+///
+/// Executes inside a single transaction so partial embedding batches are never persisted.
 pub fn save_report_chunk_embeddings(
     db: &IndexDb,
     model: &str,
     embeddings: &[(String, Vec<f32>)],
 ) -> CoreResult<()> {
-    let conn = db.connection();
-
-    for (chunk_id, vector) in embeddings {
-        conn.execute(
-            r#"
-            INSERT OR REPLACE INTO embeddings (id, ref_type, ref_id, model, vector)
-            VALUES (?1, 'report_chunk', ?2, ?3, ?4)
-            "#,
-            params![
-                format!("report_chunk:{}:{}", model, chunk_id),
-                chunk_id,
-                model,
-                encode_embedding(vector),
-            ],
-        )
-        .map_err(|e| {
-            CoreError::Internal(format!("Failed to save report chunk embedding: {}", e))
-        })?;
+    if embeddings.is_empty() {
+        return Ok(());
     }
 
-    Ok(())
+    let conn = db.connection();
+
+    conn.execute_batch("BEGIN")
+        .map_err(|e| CoreError::Internal(format!("Failed to begin transaction: {}", e)))?;
+
+    let result: CoreResult<()> = (|| {
+        for (chunk_id, vector) in embeddings {
+            conn.execute(
+                r#"
+                INSERT OR REPLACE INTO embeddings (id, ref_type, ref_id, model, vector)
+                VALUES (?1, 'report_chunk', ?2, ?3, ?4)
+                "#,
+                params![
+                    format!("report_chunk:{}:{}", model, chunk_id),
+                    chunk_id,
+                    model,
+                    encode_embedding(vector),
+                ],
+            )
+            .map_err(|e| {
+                CoreError::Internal(format!("Failed to save report chunk embedding: {}", e))
+            })?;
+        }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .map_err(|e| CoreError::Internal(format!("Failed to commit transaction: {}", e))),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 /// Loads report chunk embeddings by chunk id for a given model key.
@@ -353,7 +395,7 @@ pub fn load_report_chunk_embeddings(
 }
 
 fn encode_embedding(vector: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vector.len() * std::mem::size_of::<f32>());
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(vector));
     for value in vector {
         bytes.extend_from_slice(&value.to_le_bytes());
     }

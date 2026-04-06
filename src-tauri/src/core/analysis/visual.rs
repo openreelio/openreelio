@@ -221,15 +221,17 @@ impl VisualAnalyzer {
             return Ok(None);
         }
 
-        if is_nonempty_file(output_path) {
-            let frame_count = keyframes.len().min(CONTACT_SHEET_MAX_FRAMES);
-            let (columns, rows) = contact_sheet_layout(frame_count);
-            return Ok(Some(ContactSheetArtifact {
-                path: output_path.to_string_lossy().to_string(),
-                frame_count,
-                columns,
-                rows,
-            }));
+        // No fast-path cache: the keyframe set may have changed since the file was written
+        // (e.g. re-analysis with different shots). Always regenerate to keep the JPEG in
+        // sync with the current keyframe layout.
+        if output_path.exists() {
+            tokio::fs::remove_file(output_path).await.map_err(|e| {
+                CoreError::Internal(format!(
+                    "Failed to remove stale contact sheet {}: {}",
+                    output_path.display(),
+                    e
+                ))
+            })?;
         }
 
         let frame_count = keyframes.len().min(CONTACT_SHEET_MAX_FRAMES);

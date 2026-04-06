@@ -545,7 +545,11 @@ export function AgenticSidebarContent({
   const handleComplete = useCallback(
     (result: AgentRunResult) => {
       logger.info('Agentic session completed', { result });
-      if (activeDelegationRecord && activeDelegationRecord.status !== 'completed') {
+      if (
+        activeDelegationRecord &&
+        (activeDelegationRecord.status === 'requested' ||
+          activeDelegationRecord.status === 'running')
+      ) {
         const resultPayload = buildDelegationResultPayload(result, activeConversationMessages);
         void updateDelegationRecord({
           id: activeDelegationRecord.id,
@@ -568,7 +572,11 @@ export function AgenticSidebarContent({
   const handleError = useCallback(
     (error: Error) => {
       logger.error('Agentic session error', { error: error.message });
-      if (activeDelegationRecord && activeDelegationRecord.status !== 'failed') {
+      if (
+        activeDelegationRecord &&
+        (activeDelegationRecord.status === 'requested' ||
+          activeDelegationRecord.status === 'running')
+      ) {
         void updateDelegationRecord({
           id: activeDelegationRecord.id,
           status: 'failed',
@@ -601,7 +609,7 @@ export function AgenticSidebarContent({
 
   const handleSubmit = useCallback(
     (input: string) => {
-      logger.info('User submitted input', { input: input.substring(0, 50) });
+      logger.info('User submitted input', { inputLength: input.length });
       if (activeDelegationRecord && activeDelegationRecord.status === 'requested') {
         void updateDelegationRecord({
           id: activeDelegationRecord.id,
