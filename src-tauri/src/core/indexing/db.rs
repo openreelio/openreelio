@@ -32,7 +32,9 @@ impl IndexDb {
         let conn = Connection::open(path)
             .map_err(|e| CoreError::Internal(format!("Failed to open index database: {}", e)))?;
 
-        Ok(Self { conn })
+        let db = Self { conn };
+        db.init_schema()?;
+        Ok(db)
     }
 
     /// Creates an in-memory database (for testing)
@@ -85,12 +87,35 @@ impl IndexDb {
                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
 
+                -- Source report chunks table: stores indexed report sections for retrieval
+                CREATE TABLE IF NOT EXISTS report_chunks (
+                    id TEXT PRIMARY KEY,
+                    asset_id TEXT NOT NULL,
+                    section_type TEXT NOT NULL,
+                    section_index INTEGER NOT NULL,
+                    start_sec REAL NOT NULL,
+                    end_sec REAL NOT NULL,
+                    search_text TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                -- Full-text search over source report chunks
+                CREATE VIRTUAL TABLE IF NOT EXISTS report_chunks_fts USING fts5(
+                    id UNINDEXED,
+                    asset_id UNINDEXED,
+                    section_type UNINDEXED,
+                    search_text
+                );
+
                 -- Indexes for efficient queries
                 CREATE INDEX IF NOT EXISTS idx_shots_asset ON shots(asset_id);
                 CREATE INDEX IF NOT EXISTS idx_shots_time ON shots(asset_id, start_sec);
                 CREATE INDEX IF NOT EXISTS idx_transcripts_asset ON transcripts(asset_id);
                 CREATE INDEX IF NOT EXISTS idx_transcripts_time ON transcripts(asset_id, start_sec);
                 CREATE INDEX IF NOT EXISTS idx_embeddings_ref ON embeddings(ref_type, ref_id);
+                CREATE INDEX IF NOT EXISTS idx_report_chunks_asset ON report_chunks(asset_id);
+                CREATE INDEX IF NOT EXISTS idx_report_chunks_section ON report_chunks(section_type);
                 "#,
             )
             .map_err(|e| CoreError::Internal(format!("Failed to initialize schema: {}", e)))?;
@@ -130,6 +155,32 @@ impl IndexDb {
             )
             .map_err(|e| CoreError::Internal(format!("Failed to delete embeddings: {}", e)))?;
 
+        // Delete report chunk embeddings before removing the chunks they reference.
+        self.conn
+            .execute(
+                r#"
+                DELETE FROM embeddings
+                WHERE ref_type = 'report_chunk'
+                  AND ref_id IN (SELECT id FROM report_chunks WHERE asset_id = ?)
+                "#,
+                [asset_id],
+            )
+            .map_err(|e| {
+                CoreError::Internal(format!("Failed to delete report chunk embeddings: {}", e))
+            })?;
+
+        self.conn
+            .execute(
+                "DELETE FROM report_chunks_fts WHERE asset_id = ?",
+                [asset_id],
+            )
+            .map_err(|e| {
+                CoreError::Internal(format!("Failed to delete report chunk FTS rows: {}", e))
+            })?;
+        self.conn
+            .execute("DELETE FROM report_chunks WHERE asset_id = ?", [asset_id])
+            .map_err(|e| CoreError::Internal(format!("Failed to delete report chunks: {}", e)))?;
+
         Ok(())
     }
 
@@ -150,10 +201,16 @@ impl IndexDb {
             .query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0))
             .map_err(|e| CoreError::Internal(format!("Failed to get embedding count: {}", e)))?;
 
+        let report_chunk_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM report_chunks", [], |row| row.get(0))
+            .map_err(|e| CoreError::Internal(format!("Failed to get report chunk count: {}", e)))?;
+
         Ok(IndexStats {
             shot_count: shot_count as usize,
             transcript_count: transcript_count as usize,
             embedding_count: embedding_count as usize,
+            report_chunk_count: report_chunk_count as usize,
         })
     }
 }
@@ -168,6 +225,7 @@ pub struct IndexStats {
     pub shot_count: usize,
     pub transcript_count: usize,
     pub embedding_count: usize,
+    pub report_chunk_count: usize,
 }
 
 // =============================================================================

@@ -50,6 +50,9 @@ describe('loadProjectPromptContext', () => {
       knowledge: ['Use warm grade defaults', 'Keep subtitle pacing tight'],
       customInstructions: '# CLAUDE\nProject instruction body',
     });
+    expect(readWorkspaceDocumentFromBackend).toHaveBeenCalledWith('CLAUDE.md', {
+      failureLogLevel: 'debug',
+    });
   });
 
   it('should fall back to AGENTS.md when CLAUDE.md is unavailable', async () => {
@@ -69,6 +72,12 @@ describe('loadProjectPromptContext', () => {
     const result = await loadProjectPromptContext('project-1');
 
     expect(result.customInstructions).toBe('Follow the repo rules.');
+    expect(readWorkspaceDocumentFromBackend).toHaveBeenNthCalledWith(1, 'CLAUDE.md', {
+      failureLogLevel: 'debug',
+    });
+    expect(readWorkspaceDocumentFromBackend).toHaveBeenNthCalledWith(2, 'AGENTS.md', {
+      failureLogLevel: 'debug',
+    });
   });
 
   it('should truncate oversized instruction documents', async () => {

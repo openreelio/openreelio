@@ -5,9 +5,10 @@
  * behavior. Extracted from AgenticChat to keep components under 200 lines.
  */
 
-import { useCallback, useRef, useEffect } from 'react';
+import { useCallback, useMemo, useRef, useEffect } from 'react';
 import type { ConversationMessage } from '@/agents/engine/core/conversation';
 import { ConversationMessageItem } from './ConversationMessageItem';
+import { messageMatchesArtifactFocus, type AgentArtifactFocus } from './agentArtifactFocus';
 
 // =============================================================================
 // Types
@@ -22,6 +23,7 @@ export interface ChatMessageListProps {
   onToolAllow: () => void;
   onToolAllowAlways: () => void;
   onToolDeny: () => void;
+  artifactFocus?: AgentArtifactFocus | null;
   className?: string;
 }
 
@@ -38,18 +40,32 @@ export function ChatMessageList({
   onToolAllow,
   onToolAllowAlways,
   onToolDeny,
+  artifactFocus = null,
   className = '',
 }: ChatMessageListProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isUserScrolledUpRef = useRef(false);
+  const messageItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  const focusedMessageId = useMemo(() => {
+    if (!artifactFocus) {
+      return null;
+    }
+
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (messageMatchesArtifactFocus(message, artifactFocus)) {
+        return message.id;
+      }
+    }
+
+    return null;
+  }, [artifactFocus, messages]);
 
   const scrollToBottom = useCallback(() => {
     if (isUserScrolledUpRef.current) return;
-    if (
-      messagesEndRef.current &&
-      typeof messagesEndRef.current.scrollIntoView === 'function'
-    ) {
+    if (messagesEndRef.current && typeof messagesEndRef.current.scrollIntoView === 'function') {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, []);
@@ -59,33 +75,54 @@ export function ChatMessageList({
     if (!container) return;
     const threshold = 100;
     const isAtBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight <
-      threshold;
+      container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
     isUserScrolledUpRef.current = !isAtBottom;
   }, []);
 
   // Scroll to bottom on new messages
   useEffect(() => {
+    if (artifactFocus) {
+      return;
+    }
     scrollToBottom();
-  }, [messages, scrollToBottom]);
+  }, [artifactFocus, messages, scrollToBottom]);
+
+  useEffect(() => {
+    if (!focusedMessageId) {
+      return;
+    }
+
+    const target = messageItemRefs.current[focusedMessageId];
+    if (target && typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [focusedMessageId]);
 
   return (
     <div
       ref={scrollContainerRef}
       onScroll={handleScroll}
-      className={`flex-1 overflow-y-auto p-4 space-y-4 ${className}`}
+      className={`flex-1 overflow-y-auto px-3 py-3 space-y-3 ${className}`}
     >
       {messages.map((message) => (
-        <ConversationMessageItem
+        <div
           key={message.id}
-          message={message}
-          onApprove={onApprove}
-          onReject={onReject}
-          onRetry={onRetry}
-          onToolAllow={onToolAllow}
-          onToolAllowAlways={onToolAllowAlways}
-          onToolDeny={onToolDeny}
-        />
+          ref={(node) => {
+            messageItemRefs.current[message.id] = node;
+          }}
+          data-testid={`chat-message-wrapper-${message.id}`}
+        >
+          <ConversationMessageItem
+            message={message}
+            highlightArtifacts={message.id === focusedMessageId}
+            onApprove={onApprove}
+            onReject={onReject}
+            onRetry={onRetry}
+            onToolAllow={onToolAllow}
+            onToolAllowAlways={onToolAllowAlways}
+            onToolDeny={onToolDeny}
+          />
+        </div>
       ))}
 
       {/* Error Display */}

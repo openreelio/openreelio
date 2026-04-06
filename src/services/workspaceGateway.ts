@@ -17,6 +17,7 @@ import { parseWorkspaceScanResult, parseWorkspaceTree } from '@/schemas/workspac
 const logger = createLogger('WorkspaceGateway');
 
 const SLOW_IPC_WARNING_THRESHOLD_MS = 750;
+type FailureLogLevel = 'debug' | 'error';
 
 type WorkspaceQueryCommand =
   | 'scan_workspace'
@@ -177,6 +178,7 @@ async function invokeAndValidate<T>(
   command: WorkspaceQueryCommand,
   parser: (input: unknown) => T,
   args?: Record<string, unknown>,
+  options?: { failureLogLevel?: FailureLogLevel },
 ): Promise<T> {
   const startedAt = performance.now();
 
@@ -194,11 +196,18 @@ async function invokeAndValidate<T>(
     return parsed;
   } catch (error) {
     const message = toErrorMessage(error);
-    logger.error('Workspace IPC call failed', {
+    const context = {
       command,
       durationMs: Math.round(performance.now() - startedAt),
       error: message,
-    });
+    };
+
+    if (options?.failureLogLevel === 'debug') {
+      logger.debug('Workspace IPC call failed', context);
+    } else {
+      logger.error('Workspace IPC call failed', context);
+    }
+
     throw error instanceof Error ? error : new Error(message);
   }
 }
@@ -278,11 +287,17 @@ export async function listWorkspaceDocumentsFromBackend(
 
 export async function readWorkspaceDocumentFromBackend(
   relativePath: string,
+  options?: { failureLogLevel?: FailureLogLevel },
 ): Promise<WorkspaceDocument> {
   validateRelativePath(relativePath);
-  return invokeAndValidate('read_workspace_document', parseWorkspaceDocument, {
-    relativePath,
-  });
+  return invokeAndValidate(
+    'read_workspace_document',
+    parseWorkspaceDocument,
+    {
+      relativePath,
+    },
+    options,
+  );
 }
 
 export async function writeWorkspaceDocumentToBackend(

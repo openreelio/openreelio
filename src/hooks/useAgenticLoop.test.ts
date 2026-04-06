@@ -341,6 +341,89 @@ describe('useAgenticLoop', () => {
     vi.restoreAllMocks();
   });
 
+  it('keeps isRunning true until abort cleanup finishes', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+    const onAbort = vi.fn();
+
+    let structuredCallCount = 0;
+    vi.spyOn(llm, 'generateStructured').mockImplementation(async () => {
+      structuredCallCount += 1;
+
+      if (structuredCallCount === 1) {
+        return {
+          understanding: 'The user wants to delete a clip',
+          requirements: ['clipId'],
+          uncertainties: [],
+          approach: 'Plan a single delete step',
+          needsMoreInfo: false,
+        };
+      }
+
+      if (structuredCallCount === 2) {
+        return {
+          goal: 'Delete the target clip',
+          steps: [
+            {
+              id: 'step-1',
+              tool: 'delete_clip',
+              args: { clipId: 'clip-1' },
+              description: 'Delete clip-1 from the timeline',
+              riskLevel: 'medium',
+              estimatedDuration: 50,
+            },
+          ],
+          estimatedTotalDuration: 50,
+          requiresApproval: true,
+          rollbackStrategy: 'Restore the deleted clip',
+        };
+      }
+
+      throw new Error('generateStructured should not continue after abort');
+    });
+
+    const { result } = renderHook(() =>
+      useAgenticLoop({
+        llmClient: llm,
+        toolExecutor: tools,
+        context: {
+          projectId: 'project-1',
+          sequenceId: 'sequence-1',
+        },
+        config: {
+          enableFastPath: false,
+          enableMemory: false,
+          enableTracing: false,
+          requireApprovalForDestructiveActions: false,
+        },
+        onAbort,
+      }),
+    );
+
+    let runPromise!: Promise<unknown>;
+    act(() => {
+      runPromise = result.current.run('Delete clip 1');
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('awaiting_approval');
+    });
+
+    act(() => {
+      result.current.abort();
+    });
+
+    expect(result.current.isRunning).toBe(true);
+
+    await act(async () => {
+      await runPromise;
+    });
+
+    expect(onAbort).toHaveBeenCalledTimes(1);
+    expect(result.current.phase).toBe('aborted');
+    expect(result.current.isRunning).toBe(false);
+  });
+
   it('should replay persisted permissions and correlate interactive audits with the tpao run', async () => {
     const llm = createMockLLMAdapter();
     const tools = createMockToolExecutorWithVideoTools();

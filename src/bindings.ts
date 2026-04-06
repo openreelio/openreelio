@@ -1351,6 +1351,26 @@ async indexTranscriptsForSearch(assetId: string, segments: TranscriptionSegmentD
 }
 },
 /**
+ * Indexes source report chunks for lexical retrieval.
+ */
+async indexSourceReportChunks(assetId: string, chunks: ReportChunkDto[]) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("index_source_report_chunks", { assetId, chunks }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Searches indexed source report chunks.
+ */
+async searchSourceReportChunks(query: ReportChunkSearchQueryDto) : Promise<Result<ReportChunkSearchResponseDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("search_source_report_chunks", { query }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Removes an asset and its transcripts from the search index
  */
 async removeAssetFromSearch(assetId: string) : Promise<Result<null, string>> {
@@ -1482,6 +1502,26 @@ async analyzeVideoFull(assetId: string, options: AnalysisOptions) : Promise<Resu
 async getAnalysisBundle(assetId: string) : Promise<Result<AnalysisBundle | null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_analysis_bundle", { assetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Imports external diarization JSON and merges speaker IDs into the cached transcript bundle.
+ */
+async importDiarizationJson(assetId: string, inputPath: string) : Promise<Result<DiarizationImportSummary, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_diarization_json", { assetId, inputPath }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Runs an external diarization runner and imports the resulting JSON into the cached bundle.
+ */
+async runExternalDiarization(assetId: string, executable: string, args: string[]) : Promise<Result<ExternalDiarizationRunSummary, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("run_external_diarization", { assetId, executable, args }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -2471,6 +2511,10 @@ segments: ContentSegment[] | null;
  * Visual frame analysis results
  */
 frameAnalysis: FrameAnalysis[] | null; 
+/**
+ * Representative-frame contact sheet artifact
+ */
+contactSheet?: ContactSheetArtifact | null; 
 /**
  * Video file metadata
  */
@@ -3550,6 +3594,26 @@ errorCode: ConnectionErrorCode | null;
  */
 errorDetails: string | null }
 /**
+ * A generated contact sheet image composed from representative shot keyframes.
+ */
+export type ContactSheetArtifact = { 
+/**
+ * Absolute path to the generated contact sheet image.
+ */
+path: string; 
+/**
+ * Number of keyframes included in the sheet.
+ */
+frameCount: number; 
+/**
+ * Number of grid columns.
+ */
+columns: number; 
+/**
+ * Number of grid rows.
+ */
+rows: number }
+/**
  * A classified time segment of video content
  */
 export type ContentSegment = { 
@@ -3725,6 +3789,7 @@ regionType: RegionType;
  * Human-readable label (e.g., "um", "silence")
  */
 label: string }
+export type DiarizationImportSummary = { assetId: string; transcriptSegmentCount: number; speakerCount: number; speakerTurnCount: number }
 /**
  * Response for download_generated_video
  */
@@ -3899,6 +3964,7 @@ tempoClassification: TempoClassification }
  */
 export type EstimateGenerationCostResponse = { estimatedCents: number; quality: string; durationSec: number }
 export type ExportSettingsDto = { defaultFormat: string; defaultVideoCodec: string; defaultAudioCodec: string; defaultExportLocation: string | null; openFolderAfterExport: boolean }
+export type ExternalDiarizationRunSummary = { assetId: string; inputAudioPath: string; outputJsonPath: string; transcriptSegmentCount: number; speakerCount: number; speakerTurnCount: number }
 /**
  * FFmpeg availability and version information.
  */
@@ -4418,6 +4484,18 @@ cp2y: number } } |
  * Hold at the current source time until the next keyframe
  */
 "hold"
+/**
+ * How a shot keyframe was selected.
+ */
+export type KeyframeSelectionMethod = 
+/**
+ * Use the temporal midpoint of the shot.
+ */
+"midpoint" | 
+/**
+ * Use FFmpeg thumbnail selection within the interior of the shot.
+ */
+"thumbnail"
 /**
  * A single knowledge entry learned from AI interactions.
  */
@@ -5176,6 +5254,22 @@ sourceEndSec: number;
  */
 targetPositionSec: number }
 /**
+ * A single source report chunk to be indexed.
+ */
+export type ReportChunkDto = { id: string; sectionType: string; sectionIndex: number; startSec: number; endSec: number; searchText: string; metadata: JsonValue }
+/**
+ * Search query for indexed source report chunks.
+ */
+export type ReportChunkSearchQueryDto = { query: string; assetIds: string[] | null; sections: string[] | null; limit: number | null; useSemantic: boolean | null }
+/**
+ * Response payload for indexed source report chunk search.
+ */
+export type ReportChunkSearchResponseDto = { results: ReportChunkSearchResultDto[]; total: number; processingTimeMs: number }
+/**
+ * Indexed source report chunk search result.
+ */
+export type ReportChunkSearchResultDto = { chunkId: string; assetId: string; sectionType: string; sectionIndex: number; startSec: number; endSec: number; score: number; searchText: string; metadata: JsonValue }
+/**
  * External requirement for an EditScript (e.g., asset to fetch).
  */
 export type RequirementDto = { 
@@ -5642,7 +5736,11 @@ confidence: number;
 /**
  * Optional keyframe thumbnail path
  */
-keyframePath?: string | null }
+keyframePath?: string | null; 
+/**
+ * How the keyframe was selected
+ */
+keyframeSelectionMethod?: KeyframeSelectionMethod | null }
 /**
  * A detected region of silence in the audio track
  */

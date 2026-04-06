@@ -46,9 +46,12 @@ const QUERY_ACTIONS = `## Query Actions (meta-tool: query)
 - get_analysis_cost_estimate(assetId) → cost estimate for cloud analysis
 - get_analysis_providers → available analysis backends
 - analyze_reference_video(assetId) → extract edit/style signals from a reference video
-- generate_source_analysis_report(assetId) → build a unified source-footage report (JSON + Markdown) with moments, chapters, and candidate highlights
+- generate_source_analysis_report(assetId) → build a unified source-footage report (JSON + Markdown) with moments, chapters, candidate highlights, speaker turns, and visual artifacts like contact sheets
+- import_external_diarization(assetId, inputPath) → import external diarization JSON and merge true speaker IDs into the cached transcript bundle
+- run_external_diarization(assetId, executable, args) → run an external diarization tool against normalized source audio and import the resulting JSON into the cached transcript bundle
 - search_source_analysis_report(assetId, query) → search report moments/chapters/highlights/speaker turns and return ranked source ranges
 - search_source_library(query) → search report moments/chapters/highlights/speaker turns across multiple source assets and return ranked ranges
+- search_indexed_source_library(query) → index report chunks and search them through backend lexical or hybrid semantic retrieval across multiple source assets
 - build_source_selects(query) → turn ranked source matches (including speaker turns when relevant) into a timeline-ready selects stringout plan, optionally applying it to a selects track
 - generate_style_document(assetId) → build/reuse an editing style document (ESD)
 - compare_edit_structure(sequenceId?, esdId) → compare current cut structure to a reference style`;

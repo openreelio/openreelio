@@ -5,13 +5,15 @@
  * Supports creating, switching, and deleting sessions.
  */
 
-import { useCallback } from 'react';
+import { useCallback, useEffect } from 'react';
 import { Plus, Trash2, Archive, MessageSquare } from 'lucide-react';
 import { getAgentDisplayName } from '@/agents/engine/core/agentCatalog';
+import type { DelegationRecord } from '@/agents/engine/core/agentSession';
 import {
   summarizeAgentSessionPersistenceView,
   useAgentSessionStore,
 } from '@/stores/agentSessionStore';
+import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
 import { useConversationStore } from '@/stores/conversationStore';
 
 // =============================================================================
@@ -19,7 +21,8 @@ import { useConversationStore } from '@/stores/conversationStore';
 // =============================================================================
 
 interface SessionListProps {
-  onNewSession?: () => void;
+  onNewSession?: (agentProfileId?: string) => void;
+  onSwitchSession?: (sessionId: string) => void;
   className?: string;
 }
 
@@ -40,11 +43,61 @@ function formatRelativeTime(timestamp: number): string {
   return 'just now';
 }
 
+function formatDelegationStatus(status: DelegationRecord['status']): string {
+  switch (status) {
+    case 'requested':
+      return 'Requested';
+    case 'running':
+      return 'Running';
+    case 'completed':
+      return 'Completed';
+    case 'failed':
+      return 'Failed';
+    case 'cancelled':
+      return 'Cancelled';
+    default:
+      return status;
+  }
+}
+
+function summarizeDelegationView(
+  records: readonly DelegationRecord[],
+  sessionId: string,
+): { modeLabel: string; statusLabel: string } | null {
+  const childRecord = records.find((record) => record.childSessionId === sessionId);
+  if (childRecord) {
+    return {
+      modeLabel: 'Child',
+      statusLabel: formatDelegationStatus(childRecord.status),
+    };
+  }
+
+  const delegatedChildren = records.filter((record) => record.parentSessionId === sessionId);
+  if (delegatedChildren.length === 0) {
+    return null;
+  }
+
+  const activeCount = delegatedChildren.filter(
+    (record) => record.status === 'requested' || record.status === 'running',
+  ).length;
+  const failedCount = delegatedChildren.filter((record) => record.status === 'failed').length;
+
+  return {
+    modeLabel: `${delegatedChildren.length} delegated`,
+    statusLabel:
+      activeCount > 0
+        ? `${activeCount} active`
+        : failedCount > 0
+          ? `${failedCount} failed`
+          : 'Completed',
+  };
+}
+
 // =============================================================================
 // Component
 // =============================================================================
 
-export function SessionList({ onNewSession, className = '' }: SessionListProps) {
+export function SessionList({ onNewSession, onSwitchSession, className = '' }: SessionListProps) {
   const sessions = useConversationStore((s) => s.sessions);
   const activeSessionId = useConversationStore((s) => s.activeSessionId);
   const persistenceIssuesBySessionId = useAgentSessionStore((s) => s.persistenceIssuesBySessionId);
@@ -54,14 +107,33 @@ export function SessionList({ onNewSession, className = '' }: SessionListProps) 
   const switchSession = useConversationStore((s) => s.switchSession);
   const deleteSession = useConversationStore((s) => s.deleteSession);
   const archiveSession = useConversationStore((s) => s.archiveSession);
+  const delegationRecordsBySessionId = useAgentDelegationStore((s) => s.recordsBySessionId);
+  const delegationLoadingBySessionId = useAgentDelegationStore((s) => s.isLoadingBySessionId);
+  const loadDelegations = useAgentDelegationStore((s) => s.loadDelegations);
+
+  useEffect(() => {
+    sessions.forEach((session) => {
+      const hasLoadedRecordSet = Object.prototype.hasOwnProperty.call(
+        delegationRecordsBySessionId,
+        session.id,
+      );
+      if (!hasLoadedRecordSet && !delegationLoadingBySessionId[session.id]) {
+        void loadDelegations(session.id).catch(() => {});
+      }
+    });
+  }, [delegationLoadingBySessionId, delegationRecordsBySessionId, loadDelegations, sessions]);
 
   const handleSwitch = useCallback(
     (sessionId: string) => {
       if (sessionId !== activeSessionId) {
+        if (onSwitchSession) {
+          onSwitchSession(sessionId);
+          return;
+        }
         void switchSession(sessionId);
       }
     },
-    [activeSessionId, switchSession],
+    [activeSessionId, onSwitchSession, switchSession],
   );
 
   const handleDelete = useCallback(
@@ -88,7 +160,7 @@ export function SessionList({ onNewSession, className = '' }: SessionListProps) 
       <div className="flex items-center justify-between px-3 py-2 border-b border-border-subtle">
         <span className="text-xs font-medium text-text-secondary">Sessions</span>
         <button
-          onClick={onNewSession}
+          onClick={() => onNewSession?.()}
           className="p-1 rounded hover:bg-surface-active transition-colors"
           aria-label="New session"
           title="New session"
@@ -108,6 +180,10 @@ export function SessionList({ onNewSession, className = '' }: SessionListProps) 
         ) : (
           sessions.map((session) => {
             const isActive = session.id === activeSessionId;
+            const delegationView = summarizeDelegationView(
+              delegationRecordsBySessionId[session.id] ?? [],
+              session.id,
+            );
             const persistence = summarizeAgentSessionPersistenceView(
               persistenceIssuesBySessionId[session.id],
               persistenceLatchesBySessionId[session.id],
@@ -174,6 +250,22 @@ export function SessionList({ onNewSession, className = '' }: SessionListProps) 
                         <span className="text-[10px] text-text-tertiary">
                           {session.messageCount} msgs
                         </span>
+                      )}
+                      {delegationView && (
+                        <>
+                          <span
+                            data-testid={`session-delegation-mode-${session.id}`}
+                            className="rounded-full border border-border-subtle bg-surface-elevated px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-[0.08em] text-text-tertiary"
+                          >
+                            {delegationView.modeLabel}
+                          </span>
+                          <span
+                            data-testid={`session-delegation-status-${session.id}`}
+                            className="rounded-full border border-border-subtle bg-surface-elevated px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-[0.08em] text-text-tertiary"
+                          >
+                            {delegationView.statusLabel}
+                          </span>
+                        </>
                       )}
                     </div>
                   </div>

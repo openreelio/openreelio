@@ -72,12 +72,16 @@ pub fn infer_speaker_turns(
             None => true,
             Some(previous) => {
                 let gap_sec = (segment.start_sec - previous.end_sec).max(0.0);
+                let speaker_changed = previous.speaker_id.is_some()
+                    && segment.speaker_id.is_some()
+                    && previous.speaker_id != segment.speaker_id;
                 let speech_region_changed = previous_speech_region_index.is_some()
                     && current_speech_region_index.is_some()
                     && previous_speech_region_index != current_speech_region_index
                     && gap_sec > TURN_SPEECH_REGION_GAP_SEC;
 
-                gap_sec > TURN_HARD_GAP_SEC
+                speaker_changed
+                    || gap_sec > TURN_HARD_GAP_SEC
                     || speech_region_changed
                     || (gap_sec > TURN_PUNCTUATION_GAP_SEC && ends_sentence(&previous.text))
             }
@@ -135,6 +139,19 @@ mod tests {
         let speech_regions = vec![SpeechRegion::new(0.0, 0.9), SpeechRegion::new(1.1, 2.0)];
 
         let turns = infer_speaker_turns(&segments, &speech_regions);
+
+        assert_eq!(turns[0].speaker_turn_id.as_deref(), Some("turn_001"));
+        assert_eq!(turns[1].speaker_turn_id.as_deref(), Some("turn_002"));
+    }
+
+    #[test]
+    fn should_split_turns_when_explicit_speaker_id_changes() {
+        let segments = vec![
+            TranscriptSegment::new(0.0, 1.0, "Hello", 0.9).with_speaker("speaker_a"),
+            TranscriptSegment::new(1.05, 2.0, "Reply", 0.9).with_speaker("speaker_b"),
+        ];
+
+        let turns = infer_speaker_turns(&segments, &[]);
 
         assert_eq!(turns[0].speaker_turn_id.as_deref(), Some("turn_001"));
         assert_eq!(turns[1].speaker_turn_id.as_deref(), Some("turn_002"));

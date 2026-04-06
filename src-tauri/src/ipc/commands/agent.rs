@@ -629,7 +629,8 @@ fn rollback_steps(
 
 /// Global agent memory database instance.
 /// Initialized when the first memory command is called.
-static MEMORY_DB: OnceLock<Result<Mutex<AgentMemoryDb>, String>> = OnceLock::new();
+static MEMORY_DB: OnceLock<Mutex<AgentMemoryDb>> = OnceLock::new();
+static MEMORY_DB_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Returns a reference to the lazily-initialized agent memory database.
 ///
@@ -637,23 +638,30 @@ static MEMORY_DB: OnceLock<Result<Mutex<AgentMemoryDb>, String>> = OnceLock::new
 /// platform-specific application data directory. Subsequent calls return the
 /// same instance without re-opening the file.
 fn get_or_init_memory_db(app: &tauri::AppHandle) -> Result<&'static Mutex<AgentMemoryDb>, String> {
-    let result = MEMORY_DB.get_or_init(|| {
-        let init = || -> Result<Mutex<AgentMemoryDb>, String> {
-            let app_data = crate::core::ai::get_app_data_dir(app)?;
-            std::fs::create_dir_all(&app_data)
-                .map_err(|e| format!("Failed to create app data dir: {e}"))?;
-            let db_path = app_data.join("agent_memory.db");
-            let db = AgentMemoryDb::create(&db_path)
-                .map_err(|e| format!("Failed to open agent memory database: {e}"))?;
-            Ok(Mutex::new(db))
-        };
-        init()
-    });
-
-    match result {
-        Ok(mutex) => Ok(mutex),
-        Err(e) => Err(e.clone()),
+    if let Some(db) = MEMORY_DB.get() {
+        return Ok(db);
     }
+
+    let _guard = MEMORY_DB_INIT_LOCK
+        .lock()
+        .map_err(|_| "Failed to lock agent memory database initializer".to_string())?;
+
+    if let Some(db) = MEMORY_DB.get() {
+        return Ok(db);
+    }
+
+    let app_data = crate::core::ai::get_app_data_dir(app)?;
+    std::fs::create_dir_all(&app_data)
+        .map_err(|e| format!("Failed to create app data dir: {e}"))?;
+    let db_path = app_data.join("agent_memory.db");
+    let db = AgentMemoryDb::create(&db_path)
+        .map_err(|e| format!("Failed to open agent memory database: {e}"))?;
+
+    let _ = MEMORY_DB.set(Mutex::new(db));
+
+    MEMORY_DB
+        .get()
+        .ok_or_else(|| "Failed to initialize agent memory database".to_string())
 }
 
 /// Save (upsert) an agent memory entry.

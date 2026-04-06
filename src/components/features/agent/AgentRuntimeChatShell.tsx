@@ -10,18 +10,34 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from 'react';
+import type { Plan } from '@/agents/engine';
+import type { AgentDefinition } from '@/agents/engine/core/agentDefinitions';
 import { useConversationStore } from '@/stores/conversationStore';
 import { useMessageQueueStore } from '@/stores/messageQueueStore';
 import { useProjectStore } from '@/stores';
+import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
+import {
+  findPanelZone,
+  useWorkspaceLayoutStore,
+  type DockZoneId,
+  type PanelId,
+} from '@/stores/workspaceLayoutStore';
 import { ChatMessageList, type ChatMessageListProps } from './ChatMessageList';
 import { ChatInputArea } from './ChatInputArea';
+import { AgentArtifactFocusBanner } from './AgentArtifactFocusBanner';
+import { AgentArtifactDetailPanel } from './AgentArtifactDetailPanel';
 import { AgentSessionPersistenceBanner } from './AgentSessionPersistenceBanner';
+import { AgentSessionArtifactSummary } from './AgentSessionArtifactSummary';
+import type { AgentRuntimePermissionRequest, AgentRuntimeSummary } from './AgentComposerTray';
+import { isSameArtifactFocus, type AgentArtifactFocus } from './agentArtifactFocus';
 
 const EMPTY_MESSAGES: readonly never[] = [];
-const FORCE_STOP_WINDOW_MS = 1500;
+const AGENT_REVIEW_PANEL_ID: PanelId = 'agent-review';
+const DEFAULT_AGENT_REVIEW_ZONE: DockZoneId = 'bottom';
 
 export interface AgentRuntimeChatHandle {
   abort: () => void;
@@ -30,12 +46,7 @@ export interface AgentRuntimeChatHandle {
 
 type MessageActionProps = Pick<
   ChatMessageListProps,
-  | 'onApprove'
-  | 'onReject'
-  | 'onRetry'
-  | 'onToolAllow'
-  | 'onToolAllowAlways'
-  | 'onToolDeny'
+  'onApprove' | 'onReject' | 'onRetry' | 'onToolAllow' | 'onToolAllowAlways' | 'onToolDeny'
 >;
 
 export interface AgentRuntimeChatShellProps extends MessageActionProps {
@@ -46,179 +57,292 @@ export interface AgentRuntimeChatShellProps extends MessageActionProps {
   isRunning: boolean;
   isEnabled: boolean;
   error: Error | null;
+  runtimeSummary: AgentRuntimeSummary;
+  plan: Plan | null;
+  pendingClarificationQuestion: string | null;
+  pendingToolPermissionRequest: AgentRuntimePermissionRequest | null;
   onSubmit?: (input: string) => void;
   placeholder?: string;
   disabled?: boolean;
+  currentAgentName?: string;
+  currentAgentDescription?: string;
+  isExperimentalSession?: boolean;
+  specialistDefinitions?: Array<Pick<AgentDefinition, 'id' | 'name' | 'description'>>;
+  onStartSession?: (agentProfileId?: string) => void;
   className?: string;
   clearQueueOnProjectSwitch?: boolean;
   clearQueueOnUnmount?: boolean;
   onUnmount?: () => void;
 }
 
-export const AgentRuntimeChatShell = forwardRef<
-  AgentRuntimeChatHandle,
-  AgentRuntimeChatShellProps
->(function AgentRuntimeChatShell(
-  {
-    chatTestId,
-    executeMessage,
-    abort,
-    phase,
-    isRunning,
-    isEnabled,
-    error,
-    onSubmit,
-    placeholder = 'Ask the AI to edit your video...',
-    disabled = false,
-    className = '',
-    clearQueueOnProjectSwitch = false,
-    clearQueueOnUnmount = false,
-    onUnmount,
-    onApprove,
-    onReject,
-    onRetry,
-    onToolAllow,
-    onToolAllowAlways,
-    onToolDeny,
-  },
-  ref,
-) {
-  const [input, setInput] = useState('');
-  const [stopState, setStopState] = useState<'idle' | 'stopping'>('idle');
-  const lastStopClickRef = useRef<number>(0);
-
-  const queueSize = useMessageQueueStore((state) => state.queue.length);
-  const enqueue = useMessageQueueStore((state) => state.enqueue);
-  const dequeue = useMessageQueueStore((state) => state.dequeue);
-  const clearQueue = useMessageQueueStore((state) => state.clear);
-
-  const messages = useConversationStore(
-    (state) => state.activeConversation?.messages ?? EMPTY_MESSAGES,
-  );
-  const addUserMessage = useConversationStore((state) => state.addUserMessage);
-  const addSystemMessage = useConversationStore((state) => state.addSystemMessage);
-  const activeProjectId = useConversationStore((state) => state.activeProjectId);
-  const loadForProject = useConversationStore((state) => state.loadForProject);
-  const currentProjectId = useProjectStore((state) => state.meta?.id ?? null);
-
-  useImperativeHandle(
-    ref,
-    () => ({
+export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRuntimeChatShellProps>(
+  function AgentRuntimeChatShell(
+    {
+      chatTestId,
+      executeMessage,
       abort,
+      phase,
       isRunning,
-    }),
-    [abort, isRunning],
-  );
+      isEnabled,
+      error,
+      runtimeSummary,
+      plan,
+      pendingClarificationQuestion,
+      pendingToolPermissionRequest,
+      onSubmit,
+      placeholder = 'Ask the AI to edit your video...',
+      disabled = false,
+      currentAgentName = 'Editor',
+      currentAgentDescription,
+      isExperimentalSession = false,
+      specialistDefinitions = [],
+      onStartSession,
+      className = '',
+      clearQueueOnProjectSwitch = false,
+      clearQueueOnUnmount = false,
+      onUnmount,
+      onApprove,
+      onReject,
+      onRetry,
+      onToolAllow,
+      onToolAllowAlways,
+      onToolDeny,
+    },
+    ref,
+  ) {
+    const [input, setInput] = useState('');
+    const [stopState, setStopState] = useState<'idle' | 'stopping'>('idle');
 
-  const handleSubmit = useCallback(async () => {
-    if (!input.trim() || disabled || !isEnabled) {
-      return;
-    }
+    const queueSize = useMessageQueueStore((state) => state.queue.length);
+    const enqueue = useMessageQueueStore((state) => state.enqueue);
+    const dequeue = useMessageQueueStore((state) => state.dequeue);
+    const clearQueue = useMessageQueueStore((state) => state.clear);
 
-    const userInput = input.trim();
-    setInput('');
+    const messages = useConversationStore(
+      (state) => state.activeConversation?.messages ?? EMPTY_MESSAGES,
+    );
+    const activeConversationId = useConversationStore(
+      (state) => state.activeConversation?.id ?? null,
+    );
+    const addUserMessage = useConversationStore((state) => state.addUserMessage);
+    const addSystemMessage = useConversationStore((state) => state.addSystemMessage);
+    const activeProjectId = useConversationStore((state) => state.activeProjectId);
+    const loadForProject = useConversationStore((state) => state.loadForProject);
+    const currentProjectId = useProjectStore((state) => state.meta?.id ?? null);
+    const artifactSelection = useAgentArtifactReviewStore((state) => state.selection);
+    const setArtifactSelection = useAgentArtifactReviewStore((state) => state.setSelection);
+    const clearArtifactSelection = useAgentArtifactReviewStore((state) => state.clearSelection);
+    const restorePanel = useWorkspaceLayoutStore((state) => state.restorePanel);
+    const setActivePanel = useWorkspaceLayoutStore((state) => state.setActivePanel);
+    const setZoneCollapsed = useWorkspaceLayoutStore((state) => state.setZoneCollapsed);
 
-    addUserMessage(userInput);
-    onSubmit?.(userInput);
+    const artifactFocus = useMemo(() => {
+      if (!artifactSelection.focus) {
+        return null;
+      }
 
-    if (isRunning) {
-      enqueue(userInput);
-      return;
-    }
+      if (
+        artifactSelection.projectId !== activeProjectId ||
+        artifactSelection.conversationId !== activeConversationId
+      ) {
+        return null;
+      }
 
-    await executeMessage(userInput);
-  }, [
-    addUserMessage,
-    disabled,
-    enqueue,
-    executeMessage,
-    input,
-    isEnabled,
-    isRunning,
-    onSubmit,
-  ]);
+      return artifactSelection.focus;
+    }, [activeConversationId, activeProjectId, artifactSelection]);
 
-  const handleStop = useCallback(() => {
-    const now = Date.now();
+    useImperativeHandle(
+      ref,
+      () => ({
+        abort,
+        isRunning,
+      }),
+      [abort, isRunning],
+    );
 
-    if (stopState === 'stopping' && now - lastStopClickRef.current < FORCE_STOP_WINDOW_MS) {
-      abort();
-      addSystemMessage('Operation force-stopped by user');
-      setStopState('idle');
+    const handleSubmit = useCallback(async () => {
+      if (!input.trim() || disabled || !isEnabled || stopState === 'stopping') {
+        return;
+      }
+
+      const userInput = input.trim();
+      const targetProjectId = currentProjectId ?? 'default';
+
+      if (activeProjectId !== targetProjectId || !activeConversationId) {
+        loadForProject(targetProjectId);
+      }
+
+      setInput('');
+
+      addUserMessage(userInput);
+      onSubmit?.(userInput);
+
+      if (isRunning) {
+        enqueue(userInput);
+        return;
+      }
+
+      await executeMessage(userInput);
+    }, [
+      activeConversationId,
+      activeProjectId,
+      addUserMessage,
+      currentProjectId,
+      disabled,
+      enqueue,
+      executeMessage,
+      input,
+      isEnabled,
+      isRunning,
+      loadForProject,
+      onSubmit,
+      stopState,
+    ]);
+
+    const handleStop = useCallback(() => {
+      if (stopState === 'stopping') {
+        return;
+      }
+
+      setStopState('stopping');
       clearQueue();
-      return;
-    }
+      abort();
+      addSystemMessage(
+        queueSize > 0
+          ? `Operation stopped by user. Cleared ${queueSize} queued message${queueSize === 1 ? '' : 's'}.`
+          : 'Operation stopped by user.',
+      );
+    }, [abort, addSystemMessage, clearQueue, queueSize, stopState]);
 
-    setStopState('stopping');
-    lastStopClickRef.current = now;
-    abort();
-    addSystemMessage('Stopping after current step...');
-  }, [abort, addSystemMessage, clearQueue, stopState]);
-
-  useEffect(() => {
-    const targetProjectId = currentProjectId ?? 'default';
-    if (activeProjectId !== targetProjectId) {
-      if (clearQueueOnProjectSwitch) {
-        clearQueue();
+    useEffect(() => {
+      const targetProjectId = currentProjectId ?? 'default';
+      if (activeProjectId !== targetProjectId) {
+        if (clearQueueOnProjectSwitch) {
+          clearQueue();
+        }
+        loadForProject(targetProjectId);
       }
-      loadForProject(targetProjectId);
-    }
-  }, [
-    activeProjectId,
-    clearQueue,
-    clearQueueOnProjectSwitch,
-    currentProjectId,
-    loadForProject,
-  ]);
+    }, [activeProjectId, clearQueue, clearQueueOnProjectSwitch, currentProjectId, loadForProject]);
 
-  const prevIsRunningRef = useRef(isRunning);
-  useEffect(() => {
-    if (prevIsRunningRef.current && !isRunning) {
-      setStopState('idle');
-      const next = dequeue();
-      if (next) {
-        void executeMessage(next.content);
+    const prevIsRunningRef = useRef(isRunning);
+    useEffect(() => {
+      if (prevIsRunningRef.current && !isRunning) {
+        if (stopState === 'stopping') {
+          setStopState('idle');
+          prevIsRunningRef.current = isRunning;
+          return;
+        }
+
+        setStopState('idle');
+        const next = dequeue();
+        if (next) {
+          void executeMessage(next.content);
+        }
       }
-    }
-    prevIsRunningRef.current = isRunning;
-  }, [dequeue, executeMessage, isRunning]);
+      prevIsRunningRef.current = isRunning;
+    }, [dequeue, executeMessage, isRunning, stopState]);
 
-  useEffect(() => {
-    return () => {
-      if (clearQueueOnUnmount) {
-        clearQueue();
+    useEffect(() => {
+      return () => {
+        if (clearQueueOnUnmount) {
+          clearQueue();
+        }
+        onUnmount?.();
+      };
+    }, [clearQueue, clearQueueOnUnmount, onUnmount]);
+
+    const openAgentReviewPanel = useCallback(() => {
+      let targetZoneId = findPanelZone(
+        useWorkspaceLayoutStore.getState().layout,
+        AGENT_REVIEW_PANEL_ID,
+      );
+      if (!targetZoneId) {
+        restorePanel(AGENT_REVIEW_PANEL_ID, DEFAULT_AGENT_REVIEW_ZONE);
+        targetZoneId =
+          findPanelZone(useWorkspaceLayoutStore.getState().layout, AGENT_REVIEW_PANEL_ID) ??
+          DEFAULT_AGENT_REVIEW_ZONE;
       }
-      onUnmount?.();
-    };
-  }, [clearQueue, clearQueueOnUnmount, onUnmount]);
 
-  return (
-    <div data-testid={chatTestId} className={`flex flex-col h-full bg-surface-base ${className}`}>
-      <AgentSessionPersistenceBanner />
+      setActivePanel(targetZoneId, AGENT_REVIEW_PANEL_ID);
+      setZoneCollapsed(targetZoneId, false);
+    }, [restorePanel, setActivePanel, setZoneCollapsed]);
 
-      <ChatMessageList
-        messages={messages}
-        error={error}
-        onApprove={onApprove}
-        onReject={onReject}
-        onRetry={onRetry}
-        onToolAllow={onToolAllow}
-        onToolAllowAlways={onToolAllowAlways}
-        onToolDeny={onToolDeny}
-      />
+    const handleArtifactFocus = useCallback(
+      (focus: AgentArtifactFocus) => {
+        if (isSameArtifactFocus(artifactFocus, focus)) {
+          clearArtifactSelection();
+          return;
+        }
 
-      <ChatInputArea
-        input={input}
-        onInputChange={setInput}
-        onSubmit={() => void handleSubmit()}
-        onStop={handleStop}
-        placeholder={placeholder}
-        disabled={disabled || !isEnabled}
-        isRunning={isRunning}
-        stopState={stopState}
-        phase={phase}
-        queueSize={queueSize}
-      />
-    </div>
-  );
-});
+        setArtifactSelection({
+          focus,
+          projectId: activeProjectId,
+          conversationId: activeConversationId,
+        });
+        openAgentReviewPanel();
+      },
+      [
+        activeConversationId,
+        activeProjectId,
+        artifactFocus,
+        clearArtifactSelection,
+        openAgentReviewPanel,
+        setArtifactSelection,
+      ],
+    );
+
+    return (
+      <div data-testid={chatTestId} className={`flex flex-col h-full bg-surface-base ${className}`}>
+        <AgentSessionPersistenceBanner />
+        <AgentSessionArtifactSummary
+          messages={messages}
+          activeArtifactFocus={artifactFocus}
+          onSelectArtifact={handleArtifactFocus}
+        />
+        {artifactFocus && (
+          <AgentArtifactFocusBanner focus={artifactFocus} onClear={clearArtifactSelection} />
+        )}
+        <AgentArtifactDetailPanel messages={messages} focus={artifactFocus} />
+
+        <ChatMessageList
+          messages={messages}
+          error={error}
+          onApprove={onApprove}
+          onReject={onReject}
+          onRetry={onRetry}
+          onToolAllow={onToolAllow}
+          onToolAllowAlways={onToolAllowAlways}
+          onToolDeny={onToolDeny}
+          artifactFocus={artifactFocus}
+        />
+
+        <ChatInputArea
+          input={input}
+          onInputChange={setInput}
+          onSubmit={() => void handleSubmit()}
+          onStop={handleStop}
+          onApprove={onApprove}
+          onReject={onReject}
+          onToolAllow={onToolAllow}
+          onToolAllowAlways={onToolAllowAlways}
+          onToolDeny={onToolDeny}
+          placeholder={placeholder}
+          disabled={disabled || !isEnabled || stopState === 'stopping'}
+          isRunning={isRunning}
+          stopState={stopState}
+          currentAgentName={currentAgentName}
+          currentAgentDescription={currentAgentDescription}
+          isExperimentalSession={isExperimentalSession}
+          specialistDefinitions={specialistDefinitions}
+          onStartSession={onStartSession}
+          phase={phase}
+          runtimeSummary={runtimeSummary}
+          pendingPlan={plan}
+          pendingClarificationQuestion={pendingClarificationQuestion}
+          pendingToolPermissionRequest={pendingToolPermissionRequest}
+          queueSize={queueSize}
+        />
+      </div>
+    );
+  },
+);

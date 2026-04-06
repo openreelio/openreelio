@@ -18,6 +18,11 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import type { Track, Clip, Asset, Sequence } from '@/types';
 import { createMockAsset, createMockClip, createMockTrack, createMockSequence } from '@/test/mocks';
 import { invoke } from '@tauri-apps/api/core';
+import { executeAgentCommand } from './commandExecutor';
+
+vi.mock('./commandExecutor', () => ({
+  executeAgentCommand: vi.fn(),
+}));
 
 // =============================================================================
 // Test Helpers
@@ -100,6 +105,7 @@ describe('analysisTools', () => {
     vi.clearAllMocks();
     globalToolRegistry.clear();
     registerAnalysisTools();
+    vi.mocked(executeAgentCommand).mockReset();
 
     // Reset stores
     useProjectStore.setState({
@@ -145,7 +151,7 @@ describe('analysisTools', () => {
 
     it('should register tools in analysis category', () => {
       const analysisTools = globalToolRegistry.listByCategory('analysis');
-      expect(analysisTools.length).toBe(24);
+      expect(analysisTools.length).toBe(27);
     });
 
     it('should return correct tool names', () => {
@@ -162,8 +168,12 @@ describe('analysisTools', () => {
       expect(names).toContain('generate_source_analysis_report');
       expect(names).toContain('search_source_analysis_report');
       expect(names).toContain('search_source_library');
+      expect(names).toContain('search_indexed_source_library');
       expect(names).toContain('build_source_selects');
-      expect(names).toHaveLength(24);
+      expect(names).toContain('search_indexed_source_library');
+      expect(names).toContain('import_external_diarization');
+      expect(names).toContain('run_external_diarization');
+      expect(names).toHaveLength(27);
     });
 
     it('should unregister all tools', () => {
@@ -921,8 +931,20 @@ describe('reference style transfer analysis tools', () => {
       const mockBundle = {
         assetId: 'source-1',
         shots: [
-          { startSec: 0, endSec: 4, confidence: 0.9, keyframePath: 'shots/0001.jpg' },
-          { startSec: 4, endSec: 12, confidence: 0.84, keyframePath: 'shots/0002.jpg' },
+          {
+            startSec: 0,
+            endSec: 4,
+            confidence: 0.9,
+            keyframePath: 'shots/0001.jpg',
+            keyframeSelectionMethod: 'thumbnail',
+          },
+          {
+            startSec: 4,
+            endSec: 12,
+            confidence: 0.84,
+            keyframePath: 'shots/0002.jpg',
+            keyframeSelectionMethod: 'thumbnail',
+          },
         ],
         transcript: [
           {
@@ -963,6 +985,12 @@ describe('reference style transfer analysis tools', () => {
             visualComplexity: 0.42,
           },
         ],
+        contactSheet: {
+          path: '/analysis/source-1/contact-sheet.jpg',
+          frameCount: 2,
+          columns: 2,
+          rows: 1,
+        },
         metadata: {
           durationSec: 12,
           width: 1920,
@@ -1046,6 +1074,7 @@ describe('reference style transfer analysis tools', () => {
       expect(data.transcript.segmentCount).toBe(1);
       expect(data.moments.count).toBe(2);
       expect(data.moments.items[0].keyframePath).toBe('shots/0001.jpg');
+      expect(data.shots.firstShots[0].keyframeSelectionMethod).toBe('thumbnail');
       expect(data.moments.items[0].topObjectLabels).toContain('person');
       expect(data.moments.items[0].audioCue).toBe('speech-heavy');
       expect(data.audio.speechRegionCount).toBe(2);
@@ -1054,6 +1083,7 @@ describe('reference style transfer analysis tools', () => {
       expect(data.transcript.speakerTurnCount).toBe(1);
       expect(data.speakerTurns.count).toBe(1);
       expect(data.speakerTurns.items[0].label).toBe('speaker_1');
+      expect(data.visual.contactSheet.path).toBe('/analysis/source-1/contact-sheet.jpg');
       expect(data.chapters.count).toBeGreaterThan(0);
       expect(data.highlights.count).toBeGreaterThan(0);
       expect(data.annotations.objectDetectionCount).toBe(1);
@@ -1061,6 +1091,7 @@ describe('reference style transfer analysis tools', () => {
       expect(data.annotations.providers).toContain('google_cloud');
       expect(String(data.markdown)).toContain('# Source Analysis Report: concert.mp4');
       expect(String(data.markdown)).toContain('## Moments');
+      expect(String(data.markdown)).toContain('## Visual Artifacts');
       expect(String(data.markdown)).toContain('## Chapters');
       expect(String(data.markdown)).toContain('## Candidate Highlights');
       expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'get_analysis_bundle', {
@@ -1260,6 +1291,63 @@ describe('reference style transfer analysis tools', () => {
       expect(data.metadata.fps).toBe(30);
       expect(data.metadata.codec).toBe('h264');
       expect(data.segments.distribution[0].sharePercent).toBe(100);
+    });
+  });
+
+  // ===========================================================================
+  // import_external_diarization
+  // ===========================================================================
+
+  describe('import_external_diarization', () => {
+    it('should import external diarization and return updated counts', async () => {
+      vi.mocked(invoke).mockResolvedValueOnce({
+        assetId: 'source-1',
+        transcriptSegmentCount: 3,
+        speakerCount: 2,
+        speakerTurnCount: 2,
+      });
+
+      const result = await globalToolRegistry.execute('import_external_diarization', {
+        assetId: 'source-1',
+        inputPath: '/tmp/diarization.json',
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.assetId).toBe('source-1');
+      expect(data.speakerCount).toBe(2);
+      expect(data.speakerTurnCount).toBe(2);
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('import_diarization_json', {
+        assetId: 'source-1',
+        inputPath: '/tmp/diarization.json',
+      });
+    });
+  });
+
+  describe('run_external_diarization', () => {
+    it('should run external diarization and return import summary', async () => {
+      vi.mocked(invoke).mockResolvedValueOnce({
+        assetId: 'source-1',
+        inputAudioPath: '/tmp/in.wav',
+        outputJsonPath: '/tmp/out.json',
+        transcriptSegmentCount: 3,
+        speakerCount: 2,
+        speakerTurnCount: 2,
+      });
+
+      const result = await globalToolRegistry.execute('run_external_diarization', {
+        assetId: 'source-1',
+        executable: '/usr/bin/python',
+        args: ['runner.py', '--input', '{audioPath}', '--output', '{outputPath}'],
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.assetId).toBe('source-1');
+      expect(data.speakerCount).toBe(2);
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('run_external_diarization', {
+        assetId: 'source-1',
+        executable: '/usr/bin/python',
+        args: ['runner.py', '--input', '{audioPath}', '--output', '{outputPath}'],
+      });
     });
   });
 
@@ -2026,6 +2114,423 @@ describe('reference style transfer analysis tools', () => {
         assetId: 'lib-unused',
       });
     });
+
+    it('should analyze missing bundles when analyzeMissing is enabled', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'lib-analyze',
+            name: 'analyze.mp4',
+            kind: 'video',
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          assetId: 'lib-analyze',
+          shots: [{ startSec: 0, endSec: 4, confidence: 0.9, keyframePath: 'shots/a.jpg' }],
+          transcript: [
+            {
+              startSec: 0,
+              endSec: 2,
+              text: 'Interview answer quote',
+              confidence: 0.95,
+              language: 'en',
+              speakerId: 'speaker_1',
+              speakerTurnId: 'turn_001',
+            },
+          ],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18],
+            peakDb: -4,
+            silenceRegions: [],
+            speechRegions: [{ startSec: 0, endSec: 4 }],
+          },
+          segments: [
+            { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
+          ],
+          frameAnalysis: [],
+          metadata: {
+            durationSec: 4,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('search_source_library', {
+        query: 'answer quote',
+        analyzeMissing: true,
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.count).toBeGreaterThan(0);
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'get_analysis_bundle', {
+        assetId: 'lib-analyze',
+      });
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(2, 'analyze_video_full', {
+        assetId: 'lib-analyze',
+        options: {
+          shots: true,
+          transcript: true,
+          audio: true,
+          segments: true,
+          visual: true,
+          localOnly: false,
+        },
+      });
+    });
+
+    it('should return skipped asset details when an asset fails during library search', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'lib-bad',
+            name: 'bad.mp4',
+            kind: 'video',
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke).mockRejectedValueOnce(new Error('analysis backend unavailable'));
+
+      const result = await globalToolRegistry.execute('search_source_library', {
+        query: 'anything',
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.count).toBe(0);
+      expect(data.skippedAssetCount).toBe(1);
+      expect(data.skippedAssets).toEqual([
+        {
+          assetId: 'lib-bad',
+          assetName: 'bad.mp4',
+          reason: 'analysis backend unavailable',
+        },
+      ]);
+    });
+  });
+
+  // ===========================================================================
+  // search_indexed_source_library
+  // ===========================================================================
+
+  describe('search_indexed_source_library', () => {
+    it('should index report chunks and return indexed matches', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'idx-1',
+            name: 'indexed.mp4',
+            kind: 'video',
+            uri: '/media/indexed.mp4',
+            durationSec: 8,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'idx-1',
+          shots: [{ startSec: 0, endSec: 4, confidence: 0.9, keyframePath: 'shots/0001.jpg' }],
+          transcript: [
+            {
+              startSec: 0,
+              endSec: 3,
+              text: 'Best answer quote here',
+              confidence: 0.95,
+              language: 'en',
+              speakerId: 'speaker_1',
+              speakerTurnId: 'turn_001',
+            },
+          ],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18],
+            peakDb: -4,
+            silenceRegions: [],
+            speechRegions: [{ startSec: 0, endSec: 4 }],
+          },
+          segments: [
+            { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
+          ],
+          frameAnalysis: [],
+          contactSheet: null,
+          metadata: {
+            durationSec: 8,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' })
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({
+          total: 1,
+          processingTimeMs: 2,
+          results: [
+            {
+              chunkId: 'idx-1:speakerTurns:0',
+              assetId: 'idx-1',
+              sectionType: 'speakerTurns',
+              sectionIndex: 0,
+              startSec: 0,
+              endSec: 3,
+              score: 0.72,
+              searchText: 'best answer quote spoken content',
+              metadata: {
+                preview: 'speaker_1 - Best answer quote here',
+                audioCue: 'speech-heavy',
+                durationSec: 3,
+                speakerId: 'speaker_1',
+                wordCount: 4,
+                segmentCount: 1,
+                dominantSegmentType: 'talk',
+              },
+            },
+          ],
+        });
+
+      const result = await globalToolRegistry.execute('search_indexed_source_library', {
+        query: 'best answer quote',
+        sections: ['speakerTurns'],
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.retrievalMode).toBe('indexedChunks');
+      expect(data.count).toBe(1);
+      expect(data.matches[0].sectionType).toBe('speakerTurns');
+      expect(data.matches[0].rankingNotes).toContain('dialogue query prefers speaker turns');
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(3, 'index_source_report_chunks', {
+        assetId: 'idx-1',
+        chunks: expect.any(Array),
+      });
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(4, 'search_source_report_chunks', {
+        query: {
+          query: 'best answer quote',
+          assetIds: ['idx-1'],
+          sections: ['speakerTurns'],
+          limit: 40,
+          useSemantic: false,
+        },
+      });
+    });
+
+    it('should pass semantic mode to backend indexed retrieval when requested', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'idx-semantic',
+            name: 'semantic.mp4',
+            kind: 'video',
+            uri: '/media/semantic.mp4',
+            durationSec: 8,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'idx-semantic',
+          shots: [{ startSec: 0, endSec: 4, confidence: 0.9, keyframePath: 'shots/0001.jpg' }],
+          transcript: [],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18],
+            peakDb: -4,
+            silenceRegions: [],
+            speechRegions: [{ startSec: 0, endSec: 4 }],
+          },
+          segments: [],
+          frameAnalysis: [],
+          contactSheet: null,
+          metadata: {
+            durationSec: 8,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' })
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ total: 0, processingTimeMs: 2, results: [] })
+        .mockResolvedValueOnce([]);
+
+      await globalToolRegistry.execute('search_indexed_source_library', {
+        query: 'semantic retrieval',
+        useSemantic: true,
+      });
+
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(4, 'search_source_report_chunks', {
+        query: {
+          query: 'semantic retrieval',
+          assetIds: ['idx-semantic'],
+          sections: ['moments', 'chapters', 'highlights', 'speakerTurns'],
+          limit: 40,
+          useSemantic: true,
+        },
+      });
+    });
+
+    it('should boost indexed matches that were previously selected in memory', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'idx-memory',
+            name: 'memory.mp4',
+            kind: 'video',
+            uri: '/media/memory.mp4',
+            durationSec: 8,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'idx-memory',
+          shots: [{ startSec: 0, endSec: 4, confidence: 0.9, keyframePath: 'shots/0001.jpg' }],
+          transcript: [
+            {
+              startSec: 0,
+              endSec: 3,
+              text: 'Best answer quote here',
+              confidence: 0.95,
+              language: 'en',
+              speakerId: 'speaker_1',
+              speakerTurnId: 'turn_001',
+            },
+          ],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18],
+            peakDb: -4,
+            silenceRegions: [],
+            speechRegions: [{ startSec: 0, endSec: 4 }],
+          },
+          segments: [
+            { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
+          ],
+          frameAnalysis: [],
+          contactSheet: null,
+          metadata: {
+            durationSec: 8,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' })
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({
+          total: 1,
+          processingTimeMs: 2,
+          results: [
+            {
+              chunkId: 'idx-memory:speakerTurns:0',
+              assetId: 'idx-memory',
+              sectionType: 'speakerTurns',
+              sectionIndex: 0,
+              startSec: 0,
+              endSec: 3,
+              score: 0.72,
+              searchText: 'best answer quote spoken content',
+              metadata: {
+                preview: 'speaker_1 - Best answer quote here',
+                audioCue: 'speech-heavy',
+                durationSec: 3,
+                speakerId: 'speaker_1',
+                wordCount: 4,
+                segmentCount: 1,
+                dominantSegmentType: 'talk',
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce([
+          {
+            key: 'idx-memory:speakerTurns:0',
+            value: JSON.stringify({
+              assetId: 'idx-memory',
+              sectionType: 'speakerTurns',
+              sectionIndex: 0,
+              startSec: 0,
+              endSec: 3,
+              query: 'best answer quote',
+              selectedAt: new Date().toISOString(),
+            }),
+            updatedAt: Date.now(),
+          },
+        ]);
+
+      const result = await globalToolRegistry.execute('search_indexed_source_library', {
+        query: 'best answer quote',
+        sections: ['speakerTurns'],
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.memoryEntryCount).toBe(1);
+      expect(data.matches[0].rankingNotes).toContain('memory boost: exact chunk selected before');
+      expect(data.matches[0].score).toBeGreaterThan(data.matches[0].rawScore);
+    });
   });
 
   // ===========================================================================
@@ -2107,6 +2612,107 @@ describe('reference style transfer analysis tools', () => {
       expect(data.timelinePlan.steps[1].action).toBe('insert_clip');
       expect(data.timelinePlan.steps[1].sourceInSec).toBe(0);
       expect(data.timelinePlan.steps[1].sourceOutSec).toBe(4.5);
+    });
+
+    it('should support indexed retrieval for selects building', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'select-indexed',
+            name: 'indexed-selects.mp4',
+            kind: 'video',
+            uri: '/media/indexed-selects.mp4',
+            durationSec: 10,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'select-indexed',
+          shots: [{ startSec: 0, endSec: 4, confidence: 0.9, keyframePath: 'shots/0001.jpg' }],
+          transcript: [
+            {
+              startSec: 0,
+              endSec: 3,
+              text: 'Best answer quote here',
+              confidence: 0.95,
+              language: 'en',
+              speakerId: 'speaker_1',
+              speakerTurnId: 'turn_001',
+            },
+          ],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18],
+            peakDb: -4,
+            silenceRegions: [],
+            speechRegions: [{ startSec: 0, endSec: 4 }],
+          },
+          segments: [
+            { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
+          ],
+          frameAnalysis: [],
+          contactSheet: null,
+          metadata: {
+            durationSec: 10,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' })
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({
+          total: 1,
+          processingTimeMs: 2,
+          results: [
+            {
+              chunkId: 'select-indexed:speakerTurns:0',
+              assetId: 'select-indexed',
+              sectionType: 'speakerTurns',
+              sectionIndex: 0,
+              startSec: 0,
+              endSec: 3,
+              score: 0.72,
+              searchText: 'best answer quote spoken content',
+              metadata: {
+                preview: 'speaker_1 - Best answer quote here',
+                audioCue: 'speech-heavy',
+                durationSec: 3,
+                speakerId: 'speaker_1',
+                wordCount: 4,
+                segmentCount: 1,
+                dominantSegmentType: 'talk',
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce(undefined);
+
+      const result = await globalToolRegistry.execute('build_source_selects', {
+        query: 'best answer quote',
+        useIndexedSearch: true,
+        sections: ['speakerTurns'],
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.count).toBe(1);
+      expect(data.selects[0].sectionType).toBe('speakerTurns');
+      expect(data.selects[0].rankingNotes).toContain('dialogue query prefers speaker turns');
     });
 
     it('should fail early when given an invalid target track id', async () => {
@@ -2279,6 +2885,225 @@ describe('reference style transfer analysis tools', () => {
         insertedClipCount: 0,
       });
       expect(executeCommandMock).not.toHaveBeenCalled();
+    });
+
+    it('should apply selects onto an existing track when apply is enabled', async () => {
+      setupStores({
+        sequences: [
+          createMockSequence({
+            id: 'seq_001',
+            name: 'Test Sequence',
+            tracks: [createTrack({ id: 'selects-track', name: 'Source Selects', clips: [] })],
+          }),
+        ],
+        assets: [
+          createAsset({
+            id: 'select-apply',
+            name: 'apply.mp4',
+            kind: 'video',
+            uri: '/media/apply.mp4',
+            durationSec: 10,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'select-apply',
+          shots: [{ startSec: 0, endSec: 4, confidence: 0.9, keyframePath: 'shots/0001.jpg' }],
+          transcript: [
+            {
+              startSec: 0.5,
+              endSec: 2.5,
+              text: 'Best answer quote here',
+              confidence: 0.95,
+              language: 'en',
+              speakerId: 'speaker_1',
+              speakerTurnId: 'turn_001',
+            },
+          ],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18],
+            peakDb: -4,
+            silenceRegions: [],
+            speechRegions: [{ startSec: 0, endSec: 4 }],
+          },
+          segments: [
+            { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
+          ],
+          frameAnalysis: [],
+          metadata: {
+            durationSec: 10,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      vi.mocked(executeAgentCommand).mockResolvedValue({
+        opId: 'op-insert',
+        changes: [],
+        createdIds: ['clip-created-1'],
+        deletedIds: [],
+      });
+
+      const result = await globalToolRegistry.execute('build_source_selects', {
+        query: 'best answer quote',
+        sections: ['moments'],
+        apply: true,
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.applied).toMatchObject({
+        sequenceId: 'seq_001',
+        trackId: 'selects-track',
+        createdTrack: false,
+        insertedClipCount: 1,
+      });
+      expect(vi.mocked(executeAgentCommand)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(executeAgentCommand)).toHaveBeenCalledWith('InsertClip', {
+        sequenceId: 'seq_001',
+        trackId: 'selects-track',
+        assetId: 'select-apply',
+        timelineStart: 0,
+        sourceIn: 0,
+        sourceOut: 4.25,
+      });
+    });
+
+    it('should roll back inserted clips and created track when apply fails mid-flight', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'select-rollback',
+            name: 'rollback.mp4',
+            kind: 'video',
+            uri: '/media/rollback.mp4',
+            durationSec: 10,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'select-rollback',
+          shots: [
+            { startSec: 0, endSec: 4, confidence: 0.9, keyframePath: 'shots/0001.jpg' },
+            { startSec: 4, endSec: 8, confidence: 0.9, keyframePath: 'shots/0002.jpg' },
+          ],
+          transcript: [
+            {
+              startSec: 0.5,
+              endSec: 2.5,
+              text: 'Best answer quote here',
+              confidence: 0.95,
+              language: 'en',
+              speakerId: 'speaker_1',
+              speakerTurnId: 'turn_001',
+            },
+            {
+              startSec: 4.5,
+              endSec: 6.5,
+              text: 'Another answer quote here',
+              confidence: 0.95,
+              language: 'en',
+              speakerId: 'speaker_2',
+              speakerTurnId: 'turn_002',
+            },
+          ],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18],
+            peakDb: -4,
+            silenceRegions: [],
+            speechRegions: [
+              { startSec: 0, endSec: 4 },
+              { startSec: 4, endSec: 8 },
+            ],
+          },
+          segments: [
+            { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
+            { startSec: 4, endSec: 8, segmentType: 'talk', confidence: 0.9, features: {} },
+          ],
+          frameAnalysis: [],
+          metadata: {
+            durationSec: 10,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      vi.mocked(executeAgentCommand)
+        .mockResolvedValueOnce({
+          opId: 'op-create-track',
+          changes: [],
+          createdIds: ['new-track-id'],
+          deletedIds: [],
+        })
+        .mockResolvedValueOnce({
+          opId: 'op-insert-1',
+          changes: [],
+          createdIds: ['clip-created-1'],
+          deletedIds: [],
+        })
+        .mockRejectedValueOnce(new Error('InsertClip exploded'))
+        .mockResolvedValueOnce({
+          opId: 'op-delete-1',
+          changes: [],
+          createdIds: [],
+          deletedIds: ['clip-created-1'],
+        })
+        .mockResolvedValueOnce({
+          opId: 'op-remove-track',
+          changes: [],
+          createdIds: [],
+          deletedIds: ['new-track-id'],
+        });
+
+      const result = await globalToolRegistry.execute('build_source_selects', {
+        query: 'best answer quote',
+        sections: ['speakerTurns'],
+        limit: 2,
+        apply: true,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('InsertClip exploded');
+      expect(vi.mocked(executeAgentCommand).mock.calls.map(([name]) => name)).toEqual([
+        'CreateTrack',
+        'InsertClip',
+        'InsertClip',
+        'RemoveClip',
+        'RemoveTrack',
+      ]);
     });
   });
 

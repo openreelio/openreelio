@@ -681,7 +681,8 @@ fn build_last_message_preview(parts: &[PartRow]) -> Option<String> {
 
 /// Global conversation database instance.
 /// Initialized when the first AI session command is called.
-static CONVERSATION_DB: OnceLock<Result<Mutex<ConversationDb>, String>> = OnceLock::new();
+static CONVERSATION_DB: OnceLock<Mutex<ConversationDb>> = OnceLock::new();
+static CONVERSATION_DB_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Returns a reference to the lazily-initialized conversation database.
 ///
@@ -689,19 +690,32 @@ static CONVERSATION_DB: OnceLock<Result<Mutex<ConversationDb>, String>> = OnceLo
 /// platform-specific application data directory. Subsequent calls return the same
 /// instance without re-opening the file.
 fn get_or_init_db(app: &tauri::AppHandle) -> Result<&'static Mutex<ConversationDb>, String> {
-    let result = CONVERSATION_DB.get_or_init(|| {
-        let init = || -> Result<Mutex<ConversationDb>, String> {
-            let app_data = super::get_app_data_dir(app)?;
-            std::fs::create_dir_all(&app_data)
-                .map_err(|e| format!("Failed to create app data dir: {e}"))?;
-            let db_path = app_data.join("ai_conversations.db");
-            let db = ConversationDb::create(&db_path)
-                .map_err(|e| format!("Failed to open conversation database: {e}"))?;
-            Ok(Mutex::new(db))
-        };
-        init()
-    });
-    result.as_ref().map_err(|e| e.clone())
+    if let Some(db) = CONVERSATION_DB.get() {
+        return Ok(db);
+    }
+
+    let _guard = CONVERSATION_DB_INIT_LOCK
+        .lock()
+        .map_err(|_| "Failed to lock conversation database initializer".to_string())?;
+
+    if let Some(db) = CONVERSATION_DB.get() {
+        return Ok(db);
+    }
+
+    let app_data = super::get_app_data_dir(app)?;
+    std::fs::create_dir_all(&app_data)
+        .map_err(|e| format!("Failed to create app data dir: {e}"))?;
+    let db_path = app_data.join("ai_conversations.db");
+    let db = ConversationDb::create(&db_path)
+        .map_err(|e| format!("Failed to open conversation database: {e}"))?;
+
+    // Do not cache transient initialization failures forever. A startup race
+    // should not permanently brick AI session creation for the rest of the app run.
+    let _ = CONVERSATION_DB.set(Mutex::new(db));
+
+    CONVERSATION_DB
+        .get()
+        .ok_or_else(|| "Failed to initialize conversation database".to_string())
 }
 
 // =============================================================================

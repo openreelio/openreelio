@@ -87,7 +87,10 @@ export interface ConversationActions {
   /** Load sessions list for the active project from SQLite */
   loadSessions: (projectId: string) => Promise<void>;
   /** Create a new session and switch to it */
-  createSession: (agent?: string) => Promise<string | null>;
+  createSession: (
+    agent?: string,
+    options?: { preserveDraftConversation?: boolean },
+  ) => Promise<string | null>;
   /** Switch to an existing session */
   switchSession: (sessionId: string) => Promise<void>;
   /** Delete a session */
@@ -126,6 +129,7 @@ export type ConversationStore = ConversationState & ConversationActions;
 
 const saveTimeoutBySession = new Map<string, ReturnType<typeof setTimeout>>();
 const pendingSessionCreationByProject = new Map<string, Promise<string | null>>();
+let latestSwitchSessionRequestToken = 0;
 
 /** Clear all pending debounced saves (e.g., on project switch or conversation clear). */
 function clearAllPendingSaves(): void {
@@ -297,8 +301,25 @@ export const useConversationStore = create<ConversationStore>()(
 
           // Auto-select the most recent session if none is active
           if (!get().activeSessionId && sessions.length > 0) {
-            const mostRecent = sessions[0]; // Backend returns ordered by updated_at DESC
-            await get().switchSession(mostRecent.id);
+            const currentState = get();
+            const hasDraftTranscript =
+              currentState.activeConversation?.projectId === projectId &&
+              currentState.activeConversation.messages.length > 0;
+            const hasPendingDraftSession = pendingSessionCreationByProject.has(projectId);
+
+            // If the user already started a new draft turn while sessions were loading,
+            // keep that draft attached to the session creation flow instead of
+            // clobbering it with an auto-restored historical session.
+            if (!hasDraftTranscript && !hasPendingDraftSession) {
+              const mostRecent = sessions[0]; // Backend returns ordered by updated_at DESC
+              await get().switchSession(mostRecent.id);
+            } else {
+              logger.info('Skipped auto-restoring most recent AI session', {
+                projectId,
+                hasDraftTranscript,
+                hasPendingDraftSession,
+              });
+            }
           }
         }
       } catch (err) {
@@ -306,7 +327,7 @@ export const useConversationStore = create<ConversationStore>()(
       }
     },
 
-    createSession: async (agent?: string) => {
+    createSession: async (agent?: string, options?: { preserveDraftConversation?: boolean }) => {
       const projectId = get().activeProjectId;
       if (!projectId) return null;
 
@@ -330,10 +351,17 @@ export const useConversationStore = create<ConversationStore>()(
 
         usePermissionStore.getState().resetSessionRules();
         set((state) => {
+          const hadNoActiveSession = !state.activeSessionId;
+          const shouldPreserveDraftConversation =
+            options?.preserveDraftConversation === true &&
+            hadNoActiveSession &&
+            state.activeConversation?.projectId === projectId &&
+            state.activeConversation.messages.length > 0;
+
           state.sessions = [session, ...state.sessions.filter((s) => s.id !== session.id)];
           state.activeSessionId = session.id;
 
-          if (state.activeConversation && state.activeConversation.projectId === projectId) {
+          if (shouldPreserveDraftConversation && state.activeConversation) {
             state.activeConversation.id = session.id;
             state.activeConversation.updatedAt = Date.now();
           } else {
@@ -354,6 +382,8 @@ export const useConversationStore = create<ConversationStore>()(
     },
 
     switchSession: async (sessionId: string) => {
+      const requestToken = ++latestSwitchSessionRequestToken;
+
       try {
         const data = await invoke<{
           session: SessionSummary;
@@ -366,6 +396,11 @@ export const useConversationStore = create<ConversationStore>()(
             usageJson: string | null;
           }>;
         }>('get_ai_session', { sessionId });
+
+        if (requestToken !== latestSwitchSessionRequestToken) {
+          logger.info('Ignoring stale session switch response', { sessionId });
+          return;
+        }
 
         const activeProjectId = get().activeProjectId;
         if (activeProjectId && activeProjectId !== data.session.projectId) {
@@ -652,7 +687,7 @@ export const useConversationStore = create<ConversationStore>()(
       if (inFlight) return inFlight;
 
       const creationPromise = get()
-        .createSession(agent)
+        .createSession(agent, { preserveDraftConversation: true })
         .finally(() => {
           const current = pendingSessionCreationByProject.get(projectId);
           if (current === creationPromise) {

@@ -19,8 +19,10 @@ use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use super::types::{CameraAngle, FrameAnalysis, MotionDirection, SubjectPosition};
-use crate::core::annotations::models::ShotResult;
+use super::types::{
+    CameraAngle, ContactSheetArtifact, FrameAnalysis, MotionDirection, SubjectPosition,
+};
+use crate::core::annotations::models::{KeyframeSelectionMethod, ShotResult};
 use crate::core::process::configure_tokio_command;
 use crate::core::{CoreError, CoreResult};
 
@@ -33,6 +35,49 @@ const STDERR_TAIL_SIZE: usize = 20;
 
 /// Default visual complexity used when a shot's local analysis fails.
 const DEFAULT_COMPLEXITY: f64 = 0.5;
+
+/// Maximum number of keyframes to include in a contact sheet.
+const CONTACT_SHEET_MAX_FRAMES: usize = 12;
+
+/// Width of each contact-sheet cell.
+const CONTACT_SHEET_CELL_WIDTH: usize = 320;
+
+/// Height of each contact-sheet cell.
+const CONTACT_SHEET_CELL_HEIGHT: usize = 180;
+
+/// Minimum shot duration to attempt smarter thumbnail-based selection.
+const SMART_KEYFRAME_MIN_DURATION_SEC: f64 = 1.2;
+
+/// Minimum interior window duration for thumbnail selection.
+const SMART_KEYFRAME_MIN_WINDOW_SEC: f64 = 0.5;
+
+/// Edge guard ratio removed from start/end of each shot for thumbnail selection.
+const SMART_KEYFRAME_EDGE_GUARD_RATIO: f64 = 0.1;
+
+/// Minimum edge guard applied to each side of a shot.
+const SMART_KEYFRAME_EDGE_GUARD_MIN_SEC: f64 = 0.15;
+
+/// Maximum edge guard applied to each side of a shot.
+const SMART_KEYFRAME_EDGE_GUARD_MAX_SEC: f64 = 0.75;
+
+/// Minimum number of sampled frames for representative selection.
+const SMART_KEYFRAME_MIN_SAMPLES: usize = 4;
+
+/// Maximum number of sampled frames for representative selection.
+const SMART_KEYFRAME_MAX_SAMPLES: usize = 12;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtractedKeyframe {
+    pub path: PathBuf,
+    pub method: KeyframeSelectionMethod,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RepresentativeWindow {
+    start_sec: f64,
+    duration_sec: f64,
+    sample_count: usize,
+}
 
 // =============================================================================
 // Vision API Response Schema
@@ -73,19 +118,22 @@ impl VisualAnalyzer {
         Self { ffmpeg_path }
     }
 
-    /// Extracts a keyframe JPEG for each shot at the midpoint of the shot.
+    /// Extracts one representative JPEG for each shot.
     ///
-    /// For each shot in `shots`, a single frame is extracted at the temporal
-    /// midpoint and saved as `output_dir/<index>.jpg`. Already-existing
+    /// For each shot in `shots`, a single frame is extracted and saved as
+    /// `output_dir/<index>.jpg`. For sufficiently long shots, FFmpeg's
+    /// `thumbnail` filter is applied over an interior window that avoids the
+    /// cut edges. For short shots or failures, extraction falls back to the
+    /// temporal midpoint. Already-existing
     /// (and non-empty) files are skipped to make the operation idempotent.
     ///
-    /// Returns the ordered list of keyframe file paths.
+    /// Returns the ordered list of keyframe file paths and selection methods.
     pub async fn extract_keyframes(
         &self,
         video_path: &Path,
         shots: &[ShotResult],
         output_dir: &Path,
-    ) -> CoreResult<Vec<PathBuf>> {
+    ) -> CoreResult<Vec<ExtractedKeyframe>> {
         tokio::fs::create_dir_all(output_dir).await.map_err(|e| {
             CoreError::Internal(format!(
                 "Failed to create keyframe output directory {}: {}",
@@ -94,11 +142,11 @@ impl VisualAnalyzer {
             ))
         })?;
 
-        let mut paths = Vec::with_capacity(shots.len());
+        let mut keyframes = Vec::with_capacity(shots.len());
 
         for (index, shot) in shots.iter().enumerate() {
-            let midpoint = (shot.start_sec + shot.end_sec) / 2.0;
             let output_path = output_dir.join(format!("{}.jpg", index));
+            let preferred_method = choose_keyframe_selection_method(shot);
 
             // Skip extraction if the file already exists and is non-empty
             if is_nonempty_file(&output_path) {
@@ -106,57 +154,260 @@ impl VisualAnalyzer {
                     "Keyframe already exists, skipping: {}",
                     output_path.display()
                 );
-                paths.push(output_path);
+                keyframes.push(ExtractedKeyframe {
+                    path: output_path,
+                    method: preferred_method,
+                });
                 continue;
             }
 
-            let mut cmd = Command::new(&self.ffmpeg_path);
-            configure_tokio_command(&mut cmd);
+            let extracted = match preferred_method {
+                KeyframeSelectionMethod::Thumbnail => {
+                    if let Some(window) = representative_window_for_shot(shot) {
+                        match self
+                            .extract_thumbnail_keyframe(video_path, window, &output_path)
+                            .await
+                        {
+                            Ok(()) => ExtractedKeyframe {
+                                path: output_path,
+                                method: KeyframeSelectionMethod::Thumbnail,
+                            },
+                            Err(error) => {
+                                tracing::warn!(
+                                    "Thumbnail keyframe extraction failed for shot {}: {}. Falling back to midpoint.",
+                                    index,
+                                    error
+                                );
+                                self.extract_midpoint_keyframe(video_path, shot, &output_path)
+                                    .await?;
+                                ExtractedKeyframe {
+                                    path: output_path,
+                                    method: KeyframeSelectionMethod::Midpoint,
+                                }
+                            }
+                        }
+                    } else {
+                        self.extract_midpoint_keyframe(video_path, shot, &output_path)
+                            .await?;
+                        ExtractedKeyframe {
+                            path: output_path,
+                            method: KeyframeSelectionMethod::Midpoint,
+                        }
+                    }
+                }
+                KeyframeSelectionMethod::Midpoint => {
+                    self.extract_midpoint_keyframe(video_path, shot, &output_path)
+                        .await?;
+                    ExtractedKeyframe {
+                        path: output_path,
+                        method: KeyframeSelectionMethod::Midpoint,
+                    }
+                }
+            };
 
-            cmd.arg("-hide_banner")
-                .arg("-nostdin")
-                .arg("-ss")
-                .arg(format!("{:.3}", midpoint))
-                .arg("-i")
-                .arg(video_path)
-                .arg("-vframes")
-                .arg("1")
-                .arg("-q:v")
-                .arg("2")
-                .arg(&output_path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped());
+            keyframes.push(extracted);
+        }
 
-            let output = cmd.output().await.map_err(|e| {
+        Ok(keyframes)
+    }
+
+    /// Generates a contact-sheet image from a sequence of extracted keyframes.
+    pub async fn generate_contact_sheet(
+        &self,
+        keyframes: &[PathBuf],
+        output_path: &Path,
+    ) -> CoreResult<Option<ContactSheetArtifact>> {
+        if keyframes.is_empty() {
+            return Ok(None);
+        }
+
+        // No fast-path cache: the keyframe set may have changed since the file was written
+        // (e.g. re-analysis with different shots). Always regenerate to keep the JPEG in
+        // sync with the current keyframe layout.
+        if output_path.exists() {
+            tokio::fs::remove_file(output_path).await.map_err(|e| {
                 CoreError::Internal(format!(
-                    "Failed to spawn FFmpeg for keyframe extraction: {}",
+                    "Failed to remove stale contact sheet {}: {}",
+                    output_path.display(),
                     e
                 ))
             })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let tail = stderr_tail(&stderr, STDERR_TAIL_SIZE);
-                return Err(CoreError::AnalysisFailed(format!(
-                    "Keyframe extraction failed for shot {} (exit {}): {}",
-                    index,
-                    output.status.code().unwrap_or(-1),
-                    tail
-                )));
-            }
-
-            tracing::debug!(
-                "Extracted keyframe for shot {} at {:.3}s -> {}",
-                index,
-                midpoint,
-                output_path.display()
-            );
-
-            paths.push(output_path);
         }
 
-        Ok(paths)
+        let frame_count = keyframes.len().min(CONTACT_SHEET_MAX_FRAMES);
+        let first_keyframe = keyframes.first().ok_or_else(|| {
+            CoreError::Internal("Contact sheet requires at least one keyframe".to_string())
+        })?;
+        let keyframe_dir = first_keyframe.parent().ok_or_else(|| {
+            CoreError::Internal("Keyframe path is missing a parent directory".to_string())
+        })?;
+        let all_in_same_dir = keyframes
+            .iter()
+            .take(frame_count)
+            .all(|path| path.parent() == Some(keyframe_dir));
+        if !all_in_same_dir {
+            return Err(CoreError::AnalysisFailed(
+                "Contact sheet generation requires keyframes from the same directory".to_string(),
+            ));
+        }
+
+        if let Some(parent) = output_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                CoreError::Internal(format!(
+                    "Failed to create contact sheet output directory {}: {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
+        }
+
+        let (columns, rows) = contact_sheet_layout(frame_count);
+        let input_pattern = keyframe_dir.join("%d.jpg");
+        let filter = format!(
+            "scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,tile={cols}x{rows}:nb_frames={count}:padding=4:margin=2:color=black",
+            w = CONTACT_SHEET_CELL_WIDTH,
+            h = CONTACT_SHEET_CELL_HEIGHT,
+            cols = columns,
+            rows = rows,
+            count = frame_count,
+        );
+
+        let mut cmd = Command::new(&self.ffmpeg_path);
+        configure_tokio_command(&mut cmd);
+        cmd.arg("-hide_banner")
+            .arg("-nostdin")
+            .arg("-y")
+            .arg("-start_number")
+            .arg("0")
+            .arg("-i")
+            .arg(&input_pattern)
+            .arg("-frames:v")
+            .arg("1")
+            .arg("-vf")
+            .arg(filter)
+            .arg(output_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+
+        let output = cmd.output().await.map_err(|e| {
+            CoreError::Internal(format!(
+                "Failed to spawn FFmpeg for contact sheet generation: {}",
+                e
+            ))
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail = stderr_tail(&stderr, STDERR_TAIL_SIZE);
+            return Err(CoreError::AnalysisFailed(format!(
+                "Contact sheet generation failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                tail
+            )));
+        }
+
+        Ok(Some(ContactSheetArtifact {
+            path: output_path.to_string_lossy().to_string(),
+            frame_count,
+            columns,
+            rows,
+        }))
+    }
+
+    async fn extract_midpoint_keyframe(
+        &self,
+        video_path: &Path,
+        shot: &ShotResult,
+        output_path: &Path,
+    ) -> CoreResult<()> {
+        let midpoint = (shot.start_sec + shot.end_sec) / 2.0;
+        let mut cmd = Command::new(&self.ffmpeg_path);
+        configure_tokio_command(&mut cmd);
+
+        cmd.arg("-hide_banner")
+            .arg("-nostdin")
+            .arg("-ss")
+            .arg(format!("{:.3}", midpoint))
+            .arg("-i")
+            .arg(video_path)
+            .arg("-vframes")
+            .arg("1")
+            .arg("-q:v")
+            .arg("2")
+            .arg(output_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+
+        let output = cmd.output().await.map_err(|e| {
+            CoreError::Internal(format!(
+                "Failed to spawn FFmpeg for midpoint keyframe extraction: {}",
+                e
+            ))
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail = stderr_tail(&stderr, STDERR_TAIL_SIZE);
+            return Err(CoreError::AnalysisFailed(format!(
+                "Midpoint keyframe extraction failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                tail
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn extract_thumbnail_keyframe(
+        &self,
+        video_path: &Path,
+        window: RepresentativeWindow,
+        output_path: &Path,
+    ) -> CoreResult<()> {
+        let fps = window.sample_count as f64 / window.duration_sec.max(0.001);
+        let filter = format!("fps={:.6},thumbnail={}", fps, window.sample_count);
+
+        let mut cmd = Command::new(&self.ffmpeg_path);
+        configure_tokio_command(&mut cmd);
+        cmd.arg("-hide_banner")
+            .arg("-nostdin")
+            .arg("-ss")
+            .arg(format!("{:.3}", window.start_sec))
+            .arg("-t")
+            .arg(format!("{:.3}", window.duration_sec))
+            .arg("-i")
+            .arg(video_path)
+            .arg("-vf")
+            .arg(filter)
+            .arg("-frames:v")
+            .arg("1")
+            .arg("-q:v")
+            .arg("2")
+            .arg(output_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+
+        let output = cmd.output().await.map_err(|e| {
+            CoreError::Internal(format!(
+                "Failed to spawn FFmpeg for thumbnail keyframe extraction: {}",
+                e
+            ))
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail = stderr_tail(&stderr, STDERR_TAIL_SIZE);
+            return Err(CoreError::AnalysisFailed(format!(
+                "Thumbnail keyframe extraction failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                tail
+            )));
+        }
+
+        Ok(())
     }
 
     /// Extracts keyframes and delegates vision inference to a caller-provided function.
@@ -173,7 +424,8 @@ impl VisualAnalyzer {
         let keyframes = self
             .extract_keyframes(video_path, shots, output_dir)
             .await?;
-        let response = request_vision(keyframes).await?;
+        let response =
+            request_vision(keyframes.into_iter().map(|item| item.path).collect()).await?;
         Self::parse_vision_response(&response, shots.len())
     }
 
@@ -421,6 +673,50 @@ fn stderr_tail(stderr: &str, n: usize) -> String {
 /// Returns true when an FFmpeg stderr line corresponds to a retained frame from `showinfo`.
 fn is_showinfo_frame_line(line: &str) -> bool {
     line.contains("Parsed_showinfo") && line.contains(" n:")
+}
+
+fn choose_keyframe_selection_method(shot: &ShotResult) -> KeyframeSelectionMethod {
+    if representative_window_for_shot(shot).is_some() {
+        KeyframeSelectionMethod::Thumbnail
+    } else {
+        KeyframeSelectionMethod::Midpoint
+    }
+}
+
+fn representative_window_for_shot(shot: &ShotResult) -> Option<RepresentativeWindow> {
+    let duration_sec = shot.duration();
+    if duration_sec < SMART_KEYFRAME_MIN_DURATION_SEC {
+        return None;
+    }
+
+    let edge_guard_sec = (duration_sec * SMART_KEYFRAME_EDGE_GUARD_RATIO).clamp(
+        SMART_KEYFRAME_EDGE_GUARD_MIN_SEC,
+        SMART_KEYFRAME_EDGE_GUARD_MAX_SEC,
+    );
+    let start_sec = shot.start_sec + edge_guard_sec;
+    let end_sec = shot.end_sec - edge_guard_sec;
+    let interior_duration_sec = (end_sec - start_sec).max(0.0);
+
+    if interior_duration_sec < SMART_KEYFRAME_MIN_WINDOW_SEC {
+        return None;
+    }
+
+    let sample_count = ((interior_duration_sec * 2.0).round() as usize)
+        .clamp(SMART_KEYFRAME_MIN_SAMPLES, SMART_KEYFRAME_MAX_SAMPLES);
+
+    Some(RepresentativeWindow {
+        start_sec,
+        duration_sec: interior_duration_sec,
+        sample_count,
+    })
+}
+
+/// Computes a compact grid layout for a contact sheet.
+fn contact_sheet_layout(frame_count: usize) -> (usize, usize) {
+    let frame_count = frame_count.max(1);
+    let columns = (frame_count as f64).sqrt().ceil() as usize;
+    let rows = ((frame_count as f64) / columns as f64).ceil() as usize;
+    (columns.max(1), rows.max(1))
 }
 
 /// Parses a camera angle string from vision API response.
@@ -853,5 +1149,43 @@ mod tests {
             "[Parsed_showinfo_1 @ 0x123] n:   0 pts:      0 pts_time:0"
         ));
         assert!(!is_showinfo_frame_line("random ffmpeg stderr"));
+    }
+
+    #[test]
+    fn should_compute_contact_sheet_layout() {
+        assert_eq!(contact_sheet_layout(1), (1, 1));
+        assert_eq!(contact_sheet_layout(2), (2, 1));
+        assert_eq!(contact_sheet_layout(4), (2, 2));
+        assert_eq!(contact_sheet_layout(5), (3, 2));
+        assert_eq!(contact_sheet_layout(12), (4, 3));
+    }
+
+    #[test]
+    fn should_choose_thumbnail_selection_for_longer_shots() {
+        let shot = ShotResult::new(0.0, 5.0, 0.9);
+        assert_eq!(
+            choose_keyframe_selection_method(&shot),
+            KeyframeSelectionMethod::Thumbnail
+        );
+    }
+
+    #[test]
+    fn should_choose_midpoint_selection_for_short_shots() {
+        let shot = ShotResult::new(0.0, 0.8, 0.9);
+        assert_eq!(
+            choose_keyframe_selection_method(&shot),
+            KeyframeSelectionMethod::Midpoint
+        );
+    }
+
+    #[test]
+    fn should_compute_guarded_representative_window() {
+        let shot = ShotResult::new(10.0, 20.0, 0.9);
+        let window = representative_window_for_shot(&shot).expect("window should exist");
+
+        assert!(window.start_sec > 10.0);
+        assert!(window.duration_sec < 10.0);
+        assert!(window.sample_count >= SMART_KEYFRAME_MIN_SAMPLES);
+        assert!(window.sample_count <= SMART_KEYFRAME_MAX_SAMPLES);
     }
 }

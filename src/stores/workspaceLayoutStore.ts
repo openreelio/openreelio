@@ -22,6 +22,7 @@ export type PanelId =
   | 'timeline'
   | 'inspector'
   | 'ai-assistant'
+  | 'agent-review'
   | 'audio-mixer'
   | 'history'
   | 'transcript'
@@ -30,12 +31,7 @@ export type PanelId =
   | 'generation';
 
 /** Dock zone identifiers — fixed regions of the editor layout */
-export type DockZoneId =
-  | 'left'
-  | 'center-top'
-  | 'center-bottom'
-  | 'right'
-  | 'bottom';
+export type DockZoneId = 'left' | 'center-top' | 'center-bottom' | 'right' | 'bottom';
 
 /** Configuration for a single dock zone */
 export interface DockZone {
@@ -79,18 +75,34 @@ export interface PanelMeta {
 
 /** Panel metadata registry */
 export const PANEL_REGISTRY: Record<PanelId, PanelMeta> = {
-  'explorer': { id: 'explorer', label: 'Project Explorer', icon: 'FolderOpen', minWidth: 200 },
-  'source-monitor': { id: 'source-monitor', label: 'Source Monitor', icon: 'Monitor', minWidth: 300 },
-  'program-monitor': { id: 'program-monitor', label: 'Program Monitor', icon: 'Play', minWidth: 300 },
-  'timeline': { id: 'timeline', label: 'Timeline', icon: 'Film', minHeight: 120 },
-  'inspector': { id: 'inspector', label: 'Inspector', icon: 'SlidersHorizontal', minWidth: 240 },
+  explorer: { id: 'explorer', label: 'Project Explorer', icon: 'FolderOpen', minWidth: 200 },
+  'source-monitor': {
+    id: 'source-monitor',
+    label: 'Source Monitor',
+    icon: 'Monitor',
+    minWidth: 300,
+  },
+  'program-monitor': {
+    id: 'program-monitor',
+    label: 'Program Monitor',
+    icon: 'Play',
+    minWidth: 300,
+  },
+  timeline: { id: 'timeline', label: 'Timeline', icon: 'Film', minHeight: 120 },
+  inspector: { id: 'inspector', label: 'Inspector', icon: 'SlidersHorizontal', minWidth: 240 },
   'ai-assistant': { id: 'ai-assistant', label: 'AI Assistant', icon: 'Sparkles', minWidth: 280 },
+  'agent-review': {
+    id: 'agent-review',
+    label: 'Agent Review',
+    icon: 'ClipboardList',
+    minHeight: 120,
+  },
   'audio-mixer': { id: 'audio-mixer', label: 'Audio Mixer', icon: 'Sliders', minHeight: 100 },
-  'history': { id: 'history', label: 'History', icon: 'History', minHeight: 80 },
-  'transcript': { id: 'transcript', label: 'Transcript', icon: 'FileText', minHeight: 80 },
-  'performance': { id: 'performance', label: 'Performance', icon: 'Activity', minHeight: 80 },
-  'comparison': { id: 'comparison', label: 'Comparison', icon: 'GitCompareArrows', minHeight: 80 },
-  'generation': { id: 'generation', label: 'Generate', icon: 'Sparkles', minHeight: 80 },
+  history: { id: 'history', label: 'History', icon: 'History', minHeight: 80 },
+  transcript: { id: 'transcript', label: 'Transcript', icon: 'FileText', minHeight: 80 },
+  performance: { id: 'performance', label: 'Performance', icon: 'Activity', minHeight: 80 },
+  comparison: { id: 'comparison', label: 'Comparison', icon: 'GitCompareArrows', minHeight: 80 },
+  generation: { id: 'generation', label: 'Generate', icon: 'Sparkles', minHeight: 80 },
 };
 
 /** Default zone sizes */
@@ -119,7 +131,7 @@ export const MAX_ZONE_SIZES = {
 export function createDefaultLayout(): WorkspaceLayout {
   return {
     zones: {
-      'left': {
+      left: {
         panelIds: ['explorer'],
         activePanelId: 'explorer',
         collapsed: false,
@@ -134,12 +146,12 @@ export function createDefaultLayout(): WorkspaceLayout {
         activePanelId: 'timeline',
         collapsed: false,
       },
-      'right': {
+      right: {
         panelIds: ['inspector', 'ai-assistant'],
         activePanelId: 'inspector',
         collapsed: false,
       },
-      'bottom': {
+      bottom: {
         panelIds: ['comparison', 'history', 'transcript', 'performance'],
         activePanelId: 'comparison',
         collapsed: true,
@@ -176,19 +188,19 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     builtIn: true,
     layout: {
       zones: {
-        'left': { panelIds: ['explorer'], activePanelId: 'explorer', collapsed: false },
+        left: { panelIds: ['explorer'], activePanelId: 'explorer', collapsed: false },
         'center-top': {
           panelIds: ['source-monitor', 'program-monitor'],
           activePanelId: 'source-monitor',
           collapsed: false,
         },
         'center-bottom': { panelIds: ['timeline'], activePanelId: 'timeline', collapsed: false },
-        'right': {
+        right: {
           panelIds: ['inspector', 'ai-assistant'],
           activePanelId: 'inspector',
           collapsed: false,
         },
-        'bottom': {
+        bottom: {
           panelIds: ['history', 'comparison'],
           activePanelId: 'history',
           collapsed: true,
@@ -204,19 +216,19 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     builtIn: true,
     layout: {
       zones: {
-        'left': { panelIds: [], activePanelId: null, collapsed: true },
+        left: { panelIds: [], activePanelId: null, collapsed: true },
         'center-top': {
           panelIds: ['program-monitor'],
           activePanelId: 'program-monitor',
           collapsed: false,
         },
         'center-bottom': { panelIds: ['timeline'], activePanelId: 'timeline', collapsed: false },
-        'right': {
+        right: {
           panelIds: ['inspector', 'comparison'],
           activePanelId: 'inspector',
           collapsed: false,
         },
-        'bottom': {
+        bottom: {
           panelIds: ['history', 'performance'],
           activePanelId: 'history',
           collapsed: true,
@@ -232,19 +244,19 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     builtIn: true,
     layout: {
       zones: {
-        'left': { panelIds: ['audio-mixer'], activePanelId: 'audio-mixer', collapsed: false },
+        left: { panelIds: ['audio-mixer'], activePanelId: 'audio-mixer', collapsed: false },
         'center-top': {
           panelIds: ['program-monitor'],
           activePanelId: 'program-monitor',
           collapsed: false,
         },
         'center-bottom': { panelIds: ['timeline'], activePanelId: 'timeline', collapsed: false },
-        'right': {
+        right: {
           panelIds: ['inspector'],
           activePanelId: 'inspector',
           collapsed: false,
         },
-        'bottom': {
+        bottom: {
           panelIds: ['performance', 'transcript'],
           activePanelId: 'performance',
           collapsed: true,
@@ -260,19 +272,19 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     builtIn: true,
     layout: {
       zones: {
-        'left': { panelIds: ['explorer'], activePanelId: 'explorer', collapsed: false },
+        left: { panelIds: ['explorer'], activePanelId: 'explorer', collapsed: false },
         'center-top': {
           panelIds: ['program-monitor'],
           activePanelId: 'program-monitor',
           collapsed: false,
         },
         'center-bottom': { panelIds: ['timeline'], activePanelId: 'timeline', collapsed: false },
-        'right': {
+        right: {
           panelIds: ['inspector', 'ai-assistant'],
           activePanelId: 'inspector',
           collapsed: false,
         },
-        'bottom': {
+        bottom: {
           panelIds: ['comparison', 'generation'],
           activePanelId: 'comparison',
           collapsed: true,
@@ -288,15 +300,15 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     builtIn: true,
     layout: {
       zones: {
-        'left': { panelIds: ['explorer'], activePanelId: 'explorer', collapsed: false },
+        left: { panelIds: ['explorer'], activePanelId: 'explorer', collapsed: false },
         'center-top': {
           panelIds: ['source-monitor', 'program-monitor'],
           activePanelId: 'program-monitor',
           collapsed: false,
         },
         'center-bottom': { panelIds: ['timeline'], activePanelId: 'timeline', collapsed: false },
-        'right': { panelIds: [], activePanelId: null, collapsed: true },
-        'bottom': {
+        right: { panelIds: [], activePanelId: null, collapsed: true },
+        bottom: {
           panelIds: ['ai-assistant'],
           activePanelId: 'ai-assistant',
           collapsed: true,
@@ -313,8 +325,7 @@ export function findPreset(
   customPresets: WorkspacePreset[],
 ): WorkspacePreset | undefined {
   return (
-    WORKSPACE_PRESETS.find((p) => p.id === presetId) ??
-    customPresets.find((p) => p.id === presetId)
+    WORKSPACE_PRESETS.find((p) => p.id === presetId) ?? customPresets.find((p) => p.id === presetId)
   );
 }
 
@@ -384,10 +395,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /** Find which zone a panel currently belongs to */
-export function findPanelZone(
-  layout: WorkspaceLayout,
-  panelId: PanelId,
-): DockZoneId | null {
+export function findPanelZone(layout: WorkspaceLayout, panelId: PanelId): DockZoneId | null {
   for (const [zoneId, zone] of Object.entries(layout.zones)) {
     if (zone.panelIds.includes(panelId)) {
       return zoneId as DockZoneId;
@@ -715,8 +723,10 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
 // =============================================================================
 
 export const selectLayout = (state: WorkspaceLayoutStore): WorkspaceLayout => state.layout;
-export const selectZone = (zoneId: DockZoneId) =>
-  (state: WorkspaceLayoutStore): DockZone => state.layout.zones[zoneId];
+export const selectZone =
+  (zoneId: DockZoneId) =>
+  (state: WorkspaceLayoutStore): DockZone =>
+    state.layout.zones[zoneId];
 export const selectZoneSizes = (state: WorkspaceLayoutStore): ZoneSizes => state.layout.sizes;
 export const selectIsDragging = (state: WorkspaceLayoutStore): boolean => state.isDragging;
 export const selectDraggedPanelId = (state: WorkspaceLayoutStore): PanelId | null =>
@@ -726,5 +736,7 @@ export const selectActivePresetId = (state: WorkspaceLayoutStore): string | null
 export const selectCustomPresets = (state: WorkspaceLayoutStore): WorkspacePreset[] =>
   state.customPresets;
 /** All available presets (built-in + custom) */
-export const selectAllPresets = (state: WorkspaceLayoutStore): WorkspacePreset[] =>
-  [...WORKSPACE_PRESETS, ...state.customPresets];
+export const selectAllPresets = (state: WorkspaceLayoutStore): WorkspacePreset[] => [
+  ...WORKSPACE_PRESETS,
+  ...state.customPresets,
+];

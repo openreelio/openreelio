@@ -20,8 +20,8 @@ const logger = createLogger('AISidebar');
 // =============================================================================
 
 const MIN_WIDTH = 280;
-const MAX_WIDTH = 480;
-const DEFAULT_WIDTH = 320;
+const MAX_WIDTH = 720;
+const DEFAULT_WIDTH = 360;
 
 // =============================================================================
 // Types

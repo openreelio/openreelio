@@ -23,14 +23,39 @@ use tauri::State;
 use crate::core::analysis::color_match::{
     analyze_frame_color, compute_color_correction, ColorCorrection,
 };
+use crate::core::analysis::diarization_import::{
+    apply_imported_diarization, parse_imported_diarization_json,
+};
+use crate::core::analysis::diarization_runner::run_external_diarization_runner;
 use crate::core::analysis::esd::{self, EditingStyleDocument, EsdGenerator, EsdSummary};
 use crate::core::analysis::style_planner::{StylePlanResult, StylePlanner, StylePlanningContext};
 use crate::core::analysis::{AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata};
+use crate::core::captions::audio::extract_audio_for_transcription_async;
 use crate::core::commands::AddEffectCommand;
 use crate::core::effects::{curve_points_to_json, CurvePoint, EffectType, ParamValue};
 use crate::core::ffmpeg::SharedFFmpegState;
 use crate::core::jobs::{Job, JobStatus, JobType, Priority};
 use crate::AppState;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DiarizationImportSummary {
+    pub asset_id: String,
+    pub transcript_segment_count: usize,
+    pub speaker_count: usize,
+    pub speaker_turn_count: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalDiarizationRunSummary {
+    pub asset_id: String,
+    pub input_audio_path: String,
+    pub output_json_path: String,
+    pub transcript_segment_count: usize,
+    pub speaker_count: usize,
+    pub speaker_turn_count: usize,
+}
 
 struct ResolvedAssetContext {
     project_path: PathBuf,
@@ -189,6 +214,148 @@ pub async fn get_analysis_bundle(
     runner
         .load_bundle_optional(&asset_id)
         .map_err(|e| format!("Failed to load analysis bundle: {}", e))
+}
+
+/// Imports external diarization JSON and merges speaker IDs into the cached transcript bundle.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state), fields(asset_id = %asset_id, input_path = %input_path))]
+pub async fn import_diarization_json(
+    asset_id: String,
+    input_path: String,
+    state: State<'_, AppState>,
+) -> Result<DiarizationImportSummary, String> {
+    let project_path = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| "No project is currently open".to_string())?;
+        project.path.clone()
+    };
+
+    let resolved_input_path = {
+        let path = PathBuf::from(&input_path);
+        if path.is_absolute() {
+            path
+        } else {
+            project_path.join(path)
+        }
+    };
+
+    let json = tokio::fs::read_to_string(&resolved_input_path)
+        .await
+        .map_err(|e| format!("Failed to read diarization JSON: {}", e))?;
+    let diarization_segments =
+        parse_imported_diarization_json(&json).map_err(|e| e.to_ipc_error())?;
+
+    let runner = AnalysisJobRunner::new(&project_path);
+    let mut bundle = runner
+        .load_bundle_optional(&asset_id)
+        .map_err(|e| format!("Failed to load analysis bundle: {}", e))?
+        .ok_or_else(|| "No cached analysis bundle exists for this asset".to_string())?;
+
+    let transcript = bundle
+        .transcript
+        .as_ref()
+        .ok_or_else(|| "The cached analysis bundle does not contain a transcript".to_string())?;
+    let speech_regions = bundle
+        .audio_profile
+        .as_ref()
+        .map(|profile| profile.speech_regions.as_slice())
+        .unwrap_or(&[]);
+
+    let updated_transcript =
+        apply_imported_diarization(transcript, &diarization_segments, speech_regions);
+    let speaker_count = updated_transcript
+        .iter()
+        .filter_map(|segment| segment.speaker_id.as_deref())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let speaker_turn_count = updated_transcript
+        .iter()
+        .filter_map(|segment| segment.speaker_turn_id.as_deref())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+
+    bundle.transcript = Some(updated_transcript.clone());
+    runner
+        .save_bundle(&bundle)
+        .map_err(|e| format!("Failed to save updated analysis bundle: {}", e))?;
+
+    Ok(DiarizationImportSummary {
+        asset_id,
+        transcript_segment_count: updated_transcript.len(),
+        speaker_count,
+        speaker_turn_count,
+    })
+}
+
+/// Runs an external diarization runner and imports the resulting JSON into the cached bundle.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state, args), fields(asset_id = %asset_id, executable = %executable))]
+pub async fn run_external_diarization(
+    asset_id: String,
+    executable: String,
+    args: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<ExternalDiarizationRunSummary, String> {
+    let asset_context = resolve_asset_context(&asset_id, &state).await?;
+    let runner = AnalysisJobRunner::new(&asset_context.project_path);
+    let bundle = runner
+        .load_bundle_optional(&asset_id)
+        .map_err(|e| format!("Failed to load analysis bundle: {}", e))?
+        .ok_or_else(|| "No cached analysis bundle exists for this asset".to_string())?;
+    if bundle
+        .transcript
+        .as_ref()
+        .map(|segments| segments.is_empty())
+        .unwrap_or(true)
+    {
+        return Err("The cached analysis bundle does not contain a transcript".to_string());
+    }
+
+    let analysis_dir = runner
+        .asset_analysis_dir(&asset_id)
+        .map_err(|e| format!("Failed to resolve analysis directory: {}", e))?;
+    tokio::fs::create_dir_all(&analysis_dir)
+        .await
+        .map_err(|e| format!("Failed to create analysis directory: {}", e))?;
+
+    let audio_path = analysis_dir.join("external-diarization-input.wav");
+    let output_path = analysis_dir.join("external-diarization.json");
+    let resolved_asset_path = {
+        let path = PathBuf::from(&asset_context.asset_path);
+        if path.is_absolute() {
+            path
+        } else {
+            asset_context.project_path.join(path)
+        }
+    };
+
+    extract_audio_for_transcription_async(resolved_asset_path.as_path(), &audio_path, None)
+        .await
+        .map_err(|e| format!("Failed to extract diarization input audio: {}", e))?;
+
+    run_external_diarization_runner(&executable, &args, &audio_path, &output_path, None)
+        .await
+        .map_err(|e| e.to_ipc_error())?;
+
+    let imported = import_diarization_json(
+        asset_id.clone(),
+        output_path.to_string_lossy().to_string(),
+        state,
+    )
+    .await?;
+
+    Ok(ExternalDiarizationRunSummary {
+        asset_id,
+        input_audio_path: audio_path.to_string_lossy().to_string(),
+        output_json_path: output_path.to_string_lossy().to_string(),
+        transcript_segment_count: imported.transcript_segment_count,
+        speaker_count: imported.speaker_count,
+        speaker_turn_count: imported.speaker_turn_count,
+    })
 }
 
 // =============================================================================

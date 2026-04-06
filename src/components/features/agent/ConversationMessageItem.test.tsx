@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { ConversationMessageItem } from './ConversationMessageItem';
 import type { ConversationMessage } from '@/agents/engine/core/conversation';
 
@@ -105,6 +106,23 @@ describe('ConversationMessageItem', () => {
       expect(screen.getByTestId('thinking-part')).toBeInTheDocument();
     });
 
+    it('should render clarification parts', () => {
+      const message: ConversationMessage = {
+        id: 'msg-4b',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'clarification',
+            question: 'Which clip should be used as the background?',
+          },
+        ],
+        timestamp: Date.now(),
+      };
+      render(<ConversationMessageItem message={message} />);
+
+      expect(screen.getByTestId('clarification-part')).toBeInTheDocument();
+    });
+
     it('should render error parts with retry', () => {
       const onRetry = vi.fn();
       const message: ConversationMessage = {
@@ -177,6 +195,45 @@ describe('ConversationMessageItem', () => {
         timestamp: Date.now(),
       };
       render(<ConversationMessageItem message={message} />);
+
+      expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
+      expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();
+    });
+
+    it('collapses execution artifacts behind a summary when text is present', async () => {
+      const user = userEvent.setup();
+      const message: ConversationMessage = {
+        id: 'msg-7b',
+        role: 'assistant',
+        parts: [
+          { type: 'text', content: 'I updated the sequence.' },
+          {
+            type: 'tool_call',
+            stepId: 's1',
+            tool: 'split_clip',
+            args: {},
+            description: 'Split it',
+            riskLevel: 'low',
+            status: 'completed',
+          },
+          {
+            type: 'tool_result',
+            stepId: 's1',
+            tool: 'split_clip',
+            success: true,
+            duration: 100,
+          },
+        ],
+        timestamp: Date.now(),
+      };
+      render(<ConversationMessageItem message={message} />);
+
+      expect(screen.getByTestId('assistant-artifact-group')).toBeInTheDocument();
+      expect(screen.getByText('Execution Details')).toBeInTheDocument();
+      expect(screen.getByText('1 tool')).toBeInTheDocument();
+      expect(screen.queryByTestId('tool-call-part')).not.toBeInTheDocument();
+
+      await user.click(screen.getByTestId('assistant-artifact-toggle'));
 
       expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
       expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();

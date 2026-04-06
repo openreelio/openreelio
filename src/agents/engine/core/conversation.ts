@@ -33,6 +33,15 @@ export interface ThinkingPart {
 }
 
 /**
+ * Clarification request part emitted when the agent needs a specific answer
+ * before it can continue planning or execution.
+ */
+export interface ClarificationPart {
+  type: 'clarification';
+  question: string;
+}
+
+/**
  * Plan part from the Plan phase
  */
 export interface PlanPart {
@@ -142,6 +151,7 @@ export interface PatchPart {
 export type MessagePart =
   | TextPart
   | ThinkingPart
+  | ClarificationPart
   | PlanPart
   | ToolCallPart
   | ToolResultPart
@@ -282,12 +292,16 @@ export function createThinkingPart(thought: Thought): ThinkingPart {
 }
 
 /**
+ * Create a clarification request part.
+ */
+export function createClarificationPart(question: string): ClarificationPart {
+  return { type: 'clarification', question };
+}
+
+/**
  * Create a plan part
  */
-export function createPlanPart(
-  plan: Plan,
-  status: PlanPart['status'] = 'proposed'
-): PlanPart {
+export function createPlanPart(plan: Plan, status: PlanPart['status'] = 'proposed'): PlanPart {
   return { type: 'plan', plan, status };
 }
 
@@ -315,7 +329,7 @@ export function createToolResultPart(
   success: boolean,
   duration: number,
   data?: unknown,
-  error?: string
+  error?: string,
 ): ToolResultPart {
   return {
     type: 'tool_result',
@@ -335,7 +349,7 @@ export function createErrorPart(
   code: string,
   message: string,
   phase: string,
-  recoverable: boolean
+  recoverable: boolean,
 ): ErrorPart {
   return { type: 'error', code, message, phase, recoverable };
 }
@@ -345,7 +359,7 @@ export function createErrorPart(
  */
 export function createApprovalPart(
   plan: Plan,
-  status: ApprovalPart['status'] = 'pending'
+  status: ApprovalPart['status'] = 'pending',
 ): ApprovalPart {
   return { type: 'approval', plan, status };
 }
@@ -353,10 +367,7 @@ export function createApprovalPart(
 /**
  * Create a compaction notice part
  */
-export function createCompactionPart(
-  summary: string,
-  auto: boolean = true
-): CompactionPart {
+export function createCompactionPart(summary: string, auto: boolean = true): CompactionPart {
   return { type: 'compaction', summary, auto };
 }
 
@@ -393,9 +404,12 @@ export function toSimpleLLMMessage(msg: ConversationMessage): LLMMessage {
       case 'thinking':
         textParts.push(`[Thinking] ${part.thought.understanding}`);
         break;
+      case 'clarification':
+        textParts.push(`[Clarification] ${part.question}`);
+        break;
       case 'plan':
         textParts.push(
-          `[Plan] ${part.plan.goal}: ${part.plan.steps.map((s) => s.description).join(', ')}`
+          `[Plan] ${part.plan.goal}: ${part.plan.steps.map((s) => s.description).join(', ')}`,
         );
         break;
       case 'tool_call':
@@ -403,7 +417,7 @@ export function toSimpleLLMMessage(msg: ConversationMessage): LLMMessage {
         break;
       case 'tool_result':
         textParts.push(
-          `[Tool Result] ${part.tool}: ${part.success ? 'success' : `failed: ${part.error}`}`
+          `[Tool Result] ${part.tool}: ${part.success ? 'success' : `failed: ${part.error}`}`,
         );
         break;
       case 'error':
@@ -413,9 +427,7 @@ export function toSimpleLLMMessage(msg: ConversationMessage): LLMMessage {
         textParts.push(`[Approval] Plan ${part.status}: ${part.plan.goal}`);
         break;
       case 'tool_approval':
-        textParts.push(
-          `[Tool Approval] ${part.tool} ${part.status}: ${part.description}`
-        );
+        textParts.push(`[Tool Approval] ${part.tool} ${part.status}: ${part.description}`);
         break;
       case 'compaction':
         textParts.push(`[Context Summary] ${part.summary}`);
@@ -441,11 +453,9 @@ export function toSimpleLLMMessage(msg: ConversationMessage): LLMMessage {
  */
 export function toSimpleLLMMessages(
   messages: ConversationMessage[],
-  maxMessages?: number
+  maxMessages?: number,
 ): LLMMessage[] {
-  let filtered = messages.filter(
-    (msg) => msg.role !== 'system' && msg.parts.length > 0
-  );
+  let filtered = messages.filter((msg) => msg.role !== 'system' && msg.parts.length > 0);
 
   if (maxMessages !== undefined && filtered.length > maxMessages) {
     filtered = filtered.slice(-maxMessages);
@@ -484,9 +494,7 @@ export function isValidMessagePart(part: unknown): part is MessagePart {
       );
     case 'tool_result':
       return (
-        typeof p.stepId === 'string' &&
-        typeof p.tool === 'string' &&
-        typeof p.success === 'boolean'
+        typeof p.stepId === 'string' && typeof p.tool === 'string' && typeof p.success === 'boolean'
       );
     case 'error':
       return typeof p.code === 'string' && typeof p.message === 'string';
@@ -516,9 +524,7 @@ export function isValidMessagePart(part: unknown): part is MessagePart {
 /**
  * Check if a ConversationMessage is valid
  */
-export function isValidConversationMessage(
-  msg: unknown
-): msg is ConversationMessage {
+export function isValidConversationMessage(msg: unknown): msg is ConversationMessage {
   if (!msg || typeof msg !== 'object') return false;
   const m = msg as Record<string, unknown>;
 
