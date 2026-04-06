@@ -391,6 +391,24 @@ impl AnalysisOptions {
 }
 
 // =============================================================================
+// Contact Sheet
+// =============================================================================
+
+/// A generated contact sheet image composed from representative shot keyframes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactSheetArtifact {
+    /// Absolute path to the generated contact sheet image.
+    pub path: String,
+    /// Number of keyframes included in the sheet.
+    pub frame_count: usize,
+    /// Number of grid columns.
+    pub columns: usize,
+    /// Number of grid rows.
+    pub rows: usize,
+}
+
+// =============================================================================
 // Analysis Bundle
 // =============================================================================
 
@@ -413,6 +431,9 @@ pub struct AnalysisBundle {
     pub segments: Option<Vec<ContentSegment>>,
     /// Visual frame analysis results
     pub frame_analysis: Option<Vec<FrameAnalysis>>,
+    /// Representative-frame contact sheet artifact
+    #[serde(default)]
+    pub contact_sheet: Option<ContactSheetArtifact>,
     /// Video file metadata
     pub metadata: VideoMetadata,
     /// Errors from failed sub-jobs (key = analysis type name)
@@ -432,6 +453,7 @@ impl AnalysisBundle {
             audio_profile: None,
             segments: None,
             frame_analysis: None,
+            contact_sheet: None,
             metadata,
             errors: HashMap::new(),
             analyzed_at: chrono::Utc::now().to_rfc3339(),
@@ -450,6 +472,7 @@ impl AnalysisBundle {
             || self.audio_profile.is_some()
             || self.segments.is_some()
             || self.frame_analysis.is_some()
+            || self.contact_sheet.is_some()
     }
 
     /// Returns true if all requested analyses completed without errors
@@ -731,6 +754,12 @@ mod tests {
             },
             FrameAnalysis::local_fallback(1, 0.7),
         ]);
+        bundle.contact_sheet = Some(ContactSheetArtifact {
+            path: "/tmp/contact-sheet.jpg".to_string(),
+            frame_count: 2,
+            columns: 2,
+            rows: 1,
+        });
 
         let json = serde_json::to_string_pretty(&bundle).unwrap();
         let parsed: AnalysisBundle = serde_json::from_str(&json).unwrap();
@@ -740,6 +769,7 @@ mod tests {
         assert_eq!(parsed.audio_profile.as_ref().unwrap().bpm, Some(128.0));
         assert_eq!(parsed.segments.as_ref().unwrap().len(), 2);
         assert_eq!(parsed.frame_analysis.as_ref().unwrap().len(), 2);
+        assert_eq!(parsed.contact_sheet.as_ref().unwrap().frame_count, 2);
         assert!(parsed.errors.is_empty());
     }
 
@@ -753,6 +783,7 @@ mod tests {
         assert!(json.contains("\"audioProfile\":null"));
         assert!(json.contains("\"segments\":null"));
         assert!(json.contains("\"frameAnalysis\":null"));
+        assert!(json.contains("\"contactSheet\":null"));
         assert!(json.contains("\"errors\":{}"));
 
         let parsed: AnalysisBundle = serde_json::from_str(&json).unwrap();
@@ -762,6 +793,7 @@ mod tests {
         assert!(parsed.audio_profile.is_none());
         assert!(parsed.segments.is_none());
         assert!(parsed.frame_analysis.is_none());
+        assert!(parsed.contact_sheet.is_none());
     }
 
     #[test]

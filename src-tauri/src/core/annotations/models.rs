@@ -129,6 +129,16 @@ impl<T> AnalysisResult<T> {
 // Shot Result
 // =============================================================================
 
+/// How a shot keyframe was selected.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum KeyframeSelectionMethod {
+    /// Use the temporal midpoint of the shot.
+    Midpoint,
+    /// Use FFmpeg thumbnail selection within the interior of the shot.
+    Thumbnail,
+}
+
 /// A detected shot/scene boundary
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -142,6 +152,9 @@ pub struct ShotResult {
     /// Optional keyframe thumbnail path
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyframe_path: Option<String>,
+    /// How the keyframe was selected
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyframe_selection_method: Option<KeyframeSelectionMethod>,
 }
 
 impl ShotResult {
@@ -152,12 +165,19 @@ impl ShotResult {
             end_sec,
             confidence,
             keyframe_path: None,
+            keyframe_selection_method: None,
         }
     }
 
     /// Sets the keyframe path
     pub fn with_keyframe(mut self, path: &str) -> Self {
         self.keyframe_path = Some(path.to_string());
+        self
+    }
+
+    /// Sets the keyframe selection method
+    pub fn with_keyframe_selection_method(mut self, method: KeyframeSelectionMethod) -> Self {
+        self.keyframe_selection_method = Some(method);
         self
     }
 
@@ -824,6 +844,7 @@ mod tests {
         assert_eq!(shot.end_sec, 5.0);
         assert_eq!(shot.confidence, 0.85);
         assert!(shot.keyframe_path.is_none());
+        assert!(shot.keyframe_selection_method.is_none());
     }
 
     #[test]
@@ -832,6 +853,16 @@ mod tests {
         assert_eq!(
             shot.keyframe_path,
             Some("/path/to/keyframe.jpg".to_string())
+        );
+    }
+
+    #[test]
+    fn test_shot_result_with_keyframe_selection_method() {
+        let shot = ShotResult::new(0.0, 5.0, 0.85)
+            .with_keyframe_selection_method(KeyframeSelectionMethod::Thumbnail);
+        assert_eq!(
+            shot.keyframe_selection_method,
+            Some(KeyframeSelectionMethod::Thumbnail)
         );
     }
 

@@ -25,6 +25,8 @@
 pub mod audio;
 pub mod cleanup;
 pub mod color_match;
+pub mod diarization_import;
+pub mod diarization_runner;
 pub mod dtw;
 pub mod ducking;
 pub mod esd;
@@ -59,6 +61,9 @@ const ANALYSIS_DIR: &str = "analysis";
 /// Name of the bundle JSON file
 const BUNDLE_FILENAME: &str = "bundle.json";
 
+/// Name of the generated contact-sheet image
+const CONTACT_SHEET_FILENAME: &str = "contact-sheet.jpg";
+
 // =============================================================================
 // Analysis Job Runner
 // =============================================================================
@@ -92,7 +97,7 @@ impl AnalysisJobRunner {
     /// Returns the directory for an asset's analysis artifacts.
     ///
     /// Validates `asset_id` to prevent path traversal before joining.
-    fn asset_analysis_dir(&self, asset_id: &str) -> CoreResult<PathBuf> {
+    pub(crate) fn asset_analysis_dir(&self, asset_id: &str) -> CoreResult<PathBuf> {
         Self::validate_asset_id(asset_id)?;
         Ok(self
             .project_dir
@@ -214,6 +219,21 @@ impl AnalysisJobRunner {
                 None
             }
         };
+
+        if let Some(ref shots) = shots {
+            match self
+                .generate_contact_sheet_if_possible(asset_id, shots)
+                .await
+            {
+                Ok(Some(contact_sheet)) => {
+                    bundle.contact_sheet = Some(contact_sheet);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    bundle.add_error("contact_sheet", e.to_string());
+                }
+            }
+        }
 
         // Collect audio results
         let audio_profile = match audio_result {
@@ -366,7 +386,7 @@ impl AnalysisJobRunner {
     ///
     /// Uses `atomic_write_json_pretty` from `crate::core::fs` which handles
     /// Windows rename-over-existing semantics correctly.
-    fn save_bundle(&self, bundle: &AnalysisBundle) -> CoreResult<()> {
+    pub(crate) fn save_bundle(&self, bundle: &AnalysisBundle) -> CoreResult<()> {
         let path = self.bundle_path(&bundle.asset_id)?;
 
         crate::core::fs::atomic_write_json_pretty(&path, bundle)?;
@@ -378,6 +398,28 @@ impl AnalysisJobRunner {
         );
 
         Ok(())
+    }
+
+    async fn generate_contact_sheet_if_possible(
+        &self,
+        asset_id: &str,
+        shots: &[ShotResult],
+    ) -> CoreResult<Option<ContactSheetArtifact>> {
+        let keyframes = shots
+            .iter()
+            .filter_map(|shot| shot.keyframe_path.as_ref().map(PathBuf::from))
+            .collect::<Vec<_>>();
+        if keyframes.is_empty() {
+            return Ok(None);
+        }
+
+        let output_path = self
+            .asset_analysis_dir(asset_id)?
+            .join(CONTACT_SHEET_FILENAME);
+        let analyzer = VisualAnalyzer::new(self.ffmpeg_path.clone());
+        analyzer
+            .generate_contact_sheet(&keyframes, &output_path)
+            .await
     }
 
     // =========================================================================
@@ -423,12 +465,13 @@ impl AnalysisJobRunner {
 
         let analyzer = VisualAnalyzer::new(self.ffmpeg_path.clone());
         let keyframe_dir = self.asset_analysis_dir(asset_id)?.join("keyframes");
-        let keyframe_paths = analyzer
+        let keyframes = analyzer
             .extract_keyframes(video_path, &results, &keyframe_dir)
             .await?;
 
-        for (shot, path) in results.iter_mut().zip(keyframe_paths) {
-            shot.keyframe_path = Some(path.to_string_lossy().to_string());
+        for (shot, keyframe) in results.iter_mut().zip(keyframes) {
+            shot.keyframe_path = Some(keyframe.path.to_string_lossy().to_string());
+            shot.keyframe_selection_method = Some(keyframe.method);
         }
 
         Ok(Some(results))
@@ -663,6 +706,12 @@ mod tests {
             silence_regions: vec![],
             speech_regions: vec![],
         });
+        bundle.contact_sheet = Some(ContactSheetArtifact {
+            path: temp_dir.path().join("sheet.jpg").display().to_string(),
+            frame_count: 2,
+            columns: 2,
+            rows: 1,
+        });
 
         runner.save_bundle(&bundle).unwrap();
 
@@ -670,6 +719,7 @@ mod tests {
         assert_eq!(loaded.asset_id, "asset_001");
         assert_eq!(loaded.shots.as_ref().unwrap().len(), 2);
         assert_eq!(loaded.audio_profile.as_ref().unwrap().bpm, Some(120.0));
+        assert_eq!(loaded.contact_sheet.as_ref().unwrap().columns, 2);
     }
 
     #[test]
