@@ -16,15 +16,8 @@ import type {
   LLMToolDefinition,
   GenerateOptions,
 } from './ports/ILLMClient';
-import type {
-  IToolExecutor,
-  ExecutionContext,
-  ToolExecutionResult,
-} from './ports/IToolExecutor';
-import type {
-  AgentContext,
-  RiskLevel,
-} from './core/types';
+import type { IToolExecutor, ExecutionContext, ToolExecutionResult } from './ports/IToolExecutor';
+import type { AgentContext, RiskLevel } from './core/types';
 import type { ConversationMessage, TokenUsage } from './core/conversation';
 import { toSimpleLLMMessages } from './core/conversation';
 import { parseFastPathPlan, type FastPathMatch } from './core/fastPathParser';
@@ -75,6 +68,7 @@ export interface ToolCallStartEvent {
   id: string;
   name: string;
   args: Record<string, unknown>;
+  riskLevel: RiskLevel;
 }
 
 export interface ToolCallCompleteEvent {
@@ -213,10 +207,10 @@ function formatKnowledgeValue(value: unknown): string {
   }
 
   if (
-    typeof value === 'number'
-    || typeof value === 'boolean'
-    || value === null
-    || value === undefined
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    value === null ||
+    value === undefined
   ) {
     return String(value);
   }
@@ -228,10 +222,7 @@ function formatKnowledgeValue(value: unknown): string {
   }
 }
 
-function buildPromptKnowledge(
-  context: AgentContext,
-  explicitKnowledge: string[] = [],
-): string[] {
+function buildPromptKnowledge(context: AgentContext, explicitKnowledge: string[] = []): string[] {
   const entries = [...explicitKnowledge];
 
   if (context.recentOperations.length > 0) {
@@ -266,11 +257,7 @@ export class AgentLoop {
   private readonly config: AgentLoopConfig;
   private abortController: AbortController | null = null;
 
-  constructor(
-    llm: ILLMClient,
-    tools: IToolExecutor,
-    config: Partial<AgentLoopConfig> = {},
-  ) {
+  constructor(llm: ILLMClient, tools: IToolExecutor, config: Partial<AgentLoopConfig> = {}) {
     this.llm = llm;
     this.tools = tools;
 
@@ -416,6 +403,7 @@ export class AgentLoop {
               id: event.id,
               name: event.name,
               args: event.args,
+              riskLevel: this.tools.getToolDefinition(event.name)?.riskLevel ?? 'low',
             };
             break;
 
@@ -446,12 +434,7 @@ export class AgentLoop {
       }
 
       // Execute tools
-      const results = await this.executeToolCalls(
-        toolCalls,
-        context,
-        sessionId,
-        doomDetector,
-      );
+      const results = await this.executeToolCalls(toolCalls, context, sessionId, doomDetector);
 
       // Yield tool completion events
       for (const result of results.results) {
@@ -477,12 +460,7 @@ export class AgentLoop {
       }
 
       // Append assistant message + tool results to history
-      messages = this.appendToolRoundtrip(
-        messages,
-        assistantText,
-        toolCalls,
-        results.results,
-      );
+      messages = this.appendToolRoundtrip(messages, assistantText, toolCalls, results.results);
 
       // Check context overflow -> compact
       if (Compaction.shouldCompact(totalUsage, this.config.contextLimit)) {
@@ -494,9 +472,7 @@ export class AgentLoop {
         );
         messages = compacted.messages.map((m) => ({
           role: m.role as 'system' | 'user' | 'assistant' | 'tool',
-          content: m.parts
-            .map((p) => (p.type === 'text' ? p.content : ''))
-            .join('\n'),
+          content: m.parts.map((p) => (p.type === 'text' ? p.content : '')).join('\n'),
         }));
         // Re-append user message after compaction
         messages.push({ role: 'user', content: input });
@@ -516,8 +492,8 @@ export class AgentLoop {
           context = {
             ...context,
             ...fresh,
-            projectId: context.projectId,       // immutable identity
-            sequenceId: context.sequenceId,      // immutable identity
+            projectId: context.projectId, // immutable identity
+            sequenceId: context.sequenceId, // immutable identity
             availableTools: context.availableTools, // preserve tools
           };
         } catch {
@@ -529,9 +505,7 @@ export class AgentLoop {
     // Max iterations reached
     yield {
       type: 'error',
-      error: new Error(
-        `Agent loop reached maximum iterations (${this.config.maxIterations})`,
-      ),
+      error: new Error(`Agent loop reached maximum iterations (${this.config.maxIterations})`),
     };
     yield { type: 'done', usage: totalUsage };
   }
@@ -574,6 +548,7 @@ export class AgentLoop {
       id: `fastpath-${step.id}`,
       name: step.tool,
       args: step.args,
+      riskLevel,
     };
 
     const execCtx: ExecutionContext = {
@@ -831,9 +806,7 @@ export class AgentLoop {
    * Convert LLM messages back into ConversationMessage[] for Compaction.
    * This is a lossy conversion; we convert to simple text messages.
    */
-  private llmMessagesToConversation(
-    messages: LLMMessage[],
-  ): ConversationMessage[] {
+  private llmMessagesToConversation(messages: LLMMessage[]): ConversationMessage[] {
     return messages.map((msg) => ({
       id: crypto.randomUUID(),
       role: msg.role === 'tool' ? 'assistant' : (msg.role as 'system' | 'user' | 'assistant'),

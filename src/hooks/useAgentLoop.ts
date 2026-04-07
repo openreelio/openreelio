@@ -76,6 +76,8 @@ export interface UseAgentLoopOptions {
 
   /** Called for each event from the loop */
   onEvent?: (event: AgentLoopEvent) => void;
+  /** Called once the run is bound to a persisted conversation session */
+  onSessionReady?: (sessionId: string) => void;
   /** Called when the loop completes */
   onComplete?: (usage?: TokenUsage) => void;
   /** Called on error */
@@ -225,6 +227,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
         runGuardRef.current = false;
         return;
       }
+      optionsRef.current.onSessionReady?.(storeSessionId);
 
       const projectId = store.activeProjectId ?? context.projectId;
       const agentSessionStore = useAgentSessionStore.getState();

@@ -110,4 +110,51 @@ describe('useAgentLoopEventHandler', () => {
     ]);
     expect(state.isGenerating).toBe(false);
   });
+
+  it('should preserve the tool risk level for tool-call parts', () => {
+    const { result } = renderHook(() => useAgentLoopEventHandler());
+
+    act(() => {
+      result.current.handleEvent({
+        type: 'tool_call_start',
+        id: 'tool-call-1',
+        name: 'delete_clip',
+        args: { clipId: 'clip-1' },
+        riskLevel: 'high',
+      });
+    });
+
+    const message = useConversationStore.getState().activeConversation?.messages[0];
+    expect(message?.parts[0]).toMatchObject({
+      type: 'tool_call',
+      tool: 'delete_clip',
+      riskLevel: 'high',
+      status: 'running',
+    });
+  });
+
+  it('should drop stale events after the handler is bound to a different session', () => {
+    const { result } = renderHook(() => useAgentLoopEventHandler());
+
+    act(() => {
+      result.current.bindSession('session-1');
+      useConversationStore.setState((state) => ({
+        ...state,
+        activeSessionId: 'session-2',
+        activeConversation: {
+          id: 'conv-2',
+          projectId: 'project-1',
+          messages: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      }));
+      result.current.handleEvent({
+        type: 'text_delta',
+        content: 'late output',
+      });
+    });
+
+    expect(useConversationStore.getState().activeConversation?.messages).toHaveLength(0);
+  });
 });
