@@ -1,3 +1,5 @@
+import { useSyncExternalStore } from 'react';
+
 /**
  * Feature Flags System
  *
@@ -97,6 +99,8 @@ export interface AgentSidebarRuntimePolicy {
  * localStorage key for storing feature flag overrides
  */
 const STORAGE_KEY = 'openreelio-feature-flags';
+const featureFlagListeners = new Set<() => void>();
+let cachedFeatureFlagsSnapshot: FeatureFlags | null = null;
 
 /**
  * Default values for all feature flags
@@ -177,6 +181,26 @@ function saveOverrides(overrides: Partial<FeatureFlags>): void {
   } catch {
     // localStorage full or other error - silently ignore
   }
+}
+
+function notifyFeatureFlagListeners(): void {
+  for (const listener of featureFlagListeners) {
+    listener();
+  }
+}
+
+function readFeatureFlagsSnapshot(): FeatureFlags {
+  const nextSnapshot = getAllFeatureFlags();
+
+  if (
+    cachedFeatureFlagsSnapshot &&
+    FEATURE_FLAG_KEYS.every((key) => cachedFeatureFlagsSnapshot?.[key] === nextSnapshot[key])
+  ) {
+    return cachedFeatureFlagsSnapshot;
+  }
+
+  cachedFeatureFlagsSnapshot = nextSnapshot;
+  return nextSnapshot;
 }
 
 /**
@@ -265,6 +289,7 @@ export function setFeatureFlag(flag: FeatureFlagKey, value: boolean): void {
   const overrides = getStoredOverrides();
   overrides[flag] = value;
   saveOverrides(overrides);
+  notifyFeatureFlagListeners();
 }
 
 /**
@@ -286,9 +311,52 @@ export function resetFeatureFlags(): void {
 
   try {
     localStorage.removeItem(STORAGE_KEY);
+    notifyFeatureFlagListeners();
   } catch {
     // Silently ignore errors
   }
+}
+
+export function subscribeFeatureFlags(listener: () => void): () => void {
+  featureFlagListeners.add(listener);
+  return () => {
+    featureFlagListeners.delete(listener);
+  };
+}
+
+export function useFeatureFlag(flag: FeatureFlagKey): boolean {
+  return useSyncExternalStore(
+    subscribeFeatureFlags,
+    () => getFeatureFlag(flag),
+    () => DEFAULT_FLAGS[flag],
+  );
+}
+
+export function useFeatureFlags(): FeatureFlags {
+  return useSyncExternalStore(subscribeFeatureFlags, readFeatureFlagsSnapshot, () => DEFAULT_FLAGS);
+}
+
+export function useSidebarRuntimePolicy(): AgentSidebarRuntimePolicy {
+  const flags = useFeatureFlags();
+  const compatibilityRuntimeEnabled = flags.USE_AGENT_LOOP;
+
+  if (flags.USE_AGENTIC_ENGINE) {
+    return {
+      canonicalRuntime: 'tpao',
+      selectedRuntime: 'tpao',
+      track: 'canonical',
+      compatibilityRuntime: compatibilityRuntimeEnabled ? 'fast' : null,
+      compatibilityRuntimeEnabled,
+    };
+  }
+
+  return {
+    canonicalRuntime: 'tpao',
+    selectedRuntime: 'disabled',
+    track: 'disabled',
+    compatibilityRuntime: compatibilityRuntimeEnabled ? 'fast' : null,
+    compatibilityRuntimeEnabled,
+  };
 }
 
 /**

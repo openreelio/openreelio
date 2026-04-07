@@ -10,6 +10,8 @@ import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
 import { createDefaultLayout, useWorkspaceLayoutStore } from '@/stores/workspaceLayoutStore';
 import { loadProjectPromptContext } from '@/agents/engine/core/projectPromptContext';
+import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
+import { createBackendToolExecutor } from '@/agents/engine/adapters/tools/BackendToolExecutor';
 import { AgenticSidebarContent } from './AgenticSidebarContent';
 
 let latestSessionListProps: Record<string, unknown> | null = null;
@@ -286,6 +288,22 @@ describe('AgenticSidebarContent', () => {
       screen.getByText('Enable `USE_AGENTIC_ENGINE` to restore the canonical TPAO runtime.'),
     ).toBeInTheDocument();
     expect(screen.queryByTestId('agentic-chat')).not.toBeInTheDocument();
+  });
+
+  it('reacts to backend tool flag changes without remounting the sidebar', async () => {
+    setFeatureFlag('USE_BACKEND_TOOLS', false);
+
+    render(<AgenticSidebarContent />);
+
+    expect(createToolRegistryAdapter).toHaveBeenCalledTimes(1);
+    expect(createBackendToolExecutor).not.toHaveBeenCalled();
+
+    await act(async () => {
+      setFeatureFlag('USE_BACKEND_TOOLS', true);
+    });
+
+    expect(createToolRegistryAdapter).toHaveBeenCalledTimes(2);
+    expect(createBackendToolExecutor).toHaveBeenCalledTimes(1);
   });
 
   it('shows a transition state while a new session is starting', async () => {

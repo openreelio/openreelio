@@ -31,7 +31,7 @@ import {
   loadProjectPromptContext,
   type ProjectPromptContext,
 } from '@/agents/engine/core/projectPromptContext';
-import { resolveSidebarRuntimePolicy, isBackendToolsEnabled } from '@/config/featureFlags';
+import { useFeatureFlag, useSidebarRuntimePolicy } from '@/config/featureFlags';
 import { useConversationStore, useProjectStore } from '@/stores';
 import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
@@ -129,6 +129,8 @@ export function AgenticSidebarContent({
   // Adapters
   // ===========================================================================
 
+  const backendToolsEnabled = useFeatureFlag('USE_BACKEND_TOOLS');
+
   const llmClient = useMemo(() => {
     logger.info('Creating TauriLLMAdapter');
     return createTauriLLMAdapter();
@@ -136,20 +138,20 @@ export function AgenticSidebarContent({
 
   const toolExecutor = useMemo(() => {
     const frontend = createToolRegistryAdapter(globalToolRegistry);
-    if (isBackendToolsEnabled()) {
+    if (backendToolsEnabled) {
       logger.info('Creating BackendToolExecutor (editing tools → backend IPC)');
       return createBackendToolExecutor(frontend);
     }
     logger.info('Creating ToolRegistryAdapter (all tools → frontend)');
     return frontend;
-  }, []);
+  }, [backendToolsEnabled]);
 
   // ===========================================================================
   // Chat Handle Ref (for abort/isRunning access)
   // ===========================================================================
 
   const chatHandleRef = useRef<AgentRuntimeChatHandle>(null);
-  const runtimePolicy = resolveSidebarRuntimePolicy();
+  const runtimePolicy = useSidebarRuntimePolicy();
   const currentProjectId = useProjectStore((state) => state.meta?.id ?? null);
   const currentProjectPath = useProjectStore((state) => state.meta?.path ?? null);
   const activeSessionId = useConversationStore((state) => state.activeSessionId);
