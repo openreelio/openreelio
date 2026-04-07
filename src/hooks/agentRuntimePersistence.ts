@@ -1,9 +1,11 @@
 import type {
   AgentContext,
+  AgentRunTrigger,
   AgentRunPhase,
   AgentRuntimeKind,
   CompactionRecord,
   ILLMClient,
+  Plan,
   ResumeCheckpoint,
   ShippingAgentRuntimeKind,
 } from '@/agents/engine';
@@ -47,6 +49,7 @@ type RecoveryBootstrapBoundary =
       boundaryId: string;
       message: string;
       kind: 'checkpoint';
+      checkpoint: ResumeCheckpoint;
       traceRecord: CheckpointTraceRecord;
     }
   | {
@@ -55,6 +58,27 @@ type RecoveryBootstrapBoundary =
       kind: 'summary';
       traceRecord: CompactionTraceRecord;
     };
+
+export interface RecoveredApprovalResume {
+  kind: 'approval_wait';
+  checkpointId: string;
+  runId: string | null;
+  input: string;
+  plan: Plan;
+}
+
+export interface RecoveredToolWaitResume {
+  kind: 'tool_wait';
+  checkpointId: string;
+  runId: string | null;
+  input: string;
+  plan: Plan;
+  stepId: string;
+  toolName: string | null;
+  projectStateVersion: number;
+}
+
+export type RecoveredExecutableResume = RecoveredApprovalResume | RecoveredToolWaitResume;
 
 export async function ensureConfiguredProvider(
   llmClient: ILLMClient,
@@ -246,6 +270,7 @@ export async function bootstrapPersistedAgentSession(input: {
 export async function startPersistedRun(input: {
   sessionId: string;
   runtimeKind: AgentRuntimeKind;
+  trigger?: AgentRunTrigger;
   maxIterations?: number;
   maxToolCalls?: number;
   traceId?: string | null;
@@ -259,6 +284,7 @@ export async function startPersistedRun(input: {
   const {
     sessionId,
     runtimeKind,
+    trigger = 'user',
     maxIterations,
     maxToolCalls,
     traceId,
@@ -274,7 +300,7 @@ export async function startPersistedRun(input: {
     const persistedRun = await useAgentSessionStore.getState().startRun({
       sessionId,
       runtimeKind,
-      trigger: 'user',
+      trigger,
       maxIterations,
       maxToolCalls,
       traceId,
@@ -366,7 +392,7 @@ export async function bootstrapRecoveredContextFromCheckpoint(input: {
   lastBootstrappedCheckpointIdRef: CheckpointIdRef;
   onCheckpointRecovered?: (record: CheckpointTraceRecord) => void;
   onCompactionRecovered?: (record: CompactionTraceRecord) => void;
-}): Promise<void> {
+}): Promise<RecoveredExecutableResume | null> {
   const {
     sessionId,
     addSystemMessage,
@@ -380,7 +406,7 @@ export async function bootstrapRecoveredContextFromCheckpoint(input: {
   const session = agentSessionStore.snapshotsById[sessionId]?.session;
 
   if (!session) {
-    return;
+    return null;
   }
 
   try {
@@ -392,7 +418,7 @@ export async function bootstrapRecoveredContextFromCheckpoint(input: {
       sessionId,
       error: error instanceof Error ? error.message : String(error),
     });
-    return;
+    return null;
   }
 
   const refreshedSession = useAgentSessionStore.getState().snapshotsById[sessionId]?.session;
@@ -405,12 +431,16 @@ export async function bootstrapRecoveredContextFromCheckpoint(input: {
     checkpoints,
     compactions,
   );
+  const recoveredExecutableResume =
+    bootstrapBoundary?.kind === 'checkpoint'
+      ? resolveRecoveredExecutableResume(bootstrapBoundary.checkpoint)
+      : null;
 
   if (
     !bootstrapBoundary ||
     bootstrapBoundary.boundaryId === lastBootstrappedCheckpointIdRef.current
   ) {
-    return;
+    return recoveredExecutableResume;
   }
 
   addSystemMessage(bootstrapBoundary.message);
@@ -420,6 +450,7 @@ export async function bootstrapRecoveredContextFromCheckpoint(input: {
     onCompactionRecovered?.(bootstrapBoundary.traceRecord);
   }
   lastBootstrappedCheckpointIdRef.current = bootstrapBoundary.boundaryId;
+  return recoveredExecutableResume;
 }
 
 export function getPersistedSessionTraceState(sessionId: string): {
@@ -466,6 +497,7 @@ function resolveRecoveryBootstrapBoundary(
     return {
       boundaryId: `checkpoint:${activeCheckpoint.id}`,
       kind: 'checkpoint',
+      checkpoint: activeCheckpoint,
       message,
       traceRecord: buildResumeCheckpointTraceRecord({
         checkpointId: activeCheckpoint.id,
@@ -557,7 +589,11 @@ function buildRecoveredCheckpointMessage(checkpoint: ResumeCheckpoint): string |
     const toolName = stringValue(pendingWork?.toolName) ?? stringValue(resumeCursor?.toolName);
     lines.push(`- Pending tool permission: ${toolName ?? 'unknown tool'}`);
   } else if (pendingType === 'plan_approval') {
-    lines.push('- Pending plan approval was recovered into visible context.');
+    lines.push(
+      planValue(pendingWork?.plan)
+        ? '- Pending plan approval can resume execution after approval.'
+        : '- Pending plan approval was recovered into visible context.',
+    );
   } else if (pendingType === 'compaction_resume') {
     lines.push('- Recovered compaction boundary for context rebuild.');
   }
@@ -568,7 +604,9 @@ function buildRecoveredCheckpointMessage(checkpoint: ResumeCheckpoint): string |
   }
 
   lines.push(
-    'Use this recovered context when continuing the conversation. Execution did not automatically resume.',
+    planValue(pendingWork?.plan)
+      ? 'Use this recovered context when continuing the conversation. Execution can resume from this approval checkpoint after you confirm the recovered plan.'
+      : 'Use this recovered context when continuing the conversation. Execution did not automatically resume.',
   );
 
   return lines.join('\n');
@@ -634,6 +672,110 @@ function parseJson<T>(raw: string | null, fallback: T | null = null): T | null {
 
 function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function planValue(value: unknown): Plan | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as Partial<Plan>;
+  if (
+    typeof candidate.goal !== 'string' ||
+    !Array.isArray(candidate.steps) ||
+    typeof candidate.estimatedTotalDuration !== 'number' ||
+    typeof candidate.requiresApproval !== 'boolean' ||
+    typeof candidate.rollbackStrategy !== 'string'
+  ) {
+    return null;
+  }
+
+  return candidate as Plan;
+}
+
+function resolveRecoveredExecutableResume(
+  checkpoint: ResumeCheckpoint,
+): RecoveredExecutableResume | null {
+  if (checkpoint.checkpointKind === 'approval_wait') {
+    return resolveRecoveredApprovalResume(checkpoint);
+  }
+
+  if (checkpoint.checkpointKind === 'tool_wait') {
+    return resolveRecoveredToolWaitResume(checkpoint);
+  }
+
+  return null;
+}
+
+function resolveRecoveredApprovalResume(
+  checkpoint: ResumeCheckpoint,
+): RecoveredApprovalResume | null {
+  if (checkpoint.checkpointKind !== 'approval_wait') {
+    return null;
+  }
+
+  const sessionState = parseJson<Record<string, unknown>>(checkpoint.sessionStateJson);
+  const pendingWork = parseJson<Record<string, unknown> | null>(checkpoint.pendingWorkJson, null);
+  const plan = planValue(pendingWork?.plan);
+  const input = stringValue(sessionState?.input);
+
+  if (!plan || !plan.requiresApproval || !input) {
+    return null;
+  }
+
+  return {
+    kind: 'approval_wait',
+    checkpointId: checkpoint.id,
+    runId: checkpoint.runId,
+    input,
+    plan,
+  };
+}
+
+function resolveRecoveredToolWaitResume(
+  checkpoint: ResumeCheckpoint,
+): RecoveredToolWaitResume | null {
+  if (checkpoint.checkpointKind !== 'tool_wait') {
+    return null;
+  }
+
+  const resumeCursor = parseJson<Record<string, unknown>>(checkpoint.resumeCursorJson);
+  const sessionState = parseJson<Record<string, unknown>>(checkpoint.sessionStateJson);
+  const pendingWork = parseJson<Record<string, unknown> | null>(checkpoint.pendingWorkJson, null);
+  const plan = planValue(pendingWork?.plan);
+  const input = stringValue(sessionState?.input);
+  const stepId = stringValue(pendingWork?.stepId) ?? stringValue(resumeCursor?.stepId);
+  const toolName = stringValue(pendingWork?.toolName) ?? stringValue(resumeCursor?.toolName);
+  const nextStepIndex = numberValue(pendingWork?.nextStepIndex);
+  const toolCallsUsed = numberValue(pendingWork?.toolCallsUsed);
+  const projectStateVersion = numberValue(sessionState?.projectStateVersion);
+  const completedStepIds = Array.isArray(pendingWork?.completedStepIds)
+    ? pendingWork.completedStepIds.filter((value): value is string => typeof value === 'string')
+    : null;
+
+  if (
+    !plan ||
+    !input ||
+    !stepId ||
+    nextStepIndex !== 0 ||
+    toolCallsUsed !== 0 ||
+    projectStateVersion === null ||
+    !completedStepIds ||
+    completedStepIds.length > 0
+  ) {
+    return null;
+  }
+
+  return {
+    kind: 'tool_wait',
+    checkpointId: checkpoint.id,
+    runId: checkpoint.runId,
+    input,
+    plan,
+    stepId,
+    toolName,
+    projectStateVersion,
+  };
 }
 
 function numberValue(value: unknown): number | null {
