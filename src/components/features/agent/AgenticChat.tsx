@@ -32,6 +32,8 @@ export interface AgenticChatProps {
   onComplete?: UseAgenticLoopOptions['onComplete'];
   /** Called on error */
   onError?: UseAgenticLoopOptions['onError'];
+  /** Called when the active run is aborted */
+  onAbort?: UseAgenticLoopOptions['onAbort'];
   /** Placeholder text for input */
   placeholder?: string;
   /** Whether the chat is disabled */
@@ -66,6 +68,7 @@ export const AgenticChat = forwardRef<AgenticChatHandle, AgenticChatProps>(funct
     onSubmit,
     onComplete,
     onError,
+    onAbort,
     placeholder = 'Ask the AI to edit your video...',
     disabled = false,
     currentAgentName = 'Editor',
@@ -108,6 +111,9 @@ export const AgenticChat = forwardRef<AgenticChatHandle, AgenticChatProps>(funct
     onError: (err) => {
       addSystemMessage(`Error: ${err.message}`);
       onError?.(err);
+    },
+    onAbort: () => {
+      onAbort?.();
     },
     onApprovalRequired: () => {
       // Approval is handled through part renderers

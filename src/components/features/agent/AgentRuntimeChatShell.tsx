@@ -135,6 +135,7 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
     const restorePanel = useWorkspaceLayoutStore((state) => state.restorePanel);
     const setActivePanel = useWorkspaceLayoutStore((state) => state.setActivePanel);
     const setZoneCollapsed = useWorkspaceLayoutStore((state) => state.setZoneCollapsed);
+    const previousProjectIdRef = useRef(currentProjectId);
 
     const artifactFocus = useMemo(() => {
       if (!artifactSelection.focus) {
@@ -216,13 +217,29 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
 
     useEffect(() => {
       const targetProjectId = currentProjectId ?? 'default';
+      const previousProjectId = previousProjectIdRef.current;
+      previousProjectIdRef.current = currentProjectId;
+
+      if (previousProjectId && previousProjectId !== currentProjectId && isRunning) {
+        clearQueue();
+        abort();
+      }
+
       if (activeProjectId !== targetProjectId) {
         if (clearQueueOnProjectSwitch) {
           clearQueue();
         }
         loadForProject(targetProjectId);
       }
-    }, [activeProjectId, clearQueue, clearQueueOnProjectSwitch, currentProjectId, loadForProject]);
+    }, [
+      abort,
+      activeProjectId,
+      clearQueue,
+      clearQueueOnProjectSwitch,
+      currentProjectId,
+      isRunning,
+      loadForProject,
+    ]);
 
     const prevIsRunningRef = useRef(isRunning);
     useEffect(() => {

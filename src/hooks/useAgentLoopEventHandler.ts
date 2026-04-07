@@ -22,14 +22,19 @@ export function useAgentLoopEventHandler() {
   const messageIdRef = useRef<string | null>(null);
   const boundSessionIdRef = useRef<string | null>(null);
 
+  const bindSession = useCallback((sessionId: string | null): void => {
+    messageIdRef.current = null;
+    boundSessionIdRef.current = sessionId;
+  }, []);
+
   const getBoundMessageId = useCallback((): string | null => {
     const store = useConversationStore.getState();
     const activeSessionId = store.activeSessionId ?? null;
 
     if (
-      boundSessionIdRef.current
-      && activeSessionId
-      && activeSessionId !== boundSessionIdRef.current
+      boundSessionIdRef.current &&
+      activeSessionId &&
+      activeSessionId !== boundSessionIdRef.current
     ) {
       return null;
     }
@@ -43,11 +48,7 @@ export function useAgentLoopEventHandler() {
   }, []);
 
   const updateTrailingPart = useCallback(
-    (
-      messageId: string,
-      type: 'text' | 'reasoning',
-      appendContent: string,
-    ): void => {
+    (messageId: string, type: 'text' | 'reasoning', appendContent: string): void => {
       const store = useConversationStore.getState();
       const message = store.activeConversation?.messages.find((entry) => entry.id === messageId);
       if (!message) {
@@ -87,7 +88,8 @@ export function useAgentLoopEventHandler() {
       }
 
       const approvalIndex = message.parts.findIndex(
-        (part) => part.type === 'tool_approval' && part.stepId === stepId && part.status === 'pending',
+        (part) =>
+          part.type === 'tool_approval' && part.stepId === stepId && part.status === 'pending',
       );
       if (approvalIndex < 0) {
         return;
@@ -144,17 +146,21 @@ export function useAgentLoopEventHandler() {
             tool: event.name,
             args: event.args,
             description: `Execute ${event.name}`,
-            riskLevel: 'low',
+            riskLevel: event.riskLevel,
             status: 'running',
             startedAt: Date.now(),
           });
           break;
 
         case 'tool_call_complete': {
-          const message = store.activeConversation?.messages.find((entry) => entry.id === messageId);
-          const callIndex = message?.parts.findIndex(
-            (part) => part.type === 'tool_call' && part.stepId === event.id && part.status === 'running',
-          ) ?? -1;
+          const message = store.activeConversation?.messages.find(
+            (entry) => entry.id === messageId,
+          );
+          const callIndex =
+            message?.parts.findIndex(
+              (part) =>
+                part.type === 'tool_call' && part.stepId === event.id && part.status === 'running',
+            ) ?? -1;
 
           if (callIndex >= 0) {
             store.updatePart(messageId, callIndex, {
@@ -226,9 +232,12 @@ export function useAgentLoopEventHandler() {
     [finalizeBoundMessage, getBoundMessageId, updateToolApprovalStatus, updateTrailingPart],
   );
 
-  const handleAbort = useCallback((reason = 'Session aborted by user'): void => {
-    finalizeBoundMessage(reason);
-  }, [finalizeBoundMessage]);
+  const handleAbort = useCallback(
+    (reason = 'Session aborted by user'): void => {
+      finalizeBoundMessage(reason);
+    },
+    [finalizeBoundMessage],
+  );
 
   const reset = useCallback((): void => {
     messageIdRef.current = null;
@@ -236,6 +245,7 @@ export function useAgentLoopEventHandler() {
   }, []);
 
   return {
+    bindSession,
     handleEvent,
     handleAbort,
     reset,

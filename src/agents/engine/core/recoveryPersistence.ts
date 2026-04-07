@@ -4,10 +4,8 @@ import type {
   CompactionTier,
   ResumeCheckpointKind,
 } from './agentSession';
-import type {
-  CheckpointTraceRecord,
-  CompactionTraceRecord,
-} from './traceRecorder';
+import type { Plan } from './types';
+import type { CheckpointTraceRecord, CompactionTraceRecord } from './traceRecorder';
 
 export interface RecoveryCheckpointPayloadInput {
   sessionId: string;
@@ -17,11 +15,16 @@ export interface RecoveryCheckpointPayloadInput {
   phase: string;
   projectId: string;
   sequenceId: string | null;
+  projectStateVersion?: number | null;
   input: string;
   currentPlanId?: string | null;
   pendingApprovalId?: string | null;
   planGoal?: string | null;
   planStepIds?: string[];
+  plan?: Plan | null;
+  nextStepIndex?: number | null;
+  completedStepIds?: string[] | null;
+  toolCallsUsed?: number | null;
   stepId?: string | null;
   toolName?: string | null;
   args?: Record<string, unknown> | null;
@@ -98,6 +101,7 @@ export function buildResumeCheckpointPayload(
     version: 1,
     projectId: input.projectId,
     sequenceId: input.sequenceId,
+    projectStateVersion: input.projectStateVersion ?? null,
     phase: input.phase,
     input: input.input,
     currentPlanId: input.currentPlanId ?? null,
@@ -116,6 +120,7 @@ export function buildResumeCheckpointPayload(
       type: 'plan_approval',
       goal: input.planGoal ?? null,
       stepIds: input.planStepIds ?? [],
+      plan: input.plan ?? null,
     });
   } else if (input.checkpointKind === 'tool_wait') {
     pendingWorkJson = JSON.stringify({
@@ -123,6 +128,10 @@ export function buildResumeCheckpointPayload(
       stepId: input.stepId ?? null,
       toolName: input.toolName ?? null,
       args: input.args ?? null,
+      plan: input.plan ?? null,
+      nextStepIndex: input.nextStepIndex ?? null,
+      completedStepIds: input.completedStepIds ?? null,
+      toolCallsUsed: input.toolCallsUsed ?? null,
     });
   } else if (input.checkpointKind === 'compaction_boundary') {
     pendingWorkJson = JSON.stringify({

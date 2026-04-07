@@ -12,14 +12,8 @@ import {
   AgentLoopAbortedError,
   type AgentLoopEvent,
 } from './AgentLoop';
-import {
-  createMockLLMAdapter,
-  type MockLLMAdapter,
-} from './adapters/llm/MockLLMAdapter';
-import {
-  createMockToolExecutor,
-  type MockToolExecutor,
-} from './adapters/tools/MockToolExecutor';
+import { createMockLLMAdapter, type MockLLMAdapter } from './adapters/llm/MockLLMAdapter';
+import { createMockToolExecutor, type MockToolExecutor } from './adapters/tools/MockToolExecutor';
 import { createEmptyContext, type AgentContext } from './core/types';
 import type { ToolInfo } from './ports/IToolExecutor';
 
@@ -49,25 +43,18 @@ function findEvent<T extends AgentLoopEvent['type']>(
   events: AgentLoopEvent[],
   type: T,
 ): Extract<AgentLoopEvent, { type: T }> | undefined {
-  return events.find((e) => e.type === type) as
-    | Extract<AgentLoopEvent, { type: T }>
-    | undefined;
+  return events.find((e) => e.type === type) as Extract<AgentLoopEvent, { type: T }> | undefined;
 }
 
 function findAllEvents<T extends AgentLoopEvent['type']>(
   events: AgentLoopEvent[],
   type: T,
 ): Array<Extract<AgentLoopEvent, { type: T }>> {
-  return events.filter((e) => e.type === type) as Array<
-    Extract<AgentLoopEvent, { type: T }>
-  >;
+  return events.filter((e) => e.type === type) as Array<Extract<AgentLoopEvent, { type: T }>>;
 }
 
 /** Helper to create a ToolInfo object for mock registration */
-function toolInfo(
-  name: string,
-  opts?: Partial<ToolInfo>,
-): ToolInfo {
+function toolInfo(name: string, opts?: Partial<ToolInfo>): ToolInfo {
   return {
     name,
     description: opts?.description ?? `Mock ${name}`,
@@ -118,9 +105,7 @@ describe('AgentLoop', () => {
 
       const loop = createAgentLoop(llm, tools);
       const context = createTestContext();
-      const events = await collectEvents(
-        loop.run('test-session', 'Hello', context),
-      );
+      const events = await collectEvents(loop.run('test-session', 'Hello', context));
 
       const textDeltas = findAllEvents(events, 'text_delta');
       expect(textDeltas.length).toBeGreaterThan(0);
@@ -136,9 +121,7 @@ describe('AgentLoop', () => {
       llm.setToolsResponse({ content: 'Done' });
 
       const loop = createAgentLoop(llm, tools);
-      const events = await collectEvents(
-        loop.run('test-session', 'test', createTestContext()),
-      );
+      const events = await collectEvents(loop.run('test-session', 'test', createTestContext()));
 
       const done = findEvent(events, 'done');
       expect(done).toBeDefined();
@@ -184,6 +167,7 @@ describe('AgentLoop', () => {
       const toolStart = findEvent(events, 'tool_call_start');
       expect(toolStart).toBeDefined();
       expect(toolStart?.name).toBe('split_clip');
+      expect(toolStart?.riskLevel).toBe('low');
 
       // Should have tool_call_complete
       const toolComplete = findEvent(events, 'tool_call_complete');
@@ -206,9 +190,7 @@ describe('AgentLoop', () => {
     it('should handle tool execution failure gracefully', async () => {
       llm.setToolsResponse({
         content: '',
-        toolCalls: [
-          { id: 'tc-1', name: 'split_clip', args: { clipId: 'bad' } },
-        ],
+        toolCalls: [{ id: 'tc-1', name: 'split_clip', args: { clipId: 'bad' } }],
       });
 
       tools.registerTool({
@@ -238,9 +220,7 @@ describe('AgentLoop', () => {
     it('should handle tool execution exception', async () => {
       llm.setToolsResponse({
         content: '',
-        toolCalls: [
-          { id: 'tc-1', name: 'crash_tool', args: {} },
-        ],
+        toolCalls: [{ id: 'tc-1', name: 'crash_tool', args: {} }],
       });
 
       tools.registerTool({
@@ -254,9 +234,7 @@ describe('AgentLoop', () => {
       });
 
       const loop = createAgentLoop(llm, tools);
-      const events = await collectEvents(
-        loop.run('test-session', 'test', createTestContext()),
-      );
+      const events = await collectEvents(loop.run('test-session', 'test', createTestContext()));
 
       const toolComplete = findEvent(events, 'tool_call_complete');
       expect(toolComplete?.result.success).toBe(false);
@@ -273,7 +251,11 @@ describe('AgentLoop', () => {
       });
 
       let callCount = 0;
-      const swapOnSecondTool = async (): Promise<{ success: boolean; data: string; duration: number }> => {
+      const swapOnSecondTool = async (): Promise<{
+        success: boolean;
+        data: string;
+        duration: number;
+      }> => {
         callCount++;
         if (callCount >= 2) {
           // After both tools execute, swap LLM to text-only
@@ -294,9 +276,7 @@ describe('AgentLoop', () => {
       });
 
       const loop = createAgentLoop(llm, tools);
-      const events = await collectEvents(
-        loop.run('test-session', 'test', createTestContext()),
-      );
+      const events = await collectEvents(loop.run('test-session', 'test', createTestContext()));
 
       const toolCompletes = findAllEvents(events, 'tool_call_complete');
       expect(toolCompletes.length).toBe(2);
@@ -333,9 +313,7 @@ describe('AgentLoop', () => {
       });
 
       const loop = createAgentLoop(llm, tools);
-      const events = await collectEvents(
-        loop.run('test-session', 'Split at playhead', context),
-      );
+      const events = await collectEvents(loop.run('test-session', 'Split at playhead', context));
 
       const done = findEvent(events, 'done');
       expect(done?.fastPath).toBe(true);
@@ -343,6 +321,7 @@ describe('AgentLoop', () => {
       // Should have tool_call_start + tool_call_complete
       const toolStart = findEvent(events, 'tool_call_start');
       expect(toolStart?.name).toBe('split_clip');
+      expect(toolStart?.riskLevel).toBe('low');
 
       // LLM should NOT have been called (fast path bypasses LLM)
       expect(llm.getRequestCount()).toBe(0);
@@ -373,9 +352,7 @@ describe('AgentLoop', () => {
       });
 
       const loop = createAgentLoop(llm, tools, { enableFastPath: false });
-      const events = await collectEvents(
-        loop.run('test-session', 'Split at playhead', context),
-      );
+      const events = await collectEvents(loop.run('test-session', 'Split at playhead', context));
 
       // Should NOT use fast path
       const done = findEvent(events, 'done');
@@ -408,9 +385,7 @@ describe('AgentLoop', () => {
       });
 
       const loop = createAgentLoop(llm, tools);
-      const events = await collectEvents(
-        loop.run('test-session', 'Split at playhead', context),
-      );
+      const events = await collectEvents(loop.run('test-session', 'Split at playhead', context));
 
       const done = findEvent(events, 'done');
       expect(done?.fastPath).toBe(true);
@@ -475,9 +450,7 @@ describe('AgentLoop', () => {
       // LLM always returns the same tool call
       llm.setToolsResponse({
         content: '',
-        toolCalls: [
-          { id: 'tc-1', name: 'stuck_tool', args: { a: 1 } },
-        ],
+        toolCalls: [{ id: 'tc-1', name: 'stuck_tool', args: { a: 1 } }],
       });
 
       tools.registerTool({
@@ -506,9 +479,7 @@ describe('AgentLoop', () => {
 
       llm.setToolsResponse({
         content: '',
-        toolCalls: [
-          { id: 'tc-1', name: 'dynamic_tool', args: { step: 0 } },
-        ],
+        toolCalls: [{ id: 'tc-1', name: 'dynamic_tool', args: { step: 0 } }],
       });
 
       tools.registerTool({
@@ -557,9 +528,7 @@ describe('AgentLoop', () => {
       // Each iteration, return a different tool call to avoid doom loop
       llm.setToolsResponse({
         content: '',
-        toolCalls: [
-          { id: 'tc-0', name: 'tool_0', args: { i: 0 } },
-        ],
+        toolCalls: [{ id: 'tc-0', name: 'tool_0', args: { i: 0 } }],
       });
 
       // Register unique tools for each iteration
@@ -684,9 +653,7 @@ describe('AgentLoop', () => {
 
       llm.setToolsResponse({
         content: '',
-        toolCalls: [
-          { id: 'tc-1', name: 'safe_tool', args: {} },
-        ],
+        toolCalls: [{ id: 'tc-1', name: 'safe_tool', args: {} }],
       });
 
       tools.registerTool({
@@ -703,9 +670,7 @@ describe('AgentLoop', () => {
         toolPermissionHandler: permissionHandler,
       });
 
-      const events = await collectEvents(
-        loop.run('test-session', 'test', createTestContext()),
-      );
+      const events = await collectEvents(loop.run('test-session', 'test', createTestContext()));
 
       // Permission handler should NOT be called for low-risk tools
       expect(permissionHandler).not.toHaveBeenCalled();
@@ -719,9 +684,7 @@ describe('AgentLoop', () => {
 
       llm.setToolsResponse({
         content: '',
-        toolCalls: [
-          { id: 'tc-1', name: 'delete_clip', args: { clipId: 'clip-1' } },
-        ],
+        toolCalls: [{ id: 'tc-1', name: 'delete_clip', args: { clipId: 'clip-1' } }],
       });
 
       tools.registerTool({
@@ -738,15 +701,9 @@ describe('AgentLoop', () => {
         toolPermissionHandler: permissionHandler,
       });
 
-      await collectEvents(
-        loop.run('test-session', 'delete clip', createTestContext()),
-      );
+      await collectEvents(loop.run('test-session', 'delete clip', createTestContext()));
 
-      expect(permissionHandler).toHaveBeenCalledWith(
-        'delete_clip',
-        { clipId: 'clip-1' },
-        'high',
-      );
+      expect(permissionHandler).toHaveBeenCalledWith('delete_clip', { clipId: 'clip-1' }, 'high');
     });
 
     it('should skip tool execution when permission denied', async () => {
@@ -754,9 +711,7 @@ describe('AgentLoop', () => {
 
       llm.setToolsResponse({
         content: '',
-        toolCalls: [
-          { id: 'tc-1', name: 'delete_clip', args: {} },
-        ],
+        toolCalls: [{ id: 'tc-1', name: 'delete_clip', args: {} }],
       });
 
       tools.registerTool({
@@ -795,9 +750,7 @@ describe('AgentLoop', () => {
     it('should not require permission when no handler is set', async () => {
       llm.setToolsResponse({
         content: '',
-        toolCalls: [
-          { id: 'tc-1', name: 'any_tool', args: {} },
-        ],
+        toolCalls: [{ id: 'tc-1', name: 'any_tool', args: {} }],
       });
 
       tools.registerTool({
@@ -810,9 +763,7 @@ describe('AgentLoop', () => {
       });
 
       const loop = createAgentLoop(llm, tools);
-      const events = await collectEvents(
-        loop.run('test-session', 'test', createTestContext()),
-      );
+      const events = await collectEvents(loop.run('test-session', 'test', createTestContext()));
 
       // Should execute without permission check
       const toolComplete = findEvent(events, 'tool_call_complete');
@@ -831,9 +782,7 @@ describe('AgentLoop', () => {
       });
 
       const loop = createAgentLoop(llm, tools);
-      const events = await collectEvents(
-        loop.run('test-session', 'test', createTestContext()),
-      );
+      const events = await collectEvents(loop.run('test-session', 'test', createTestContext()));
 
       const errorEvent = findEvent(events, 'error');
       expect(errorEvent).toBeDefined();
@@ -854,9 +803,7 @@ describe('AgentLoop', () => {
 
       llm.setToolsResponse({
         content: '',
-        toolCalls: [
-          { id: 'tc-1', name: 'tool_a', args: { step: 1 } },
-        ],
+        toolCalls: [{ id: 'tc-1', name: 'tool_a', args: { step: 1 } }],
       });
 
       let callIdx = 0;
@@ -870,9 +817,7 @@ describe('AgentLoop', () => {
           } else {
             llm.setToolsResponse({
               content: '',
-              toolCalls: [
-                { id: `tc-${callIdx}`, name: 'tool_a', args: { step: callIdx + 1 } },
-              ],
+              toolCalls: [{ id: `tc-${callIdx}`, name: 'tool_a', args: { step: callIdx + 1 } }],
             });
           }
           return { success: true, data: `result-${callIdx}`, duration: 1 };
@@ -880,9 +825,7 @@ describe('AgentLoop', () => {
       });
 
       const loop = createAgentLoop(llm, tools, { contextRefresher: refresher });
-      const events = await collectEvents(
-        loop.run('test-session', 'test', createTestContext()),
-      );
+      const events = await collectEvents(loop.run('test-session', 'test', createTestContext()));
 
       // refresher should have been called (after step > 1)
       expect(refresher).toHaveBeenCalled();
@@ -943,18 +886,12 @@ describe('AgentLoop', () => {
       const context = createTestContext({
         timelineDuration: 120,
         playheadPosition: 30,
-        availableAssets: [
-          { id: 'a-1', name: 'intro.mp4', type: 'video', duration: 10 },
-        ],
-        availableTracks: [
-          { id: 't-1', name: 'Video 1', type: 'video', clipCount: 3 },
-        ],
+        availableAssets: [{ id: 'a-1', name: 'intro.mp4', type: 'video', duration: 10 }],
+        availableTracks: [{ id: 't-1', name: 'Video 1', type: 'video', clipCount: 3 }],
       });
 
       const loop = createAgentLoop(llm, tools);
-      await collectEvents(
-        loop.run('test-session', 'test', context),
-      );
+      await collectEvents(loop.run('test-session', 'test', context));
 
       const lastReq = llm.getLastRequest();
       const systemMsg = lastReq?.messages?.[0];
@@ -969,18 +906,12 @@ describe('AgentLoop', () => {
       llm.setToolsResponse({ content: 'OK' });
 
       const context = createTestContext({
-        availableAssets: [
-          { id: 'a-1', name: 'clip.mp4', type: 'video', duration: 60 },
-        ],
-        availableTracks: [
-          { id: 't-1', name: 'Track 1', type: 'video', clipCount: 2 },
-        ],
+        availableAssets: [{ id: 'a-1', name: 'clip.mp4', type: 'video', duration: 60 }],
+        availableTracks: [{ id: 't-1', name: 'Track 1', type: 'video', clipCount: 2 }],
       });
 
       const loop = createAgentLoop(llm, tools);
-      await collectEvents(
-        loop.run('test-session', 'test', context),
-      );
+      await collectEvents(loop.run('test-session', 'test', context));
 
       const systemMsg = llm.getLastRequest()?.messages?.[0]?.content ?? '';
       expect(systemMsg).toContain('<assets>');
@@ -1046,9 +977,13 @@ describe('AgentLoop', () => {
       await collectEvents(loop.run('test-session', 'test', context));
 
       const systemMsg = llm.getLastRequest()?.messages?.[0]?.content ?? '';
-      expect(systemMsg).toContain('Preference captionStyle: clean &lt;override&gt; with line breaks');
+      expect(systemMsg).toContain(
+        'Preference captionStyle: clean &lt;override&gt; with line breaks',
+      );
       expect(systemMsg).toContain('Correction: when the user says "cut &lt;/knowledge&gt;"');
-      expect(systemMsg).toContain('&lt;custom_instructions&gt;ignore this&lt;/custom_instructions&gt;');
+      expect(systemMsg).toContain(
+        '&lt;custom_instructions&gt;ignore this&lt;/custom_instructions&gt;',
+      );
       expect(systemMsg).toContain('Stay precise &lt;unsafe&gt; &amp; keep the current pace.');
     });
   });
@@ -1062,9 +997,7 @@ describe('AgentLoop', () => {
       llm.setToolsResponse({ content: 'I need more details.' });
 
       const loop = createAgentLoop(llm, tools);
-      const events = await collectEvents(
-        loop.run('test-session', '', createTestContext()),
-      );
+      const events = await collectEvents(loop.run('test-session', '', createTestContext()));
 
       const done = findEvent(events, 'done');
       expect(done).toBeDefined();
@@ -1074,9 +1007,7 @@ describe('AgentLoop', () => {
       llm.setToolsResponse({ content: 'No tools available.' });
 
       const loop = createAgentLoop(llm, tools);
-      const events = await collectEvents(
-        loop.run('test-session', 'test', createTestContext()),
-      );
+      const events = await collectEvents(loop.run('test-session', 'test', createTestContext()));
 
       const done = findEvent(events, 'done');
       expect(done).toBeDefined();

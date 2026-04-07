@@ -1,10 +1,6 @@
 import { act, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type {
-  AgentSession,
-  CompactionRecord,
-  ResumeCheckpoint,
-} from '@/agents/engine';
+import type { AgentSession, CompactionRecord, ResumeCheckpoint } from '@/agents/engine';
 import { useConversationStore } from '@/stores/conversationStore';
 import {
   buildAgentSessionRecoveryFingerprint,
@@ -47,9 +43,7 @@ function createSession(overrides: Partial<AgentSession> = {}): AgentSession {
   };
 }
 
-function createCompactionRecord(
-  overrides: Partial<CompactionRecord> = {},
-): CompactionRecord {
+function createCompactionRecord(overrides: Partial<CompactionRecord> = {}): CompactionRecord {
   return {
     id: 'compaction-1',
     sessionId: 'session-1',
@@ -67,9 +61,7 @@ function createCompactionRecord(
   };
 }
 
-function createResumeCheckpoint(
-  overrides: Partial<ResumeCheckpoint> = {},
-): ResumeCheckpoint {
+function createResumeCheckpoint(overrides: Partial<ResumeCheckpoint> = {}): ResumeCheckpoint {
   return {
     id: 'checkpoint-1',
     sessionId: 'session-1',
@@ -107,8 +99,12 @@ function seedSessionKernel(input?: {
   compactions?: CompactionRecord[];
   checkpoints?: ResumeCheckpoint[];
   artifactsLastError?: string | null;
-  activeIssues?: ReturnType<typeof useAgentSessionStore.getState>['persistenceIssuesBySessionId'][string];
-  latchedIssues?: ReturnType<typeof useAgentSessionStore.getState>['persistenceLatchesBySessionId'][string];
+  activeIssues?: ReturnType<
+    typeof useAgentSessionStore.getState
+  >['persistenceIssuesBySessionId'][string];
+  latchedIssues?: ReturnType<
+    typeof useAgentSessionStore.getState
+  >['persistenceLatchesBySessionId'][string];
 }): AgentSession {
   const session = createSession(input?.sessionOverrides);
   const headerFingerprint = buildAgentSessionRecoveryFingerprint(session);
@@ -130,9 +126,7 @@ function seedSessionKernel(input?: {
         lastError: input?.artifactsLastError ?? null,
       },
     },
-    persistenceIssuesBySessionId: input?.activeIssues
-      ? { [session.id]: input.activeIssues }
-      : {},
+    persistenceIssuesBySessionId: input?.activeIssues ? { [session.id]: input.activeIssues } : {},
     persistenceLatchesBySessionId: input?.latchedIssues
       ? { [session.id]: input.latchedIssues }
       : {},
@@ -211,9 +205,7 @@ describe('AgentSessionResumeHistoryPanel', () => {
         /recovery will rebuild visible context from that summary instead of a linked checkpoint/i,
       ),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/persisted recovery history refresh is partial/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/persisted recovery history refresh is partial/i)).toBeInTheDocument();
   });
 
   it('should render a cold conversation-log path when no durable boundary exists', () => {
@@ -224,6 +216,24 @@ describe('AgentSessionResumeHistoryPanel', () => {
     expect(screen.getByText('Cold')).toBeInTheDocument();
     expect(screen.getByText('Conversation log replay')).toBeInTheDocument();
     expect(screen.getByText('0 persisted checkpoints')).toBeInTheDocument();
+    expect(screen.getByText('0 persisted compactions')).toBeInTheDocument();
+  });
+
+  it('should stay cold when only header metadata hints at compaction but no persisted summary rows are loaded', () => {
+    seedSessionKernel({
+      sessionOverrides: {
+        latestSummaryMessageId: 'summary-1',
+        compactionVersion: 1,
+        lastCompactedAt: 700,
+      },
+      artifactsLastError: 'Failed to load compaction history: backend offline',
+    });
+
+    render(<AgentSessionResumeHistoryPanel />);
+
+    expect(screen.getByText('Cold')).toBeInTheDocument();
+    expect(screen.getByText('Conversation log replay')).toBeInTheDocument();
+    expect(screen.getByText(/persisted recovery history refresh is partial/i)).toBeInTheDocument();
     expect(screen.getByText('0 persisted compactions')).toBeInTheDocument();
   });
 

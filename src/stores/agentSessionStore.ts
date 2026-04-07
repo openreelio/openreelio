@@ -15,8 +15,9 @@ import {
 } from '@/agents/engine';
 import type { CreateAgentSessionInput } from '@/agents/engine';
 
-export type AgentSessionStoreCreateInput =
-  Omit<CreateAgentSessionInput, 'projectId'> & { projectId?: string };
+export type AgentSessionStoreCreateInput = Omit<CreateAgentSessionInput, 'projectId'> & {
+  projectId?: string;
+};
 export type AgentSessionStoreEnsureInput = AgentSessionStoreCreateInput & { id: string };
 export type AgentSessionPersistenceStage =
   | 'session_ensure'
@@ -125,9 +126,7 @@ export interface AgentSessionStoreActions {
     options?: { headerFingerprint?: string | null },
   ): Promise<AgentSessionRecoveryArtifacts>;
   recordCompaction(input: CreatePersistedCompactionInput): Promise<CompactionRecord>;
-  createResumeCheckpoint(
-    input: CreatePersistedResumeCheckpointInput,
-  ): Promise<ResumeCheckpoint>;
+  createResumeCheckpoint(input: CreatePersistedResumeCheckpointInput): Promise<ResumeCheckpoint>;
   consumeResumeCheckpoint(checkpointId: string): Promise<ResumeCheckpoint>;
   reportPersistenceIssue: (input: {
     sessionId: string;
@@ -135,10 +134,7 @@ export interface AgentSessionStoreActions {
     error: unknown;
     occurredAt?: number;
   }) => AgentSessionPersistenceIssue;
-  clearPersistenceIssue: (
-    sessionId: string,
-    stage?: AgentSessionPersistenceStage,
-  ) => void;
+  clearPersistenceIssue: (sessionId: string, stage?: AgentSessionPersistenceStage) => void;
   createSession(input?: AgentSessionStoreCreateInput): Promise<AgentSession>;
   startRun(input: StartPersistedAgentRunInput): Promise<AgentRun>;
   updateRunPhase(input: UpdatePersistedAgentRunPhaseInput): Promise<AgentRun>;
@@ -211,10 +207,9 @@ function upsertPersistenceIssue(
   issues: AgentSessionPersistenceIssue[],
   nextIssue: AgentSessionPersistenceIssue,
 ): AgentSessionPersistenceIssue[] {
-  return [
-    ...issues.filter((issue) => issue.stage !== nextIssue.stage),
-    nextIssue,
-  ].sort((left, right) => left.occurredAt - right.occurredAt);
+  return [...issues.filter((issue) => issue.stage !== nextIssue.stage), nextIssue].sort(
+    (left, right) => left.occurredAt - right.occurredAt,
+  );
 }
 
 export function deriveAgentSessionPersistenceMode(
@@ -228,9 +223,7 @@ export function summarizeAgentSessionPersistenceView(
   latchedIssues?: AgentSessionPersistenceIssue[],
 ): AgentSessionPersistenceView {
   const hasActiveIssues = Boolean(activeIssues && activeIssues.length > 0);
-  const visibleIssues = hasActiveIssues
-    ? [...(activeIssues ?? [])]
-    : [...(latchedIssues ?? [])];
+  const visibleIssues = hasActiveIssues ? [...(activeIssues ?? [])] : [...(latchedIssues ?? [])];
   const summary = summarizeAgentSessionPersistence(visibleIssues);
 
   if (summary.status === 'healthy') {
@@ -287,15 +280,11 @@ export function buildAgentSessionRecoveryFingerprint(session: AgentSession): str
   ].join('|');
 }
 
-function sortCompactions(
-  compactions: CompactionRecord[],
-): CompactionRecord[] {
+function sortCompactions(compactions: CompactionRecord[]): CompactionRecord[] {
   return [...compactions].sort((left, right) => right.createdAt - left.createdAt);
 }
 
-function sortResumeCheckpoints(
-  checkpoints: ResumeCheckpoint[],
-): ResumeCheckpoint[] {
+function sortResumeCheckpoints(checkpoints: ResumeCheckpoint[]): ResumeCheckpoint[] {
   return [...checkpoints].sort((left, right) => right.createdAt - left.createdAt);
 }
 
@@ -329,7 +318,6 @@ function buildRestartBoundary(input: {
   session: AgentSession | null;
   activeCheckpoint: ResumeCheckpoint | null;
   latestSummaryCompaction: CompactionRecord | null;
-  latestCompaction: CompactionRecord | null;
 }): AgentSessionRestartBoundaryView {
   if (!input.session) {
     return {
@@ -349,12 +337,7 @@ function buildRestartBoundary(input: {
     };
   }
 
-  if (
-    input.latestSummaryCompaction
-    || input.latestCompaction
-    || input.session.latestSummaryMessageId
-    || input.session.lastCompactedAt
-  ) {
+  if (input.latestSummaryCompaction) {
     return {
       kind: 'summary_boundary',
       title: 'Persisted summary',
@@ -377,10 +360,7 @@ export function summarizeAgentSessionResumeHistory(input: {
   latchedIssues?: AgentSessionPersistenceIssue[];
   artifacts?: AgentSessionRecoveryArtifacts | null;
 }): AgentSessionResumeHistoryView {
-  const persistence = summarizeAgentSessionPersistenceView(
-    input.activeIssues,
-    input.latchedIssues,
-  );
+  const persistence = summarizeAgentSessionPersistenceView(input.activeIssues, input.latchedIssues);
   const checkpoints = sortResumeCheckpoints(input.artifacts?.checkpoints ?? []);
   const compactions = sortCompactions(input.artifacts?.compactions ?? []);
   const activeCheckpoint = input.session
@@ -388,13 +368,12 @@ export function summarizeAgentSessionResumeHistory(input: {
     : null;
   const latestCheckpoint = checkpoints[0] ?? null;
   const latestCompaction = compactions[0] ?? null;
-  const latestSummaryCompaction = compactions.find((compaction) => compaction.tier === 'summary')
-    ?? null;
+  const latestSummaryCompaction =
+    compactions.find((compaction) => compaction.tier === 'summary') ?? null;
   const restartBoundary = buildRestartBoundary({
     session: input.session,
     activeCheckpoint,
     latestSummaryCompaction,
-    latestCompaction,
   });
 
   let status: AgentSessionRecoveryMode = 'cold';
@@ -437,10 +416,7 @@ function findSessionIdForRun(
   runId: string,
 ): string | null {
   for (const snapshot of Object.values(snapshotsById)) {
-    if (
-      snapshot.runs.some((run) => run.id === runId)
-      || snapshot.session.currentRunId === runId
-    ) {
+    if (snapshot.runs.some((run) => run.id === runId) || snapshot.session.currentRunId === runId) {
       return snapshot.session.id;
     }
   }
@@ -583,8 +559,8 @@ export function createAgentSessionStore(
 
       refreshRecoveryArtifacts: async (sessionId: string, options) => {
         const current =
-          get().recoveryArtifactsBySessionId[sessionId]
-          ?? createEmptyAgentSessionRecoveryArtifacts();
+          get().recoveryArtifactsBySessionId[sessionId] ??
+          createEmptyAgentSessionRecoveryArtifacts();
 
         set((state) => {
           state.recoveryArtifactsBySessionId[sessionId] = {
@@ -599,16 +575,16 @@ export function createAgentSessionStore(
           backend.listCompactions(sessionId),
           backend.listResumeCheckpoints(sessionId),
         ]);
-        const nextCompactions = compactionsResult.status === 'fulfilled'
-          ? compactionsResult.value
-          : current.compactions;
-        const nextCheckpoints = checkpointsResult.status === 'fulfilled'
-          ? checkpointsResult.value
-          : current.checkpoints;
+        const nextCompactions =
+          compactionsResult.status === 'fulfilled' ? compactionsResult.value : current.compactions;
+        const nextCheckpoints =
+          checkpointsResult.status === 'fulfilled' ? checkpointsResult.value : current.checkpoints;
         const errors: string[] = [];
 
         if (compactionsResult.status === 'rejected') {
-          errors.push(`Failed to load compaction history: ${extractErrorMessage(compactionsResult.reason)}`);
+          errors.push(
+            `Failed to load compaction history: ${extractErrorMessage(compactionsResult.reason)}`,
+          );
         }
 
         if (checkpointsResult.status === 'rejected') {
@@ -684,8 +660,9 @@ export function createAgentSessionStore(
       },
 
       consumeResumeCheckpoint: async (checkpointId: string) => {
-        const checkpoints = Object.values(get().recoveryArtifactsBySessionId)
-          .flatMap((artifacts) => artifacts.checkpoints);
+        const checkpoints = Object.values(get().recoveryArtifactsBySessionId).flatMap(
+          (artifacts) => artifacts.checkpoints,
+        );
         const cachedCheckpoint = checkpoints.find((checkpoint) => checkpoint.id === checkpointId);
 
         try {
@@ -748,9 +725,7 @@ export function createAgentSessionStore(
             delete state.persistenceIssuesBySessionId[sessionId];
             remainingIssues = [];
           } else {
-            remainingIssues = currentIssues.filter(
-              (issue) => issue.stage !== stage,
-            );
+            remainingIssues = currentIssues.filter((issue) => issue.stage !== stage);
             if (remainingIssues.length === 0) {
               delete state.persistenceIssuesBySessionId[sessionId];
             } else {
@@ -759,9 +734,10 @@ export function createAgentSessionStore(
           }
 
           if (state.activeSessionId === sessionId) {
-            state.lastError = remainingIssues.length > 0
-              ? remainingIssues[remainingIssues.length - 1]?.message ?? null
-              : null;
+            state.lastError =
+              remainingIssues.length > 0
+                ? (remainingIssues[remainingIssues.length - 1]?.message ?? null)
+                : null;
           }
         });
       },
@@ -789,7 +765,8 @@ export function createAgentSessionStore(
 
           set((state) => {
             applySnapshot(state, snapshot);
-            state.recoveryArtifactsBySessionId[session.id] ??= createEmptyAgentSessionRecoveryArtifacts();
+            state.recoveryArtifactsBySessionId[session.id] ??=
+              createEmptyAgentSessionRecoveryArtifacts();
             state.isMutating = false;
           });
 
@@ -863,8 +840,8 @@ export function createAgentSessionStore(
           return run;
         } catch (error) {
           const message = extractErrorMessage(error);
-          const sessionId = findSessionIdForRun(get().snapshotsById, input.runId)
-            ?? get().activeSessionId;
+          const sessionId =
+            findSessionIdForRun(get().snapshotsById, input.runId) ?? get().activeSessionId;
           set((state) => {
             state.isMutating = false;
             state.lastError = message;

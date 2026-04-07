@@ -89,9 +89,7 @@ function createSnapshot(
   };
 }
 
-function createPermissionDecision(
-  overrides: Partial<PermissionDecision> = {},
-): PermissionDecision {
+function createPermissionDecision(overrides: Partial<PermissionDecision> = {}): PermissionDecision {
   return {
     id: 'decision-1',
     sessionId: 'session-1',
@@ -107,9 +105,7 @@ function createPermissionDecision(
   };
 }
 
-function createCompactionRecord(
-  overrides: Partial<CompactionRecord> = {},
-): CompactionRecord {
+function createCompactionRecord(overrides: Partial<CompactionRecord> = {}): CompactionRecord {
   return {
     id: 'compaction-1',
     sessionId: 'session-1',
@@ -127,9 +123,7 @@ function createCompactionRecord(
   };
 }
 
-function createResumeCheckpoint(
-  overrides: Partial<ResumeCheckpoint> = {},
-): ResumeCheckpoint {
+function createResumeCheckpoint(overrides: Partial<ResumeCheckpoint> = {}): ResumeCheckpoint {
   return {
     id: 'checkpoint-1',
     sessionId: 'session-1',
@@ -151,11 +145,12 @@ describe('agentSessionStore', () => {
 
   beforeEach(() => {
     backend = {
-      createSession: async (input) => createSession({
-        id: input.id ?? 'session-1',
-        projectId: input.projectId,
-        title: input.title ?? 'New Agent Session',
-      }),
+      createSession: async (input) =>
+        createSession({
+          id: input.id ?? 'session-1',
+          projectId: input.projectId,
+          title: input.title ?? 'New Agent Session',
+        }),
       getSession: async (sessionId) => createSnapshot({ id: sessionId }),
       listPermissionDecisions: async () => [],
       listCompactions: async () => [],
@@ -608,20 +603,22 @@ describe('agentSessionStore', () => {
   });
 
   it('classifies permission replay and finalize misses as degraded', () => {
-    expect(summarizeAgentSessionPersistence([
-      {
-        sessionId: 'session-1',
-        stage: 'permission_replay',
-        message: 'failed to replay permissions',
-        occurredAt: 100,
-      },
-      {
-        sessionId: 'session-1',
-        stage: 'run_finalize',
-        message: 'failed to finalize run',
-        occurredAt: 200,
-      },
-    ])).toEqual({
+    expect(
+      summarizeAgentSessionPersistence([
+        {
+          sessionId: 'session-1',
+          stage: 'permission_replay',
+          message: 'failed to replay permissions',
+          occurredAt: 100,
+        },
+        {
+          sessionId: 'session-1',
+          stage: 'run_finalize',
+          message: 'failed to finalize run',
+          occurredAt: 200,
+        },
+      ]),
+    ).toEqual({
       status: 'degraded',
       label: 'Degraded',
       description:
@@ -631,14 +628,16 @@ describe('agentSessionStore', () => {
   });
 
   it('classifies session creation or run-start misses as ephemeral', () => {
-    expect(summarizeAgentSessionPersistence([
-      {
-        sessionId: 'session-1',
-        stage: 'run_start',
-        message: 'failed to start persisted run',
-        occurredAt: 100,
-      },
-    ])).toEqual({
+    expect(
+      summarizeAgentSessionPersistence([
+        {
+          sessionId: 'session-1',
+          stage: 'run_start',
+          message: 'failed to start persisted run',
+          occurredAt: 100,
+        },
+      ]),
+    ).toEqual({
       status: 'ephemeral',
       label: 'Ephemeral',
       description:
@@ -674,26 +673,28 @@ describe('agentSessionStore', () => {
       resumeCursorVersion: 4,
     });
 
-    expect(summarizeAgentSessionResumeHistory({
-      session,
-      artifacts: {
-        ...createEmptyAgentSessionRecoveryArtifacts(),
-        checkpoints: [
-          createResumeCheckpoint({
-            id: 'checkpoint-9',
-            checkpointKind: 'approval_wait',
-            status: 'active',
-            createdAt: 900,
-          }),
-        ],
-        compactions: [
-          createCompactionRecord({
-            id: 'compaction-9',
-            createdAt: 800,
-          }),
-        ],
-      },
-    })).toMatchObject({
+    expect(
+      summarizeAgentSessionResumeHistory({
+        session,
+        artifacts: {
+          ...createEmptyAgentSessionRecoveryArtifacts(),
+          checkpoints: [
+            createResumeCheckpoint({
+              id: 'checkpoint-9',
+              checkpointKind: 'approval_wait',
+              status: 'active',
+              createdAt: 900,
+            }),
+          ],
+          compactions: [
+            createCompactionRecord({
+              id: 'compaction-9',
+              createdAt: 800,
+            }),
+          ],
+        },
+      }),
+    ).toMatchObject({
       status: 'full',
       label: 'Context Available',
       restartBoundary: {
@@ -713,19 +714,21 @@ describe('agentSessionStore', () => {
       lastCompactedAt: 700,
     });
 
-    expect(summarizeAgentSessionResumeHistory({
-      session,
-      artifacts: {
-        ...createEmptyAgentSessionRecoveryArtifacts(),
-        checkpoints: [],
-        compactions: [
-          createCompactionRecord({
-            id: 'compaction-9',
-            createdAt: 700,
-          }),
-        ],
-      },
-    })).toMatchObject({
+    expect(
+      summarizeAgentSessionResumeHistory({
+        session,
+        artifacts: {
+          ...createEmptyAgentSessionRecoveryArtifacts(),
+          checkpoints: [],
+          compactions: [
+            createCompactionRecord({
+              id: 'compaction-9',
+              createdAt: 700,
+            }),
+          ],
+        },
+      }),
+    ).toMatchObject({
       status: 'degraded',
       label: 'Degraded',
       restartBoundary: {
@@ -740,10 +743,34 @@ describe('agentSessionStore', () => {
   });
 
   it('classifies restart as cold when no durable boundary is linked', () => {
-    expect(summarizeAgentSessionResumeHistory({
-      session: createSession(),
-      artifacts: createEmptyAgentSessionRecoveryArtifacts(),
-    })).toMatchObject({
+    expect(
+      summarizeAgentSessionResumeHistory({
+        session: createSession(),
+        artifacts: createEmptyAgentSessionRecoveryArtifacts(),
+      }),
+    ).toMatchObject({
+      status: 'cold',
+      label: 'Cold',
+      restartBoundary: {
+        kind: 'conversation_log',
+        title: 'Conversation log replay',
+      },
+      checkpointCount: 0,
+      compactionCount: 0,
+    });
+  });
+
+  it('stays cold when only session-header compaction metadata exists without persisted summary rows', () => {
+    expect(
+      summarizeAgentSessionResumeHistory({
+        session: createSession({
+          latestSummaryMessageId: 'summary-9',
+          lastCompactedAt: 700,
+          compactionVersion: 1,
+        }),
+        artifacts: createEmptyAgentSessionRecoveryArtifacts(),
+      }),
+    ).toMatchObject({
       status: 'cold',
       label: 'Cold',
       restartBoundary: {
@@ -756,28 +783,30 @@ describe('agentSessionStore', () => {
   });
 
   it('keeps restart mode ephemeral when a non-durable boundary was latched', () => {
-    expect(summarizeAgentSessionResumeHistory({
-      session: createSession({
-        activeCheckpointId: 'checkpoint-9',
-        resumeCursorVersion: 1,
-      }),
-      latchedIssues: [
-        {
-          sessionId: 'session-1',
-          stage: 'run_start',
-          message: 'failed to persist run start',
-          occurredAt: 100,
-        },
-      ],
-      artifacts: {
-        ...createEmptyAgentSessionRecoveryArtifacts(),
-        checkpoints: [
-          createResumeCheckpoint({
-            id: 'checkpoint-9',
-          }),
+    expect(
+      summarizeAgentSessionResumeHistory({
+        session: createSession({
+          activeCheckpointId: 'checkpoint-9',
+          resumeCursorVersion: 1,
+        }),
+        latchedIssues: [
+          {
+            sessionId: 'session-1',
+            stage: 'run_start',
+            message: 'failed to persist run start',
+            occurredAt: 100,
+          },
         ],
-      },
-    })).toMatchObject({
+        artifacts: {
+          ...createEmptyAgentSessionRecoveryArtifacts(),
+          checkpoints: [
+            createResumeCheckpoint({
+              id: 'checkpoint-9',
+            }),
+          ],
+        },
+      }),
+    ).toMatchObject({
       status: 'ephemeral',
       label: 'Ephemeral',
       restartBoundary: {
@@ -789,18 +818,20 @@ describe('agentSessionStore', () => {
   });
 
   it('ignores active checkpoint rows that are not linked from the session header', () => {
-    expect(summarizeAgentSessionResumeHistory({
-      session: createSession(),
-      artifacts: {
-        ...createEmptyAgentSessionRecoveryArtifacts(),
-        checkpoints: [
-          createResumeCheckpoint({
-            id: 'checkpoint-unlinked',
-            status: 'active',
-          }),
-        ],
-      },
-    })).toMatchObject({
+    expect(
+      summarizeAgentSessionResumeHistory({
+        session: createSession(),
+        artifacts: {
+          ...createEmptyAgentSessionRecoveryArtifacts(),
+          checkpoints: [
+            createResumeCheckpoint({
+              id: 'checkpoint-unlinked',
+              status: 'active',
+            }),
+          ],
+        },
+      }),
+    ).toMatchObject({
       status: 'cold',
       label: 'Cold',
       restartBoundary: {
@@ -816,17 +847,19 @@ describe('agentSessionStore', () => {
   });
 
   it('builds a stable recovery fingerprint from persisted session markers', () => {
-    expect(buildAgentSessionRecoveryFingerprint(createSession())).toBe(
-      'session-1||||0|0||',
-    );
-    expect(buildAgentSessionRecoveryFingerprint(createSession({
-      currentRunId: 'run-2',
-      activeCheckpointId: 'checkpoint-2',
-      latestSummaryMessageId: 'summary-2',
-      compactionVersion: 2,
-      resumeCursorVersion: 4,
-      lastCompactedAt: 600,
-      lastResumedAt: 700,
-    }))).toBe('session-1|run-2|checkpoint-2|summary-2|2|4|600|700');
+    expect(buildAgentSessionRecoveryFingerprint(createSession())).toBe('session-1||||0|0||');
+    expect(
+      buildAgentSessionRecoveryFingerprint(
+        createSession({
+          currentRunId: 'run-2',
+          activeCheckpointId: 'checkpoint-2',
+          latestSummaryMessageId: 'summary-2',
+          compactionVersion: 2,
+          resumeCursorVersion: 4,
+          lastCompactedAt: 600,
+          lastResumedAt: 700,
+        }),
+      ),
+    ).toBe('session-1|run-2|checkpoint-2|summary-2|2|4|600|700');
   });
 });

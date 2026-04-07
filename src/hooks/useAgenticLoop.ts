@@ -194,6 +194,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   const bootstrappedCheckpointIdRef = useRef<string | null>(null);
   const memoryStoreRef = useRef<IMemoryStore | null>(null);
   const persistedRunIdRef = useRef<string | null>(null);
+  const latestPlanRef = useRef<Plan | null>(null);
 
   if (!memoryStoreRef.current && config?.enableMemory !== false) {
     memoryStoreRef.current = createMemoryManagerAdapter();
@@ -242,6 +243,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       case 'approval_required':
         setPhase('awaiting_approval');
         setPlan(event.plan);
+        latestPlanRef.current = event.plan;
         // Trigger callback and wait for response
         optionsRef.current.onApprovalRequired?.(event.plan);
         break;
@@ -264,6 +266,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
 
       case 'planning_complete':
         setPlan(event.plan);
+        latestPlanRef.current = event.plan;
         break;
 
       case 'execution_start':
@@ -328,6 +331,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       setError(null);
       setThought(null);
       setPlan(null);
+      latestPlanRef.current = null;
       setPendingClarificationQuestion(null);
       setPendingToolPermissionStep(null);
       setPhase('thinking');
@@ -428,7 +432,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         logger,
         loggerLabel: 'agentic',
       });
-      await bootstrapRecoveredContextFromCheckpoint({
+      const recoveredExecutableResume = await bootstrapRecoveredContextFromCheckpoint({
         sessionId: storeSessionId,
         addSystemMessage: convStore.addSystemMessage,
         logger,
@@ -437,6 +441,14 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         onCheckpointRecovered: (record) => runtimeTraceRecorder?.recordCheckpointEvent(record),
         onCompactionRecovered: (record) => runtimeTraceRecorder?.recordCompactionEvent(record),
       });
+      const recoveredApprovalResume =
+        recoveredExecutableResume?.kind === 'approval_wait' ? recoveredExecutableResume : null;
+      const recoveredToolWaitResume =
+        recoveredExecutableResume?.kind === 'tool_wait' &&
+        typeof context.projectStateVersion === 'number' &&
+        recoveredExecutableResume.projectStateVersion === context.projectStateVersion
+          ? recoveredExecutableResume
+          : null;
 
       // Create execution context bound to the store session
       const executionContext = {
@@ -474,10 +486,11 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       const startedRunId = await startPersistedRun({
         sessionId: executionContext.sessionId,
         runtimeKind: 'tpao',
+        trigger: recoveredApprovalResume || recoveredToolWaitResume ? 'resume' : 'user',
         maxIterations: config?.maxIterations,
         maxToolCalls: config?.maxToolCallsPerRun,
         traceId: persistedTraceId,
-        runInput: input,
+        runInput: recoveredApprovalResume?.input ?? recoveredToolWaitResume?.input ?? input,
         context,
         checkpointController,
         persistedRunIdRef,
@@ -574,6 +587,14 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
           writeTraceOnComplete: false,
           memoryStore: config?.memoryStore ?? memoryStoreRef.current ?? undefined,
           approvalHandler: async (plan) => {
+            if (recoveredApprovalResume?.checkpointId) {
+              try {
+                return await baseApprovalHandler(plan);
+              } finally {
+                await checkpointController.consumeCheckpoint(recoveredApprovalResume.checkpointId);
+              }
+            }
+
             const checkpointId = await checkpointController.persistCheckpoint({
               sessionId: storeSessionId,
               runId: persistedRunIdRef.current,
@@ -585,6 +606,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
               input,
               planGoal: plan.goal,
               planStepIds: plan.steps.map((step) => step.id),
+              plan,
             });
 
             try {
@@ -594,6 +616,21 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
             }
           },
           toolPermissionHandler: async (toolName, args, step) => {
+            const activePlan = latestPlanRef.current;
+            const stepIndex =
+              activePlan?.steps.findIndex((candidate) => candidate.id === step.id) ?? -1;
+
+            if (
+              recoveredToolWaitResume?.checkpointId &&
+              step.id === recoveredToolWaitResume.stepId
+            ) {
+              try {
+                return await baseToolPermissionHandler(toolName, args, step);
+              } finally {
+                await checkpointController.consumeCheckpoint(recoveredToolWaitResume.checkpointId);
+              }
+            }
+
             const decisionPromise = baseToolPermissionHandler(toolName, args, step);
             let autoResolved = false;
             let autoDecision: 'allow' | 'deny' | 'allow_always' | undefined;
@@ -617,7 +654,12 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
                 phase: 'awaiting_tool_permission',
                 projectId: context.projectId,
                 sequenceId: context.sequenceId ?? null,
+                projectStateVersion: context.projectStateVersion ?? null,
                 input,
+                plan: activePlan,
+                nextStepIndex: stepIndex >= 0 ? stepIndex : null,
+                completedStepIds: stepIndex === 0 ? [] : null,
+                toolCallsUsed: stepIndex === 0 ? 0 : null,
                 stepId: typeof step.id === 'string' ? step.id : null,
                 toolName,
                 args,
@@ -641,13 +683,23 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         const conversationHistory = trimDuplicatedTailUserMessageForContext(rawHistory, input);
 
         // Run engine with conversation history
-        const result = await engine.run(
-          input,
-          context,
-          executionContext,
-          handleEvent,
-          conversationHistory,
-        );
+        const result = recoveredApprovalResume
+          ? await engine.resumePendingApproval(
+              recoveredApprovalResume.input,
+              recoveredApprovalResume.plan,
+              context,
+              executionContext,
+              handleEvent,
+            )
+          : recoveredToolWaitResume
+            ? await engine.resumePendingToolPermission(
+                recoveredToolWaitResume.input,
+                recoveredToolWaitResume.plan,
+                context,
+                executionContext,
+                handleEvent,
+              )
+            : await engine.run(input, context, executionContext, handleEvent, conversationHistory);
 
         persistedFinalPhase =
           result.finalState.phase === 'aborted'
@@ -767,6 +819,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     setError(null);
     setThought(null);
     setPlan(null);
+    latestPlanRef.current = null;
     setPendingClarificationQuestion(null);
     setPendingToolPermissionStep(null);
     setSessionId(null);

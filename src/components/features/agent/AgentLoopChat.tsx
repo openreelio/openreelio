@@ -53,7 +53,7 @@ export const AgentLoopChat = forwardRef<AgentLoopChatHandle, AgentLoopChatProps>
     const activeSessionId = useConversationStore((state) => state.activeSessionId);
     const sessions = useConversationStore((state) => state.sessions);
 
-    const { handleEvent, handleAbort, reset } = useAgentLoopEventHandler();
+    const { bindSession, handleEvent, handleAbort, reset } = useAgentLoopEventHandler();
 
     const {
       run,
@@ -72,6 +72,7 @@ export const AgentLoopChat = forwardRef<AgentLoopChatHandle, AgentLoopChatProps>
       config,
       context,
       onEvent: handleEvent,
+      onSessionReady: bindSession,
       onComplete: (usage) => {
         onComplete?.(usage);
       },
