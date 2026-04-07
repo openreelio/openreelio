@@ -879,6 +879,564 @@ export class AgenticEngine {
     }
   }
 
+  async resumePendingApproval(
+    input: string,
+    plan: Plan,
+    agentContext: AgentContext,
+    executionContext: ExecutionContext,
+    onEvent?: (event: AgentEvent) => void,
+  ): Promise<AgentRunResult> {
+    if (this.activeSessionId) {
+      const err = new SessionActiveError(this.activeSessionId);
+      this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+
+      const finalState = createInitialState(
+        executionContext.sessionId,
+        input,
+        agentContext,
+        this.config,
+      );
+
+      return this.createResult(false, [], 0, 0, {
+        error: err,
+        finalState,
+      });
+    }
+
+    this.activeSessionId = executionContext.sessionId;
+    this.isAborted = false;
+
+    const tracer = this.config.enableTracing ? new TraceRecorder() : null;
+    tracer?.startRun({
+      sessionId: executionContext.sessionId,
+      input,
+      model: this.config.activeModel,
+      provider: this.config.activeProvider,
+      traceId: executionContext.traceId,
+      runtimeKind: 'tpao',
+    });
+
+    const startTime = Date.now();
+    const executionResults: ExecutionResult[] = [];
+    let toolCallsUsed = 0;
+
+    let contextWithTools = await this.hydrateContextWithMemory(agentContext);
+    contextWithTools = {
+      ...contextWithTools,
+      availableTools:
+        contextWithTools.availableTools.length > 0
+          ? contextWithTools.availableTools
+          : this.toolExecutor.getAvailableTools().map((tool) => tool.name),
+    };
+
+    let state = createInitialState(
+      executionContext.sessionId,
+      input,
+      contextWithTools,
+      this.config,
+    );
+    state.iteration = 1;
+    state.plan = plan;
+
+    this.emitEvent(onEvent, {
+      type: 'session_start',
+      sessionId: executionContext.sessionId,
+      input,
+      timestamp: Date.now(),
+    });
+
+    logger.info('Agent session resumed from approval checkpoint', {
+      sessionId: executionContext.sessionId,
+      projectId: contextWithTools.projectId,
+      sequenceId: executionContext.sequenceId,
+    });
+
+    try {
+      if (this.isAborted) {
+        state = this.finalizeState(state, 'aborted');
+        this.emitEvent(onEvent, {
+          type: 'session_aborted',
+          reason: 'Aborted by user',
+          timestamp: Date.now(),
+        });
+
+        return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+          aborted: true,
+          finalState: state,
+          trace: tracer?.finalize(false, 'Aborted by user'),
+        });
+      }
+
+      this.currentPhase = 'awaiting_approval';
+      state.phase = 'awaiting_approval';
+      this.emitEvent(onEvent, { type: 'approval_required', plan, timestamp: Date.now() });
+
+      let approved: boolean;
+      let feedback: string | undefined;
+      try {
+        const rawResult = await this.approvalHandler(plan);
+        if (typeof rawResult === 'boolean') {
+          approved = rawResult;
+        } else {
+          approved = rawResult.approved;
+          feedback = rawResult.feedback;
+        }
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        state.error = err;
+        state = this.finalizeState(state, 'failed');
+        this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+        logger.error('Recovered approval phase failed', {
+          sessionId: executionContext.sessionId,
+          error: err.message,
+        });
+        return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+          error: err,
+          finalState: state,
+          trace: tracer?.finalize(false, err.message),
+        });
+      }
+
+      this.emitEvent(onEvent, {
+        type: 'approval_response',
+        approved,
+        reason: feedback,
+        timestamp: Date.now(),
+      });
+
+      if (!approved) {
+        state = this.finalizeState(state, 'completed');
+        const summary = this.createSummary(state, Date.now() - startTime);
+        this.emitEvent(onEvent, { type: 'session_complete', summary, timestamp: Date.now() });
+
+        return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+          needsApproval: true,
+          pendingPlan: plan,
+          approvalDenied: true,
+          finalState: state,
+          summary,
+          trace: tracer?.finalize(false, 'Recovered plan approval denied'),
+        });
+      }
+
+      if (this.isAborted) {
+        state = this.finalizeState(state, 'aborted');
+        this.emitEvent(onEvent, {
+          type: 'session_aborted',
+          reason: 'Aborted by user',
+          timestamp: Date.now(),
+        });
+
+        return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+          aborted: true,
+          finalState: state,
+          trace: tracer?.finalize(false, 'Aborted by user'),
+        });
+      }
+
+      this.currentPhase = 'executing';
+      state.phase = 'executing';
+      tracer?.startPhase('executing');
+
+      const stepById = new Map<string, PlanStep>(plan.steps.map((step) => [step.id, step]));
+      const executionContextForIteration: ExecutionContext = {
+        ...executionContext,
+        expectedStateVersion:
+          state.context.projectStateVersion ?? executionContext.expectedStateVersion,
+      };
+      const remainingToolCalls = this.config.maxToolCallsPerRun - toolCallsUsed;
+
+      if (remainingToolCalls <= 0) {
+        const err = new ToolBudgetExceededError(this.config.maxToolCallsPerRun, toolCallsUsed);
+        state.error = err;
+        state = this.finalizeState(state, 'failed');
+        this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+        logger.error('Tool budget exhausted before resumed execution', {
+          sessionId: executionContext.sessionId,
+          maxToolCallsPerRun: this.config.maxToolCallsPerRun,
+          toolCallsUsed,
+        });
+
+        return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+          error: err,
+          finalState: state,
+          trace: tracer?.finalize(false, err.message),
+        });
+      }
+
+      const onBeforeStep = this.config.toolPermissionHandler
+        ? async (step: PlanStep): Promise<'allow' | 'deny' | 'allow_always'> => {
+            const handler = this.config.toolPermissionHandler!;
+            const decisionPromise = handler(step.tool, step.args, step);
+
+            let autoResolved = false;
+            let autoDecision: 'allow' | 'deny' | 'allow_always' | undefined;
+
+            void decisionPromise.then((decision) => {
+              if (!autoResolved) {
+                autoResolved = true;
+                autoDecision = decision;
+              }
+            });
+
+            await Promise.resolve();
+
+            if (autoResolved && autoDecision !== undefined) {
+              return autoDecision;
+            }
+
+            autoResolved = true;
+            this.emitEvent(onEvent, {
+              type: 'tool_permission_request',
+              step,
+              timestamp: Date.now(),
+            });
+
+            const decision = await decisionPromise;
+
+            this.emitEvent(onEvent, {
+              type: 'tool_permission_response',
+              step,
+              decision,
+              timestamp: Date.now(),
+            });
+
+            return decision;
+          }
+        : undefined;
+
+      let executionResult: ExecutionResult;
+      try {
+        executionResult = await this.executor.execute(
+          plan,
+          executionContextForIteration,
+          (progress) => {
+            const step = progress.stepId ? stepById.get(progress.stepId) : undefined;
+            if (!step) return;
+
+            if (progress.phase === 'step_started') {
+              this.emitEvent(onEvent, { type: 'execution_start', step, timestamp: Date.now() });
+            }
+
+            if (progress.phase === 'step_completed' || progress.phase === 'step_failed') {
+              if (progress.result) {
+                tracer?.recordToolCall({
+                  name: step.tool,
+                  success: progress.result.success,
+                  durationMs: progress.result.duration,
+                  error: progress.result.error,
+                });
+                this.emitEvent(onEvent, {
+                  type: 'execution_complete',
+                  step,
+                  result: this.toToolResult(progress.result),
+                  timestamp: Date.now(),
+                });
+              }
+            }
+
+            const ratio =
+              progress.totalSteps > 0
+                ? (progress.completedCount + progress.failedCount) / progress.totalSteps
+                : 0;
+
+            this.emitEvent(onEvent, {
+              type: 'execution_progress',
+              step,
+              progress: ratio,
+              timestamp: Date.now(),
+            });
+          },
+          { maxToolCalls: remainingToolCalls, onBeforeStep },
+        );
+      } catch (error) {
+        const err = asError(error);
+
+        if (error instanceof DoomLoopError) {
+          this.emitEvent(onEvent, {
+            type: 'doom_loop_detected',
+            tool: error.tool,
+            count: error.consecutiveCalls,
+            timestamp: Date.now(),
+          });
+        }
+
+        const partialExecutionResult = getPartialExecutionResult(error);
+
+        if (partialExecutionResult) {
+          executionResults.push(partialExecutionResult);
+          toolCallsUsed += partialExecutionResult.toolCallsUsed;
+          state.executionHistory.push(...this.toExecutionRecords(partialExecutionResult));
+          await this.recordExecutionOperations(partialExecutionResult, contextWithTools.projectId);
+        }
+
+        const rollbackReport = await this.attemptRollback(executionResults, executionContext);
+
+        state.error = err;
+        state = this.finalizeState(state, 'failed');
+        tracer?.endPhase(err.message);
+        this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+        logger.error('Recovered execution phase failed', {
+          sessionId: executionContext.sessionId,
+          error: err.message,
+          rollbackAttempted: rollbackReport.attempted,
+          rollbackSucceeded: rollbackReport.succeededCount,
+          rollbackFailed: rollbackReport.failedCount,
+          rollbackSkipped: rollbackReport.skippedCount,
+        });
+
+        const summary = this.createSummary(state, Date.now() - startTime, {
+          failureReason: err.message,
+          rollbackReport,
+        });
+
+        return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+          error: err,
+          finalState: state,
+          summary,
+          rollbackReport,
+          trace: tracer?.finalize(false, err.message),
+        });
+      }
+
+      executionResults.push(executionResult);
+      toolCallsUsed += executionResult.toolCallsUsed;
+      state.executionHistory.push(...this.toExecutionRecords(executionResult));
+      await this.recordExecutionOperations(executionResult, contextWithTools.projectId);
+      tracer?.endPhase();
+
+      const immediateTerminalFailure = detectImmediateTerminalFailure(
+        executionResult,
+        state.context,
+      );
+      const repeatedTerminalFailure = null;
+      const terminalFailureGuard = immediateTerminalFailure ?? repeatedTerminalFailure;
+
+      if (!executionResult.success) {
+        const failureReason =
+          executionResult.failedSteps[0]?.result.error ?? 'Execution failed before observation';
+        const rollbackReport = await this.attemptRollback(executionResults, executionContext);
+        const observation = terminalFailureGuard
+          ? this.applyTerminalFailureGuard(
+              {
+                goalAchieved: false,
+                stateChanges: [],
+                summary: failureReason,
+                confidence: 0.5,
+                needsIteration: true,
+              },
+              terminalFailureGuard,
+            )
+          : undefined;
+
+        const executionError = new Error(failureReason);
+        state.error = executionError;
+        state = this.finalizeState(state, 'failed');
+        this.emitEvent(onEvent, {
+          type: 'session_failed',
+          error: executionError,
+          timestamp: Date.now(),
+        });
+        logger.error('Recovered execution completed with failed steps', {
+          sessionId: executionContext.sessionId,
+          error: failureReason,
+          rollbackAttempted: rollbackReport.attempted,
+          rollbackSucceeded: rollbackReport.succeededCount,
+          rollbackFailed: rollbackReport.failedCount,
+          rollbackSkipped: rollbackReport.skippedCount,
+        });
+
+        const summary = this.createSummary(state, Date.now() - startTime, {
+          failureReason,
+          rollbackReport,
+        });
+
+        return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+          observation,
+          error: executionError,
+          finalState: state,
+          summary,
+          rollbackReport,
+          trace: tracer?.finalize(false, failureReason),
+        });
+      }
+
+      if (this.isAborted || executionResult.aborted) {
+        state = this.finalizeState(state, 'aborted');
+        this.emitEvent(onEvent, {
+          type: 'session_aborted',
+          reason: 'Aborted by user',
+          timestamp: Date.now(),
+        });
+
+        return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+          aborted: true,
+          finalState: state,
+          trace: tracer?.finalize(false, 'Aborted by user'),
+        });
+      }
+
+      this.currentPhase = 'observing';
+      state.phase = 'observing';
+      tracer?.startPhase('observing');
+
+      let observation: Observation;
+      try {
+        observation = await this.observer.observe(plan, executionResult, state.context);
+      } catch (error) {
+        const err = asError(error);
+        state.error = err;
+        state = this.finalizeState(state, 'failed');
+        tracer?.endPhase(err.message);
+        this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+        logger.error('Recovered observation phase failed', {
+          sessionId: executionContext.sessionId,
+          error: err.message,
+        });
+
+        return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+          error: err,
+          finalState: state,
+          trace: tracer?.finalize(false, err.message),
+        });
+      }
+
+      if (observation.needsIteration && terminalFailureGuard) {
+        observation = this.applyTerminalFailureGuard(observation, terminalFailureGuard);
+      }
+
+      tracer?.endPhase();
+      this.emitEvent(onEvent, {
+        type: 'observation_complete',
+        observation,
+        timestamp: Date.now(),
+      });
+
+      state = this.finalizeState(state, 'completed');
+      const summary = this.createSummary(state, Date.now() - startTime);
+      this.emitEvent(onEvent, { type: 'session_complete', summary, timestamp: Date.now() });
+
+      tracer?.setIterations(1);
+      return this.createResult(
+        observation.goalAchieved,
+        executionResults,
+        1,
+        Date.now() - startTime,
+        {
+          observation,
+          finalState: state,
+          summary,
+          trace: tracer?.finalize(observation.goalAchieved),
+        },
+      );
+    } finally {
+      this.currentPhase = 'idle';
+      this.activeSessionId = null;
+    }
+  }
+
+  async resumePendingToolPermission(
+    input: string,
+    plan: Plan,
+    agentContext: AgentContext,
+    executionContext: ExecutionContext,
+    onEvent?: (event: AgentEvent) => void,
+  ): Promise<AgentRunResult> {
+    if (this.activeSessionId) {
+      const err = new SessionActiveError(this.activeSessionId);
+      this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+
+      const finalState = createInitialState(
+        executionContext.sessionId,
+        input,
+        agentContext,
+        this.config,
+      );
+
+      return this.createResult(false, [], 0, 0, {
+        error: err,
+        finalState,
+      });
+    }
+
+    this.activeSessionId = executionContext.sessionId;
+    this.isAborted = false;
+
+    const tracer = this.config.enableTracing ? new TraceRecorder() : null;
+    tracer?.startRun({
+      sessionId: executionContext.sessionId,
+      input,
+      model: this.config.activeModel,
+      provider: this.config.activeProvider,
+      traceId: executionContext.traceId,
+      runtimeKind: 'tpao',
+    });
+
+    const startTime = Date.now();
+
+    let contextWithTools = await this.hydrateContextWithMemory(agentContext);
+    contextWithTools = {
+      ...contextWithTools,
+      availableTools:
+        contextWithTools.availableTools.length > 0
+          ? contextWithTools.availableTools
+          : this.toolExecutor.getAvailableTools().map((tool) => tool.name),
+    };
+
+    let state = createInitialState(
+      executionContext.sessionId,
+      input,
+      contextWithTools,
+      this.config,
+    );
+    state.iteration = 1;
+    state.plan = plan;
+
+    this.emitEvent(onEvent, {
+      type: 'session_start',
+      sessionId: executionContext.sessionId,
+      input,
+      timestamp: Date.now(),
+    });
+    this.emitEvent(onEvent, { type: 'planning_complete', plan, timestamp: Date.now() });
+
+    logger.info('Agent session resumed from tool permission checkpoint', {
+      sessionId: executionContext.sessionId,
+      projectId: contextWithTools.projectId,
+      sequenceId: executionContext.sequenceId,
+    });
+
+    try {
+      if (this.isAborted) {
+        state = this.finalizeState(state, 'aborted');
+        this.emitEvent(onEvent, {
+          type: 'session_aborted',
+          reason: 'Aborted by user',
+          timestamp: Date.now(),
+        });
+
+        return this.createResult(false, [], 1, Date.now() - startTime, {
+          aborted: true,
+          finalState: state,
+          trace: tracer?.finalize(false, 'Aborted by user'),
+        });
+      }
+
+      return await this.executeRecoveredPlan(
+        plan,
+        state,
+        executionContext,
+        onEvent,
+        tracer,
+        startTime,
+        contextWithTools,
+      );
+    } finally {
+      this.currentPhase = 'idle';
+      this.activeSessionId = null;
+    }
+  }
+
   abort(): void {
     this.isAborted = true;
     this.thinker.abort();
@@ -898,6 +1456,311 @@ export class AgenticEngine {
   // ===========================================================================
   // Private Helpers
   // ===========================================================================
+
+  private async executeRecoveredPlan(
+    plan: Plan,
+    state: AgentState,
+    executionContext: ExecutionContext,
+    onEvent: ((event: AgentEvent) => void) | undefined,
+    tracer: TraceRecorder | null,
+    startTime: number,
+    contextWithTools: AgentContext,
+  ): Promise<AgentRunResult> {
+    const executionResults: ExecutionResult[] = [];
+    let toolCallsUsed = 0;
+
+    this.currentPhase = 'executing';
+    state.phase = 'executing';
+    tracer?.startPhase('executing');
+
+    const stepById = new Map<string, PlanStep>(plan.steps.map((step) => [step.id, step]));
+    const executionContextForIteration: ExecutionContext = {
+      ...executionContext,
+      expectedStateVersion:
+        state.context.projectStateVersion ?? executionContext.expectedStateVersion,
+    };
+    const remainingToolCalls = this.config.maxToolCallsPerRun - toolCallsUsed;
+
+    if (remainingToolCalls <= 0) {
+      const err = new ToolBudgetExceededError(this.config.maxToolCallsPerRun, toolCallsUsed);
+      state.error = err;
+      state = this.finalizeState(state, 'failed');
+      this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+      logger.error('Tool budget exhausted before recovered execution', {
+        sessionId: executionContext.sessionId,
+        maxToolCallsPerRun: this.config.maxToolCallsPerRun,
+        toolCallsUsed,
+      });
+
+      return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+        error: err,
+        finalState: state,
+        trace: tracer?.finalize(false, err.message),
+      });
+    }
+
+    const onBeforeStep = this.config.toolPermissionHandler
+      ? async (step: PlanStep): Promise<'allow' | 'deny' | 'allow_always'> => {
+          const handler = this.config.toolPermissionHandler!;
+          const decisionPromise = handler(step.tool, step.args, step);
+
+          let autoResolved = false;
+          let autoDecision: 'allow' | 'deny' | 'allow_always' | undefined;
+
+          void decisionPromise.then((decision) => {
+            if (!autoResolved) {
+              autoResolved = true;
+              autoDecision = decision;
+            }
+          });
+
+          await Promise.resolve();
+
+          if (autoResolved && autoDecision !== undefined) {
+            return autoDecision;
+          }
+
+          autoResolved = true;
+          this.emitEvent(onEvent, {
+            type: 'tool_permission_request',
+            step,
+            timestamp: Date.now(),
+          });
+
+          const decision = await decisionPromise;
+
+          this.emitEvent(onEvent, {
+            type: 'tool_permission_response',
+            step,
+            decision,
+            timestamp: Date.now(),
+          });
+
+          return decision;
+        }
+      : undefined;
+
+    let executionResult: ExecutionResult;
+    try {
+      executionResult = await this.executor.execute(
+        plan,
+        executionContextForIteration,
+        (progress) => {
+          const step = progress.stepId ? stepById.get(progress.stepId) : undefined;
+          if (!step) return;
+
+          if (progress.phase === 'step_started') {
+            this.emitEvent(onEvent, { type: 'execution_start', step, timestamp: Date.now() });
+          }
+
+          if (progress.phase === 'step_completed' || progress.phase === 'step_failed') {
+            if (progress.result) {
+              tracer?.recordToolCall({
+                name: step.tool,
+                success: progress.result.success,
+                durationMs: progress.result.duration,
+                error: progress.result.error,
+              });
+              this.emitEvent(onEvent, {
+                type: 'execution_complete',
+                step,
+                result: this.toToolResult(progress.result),
+                timestamp: Date.now(),
+              });
+            }
+          }
+
+          const ratio =
+            progress.totalSteps > 0
+              ? (progress.completedCount + progress.failedCount) / progress.totalSteps
+              : 0;
+
+          this.emitEvent(onEvent, {
+            type: 'execution_progress',
+            step,
+            progress: ratio,
+            timestamp: Date.now(),
+          });
+        },
+        { maxToolCalls: remainingToolCalls, onBeforeStep },
+      );
+    } catch (error) {
+      const err = asError(error);
+
+      if (error instanceof DoomLoopError) {
+        this.emitEvent(onEvent, {
+          type: 'doom_loop_detected',
+          tool: error.tool,
+          count: error.consecutiveCalls,
+          timestamp: Date.now(),
+        });
+      }
+
+      const partialExecutionResult = getPartialExecutionResult(error);
+
+      if (partialExecutionResult) {
+        executionResults.push(partialExecutionResult);
+        toolCallsUsed += partialExecutionResult.toolCallsUsed;
+        state.executionHistory.push(...this.toExecutionRecords(partialExecutionResult));
+        await this.recordExecutionOperations(partialExecutionResult, contextWithTools.projectId);
+      }
+
+      const rollbackReport = await this.attemptRollback(executionResults, executionContext);
+
+      state.error = err;
+      state = this.finalizeState(state, 'failed');
+      tracer?.endPhase(err.message);
+      this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+      logger.error('Recovered execution phase failed', {
+        sessionId: executionContext.sessionId,
+        error: err.message,
+        rollbackAttempted: rollbackReport.attempted,
+        rollbackSucceeded: rollbackReport.succeededCount,
+        rollbackFailed: rollbackReport.failedCount,
+        rollbackSkipped: rollbackReport.skippedCount,
+      });
+
+      const summary = this.createSummary(state, Date.now() - startTime, {
+        failureReason: err.message,
+        rollbackReport,
+      });
+
+      return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+        error: err,
+        finalState: state,
+        summary,
+        rollbackReport,
+        trace: tracer?.finalize(false, err.message),
+      });
+    }
+
+    executionResults.push(executionResult);
+    toolCallsUsed += executionResult.toolCallsUsed;
+    state.executionHistory.push(...this.toExecutionRecords(executionResult));
+    await this.recordExecutionOperations(executionResult, contextWithTools.projectId);
+    tracer?.endPhase();
+
+    const immediateTerminalFailure = detectImmediateTerminalFailure(executionResult, state.context);
+    const terminalFailureGuard = immediateTerminalFailure;
+
+    if (!executionResult.success) {
+      const failureReason =
+        executionResult.failedSteps[0]?.result.error ?? 'Execution failed before observation';
+      const rollbackReport = await this.attemptRollback(executionResults, executionContext);
+      const observation = terminalFailureGuard
+        ? this.applyTerminalFailureGuard(
+            {
+              goalAchieved: false,
+              stateChanges: [],
+              summary: failureReason,
+              confidence: 0.5,
+              needsIteration: true,
+            },
+            terminalFailureGuard,
+          )
+        : undefined;
+
+      const executionError = new Error(failureReason);
+      state.error = executionError;
+      state = this.finalizeState(state, 'failed');
+      this.emitEvent(onEvent, {
+        type: 'session_failed',
+        error: executionError,
+        timestamp: Date.now(),
+      });
+      logger.error('Recovered execution completed with failed steps', {
+        sessionId: executionContext.sessionId,
+        error: failureReason,
+        rollbackAttempted: rollbackReport.attempted,
+        rollbackSucceeded: rollbackReport.succeededCount,
+        rollbackFailed: rollbackReport.failedCount,
+        rollbackSkipped: rollbackReport.skippedCount,
+      });
+
+      const summary = this.createSummary(state, Date.now() - startTime, {
+        failureReason,
+        rollbackReport,
+      });
+
+      return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+        observation,
+        error: executionError,
+        finalState: state,
+        summary,
+        rollbackReport,
+        trace: tracer?.finalize(false, failureReason),
+      });
+    }
+
+    if (this.isAborted || executionResult.aborted) {
+      state = this.finalizeState(state, 'aborted');
+      this.emitEvent(onEvent, {
+        type: 'session_aborted',
+        reason: 'Aborted by user',
+        timestamp: Date.now(),
+      });
+
+      return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+        aborted: true,
+        finalState: state,
+        trace: tracer?.finalize(false, 'Aborted by user'),
+      });
+    }
+
+    this.currentPhase = 'observing';
+    state.phase = 'observing';
+    tracer?.startPhase('observing');
+
+    let observation: Observation;
+    try {
+      observation = await this.observer.observe(plan, executionResult, state.context);
+    } catch (error) {
+      const err = asError(error);
+      state.error = err;
+      state = this.finalizeState(state, 'failed');
+      tracer?.endPhase(err.message);
+      this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+      logger.error('Recovered observation phase failed', {
+        sessionId: executionContext.sessionId,
+        error: err.message,
+      });
+
+      return this.createResult(false, executionResults, 1, Date.now() - startTime, {
+        error: err,
+        finalState: state,
+        trace: tracer?.finalize(false, err.message),
+      });
+    }
+
+    if (observation.needsIteration && terminalFailureGuard) {
+      observation = this.applyTerminalFailureGuard(observation, terminalFailureGuard);
+    }
+
+    tracer?.endPhase();
+    this.emitEvent(onEvent, {
+      type: 'observation_complete',
+      observation,
+      timestamp: Date.now(),
+    });
+
+    state = this.finalizeState(state, 'completed');
+    const summary = this.createSummary(state, Date.now() - startTime);
+    this.emitEvent(onEvent, { type: 'session_complete', summary, timestamp: Date.now() });
+
+    tracer?.setIterations(1);
+    return this.createResult(
+      observation.goalAchieved,
+      executionResults,
+      1,
+      Date.now() - startTime,
+      {
+        observation,
+        finalState: state,
+        summary,
+        trace: tracer?.finalize(observation.goalAchieved),
+      },
+    );
+  }
 
   private enforceDestructiveApproval(plan: Plan): Plan {
     if (!this.config.requireApprovalForDestructiveActions || plan.requiresApproval) {

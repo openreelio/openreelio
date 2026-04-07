@@ -134,6 +134,56 @@ function createPersistedRecoveryCheckpoint(overrides: Record<string, unknown> = 
   };
 }
 
+function createPersistedToolWaitCheckpoint(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'checkpoint-recovery-tool-1',
+    sessionId: 'conversation-session-1',
+    runId: 'run-previous',
+    checkpointKind: 'tool_wait',
+    status: 'active',
+    resumeCursorJson: JSON.stringify({
+      checkpointKind: 'tool_wait',
+      phase: 'awaiting_tool_permission',
+      stepId: 'step-1',
+      toolName: 'delete_clip',
+    }),
+    sessionStateJson: JSON.stringify({
+      phase: 'awaiting_tool_permission',
+      input: 'Delete the intro clip',
+      planGoal: 'Delete the intro clip safely',
+      projectStateVersion: 7,
+    }),
+    pendingWorkJson: JSON.stringify({
+      type: 'tool_permission',
+      stepId: 'step-1',
+      toolName: 'delete_clip',
+      args: { clipId: 'clip-1' },
+      plan: {
+        goal: 'Delete the intro clip safely',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'delete_clip',
+            args: { clipId: 'clip-1' },
+            description: 'Delete the intro clip from the timeline',
+            riskLevel: 'high',
+            estimatedDuration: 75,
+          },
+        ],
+        estimatedTotalDuration: 75,
+        requiresApproval: false,
+        rollbackStrategy: 'Restore the deleted clip from undo history.',
+      },
+      nextStepIndex: 0,
+      completedStepIds: [],
+      toolCallsUsed: 0,
+    }),
+    createdAt: 97,
+    consumedAt: null,
+    ...overrides,
+  };
+}
+
 function createPersistedCompaction(overrides: Record<string, unknown> = {}) {
   return {
     id: 'compaction-summary-1',
@@ -1006,6 +1056,211 @@ describe('useAgenticLoop', () => {
     );
     expect(vi.mocked(commands.consumeAgentResumeCheckpoint)).not.toHaveBeenCalledWith(
       'checkpoint-recovery-1',
+    );
+  });
+
+  it('should resume a recovered approval checkpoint into execution with a resume-triggered run', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+    const recoveredPlan = {
+      goal: 'Delete the intro clip safely',
+      steps: [
+        {
+          id: 'step-1',
+          tool: 'delete_clip',
+          args: { clipId: 'clip-1' },
+          description: 'Delete the intro clip from the timeline',
+          riskLevel: 'high' as const,
+          estimatedDuration: 75,
+        },
+      ],
+      estimatedTotalDuration: 75,
+      requiresApproval: true,
+      rollbackStrategy: 'Restore the deleted clip from undo history.',
+    };
+
+    sessionState = {
+      ...createAgentSessionDto(),
+      activeCheckpointId: 'checkpoint-recovery-1',
+      resumeCursorVersion: 1,
+    };
+    persistedCheckpoints = [
+      createPersistedRecoveryCheckpoint({
+        pendingWorkJson: JSON.stringify({
+          type: 'plan_approval',
+          goal: recoveredPlan.goal,
+          stepIds: ['step-1'],
+          plan: recoveredPlan,
+        }),
+      }),
+    ];
+
+    const structuredSpy = vi.spyOn(llm, 'generateStructured').mockResolvedValue({
+      goalAchieved: true,
+      stateChanges: [
+        {
+          type: 'clip_deleted',
+          target: 'clip-1',
+          details: { deleted: true },
+        },
+      ],
+      summary: 'Deleted clip-1 after resume',
+      confidence: 0.96,
+      needsIteration: false,
+    });
+
+    const { result } = renderHook(() =>
+      useAgenticLoop({
+        llmClient: llm,
+        toolExecutor: tools,
+        context: {
+          projectId: 'project-1',
+          sequenceId: 'sequence-1',
+        },
+        config: {
+          enableFastPath: false,
+          enableMemory: false,
+          enableTracing: false,
+          toolPermissionHandler: async () => 'allow',
+        },
+      }),
+    );
+
+    let runPromise!: ReturnType<typeof result.current.run>;
+    act(() => {
+      runPromise = result.current.run('Continue the recovered edit');
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('awaiting_approval');
+      expect(result.current.plan?.goal).toBe('Delete the intro clip safely');
+    });
+
+    expect(structuredSpy).not.toHaveBeenCalled();
+    expect(vi.mocked(commands.startAgentRun)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'conversation-session-1',
+        trigger: 'resume',
+      }),
+    );
+    expect(
+      vi
+        .mocked(commands.createAgentResumeCheckpoint)
+        .mock.calls.map(([input]) => input)
+        .filter((input) => input.checkpointKind === 'approval_wait'),
+    ).toHaveLength(0);
+
+    act(() => {
+      result.current.approvePlan();
+    });
+
+    await act(async () => {
+      await runPromise;
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('completed');
+    });
+
+    expect(structuredSpy).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(commands.consumeAgentResumeCheckpoint)).toHaveBeenCalledWith(
+      'checkpoint-recovery-1',
+    );
+    expect(vi.mocked(commands.updateAgentRunPhase)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-tpao-1',
+        phase: 'completed',
+      }),
+    );
+  });
+
+  it('should resume a recovered first-step tool permission checkpoint without replaying planning', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+
+    sessionState = {
+      ...createAgentSessionDto(),
+      activeCheckpointId: 'checkpoint-recovery-tool-1',
+      resumeCursorVersion: 1,
+    };
+    persistedCheckpoints = [createPersistedToolWaitCheckpoint()];
+
+    const structuredSpy = vi.spyOn(llm, 'generateStructured').mockResolvedValue({
+      goalAchieved: true,
+      stateChanges: [
+        {
+          type: 'clip_deleted',
+          target: 'clip-1',
+          details: { deleted: true },
+        },
+      ],
+      summary: 'Deleted clip-1 after resumed tool permission',
+      confidence: 0.97,
+      needsIteration: false,
+    });
+
+    const { result } = renderHook(() =>
+      useAgenticLoop({
+        llmClient: llm,
+        toolExecutor: tools,
+        context: {
+          projectId: 'project-1',
+          sequenceId: 'sequence-1',
+          projectStateVersion: 7,
+        },
+        config: {
+          enableFastPath: false,
+          enableMemory: false,
+          enableTracing: false,
+        },
+      }),
+    );
+
+    let runPromise!: ReturnType<typeof result.current.run>;
+    act(() => {
+      runPromise = result.current.run('Continue the recovered edit');
+    });
+
+    await waitFor(() => {
+      expect(result.current.pendingToolPermissionStep?.id).toBe('step-1');
+    });
+
+    expect(result.current.plan?.goal).toBe('Delete the intro clip safely');
+    expect(structuredSpy).not.toHaveBeenCalled();
+    expect(vi.mocked(commands.startAgentRun)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'conversation-session-1',
+        trigger: 'resume',
+      }),
+    );
+    expect(
+      vi
+        .mocked(commands.createAgentResumeCheckpoint)
+        .mock.calls.map(([input]) => input)
+        .filter((input) => input.checkpointKind === 'tool_wait'),
+    ).toHaveLength(0);
+
+    act(() => {
+      result.current.approveToolPermission('allow');
+    });
+
+    await act(async () => {
+      await runPromise;
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('completed');
+    });
+
+    expect(structuredSpy).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(commands.consumeAgentResumeCheckpoint)).toHaveBeenCalledWith(
+      'checkpoint-recovery-tool-1',
+    );
+    expect(vi.mocked(commands.updateAgentRunPhase)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-tpao-1',
+        phase: 'completed',
+      }),
     );
   });
 

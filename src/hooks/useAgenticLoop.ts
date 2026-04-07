@@ -432,7 +432,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         logger,
         loggerLabel: 'agentic',
       });
-      await bootstrapRecoveredContextFromCheckpoint({
+      const recoveredExecutableResume = await bootstrapRecoveredContextFromCheckpoint({
         sessionId: storeSessionId,
         addSystemMessage: convStore.addSystemMessage,
         logger,
@@ -441,6 +441,14 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         onCheckpointRecovered: (record) => runtimeTraceRecorder?.recordCheckpointEvent(record),
         onCompactionRecovered: (record) => runtimeTraceRecorder?.recordCompactionEvent(record),
       });
+      const recoveredApprovalResume =
+        recoveredExecutableResume?.kind === 'approval_wait' ? recoveredExecutableResume : null;
+      const recoveredToolWaitResume =
+        recoveredExecutableResume?.kind === 'tool_wait' &&
+        typeof context.projectStateVersion === 'number' &&
+        recoveredExecutableResume.projectStateVersion === context.projectStateVersion
+          ? recoveredExecutableResume
+          : null;
 
       // Create execution context bound to the store session
       const executionContext = {
@@ -478,10 +486,11 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       const startedRunId = await startPersistedRun({
         sessionId: executionContext.sessionId,
         runtimeKind: 'tpao',
+        trigger: recoveredApprovalResume || recoveredToolWaitResume ? 'resume' : 'user',
         maxIterations: config?.maxIterations,
         maxToolCalls: config?.maxToolCallsPerRun,
         traceId: persistedTraceId,
-        runInput: input,
+        runInput: recoveredApprovalResume?.input ?? recoveredToolWaitResume?.input ?? input,
         context,
         checkpointController,
         persistedRunIdRef,
@@ -578,6 +587,14 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
           writeTraceOnComplete: false,
           memoryStore: config?.memoryStore ?? memoryStoreRef.current ?? undefined,
           approvalHandler: async (plan) => {
+            if (recoveredApprovalResume?.checkpointId) {
+              try {
+                return await baseApprovalHandler(plan);
+              } finally {
+                await checkpointController.consumeCheckpoint(recoveredApprovalResume.checkpointId);
+              }
+            }
+
             const checkpointId = await checkpointController.persistCheckpoint({
               sessionId: storeSessionId,
               runId: persistedRunIdRef.current,
@@ -602,6 +619,17 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
             const activePlan = latestPlanRef.current;
             const stepIndex =
               activePlan?.steps.findIndex((candidate) => candidate.id === step.id) ?? -1;
+
+            if (
+              recoveredToolWaitResume?.checkpointId &&
+              step.id === recoveredToolWaitResume.stepId
+            ) {
+              try {
+                return await baseToolPermissionHandler(toolName, args, step);
+              } finally {
+                await checkpointController.consumeCheckpoint(recoveredToolWaitResume.checkpointId);
+              }
+            }
 
             const decisionPromise = baseToolPermissionHandler(toolName, args, step);
             let autoResolved = false;
@@ -655,13 +683,23 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         const conversationHistory = trimDuplicatedTailUserMessageForContext(rawHistory, input);
 
         // Run engine with conversation history
-        const result = await engine.run(
-          input,
-          context,
-          executionContext,
-          handleEvent,
-          conversationHistory,
-        );
+        const result = recoveredApprovalResume
+          ? await engine.resumePendingApproval(
+              recoveredApprovalResume.input,
+              recoveredApprovalResume.plan,
+              context,
+              executionContext,
+              handleEvent,
+            )
+          : recoveredToolWaitResume
+            ? await engine.resumePendingToolPermission(
+                recoveredToolWaitResume.input,
+                recoveredToolWaitResume.plan,
+                context,
+                executionContext,
+                handleEvent,
+              )
+            : await engine.run(input, context, executionContext, handleEvent, conversationHistory);
 
         persistedFinalPhase =
           result.finalState.phase === 'aborted'
