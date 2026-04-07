@@ -873,11 +873,24 @@ describe('useAgenticLoop', () => {
         checkpointKind: 'approval_wait',
       }),
     );
-    expect(JSON.parse(approvalCheckpointCall?.pendingWorkJson ?? 'null')).toEqual({
-      type: 'plan_approval',
-      goal: 'Delete the target clip',
-      stepIds: ['step-approval-1'],
-    });
+    expect(JSON.parse(approvalCheckpointCall?.pendingWorkJson ?? 'null')).toEqual(
+      expect.objectContaining({
+        type: 'plan_approval',
+        goal: 'Delete the target clip',
+        stepIds: ['step-approval-1'],
+        plan: expect.objectContaining({
+          goal: 'Delete the target clip',
+          requiresApproval: true,
+          steps: [
+            expect.objectContaining({
+              id: 'step-approval-1',
+              tool: 'delete_clip',
+              args: { clipId: 'clip-1' },
+            }),
+          ],
+        }),
+      }),
+    );
 
     act(() => {
       result.current.approvePlan();

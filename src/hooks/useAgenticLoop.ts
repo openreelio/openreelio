@@ -194,6 +194,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   const bootstrappedCheckpointIdRef = useRef<string | null>(null);
   const memoryStoreRef = useRef<IMemoryStore | null>(null);
   const persistedRunIdRef = useRef<string | null>(null);
+  const latestPlanRef = useRef<Plan | null>(null);
 
   if (!memoryStoreRef.current && config?.enableMemory !== false) {
     memoryStoreRef.current = createMemoryManagerAdapter();
@@ -242,6 +243,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       case 'approval_required':
         setPhase('awaiting_approval');
         setPlan(event.plan);
+        latestPlanRef.current = event.plan;
         // Trigger callback and wait for response
         optionsRef.current.onApprovalRequired?.(event.plan);
         break;
@@ -264,6 +266,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
 
       case 'planning_complete':
         setPlan(event.plan);
+        latestPlanRef.current = event.plan;
         break;
 
       case 'execution_start':
@@ -328,6 +331,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       setError(null);
       setThought(null);
       setPlan(null);
+      latestPlanRef.current = null;
       setPendingClarificationQuestion(null);
       setPendingToolPermissionStep(null);
       setPhase('thinking');
@@ -585,6 +589,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
               input,
               planGoal: plan.goal,
               planStepIds: plan.steps.map((step) => step.id),
+              plan,
             });
 
             try {
@@ -594,6 +599,10 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
             }
           },
           toolPermissionHandler: async (toolName, args, step) => {
+            const activePlan = latestPlanRef.current;
+            const stepIndex =
+              activePlan?.steps.findIndex((candidate) => candidate.id === step.id) ?? -1;
+
             const decisionPromise = baseToolPermissionHandler(toolName, args, step);
             let autoResolved = false;
             let autoDecision: 'allow' | 'deny' | 'allow_always' | undefined;
@@ -617,7 +626,12 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
                 phase: 'awaiting_tool_permission',
                 projectId: context.projectId,
                 sequenceId: context.sequenceId ?? null,
+                projectStateVersion: context.projectStateVersion ?? null,
                 input,
+                plan: activePlan,
+                nextStepIndex: stepIndex >= 0 ? stepIndex : null,
+                completedStepIds: stepIndex === 0 ? [] : null,
+                toolCallsUsed: stepIndex === 0 ? 0 : null,
                 stepId: typeof step.id === 'string' ? step.id : null,
                 toolName,
                 args,
@@ -767,6 +781,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     setError(null);
     setThought(null);
     setPlan(null);
+    latestPlanRef.current = null;
     setPendingClarificationQuestion(null);
     setPendingToolPermissionStep(null);
     setSessionId(null);
