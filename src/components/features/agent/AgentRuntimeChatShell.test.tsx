@@ -297,6 +297,75 @@ describe('AgentRuntimeChatShell', () => {
     expect(screen.getByTestId('chat-input-disabled')).toHaveTextContent('true');
   });
 
+  it('aborts the active run when the user switches projects', async () => {
+    const abort = vi.fn();
+    const loadForProject = vi.fn((projectId: string) => {
+      useConversationStore.setState((state) => ({
+        ...state,
+        activeProjectId: projectId,
+        activeConversation: {
+          id: `draft-${projectId}`,
+          projectId,
+          messages: [],
+          createdAt: 200,
+          updatedAt: 200,
+        },
+      }));
+    });
+
+    act(() => {
+      useMessageQueueStore.getState().enqueue('queued prompt');
+      useConversationStore.setState((state) => ({
+        ...state,
+        loadForProject,
+      }));
+    });
+
+    render(
+      <AgentRuntimeChatShell
+        chatTestId="agent-runtime-shell"
+        executeMessage={vi.fn()}
+        abort={abort}
+        phase="executing"
+        isRunning={true}
+        isEnabled={true}
+        error={null}
+        runtimeSummary={{ startedTools: 1, completedTools: 0, latestIteration: 0 }}
+        plan={null}
+        pendingClarificationQuestion={null}
+        pendingToolPermissionRequest={null}
+        onApprove={() => {}}
+        onReject={() => {}}
+        onRetry={() => {}}
+        onToolAllow={() => {}}
+        onToolAllowAlways={() => {}}
+        onToolDeny={() => {}}
+      />,
+    );
+
+    act(() => {
+      useProjectStore.setState((state) => ({
+        ...state,
+        meta: {
+          ...(state.meta ?? {
+            name: 'Test Project',
+            path: '/tmp/project',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            modifiedAt: '2026-01-01T00:00:00.000Z',
+          }),
+          id: 'project-2',
+        },
+      }));
+    });
+
+    await waitFor(() => {
+      expect(abort).toHaveBeenCalledTimes(1);
+      expect(loadForProject).toHaveBeenCalledWith('project-2');
+    });
+
+    expect(useMessageQueueStore.getState().queue).toHaveLength(0);
+  });
+
   it('clears artifact focus when the active conversation changes', async () => {
     const user = userEvent.setup();
 

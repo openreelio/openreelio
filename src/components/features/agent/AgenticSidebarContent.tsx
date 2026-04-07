@@ -154,6 +154,7 @@ export function AgenticSidebarContent({
   const runtimePolicy = useSidebarRuntimePolicy();
   const currentProjectId = useProjectStore((state) => state.meta?.id ?? null);
   const currentProjectPath = useProjectStore((state) => state.meta?.path ?? null);
+  const previousProjectIdRef = useRef<string | null>(currentProjectId);
   const activeSessionId = useConversationStore((state) => state.activeSessionId);
   const sessions = useConversationStore((state) => state.sessions);
   const activeConversationMessages = useConversationStore(
@@ -166,6 +167,7 @@ export function AgenticSidebarContent({
   const getLastUserInput = useConversationStore((state) => state.getLastUserInput);
   const clearQueuedMessages = useMessageQueueStore((state) => state.clear);
   const setArtifactReviewSelection = useAgentArtifactReviewStore((state) => state.setSelection);
+  const clearArtifactReviewSelection = useAgentArtifactReviewStore((state) => state.clearSelection);
   const restorePanel = useWorkspaceLayoutStore((state) => state.restorePanel);
   const setActivePanel = useWorkspaceLayoutStore((state) => state.setActivePanel);
   const setZoneCollapsed = useWorkspaceLayoutStore((state) => state.setZoneCollapsed);
@@ -205,6 +207,21 @@ export function AgenticSidebarContent({
     clearQueuedMessages();
     chatHandleRef.current?.abort();
   }, [clearQueuedMessages]);
+
+  useEffect(() => {
+    const previousProjectId = previousProjectIdRef.current;
+    previousProjectIdRef.current = currentProjectId;
+
+    if (!previousProjectId || previousProjectId === currentProjectId) {
+      return;
+    }
+
+    abortCurrentSession();
+    clearArtifactReviewSelection();
+    setChatSurfaceKey((prev) => prev + 1);
+    setIsSessionTransitionPending(false);
+    setSessionTransitionLabel(null);
+  }, [abortCurrentSession, clearArtifactReviewSelection, currentProjectId]);
 
   const runSessionTransition = useCallback(
     async (label: 'new' | 'switch' | 'delegate', action: () => Promise<unknown>) => {
@@ -552,11 +569,16 @@ export function AgenticSidebarContent({
         (activeDelegationRecord.status === 'requested' ||
           activeDelegationRecord.status === 'running')
       ) {
-        const resultPayload = buildDelegationResultPayload(result, activeConversationMessages);
+        const liveMessages =
+          useConversationStore.getState().activeConversation?.id ===
+          activeDelegationRecord.childSessionId
+            ? (useConversationStore.getState().activeConversation?.messages ?? EMPTY_MESSAGES)
+            : activeConversationMessages;
+        const resultPayload = buildDelegationResultPayload(result, liveMessages);
         void updateDelegationRecord({
           id: activeDelegationRecord.id,
           status: 'completed',
-          summaryMessageId: resolveDelegationSummaryMessageId(activeConversationMessages),
+          summaryMessageId: resolveDelegationSummaryMessageId(liveMessages),
           resultJson: JSON.stringify(resultPayload),
           completedAt: Date.now(),
         }).catch((error) => {
@@ -571,6 +593,34 @@ export function AgenticSidebarContent({
     [activeConversationMessages, activeDelegationRecord, onSessionComplete, updateDelegationRecord],
   );
 
+  const handleAbort = useCallback(() => {
+    if (
+      !activeDelegationRecord ||
+      (activeDelegationRecord.status !== 'requested' && activeDelegationRecord.status !== 'running')
+    ) {
+      return;
+    }
+
+    const liveMessages =
+      useConversationStore.getState().activeConversation?.id ===
+      activeDelegationRecord.childSessionId
+        ? (useConversationStore.getState().activeConversation?.messages ?? EMPTY_MESSAGES)
+        : activeConversationMessages;
+
+    void updateDelegationRecord({
+      id: activeDelegationRecord.id,
+      status: 'cancelled',
+      summaryMessageId: resolveDelegationSummaryMessageId(liveMessages),
+      errorMessage: 'Cancelled by user.',
+      completedAt: Date.now(),
+    }).catch((error) => {
+      logger.warn('Failed to mark delegation cancelled', {
+        delegationId: activeDelegationRecord.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }, [activeConversationMessages, activeDelegationRecord, updateDelegationRecord]);
+
   const handleError = useCallback(
     (error: Error) => {
       logger.error('Agentic session error', { error: error.message });
@@ -579,10 +629,15 @@ export function AgenticSidebarContent({
         (activeDelegationRecord.status === 'requested' ||
           activeDelegationRecord.status === 'running')
       ) {
+        const liveMessages =
+          useConversationStore.getState().activeConversation?.id ===
+          activeDelegationRecord.childSessionId
+            ? (useConversationStore.getState().activeConversation?.messages ?? EMPTY_MESSAGES)
+            : activeConversationMessages;
         void updateDelegationRecord({
           id: activeDelegationRecord.id,
           status: 'failed',
-          summaryMessageId: resolveDelegationSummaryMessageId(activeConversationMessages),
+          summaryMessageId: resolveDelegationSummaryMessageId(liveMessages),
           resultJson: JSON.stringify({
             success: false,
             aborted: false,
@@ -722,6 +777,7 @@ export function AgenticSidebarContent({
             config={chatPromptConfig}
             onSubmit={handleSubmit}
             onComplete={handleComplete}
+            onAbort={handleAbort}
             onError={handleError}
             placeholder={promptPlaceholder}
             disabled={isSessionTransitionPending}

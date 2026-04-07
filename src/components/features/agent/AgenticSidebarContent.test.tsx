@@ -600,6 +600,127 @@ describe('AgenticSidebarContent', () => {
     );
   });
 
+  it('marks an active child delegation as cancelled when the run aborts', async () => {
+    const updateDelegationRecord = vi.fn().mockResolvedValue({});
+
+    useConversationStore.setState((state) => ({
+      ...state,
+      activeSessionId: 'session-child',
+      activeConversation: {
+        id: 'session-child',
+        projectId: 'project-1',
+        messages: [
+          {
+            id: 'assistant-msg-cancel',
+            role: 'assistant',
+            parts: [{ type: 'text', content: 'Partial pacing analysis.' }],
+            timestamp: 2,
+          },
+        ],
+        createdAt: 2,
+        updatedAt: 2,
+      },
+      sessions: [
+        ...state.sessions,
+        {
+          id: 'session-child',
+          projectId: 'project-1',
+          title: 'Planner Session',
+          agent: 'planner',
+          modelProvider: null,
+          modelId: null,
+          createdAt: 2,
+          updatedAt: 2,
+          archived: false,
+          messageCount: 1,
+          lastMessagePreview: 'Partial pacing analysis.',
+        },
+      ],
+    }));
+    useAgentSessionStore.setState((state) => ({
+      ...state,
+      snapshotsById: {
+        ...state.snapshotsById,
+        'session-child': {
+          session: {
+            id: 'session-child',
+            projectId: 'project-1',
+            sequenceId: null,
+            title: 'Planner Session',
+            status: 'idle',
+            runtimeKind: 'subagent',
+            agentProfileId: 'planner',
+            sessionMode: 'child',
+            lineage: {
+              parentSessionId: 'session-1',
+              branchFromSessionId: null,
+              rootSessionId: 'session-1',
+            },
+            currentRunId: 'run-child',
+            currentPlanId: null,
+            pendingApprovalId: null,
+            activeCheckpointId: null,
+            permissionStateVersion: 0,
+            compactionVersion: 0,
+            resumeCursorVersion: 0,
+            latestSummaryMessageId: null,
+            lastCompactedAt: null,
+            lastResumedAt: null,
+            modelProvider: null,
+            modelId: null,
+            createdAt: 2,
+            updatedAt: 2,
+            completedAt: null,
+          },
+          runs: [],
+        },
+      },
+      activeSessionId: 'session-child',
+    }));
+    useAgentDelegationStore.setState((state) => ({
+      ...state,
+      recordsBySessionId: {
+        'session-child': [
+          {
+            id: 'delegation-1',
+            parentSessionId: 'session-1',
+            childSessionId: 'session-child',
+            parentRunId: 'run-parent',
+            agentProfileId: 'planner',
+            delegatedGoal: 'Review pacing',
+            contextPacketJson: '{}',
+            allowedToolsDeltaJson: null,
+            permissionSnapshotJson: null,
+            status: 'running',
+            mergeStatus: 'pending',
+            summaryMessageId: null,
+            resultJson: null,
+            errorMessage: null,
+            createdAt: 2,
+            updatedAt: 2,
+            completedAt: null,
+          },
+        ],
+      },
+      updateDelegationRecord,
+    }));
+
+    render(<AgenticSidebarContent />);
+
+    await act(async () => {
+      await (latestAgenticChatProps as { onAbort?: () => void }).onAbort?.();
+    });
+
+    expect(updateDelegationRecord).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'delegation-1',
+        status: 'cancelled',
+        summaryMessageId: 'assistant-msg-cancel',
+        errorMessage: 'Cancelled by user.',
+      }),
+    );
+  });
+
   it('opens agent review for a delegated child result from the parent session', async () => {
     const user = userEvent.setup();
 
