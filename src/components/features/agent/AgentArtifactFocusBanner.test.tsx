@@ -12,7 +12,7 @@ describe('AgentArtifactFocusBanner', () => {
       <AgentArtifactFocusBanner focus={{ kind: 'tool', value: 'delete_clip' }} onClear={onClear} />,
     );
 
-    expect(screen.getByText('Focused tool output: delete_clip')).toBeInTheDocument();
+    expect(screen.getByText('Showing action details: delete_clip')).toBeInTheDocument();
 
     await user.click(screen.getByTestId('agent-artifact-focus-clear-btn'));
 

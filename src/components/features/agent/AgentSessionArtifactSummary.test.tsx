@@ -53,10 +53,10 @@ describe('AgentSessionArtifactSummary', () => {
     render(<AgentSessionArtifactSummary messages={messages} />);
 
     expect(screen.getByTestId('agent-session-artifact-summary')).toBeInTheDocument();
-    expect(screen.getByText('Session Outputs')).toBeInTheDocument();
-    expect(screen.getByText('1 tool run')).toBeInTheDocument();
+    expect(screen.getByText('Recent Activity')).toBeInTheDocument();
+    expect(screen.getByText('1 action')).toBeInTheDocument();
     expect(screen.getByText('2 files')).toBeInTheDocument();
-    expect(screen.getByText('summary available')).toBeInTheDocument();
+    expect(screen.getByText('earlier context')).toBeInTheDocument();
     expect(screen.getByText('src/foo.ts')).toBeInTheDocument();
     expect(screen.getByText('delete_clip')).toBeInTheDocument();
   });

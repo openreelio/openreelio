@@ -20,17 +20,17 @@ describe('CompactionPartRenderer', () => {
   it('should render collapsed by default', () => {
     render(<CompactionPartRenderer part={autoPart} />);
     expect(screen.getByTestId('compaction-part')).toBeInTheDocument();
-    expect(screen.getByText('Context summarized')).toBeInTheDocument();
+    expect(screen.getByText('Earlier context saved')).toBeInTheDocument();
   });
 
-  it('should show (auto) label for auto-triggered compaction', () => {
+  it('should show automatic copy for auto-triggered compaction', () => {
     render(<CompactionPartRenderer part={autoPart} />);
-    expect(screen.getByText('(auto)')).toBeInTheDocument();
+    expect(screen.getByText('created automatically')).toBeInTheDocument();
   });
 
-  it('should show (manual) label for manual compaction', () => {
+  it('should show manual copy for manual compaction', () => {
     render(<CompactionPartRenderer part={manualPart} />);
-    expect(screen.getByText('(manual)')).toBeInTheDocument();
+    expect(screen.getByText('saved manually')).toBeInTheDocument();
   });
 
   it('should expand on click and show summary', async () => {
@@ -41,9 +41,7 @@ describe('CompactionPartRenderer', () => {
     await user.click(button);
 
     expect(button).toHaveAttribute('aria-expanded', 'true');
-    expect(
-      screen.getByText(autoPart.summary),
-    ).toBeInTheDocument();
+    expect(screen.getByText(autoPart.summary)).toBeInTheDocument();
   });
 
   it('should collapse on second click', async () => {

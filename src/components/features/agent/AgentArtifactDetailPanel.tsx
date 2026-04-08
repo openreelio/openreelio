@@ -47,35 +47,49 @@ export function AgentArtifactDetailPanel({
       : `border-b border-border-subtle bg-surface-elevated/80 px-4 py-3 ${className}`;
   const patchStats = detail.kind === 'file' ? countPatchStats(detail.patch.diff) : null;
   const toolStatus = detail.kind === 'tool' ? (detail.toolCall?.status ?? 'completed') : null;
-  const toolDuration = detail.kind === 'tool' ? (detail.toolResult?.duration ?? null) : null;
   const toolRisk = detail.kind === 'tool' ? (detail.toolCall?.riskLevel ?? null) : null;
+
+  const toolStatusLabel =
+    toolStatus === 'completed'
+      ? 'Completed'
+      : toolStatus === 'failed'
+        ? 'Needs attention'
+        : toolStatus === 'running'
+          ? 'Running'
+          : 'Waiting';
+  const toolImpactLabel =
+    toolRisk === 'critical'
+      ? 'High impact'
+      : toolRisk === 'high'
+        ? 'High impact'
+        : toolRisk === 'medium'
+          ? 'Medium impact'
+          : toolRisk === 'low'
+            ? 'Low impact'
+            : null;
 
   return (
     <div className={containerClassName} data-testid="agent-artifact-detail-panel">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-text-tertiary">
-          Artifact Detail
+          Work Details
         </span>
         <span className="rounded-full border border-border-subtle bg-surface-base px-2 py-0.5 text-[11px] text-text-secondary">
           {new Date(detail.timestamp).toLocaleTimeString()}
-        </span>
-        <span className="rounded-full border border-border-subtle bg-surface-base px-2 py-0.5 text-[11px] text-text-secondary">
-          message {detail.messageId}
         </span>
       </div>
 
       {detail.kind === 'tool' && (
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium text-text-primary">Tool Review</span>
+            <span className="text-sm font-medium text-text-primary">Action Details</span>
             <code className="rounded bg-surface-base px-1.5 py-0.5 text-xs text-text-secondary">
               {detail.value}
             </code>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <DetailChip>status: {toolStatus}</DetailChip>
-            {toolRisk && <DetailChip>risk: {toolRisk}</DetailChip>}
-            {toolDuration !== null && <DetailChip>{toolDuration}ms</DetailChip>}
+            <DetailChip>{toolStatusLabel}</DetailChip>
+            {toolImpactLabel && <DetailChip>{toolImpactLabel}</DetailChip>}
             {detail.approvals.length > 0 && (
               <DetailChip>{detail.approvals.length} approvals</DetailChip>
             )}
@@ -91,7 +105,7 @@ export function AgentArtifactDetailPanel({
       {detail.kind === 'file' && (
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium text-text-primary">Patch Review</span>
+            <span className="text-sm font-medium text-text-primary">File Changes</span>
             <code className="rounded bg-surface-base px-1.5 py-0.5 text-xs text-text-secondary">
               {detail.value}
             </code>
@@ -126,14 +140,15 @@ export function AgentArtifactDetailPanel({
       {detail.kind === 'summary' && (
         <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 px-3 py-3">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-blue-300">Context Summary Review</span>
+            <span className="text-sm font-medium text-blue-300">Earlier Context Summary</span>
             <span className="text-xs text-blue-300/70">
-              {detail.compaction.auto ? 'auto' : 'manual'}
+              {detail.compaction.auto ? 'created automatically' : 'saved manually'}
             </span>
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <DetailChip>{detail.compaction.summary.length} chars</DetailChip>
-            <DetailChip>{detail.compaction.auto ? 'auto-generated' : 'manual summary'}</DetailChip>
+            <DetailChip>
+              {detail.compaction.auto ? 'Created automatically' : 'Saved manually'}
+            </DetailChip>
           </div>
           <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-text-secondary">
             {detail.compaction.summary}

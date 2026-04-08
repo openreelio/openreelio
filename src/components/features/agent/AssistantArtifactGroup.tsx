@@ -55,13 +55,13 @@ export function AssistantArtifactGroup({
     const toolCount = Math.max(toolCallCount, toolResultCount);
 
     if (toolCount > 0) {
-      result.push(pluralize(toolCount, 'tool'));
+      result.push(pluralize(toolCount, 'action'));
     }
     if (patchPartCount > 0) {
       result.push(pluralize(patchFileCount || patchPartCount, 'file'));
     }
     if (hasCompaction) {
-      result.push('summary');
+      result.push('earlier context');
     }
 
     return result;
@@ -94,7 +94,7 @@ export function AssistantArtifactGroup({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="text-xs font-medium uppercase tracking-[0.08em] text-text-tertiary">
-              Execution Details
+              Work Details
             </span>
             <span
               className={`rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${status.tone}`}

@@ -39,9 +39,9 @@ describe('AgentArtifactDetailPanel', () => {
     );
 
     expect(screen.getByTestId('agent-artifact-detail-panel')).toBeInTheDocument();
-    expect(screen.getByText('Tool Review')).toBeInTheDocument();
-    expect(screen.getByText('status: completed')).toBeInTheDocument();
-    expect(screen.getByText('risk: medium')).toBeInTheDocument();
+    expect(screen.getByText('Action Details')).toBeInTheDocument();
+    expect(screen.getByText('Completed')).toBeInTheDocument();
+    expect(screen.getByText('Medium impact')).toBeInTheDocument();
     expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
     expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();
   });
@@ -64,8 +64,8 @@ describe('AgentArtifactDetailPanel', () => {
 
     render(<AgentArtifactDetailPanel messages={messages} focus={{ kind: 'summary' }} />);
 
-    expect(screen.getByText('Context Summary Review')).toBeInTheDocument();
-    expect(screen.getByText('auto-generated')).toBeInTheDocument();
+    expect(screen.getByText('Earlier Context Summary')).toBeInTheDocument();
+    expect(screen.getByText('Created automatically')).toBeInTheDocument();
     expect(screen.getByText('Summarized the earlier editing discussion.')).toBeInTheDocument();
   });
 });
