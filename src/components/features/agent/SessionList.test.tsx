@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useConversationStore, type SessionSummary } from '@/stores/conversationStore';
 import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
+import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { SessionList } from './SessionList';
 
 function createSessionSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
@@ -25,6 +26,7 @@ function createSessionSummary(overrides: Partial<SessionSummary> = {}): SessionS
 describe('SessionList', () => {
   beforeEach(() => {
     act(() => {
+      useAgentSessionStore.getState().clear();
       useAgentDelegationStore.setState({
         recordsBySessionId: {},
         isLoadingBySessionId: {},
@@ -61,6 +63,24 @@ describe('SessionList', () => {
   });
 
   it('shows only session identity badges in the list', () => {
+    render(<SessionList />);
+
+    expect(screen.getByTestId('session-agent-badge-session-1')).toHaveTextContent('Editor');
+    expect(screen.getByTestId('session-agent-badge-session-2')).toHaveTextContent('Planner');
+    expect(screen.queryByTestId('session-persistence-badge-session-1')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('session-persistence-badge-session-2')).not.toBeInTheDocument();
+  });
+
+  it('keeps persistence badges hidden even when session persistence errors are present', () => {
+    act(() => {
+      useAgentSessionStore.getState().reportPersistenceIssue({
+        sessionId: 'session-1',
+        stage: 'run_finalize',
+        error: new Error('failed to finalize run'),
+        occurredAt: 200,
+      });
+    });
+
     render(<SessionList />);
 
     expect(screen.getByTestId('session-agent-badge-session-1')).toHaveTextContent('Editor');

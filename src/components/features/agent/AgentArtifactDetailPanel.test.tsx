@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import type { ConversationMessage } from '@/agents/engine/core/conversation';
 import { AgentArtifactDetailPanel } from './AgentArtifactDetailPanel';
@@ -38,10 +38,12 @@ describe('AgentArtifactDetailPanel', () => {
       />,
     );
 
-    expect(screen.getByTestId('agent-artifact-detail-panel')).toBeInTheDocument();
-    expect(screen.getByText('Action Details')).toBeInTheDocument();
-    expect(screen.getByText('Completed')).toBeInTheDocument();
-    expect(screen.getByText('Medium impact')).toBeInTheDocument();
+    const panel = screen.getByTestId('agent-artifact-detail-panel');
+
+    expect(panel).toBeInTheDocument();
+    expect(within(panel).getByText('Action Details')).toBeInTheDocument();
+    expect(within(panel).getByText('Completed')).toBeInTheDocument();
+    expect(within(panel).getByText('Medium impact')).toBeInTheDocument();
     expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
     expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();
   });
@@ -64,8 +66,12 @@ describe('AgentArtifactDetailPanel', () => {
 
     render(<AgentArtifactDetailPanel messages={messages} focus={{ kind: 'summary' }} />);
 
-    expect(screen.getByText('Earlier Context Summary')).toBeInTheDocument();
-    expect(screen.getByText('Created automatically')).toBeInTheDocument();
-    expect(screen.getByText('Summarized the earlier editing discussion.')).toBeInTheDocument();
+    const panel = screen.getByTestId('agent-artifact-detail-panel');
+
+    expect(within(panel).getByText('Earlier Context Summary')).toBeInTheDocument();
+    expect(within(panel).getByText('Created automatically')).toBeInTheDocument();
+    expect(
+      within(panel).getByText('Summarized the earlier editing discussion.'),
+    ).toBeInTheDocument();
   });
 });

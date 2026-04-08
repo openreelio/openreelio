@@ -86,7 +86,7 @@ describe('AgentArtifactReviewPanel', () => {
     render(<AgentArtifactReviewPanel />);
 
     expect(screen.getByTestId('agent-artifact-review-panel')).toBeInTheDocument();
-    expect(screen.getByText('Patch Review')).toBeInTheDocument();
+    expect(screen.getByText('File Changes')).toBeInTheDocument();
     expect(screen.getByTestId('agent-artifact-detail-panel')).toHaveTextContent('src/foo.ts');
   });
 
@@ -97,7 +97,7 @@ describe('AgentArtifactReviewPanel', () => {
 
     await user.click(screen.getByTestId('review-file-src/foo.ts'));
 
-    expect(screen.getByText('Patch Review')).toBeInTheDocument();
+    expect(screen.getByText('File Changes')).toBeInTheDocument();
     expect(useAgentArtifactReviewStore.getState().selection.focus).toEqual({
       kind: 'file',
       value: 'src/foo.ts',
@@ -156,7 +156,7 @@ describe('AgentArtifactReviewPanel', () => {
     render(<AgentArtifactReviewPanel />);
 
     expect(screen.getByTestId('review-source-session-child')).toHaveTextContent('Planner Session');
-    expect(screen.getByText('Tool Review')).toBeInTheDocument();
+    expect(screen.getByText('Action Details')).toBeInTheDocument();
     expect(screen.getByTestId('agent-artifact-detail-panel')).toHaveTextContent('query_timeline');
     expect(screen.getByTestId('review-source-session-1')).toBeInTheDocument();
     expect(screen.getByTestId('review-source-session-child')).toBeInTheDocument();

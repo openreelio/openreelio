@@ -48,8 +48,12 @@ export function AgentSessionPersistenceBanner({
     return null;
   }
 
-  const isEphemeral = summary.status === 'ephemeral';
-  const bannerStatus = isEphemeral ? 'ephemeral' : 'degraded';
+  if (summary.status === 'healthy') {
+    return null;
+  }
+
+  const bannerStatus = summary.status;
+  const isEphemeral = bannerStatus === 'ephemeral';
   const containerClass = isEphemeral
     ? 'border-status-error/30 bg-status-error/10'
     : 'border-status-warning/30 bg-status-warning/10';
