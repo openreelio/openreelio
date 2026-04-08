@@ -9,9 +9,6 @@ import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { AgenticChat } from './AgenticChat';
 import type { AgentRuntimeChatHandle } from './AgentRuntimeChatShell';
-import { AgentSessionRecoveryPanel } from './AgentSessionRecoveryPanel';
-import { AgentSessionResumeHistoryPanel } from './AgentSessionResumeHistoryPanel';
-import { AgentSessionRecoveryStatus } from './AgentSessionRecoveryStatus';
 import { SessionList } from './SessionList';
 import { AgentDelegationStrip } from './AgentDelegationStrip';
 import { DEFAULT_AGENT_PROFILE_ID, type AgentRunResult } from '@/agents/engine';
@@ -727,12 +724,7 @@ export function AgenticSidebarContent({
               </span>
             )}
           </div>
-          <div className="ml-auto">
-            <AgentSessionRecoveryStatus />
-          </div>
         </div>
-        <AgentSessionRecoveryPanel />
-        <AgentSessionResumeHistoryPanel />
         <AgentDelegationStrip
           delegatedFrom={delegatedFromContext}
           delegatedChildren={delegatedChildItems}

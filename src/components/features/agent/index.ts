@@ -19,10 +19,6 @@ export { ChatInputArea, type ChatInputAreaProps } from './ChatInputArea';
 
 // Integration components (Phase 8)
 export { AgenticSidebarContent, type AgenticSidebarContentProps } from './AgenticSidebarContent';
-export {
-  AgentSessionResumeHistoryPanel,
-  type AgentSessionResumeHistoryPanelProps,
-} from './AgentSessionResumeHistoryPanel';
 
 // Enhanced prompt input (Phase 4 - Rich Chat UI)
 export { PromptInput, type PromptInputProps } from './PromptInput';

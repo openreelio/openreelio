@@ -24,18 +24,6 @@ vi.mock('./AgenticChat', () => ({
   }),
 }));
 
-vi.mock('./AgentSessionRecoveryPanel', () => ({
-  AgentSessionRecoveryPanel: vi.fn(() => <div data-testid="recovery-panel" />),
-}));
-
-vi.mock('./AgentSessionResumeHistoryPanel', () => ({
-  AgentSessionResumeHistoryPanel: vi.fn(() => <div data-testid="resume-history-panel" />),
-}));
-
-vi.mock('./AgentSessionRecoveryStatus', () => ({
-  AgentSessionRecoveryStatus: vi.fn(() => <div data-testid="recovery-status" />),
-}));
-
 vi.mock('./SessionList', () => ({
   SessionList: vi.fn((props) => {
     latestSessionListProps = props as Record<string, unknown>;
@@ -288,6 +276,14 @@ describe('AgenticSidebarContent', () => {
       screen.getByText('Enable `USE_AGENTIC_ENGINE` to restore the canonical TPAO runtime.'),
     ).toBeInTheDocument();
     expect(screen.queryByTestId('agentic-chat')).not.toBeInTheDocument();
+  });
+
+  it('keeps internal recovery diagnostics out of the main user sidebar surface', () => {
+    render(<AgenticSidebarContent />);
+
+    expect(screen.queryByText('Recovery History')).not.toBeInTheDocument();
+    expect(screen.queryByText('Session Recovery')).not.toBeInTheDocument();
+    expect(screen.queryByText('Restart safety')).not.toBeInTheDocument();
   });
 
   it('reacts to backend tool flag changes without remounting the sidebar', async () => {

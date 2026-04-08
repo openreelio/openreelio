@@ -9,10 +9,6 @@ import { useCallback, useEffect } from 'react';
 import { Plus, Trash2, Archive, MessageSquare } from 'lucide-react';
 import { getAgentDisplayName } from '@/agents/engine/core/agentCatalog';
 import type { DelegationRecord } from '@/agents/engine/core/agentSession';
-import {
-  summarizeAgentSessionPersistenceView,
-  useAgentSessionStore,
-} from '@/stores/agentSessionStore';
 import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
 import { useConversationStore } from '@/stores/conversationStore';
 
@@ -100,10 +96,6 @@ function summarizeDelegationView(
 export function SessionList({ onNewSession, onSwitchSession, className = '' }: SessionListProps) {
   const sessions = useConversationStore((s) => s.sessions);
   const activeSessionId = useConversationStore((s) => s.activeSessionId);
-  const persistenceIssuesBySessionId = useAgentSessionStore((s) => s.persistenceIssuesBySessionId);
-  const persistenceLatchesBySessionId = useAgentSessionStore(
-    (s) => s.persistenceLatchesBySessionId,
-  );
   const switchSession = useConversationStore((s) => s.switchSession);
   const deleteSession = useConversationStore((s) => s.deleteSession);
   const archiveSession = useConversationStore((s) => s.archiveSession);
@@ -184,14 +176,6 @@ export function SessionList({ onNewSession, onSwitchSession, className = '' }: S
               delegationRecordsBySessionId[session.id] ?? [],
               session.id,
             );
-            const persistence = summarizeAgentSessionPersistenceView(
-              persistenceIssuesBySessionId[session.id],
-              persistenceLatchesBySessionId[session.id],
-            );
-            const badgeClass =
-              persistence.status === 'ephemeral'
-                ? 'border-status-error/30 bg-status-error/10 text-status-error'
-                : 'border-status-warning/30 bg-status-warning/10 text-status-warning';
             return (
               <div
                 key={session.id}
@@ -227,15 +211,6 @@ export function SessionList({ onNewSession, onSwitchSession, className = '' }: S
                       >
                         {getAgentDisplayName(session.agent)}
                       </span>
-                      {persistence.status !== 'healthy' && (
-                        <span
-                          data-testid={`session-persistence-badge-${session.id}`}
-                          title={persistence.description}
-                          className={`rounded-full border px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-[0.08em] ${badgeClass}`}
-                        >
-                          {persistence.label}
-                        </span>
-                      )}
                     </div>
                     {session.lastMessagePreview && (
                       <p className="text-[10px] text-text-tertiary truncate mt-0.5">
