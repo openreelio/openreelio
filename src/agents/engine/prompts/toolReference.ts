@@ -153,7 +153,17 @@ function getSectionsForRole(role: ToolReferenceRole): string[] {
         CLI_REFERENCE,
       ];
     case 'planner':
-      return [QUERY_ACTIONS, WORKSPACE_TOOLS, EDITING_CONCEPTS, COMMON_WORKFLOWS, CLI_REFERENCE];
+      return [
+        QUERY_ACTIONS,
+        EDIT_ACTIONS,
+        AUDIO_ACTIONS,
+        EFFECTS_ACTIONS,
+        TEXT_ACTIONS,
+        WORKSPACE_TOOLS,
+        EDITING_CONCEPTS,
+        COMMON_WORKFLOWS,
+        CLI_REFERENCE,
+      ];
     case 'analyst':
       return [QUERY_ACTIONS, WORKSPACE_TOOLS, CLI_REFERENCE];
     case 'colorist':

@@ -186,6 +186,20 @@ describe('ToolRegistryAdapter', () => {
       expect(result.duration).toBeGreaterThanOrEqual(0);
     });
 
+    it('accepts normalized tool-name aliases during execution', async () => {
+      const result = await adapter.execute(
+        'splitClip',
+        { clipId: 'clip-1', atTimelineSec: 5 },
+        executionContext,
+      );
+
+      expect(result.success).toBe(true);
+      expect(splitClipTool.handler).toHaveBeenCalledWith(
+        { clipId: 'clip-1', atTimelineSec: 5 },
+        expect.any(Object),
+      );
+    });
+
     it('should fail fast when expected state version is stale', async () => {
       useProjectStore.setState({
         isLoaded: true,
