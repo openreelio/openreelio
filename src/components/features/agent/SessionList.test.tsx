@@ -1,6 +1,6 @@
 import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useConversationStore, type SessionSummary } from '@/stores/conversationStore';
 import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
@@ -62,13 +62,7 @@ describe('SessionList', () => {
     });
   });
 
-  afterEach(() => {
-    act(() => {
-      useAgentSessionStore.getState().clear();
-    });
-  });
-
-  it('does not show persistence badges for healthy sessions', () => {
+  it('shows only session identity badges in the list', () => {
     render(<SessionList />);
 
     expect(screen.getByTestId('session-agent-badge-session-1')).toHaveTextContent('Editor');
@@ -77,7 +71,7 @@ describe('SessionList', () => {
     expect(screen.queryByTestId('session-persistence-badge-session-2')).not.toBeInTheDocument();
   });
 
-  it('shows degraded and ephemeral persistence badges per session', () => {
+  it('keeps persistence badges hidden even when session persistence errors are present', () => {
     act(() => {
       useAgentSessionStore.getState().reportPersistenceIssue({
         sessionId: 'session-1',
@@ -85,44 +79,14 @@ describe('SessionList', () => {
         error: new Error('failed to finalize run'),
         occurredAt: 200,
       });
-      useAgentSessionStore.getState().reportPersistenceIssue({
-        sessionId: 'session-2',
-        stage: 'run_start',
-        error: new Error('failed to create persisted run'),
-        occurredAt: 300,
-      });
     });
 
     render(<SessionList />);
 
-    expect(screen.getByTestId('session-persistence-badge-session-1')).toHaveTextContent('Degraded');
-    expect(screen.getByTestId('session-persistence-badge-session-2')).toHaveTextContent(
-      'Ephemeral',
-    );
-    expect(screen.getByTestId('session-persistence-badge-session-2')).toHaveAttribute(
-      'title',
-      expect.stringMatching(/restart survivability is not guaranteed/i),
-    );
-  });
-
-  it('keeps session badges visible when persistence recovered but the session is latched', () => {
-    act(() => {
-      useAgentSessionStore.getState().reportPersistenceIssue({
-        sessionId: 'session-1',
-        stage: 'run_finalize',
-        error: new Error('failed to finalize run'),
-        occurredAt: 200,
-      });
-      useAgentSessionStore.getState().clearPersistenceIssue('session-1', 'run_finalize');
-    });
-
-    render(<SessionList />);
-
-    expect(screen.getByTestId('session-persistence-badge-session-1')).toHaveTextContent('Degraded');
-    expect(screen.getByTestId('session-persistence-badge-session-1')).toHaveAttribute(
-      'title',
-      expect.stringMatching(/persistence recovered for the active run/i),
-    );
+    expect(screen.getByTestId('session-agent-badge-session-1')).toHaveTextContent('Editor');
+    expect(screen.getByTestId('session-agent-badge-session-2')).toHaveTextContent('Planner');
+    expect(screen.queryByTestId('session-persistence-badge-session-1')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('session-persistence-badge-session-2')).not.toBeInTheDocument();
   });
 
   it('shows the resolved experimental agent label when the session uses a specialist profile', () => {

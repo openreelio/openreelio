@@ -26,6 +26,7 @@ import { getAudioToolNames } from './audioTools';
 import { getEffectToolNames } from './effectTools';
 import { getTransitionToolNames } from './transitionTools';
 import { getCaptionToolNames } from './captionTools';
+import { canonicalizeToolNameCandidate } from '../toolNameNormalization';
 
 const logger = createLogger('MetaTools');
 
@@ -42,7 +43,9 @@ async function dispatchToTool(
   args: Record<string, unknown>,
   validActions: readonly string[],
 ) {
-  const action = args.action as string | undefined;
+  const rawAction = args.action as string | undefined;
+  const action =
+    typeof rawAction === 'string' ? resolveMetaToolAction(rawAction, validActions) : null;
   if (!action) {
     return {
       success: false,
@@ -124,6 +127,15 @@ function normalizeMetaToolArgs(
   return normalized;
 }
 
+function resolveMetaToolAction(action: string, validActions: readonly string[]): string | null {
+  if (validActions.includes(action)) {
+    return action;
+  }
+
+  const canonical = canonicalizeToolNameCandidate(action);
+  return validActions.includes(canonical) ? canonical : null;
+}
+
 export function normalizeMetaToolArgsForValidation(
   metaToolName: string,
   action: string,
@@ -160,7 +172,7 @@ const META_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   {
     name: 'query',
-    description: `Query timeline, assets, clips, tracks, and media analysis. Actions: ${QUERY_ACTIONS.join(', ')}`,
+    description: `Inspect the timeline, clips, tracks, workspace files, and source analysis. Use this for looking up context, finding assets, checking gaps, searching footage, or reading analysis results. Actions: ${QUERY_ACTIONS.join(', ')}`,
     category: 'analysis',
     parameters: {
       type: 'object',
@@ -248,7 +260,7 @@ const META_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   {
     name: 'edit',
-    description: `Perform timeline editing operations. Actions: ${EDIT_ACTIONS.join(', ')}`,
+    description: `Change the edit: insert, move, trim, split, delete, ripple, roll, slip, slide, manage tracks, or place markers. Use when the user wants timeline changes. Actions: ${EDIT_ACTIONS.join(', ')}`,
     category: 'timeline',
     parameters: {
       type: 'object',
@@ -316,7 +328,7 @@ const META_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   {
     name: 'audio',
-    description: `Audio operations: volume, fades, mute, normalize. Actions: ${AUDIO_ACTIONS.join(', ')}`,
+    description: `Adjust sound: volume, fades, mute states, and normalization. Use when the user wants audio cleanup or mix changes. Actions: ${AUDIO_ACTIONS.join(', ')}`,
     category: 'audio',
     parameters: {
       type: 'object',
@@ -348,7 +360,7 @@ const META_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   {
     name: 'effects',
-    description: `Manage effects and transitions. Actions: ${EFFECTS_ACTIONS.join(', ')}`,
+    description: `Apply or adjust visual effects and transitions. Use for blur, style tweaks, and clip-to-clip transitions. Actions: ${EFFECTS_ACTIONS.join(', ')}`,
     category: 'effect',
     parameters: {
       type: 'object',
@@ -384,7 +396,7 @@ const META_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   {
     name: 'text',
-    description: `Caption and text operations. Actions: ${TEXT_ACTIONS.join(', ')}. Note: auto_transcribe requires the whisper feature; if unavailable, use the query meta-tool with analyze_asset action and analysisTypes ["transcript"] or ["textOcr"] instead.`,
+    description: `Create and edit on-screen text, captions, and subtitles. Use when the user asks for subtitles, captions, or text styling. Actions: ${TEXT_ACTIONS.join(', ')}. Note: auto_transcribe requires the whisper feature; if unavailable, use the query meta-tool with analyze_asset action and analysisTypes ["transcript"] or ["textOcr"] instead.`,
     category: 'clip',
     parameters: {
       type: 'object',

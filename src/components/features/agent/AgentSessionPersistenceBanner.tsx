@@ -2,17 +2,31 @@ import { useConversationStore } from '@/stores/conversationStore';
 import {
   summarizeAgentSessionPersistenceView,
   useAgentSessionStore,
-  type AgentSessionPersistenceStage,
 } from '@/stores/agentSessionStore';
 
-const STAGE_COPY: Record<AgentSessionPersistenceStage, string> = {
-  session_ensure: 'The persisted agent session could not be prepared.',
-  permission_replay: 'Saved permission decisions could not be restored.',
-  run_start: 'Run history could not be persisted at start.',
-  run_finalize: 'Run completion could not be persisted.',
-  compaction_record: 'Compaction history could not be persisted.',
-  resume_checkpoint: 'Recovery checkpoint history could not be persisted.',
-};
+function buildHeadline(status: 'degraded' | 'ephemeral', isLatched: boolean): string {
+  if (status === 'ephemeral') {
+    return isLatched
+      ? 'Earlier recovery protection was limited in this app session'
+      : 'Saved recovery protection is limited right now';
+  }
+
+  return isLatched
+    ? 'Earlier recovery details were partially unavailable'
+    : 'Some saved recovery details are temporarily unavailable';
+}
+
+function buildBody(status: 'degraded' | 'ephemeral', isLatched: boolean): string {
+  if (status === 'ephemeral') {
+    return isLatched
+      ? 'Current work can continue, but some interrupted work from earlier in this app session may not be restorable after a reload.'
+      : 'Current work can continue, but if the app closes unexpectedly, this turn may not be restorable.';
+  }
+
+  return isLatched
+    ? 'Current work can continue, but older recovery details from earlier in this app session may be incomplete.'
+    : 'Current work can continue, but resuming an interrupted task may be limited until recovery catches up.';
+}
 
 export interface AgentSessionPersistenceBannerProps {
   className?: string;
@@ -34,18 +48,18 @@ export function AgentSessionPersistenceBanner({
     return null;
   }
 
-  const isEphemeral = summary.status === 'ephemeral';
+  if (summary.status === 'healthy') {
+    return null;
+  }
+
+  const bannerStatus = summary.status;
+  const isEphemeral = bannerStatus === 'ephemeral';
   const containerClass = isEphemeral
     ? 'border-status-error/30 bg-status-error/10'
     : 'border-status-warning/30 bg-status-warning/10';
   const titleClass = isEphemeral ? 'text-status-error' : 'text-status-warning';
-  const headline = summary.hasActiveIssues
-    ? isEphemeral
-      ? 'Agent session persistence is ephemeral'
-      : 'Agent session persistence is degraded'
-    : isEphemeral
-      ? 'Agent session persistence was ephemeral earlier in this app session'
-      : 'Agent session persistence was degraded earlier in this app session';
+  const headline = buildHeadline(bannerStatus, summary.isLatched);
+  const body = buildBody(bannerStatus, summary.isLatched);
 
   return (
     <div
@@ -54,15 +68,7 @@ export function AgentSessionPersistenceBanner({
       className={`border-b px-4 py-3 ${containerClass} ${className}`}
     >
       <p className={`text-sm font-medium ${titleClass}`}>{headline}</p>
-      <p className="mt-1 text-xs text-text-secondary">{summary.description}</p>
-      <div className="mt-2 space-y-2">
-        {summary.visibleIssues.map((issue) => (
-          <div key={`${issue.sessionId}-${issue.stage}`} className="text-xs">
-            <p className="text-text-secondary">{STAGE_COPY[issue.stage]}</p>
-            <p className="mt-0.5 text-text-tertiary">{issue.message}</p>
-          </div>
-        ))}
-      </div>
+      <p className="mt-1 text-xs text-text-secondary">{body}</p>
     </div>
   );
 }

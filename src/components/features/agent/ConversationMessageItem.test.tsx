@@ -229,8 +229,8 @@ describe('ConversationMessageItem', () => {
       render(<ConversationMessageItem message={message} />);
 
       expect(screen.getByTestId('assistant-artifact-group')).toBeInTheDocument();
-      expect(screen.getByText('Execution Details')).toBeInTheDocument();
-      expect(screen.getByText('1 tool')).toBeInTheDocument();
+      expect(screen.getByText('Work Details')).toBeInTheDocument();
+      expect(screen.getByText('1 action')).toBeInTheDocument();
       expect(screen.queryByTestId('tool-call-part')).not.toBeInTheDocument();
 
       await user.click(screen.getByTestId('assistant-artifact-toggle'));

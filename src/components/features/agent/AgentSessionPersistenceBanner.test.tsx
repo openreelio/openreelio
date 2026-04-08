@@ -50,14 +50,14 @@ describe('AgentSessionPersistenceBanner', () => {
     render(<AgentSessionPersistenceBanner />);
 
     expect(screen.getByTestId('agent-session-persistence-banner')).toBeInTheDocument();
-    expect(screen.getByText('Agent session persistence is degraded')).toBeInTheDocument();
-    expect(screen.getByText('Run completion could not be persisted.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Some saved recovery details are temporarily unavailable'),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(
-        /recovery context, approval history, or audit trail may be incomplete until persistence recovers/i,
+        /current work can continue, but resuming an interrupted task may be limited until recovery catches up/i,
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText('failed to persist final run phase')).toBeInTheDocument();
   });
 
   it('should render multiple unresolved persistence issues for the active session', () => {
@@ -78,10 +78,14 @@ describe('AgentSessionPersistenceBanner', () => {
 
     render(<AgentSessionPersistenceBanner />);
 
-    expect(screen.getByText('Saved permission decisions could not be restored.')).toBeInTheDocument();
-    expect(screen.getByText('Run completion could not be persisted.')).toBeInTheDocument();
-    expect(screen.getByText('failed to replay permissions')).toBeInTheDocument();
-    expect(screen.getByText('failed to finalize run')).toBeInTheDocument();
+    expect(
+      screen.getByText('Some saved recovery details are temporarily unavailable'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Current work can continue, but resuming an interrupted task may be limited until recovery catches up.',
+      ),
+    ).toBeInTheDocument();
   });
 
   it('should escalate to ephemeral copy when restart survivability is not guaranteed', () => {
@@ -96,11 +100,12 @@ describe('AgentSessionPersistenceBanner', () => {
 
     render(<AgentSessionPersistenceBanner />);
 
-    expect(screen.getByText('Agent session persistence is ephemeral')).toBeInTheDocument();
+    expect(screen.getByText('Saved recovery protection is limited right now')).toBeInTheDocument();
     expect(
-      screen.getByText(/restart survivability is not guaranteed/i),
+      screen.getByText(
+        'Current work can continue, but if the app closes unexpectedly, this turn may not be restorable.',
+      ),
     ).toBeInTheDocument();
-    expect(screen.getByText('failed to create persisted run')).toBeInTheDocument();
   });
 
   it('should keep showing a latched warning after the active issue is cleared', () => {
@@ -117,11 +122,12 @@ describe('AgentSessionPersistenceBanner', () => {
     render(<AgentSessionPersistenceBanner />);
 
     expect(
-      screen.getByText('Agent session persistence was ephemeral earlier in this app session'),
+      screen.getByText('Earlier recovery protection was limited in this app session'),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/persistence recovered for the active run, but this session crossed a non-durable boundary earlier in this app session/i),
+      screen.getByText(
+        'Current work can continue, but some interrupted work from earlier in this app session may not be restorable after a reload.',
+      ),
     ).toBeInTheDocument();
-    expect(screen.getByText('failed to create persisted run')).toBeInTheDocument();
   });
 });

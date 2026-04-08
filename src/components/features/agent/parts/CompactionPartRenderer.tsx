@@ -26,14 +26,10 @@ export function CompactionPartRenderer({ part, className = '' }: CompactionPartR
         className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-blue-500/10 transition-colors"
         aria-expanded={isExpanded}
       >
-        <span className="text-xs text-blue-400">
-          {isExpanded ? '\u25BC' : '\u25B6'}
-        </span>
-        <span className="text-xs font-medium text-blue-400">
-          Context summarized
-        </span>
+        <span className="text-xs text-blue-400">{isExpanded ? '\u25BC' : '\u25B6'}</span>
+        <span className="text-xs font-medium text-blue-400">Earlier context saved</span>
         <span className="text-xs text-blue-400/60">
-          {part.auto ? '(auto)' : '(manual)'}
+          {part.auto ? 'created automatically' : 'saved manually'}
         </span>
       </button>
 

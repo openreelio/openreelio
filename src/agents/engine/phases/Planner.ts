@@ -18,6 +18,7 @@ import type { IToolExecutor } from '../ports/IToolExecutor';
 import type { AgentContext, Thought, Plan, PlanStep, RiskLevel } from '../core/types';
 import { PlanningTimeoutError, PlanValidationError } from '../core/errors';
 import { createLogger } from '@/services/logger';
+import { canonicalizeToolNameCandidate } from '@/agents/toolNameNormalization';
 import { assembleSystemPrompt } from '../prompts/system';
 import type { AgentRole } from '../prompts/agentRoles';
 import {
@@ -158,11 +159,12 @@ export class Planner {
 
     const schema = this.buildPlanSchema();
     const maxAttempts = this.config.maxRetries + 1;
+    let repairFeedback: string[] = [];
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const promptMode: PromptDetailLevel = attempt === 0 ? 'full' : 'compact';
       const timeoutMs = this.resolveTimeoutForAttempt(attempt);
-      const messages = this.buildMessages(thought, context, history, promptMode);
+      const messages = this.buildMessages(thought, context, history, promptMode, repairFeedback);
 
       this.abortController = new AbortController();
 
@@ -196,6 +198,20 @@ export class Planner {
         const aborted = this.abortController?.signal.aborted ?? false;
 
         if (error instanceof PlanValidationError) {
+          const shouldRetryValidation = !aborted && attempt < maxAttempts - 1;
+          if (shouldRetryValidation) {
+            repairFeedback = error.validationErrors;
+            const backoffMs = this.config.retryBackoffMs * (attempt + 1);
+            logger.warn('Planning validation failed; retrying with repair feedback', {
+              attempt: attempt + 1,
+              maxAttempts,
+              backoffMs,
+              validationErrors: error.validationErrors,
+            });
+            await this.delay(backoffMs);
+            continue;
+          }
+
           throw error;
         }
 
@@ -320,6 +336,7 @@ export class Planner {
     context: AgentContext,
     history?: LLMMessage[],
     promptDetailLevel: PromptDetailLevel = 'full',
+    repairFeedback: string[] = [],
   ): LLMMessage[] {
     const systemPrompt = this.buildSystemPrompt(context, promptDetailLevel);
     const userPrompt = this.buildUserPrompt(thought);
@@ -332,6 +349,12 @@ export class Planner {
     }
 
     messages.push({ role: 'user', content: userPrompt });
+    if (repairFeedback.length > 0) {
+      messages.push({
+        role: 'user',
+        content: this.buildRepairPrompt(repairFeedback),
+      });
+    }
     return messages;
   }
 
@@ -463,6 +486,9 @@ export class Planner {
     parts.push(
       '12. Tool output contracts: insert_clip exposes data.clipId; split_clip exposes data.newClipId for the newly created right-hand segment. For repeated segmentation, first reference data.clipId from insert_clip, then chain later split_clip steps through data.newClipId.',
     );
+    parts.push(
+      '13. Match near-synonyms to the exact available tool or action name. Example: splitClip -> split_clip, add_subtitle -> add_caption, remove_clip -> delete_clip.',
+    );
     parts.push('');
     parts.push(...ORCHESTRATION_PLAYBOOK_LINES);
 
@@ -492,6 +518,20 @@ export class Planner {
     }
 
     return parts.join('\n');
+  }
+
+  private buildRepairPrompt(validationErrors: string[]): string {
+    const visibleErrors = validationErrors.slice(0, 12);
+
+    return [
+      'Revise the previous plan and return a corrected JSON plan only.',
+      'Fix every validation error below without adding commentary.',
+      'Use canonical tool names and canonical argument names from the tool list.',
+      'If a step used a near-match tool name, replace it with the exact available tool/action.',
+      '',
+      'Validation errors:',
+      ...visibleErrors.map((error) => `- ${error}`),
+    ].join('\n');
   }
 
   private prepareHistory(
@@ -801,19 +841,26 @@ export class Planner {
     if (typeof s.tool !== 'string' || s.tool === '') {
       errors.push(`Step ${index}: missing or invalid tool`);
     } else {
+      const rawArgs = (s.args ?? {}) as Record<string, unknown>;
+      const canonicalToolName = this.resolveCanonicalToolName(s.tool, rawArgs);
+      if (canonicalToolName) {
+        s.tool = canonicalToolName;
+      }
+      const toolName = typeof s.tool === 'string' ? s.tool : '';
+
       // Validate tool exists
-      if (!this.toolExecutor.hasTool(s.tool)) {
-        errors.push(`Step ${index}: unknown tool '${s.tool}'`);
+      if (!this.toolExecutor.hasTool(toolName)) {
+        errors.push(`Step ${index}: unknown tool '${toolName}'`);
       } else {
         // Canonicalize plan args (strip legacy aliases) and validate
         const args = (s.args ?? {}) as Record<string, unknown>;
-        const canonicalArgs = normalizeLegacyAgentArgs(s.tool, args);
+        const canonicalArgs = normalizeLegacyAgentArgs(toolName, args);
         s.args = canonicalArgs;
-        const argsForValidation = this.normalizeArgsForValidation(s.tool, canonicalArgs);
-        const validation = this.toolExecutor.validateArgs(s.tool, argsForValidation);
+        const argsForValidation = this.normalizeArgsForValidation(toolName, canonicalArgs);
+        const validation = this.toolExecutor.validateArgs(toolName, argsForValidation);
         if (!validation.valid) {
           errors.push(
-            `Step ${index}: invalid arguments for '${s.tool}': ${validation.errors.join(', ')}`,
+            `Step ${index}: invalid arguments for '${toolName}': ${validation.errors.join(', ')}`,
           );
         }
       }
@@ -916,6 +963,26 @@ export class Planner {
     }
 
     return normalized as Record<string, unknown>;
+  }
+
+  private resolveCanonicalToolName(toolName: string, args: Record<string, unknown>): string | null {
+    const action =
+      typeof args.action === 'string' ? canonicalizeToolNameCandidate(args.action) : null;
+
+    if (action && action !== args.action) {
+      args.action = action;
+    }
+
+    if (this.toolExecutor.hasTool(toolName)) {
+      return this.toolExecutor.getToolDefinition(toolName)?.name ?? toolName;
+    }
+
+    const canonicalToolName = canonicalizeToolNameCandidate(toolName);
+    if (canonicalToolName && this.toolExecutor.hasTool(canonicalToolName)) {
+      return this.toolExecutor.getToolDefinition(canonicalToolName)?.name ?? canonicalToolName;
+    }
+
+    return null;
   }
 
   private validateStepReferences(steps: PlanStep[]): string[] {

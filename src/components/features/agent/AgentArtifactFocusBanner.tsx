@@ -8,14 +8,14 @@ interface AgentArtifactFocusBannerProps {
 
 function getLabel(focus: AgentArtifactFocus): string {
   if (focus.kind === 'tool') {
-    return `Focused tool output: ${focus.value}`;
+    return `Showing action details: ${focus.value}`;
   }
 
   if (focus.kind === 'file') {
-    return `Focused file output: ${focus.value}`;
+    return `Showing file changes: ${focus.value}`;
   }
 
-  return 'Focused summary output';
+  return 'Showing earlier context';
 }
 
 export function AgentArtifactFocusBanner({
@@ -31,7 +31,7 @@ export function AgentArtifactFocusBanner({
       <div>
         <p className="text-xs font-medium text-primary-300">{getLabel(focus)}</p>
         <p className="mt-0.5 text-[11px] text-text-tertiary">
-          Jumped to the latest matching execution details in this session.
+          Jumped to the latest matching work details in this session.
         </p>
       </div>
       <button

@@ -4,7 +4,7 @@
  * Tests for the Plan phase of the agentic loop.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { Planner, createPlanner } from './Planner';
 import { createMockLLMAdapter, type MockLLMAdapter } from '../adapters/llm/MockLLMAdapter';
 import { createMockToolExecutor, type MockToolExecutor } from '../adapters/tools/MockToolExecutor';
@@ -142,6 +142,131 @@ describe('Planner', () => {
       expect(result.goal).toBe('Split the clip at 5 seconds');
       expect(result.steps).toHaveLength(1);
       expect(result.steps[0].tool).toBe('split_clip');
+    });
+
+    it('canonicalizes normalized tool names before validation', async () => {
+      const mockPlan: Plan = {
+        goal: 'Split the clip at 5 seconds',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'splitClip',
+            args: { clipId: 'clip-1', position: 5 },
+            description: 'Split clip-1 at position 5',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+        ],
+        estimatedTotalDuration: 100,
+        requiresApproval: false,
+        rollbackStrategy: 'Use undo to reverse split',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      const result = await planner.plan(sampleThought, context);
+
+      expect(result.steps[0].tool).toBe('split_clip');
+    });
+
+    it('canonicalizes safe semantic tool aliases before validation', async () => {
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'add_caption',
+          description: 'Add a caption',
+          category: 'editing',
+          riskLevel: 'low',
+          supportsUndo: true,
+          parallelizable: false,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            text: { type: 'string' },
+            startTime: { type: 'number' },
+            endTime: { type: 'number' },
+          },
+        },
+        required: ['text', 'startTime', 'endTime'],
+      });
+
+      const mockPlan: Plan = {
+        goal: 'Add a subtitle',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'add_subtitle',
+            args: { text: 'Hello', startTime: 0, endTime: 3 },
+            description: 'Add subtitle text',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+        ],
+        estimatedTotalDuration: 100,
+        requiresApproval: false,
+        rollbackStrategy: 'Delete the caption',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      const result = await planner.plan(sampleThought, context);
+
+      expect(result.steps[0].tool).toBe('add_caption');
+    });
+
+    it('retries once with repair feedback after validation errors', async () => {
+      const invalidPlan: Plan = {
+        goal: 'Split the clip at 5 seconds',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'splitClip',
+            args: { clipId: 'clip-1' },
+            description: 'Split clip-1 at position 5',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+        ],
+        estimatedTotalDuration: 100,
+        requiresApproval: false,
+        rollbackStrategy: 'Use undo to reverse split',
+      };
+      const repairedPlan: Plan = {
+        goal: 'Split the clip at 5 seconds',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'split_clip',
+            args: { clipId: 'clip-1', position: 5 },
+            description: 'Split clip-1 at position 5',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+        ],
+        estimatedTotalDuration: 100,
+        requiresApproval: false,
+        rollbackStrategy: 'Use undo to reverse split',
+      };
+
+      const structuredSpy = vi
+        .spyOn(mockLLM, 'generateStructured')
+        .mockResolvedValueOnce(invalidPlan)
+        .mockResolvedValueOnce(repairedPlan);
+
+      const result = await planner.plan(sampleThought, context);
+
+      expect(result.steps[0].tool).toBe('split_clip');
+      expect(structuredSpy).toHaveBeenCalledTimes(2);
+      const retryMessages = structuredSpy.mock.calls[1]?.[0] ?? [];
+      const retryUserMessages = retryMessages.filter((message) => message.role === 'user');
+      expect(retryUserMessages.some((message) => /Validation errors:/i.test(message.content))).toBe(
+        true,
+      );
+      expect(
+        retryUserMessages.some((message) =>
+          /canonical tool names and canonical argument names/i.test(message.content),
+        ),
+      ).toBe(true);
     });
 
     it('should include the shared editor tool reference in the planning prompt', async () => {

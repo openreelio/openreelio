@@ -6,6 +6,7 @@
  */
 
 import { createLogger } from '@/services/logger';
+import { canonicalizeToolNameCandidate, normalizeToolNameCandidate } from './toolNameNormalization';
 
 // =============================================================================
 // Shared Types (formerly from Agent.ts)
@@ -62,7 +63,7 @@ export type ToolCategory =
 /** Handler function for a tool */
 export type ToolHandler = (
   args: Record<string, unknown>,
-  context: AgentContext
+  context: AgentContext,
 ) => Promise<ToolExecutionResult>;
 
 /** Full tool definition with handler */
@@ -83,6 +84,8 @@ export interface ToolDefinition {
    * or annotated in descriptions. Returns true if the tool is functional.
    */
   isAvailable?: () => Promise<boolean>;
+  /** Optional compatibility aliases accepted at lookup time */
+  aliases?: string[];
 }
 
 /** Result of executing a tool */
@@ -117,6 +120,7 @@ export interface AIFunctionSchema {
  */
 export class ToolRegistry {
   private tools: Map<string, ToolDefinition> = new Map();
+  private aliases: Map<string, string> = new Map();
 
   // ===========================================================================
   // Registration
@@ -128,7 +132,27 @@ export class ToolRegistry {
    * @param tool - The tool definition to register
    */
   register(tool: ToolDefinition): void {
+    this.unregister(tool.name);
     this.tools.set(tool.name, tool);
+
+    const aliasCandidates = new Set<string>(tool.aliases ?? []);
+    const normalizedName = normalizeToolNameCandidate(tool.name);
+    const canonicalName = canonicalizeToolNameCandidate(tool.name);
+
+    if (normalizedName && normalizedName !== tool.name) {
+      aliasCandidates.add(normalizedName);
+    }
+    if (canonicalName && canonicalName !== tool.name) {
+      aliasCandidates.add(canonicalName);
+    }
+
+    for (const alias of aliasCandidates) {
+      const normalizedAlias = normalizeToolNameCandidate(alias);
+      if (normalizedAlias && normalizedAlias !== tool.name) {
+        this.aliases.set(normalizedAlias, tool.name);
+      }
+    }
+
     logger.debug('Tool registered', { name: tool.name, category: tool.category });
   }
 
@@ -149,7 +173,13 @@ export class ToolRegistry {
    * @param name - The name of the tool to unregister
    */
   unregister(name: string): void {
-    this.tools.delete(name);
+    const resolvedName = this.resolveName(name) ?? name;
+    this.tools.delete(resolvedName);
+    for (const [alias, canonicalName] of Array.from(this.aliases.entries())) {
+      if (canonicalName === resolvedName) {
+        this.aliases.delete(alias);
+      }
+    }
     logger.debug('Tool unregistered', { name });
   }
 
@@ -158,6 +188,7 @@ export class ToolRegistry {
    */
   clear(): void {
     this.tools.clear();
+    this.aliases.clear();
     logger.debug('All tools cleared');
   }
 
@@ -172,7 +203,7 @@ export class ToolRegistry {
    * @returns True if the tool exists
    */
   has(name: string): boolean {
-    return this.tools.has(name);
+    return this.resolveName(name) !== undefined;
   }
 
   /**
@@ -182,7 +213,8 @@ export class ToolRegistry {
    * @returns The tool definition, or undefined if not found
    */
   get(name: string): ToolDefinition | undefined {
-    return this.tools.get(name);
+    const resolvedName = this.resolveName(name);
+    return resolvedName ? this.tools.get(resolvedName) : undefined;
   }
 
   /**
@@ -232,9 +264,10 @@ export class ToolRegistry {
   async execute(
     name: string,
     args: Record<string, unknown>,
-    context: AgentContext = {}
+    context: AgentContext = {},
   ): Promise<ToolExecutionResult> {
-    const tool = this.tools.get(name);
+    const resolvedName = this.resolveName(name);
+    const tool = resolvedName ? this.tools.get(resolvedName) : undefined;
 
     if (!tool) {
       return {
@@ -254,11 +287,19 @@ export class ToolRegistry {
 
     try {
       const result = await tool.handler(args, context);
-      logger.debug('Tool executed', { name, success: result.success });
+      logger.debug('Tool executed', {
+        name: tool.name,
+        requestedName: name,
+        success: result.success,
+      });
       return result;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      logger.error('Tool execution failed', { name, error: errorMessage });
+      logger.error('Tool execution failed', {
+        name: tool.name,
+        requestedName: name,
+        error: errorMessage,
+      });
       return {
         success: false,
         error: errorMessage,
@@ -327,7 +368,7 @@ export class ToolRegistry {
    */
   private validateParameters(
     schema: JsonSchema,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
   ): string | undefined {
     // Check required parameters
     if (schema.required) {
@@ -360,11 +401,7 @@ export class ToolRegistry {
    * @param schema - The schema to validate against
    * @returns Error message if validation fails, undefined if valid
    */
-  private validateType(
-    name: string,
-    value: unknown,
-    schema: JsonSchema
-  ): string | undefined {
+  private validateType(name: string, value: unknown, schema: JsonSchema): string | undefined {
     const actualType = typeof value;
 
     switch (schema.type) {
@@ -405,6 +442,28 @@ export class ToolRegistry {
           return `Parameter '${name}' must be an object`;
         }
         break;
+    }
+
+    return undefined;
+  }
+
+  private resolveName(name: string): string | undefined {
+    if (this.tools.has(name)) {
+      return name;
+    }
+
+    const normalized = normalizeToolNameCandidate(name);
+    if (normalized && this.tools.has(normalized)) {
+      return normalized;
+    }
+
+    const canonicalized = canonicalizeToolNameCandidate(name);
+    if (canonicalized && this.tools.has(canonicalized)) {
+      return canonicalized;
+    }
+
+    if (normalized) {
+      return this.aliases.get(normalized);
     }
 
     return undefined;

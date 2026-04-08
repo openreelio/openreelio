@@ -67,11 +67,11 @@ export function AgentSessionArtifactSummary({
     >
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-text-tertiary">
-          Session Outputs
+          Recent Activity
         </span>
         {summary.toolRuns > 0 && (
           <span className="rounded-full border border-border-subtle bg-surface-base px-2 py-0.5 text-[11px] text-text-secondary">
-            {pluralize(summary.toolRuns, 'tool run')}
+            {pluralize(summary.toolRuns, 'action')}
           </span>
         )}
         {summary.touchedFiles > 0 && (
@@ -91,7 +91,7 @@ export function AgentSessionArtifactSummary({
             } ${onSelectArtifact ? '' : 'cursor-default'}`}
             disabled={!onSelectArtifact}
           >
-            summary available
+            earlier context
           </button>
         )}
       </div>
@@ -107,7 +107,7 @@ export function AgentSessionArtifactSummary({
 
       {summary.recentTools.length > 0 && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <span className="text-[11px] text-text-tertiary">Tools</span>
+          <span className="text-[11px] text-text-tertiary">Actions</span>
           {summary.recentTools.map((tool) =>
             renderChip(tool, { kind: 'tool', value: tool }, `artifact-tool-${tool}`),
           )}

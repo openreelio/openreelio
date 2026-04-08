@@ -35,4 +35,18 @@ describe('metaTools', () => {
     expect(invalid.valid).toBe(false);
     expect(invalid.errors.some((error) => error.includes('sequenceId'))).toBe(true);
   });
+
+  it('accepts safe action aliases when validating meta-tool calls', () => {
+    const adapter = createToolRegistryAdapter(globalToolRegistry);
+
+    const aliased = adapter.validateArgs('text', {
+      action: 'add_subtitle',
+      text: 'Hello world',
+      startTime: 0,
+      endTime: 1,
+    });
+
+    expect(aliased.valid).toBe(false);
+    expect(aliased.errors.some((error) => error.includes('sequenceId'))).toBe(true);
+  });
 });
