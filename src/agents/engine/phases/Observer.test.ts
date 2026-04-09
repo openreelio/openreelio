@@ -4,7 +4,7 @@
  * Tests for the Observe phase of the agentic loop.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { Observer, createObserver } from './Observer';
 import { createMockLLMAdapter, type MockLLMAdapter } from '../adapters/llm/MockLLMAdapter';
 import {
@@ -15,7 +15,7 @@ import {
   createEmptyContext,
 } from '../core/types';
 import type { ExecutionResult } from './Executor';
-import { ObservationTimeoutError } from '../core/errors';
+import { ObservationError, ObservationTimeoutError } from '../core/errors';
 
 describe('Observer', () => {
   let observer: Observer;
@@ -234,6 +234,40 @@ describe('Observer', () => {
       expect(hasResult).toBe(true);
     });
 
+    it('should preserve falsy execution results in analysis', async () => {
+      const falsyExecution: ExecutionResult = {
+        ...successfulExecution,
+        completedSteps: [
+          {
+            ...successfulExecution.completedSteps[0],
+            result: {
+              success: true,
+              data: 0,
+              duration: 50,
+            },
+          },
+        ],
+      };
+
+      mockLLM.setStructuredResponse({
+        structured: {
+          goalAchieved: true,
+          stateChanges: [],
+          summary: 'Done',
+          confidence: 0.9,
+          needsIteration: false,
+        } as Observation,
+      });
+
+      await observer.observe(successfulPlan, falsyExecution, context);
+
+      const request = mockLLM.getLastRequest();
+      const hasFalsyResult = request?.messages.some((message) =>
+        message.content.includes('Result: 0'),
+      );
+      expect(hasFalsyResult).toBe(true);
+    });
+
     it('should include language policy instructions in observer system prompt', async () => {
       context.languagePolicy = createLanguagePolicy('en', {
         outputLanguage: 'ja',
@@ -294,7 +328,7 @@ describe('Observer', () => {
 
   describe('error handling', () => {
     it('should throw ObservationTimeoutError on timeout', async () => {
-      const shortTimeoutObserver = createObserver(mockLLM, { timeout: 10 });
+      const shortTimeoutObserver = createObserver(mockLLM, { timeout: 10, maxRetries: 0 });
 
       mockLLM.setStructuredResponse({
         structured: {
@@ -310,6 +344,114 @@ describe('Observer', () => {
       await expect(
         shortTimeoutObserver.observe(successfulPlan, successfulExecution, context),
       ).rejects.toThrow(ObservationTimeoutError);
+    });
+
+    it('should retry observation after a timeout', async () => {
+      const retryingObserver = createObserver(mockLLM, { timeout: 10, maxRetries: 1 });
+      const structuredSpy = vi.spyOn(mockLLM, 'generateStructured');
+
+      mockLLM.setStructuredResponse({
+        structured: {
+          goalAchieved: true,
+          stateChanges: [],
+          summary: 'Done after retry',
+          confidence: 0.9,
+          needsIteration: false,
+        },
+        delay: 100,
+      });
+
+      await expect(
+        retryingObserver.observe(successfulPlan, successfulExecution, context),
+      ).resolves.toMatchObject({
+        goalAchieved: true,
+        summary: 'Done after retry',
+      });
+      expect(structuredSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('should preserve caller timeout on retry when timeout exceeds retry cap', async () => {
+      vi.useFakeTimers();
+
+      try {
+        let callCount = 0;
+
+        mockLLM.generateStructured = async <T>(): Promise<T> => {
+          callCount += 1;
+
+          if (callCount === 1) {
+            throw new Error('Failed to parse structured response');
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 95000));
+
+          return {
+            goalAchieved: true,
+            stateChanges: [],
+            summary: 'Recovered after long retry',
+            confidence: 0.9,
+            needsIteration: false,
+          } as T;
+        };
+
+        const longTimeoutObserver = createObserver(mockLLM, {
+          timeout: 120000,
+          maxRetries: 1,
+          retryBackoffMs: 0,
+        });
+
+        const promise = longTimeoutObserver.observe(successfulPlan, successfulExecution, context);
+
+        await vi.advanceTimersByTimeAsync(95000);
+
+        await expect(promise).resolves.toMatchObject({
+          goalAchieved: true,
+          summary: 'Recovered after long retry',
+        });
+        expect(callCount).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should abort without starting another retry attempt during backoff', async () => {
+      vi.useFakeTimers();
+
+      try {
+        let callCount = 0;
+
+        mockLLM.generateStructured = async <T>(): Promise<T> => {
+          callCount += 1;
+
+          if (callCount === 1) {
+            throw new Error('Network timeout while observing execution');
+          }
+
+          return {
+            goalAchieved: true,
+            stateChanges: [],
+            summary: 'Should not retry after abort',
+            confidence: 0.9,
+            needsIteration: false,
+          } as T;
+        };
+
+        const abortingObserver = createObserver(mockLLM, {
+          timeout: 100,
+          maxRetries: 1,
+          retryBackoffMs: 100,
+        });
+
+        const promise = abortingObserver.observe(successfulPlan, successfulExecution, context);
+
+        await vi.advanceTimersByTimeAsync(0);
+        abortingObserver.abort();
+
+        await expect(promise).rejects.toThrow(ObservationError);
+        expect(callCount).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should handle LLM error gracefully', async () => {

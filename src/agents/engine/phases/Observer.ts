@@ -29,6 +29,10 @@ export interface ObserverConfig {
   timeout?: number;
   /** Maximum iterations before stopping */
   maxIterations?: number;
+  /** Maximum retries on transient observation failures */
+  maxRetries?: number;
+  /** Backoff in milliseconds between retries */
+  retryBackoffMs?: number;
   /** Custom system prompt override */
   systemPromptOverride?: string;
   /** Additional project prompt sections appended to the base phase prompt */
@@ -41,9 +45,13 @@ export interface ObserverConfig {
 const DEFAULT_CONFIG: Required<ObserverConfig> = {
   timeout: 30000, // 30 seconds
   maxIterations: 5,
+  maxRetries: 1,
+  retryBackoffMs: 400,
   systemPromptOverride: '',
   projectPromptAddendum: '',
 };
+
+const MAX_RESULT_CHARS = 2000;
 
 // =============================================================================
 // Observer Class
@@ -100,37 +108,53 @@ export class Observer {
     execution: ExecutionResult,
     context: AgentContext,
   ): Promise<Observation> {
-    this.abortController = new AbortController();
-
-    const messages = this.buildMessages(plan, execution, context);
     const schema = this.buildObservationSchema();
 
-    try {
-      const observation = await this.executeWithTimeout(
-        () => this.llm.generateStructured<Observation>(messages, schema),
-        this.config.timeout,
-      );
+    const maxAttempts = this.config.maxRetries + 1;
 
-      // Validate the observation
-      this.validateObservation(observation);
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      this.abortController = new AbortController();
 
-      // Apply iteration limit
-      const finalObservation = this.applyIterationLimit(observation, context);
+      const messages = this.buildMessages(plan, execution, context);
+      const timeoutMs = this.resolveTimeoutForAttempt(attempt);
 
-      return finalObservation;
-    } catch (error) {
-      if (error instanceof ObservationTimeoutError) {
-        throw error;
+      try {
+        const observation = await this.executeWithTimeout(
+          () => this.llm.generateStructured<Observation>(messages, schema),
+          timeoutMs,
+        );
+
+        this.validateObservation(observation);
+        return this.applyIterationLimit(observation, context);
+      } catch (error) {
+        const aborted =
+          !(error instanceof ObservationTimeoutError) &&
+          (this.abortController?.signal.aborted ?? false);
+        const shouldRetry = this.shouldRetryObservation(error, aborted, attempt, maxAttempts);
+
+        if (shouldRetry) {
+          await this.delay(
+            this.config.retryBackoffMs * (attempt + 1),
+            this.abortController?.signal,
+          );
+          continue;
+        }
+
+        if (error instanceof ObservationTimeoutError) {
+          throw error;
+        }
+        if (error instanceof ObservationError) {
+          throw error;
+        }
+        throw new ObservationError(
+          `Failed to analyze execution: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      } finally {
+        this.abortController = null;
       }
-      if (error instanceof ObservationError) {
-        throw error;
-      }
-      throw new ObservationError(
-        `Failed to analyze execution: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    } finally {
-      this.abortController = null;
     }
+
+    throw new ObservationError('Failed to analyze execution');
   }
 
   /**
@@ -319,8 +343,8 @@ ${languageSection}${projectPromptAddendum}`;
       `  Retries: ${step.retryCount}`,
     ];
 
-    if (step.result.data) {
-      lines.push(`  Result: ${JSON.stringify(step.result.data)}`);
+    if (step.result.data !== undefined) {
+      lines.push(`  Result: ${this.serializeResultData(step.result.data)}`);
     }
 
     if (step.result.error) {
@@ -449,6 +473,90 @@ ${languageSection}${projectPromptAddendum}`;
     return observation;
   }
 
+  private serializeResultData(data: unknown): string {
+    try {
+      const serialized = JSON.stringify(data);
+
+      if (serialized.length <= MAX_RESULT_CHARS) {
+        return serialized;
+      }
+
+      const head = serialized.slice(0, Math.floor(MAX_RESULT_CHARS * 0.75));
+      const tail = serialized.slice(-Math.floor(MAX_RESULT_CHARS * 0.15));
+      return `${head}...[truncated ${serialized.length - MAX_RESULT_CHARS} chars]...${tail}`;
+    } catch {
+      return '[unserializable result]';
+    }
+  }
+
+  private resolveTimeoutForAttempt(attempt: number): number {
+    if (attempt === 0) {
+      return this.config.timeout;
+    }
+
+    const expanded = Math.max(this.config.timeout + 15000, Math.round(this.config.timeout * 1.5));
+    return Math.max(this.config.timeout, Math.min(expanded, 90000));
+  }
+
+  private shouldRetryObservation(
+    error: unknown,
+    aborted: boolean,
+    attempt: number,
+    maxAttempts: number,
+  ): boolean {
+    if (aborted || attempt >= maxAttempts - 1) {
+      return false;
+    }
+
+    if (error instanceof ObservationTimeoutError) {
+      return true;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    return /timeout|timed out|rate limit|429|503|network|temporar|service unavailable|failed to parse structured response|invalid json|unterminated string/i.test(
+      message,
+    );
+  }
+
+  private delay(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new ObservationError('Observation aborted'));
+        return;
+      }
+
+      let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        signal?.removeEventListener('abort', abortHandler);
+      };
+
+      const abortHandler = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        cleanup();
+        reject(new ObservationError('Observation aborted'));
+      };
+
+      timeoutId = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve();
+      }, ms);
+
+      signal?.addEventListener('abort', abortHandler);
+    });
+  }
+
   // ===========================================================================
   // Private Methods - Execution
   // ===========================================================================
@@ -460,39 +568,50 @@ ${languageSection}${projectPromptAddendum}`;
     return new Promise<T>((resolve, reject) => {
       let settled = false;
 
-      const timeoutId = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          this.abort();
-          reject(new ObservationTimeoutError(timeout));
-        }
-      }, timeout);
-
-      const abortHandler = () => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timeoutId);
-          reject(new ObservationTimeoutError(timeout));
-        }
-      };
-
-      if (this.abortController?.signal.aborted) {
-        settled = true;
-        clearTimeout(timeoutId);
-        reject(new ObservationTimeoutError(timeout));
-        return;
-      }
-
       const signal = this.abortController?.signal;
-      if (signal) {
-        signal.addEventListener('abort', abortHandler);
-      }
-
       const cleanup = () => {
         if (signal) {
           signal.removeEventListener('abort', abortHandler);
         }
       };
+
+      const failAsAborted = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutId);
+        cleanup();
+        reject(new ObservationError('Observation aborted'));
+      };
+
+      const failAsTimeout = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutId);
+        cleanup();
+        this.llm.abort();
+        reject(new ObservationTimeoutError(timeout));
+      };
+
+      const timeoutId = setTimeout(() => {
+        failAsTimeout();
+      }, timeout);
+
+      const abortHandler = () => {
+        failAsAborted();
+      };
+
+      if (this.abortController?.signal.aborted) {
+        failAsAborted();
+        return;
+      }
+
+      if (signal) {
+        signal.addEventListener('abort', abortHandler);
+      }
 
       operation()
         .then((result) => {

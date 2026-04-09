@@ -599,7 +599,7 @@ export interface AgenticEngineConfig {
   planningTimeout: number;
   /** Timeout for execution phase in ms (default: 60000) */
   executionTimeout: number;
-  /** Timeout for observation phase in ms (default: 15000) */
+  /** Timeout for observation phase in ms (default: 30000) */
   observationTimeout: number;
 
   /** Enable streaming output (default: true) */
@@ -724,7 +724,7 @@ export const DEFAULT_ENGINE_CONFIG: AgenticEngineConfig = {
   thinkingTimeout: 60000,
   planningTimeout: 90000,
   executionTimeout: 60000,
-  observationTimeout: 15000,
+  observationTimeout: 30000,
   enableStreaming: true,
   enableMemory: true,
   enableCheckpoints: true,

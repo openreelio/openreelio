@@ -278,6 +278,7 @@ export async function startPersistedRun(input: {
   context: AgentContext;
   checkpointController: ResumeCheckpointController;
   persistedRunIdRef: PersistedRunIdRef;
+  safeCheckpointIdRef: CheckpointIdRef;
   logger: WarnLogger;
   loggerLabel: string;
 }): Promise<string | null> {
@@ -292,6 +293,7 @@ export async function startPersistedRun(input: {
     context,
     checkpointController,
     persistedRunIdRef,
+    safeCheckpointIdRef,
     logger,
     loggerLabel,
   } = input;
@@ -307,7 +309,7 @@ export async function startPersistedRun(input: {
     });
 
     persistedRunIdRef.current = persistedRun.id;
-    await checkpointController.persistCheckpoint({
+    safeCheckpointIdRef.current = await checkpointController.persistCheckpoint({
       sessionId,
       runId: persistedRun.id,
       runtimeKind,
@@ -321,6 +323,7 @@ export async function startPersistedRun(input: {
     return persistedRun.id;
   } catch (error) {
     persistedRunIdRef.current = null;
+    safeCheckpointIdRef.current = null;
     logger.warn(`Failed to create persisted ${loggerLabel} run`, {
       sessionId,
       error: error instanceof Error ? error.message : String(error),

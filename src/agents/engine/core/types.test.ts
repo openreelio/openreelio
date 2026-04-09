@@ -211,7 +211,7 @@ describe('types', () => {
       expect(DEFAULT_ENGINE_CONFIG.thinkingTimeout).toBe(60000);
       expect(DEFAULT_ENGINE_CONFIG.planningTimeout).toBe(90000);
       expect(DEFAULT_ENGINE_CONFIG.executionTimeout).toBe(60000);
-      expect(DEFAULT_ENGINE_CONFIG.observationTimeout).toBe(15000);
+      expect(DEFAULT_ENGINE_CONFIG.observationTimeout).toBe(30000);
       expect(DEFAULT_ENGINE_CONFIG.enableStreaming).toBe(true);
       expect(DEFAULT_ENGINE_CONFIG.enableMemory).toBe(true);
       expect(DEFAULT_ENGINE_CONFIG.enableCheckpoints).toBe(true);
