@@ -141,6 +141,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
   } | null>(null);
   const bootstrappedCheckpointIdRef = useRef<string | null>(null);
   const persistedRunIdRef = useRef<string | null>(null);
+  const safeCheckpointIdRef = useRef<string | null>(null);
   const optionsRef = useRef(options);
 
   useEffect(() => {
@@ -180,6 +181,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
       }
       runGuardRef.current = true;
       persistedRunIdRef.current = null;
+      safeCheckpointIdRef.current = null;
 
       // Reset state
       setIsRunning(true);
@@ -372,6 +374,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
         context,
         checkpointController,
         persistedRunIdRef,
+        safeCheckpointIdRef,
         logger,
         loggerLabel: 'agent loop',
       });
@@ -629,7 +632,9 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
         }
       } finally {
         const persistedRunId = persistedRunIdRef.current;
+        const safeCheckpointId = safeCheckpointIdRef.current;
         persistedRunIdRef.current = null;
+        safeCheckpointIdRef.current = null;
         if (persistedRunId) {
           await finalizePersistedRun({
             sessionId: storeSessionId,
@@ -649,6 +654,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
             loggerLabel: 'agent loop',
           });
         }
+        await checkpointController.consumeCheckpoint(safeCheckpointId);
         if (!traceToWrite) {
           traceToWrite = finalizeRuntimeTrace(
             persistedFinalPhase === 'completed',
@@ -695,6 +701,8 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
     loopRef.current = null;
     toolPermissionResolverRef.current = null;
     bootstrappedCheckpointIdRef.current = null;
+    persistedRunIdRef.current = null;
+    safeCheckpointIdRef.current = null;
     abortNotifiedRef.current = false;
     setPhase('idle');
     setIsRunning(false);

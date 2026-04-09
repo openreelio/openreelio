@@ -194,6 +194,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   const bootstrappedCheckpointIdRef = useRef<string | null>(null);
   const memoryStoreRef = useRef<IMemoryStore | null>(null);
   const persistedRunIdRef = useRef<string | null>(null);
+  const safeCheckpointIdRef = useRef<string | null>(null);
   const latestPlanRef = useRef<Plan | null>(null);
 
   if (!memoryStoreRef.current && config?.enableMemory !== false) {
@@ -324,6 +325,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       }
       runGuardRef.current = true;
       persistedRunIdRef.current = null;
+      safeCheckpointIdRef.current = null;
 
       // Reset state
       setIsRunning(true);
@@ -494,6 +496,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         context,
         checkpointController,
         persistedRunIdRef,
+        safeCheckpointIdRef,
         logger,
         loggerLabel: 'agentic',
       });
@@ -748,7 +751,9 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         throw error;
       } finally {
         const persistedRunId = persistedRunIdRef.current;
+        const safeCheckpointId = safeCheckpointIdRef.current;
         persistedRunIdRef.current = null;
+        safeCheckpointIdRef.current = null;
         if (persistedRunId) {
           await finalizePersistedRun({
             sessionId: executionContext.sessionId,
@@ -764,6 +769,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
             loggerLabel: 'agentic',
           });
         }
+        await checkpointController.consumeCheckpoint(safeCheckpointId);
         if (traceToWrite) {
           traceToWrite = {
             ...traceToWrite,
@@ -813,6 +819,8 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     approvalResolverRef.current = null;
     clearPendingApprovals();
     bootstrappedCheckpointIdRef.current = null;
+    persistedRunIdRef.current = null;
+    safeCheckpointIdRef.current = null;
     setPhase('idle');
     setIsRunning(false);
     setEvents([]);

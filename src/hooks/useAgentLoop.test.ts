@@ -467,6 +467,11 @@ describe('useAgentLoop', () => {
       }),
     );
     expect(vi.mocked(commands.consumeAgentResumeCheckpoint)).toHaveBeenCalled();
+    expect(sessionState.activeCheckpointId).toBeNull();
+    expect(
+      persistedCheckpoints.find((checkpoint) => checkpoint.checkpointKind === 'safe_resume_point')
+        ?.status,
+    ).toBe('consumed');
     expect(vi.mocked(commands.updateAgentRunPhase)).toHaveBeenCalledWith(
       expect.objectContaining({
         runId: 'run-fast-1',
