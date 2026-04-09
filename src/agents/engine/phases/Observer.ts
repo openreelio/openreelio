@@ -133,7 +133,10 @@ export class Observer {
         const shouldRetry = this.shouldRetryObservation(error, aborted, attempt, maxAttempts);
 
         if (shouldRetry) {
-          await this.delay(this.config.retryBackoffMs * (attempt + 1));
+          await this.delay(
+            this.config.retryBackoffMs * (attempt + 1),
+            this.abortController?.signal,
+          );
           continue;
         }
 
@@ -492,7 +495,7 @@ ${languageSection}${projectPromptAddendum}`;
     }
 
     const expanded = Math.max(this.config.timeout + 15000, Math.round(this.config.timeout * 1.5));
-    return Math.min(expanded, 90000);
+    return Math.max(this.config.timeout, Math.min(expanded, 90000));
   }
 
   private shouldRetryObservation(
@@ -515,8 +518,43 @@ ${languageSection}${projectPromptAddendum}`;
     );
   }
 
-  private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  private delay(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new ObservationError('Observation aborted'));
+        return;
+      }
+
+      let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        signal?.removeEventListener('abort', abortHandler);
+      };
+
+      const abortHandler = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        cleanup();
+        reject(new ObservationError('Observation aborted'));
+      };
+
+      timeoutId = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve();
+      }, ms);
+
+      signal?.addEventListener('abort', abortHandler);
+    });
   }
 
   // ===========================================================================
