@@ -294,7 +294,7 @@ describe('Observer', () => {
 
   describe('error handling', () => {
     it('should throw ObservationTimeoutError on timeout', async () => {
-      const shortTimeoutObserver = createObserver(mockLLM, { timeout: 10 });
+      const shortTimeoutObserver = createObserver(mockLLM, { timeout: 10, maxRetries: 0 });
 
       mockLLM.setStructuredResponse({
         structured: {
@@ -310,6 +310,28 @@ describe('Observer', () => {
       await expect(
         shortTimeoutObserver.observe(successfulPlan, successfulExecution, context),
       ).rejects.toThrow(ObservationTimeoutError);
+    });
+
+    it('should retry observation after a timeout', async () => {
+      const retryingObserver = createObserver(mockLLM, { timeout: 10, maxRetries: 1 });
+
+      mockLLM.setStructuredResponse({
+        structured: {
+          goalAchieved: true,
+          stateChanges: [],
+          summary: 'Done after retry',
+          confidence: 0.9,
+          needsIteration: false,
+        },
+        delay: 100,
+      });
+
+      await expect(
+        retryingObserver.observe(successfulPlan, successfulExecution, context),
+      ).resolves.toMatchObject({
+        goalAchieved: true,
+        summary: 'Done after retry',
+      });
     });
 
     it('should handle LLM error gracefully', async () => {
