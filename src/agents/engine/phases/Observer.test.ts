@@ -234,6 +234,40 @@ describe('Observer', () => {
       expect(hasResult).toBe(true);
     });
 
+    it('should preserve falsy execution results in analysis', async () => {
+      const falsyExecution: ExecutionResult = {
+        ...successfulExecution,
+        completedSteps: [
+          {
+            ...successfulExecution.completedSteps[0],
+            result: {
+              success: true,
+              data: 0,
+              duration: 50,
+            },
+          },
+        ],
+      };
+
+      mockLLM.setStructuredResponse({
+        structured: {
+          goalAchieved: true,
+          stateChanges: [],
+          summary: 'Done',
+          confidence: 0.9,
+          needsIteration: false,
+        } as Observation,
+      });
+
+      await observer.observe(successfulPlan, falsyExecution, context);
+
+      const request = mockLLM.getLastRequest();
+      const hasFalsyResult = request?.messages.some((message) =>
+        message.content.includes('Result: 0'),
+      );
+      expect(hasFalsyResult).toBe(true);
+    });
+
     it('should include language policy instructions in observer system prompt', async () => {
       context.languagePolicy = createLanguagePolicy('en', {
         outputLanguage: 'ja',

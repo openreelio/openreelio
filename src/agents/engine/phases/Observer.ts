@@ -343,7 +343,7 @@ ${languageSection}${projectPromptAddendum}`;
       `  Retries: ${step.retryCount}`,
     ];
 
-    if (step.result.data) {
+    if (step.result.data !== undefined) {
       lines.push(`  Result: ${this.serializeResultData(step.result.data)}`);
     }
 
