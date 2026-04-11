@@ -11,6 +11,8 @@
  * Token budget: ~700 tokens full, ~200-300 for specialized roles.
  */
 
+import { buildToolOutputContractSection } from '@/agents/toolOutputContracts';
+
 // =============================================================================
 // Role type (duplicated from system.ts to avoid circular dependency)
 // =============================================================================
@@ -27,7 +29,8 @@ const QUERY_ACTIONS = `## Query Actions (meta-tool: query)
 - list_tracks → all tracks with type, clip count, lock/mute status
 - get_clip_info(clipId) → detailed clip: position, duration, speed, effects, source range
 - get_track_clips(trackId) → all clips on one track
-- get_clips_at_time(time) → clips spanning a specific time point
+- get_clips_at_time(time) → clips spanning a specific time point across tracks
+- prefer get_track_clips(trackId) for track-specific edits because step references cannot filter cross-track results
 - get_selected_clips → currently selected clips (full detail)
 - get_playhead_position → current playhead seconds + total duration
 - find_clips_by_asset(assetId) → clips using a specific asset
@@ -111,6 +114,16 @@ const WORKSPACE_TOOLS = `## Workspace Tools (always available, not behind meta-t
 - replace_workspace_document_text / create_workspace_folder
 - rename_workspace_entry / move_workspace_entry / delete_workspace_entry`;
 
+const TOOL_OUTPUT_CONTRACTS = buildToolOutputContractSection([
+  'get_timeline_info',
+  'get_track_clips',
+  'get_clips_at_time',
+  'get_selected_clips',
+  'insert_clip',
+  'insert_clip_from_file',
+  'split_clip',
+]);
+
 const EDITING_CONCEPTS = `## Editing Concepts
 - Ripple: trim + shift subsequent clips to fill/accommodate
 - Roll: move cut point between adjacent clips (total duration unchanged)
@@ -125,7 +138,9 @@ const COMMON_WORKFLOWS = `## Common Workflows
 3. Remove silence: find_gaps → delete_clips_in_range or manual split+delete
 4. Speed ramp: split_clip at boundaries → change_clip_speed on middle segment
 5. Multi-step edit: issue ordered edit actions only when needed; backend-safe edit actions may be fused into one atomic backend plan
-6. Segment an inserted clip: insert_clip → split_clip using data.clipId for the first cut → later split_clip steps use the previous split's data.newClipId`;
+6. Segment an inserted clip: insert_clip → split_clip using data.clipId for the first cut → later split_clip steps use the previous split's data.newClipId
+7. Track-specific clip lookup: get_track_clips(trackId) → reference clip IDs via data.clips[n].id
+8. Time-based clip lookup across tracks: get_clips_at_time(time) → reference clip IDs via data[n].id (never data[n].clipId)`;
 
 const CLI_REFERENCE = `## CLI (headless alternative)
 openreelio-cli <group> <command> --path <dir> [--args]
@@ -143,6 +158,7 @@ function getSectionsForRole(role: ToolReferenceRole): string[] {
     case 'editor':
       return [
         QUERY_ACTIONS,
+        TOOL_OUTPUT_CONTRACTS,
         EDIT_ACTIONS,
         AUDIO_ACTIONS,
         EFFECTS_ACTIONS,
@@ -155,6 +171,7 @@ function getSectionsForRole(role: ToolReferenceRole): string[] {
     case 'planner':
       return [
         QUERY_ACTIONS,
+        TOOL_OUTPUT_CONTRACTS,
         EDIT_ACTIONS,
         AUDIO_ACTIONS,
         EFFECTS_ACTIONS,
@@ -165,13 +182,20 @@ function getSectionsForRole(role: ToolReferenceRole): string[] {
         CLI_REFERENCE,
       ];
     case 'analyst':
-      return [QUERY_ACTIONS, WORKSPACE_TOOLS, CLI_REFERENCE];
+      return [QUERY_ACTIONS, TOOL_OUTPUT_CONTRACTS, WORKSPACE_TOOLS, CLI_REFERENCE];
     case 'colorist':
-      return [QUERY_ACTIONS, EFFECTS_ACTIONS, WORKSPACE_TOOLS, EDITING_CONCEPTS, CLI_REFERENCE];
+      return [
+        QUERY_ACTIONS,
+        TOOL_OUTPUT_CONTRACTS,
+        EFFECTS_ACTIONS,
+        WORKSPACE_TOOLS,
+        EDITING_CONCEPTS,
+        CLI_REFERENCE,
+      ];
     case 'audio':
-      return [QUERY_ACTIONS, AUDIO_ACTIONS, WORKSPACE_TOOLS, CLI_REFERENCE];
+      return [QUERY_ACTIONS, TOOL_OUTPUT_CONTRACTS, AUDIO_ACTIONS, WORKSPACE_TOOLS, CLI_REFERENCE];
     case 'captioner':
-      return [QUERY_ACTIONS, TEXT_ACTIONS, WORKSPACE_TOOLS, CLI_REFERENCE];
+      return [QUERY_ACTIONS, TOOL_OUTPUT_CONTRACTS, TEXT_ACTIONS, WORKSPACE_TOOLS, CLI_REFERENCE];
   }
 }
 

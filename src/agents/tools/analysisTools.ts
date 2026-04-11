@@ -10,6 +10,7 @@
  */
 
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
+import { getToolOutputContract } from '../toolOutputContracts';
 import { createLogger } from '@/services/logger';
 import { invoke } from '@tauri-apps/api/core';
 import type {
@@ -2668,6 +2669,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
     description:
       'Get general information about the current timeline/sequence including duration, track count, clip count, and playhead position',
     category: 'analysis',
+    outputContract: getToolOutputContract('get_timeline_info') ?? undefined,
     parameters: {
       type: 'object',
       properties: {},
@@ -2900,6 +2902,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
     name: 'get_clips_at_time',
     description: 'Find all clips that span a specific time point on the timeline',
     category: 'analysis',
+    outputContract: getToolOutputContract('get_clips_at_time') ?? undefined,
     parameters: {
       type: 'object',
       properties: {
@@ -2934,6 +2937,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
     name: 'get_selected_clips',
     description: 'Get full details of all currently selected clips',
     category: 'analysis',
+    outputContract: getToolOutputContract('get_selected_clips') ?? undefined,
     parameters: {
       type: 'object',
       properties: {},
@@ -2998,6 +3002,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
     name: 'get_track_clips',
     description: 'Get all clips on a specific track',
     category: 'analysis',
+    outputContract: getToolOutputContract('get_track_clips') ?? undefined,
     parameters: {
       type: 'object',
       properties: {

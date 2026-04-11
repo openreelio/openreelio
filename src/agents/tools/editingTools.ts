@@ -6,6 +6,7 @@
  */
 
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
+import { getToolOutputContract } from '../toolOutputContracts';
 import { createLogger } from '@/services/logger';
 import { invoke } from '@tauri-apps/api/core';
 import { getTimelineSnapshot, findWorkspaceFile } from './storeAccessor';
@@ -473,6 +474,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
     name: 'split_clip',
     description: 'Split a clip at a specific time point, creating two separate clips',
     category: 'clip',
+    outputContract: getToolOutputContract('split_clip') ?? undefined,
     parameters: {
       type: 'object',
       properties: {
@@ -680,6 +682,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
     name: 'insert_clip',
     description: 'Insert a new clip from an asset onto the timeline',
     category: 'clip',
+    outputContract: getToolOutputContract('insert_clip') ?? undefined,
     parameters: {
       type: 'object',
       properties: {
@@ -774,6 +777,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
     description:
       'Insert a clip from a workspace file by its relative path or name. Automatically registers the file as a project asset if not already registered, then inserts it onto the timeline. This is the preferred way to add workspace files to the timeline.',
     category: 'clip',
+    outputContract: getToolOutputContract('insert_clip_from_file') ?? undefined,
     parameters: {
       type: 'object',
       properties: {
@@ -1730,8 +1734,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
               applyProjectState(draft, freshState);
             });
           } catch (syncError) {
-            const syncMessage =
-              syncError instanceof Error ? syncError.message : String(syncError);
+            const syncMessage = syncError instanceof Error ? syncError.message : String(syncError);
             syncWarning = syncMessage;
             logger.warn('apply_editing_style executed but state refresh failed', {
               error: syncMessage,

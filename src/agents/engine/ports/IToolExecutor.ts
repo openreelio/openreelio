@@ -6,6 +6,7 @@
  */
 
 import type { RiskLevel, SideEffect, ValidationResult } from '../core/types';
+import type { ToolOutputContract } from '@/agents/toolOutputContracts';
 
 // =============================================================================
 // Types
@@ -94,6 +95,8 @@ export interface ToolDefinition extends ToolInfo {
     description: string;
     args: Record<string, unknown>;
   }>;
+  /** Optional output contract for downstream step references */
+  outputContract?: ToolOutputContract;
 }
 
 /**

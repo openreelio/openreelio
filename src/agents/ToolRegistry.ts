@@ -7,6 +7,7 @@
 
 import { createLogger } from '@/services/logger';
 import { canonicalizeToolNameCandidate, normalizeToolNameCandidate } from './toolNameNormalization';
+import type { ToolOutputContract } from './toolOutputContracts';
 
 // =============================================================================
 // Shared Types (formerly from Agent.ts)
@@ -86,6 +87,8 @@ export interface ToolDefinition {
   isAvailable?: () => Promise<boolean>;
   /** Optional compatibility aliases accepted at lookup time */
   aliases?: string[];
+  /** Optional output contract for step-reference consumers and prompt docs */
+  outputContract?: ToolOutputContract;
 }
 
 /** Result of executing a tool */

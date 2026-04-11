@@ -26,6 +26,7 @@ import {
   normalizeReferencesForValidation,
 } from '../core/stepReferences';
 import { buildOrchestrationPlaybook } from '../core/orchestrationPlaybooks';
+import { getToolOutputContract } from '@/agents/toolOutputContracts';
 
 const logger = createLogger('Planner');
 
@@ -488,6 +489,9 @@ export class Planner {
     );
     parts.push(
       '13. Match near-synonyms to the exact available tool or action name. Example: splitClip -> split_clip, add_subtitle -> add_caption, remove_clip -> delete_clip.',
+    );
+    parts.push(
+      '14. When the target track is known, prefer get_track_clips(trackId) over get_clips_at_time(time) so later steps can reference data.clips[n].id without cross-track ambiguity.',
     );
     parts.push('');
     parts.push(...ORCHESTRATION_PLAYBOOK_LINES);
@@ -988,6 +992,7 @@ export class Planner {
   private validateStepReferences(steps: PlanStep[]): string[] {
     const errors: string[] = [];
     const knownStepIds = new Set(steps.map((step) => step.id));
+    const stepById = new Map(steps.map((step) => [step.id, step]));
 
     steps.forEach((step, index) => {
       const references = collectStepValueReferences(step.args);
@@ -1024,11 +1029,47 @@ export class Planner {
           errors.push(
             `Step ${index}: reference at '${occurrence.sourcePath}' must read from 'data.*' to use tool output contracts.`,
           );
+          continue;
+        }
+
+        const sourceStep = stepById.get(reference.$fromStep);
+        if (!sourceStep) {
+          continue;
+        }
+
+        const contractError = this.validateToolOutputReferencePath(
+          index,
+          occurrence.sourcePath,
+          sourceStep.tool,
+          reference.$path,
+        );
+        if (contractError) {
+          errors.push(contractError);
         }
       }
     });
 
     return errors;
+  }
+
+  private validateToolOutputReferencePath(
+    index: number,
+    sourcePath: string,
+    toolName: string,
+    rawReferencePath: string,
+  ): string | null {
+    const referencePath = rawReferencePath.trim().replace(/^\$\.?/, '');
+    const contract =
+      this.toolExecutor.getToolDefinition(toolName)?.outputContract ??
+      getToolOutputContract(toolName);
+    if (!contract?.validatePath || contract.validatePath(referencePath)) {
+      return null;
+    }
+
+    return (
+      `Step ${index}: reference at '${sourcePath}' uses invalid output path '${rawReferencePath}' for tool '${toolName}'. ` +
+      `Use one of: ${contract.examples.join(', ')}`
+    );
   }
 
   private isPlaceholderId(value: string, key: string): boolean {
