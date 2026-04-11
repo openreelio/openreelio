@@ -65,6 +65,7 @@ const EDIT_ACTIONS = `## Edit Actions (meta-tool: edit, all require sequenceId)
 - move_clip(trackId, clipId, newTimelineIn, newTrackId?) → reposition or cross-track move
 - trim_clip(trackId, clipId, newSourceIn?, newSourceOut?) → adjust source boundaries
 - split_clip(trackId, clipId, splitTime) → divide into two clips at time point; result exposes data.newClipId for the right-hand segment
+- split_timeline_by_interval(intervalSeconds, includeVideo?, includeAudio?, startTime?, endTime?) → split unlocked timeline clips at regular boundaries across video and/or audio tracks
 - delete_clip(trackId, clipId) → remove clip from timeline
 - delete_clips_in_range(startTime, endTime, trackId?) → bulk remove by time range
 - change_clip_speed(trackId, clipId, speed) → speed 0.1–10.0, duration auto-adjusts

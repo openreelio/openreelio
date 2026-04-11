@@ -134,7 +134,8 @@ describe('buildOrchestrationPlaybook', () => {
 
   it('creates insert-and-segment playbook with chained split references', () => {
     const thought: Thought = {
-      understanding: "Insert '20240921_214806_1.mp4' into the timeline and split it into 5-second segments",
+      understanding:
+        "Insert '20240921_214806_1.mp4' into the timeline and split it into 5-second segments",
       requirements: ['insert asset', 'split into 5-second segments'],
       uncertainties: [],
       approach: 'Insert the named clip, then split each following 5-second boundary',
@@ -179,9 +180,36 @@ describe('buildOrchestrationPlaybook', () => {
     expect(thirdSplit?.dependsOn).toEqual(['playbook_split_segment_2']);
   });
 
+  it('creates timeline interval split playbook for whole-timeline video and audio segmentation', () => {
+    const thought: Thought = {
+      understanding: 'Split the video and audio on the timeline every 1 second',
+      requirements: ['timeline split', 'video', 'audio'],
+      uncertainties: [],
+      approach: 'Apply a regular 1-second split across the whole timeline',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor(['split_timeline_by_interval']);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match).not.toBeNull();
+    expect(match?.id).toBe('timeline_interval_split');
+    expect(match?.plan.steps).toHaveLength(1);
+    expect(match?.plan.steps[0]).toMatchObject({
+      tool: 'split_timeline_by_interval',
+      args: {
+        sequenceId: 'sequence-1',
+        intervalSeconds: 1,
+        includeVideo: true,
+        includeAudio: true,
+      },
+    });
+  });
+
   it('returns null for insert-and-segment requests when the target asset has no duration', () => {
     const thought: Thought = {
-      understanding: "Insert '20240921_214806_1.mp4' into the timeline and split it into 5-second segments",
+      understanding:
+        "Insert '20240921_214806_1.mp4' into the timeline and split it into 5-second segments",
       requirements: ['insert asset', 'split into 5-second segments'],
       uncertainties: [],
       approach: 'Insert the named clip, then split each following 5-second boundary',
@@ -445,7 +473,11 @@ describe('buildOrchestrationPlaybook', () => {
   it('should not match auto-caption when requirements include non-captioning analysis', () => {
     const thought: Thought = {
       understanding: 'Identify what is being said and shown in this video',
-      requirements: ['speech-to-text transcription', 'shot boundary detection', 'object recognition'],
+      requirements: [
+        'speech-to-text transcription',
+        'shot boundary detection',
+        'object recognition',
+      ],
       uncertainties: [],
       approach: 'Run multi-modal analysis pipeline',
       needsMoreInfo: false,

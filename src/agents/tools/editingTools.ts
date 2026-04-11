@@ -28,6 +28,7 @@ import type { AgentPlanResult, StylePlanResult } from '@/bindings';
 const logger = createLogger('EditingTools');
 const DEFAULT_INSERT_CLIP_DURATION_SEC = 10;
 const DEFAULT_FREEZE_FRAME_RATE = 30;
+const SPLIT_TIME_EPSILON = 1e-6;
 
 const MARKER_COLOR_PRESETS: Record<string, Color> = {
   red: { r: 1, g: 0, b: 0 },
@@ -41,6 +42,106 @@ const MARKER_COLOR_PRESETS: Record<string, Color> = {
   white: { r: 1, g: 1, b: 1 },
   black: { r: 0, g: 0, b: 0 },
 };
+
+type IntervalSplitOperation = {
+  trackId: string;
+  trackKind: Track['kind'];
+  clipId: string;
+  splitTime: number;
+};
+
+function roundSplitTime(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function buildIntervalBoundaries(
+  clipStart: number,
+  clipEnd: number,
+  intervalSeconds: number,
+  startTime: number,
+  endTime: number,
+): number[] {
+  const effectiveStart = Math.max(clipStart, startTime);
+  const effectiveEnd = Math.min(clipEnd, endTime);
+  if (effectiveEnd - effectiveStart <= SPLIT_TIME_EPSILON) {
+    return [];
+  }
+
+  const boundaries: number[] = [];
+  const firstBoundary =
+    Math.ceil((effectiveStart + SPLIT_TIME_EPSILON) / intervalSeconds) * intervalSeconds;
+
+  for (
+    let boundary = firstBoundary;
+    boundary < effectiveEnd - SPLIT_TIME_EPSILON;
+    boundary += intervalSeconds
+  ) {
+    if (boundary <= clipStart + SPLIT_TIME_EPSILON) {
+      continue;
+    }
+
+    boundaries.push(roundSplitTime(boundary));
+  }
+
+  return boundaries;
+}
+
+function buildTimelineIntervalSplitOperations(
+  sequence: Sequence,
+  options: {
+    intervalSeconds: number;
+    includeVideo: boolean;
+    includeAudio: boolean;
+    startTime: number;
+    endTime: number;
+  },
+): IntervalSplitOperation[] {
+  const { intervalSeconds, includeVideo, includeAudio, startTime, endTime } = options;
+  const operations: IntervalSplitOperation[] = [];
+
+  for (const track of sequence.tracks) {
+    if (track.locked) {
+      continue;
+    }
+
+    const includeTrack =
+      (track.kind === 'video' && includeVideo) || (track.kind === 'audio' && includeAudio);
+    if (!includeTrack) {
+      continue;
+    }
+
+    for (const clip of track.clips) {
+      const clipStart = clip.place.timelineInSec;
+      const clipEnd = clipStart + clip.place.durationSec;
+      const boundaries = buildIntervalBoundaries(
+        clipStart,
+        clipEnd,
+        intervalSeconds,
+        startTime,
+        endTime,
+      );
+
+      for (const splitTime of boundaries) {
+        operations.push({
+          trackId: track.id,
+          trackKind: track.kind,
+          clipId: clip.id,
+          splitTime,
+        });
+      }
+    }
+  }
+
+  operations.sort((left, right) => {
+    if (right.splitTime !== left.splitTime) {
+      return right.splitTime - left.splitTime;
+    }
+
+    return left.trackId.localeCompare(right.trackId);
+  });
+
+  return operations;
+}
 
 function parseHexMarkerColor(input: string): Color | undefined {
   const normalized = input.trim().replace(/^#/, '');
@@ -519,6 +620,120 @@ const EDITING_TOOLS: ToolDefinition[] = [
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('split_clip failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // Split Timeline By Interval
+  // -------------------------------------------------------------------------
+  {
+    name: 'split_timeline_by_interval',
+    description:
+      'Split timeline clips at regular interval boundaries across unlocked video and/or audio tracks',
+    category: 'timeline',
+    parameters: {
+      type: 'object',
+      properties: {
+        sequenceId: {
+          type: 'string',
+          description: 'The ID of the sequence to process',
+        },
+        intervalSeconds: {
+          type: 'number',
+          description: 'Split interval in seconds',
+        },
+        includeVideo: {
+          type: 'boolean',
+          description: 'Whether to split video tracks',
+        },
+        includeAudio: {
+          type: 'boolean',
+          description: 'Whether to split audio tracks',
+        },
+        startTime: {
+          type: 'number',
+          description: 'Optional inclusive start time for splitting',
+        },
+        endTime: {
+          type: 'number',
+          description: 'Optional exclusive end time for splitting',
+        },
+      },
+      required: ['sequenceId', 'intervalSeconds'],
+    },
+    handler: async (args) => {
+      try {
+        const sequenceId = args.sequenceId as string;
+        const intervalSeconds = Number(args.intervalSeconds);
+        const includeVideo = args.includeVideo !== false;
+        const includeAudio = args.includeAudio === true;
+
+        if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
+          return { success: false, error: 'intervalSeconds must be a positive number' };
+        }
+
+        if (!includeVideo && !includeAudio) {
+          return {
+            success: false,
+            error: 'At least one of includeVideo or includeAudio must be true',
+          };
+        }
+
+        const project = useProjectStore.getState();
+        const sequence = project.sequences.get(sequenceId);
+        if (!sequence) {
+          return { success: false, error: `Sequence '${sequenceId}' not found` };
+        }
+
+        const timelineEnd =
+          typeof args.endTime === 'number' ? args.endTime : Number.POSITIVE_INFINITY;
+        const startTime = typeof args.startTime === 'number' ? Math.max(0, args.startTime) : 0;
+        const endTime = Math.max(startTime, timelineEnd);
+        const operations = buildTimelineIntervalSplitOperations(sequence, {
+          intervalSeconds,
+          includeVideo,
+          includeAudio,
+          startTime,
+          endTime,
+        });
+
+        const executedOperations: Array<
+          Pick<IntervalSplitOperation, 'trackId' | 'trackKind' | 'clipId' | 'splitTime'>
+        > = [];
+
+        for (const operation of operations) {
+          await executeAgentCommand('SplitClip', {
+            sequenceId,
+            trackId: operation.trackId,
+            clipId: operation.clipId,
+            splitTime: operation.splitTime,
+          });
+          executedOperations.push(operation);
+        }
+
+        logger.debug('split_timeline_by_interval executed', {
+          sequenceId,
+          intervalSeconds,
+          operationCount: executedOperations.length,
+        });
+        return {
+          success: true,
+          result: {
+            sequenceId,
+            intervalSeconds,
+            includeVideo,
+            includeAudio,
+            startTime,
+            endTime,
+            operationsExecuted: executedOperations.length,
+            operations: executedOperations,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('split_timeline_by_interval failed', { error: message });
         return { success: false, error: message };
       }
     },
