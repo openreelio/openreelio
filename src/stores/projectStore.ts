@@ -138,6 +138,7 @@ interface ProjectState {
 
   // Command execution
   executeCommand: (command: Command) => Promise<CommandResult>;
+  refreshFromBackendMutation: () => Promise<number>;
   undo: () => Promise<UndoRedoResult>;
   redo: () => Promise<UndoRedoResult>;
   jumpToHistoryState: (targetIndex: number) => Promise<UndoRedoResult>;
@@ -685,6 +686,53 @@ export const useProjectStore = create<ProjectState>()(
           }
         }, `executeCommand:${command.type}`),
       );
+    },
+
+    refreshFromBackendMutation: async () => {
+      return commandQueue.enqueue(async () => {
+        const versionBefore = get().stateVersion;
+
+        try {
+          logger.debug('Refreshing store after backend mutation', { version: versionBefore });
+          const freshState = await refreshProjectState();
+
+          let concurrentModificationDetected = false;
+          let nextStateVersion = versionBefore;
+          set((state) => {
+            if (state.stateVersion !== versionBefore) {
+              concurrentModificationDetected = true;
+              logger.error('Concurrent modification detected during backend mutation refresh', {
+                expectedVersion: versionBefore,
+                actualVersion: state.stateVersion,
+              });
+              return;
+            }
+
+            state.isDirty = true;
+            state.stateVersion += 1;
+            nextStateVersion = state.stateVersion;
+            state.error = null;
+            applyProjectState(state, freshState);
+          });
+
+          if (concurrentModificationDetected) {
+            throw new Error(
+              'Concurrent modification detected during backend mutation refresh. Please retry the operation.',
+            );
+          }
+
+          logger.debug('Backend mutation refresh completed', { newVersion: nextStateVersion });
+          return nextStateVersion;
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          logger.error('Backend mutation refresh failed', { error: errorMessage });
+
+          set((state) => {
+            state.error = errorMessage;
+          });
+          throw error;
+        }
+      }, 'refreshFromBackendMutation');
     },
 
     /**

@@ -19,6 +19,7 @@ import type {
   AgentPhase,
   AgentState,
   AgenticEngineConfig,
+  CorrectionRecord,
   ExecutionRecord,
   Observation,
   Plan,
@@ -51,10 +52,12 @@ import { Observer, createObserver } from './phases/Observer';
 import {
   detectImmediateTerminalFailure,
   detectRepeatedTerminalFailure,
+  didExecutionMutateState,
   type TerminalFailureGuidance,
 } from './phases/executionFailureUtils';
 import { TraceRecorder, type AgentTrace } from './core/traceRecorder';
 import { writeTrace } from './core/traceWriter';
+import { hasMutationIntentText, isMutatingToolName } from './core/toolSemantics';
 import { buildProjectPromptAddendum } from './prompts/system';
 import { createLogger } from '@/services/logger';
 
@@ -822,6 +825,20 @@ export class AgenticEngine {
           observation = this.applyTerminalFailureGuard(observation, terminalFailureGuard);
         }
 
+        const mutationGuard = this.enforceMutationExpectation(
+          state.input,
+          state.thought ?? undefined,
+          plan,
+          executionResult,
+          observation,
+          iteration,
+        );
+        observation = mutationGuard.observation;
+        if (mutationGuard.correction) {
+          contextWithTools = this.appendCorrection(contextWithTools, mutationGuard.correction);
+          state.context = { ...contextWithTools, currentIteration: iteration };
+        }
+
         lastObservation = observation;
         tracer?.endPhase();
         this.emitEvent(onEvent, {
@@ -1305,6 +1322,20 @@ export class AgenticEngine {
         observation = this.applyTerminalFailureGuard(observation, terminalFailureGuard);
       }
 
+      const resumedApprovalGuard = this.enforceMutationExpectation(
+        state.input,
+        state.thought ?? undefined,
+        plan,
+        executionResult,
+        observation,
+        1,
+      );
+      observation = resumedApprovalGuard.observation;
+      if (resumedApprovalGuard.correction) {
+        contextWithTools = this.appendCorrection(contextWithTools, resumedApprovalGuard.correction);
+        state.context = { ...contextWithTools, currentIteration: 1 };
+      }
+
       tracer?.endPhase();
       this.emitEvent(onEvent, {
         type: 'observation_complete',
@@ -1736,6 +1767,20 @@ export class AgenticEngine {
       observation = this.applyTerminalFailureGuard(observation, terminalFailureGuard);
     }
 
+    const resumedPermissionGuard = this.enforceMutationExpectation(
+      state.input,
+      state.thought ?? undefined,
+      plan,
+      executionResult,
+      observation,
+      1,
+    );
+    observation = resumedPermissionGuard.observation;
+    if (resumedPermissionGuard.correction) {
+      contextWithTools = this.appendCorrection(contextWithTools, resumedPermissionGuard.correction);
+      state.context = { ...contextWithTools, currentIteration: 1 };
+    }
+
     tracer?.endPhase();
     this.emitEvent(onEvent, {
       type: 'observation_complete',
@@ -2027,6 +2072,103 @@ export class AgenticEngine {
       suggestedAction: hasSuggestedAction ? observation.suggestedAction : guidance.suggestedAction,
       summary,
       confidence: Math.max(observation.confidence, 0.9),
+    };
+  }
+
+  private enforceMutationExpectation(
+    input: string,
+    thought: Thought | undefined,
+    plan: Plan,
+    execution: ExecutionResult,
+    observation: Observation,
+    iteration: number,
+  ): { observation: Observation; correction?: CorrectionRecord } {
+    if (
+      !this.requiresMutationToSatisfyGoal(input, thought, plan) ||
+      didExecutionMutateState(execution)
+    ) {
+      return { observation };
+    }
+
+    const executedToolNames = execution.completedSteps.map((step) => step.tool);
+    const reason =
+      'The request requires an actual edit, but the last execution only gathered information and did not run a mutating tool.';
+    const summary = observation.summary.includes(reason)
+      ? observation.summary
+      : `${observation.summary} ${reason}`.trim();
+    const shouldRetry = iteration < this.config.maxIterations;
+
+    logger.warn('Preventing false success after read-only execution for edit intent', {
+      goal: plan.goal,
+      iteration,
+      executedToolNames,
+    });
+
+    return {
+      observation: {
+        ...observation,
+        goalAchieved: false,
+        needsIteration: shouldRetry,
+        iterationReason: reason,
+        suggestedAction:
+          'Plan and execute the required mutating tools. If analysis is needed first, use those results to drive edit steps instead of stopping after queries.',
+        summary,
+        confidence: Math.min(observation.confidence, 0.4),
+      },
+      correction: shouldRetry
+        ? {
+            original: plan.goal,
+            corrected:
+              'Do not stop after read-only analysis for an edit request. The next plan must execute the mutating tools needed to fulfill the requested change.',
+            context:
+              executedToolNames.length > 0
+                ? `Iteration ${iteration} only executed read-only tools: ${executedToolNames.join(', ')}`
+                : `Iteration ${iteration} executed no tools`,
+          }
+        : undefined,
+    };
+  }
+
+  private requiresMutationToSatisfyGoal(
+    input: string,
+    thought: Thought | undefined,
+    plan: Plan,
+  ): boolean {
+    if (plan.steps.some((step) => this.isMutatingTool(step.tool))) {
+      return true;
+    }
+
+    const intentSignals = [plan.goal, thought?.understanding].filter(
+      (value): value is string => typeof value === 'string' && value.trim().length > 0,
+    );
+
+    if (intentSignals.length === 0) {
+      return hasMutationIntentText(input);
+    }
+
+    return hasMutationIntentText(...intentSignals);
+  }
+
+  private isMutatingTool(toolName: string): boolean {
+    const category = this.toolExecutor.getToolDefinition(toolName)?.category?.trim().toLowerCase();
+    return isMutatingToolName(toolName, category);
+  }
+
+  private appendCorrection(context: AgentContext, correction: CorrectionRecord): AgentContext {
+    const alreadyPresent = context.corrections.some(
+      (entry) =>
+        entry.original === correction.original &&
+        entry.corrected === correction.corrected &&
+        entry.context === correction.context,
+    );
+
+    if (alreadyPresent) {
+      return context;
+    }
+
+    return {
+      ...context,
+      corrections: [...context.corrections, correction],
     };
   }
 

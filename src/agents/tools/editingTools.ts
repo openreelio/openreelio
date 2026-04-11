@@ -6,6 +6,7 @@
  */
 
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
+import { getToolOutputContract } from '../toolOutputContracts';
 import { createLogger } from '@/services/logger';
 import { invoke } from '@tauri-apps/api/core';
 import { getTimelineSnapshot, findWorkspaceFile } from './storeAccessor';
@@ -27,6 +28,8 @@ import type { AgentPlanResult, StylePlanResult } from '@/bindings';
 const logger = createLogger('EditingTools');
 const DEFAULT_INSERT_CLIP_DURATION_SEC = 10;
 const DEFAULT_FREEZE_FRAME_RATE = 30;
+const SPLIT_TIME_EPSILON = 1e-6;
+const MAX_INTERVAL_SPLIT_OPERATIONS = 5000;
 
 const MARKER_COLOR_PRESETS: Record<string, Color> = {
   red: { r: 1, g: 0, b: 0 },
@@ -40,6 +43,157 @@ const MARKER_COLOR_PRESETS: Record<string, Color> = {
   white: { r: 1, g: 1, b: 1 },
   black: { r: 0, g: 0, b: 0 },
 };
+
+type IntervalSplitOperation = {
+  trackId: string;
+  trackKind: Track['kind'];
+  clipId: string;
+  splitTime: number;
+};
+
+function roundSplitTime(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function buildIntervalBoundaries(
+  clipStart: number,
+  clipEnd: number,
+  intervalSeconds: number,
+  startTime: number,
+  endTime: number,
+): number[] {
+  const effectiveStart = Math.max(clipStart, startTime);
+  const effectiveEnd = Math.min(clipEnd, endTime);
+  if (effectiveEnd - effectiveStart <= SPLIT_TIME_EPSILON) {
+    return [];
+  }
+
+  const boundaries: number[] = [];
+  const firstBoundary =
+    Math.ceil((effectiveStart + SPLIT_TIME_EPSILON) / intervalSeconds) * intervalSeconds;
+
+  for (
+    let boundary = firstBoundary;
+    boundary < effectiveEnd - SPLIT_TIME_EPSILON;
+    boundary += intervalSeconds
+  ) {
+    if (boundary <= clipStart + SPLIT_TIME_EPSILON) {
+      continue;
+    }
+
+    boundaries.push(roundSplitTime(boundary));
+  }
+
+  return boundaries;
+}
+
+function buildTimelineIntervalSplitOperations(
+  sequence: Sequence,
+  options: {
+    intervalSeconds: number;
+    includeVideo: boolean;
+    includeAudio: boolean;
+    startTime: number;
+    endTime: number;
+  },
+): IntervalSplitOperation[] {
+  const { intervalSeconds, includeVideo, includeAudio, startTime, endTime } = options;
+  const operations: IntervalSplitOperation[] = [];
+
+  for (const track of sequence.tracks) {
+    if (track.locked) {
+      continue;
+    }
+
+    const includeTrack =
+      (track.kind === 'video' && includeVideo) || (track.kind === 'audio' && includeAudio);
+    if (!includeTrack) {
+      continue;
+    }
+
+    for (const clip of track.clips) {
+      const clipStart = clip.place.timelineInSec;
+      const clipEnd = clipStart + clip.place.durationSec;
+      const boundaries = buildIntervalBoundaries(
+        clipStart,
+        clipEnd,
+        intervalSeconds,
+        startTime,
+        endTime,
+      );
+
+      for (const splitTime of boundaries) {
+        operations.push({
+          trackId: track.id,
+          trackKind: track.kind,
+          clipId: clip.id,
+          splitTime,
+        });
+      }
+    }
+  }
+
+  operations.sort((left, right) => {
+    if (right.splitTime !== left.splitTime) {
+      return right.splitTime - left.splitTime;
+    }
+
+    return left.trackId.localeCompare(right.trackId);
+  });
+
+  return operations;
+}
+
+function estimateTimelineIntervalSplitOperations(
+  sequence: Sequence,
+  options: {
+    intervalSeconds: number;
+    includeVideo: boolean;
+    includeAudio: boolean;
+    startTime: number;
+    endTime: number;
+  },
+): number {
+  const { intervalSeconds, includeVideo, includeAudio, startTime, endTime } = options;
+  let estimatedOperations = 0;
+
+  for (const track of sequence.tracks) {
+    if (track.locked) {
+      continue;
+    }
+
+    const includeTrack =
+      (track.kind === 'video' && includeVideo) || (track.kind === 'audio' && includeAudio);
+    if (!includeTrack) {
+      continue;
+    }
+
+    for (const clip of track.clips) {
+      const clipStart = clip.place.timelineInSec;
+      const clipEnd = clipStart + clip.place.durationSec;
+      const effectiveStart = Math.max(clipStart, startTime);
+      const effectiveEnd = Math.min(clipEnd, endTime);
+
+      if (effectiveEnd - effectiveStart <= SPLIT_TIME_EPSILON) {
+        continue;
+      }
+
+      const firstBoundary =
+        Math.ceil((effectiveStart + SPLIT_TIME_EPSILON) / intervalSeconds) * intervalSeconds;
+      const availableSpan = effectiveEnd - SPLIT_TIME_EPSILON - firstBoundary;
+      if (availableSpan < 0) {
+        continue;
+      }
+
+      estimatedOperations += Math.floor(availableSpan / intervalSeconds) + 1;
+      if (estimatedOperations > MAX_INTERVAL_SPLIT_OPERATIONS) {
+        return estimatedOperations;
+      }
+    }
+  }
+
+  return estimatedOperations;
+}
 
 function parseHexMarkerColor(input: string): Color | undefined {
   const normalized = input.trim().replace(/^#/, '');
@@ -473,6 +627,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
     name: 'split_clip',
     description: 'Split a clip at a specific time point, creating two separate clips',
     category: 'clip',
+    outputContract: getToolOutputContract('split_clip') ?? undefined,
     parameters: {
       type: 'object',
       properties: {
@@ -517,6 +672,136 @@ const EDITING_TOOLS: ToolDefinition[] = [
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('split_clip failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // Split Timeline By Interval
+  // -------------------------------------------------------------------------
+  {
+    name: 'split_timeline_by_interval',
+    description:
+      'Split timeline clips at regular interval boundaries across unlocked video and/or audio tracks',
+    category: 'timeline',
+    parameters: {
+      type: 'object',
+      properties: {
+        sequenceId: {
+          type: 'string',
+          description: 'The ID of the sequence to process',
+        },
+        intervalSeconds: {
+          type: 'number',
+          description: 'Split interval in seconds',
+        },
+        includeVideo: {
+          type: 'boolean',
+          description: 'Whether to split video tracks',
+        },
+        includeAudio: {
+          type: 'boolean',
+          description: 'Whether to split audio tracks',
+        },
+        startTime: {
+          type: 'number',
+          description: 'Optional inclusive start time for splitting',
+        },
+        endTime: {
+          type: 'number',
+          description: 'Optional exclusive end time for splitting',
+        },
+      },
+      required: ['sequenceId', 'intervalSeconds'],
+    },
+    handler: async (args) => {
+      try {
+        const sequenceId = args.sequenceId as string;
+        const intervalSeconds = Number(args.intervalSeconds);
+        const includeVideo = args.includeVideo !== false;
+        const includeAudio = args.includeAudio === true;
+
+        if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
+          return { success: false, error: 'intervalSeconds must be a positive number' };
+        }
+
+        if (!includeVideo && !includeAudio) {
+          return {
+            success: false,
+            error: 'At least one of includeVideo or includeAudio must be true',
+          };
+        }
+
+        const project = useProjectStore.getState();
+        const sequence = project.sequences.get(sequenceId);
+        if (!sequence) {
+          return { success: false, error: `Sequence '${sequenceId}' not found` };
+        }
+
+        const timelineEnd =
+          typeof args.endTime === 'number' ? args.endTime : Number.POSITIVE_INFINITY;
+        const startTime = typeof args.startTime === 'number' ? Math.max(0, args.startTime) : 0;
+        const endTime = Math.max(startTime, timelineEnd);
+        const estimatedOperations = estimateTimelineIntervalSplitOperations(sequence, {
+          intervalSeconds,
+          includeVideo,
+          includeAudio,
+          startTime,
+          endTime,
+        });
+        if (estimatedOperations > MAX_INTERVAL_SPLIT_OPERATIONS) {
+          return {
+            success: false,
+            error:
+              `split_timeline_by_interval would execute ${estimatedOperations} split operations, ` +
+              `which exceeds the safety limit of ${MAX_INTERVAL_SPLIT_OPERATIONS}`,
+          };
+        }
+
+        const operations = buildTimelineIntervalSplitOperations(sequence, {
+          intervalSeconds,
+          includeVideo,
+          includeAudio,
+          startTime,
+          endTime,
+        });
+
+        const executedOperations: Array<
+          Pick<IntervalSplitOperation, 'trackId' | 'trackKind' | 'clipId' | 'splitTime'>
+        > = [];
+
+        for (const operation of operations) {
+          await executeAgentCommand('SplitClip', {
+            sequenceId,
+            trackId: operation.trackId,
+            clipId: operation.clipId,
+            splitTime: operation.splitTime,
+          });
+          executedOperations.push(operation);
+        }
+
+        logger.debug('split_timeline_by_interval executed', {
+          sequenceId,
+          intervalSeconds,
+          operationCount: executedOperations.length,
+        });
+        return {
+          success: true,
+          result: {
+            sequenceId,
+            intervalSeconds,
+            includeVideo,
+            includeAudio,
+            startTime,
+            endTime,
+            operationsExecuted: executedOperations.length,
+            operations: executedOperations,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('split_timeline_by_interval failed', { error: message });
         return { success: false, error: message };
       }
     },
@@ -680,6 +965,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
     name: 'insert_clip',
     description: 'Insert a new clip from an asset onto the timeline',
     category: 'clip',
+    outputContract: getToolOutputContract('insert_clip') ?? undefined,
     parameters: {
       type: 'object',
       properties: {
@@ -774,6 +1060,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
     description:
       'Insert a clip from a workspace file by its relative path or name. Automatically registers the file as a project asset if not already registered, then inserts it onto the timeline. This is the preferred way to add workspace files to the timeline.',
     category: 'clip',
+    outputContract: getToolOutputContract('insert_clip_from_file') ?? undefined,
     parameters: {
       type: 'object',
       properties: {
@@ -1730,8 +2017,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
               applyProjectState(draft, freshState);
             });
           } catch (syncError) {
-            const syncMessage =
-              syncError instanceof Error ? syncError.message : String(syncError);
+            const syncMessage = syncError instanceof Error ? syncError.message : String(syncError);
             syncWarning = syncMessage;
             logger.warn('apply_editing_style executed but state refresh failed', {
               error: syncMessage,

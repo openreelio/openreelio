@@ -432,6 +432,89 @@ describe('AgenticEngine', () => {
       expect(events.some((e) => e.type === 'session_complete')).toBe(true);
     });
 
+    it('should recover when planning first returns a read-only edit plan', async () => {
+      const analysisOnlyThought: Thought = {
+        understanding: 'The user wants the timeline split into 1-second segments',
+        requirements: ['Track clip list', 'Timeline duration'],
+        uncertainties: [],
+        approach: 'First inspect the timeline, then execute split operations.',
+        needsMoreInfo: false,
+      };
+
+      const analysisOnlyPlan: Plan = {
+        goal: 'Split the timeline into 1-second segments',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'get_track_clips',
+            args: { trackId: 'track-1' },
+            description: 'Inspect clips on the target track',
+            riskLevel: 'low',
+            estimatedDuration: 50,
+          },
+          {
+            id: 'step-2',
+            tool: 'get_timeline_info',
+            args: { sequenceId: 'sequence-1' },
+            description: 'Inspect timeline duration',
+            riskLevel: 'low',
+            estimatedDuration: 50,
+          },
+        ],
+        estimatedTotalDuration: 100,
+        requiresApproval: false,
+        rollbackStrategy: 'None needed for analysis',
+      };
+
+      const executionPlan: Plan = {
+        goal: 'Perform the first timeline split',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'split_clip',
+            args: { clipId: 'clip-1', position: 1 },
+            description: 'Split the first clip at 1 second',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+        ],
+        estimatedTotalDuration: 100,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo split',
+      };
+
+      const executionObservation: Observation = {
+        goalAchieved: true,
+        stateChanges: [
+          { type: 'clip_created', target: 'clip-2', details: { splitFrom: 'clip-1' } },
+        ],
+        summary: 'Split the clip at 1 second.',
+        confidence: 0.95,
+        needsIteration: false,
+      };
+
+      let callCount = 0;
+      vi.spyOn(mockLLM, 'generateStructured').mockImplementation(async () => {
+        callCount += 1;
+        if (callCount === 1) return analysisOnlyThought;
+        if (callCount === 2) return analysisOnlyPlan;
+        if (callCount === 3) return executionPlan;
+        return executionObservation;
+      });
+
+      const result = await engine.run(
+        'Split the video every 1 second',
+        agentContext,
+        executionContext,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.iterations).toBe(1);
+      expect(mockToolExecutor.wasToolCalled('get_track_clips')).toBe(false);
+      expect(mockToolExecutor.wasToolCalled('get_timeline_info')).toBe(false);
+      expect(mockToolExecutor.wasToolCalled('split_clip')).toBe(true);
+    });
+
     it('should handle clarification needed', async () => {
       const clarificationThought: Thought = {
         understanding: 'User wants to do something with a clip',

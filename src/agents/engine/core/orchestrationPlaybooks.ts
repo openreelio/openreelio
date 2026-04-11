@@ -5,6 +5,7 @@ import type { StepValueReference } from './stepReferences';
 export type OrchestrationPlaybookId =
   | 'broll_music_subtitles'
   | 'generate_and_place'
+  | 'timeline_interval_split'
   | 'insert_and_segment'
   | 'stock_media_search'
   | 'auto_caption'
@@ -82,6 +83,20 @@ const SEGMENT_KEYWORDS = [
   /분할/i,
   /나누/i,
 ];
+
+const TIMELINE_SPLIT_SCOPE_KEYWORDS = [
+  /timeline/i,
+  /all\s+(?:clips?|tracks?)/i,
+  /(?:whole|entire)\s+(?:timeline|sequence)/i,
+  /(?:video|audio|sound)\s+(?:on|across)\s+(?:the\s+)?timeline/i,
+  /(?:all|every)\s+(?:video|audio|clips?|tracks?)/i,
+  /타임라인/i,
+  /전체\s*(?:타임라인|클립|트랙)?/i,
+  /모든\s*(?:클립|트랙|영상|비디오|오디오)/i,
+];
+
+const AUDIO_SCOPE_KEYWORDS = [/\baudio\b/i, /\bsound\b/i, /오디오/i, /소리/i, /음성/i];
+const VIDEO_SCOPE_KEYWORDS = [/\bvideo\b/i, /\bclip\b/i, /영상/i, /비디오/i];
 
 const STOCK_KEYWORDS = [
   /\bstock\b/i,
@@ -209,6 +224,11 @@ export function buildOrchestrationPlaybook(
     return insertAndSegment;
   }
 
+  const timelineIntervalSplit = buildTimelineIntervalSplitPlaybook(playbookContext);
+  if (timelineIntervalSplit) {
+    return timelineIntervalSplit;
+  }
+
   const brollMusicSubtitles = buildBrollMusicSubtitlesPlaybook(playbookContext);
   if (brollMusicSubtitles) {
     return brollMusicSubtitles;
@@ -260,14 +280,22 @@ function buildInsertAndSegmentPlaybook(
   }
 
   const assetDuration = targetAsset.duration;
-  if (typeof assetDuration !== 'number' || !Number.isFinite(assetDuration) || assetDuration <= segmentDurationSec) {
+  if (
+    typeof assetDuration !== 'number' ||
+    !Number.isFinite(assetDuration) ||
+    assetDuration <= segmentDurationSec
+  ) {
     return null;
   }
 
   const MAX_SEGMENT_SPLITS = 50;
   const MIN_SEGMENT_TAIL_SECONDS = 0.05;
 
-  const splitBoundaries = buildSegmentBoundaries(assetDuration, segmentDurationSec, MIN_SEGMENT_TAIL_SECONDS);
+  const splitBoundaries = buildSegmentBoundaries(
+    assetDuration,
+    segmentDurationSec,
+    MIN_SEGMENT_TAIL_SECONDS,
+  );
   if (splitBoundaries.length === 0 || splitBoundaries.length > MAX_SEGMENT_SPLITS) {
     return null;
   }
@@ -325,6 +353,69 @@ function buildInsertAndSegmentPlaybook(
       requiresApproval: false,
       rollbackStrategy:
         'Undo the split operations in reverse order, then remove the inserted source clip if needed.',
+    },
+  };
+}
+
+function buildTimelineIntervalSplitPlaybook(
+  playbookContext: PlaybookContext,
+): OrchestrationPlaybookMatch | null {
+  const { text, context, toolExecutor } = playbookContext;
+
+  if (!matchesAny(text, SEGMENT_KEYWORDS) || !matchesAny(text, TIMELINE_SPLIT_SCOPE_KEYWORDS)) {
+    return null;
+  }
+
+  if (
+    matchesAny(text, INSERT_KEYWORDS) ||
+    !hasTools(toolExecutor, ['split_timeline_by_interval'])
+  ) {
+    return null;
+  }
+
+  const intervalSeconds = parseSegmentIntervalSeconds(text);
+  if (!intervalSeconds || !context.sequenceId) {
+    return null;
+  }
+
+  const mentionsAudio = matchesAny(text, AUDIO_SCOPE_KEYWORDS);
+  const mentionsVideo = matchesAny(text, VIDEO_SCOPE_KEYWORDS);
+  const includeAudio = mentionsAudio || (!mentionsAudio && !mentionsVideo);
+  const includeVideo = mentionsVideo || (!mentionsAudio && !mentionsVideo);
+  const trackKinds = context.availableTracks.map((track) => track.type);
+  const canSplitVideo = includeVideo && trackKinds.includes('video');
+  const canSplitAudio = includeAudio && trackKinds.includes('audio');
+
+  if (!canSplitVideo && !canSplitAudio) {
+    return null;
+  }
+
+  const steps: PlanStep[] = [
+    {
+      id: 'playbook_split_timeline_by_interval',
+      tool: 'split_timeline_by_interval',
+      args: {
+        sequenceId: context.sequenceId,
+        intervalSeconds,
+        includeVideo: canSplitVideo,
+        includeAudio: canSplitAudio,
+      },
+      description: `Split unlocked ${canSplitVideo && canSplitAudio ? 'video and audio' : canSplitAudio ? 'audio' : 'video'} clips every ${formatPlanSeconds(intervalSeconds)}`,
+      riskLevel: 'medium',
+      estimatedDuration: 1200,
+    },
+  ];
+
+  return {
+    id: 'timeline_interval_split',
+    confidence: 0.92,
+    plan: {
+      goal: `Split timeline clips every ${formatPlanSeconds(intervalSeconds)}`,
+      steps,
+      estimatedTotalDuration: estimateTotalDuration(steps),
+      requiresApproval: false,
+      rollbackStrategy:
+        'Undo the generated split operations from the edit history if the segmentation is not desired.',
     },
   };
 }

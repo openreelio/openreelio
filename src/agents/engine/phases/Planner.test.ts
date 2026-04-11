@@ -96,6 +96,42 @@ describe('Planner', () => {
 
     mockToolExecutor.registerTool({
       info: {
+        name: 'get_track_clips',
+        description: 'Get clips on a track',
+        category: 'analysis',
+        riskLevel: 'low',
+        supportsUndo: false,
+        parallelizable: true,
+      },
+      parameters: {
+        type: 'object',
+        properties: {
+          trackId: { type: 'string' },
+        },
+      },
+      required: ['trackId'],
+    });
+
+    mockToolExecutor.registerTool({
+      info: {
+        name: 'get_clips_at_time',
+        description: 'Get clips at a time point',
+        category: 'analysis',
+        riskLevel: 'low',
+        supportsUndo: false,
+        parallelizable: true,
+      },
+      parameters: {
+        type: 'object',
+        properties: {
+          time: { type: 'number' },
+        },
+      },
+      required: ['time'],
+    });
+
+    mockToolExecutor.registerTool({
+      info: {
         name: 'insert_clip',
         description: 'Insert an asset clip into timeline',
         category: 'editing',
@@ -137,7 +173,15 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      const result = await planner.plan(sampleThought, context);
+      const analysisThought: Thought = {
+        understanding: 'User wants to analyze the current timeline',
+        requirements: ['Timeline info', 'Audio analysis'],
+        uncertainties: [],
+        approach: 'Collect read-only analysis in parallel',
+        needsMoreInfo: false,
+      };
+
+      const result = await planner.plan(analysisThought, context);
 
       expect(result.goal).toBe('Split the clip at 5 seconds');
       expect(result.steps).toHaveLength(1);
@@ -164,7 +208,15 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      const result = await planner.plan(sampleThought, context);
+      const analysisThought: Thought = {
+        understanding: 'User wants to analyze the current timeline',
+        requirements: ['Timeline info', 'Audio analysis'],
+        uncertainties: [],
+        approach: 'Collect read-only analysis in parallel',
+        needsMoreInfo: false,
+      };
+
+      const result = await planner.plan(analysisThought, context);
 
       expect(result.steps[0].tool).toBe('split_clip');
     });
@@ -209,7 +261,15 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      const result = await planner.plan(sampleThought, context);
+      const analysisThought: Thought = {
+        understanding: 'User wants to analyze the current timeline',
+        requirements: ['Timeline info', 'Audio analysis'],
+        uncertainties: [],
+        approach: 'Collect read-only analysis in parallel',
+        needsMoreInfo: false,
+      };
+
+      const result = await planner.plan(analysisThought, context);
 
       expect(result.steps[0].tool).toBe('add_caption');
     });
@@ -875,6 +935,8 @@ describe('Planner', () => {
       expect(systemMessage?.content).toContain('file');
       expect(systemMessage?.content).toContain('data.clipId');
       expect(systemMessage?.content).toContain('data.newClipId');
+      expect(systemMessage?.content).toContain('data.clips[n].id');
+      expect(systemMessage?.content).toContain('data[n].id');
       expect(systemMessage?.content).toContain('timelineIn');
       expect(systemMessage?.content).toContain('atTimelineSec');
       expect(systemMessage?.content).toContain('filePath');
@@ -1270,7 +1332,15 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      const result = await planner.plan(sampleThought, context);
+      const analysisThought: Thought = {
+        understanding: 'User wants to analyze the current timeline',
+        requirements: ['Timeline info', 'Audio analysis'],
+        uncertainties: [],
+        approach: 'Collect read-only analysis in parallel',
+        needsMoreInfo: false,
+      };
+
+      const result = await planner.plan(analysisThought, context);
 
       // Both steps are parallelizable and have no dependencies
       const step1 = result.steps.find((s) => s.id === 'step-1');
@@ -1347,6 +1417,52 @@ describe('Planner', () => {
           },
         ],
         estimatedTotalDuration: 100,
+        requiresApproval: false,
+        rollbackStrategy: 'N/A',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
+    });
+
+    it('should reject read-only plans for edit intents', async () => {
+      const mockPlan: Plan = {
+        goal: 'Split the timeline every 1 second',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'get_timeline_info',
+            args: { sequenceId: 'seq-1' },
+            description: 'Inspect timeline info',
+            riskLevel: 'low',
+            estimatedDuration: 50,
+          },
+        ],
+        estimatedTotalDuration: 50,
+        requiresApproval: false,
+        rollbackStrategy: 'N/A',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
+    });
+
+    it('should reject read-only plans when mutation intent only appears in thought context', async () => {
+      const mockPlan: Plan = {
+        goal: 'Continue the task',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'get_timeline_info',
+            args: { sequenceId: 'seq-1' },
+            description: 'Inspect timeline info',
+            riskLevel: 'low',
+            estimatedDuration: 50,
+          },
+        ],
+        estimatedTotalDuration: 50,
         requiresApproval: false,
         rollbackStrategy: 'N/A',
       };
@@ -1568,6 +1684,41 @@ describe('Planner', () => {
           },
         ],
         estimatedTotalDuration: 200,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
+    });
+
+    it('should reject invalid output paths for get_clips_at_time references', async () => {
+      const mockPlan: Plan = {
+        goal: 'Split the clip at 3 seconds',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'get_clips_at_time',
+            args: { time: 3 },
+            description: 'Find clips at 3 seconds',
+            riskLevel: 'low',
+            estimatedDuration: 50,
+          },
+          {
+            id: 'step-2',
+            tool: 'split_clip',
+            args: {
+              clipId: { $fromStep: 'step-1', $path: 'data[0].clipId' },
+              position: 3,
+            },
+            description: 'Split the clip at 3 seconds',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+            dependsOn: ['step-1'],
+          },
+        ],
+        estimatedTotalDuration: 150,
         requiresApproval: false,
         rollbackStrategy: 'Undo',
       };

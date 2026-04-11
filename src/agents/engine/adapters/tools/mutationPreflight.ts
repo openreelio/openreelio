@@ -1,23 +1,8 @@
 import type { ExecutionContext } from '../../ports/IToolExecutor';
-import {
-  getAssetCatalogSnapshot,
-  getTimelineSnapshot,
-} from '@/agents/tools/storeAccessor';
+import { getAssetCatalogSnapshot, getTimelineSnapshot } from '@/agents/tools/storeAccessor';
 import { useProjectStore } from '@/stores/projectStore';
-
-const READ_ONLY_TOOL_PREFIXES = [
-  'get_',
-  'list_',
-  'find_',
-  'search_',
-  'analyze_',
-  'inspect_',
-  'query_',
-  'read_',
-  'check_',
-  'compare_',
-  'estimate_',
-];
+export { isReadOnlyToolName, requiresProjectMutationPreflight } from '../../core/toolSemantics';
+import { requiresProjectMutationPreflight } from '../../core/toolSemantics';
 
 const ID_PLACEHOLDER_PATTERNS: RegExp[] = [
   /(?:^|[_-])(placeholder|example|sample|dummy|temp|todo|tbd|unknown)(?:$|[_-])/i,
@@ -26,58 +11,6 @@ const ID_PLACEHOLDER_PATTERNS: RegExp[] = [
 ];
 
 const TRACK_ALIAS_PATTERNS: RegExp[] = [/^(video|audio)_[0-9]+$/i];
-
-const PROJECT_MUTATION_CATEGORIES = new Set([
-  'timeline',
-  'clip',
-  'track',
-  'effect',
-  'transition',
-  'audio',
-]);
-
-const PROJECT_MUTATION_UTILITY_TOOLS = new Set([
-  'add_caption',
-  'update_caption',
-  'delete_caption',
-  'style_caption',
-  'add_captions_from_transcription',
-  'import_captions_from_file',
-]);
-
-const READ_ONLY_EXACT_TOOL_NAMES = new Set([
-  'check_generation_status',
-  'estimate_generation_cost',
-]);
-
-export function isReadOnlyToolName(toolName: string, category?: string | null): boolean {
-  const normalized = toolName.trim().toLowerCase();
-  const normalizedCategory = category?.trim().toLowerCase() ?? null;
-
-  if (normalizedCategory === 'analysis' || READ_ONLY_EXACT_TOOL_NAMES.has(normalized)) {
-    return true;
-  }
-
-  return READ_ONLY_TOOL_PREFIXES.some((prefix) => normalized.startsWith(prefix));
-}
-
-export function requiresProjectMutationPreflight(
-  toolName: string,
-  category?: string | null,
-): boolean {
-  const normalized = toolName.trim().toLowerCase();
-  const normalizedCategory = category?.trim().toLowerCase() ?? null;
-
-  if (normalized === 'execute_plan' || normalized === 'edit') {
-    return true;
-  }
-
-  if (PROJECT_MUTATION_UTILITY_TOOLS.has(normalized)) {
-    return true;
-  }
-
-  return normalizedCategory !== null && PROJECT_MUTATION_CATEGORIES.has(normalizedCategory);
-}
 
 export function validateMutationStateRevision(
   context: ExecutionContext,
@@ -95,8 +28,8 @@ export function validateMutationStateRevision(
     return {
       currentVersion,
       error:
-        `REV_CONFLICT: expected state version ${expectedVersion}, current version ${currentVersion}. `
-        + 'Refresh context and re-plan with current IDs.',
+        `REV_CONFLICT: expected state version ${expectedVersion}, current version ${currentVersion}. ` +
+        'Refresh context and re-plan with current IDs.',
     };
   }
 
@@ -179,8 +112,8 @@ function isPlaceholderId(value: string, key: string): boolean {
   }
 
   if (
-    key.toLowerCase().includes('track')
-    && TRACK_ALIAS_PATTERNS.some((pattern) => pattern.test(value))
+    key.toLowerCase().includes('track') &&
+    TRACK_ALIAS_PATTERNS.some((pattern) => pattern.test(value))
   ) {
     return true;
   }

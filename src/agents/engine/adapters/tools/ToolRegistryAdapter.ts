@@ -408,6 +408,7 @@ export class ToolRegistryAdapter implements IToolExecutor {
       ...this.toToolInfo(tool),
       parameters: tool.parameters as unknown as Record<string, unknown>,
       required: (tool.parameters as { required?: string[] }).required,
+      outputContract: tool.outputContract,
     };
   }
 
