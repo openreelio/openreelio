@@ -276,6 +276,16 @@ function seedActiveProjectState(
   });
 }
 
+function buildBackendProjectState() {
+  const project = useProjectStore.getState();
+  return {
+    assets: Array.from(project.assets.values()),
+    sequences: Array.from(project.sequences.values()),
+    effects: Array.from(project.effects.values()),
+    activeSequenceId: project.activeSequenceId,
+  };
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -287,6 +297,13 @@ describe('BackendToolExecutor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     seedActiveProjectState();
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'get_project_state') {
+        return buildBackendProjectState();
+      }
+
+      throw new Error(`Unexpected invoke: ${command}`);
+    });
     frontend = createMockFrontendExecutor(TOOL_DEFS);
     backend = createBackendToolExecutor(frontend);
   });
@@ -924,6 +941,7 @@ describe('BackendToolExecutor', () => {
         operationIds: ['op-1'],
         executionTimeMs: 5,
       });
+      mockInvoke.mockResolvedValueOnce(buildBackendProjectState());
       mockInvoke.mockResolvedValueOnce({
         planId: 'single-2',
         success: true,
@@ -933,6 +951,7 @@ describe('BackendToolExecutor', () => {
         operationIds: ['op-2'],
         executionTimeMs: 5,
       });
+      mockInvoke.mockResolvedValueOnce(buildBackendProjectState());
 
       const result = await backend.executeBatch(
         {
@@ -1206,13 +1225,128 @@ describe('BackendToolExecutor', () => {
 
       // Editing tool → backend
       await backend.execute('split_clip', { clipId: 'c1', atTimelineSec: 5 }, CONTEXT);
-      expect(mockInvoke).toHaveBeenCalledTimes(1);
+      expect(mockInvoke).toHaveBeenCalledTimes(2);
       expect(frontend.execute).not.toHaveBeenCalled();
 
       // Analysis tool → frontend
       await backend.execute('analyze_video', { assetId: 'a1' }, CONTEXT);
       expect(frontend.execute).toHaveBeenCalledTimes(1);
-      expect(mockInvoke).toHaveBeenCalledTimes(1); // Still just the 1 call from editing
+      expect(mockInvoke).toHaveBeenCalledTimes(2); // execute_agent_plan + get_project_state
+    });
+
+    it('should sync backend-created clip ids into store for chained split steps', async () => {
+      seedActiveProjectState({ clipIds: ['clip-1'] });
+
+      const firstRefreshState = {
+        assets: [
+          createMockAsset({ id: 'asset-clip-1', name: 'clip-1.mp4', kind: 'video' }),
+          createMockAsset({ id: 'asset-clip-new', name: 'clip-new.mp4', kind: 'video' }),
+        ],
+        sequences: [
+          createMockSequence({
+            id: 'seq-1',
+            name: 'Test Sequence',
+            tracks: [
+              createMockTrack({
+                id: 'track-1',
+                kind: 'video',
+                name: 'Video 1',
+                clips: [
+                  createMockClip({ id: 'clip-1', assetId: 'asset-clip-1' }),
+                  createMockClip({ id: 'clip-new', assetId: 'asset-clip-new' }),
+                ],
+              }),
+            ],
+          }),
+        ],
+        effects: [],
+        activeSequenceId: 'seq-1',
+      };
+
+      const secondRefreshState = {
+        assets: [
+          createMockAsset({ id: 'asset-clip-1', name: 'clip-1.mp4', kind: 'video' }),
+          createMockAsset({ id: 'asset-clip-new', name: 'clip-new.mp4', kind: 'video' }),
+          createMockAsset({ id: 'asset-clip-new-2', name: 'clip-new-2.mp4', kind: 'video' }),
+        ],
+        sequences: [
+          createMockSequence({
+            id: 'seq-1',
+            name: 'Test Sequence',
+            tracks: [
+              createMockTrack({
+                id: 'track-1',
+                kind: 'video',
+                name: 'Video 1',
+                clips: [
+                  createMockClip({ id: 'clip-1', assetId: 'asset-clip-1' }),
+                  createMockClip({ id: 'clip-new', assetId: 'asset-clip-new' }),
+                  createMockClip({ id: 'clip-new-2', assetId: 'asset-clip-new-2' }),
+                ],
+              }),
+            ],
+          }),
+        ],
+        effects: [],
+        activeSequenceId: 'seq-1',
+      };
+
+      mockInvoke
+        .mockResolvedValueOnce({
+          planId: 'plan-1',
+          success: true,
+          totalSteps: 1,
+          stepsCompleted: 1,
+          stepResults: [
+            {
+              stepId: 'step-1',
+              success: true,
+              data: { createdIds: ['clip-new'] },
+              durationMs: 5,
+            },
+          ],
+          operationIds: ['op-1'],
+          executionTimeMs: 5,
+        })
+        .mockResolvedValueOnce(firstRefreshState)
+        .mockResolvedValueOnce({
+          planId: 'plan-2',
+          success: true,
+          totalSteps: 1,
+          stepsCompleted: 1,
+          stepResults: [
+            {
+              stepId: 'step-1',
+              success: true,
+              data: { createdIds: ['clip-new-2'] },
+              durationMs: 5,
+            },
+          ],
+          operationIds: ['op-2'],
+          executionTimeMs: 5,
+        })
+        .mockResolvedValueOnce(secondRefreshState);
+
+      const firstResult = await backend.execute(
+        'split_clip',
+        { clipId: 'clip-1', splitTime: 1 },
+        CONTEXT,
+      );
+      const secondResult = await backend.execute(
+        'split_clip',
+        { clipId: 'clip-new', splitTime: 2 },
+        CONTEXT,
+      );
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(true);
+      expect(useProjectStore.getState().stateVersion).toBeGreaterThan(8);
+      expect(
+        useProjectStore
+          .getState()
+          .getActiveSequence?.()
+          ?.tracks[0]?.clips.some((clip) => clip.id === 'clip-new'),
+      ).toBe(true);
     });
   });
 

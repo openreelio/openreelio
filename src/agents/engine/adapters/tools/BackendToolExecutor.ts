@@ -31,6 +31,7 @@ import { createLogger } from '@/services/logger';
 import { isMetaToolsEnabled } from '@/config/featureFlags';
 import { getVisibleMetaToolNames } from '@/agents/tools/metaTools';
 import { getWorkspaceToolNames } from '@/agents/tools/workspaceTools';
+import { useProjectStore } from '@/stores/projectStore';
 import {
   requiresProjectMutationPreflight,
   validateMutationPreconditions,
@@ -235,6 +236,8 @@ function normalizeBackendSingleStepData(
  * and delegates analysis/utility tools to the frontend fallback executor.
  */
 export class BackendToolExecutor implements IToolExecutor {
+  private readonly sessionStateVersions = new Map<string, number>();
+
   constructor(private readonly frontendExecutor: IToolExecutor) {}
 
   /**
@@ -276,8 +279,12 @@ export class BackendToolExecutor implements IToolExecutor {
     args: Record<string, unknown>,
     context: ExecutionContext,
   ): string | null {
-    const { error: revisionError } = validateMutationStateRevision(context);
+    const { error: revisionError, currentVersion } = validateMutationStateRevision(
+      context,
+      this.sessionStateVersions.get(context.sessionId),
+    );
     if (revisionError) {
+      this.rememberSessionStateVersion(context.sessionId, currentVersion);
       return revisionError;
     }
 
@@ -506,6 +513,9 @@ export class BackendToolExecutor implements IToolExecutor {
       const legacyRoute = this.tryBuildLegacyExecutePlanRoute(args, context);
       if (legacyRoute) {
         for (const step of legacyRoute.plan.steps) {
+          if ((step.dependsOn?.length ?? 0) > 0) {
+            continue;
+          }
           const preflightFailure = this.getMutationPreflightFailure(
             step.toolName.replace(/[A-Z]/g, (match) => `_${match.toLowerCase()}`),
             step.params as Record<string, unknown>,
@@ -521,11 +531,17 @@ export class BackendToolExecutor implements IToolExecutor {
         });
 
         if (!execution.ok) {
+          this.rememberSessionStateVersion(
+            context.sessionId,
+            useProjectStore.getState().stateVersion,
+          );
           return createFailureResult(
             `Backend execution error: ${execution.error}`,
             execution.duration,
           );
         }
+
+        const syncWarning = await this.syncProjectState(context.sessionId);
 
         const stepResultById = new Map(
           execution.result.stepResults.map((stepResult) => [stepResult.stepId, stepResult]),
@@ -578,6 +594,7 @@ export class BackendToolExecutor implements IToolExecutor {
           data: {
             stepsExecuted: stepResults.length,
             stepResults,
+            ...(syncWarning ? { syncWarning } : {}),
           },
           duration: execution.duration,
           undoable: true,
@@ -600,7 +617,10 @@ export class BackendToolExecutor implements IToolExecutor {
           return createFailureResult(preflightFailure, 0);
         }
       }
-      return this.frontendExecutor.execute(toolName, args, context);
+
+      const frontendResult = await this.frontendExecutor.execute(toolName, args, context);
+      this.rememberSessionStateVersion(context.sessionId, useProjectStore.getState().stateVersion);
+      return frontendResult;
     }
 
     const preflightFailure = this.getMutationPreflightFailure(
@@ -667,8 +687,11 @@ export class BackendToolExecutor implements IToolExecutor {
       metaToolAction: executionTarget.metaAction ?? null,
     });
     if (!execution.ok) {
+      this.rememberSessionStateVersion(context.sessionId, useProjectStore.getState().stateVersion);
       return createFailureResult(`Backend execution error: ${execution.error}`, execution.duration);
     }
+
+    const syncWarning = await this.syncProjectState(context.sessionId);
 
     if (execution.result.success && execution.result.stepResults.length > 0) {
       // For compound tools, aggregate all step results into the data field
@@ -688,7 +711,7 @@ export class BackendToolExecutor implements IToolExecutor {
 
       return {
         success: true,
-        data,
+        data: this.appendSyncWarning(data, syncWarning),
         duration: execution.duration,
         undoable: true,
         undoOperation: {
@@ -759,24 +782,27 @@ export class BackendToolExecutor implements IToolExecutor {
 
       for (let i = 0; i < backendTools.length; i++) {
         const { requestTool, executionTarget } = backendTools[i];
-        const preflightFailure = this.getMutationPreflightFailure(
-          executionTarget.effectiveToolName,
-          executionTarget.params,
-          context,
-        );
-        if (preflightFailure) {
-          return {
-            success: false,
-            results: [
-              {
-                tool: requestTool.name,
-                result: createFailureResult(preflightFailure, performance.now() - start),
-              },
-            ],
-            totalDuration: performance.now() - start,
-            successCount: 0,
-            failureCount: 1,
-          };
+        const shouldPreflightNow = request.mode !== 'sequential' || i === 0;
+        if (shouldPreflightNow) {
+          const preflightFailure = this.getMutationPreflightFailure(
+            executionTarget.effectiveToolName,
+            executionTarget.params,
+            context,
+          );
+          if (preflightFailure) {
+            return {
+              success: false,
+              results: [
+                {
+                  tool: requestTool.name,
+                  result: createFailureResult(preflightFailure, performance.now() - start),
+                },
+              ],
+              totalDuration: performance.now() - start,
+              successCount: 0,
+              failureCount: 1,
+            };
+          }
         }
         const exp = compoundExpanders.get(executionTarget.effectiveToolName);
 
@@ -862,6 +888,7 @@ export class BackendToolExecutor implements IToolExecutor {
 
         try {
           const planResult = await invoke<AgentPlanResult>('execute_agent_plan', { plan });
+          const syncWarning = await this.syncProjectState(context.sessionId);
 
           // If the plan failed atomically (with rollback), all tools must be
           // reported as failed — individual step slices may look successful
@@ -893,12 +920,14 @@ export class BackendToolExecutor implements IToolExecutor {
                   tool: backendTools[mapping.toolIndex].requestTool.name,
                   result: {
                     success: true,
-                    data:
+                    data: this.appendSyncWarning(
                       mapping.stepCount > 1
                         ? {
                             steps: stepSlice.map((sr) => ({ success: sr.success, data: sr.data })),
                           }
                         : stepSlice[0].data,
+                      syncWarning,
+                    ),
                     duration: totalDuration,
                     undoable: true,
                   },
@@ -990,6 +1019,59 @@ export class BackendToolExecutor implements IToolExecutor {
 
   getToolsByRisk(maxRisk: RiskLevel): ToolInfo[] {
     return this.frontendExecutor.getToolsByRisk(maxRisk);
+  }
+
+  private rememberSessionStateVersion(sessionId: string, stateVersion: number): void {
+    this.sessionStateVersions.set(sessionId, stateVersion);
+    if (this.sessionStateVersions.size <= 200) {
+      return;
+    }
+
+    const oldest = this.sessionStateVersions.keys().next().value;
+    if (typeof oldest === 'string') {
+      this.sessionStateVersions.delete(oldest);
+    }
+  }
+
+  private async syncProjectState(sessionId: string): Promise<string | null> {
+    const projectState = useProjectStore.getState();
+    if (!projectState.isLoaded || !projectState.meta) {
+      this.rememberSessionStateVersion(sessionId, projectState.stateVersion);
+      return null;
+    }
+
+    try {
+      const nextStateVersion = await projectState.refreshFromBackendMutation();
+
+      this.rememberSessionStateVersion(sessionId, nextStateVersion);
+      return null;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn('Backend execution succeeded but frontend state refresh failed', {
+        sessionId,
+        error: message,
+      });
+      this.rememberSessionStateVersion(sessionId, useProjectStore.getState().stateVersion);
+      return message;
+    }
+  }
+
+  private appendSyncWarning(data: unknown, syncWarning: string | null): unknown {
+    if (!syncWarning) {
+      return data;
+    }
+
+    if (!isRecord(data)) {
+      return {
+        data,
+        syncWarning,
+      };
+    }
+
+    return {
+      ...data,
+      syncWarning,
+    };
   }
 }
 
