@@ -173,7 +173,15 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      const result = await planner.plan(sampleThought, context);
+      const analysisThought: Thought = {
+        understanding: 'User wants to analyze the current timeline',
+        requirements: ['Timeline info', 'Audio analysis'],
+        uncertainties: [],
+        approach: 'Collect read-only analysis in parallel',
+        needsMoreInfo: false,
+      };
+
+      const result = await planner.plan(analysisThought, context);
 
       expect(result.goal).toBe('Split the clip at 5 seconds');
       expect(result.steps).toHaveLength(1);
@@ -200,7 +208,15 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      const result = await planner.plan(sampleThought, context);
+      const analysisThought: Thought = {
+        understanding: 'User wants to analyze the current timeline',
+        requirements: ['Timeline info', 'Audio analysis'],
+        uncertainties: [],
+        approach: 'Collect read-only analysis in parallel',
+        needsMoreInfo: false,
+      };
+
+      const result = await planner.plan(analysisThought, context);
 
       expect(result.steps[0].tool).toBe('split_clip');
     });
@@ -245,7 +261,15 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      const result = await planner.plan(sampleThought, context);
+      const analysisThought: Thought = {
+        understanding: 'User wants to analyze the current timeline',
+        requirements: ['Timeline info', 'Audio analysis'],
+        uncertainties: [],
+        approach: 'Collect read-only analysis in parallel',
+        needsMoreInfo: false,
+      };
+
+      const result = await planner.plan(analysisThought, context);
 
       expect(result.steps[0].tool).toBe('add_caption');
     });
@@ -1308,7 +1332,15 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      const result = await planner.plan(sampleThought, context);
+      const analysisThought: Thought = {
+        understanding: 'User wants to analyze the current timeline',
+        requirements: ['Timeline info', 'Audio analysis'],
+        uncertainties: [],
+        approach: 'Collect read-only analysis in parallel',
+        needsMoreInfo: false,
+      };
+
+      const result = await planner.plan(analysisThought, context);
 
       // Both steps are parallelizable and have no dependencies
       const step1 = result.steps.find((s) => s.id === 'step-1');
@@ -1397,6 +1429,29 @@ describe('Planner', () => {
     it('should reject read-only plans for edit intents', async () => {
       const mockPlan: Plan = {
         goal: 'Split the timeline every 1 second',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'get_timeline_info',
+            args: { sequenceId: 'seq-1' },
+            description: 'Inspect timeline info',
+            riskLevel: 'low',
+            estimatedDuration: 50,
+          },
+        ],
+        estimatedTotalDuration: 50,
+        requiresApproval: false,
+        rollbackStrategy: 'N/A',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
+    });
+
+    it('should reject read-only plans when mutation intent only appears in thought context', async () => {
+      const mockPlan: Plan = {
+        goal: 'Continue the task',
         steps: [
           {
             id: 'step-1',

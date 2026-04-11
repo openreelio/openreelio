@@ -29,6 +29,7 @@ const logger = createLogger('EditingTools');
 const DEFAULT_INSERT_CLIP_DURATION_SEC = 10;
 const DEFAULT_FREEZE_FRAME_RATE = 30;
 const SPLIT_TIME_EPSILON = 1e-6;
+const MAX_INTERVAL_SPLIT_OPERATIONS = 5000;
 
 const MARKER_COLOR_PRESETS: Record<string, Color> = {
   red: { r: 1, g: 0, b: 0 },
@@ -141,6 +142,57 @@ function buildTimelineIntervalSplitOperations(
   });
 
   return operations;
+}
+
+function estimateTimelineIntervalSplitOperations(
+  sequence: Sequence,
+  options: {
+    intervalSeconds: number;
+    includeVideo: boolean;
+    includeAudio: boolean;
+    startTime: number;
+    endTime: number;
+  },
+): number {
+  const { intervalSeconds, includeVideo, includeAudio, startTime, endTime } = options;
+  let estimatedOperations = 0;
+
+  for (const track of sequence.tracks) {
+    if (track.locked) {
+      continue;
+    }
+
+    const includeTrack =
+      (track.kind === 'video' && includeVideo) || (track.kind === 'audio' && includeAudio);
+    if (!includeTrack) {
+      continue;
+    }
+
+    for (const clip of track.clips) {
+      const clipStart = clip.place.timelineInSec;
+      const clipEnd = clipStart + clip.place.durationSec;
+      const effectiveStart = Math.max(clipStart, startTime);
+      const effectiveEnd = Math.min(clipEnd, endTime);
+
+      if (effectiveEnd - effectiveStart <= SPLIT_TIME_EPSILON) {
+        continue;
+      }
+
+      const firstBoundary =
+        Math.ceil((effectiveStart + SPLIT_TIME_EPSILON) / intervalSeconds) * intervalSeconds;
+      const availableSpan = effectiveEnd - SPLIT_TIME_EPSILON - firstBoundary;
+      if (availableSpan < 0) {
+        continue;
+      }
+
+      estimatedOperations += Math.floor(availableSpan / intervalSeconds) + 1;
+      if (estimatedOperations > MAX_INTERVAL_SPLIT_OPERATIONS) {
+        return estimatedOperations;
+      }
+    }
+  }
+
+  return estimatedOperations;
 }
 
 function parseHexMarkerColor(input: string): Color | undefined {
@@ -691,6 +743,22 @@ const EDITING_TOOLS: ToolDefinition[] = [
           typeof args.endTime === 'number' ? args.endTime : Number.POSITIVE_INFINITY;
         const startTime = typeof args.startTime === 'number' ? Math.max(0, args.startTime) : 0;
         const endTime = Math.max(startTime, timelineEnd);
+        const estimatedOperations = estimateTimelineIntervalSplitOperations(sequence, {
+          intervalSeconds,
+          includeVideo,
+          includeAudio,
+          startTime,
+          endTime,
+        });
+        if (estimatedOperations > MAX_INTERVAL_SPLIT_OPERATIONS) {
+          return {
+            success: false,
+            error:
+              `split_timeline_by_interval would execute ${estimatedOperations} split operations, ` +
+              `which exceeds the safety limit of ${MAX_INTERVAL_SPLIT_OPERATIONS}`,
+          };
+        }
+
         const operations = buildTimelineIntervalSplitOperations(sequence, {
           intervalSeconds,
           includeVideo,

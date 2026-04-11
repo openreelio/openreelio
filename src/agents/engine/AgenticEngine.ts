@@ -2138,7 +2138,15 @@ export class AgenticEngine {
       return true;
     }
 
-    return hasMutationIntentText(input, thought?.understanding, thought?.approach, plan.goal);
+    const intentSignals = [plan.goal, thought?.understanding].filter(
+      (value): value is string => typeof value === 'string' && value.trim().length > 0,
+    );
+
+    if (intentSignals.length === 0) {
+      return hasMutationIntentText(input);
+    }
+
+    return hasMutationIntentText(...intentSignals);
   }
 
   private isMutatingTool(toolName: string): boolean {

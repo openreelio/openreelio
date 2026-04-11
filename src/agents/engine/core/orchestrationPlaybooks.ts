@@ -87,16 +87,12 @@ const SEGMENT_KEYWORDS = [
 const TIMELINE_SPLIT_SCOPE_KEYWORDS = [
   /timeline/i,
   /all\s+(?:clips?|tracks?)/i,
-  /video\s*(?:and|&)\s*audio/i,
-  /audio\s*(?:and|&)\s*video/i,
-  /sound/i,
+  /(?:whole|entire)\s+(?:timeline|sequence)/i,
+  /(?:video|audio|sound)\s+(?:on|across)\s+(?:the\s+)?timeline/i,
+  /(?:all|every)\s+(?:video|audio|clips?|tracks?)/i,
   /타임라인/i,
-  /전체/i,
-  /모든/i,
-  /영상/i,
-  /비디오/i,
-  /오디오/i,
-  /소리/i,
+  /전체\s*(?:타임라인|클립|트랙)?/i,
+  /모든\s*(?:클립|트랙|영상|비디오|오디오)/i,
 ];
 
 const AUDIO_SCOPE_KEYWORDS = [/\baudio\b/i, /\bsound\b/i, /오디오/i, /소리/i, /음성/i];
@@ -223,14 +219,14 @@ export function buildOrchestrationPlaybook(
     return generateAndPlace;
   }
 
-  const timelineIntervalSplit = buildTimelineIntervalSplitPlaybook(playbookContext);
-  if (timelineIntervalSplit) {
-    return timelineIntervalSplit;
-  }
-
   const insertAndSegment = buildInsertAndSegmentPlaybook(playbookContext);
   if (insertAndSegment) {
     return insertAndSegment;
+  }
+
+  const timelineIntervalSplit = buildTimelineIntervalSplitPlaybook(playbookContext);
+  if (timelineIntervalSplit) {
+    return timelineIntervalSplit;
   }
 
   const brollMusicSubtitles = buildBrollMusicSubtitlesPlaybook(playbookContext);
@@ -382,8 +378,10 @@ function buildTimelineIntervalSplitPlaybook(
     return null;
   }
 
-  const includeAudio = matchesAny(text, AUDIO_SCOPE_KEYWORDS);
-  const includeVideo = matchesAny(text, VIDEO_SCOPE_KEYWORDS) || !includeAudio;
+  const mentionsAudio = matchesAny(text, AUDIO_SCOPE_KEYWORDS);
+  const mentionsVideo = matchesAny(text, VIDEO_SCOPE_KEYWORDS);
+  const includeAudio = mentionsAudio || (!mentionsAudio && !mentionsVideo);
+  const includeVideo = mentionsVideo || (!mentionsAudio && !mentionsVideo);
   const trackKinds = context.availableTracks.map((track) => track.type);
   const canSplitVideo = includeVideo && trackKinds.includes('video');
   const canSplitAudio = includeAudio && trackKinds.includes('audio');

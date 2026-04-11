@@ -206,6 +206,41 @@ describe('buildOrchestrationPlaybook', () => {
     });
   });
 
+  it('defaults to splitting both video and audio when the request targets the timeline without media qualifiers', () => {
+    const thought: Thought = {
+      understanding: 'Split the timeline every 1 second',
+      requirements: ['timeline split'],
+      uncertainties: [],
+      approach: 'Apply a regular 1-second split across the whole timeline',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor(['split_timeline_by_interval']);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match?.id).toBe('timeline_interval_split');
+    expect(match?.plan.steps[0]).toMatchObject({
+      args: {
+        includeVideo: true,
+        includeAudio: true,
+      },
+    });
+  });
+
+  it('does not match whole-timeline interval split for single-clip split wording', () => {
+    const thought: Thought = {
+      understanding: 'Split this video clip every 1 second',
+      requirements: ['split one clip'],
+      uncertainties: [],
+      approach: 'Segment the selected clip only',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor(['split_timeline_by_interval']);
+
+    expect(buildOrchestrationPlaybook(thought, createContext(), toolExecutor)).toBeNull();
+  });
+
   it('returns null for insert-and-segment requests when the target asset has no duration', () => {
     const thought: Thought = {
       understanding:

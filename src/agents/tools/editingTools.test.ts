@@ -363,6 +363,194 @@ describe('editingTools — extended tools', () => {
         },
       ]);
     });
+
+    it('should reject invalid interval values', async () => {
+      vi.mocked(useProjectStore.getState).mockReturnValue({
+        isLoaded: true,
+        meta: { id: 'project-1', name: 'Test' },
+        sequences: new Map(),
+      } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+      const tool = globalToolRegistry.get('split_timeline_by_interval');
+      const result = await tool!.handler(
+        {
+          sequenceId: 'seq-1',
+          intervalSeconds: 0,
+        },
+        CTX,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('positive number');
+    });
+
+    it('should reject requests when both media flags are disabled', async () => {
+      vi.mocked(useProjectStore.getState).mockReturnValue({
+        isLoaded: true,
+        meta: { id: 'project-1', name: 'Test' },
+        sequences: new Map(),
+      } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+      const tool = globalToolRegistry.get('split_timeline_by_interval');
+      const result = await tool!.handler(
+        {
+          sequenceId: 'seq-1',
+          intervalSeconds: 1,
+          includeVideo: false,
+          includeAudio: false,
+        },
+        CTX,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('At least one');
+    });
+
+    it('should skip locked tracks and zero-length ranges', async () => {
+      const executeCommand = vi.fn();
+
+      vi.mocked(useProjectStore.getState).mockReturnValue({
+        isLoaded: true,
+        meta: { id: 'project-1', name: 'Test' },
+        executeCommand,
+        sequences: new Map([
+          [
+            'seq-1',
+            {
+              id: 'seq-1',
+              name: 'Main',
+              format: '16:9',
+              fps: 30,
+              sampleRate: 48000,
+              tracks: [
+                {
+                  id: 'track-video-locked',
+                  kind: 'video',
+                  name: 'Video Locked',
+                  clips: [
+                    {
+                      id: 'clip-video-locked',
+                      assetId: 'asset-video-locked',
+                      place: { timelineInSec: 0, durationSec: 5 },
+                      range: { sourceInSec: 0, sourceOutSec: 5 },
+                      speed: 1,
+                      opacity: 1,
+                      effects: [],
+                    },
+                  ],
+                  blendMode: 'normal',
+                  muted: false,
+                  locked: true,
+                  visible: true,
+                  volume: 1,
+                },
+                {
+                  id: 'track-audio-1',
+                  kind: 'audio',
+                  name: 'Audio 1',
+                  clips: [
+                    {
+                      id: 'clip-audio-zero',
+                      assetId: 'asset-audio-zero',
+                      place: { timelineInSec: 2, durationSec: 0 },
+                      range: { sourceInSec: 0, sourceOutSec: 0 },
+                      speed: 1,
+                      opacity: 1,
+                      effects: [],
+                    },
+                  ],
+                  blendMode: 'normal',
+                  muted: false,
+                  locked: false,
+                  visible: true,
+                  volume: 1,
+                },
+              ],
+              markers: [],
+            },
+          ],
+        ]),
+      } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+      const tool = globalToolRegistry.get('split_timeline_by_interval');
+      const result = await tool!.handler(
+        {
+          sequenceId: 'seq-1',
+          intervalSeconds: 1,
+          includeVideo: true,
+          includeAudio: true,
+        },
+        CTX,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.result).toEqual(
+        expect.objectContaining({
+          operationsExecuted: 0,
+        }),
+      );
+      expect(executeCommand).not.toHaveBeenCalled();
+    });
+
+    it('should fail when the requested split count exceeds the safety cap', async () => {
+      const executeCommand = vi.fn();
+
+      vi.mocked(useProjectStore.getState).mockReturnValue({
+        isLoaded: true,
+        meta: { id: 'project-1', name: 'Test' },
+        executeCommand,
+        sequences: new Map([
+          [
+            'seq-1',
+            {
+              id: 'seq-1',
+              name: 'Main',
+              format: '16:9',
+              fps: 30,
+              sampleRate: 48000,
+              tracks: [
+                {
+                  id: 'track-video-1',
+                  kind: 'video',
+                  name: 'Video 1',
+                  clips: [
+                    {
+                      id: 'clip-video-long',
+                      assetId: 'asset-video-long',
+                      place: { timelineInSec: 0, durationSec: 6001 },
+                      range: { sourceInSec: 0, sourceOutSec: 6001 },
+                      speed: 1,
+                      opacity: 1,
+                      effects: [],
+                    },
+                  ],
+                  blendMode: 'normal',
+                  muted: false,
+                  locked: false,
+                  visible: true,
+                  volume: 1,
+                },
+              ],
+              markers: [],
+            },
+          ],
+        ]),
+      } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+      const tool = globalToolRegistry.get('split_timeline_by_interval');
+      const result = await tool!.handler(
+        {
+          sequenceId: 'seq-1',
+          intervalSeconds: 1,
+          includeVideo: true,
+        },
+        CTX,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('safety limit');
+      expect(executeCommand).not.toHaveBeenCalled();
+    });
   });
 
   describe('freeze_frame', () => {

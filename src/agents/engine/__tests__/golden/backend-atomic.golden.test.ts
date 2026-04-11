@@ -16,12 +16,7 @@ import {
 } from '../../adapters/tools/MockToolExecutor';
 import type { ExecutionContext } from '../../ports/IToolExecutor';
 import { useProjectStore } from '@/stores/projectStore';
-import {
-  createMockAsset,
-  createMockClip,
-  createMockSequence,
-  createMockTrack,
-} from '@/test/mocks';
+import { createMockAsset, createMockClip, createMockSequence, createMockTrack } from '@/test/mocks';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -32,6 +27,16 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 const mockInvoke = vi.mocked(invoke);
+
+function buildBackendProjectState() {
+  const project = useProjectStore.getState();
+  return {
+    assets: Array.from(project.assets.values()),
+    sequences: Array.from(project.sequences.values()),
+    effects: Array.from(project.effects.values()),
+    activeSequenceId: project.activeSequenceId,
+  };
+}
 
 function seedActiveProjectState(): void {
   const clip1 = createMockClip({
@@ -83,6 +88,13 @@ describe('Golden: backend-atomic', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     seedActiveProjectState();
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'get_project_state') {
+        return buildBackendProjectState();
+      }
+
+      throw new Error(`Unexpected invoke: ${command}`);
+    });
     mockToolExecutor = createMockToolExecutor();
 
     // Register editing tools (category: 'clip' → backend route)
@@ -203,7 +215,7 @@ describe('Golden: backend-atomic', () => {
     expect(result.failureCount).toBe(0);
 
     // Single IPC call containing all 3 steps
-    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
     expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
       plan: expect.objectContaining({
         steps: [
@@ -295,27 +307,42 @@ describe('Golden: backend-atomic', () => {
     // Mixed batches execute per-tool in order (not partitioned) to preserve
     // the caller's intended execution sequence.
     // Backend tools are routed individually via execute() calls.
-    mockInvoke.mockResolvedValueOnce({
-      planId: 'single-1',
-      success: true,
-      totalSteps: 1,
-      stepsCompleted: 1,
-      stepResults: [
-        { stepId: 'step-1', success: true, data: { newClipId: 'clip-2' }, durationMs: 20 },
-      ],
-      operationIds: ['op-1'],
-      executionTimeMs: 20,
-    });
-    mockInvoke.mockResolvedValueOnce({
-      planId: 'single-2',
-      success: true,
-      totalSteps: 1,
-      stepsCompleted: 1,
-      stepResults: [
-        { stepId: 'step-1', success: true, data: { moved: true }, durationMs: 15 },
-      ],
-      operationIds: ['op-2'],
-      executionTimeMs: 15,
+    const backendPlanResults = [
+      {
+        planId: 'single-1',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { newClipId: 'clip-2' }, durationMs: 20 },
+        ],
+        operationIds: ['op-1'],
+        executionTimeMs: 20,
+      },
+      {
+        planId: 'single-2',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [{ stepId: 'step-1', success: true, data: { moved: true }, durationMs: 15 }],
+        operationIds: ['op-2'],
+        executionTimeMs: 15,
+      },
+    ];
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'get_project_state') {
+        return buildBackendProjectState();
+      }
+
+      if (command === 'execute_agent_plan') {
+        const nextResult = backendPlanResults.shift();
+        if (!nextResult) {
+          throw new Error('Unexpected execute_agent_plan call');
+        }
+        return nextResult;
+      }
+
+      throw new Error(`Unexpected invoke: ${command}`);
     });
 
     const result = await backendExecutor.executeBatch(
@@ -339,7 +366,7 @@ describe('Golden: backend-atomic', () => {
     expect(result.results[2].tool).toBe('get_timeline_info');
 
     // Backend IPC: 2 separate single-tool plans (not one combined plan)
-    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(mockInvoke).toHaveBeenCalledTimes(4);
 
     // Frontend executor handled the analysis tool
     expect(mockToolExecutor.wasToolCalled('get_timeline_info')).toBe(true);

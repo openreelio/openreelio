@@ -1348,6 +1348,39 @@ describe('BackendToolExecutor', () => {
           ?.tracks[0]?.clips.some((clip) => clip.id === 'clip-new'),
       ).toBe(true);
     });
+
+    it('should poison the session after backend sync failure and block later mutations', async () => {
+      mockInvoke
+        .mockResolvedValueOnce({
+          planId: 'plan-1',
+          success: true,
+          totalSteps: 1,
+          stepsCompleted: 1,
+          stepResults: [{ stepId: 'step-1', success: true, data: { ok: true }, durationMs: 5 }],
+          operationIds: ['op-1'],
+          executionTimeMs: 5,
+        })
+        .mockRejectedValueOnce(new Error('refresh failed'));
+
+      const firstResult = await backend.execute(
+        'split_clip',
+        { clipId: 'clip-1', splitTime: 1 },
+        CONTEXT,
+      );
+      expect(firstResult.success).toBe(true);
+      expect(firstResult.data).toEqual(expect.objectContaining({ syncWarning: 'refresh failed' }));
+
+      const callCountAfterFirstMutation = mockInvoke.mock.calls.length;
+      const secondResult = await backend.execute(
+        'split_clip',
+        { clipId: 'clip-1', splitTime: 2 },
+        CONTEXT,
+      );
+
+      expect(secondResult.success).toBe(false);
+      expect(secondResult.error).toContain('SESSION_SYNC_FAILED');
+      expect(mockInvoke.mock.calls.length).toBe(callCountAfterFirstMutation);
+    });
   });
 
   // ===========================================================================

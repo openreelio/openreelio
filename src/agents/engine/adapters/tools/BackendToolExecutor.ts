@@ -237,6 +237,7 @@ function normalizeBackendSingleStepData(
  */
 export class BackendToolExecutor implements IToolExecutor {
   private readonly sessionStateVersions = new Map<string, number>();
+  private readonly poisonedSessions = new Set<string>();
 
   constructor(private readonly frontendExecutor: IToolExecutor) {}
 
@@ -279,6 +280,13 @@ export class BackendToolExecutor implements IToolExecutor {
     args: Record<string, unknown>,
     context: ExecutionContext,
   ): string | null {
+    if (this.poisonedSessions.has(context.sessionId)) {
+      return (
+        'SESSION_SYNC_FAILED: a previous backend mutation succeeded but local state refresh failed. ' +
+        'Refresh context and re-plan before running more mutating steps.'
+      );
+    }
+
     const { error: revisionError, currentVersion } = validateMutationStateRevision(
       context,
       this.sessionStateVersions.get(context.sessionId),
@@ -1023,6 +1031,7 @@ export class BackendToolExecutor implements IToolExecutor {
 
   private rememberSessionStateVersion(sessionId: string, stateVersion: number): void {
     this.sessionStateVersions.set(sessionId, stateVersion);
+    this.poisonedSessions.delete(sessionId);
     if (this.sessionStateVersions.size <= 200) {
       return;
     }
@@ -1030,6 +1039,21 @@ export class BackendToolExecutor implements IToolExecutor {
     const oldest = this.sessionStateVersions.keys().next().value;
     if (typeof oldest === 'string') {
       this.sessionStateVersions.delete(oldest);
+      this.poisonedSessions.delete(oldest);
+    }
+  }
+
+  private poisonSession(sessionId: string): void {
+    this.sessionStateVersions.delete(sessionId);
+    this.poisonedSessions.add(sessionId);
+
+    if (this.poisonedSessions.size <= 200) {
+      return;
+    }
+
+    const oldest = this.poisonedSessions.values().next().value;
+    if (typeof oldest === 'string') {
+      this.poisonedSessions.delete(oldest);
     }
   }
 
@@ -1051,7 +1075,7 @@ export class BackendToolExecutor implements IToolExecutor {
         sessionId,
         error: message,
       });
-      this.rememberSessionStateVersion(sessionId, useProjectStore.getState().stateVersion);
+      this.poisonSession(sessionId);
       return message;
     }
   }

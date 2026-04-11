@@ -510,6 +510,8 @@ describe('AgenticEngine', () => {
 
       expect(result.success).toBe(true);
       expect(result.iterations).toBe(1);
+      expect(mockToolExecutor.wasToolCalled('get_track_clips')).toBe(false);
+      expect(mockToolExecutor.wasToolCalled('get_timeline_info')).toBe(false);
       expect(mockToolExecutor.wasToolCalled('split_clip')).toBe(true);
     });
 

@@ -1072,8 +1072,9 @@ export class Planner {
 
   private validateMutationCoverage(goal: string, steps: PlanStep[], thought?: Thought): string[] {
     const normalizedGoal = goal.trim();
-    const intentSignals =
-      normalizedGoal.length > 0 ? [normalizedGoal] : [thought?.understanding, thought?.approach];
+    const intentSignals = [normalizedGoal, thought?.understanding].filter(
+      (value): value is string => typeof value === 'string' && value.trim().length > 0,
+    );
 
     if (!hasMutationIntentText(...intentSignals) || steps.length === 0) {
       return [];
