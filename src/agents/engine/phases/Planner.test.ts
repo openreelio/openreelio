@@ -1394,6 +1394,29 @@ describe('Planner', () => {
       await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
     });
 
+    it('should reject read-only plans for edit intents', async () => {
+      const mockPlan: Plan = {
+        goal: 'Split the timeline every 1 second',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'get_timeline_info',
+            args: { sequenceId: 'seq-1' },
+            description: 'Inspect timeline info',
+            riskLevel: 'low',
+            estimatedDuration: 50,
+          },
+        ],
+        estimatedTotalDuration: 50,
+        requiresApproval: false,
+        rollbackStrategy: 'N/A',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
+    });
+
     it('should reject placeholder-like IDs in plan arguments', async () => {
       context.sequenceId = 'seq_active';
       context.availableTracks = [

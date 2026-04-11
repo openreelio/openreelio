@@ -26,6 +26,7 @@ import {
   normalizeReferencesForValidation,
 } from '../core/stepReferences';
 import { buildOrchestrationPlaybook } from '../core/orchestrationPlaybooks';
+import { hasMutationIntentText, isReadOnlyToolName } from '../core/toolSemantics';
 import { getToolOutputContract } from '@/agents/toolOutputContracts';
 
 const logger = createLogger('Planner');
@@ -154,7 +155,7 @@ export class Planner {
   async plan(thought: Thought, context: AgentContext, history?: LLMMessage[]): Promise<Plan> {
     const playbookMatch = buildOrchestrationPlaybook(thought, context, this.toolExecutor);
     if (playbookMatch) {
-      this.validatePlan(playbookMatch.plan, context);
+      this.validatePlan(playbookMatch.plan, context, thought);
       return playbookMatch.plan;
     }
 
@@ -193,7 +194,7 @@ export class Planner {
           timeoutMs,
         );
 
-        this.validatePlan(plan, context);
+        this.validatePlan(plan, context, thought);
         return plan;
       } catch (error) {
         const aborted = this.abortController?.signal.aborted ?? false;
@@ -264,7 +265,7 @@ export class Planner {
     const playbookMatch = buildOrchestrationPlaybook(thought, context, this.toolExecutor);
     if (playbookMatch) {
       onProgress(`Using deterministic orchestration playbook: ${playbookMatch.id}`);
-      this.validatePlan(playbookMatch.plan, context);
+      this.validatePlan(playbookMatch.plan, context, thought);
       return playbookMatch.plan;
     }
 
@@ -300,7 +301,7 @@ export class Planner {
       // instead of making a second LLM call
       const plan = this.parseAccumulatedPlan<Plan>(accumulated);
 
-      this.validatePlan(plan, context);
+      this.validatePlan(plan, context, thought);
       return plan;
     } catch (error) {
       if (error instanceof PlanValidationError) {
@@ -491,7 +492,13 @@ export class Planner {
       '13. Match near-synonyms to the exact available tool or action name. Example: splitClip -> split_clip, add_subtitle -> add_caption, remove_clip -> delete_clip.',
     );
     parts.push(
-      '14. When the target track is known, prefer get_track_clips(trackId) over get_clips_at_time(time) so later steps can reference data.clips[n].id without cross-track ambiguity.',
+      '14. If the user asked to change the timeline, project, captions, audio, or workspace, do not stop at read-only inspection steps. Include the actual mutating steps required to fulfill the request unless the task is explicitly informational.',
+    );
+    parts.push(
+      '15. Do not arbitrarily narrow scope (for example, only the first 10 seconds or only one track) unless the user explicitly requested that limit or the active selection clearly defines it.',
+    );
+    parts.push(
+      '16. When the target track is known, prefer get_track_clips(trackId) over get_clips_at_time(time) so later steps can reference data.clips[n].id without cross-track ambiguity.',
     );
     parts.push('');
     parts.push(...ORCHESTRATION_PLAYBOOK_LINES);
@@ -754,7 +761,11 @@ export class Planner {
   /**
    * Validate the generated plan
    */
-  private validatePlan(plan: unknown, context: AgentContext): asserts plan is Plan {
+  private validatePlan(
+    plan: unknown,
+    context: AgentContext,
+    thought?: Thought,
+  ): asserts plan is Plan {
     const errors: string[] = [];
 
     // Basic structure validation
@@ -802,6 +813,13 @@ export class Planner {
 
     const stepReferenceErrors = this.validateStepReferences(steps as PlanStep[]);
     errors.push(...stepReferenceErrors);
+
+    const mutationCoverageErrors = this.validateMutationCoverage(
+      p.goal as string,
+      steps as PlanStep[],
+      thought,
+    );
+    errors.push(...mutationCoverageErrors);
 
     if (errors.length > 0) {
       throw new PlanValidationError('Step validation failed', errors);
@@ -1050,6 +1068,29 @@ export class Planner {
     });
 
     return errors;
+  }
+
+  private validateMutationCoverage(goal: string, steps: PlanStep[], thought?: Thought): string[] {
+    const normalizedGoal = goal.trim();
+    const intentSignals =
+      normalizedGoal.length > 0 ? [normalizedGoal] : [thought?.understanding, thought?.approach];
+
+    if (!hasMutationIntentText(...intentSignals) || steps.length === 0) {
+      return [];
+    }
+
+    if (steps.some((step) => !this.isReadOnlyTool(step.tool))) {
+      return [];
+    }
+
+    return [
+      'Plan contains only read-only/query steps even though the goal is an edit request. Include the actual mutating steps needed to complete the edit or ask for clarification if execution should not proceed.',
+    ];
+  }
+
+  private isReadOnlyTool(toolName: string): boolean {
+    const category = this.toolExecutor.getToolDefinition(toolName)?.category?.trim().toLowerCase();
+    return isReadOnlyToolName(toolName, category);
   }
 
   private validateToolOutputReferencePath(
