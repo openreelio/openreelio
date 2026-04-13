@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::core::assets::{Asset, AssetKind, AudioInfo, MetadataExtractor, VideoInfo};
+use crate::core::assets::{Asset, AssetKind, MetadataExtractor};
 use crate::core::project::ProjectState;
 use crate::core::CoreResult;
 
@@ -86,7 +86,7 @@ fn build_workspace_asset(entry: &IndexEntry, absolute_path: &std::path::Path) ->
             extracted_metadata
                 .as_ref()
                 .and_then(|metadata| metadata.audio.clone())
-                .unwrap_or_else(AudioInfo::default),
+                .unwrap_or_default(),
         ),
         AssetKind::Image => {
             let (width, height) = extracted_metadata
@@ -106,7 +106,7 @@ fn build_workspace_asset(entry: &IndexEntry, absolute_path: &std::path::Path) ->
             extracted_metadata
                 .as_ref()
                 .and_then(|metadata| metadata.video.clone())
-                .unwrap_or_else(VideoInfo::default),
+                .unwrap_or_default(),
         ),
     };
 
@@ -565,7 +565,7 @@ fn get_direct_child_dir(prefix: &str, full_path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::assets::AssetKind;
+    use crate::core::assets::{AssetKind, AudioInfo};
 
     fn create_test_project(dir: &std::path::Path) {
         std::fs::create_dir_all(dir.join("footage")).unwrap();

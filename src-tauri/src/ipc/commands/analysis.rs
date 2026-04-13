@@ -114,7 +114,7 @@ async fn resolve_asset_context(
     })
 }
 
-fn resolve_asset_media_path(project_path: &PathBuf, asset_path: &str) -> PathBuf {
+fn resolve_asset_media_path(project_path: &std::path::Path, asset_path: &str) -> PathBuf {
     let path = PathBuf::from(asset_path);
     if path.is_absolute() {
         path
