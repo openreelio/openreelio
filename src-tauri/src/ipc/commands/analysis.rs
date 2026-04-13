@@ -33,7 +33,7 @@ use crate::core::analysis::{AnalysisBundle, AnalysisJobRunner, AnalysisOptions, 
 use crate::core::captions::audio::extract_audio_for_transcription_async;
 use crate::core::commands::AddEffectCommand;
 use crate::core::effects::{curve_points_to_json, CurvePoint, EffectType, ParamValue};
-use crate::core::ffmpeg::SharedFFmpegState;
+use crate::core::ffmpeg::{MediaInfo, SharedFFmpegState};
 use crate::core::jobs::{Job, JobStatus, JobType, Priority};
 use crate::AppState;
 
@@ -67,24 +67,66 @@ struct ResolvedAssetContext {
 async fn resolve_asset_context(
     asset_id: &str,
     state: &State<'_, AppState>,
+    ffmpeg_state: &State<'_, SharedFFmpegState>,
 ) -> Result<ResolvedAssetContext, String> {
-    let guard = state.project.lock().await;
-    let project = guard
-        .as_ref()
-        .ok_or_else(|| "No project is currently open".to_string())?;
+    let (project_path, asset_path, active_sequence_id, cached_metadata) = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| "No project is currently open".to_string())?;
 
-    let asset = project
-        .state
-        .assets
-        .get(asset_id)
-        .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
+        let asset = project
+            .state
+            .assets
+            .get(asset_id)
+            .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
 
-    let duration = asset
-        .duration_sec
-        .ok_or_else(|| "Asset has no duration (not a video/audio file?)".to_string())?;
+        (
+            project.path.clone(),
+            asset.uri.clone(),
+            project.state.active_sequence_id.clone(),
+            asset.duration_sec.map(|duration| build_asset_video_metadata(duration, asset)),
+        )
+    };
 
+    if let Some(metadata) = cached_metadata {
+        return Ok(ResolvedAssetContext {
+            project_path,
+            asset_path,
+            metadata,
+            active_sequence_id,
+        });
+    }
+
+    let resolved_asset_path = resolve_asset_media_path(&project_path, &asset_path);
+    let probed = probe_missing_asset_metadata(&resolved_asset_path, ffmpeg_state).await?;
+    if probed.duration_sec <= 0.0 {
+        return Err("Asset has no duration (not a video/audio file?)".to_string());
+    }
+
+    Ok(ResolvedAssetContext {
+        project_path,
+        asset_path,
+        metadata: build_probe_video_metadata(&probed),
+        active_sequence_id,
+    })
+}
+
+fn resolve_asset_media_path(project_path: &PathBuf, asset_path: &str) -> PathBuf {
+    let path = PathBuf::from(asset_path);
+    if path.is_absolute() {
+        path
+    } else {
+        project_path.join(path)
+    }
+}
+
+fn build_asset_video_metadata(
+    duration: f64,
+    asset: &crate::core::assets::Asset,
+) -> VideoMetadata {
     let has_audio = asset.audio.is_some();
-    let metadata = asset.video.as_ref().map_or_else(
+    asset.video.as_ref().map_or_else(
         || VideoMetadata::new(duration).with_audio(has_audio),
         |video| {
             VideoMetadata::new(duration)
@@ -93,13 +135,35 @@ async fn resolve_asset_context(
                 .with_codec(&video.codec)
                 .with_audio(has_audio)
         },
-    );
+    )
+}
 
-    Ok(ResolvedAssetContext {
-        project_path: project.path.clone(),
-        asset_path: asset.uri.clone(),
-        metadata,
-        active_sequence_id: project.state.active_sequence_id.clone(),
+fn build_probe_video_metadata(probed: &MediaInfo) -> VideoMetadata {
+    let mut metadata = VideoMetadata::new(probed.duration_sec).with_audio(probed.audio.is_some());
+    if let Some(video) = probed.video.as_ref() {
+        metadata = metadata
+            .with_dimensions(video.width, video.height)
+            .with_fps(video.fps)
+            .with_codec(&video.codec);
+    }
+    metadata
+}
+
+async fn probe_missing_asset_metadata(
+    asset_path: &std::path::Path,
+    ffmpeg_state: &State<'_, SharedFFmpegState>,
+) -> Result<MediaInfo, String> {
+    let ffmpeg = ffmpeg_state.read().await;
+    let runner = ffmpeg
+        .runner()
+        .ok_or_else(|| "FFmpeg not available to probe missing asset metadata".to_string())?;
+
+    runner.probe(asset_path).await.map_err(|error| {
+        format!(
+            "Asset metadata is incomplete and probing failed for '{}': {}",
+            asset_path.display(),
+            error
+        )
     })
 }
 
@@ -171,13 +235,14 @@ async fn submit_analysis_job_and_wait(
 /// `{project}/.openreelio/analysis/{asset_id}/bundle.json`
 #[tauri::command]
 #[specta::specta]
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, ffmpeg_state))]
 pub async fn analyze_video_full(
     asset_id: String,
     options: AnalysisOptions,
     state: State<'_, AppState>,
+    ffmpeg_state: State<'_, SharedFFmpegState>,
 ) -> Result<AnalysisBundle, String> {
-    let asset_context = resolve_asset_context(&asset_id, &state).await?;
+    let asset_context = resolve_asset_context(&asset_id, &state, &ffmpeg_state).await?;
 
     submit_analysis_job_and_wait(
         &asset_id,
@@ -293,14 +358,15 @@ pub async fn import_diarization_json(
 /// Runs an external diarization runner and imports the resulting JSON into the cached bundle.
 #[tauri::command]
 #[specta::specta]
-#[tracing::instrument(skip(state, args), fields(asset_id = %asset_id, executable = %executable))]
+#[tracing::instrument(skip(state, args, ffmpeg_state), fields(asset_id = %asset_id, executable = %executable))]
 pub async fn run_external_diarization(
     asset_id: String,
     executable: String,
     args: Vec<String>,
     state: State<'_, AppState>,
+    ffmpeg_state: State<'_, SharedFFmpegState>,
 ) -> Result<ExternalDiarizationRunSummary, String> {
-    let asset_context = resolve_asset_context(&asset_id, &state).await?;
+    let asset_context = resolve_asset_context(&asset_id, &state, &ffmpeg_state).await?;
     let runner = AnalysisJobRunner::new(&asset_context.project_path);
     let bundle = runner
         .load_bundle_optional(&asset_id)
@@ -467,13 +533,14 @@ pub async fn delete_esd(esd_id: String, state: State<'_, AppState>) -> Result<bo
 /// dedicated track, inserts the source asset, and applies DTW-guided splits.
 #[tauri::command]
 #[specta::specta]
-#[tracing::instrument(skip(state), fields(esd_id = %esd_id, source_asset_id = %source_asset_id))]
+#[tracing::instrument(skip(state, ffmpeg_state), fields(esd_id = %esd_id, source_asset_id = %source_asset_id))]
 pub async fn apply_editing_style(
     esd_id: String,
     source_asset_id: String,
     state: State<'_, AppState>,
+    ffmpeg_state: State<'_, SharedFFmpegState>,
 ) -> Result<StylePlanResult, String> {
-    let asset_context = resolve_asset_context(&source_asset_id, &state).await?;
+    let asset_context = resolve_asset_context(&source_asset_id, &state, &ffmpeg_state).await?;
     let project_path = asset_context.project_path.clone();
     let sequence_id = asset_context
         .active_sequence_id
@@ -766,4 +833,80 @@ fn build_curves_params(correction: &ColorCorrection) -> HashMap<String, ParamVal
     params.insert("luma_vs_sat_curve".to_string(), ParamValue::String(flat));
 
     params
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::assets::{Asset, AudioInfo, VideoInfo};
+    use crate::core::ffmpeg::{AudioStreamInfo, VideoStreamInfo};
+    use crate::core::Ratio;
+
+    #[test]
+    fn build_asset_video_metadata_uses_asset_duration_and_streams() {
+        let mut asset = Asset::new_video(
+            "clip.mp4",
+            "/tmp/clip.mp4",
+            VideoInfo {
+                width: 1280,
+                height: 720,
+                fps: Ratio::new(30000, 1001),
+                codec: "h264".to_string(),
+                bitrate: Some(4_000_000),
+                has_alpha: false,
+                is_hdr: false,
+                color_transfer: None,
+            },
+        )
+        .with_duration(12.5);
+        asset.audio = Some(AudioInfo::default());
+
+        let metadata = build_asset_video_metadata(12.5, &asset);
+
+        assert_eq!(metadata.duration_sec, 12.5);
+        assert_eq!(metadata.width, Some(1280));
+        assert_eq!(metadata.height, Some(720));
+        assert_eq!(metadata.codec.as_deref(), Some("h264"));
+        assert!(metadata.has_audio);
+    }
+
+    #[test]
+    fn build_probe_video_metadata_uses_probed_duration_when_asset_metadata_is_missing() {
+        let metadata = build_probe_video_metadata(&MediaInfo {
+            duration_sec: 8.25,
+            video: Some(VideoStreamInfo {
+                width: 1920,
+                height: 1080,
+                fps: 23.976,
+                codec: "prores".to_string(),
+                pixel_format: "yuv422p10le".to_string(),
+                bitrate: Some(12_000_000),
+                is_hdr: false,
+                color_transfer: None,
+            }),
+            audio: Some(AudioStreamInfo {
+                sample_rate: 48_000,
+                channels: 2,
+                codec: "aac".to_string(),
+                bitrate: Some(192_000),
+            }),
+            format: "mov,mp4,m4a,3gp,3g2,mj2".to_string(),
+            size_bytes: 123,
+        });
+
+        assert_eq!(metadata.duration_sec, 8.25);
+        assert_eq!(metadata.width, Some(1920));
+        assert_eq!(metadata.height, Some(1080));
+        assert_eq!(metadata.codec.as_deref(), Some("prores"));
+        assert!(metadata.has_audio);
+    }
+
+    #[test]
+    fn resolve_asset_media_path_joins_relative_paths_to_project_root() {
+        let project_path = PathBuf::from("/project");
+        assert_eq!(
+            resolve_asset_media_path(&project_path, "media/clip.mp4"),
+            PathBuf::from("/project/media/clip.mp4")
+        );
+    }
 }

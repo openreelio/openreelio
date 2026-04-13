@@ -77,6 +77,8 @@ pub struct AnalysisJobRunner {
     project_dir: PathBuf,
     /// Path to FFmpeg binary (uses PATH if not set)
     ffmpeg_path: PathBuf,
+    /// Path to FFprobe binary (uses PATH if not set)
+    ffprobe_path: PathBuf,
 }
 
 impl AnalysisJobRunner {
@@ -85,12 +87,19 @@ impl AnalysisJobRunner {
         Self {
             project_dir: project_dir.to_path_buf(),
             ffmpeg_path: PathBuf::from("ffmpeg"),
+            ffprobe_path: PathBuf::from("ffprobe"),
         }
     }
 
     /// Creates a job runner with a custom FFmpeg path
     pub fn with_ffmpeg_path(mut self, ffmpeg_path: PathBuf) -> Self {
         self.ffmpeg_path = ffmpeg_path;
+        self
+    }
+
+    /// Creates a job runner with a custom FFprobe path
+    pub fn with_ffprobe_path(mut self, ffprobe_path: PathBuf) -> Self {
+        self.ffprobe_path = ffprobe_path;
         self
     }
 
@@ -440,6 +449,7 @@ impl AnalysisJobRunner {
 
         let config = ShotDetectorConfig {
             ffmpeg_path: Some(self.ffmpeg_path.clone()),
+            ffprobe_path: Some(self.ffprobe_path.clone()),
             ..Default::default()
         };
 

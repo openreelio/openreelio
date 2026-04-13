@@ -501,16 +501,20 @@ impl JobProcessor {
             }
         }
 
-        let ffmpeg_path = {
+        let (ffmpeg_path, ffprobe_path) = {
             let ffmpeg_state = self.ffmpeg_state.read().await;
             let runner = ffmpeg_state.runner().ok_or("FFmpeg not available")?;
-            runner.info().ffmpeg_path.clone()
+            (
+                runner.info().ffmpeg_path.clone(),
+                runner.info().ffprobe_path.clone(),
+            )
         };
 
         self.emit_progress(&job.id, 0.05, Some("Queued analysis pipeline"));
 
         let runner = AnalysisJobRunner::new(std::path::Path::new(&payload.project_path))
-            .with_ffmpeg_path(ffmpeg_path);
+            .with_ffmpeg_path(ffmpeg_path)
+            .with_ffprobe_path(ffprobe_path);
         let input_path_string = input_path.to_string_lossy().to_string();
         let app_handle = self.app_handle.clone();
         let asset_id = payload.asset_id.clone();
