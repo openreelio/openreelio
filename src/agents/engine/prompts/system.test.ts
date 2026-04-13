@@ -73,6 +73,7 @@ describe('assembleSystemPrompt', () => {
     expect(result).toContain('## Effects Actions');
     expect(result).toContain('## Text Actions');
     expect(result).toContain('## Common Workflows');
+    expect(result).toContain('read_source_analysis_report');
     expect(result).toContain('</tool_reference>');
   });
 
@@ -94,10 +95,7 @@ describe('assembleSystemPrompt', () => {
     const result = assembleSystemPrompt({
       role: 'editor',
       context: makeContext(),
-      knowledge: [
-        'User prefers warm tones',
-        'Always normalize audio to -6dB',
-      ],
+      knowledge: ['User prefers warm tones', 'Always normalize audio to -6dB'],
     });
 
     expect(result).toContain('<knowledge>');

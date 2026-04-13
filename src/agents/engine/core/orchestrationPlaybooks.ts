@@ -3,6 +3,7 @@ import type { AgentContext, Plan, PlanStep, Thought } from './types';
 import type { StepValueReference } from './stepReferences';
 
 export type OrchestrationPlaybookId =
+  | 'source_analysis_read'
   | 'broll_music_subtitles'
   | 'generate_and_place'
   | 'timeline_interval_split'
@@ -140,6 +141,52 @@ const AUTO_CAPTION_KEYWORDS = [
   /음성\s*인식/i,
 ];
 
+const SOURCE_ANALYSIS_READ_KEYWORDS = [
+  /\banaly[sz]e\b/i,
+  /\binspect\b/i,
+  /\breview\b/i,
+  /\bread\b/i,
+  /\bbreak\s*down\b/i,
+  /\breport\b/i,
+  /분석/i,
+  /검토/i,
+  /읽/i,
+  /리포트/i,
+];
+
+const SOURCE_MEDIA_KEYWORDS = [
+  /\bsource\b/i,
+  /\bfootage\b/i,
+  /\bmaterial\b/i,
+  /\bvideo\b/i,
+  /\bclip\b/i,
+  /\bscene\b/i,
+  /원본/i,
+  /소스/i,
+  /영상/i,
+  /비디오/i,
+];
+
+const SOURCE_ANALYSIS_EDIT_EXCLUSION_KEYWORDS = [
+  /\btimeline\b/i,
+  /\binsert\b/i,
+  /\badd\b/i,
+  /\bplace\b/i,
+  /\bapply\b/i,
+  /\bsplit\b/i,
+  /\btrim\b/i,
+  /\bcaption\b/i,
+  /\bsubtitle\b/i,
+  /\bmusic\b/i,
+  /타임라인/i,
+  /삽입/i,
+  /추가/i,
+  /적용/i,
+  /분할/i,
+  /자막/i,
+  /음악/i,
+];
+
 /**
  * Patterns that fall within the scope of the auto_caption playbook
  * (audio transcription + adding caption clips to the timeline).
@@ -202,10 +249,6 @@ export function buildOrchestrationPlaybook(
   context: AgentContext,
   toolExecutor: IToolExecutor,
 ): OrchestrationPlaybookMatch | null {
-  if (!context.sequenceId) {
-    return null;
-  }
-
   const text = buildSearchText(thought);
   const playbookContext: PlaybookContext = {
     text,
@@ -213,6 +256,15 @@ export function buildOrchestrationPlaybook(
     context,
     toolExecutor,
   };
+
+  const sourceAnalysisRead = buildSourceAnalysisReadPlaybook(playbookContext);
+  if (sourceAnalysisRead) {
+    return sourceAnalysisRead;
+  }
+
+  if (!context.sequenceId) {
+    return null;
+  }
 
   const generateAndPlace = buildGenerateAndPlacePlaybook(playbookContext);
   if (generateAndPlace) {
@@ -255,6 +307,56 @@ export function buildOrchestrationPlaybook(
   }
 
   return null;
+}
+
+function buildSourceAnalysisReadPlaybook(
+  playbookContext: PlaybookContext,
+): OrchestrationPlaybookMatch | null {
+  const { text, thought, context, toolExecutor } = playbookContext;
+
+  if (matchesAny(text, SOURCE_ANALYSIS_EDIT_EXCLUSION_KEYWORDS)) {
+    return null;
+  }
+
+  if (
+    !matchesAny(text, SOURCE_ANALYSIS_READ_KEYWORDS) ||
+    !matchesAny(text, SOURCE_MEDIA_KEYWORDS) ||
+    !hasTools(toolExecutor, ['read_source_analysis_report'])
+  ) {
+    return null;
+  }
+
+  const targetAsset = pickMentionedAsset(context, thought, 'video');
+  const referencedFile = extractMentionedMediaFile(thought);
+  if (!targetAsset && !referencedFile) {
+    return null;
+  }
+
+  const args = targetAsset ? { assetId: targetAsset.id } : { file: referencedFile };
+  const targetLabel = targetAsset?.name ?? referencedFile ?? 'source video';
+
+  return {
+    id: 'source_analysis_read',
+    confidence: 0.9,
+    plan: {
+      goal: `Read the canonical source analysis report for ${targetLabel}`,
+      steps: [
+        {
+          id: 'playbook_read_source_analysis_report',
+          tool: 'read_source_analysis_report',
+          args,
+          description:
+            'Generate or reuse the canonical Markdown source-analysis report for the target video and save the default .analysis.md file beside the asset',
+          riskLevel: 'low',
+          estimatedDuration: 1200,
+        },
+      ],
+      estimatedTotalDuration: 1200,
+      requiresApproval: false,
+      rollbackStrategy:
+        'No timeline edits are applied. Internal analysis artifacts may be refreshed for reuse.',
+    },
+  };
 }
 
 function buildInsertAndSegmentPlaybook(
@@ -1253,4 +1355,18 @@ function extractQuotedText(thought: Thought): string | null {
 
   const text = quoted[1].trim();
   return text.length > 0 ? text : null;
+}
+
+function extractMentionedMediaFile(thought: Thought): string | null {
+  const source = [thought.understanding, thought.approach, ...thought.requirements]
+    .filter((value) => value.trim().length > 0)
+    .join(' ');
+  const quoted = extractQuotedText(thought);
+  if (quoted && /\.(mp4|mov|mkv|avi|webm|m4v)$/i.test(quoted)) {
+    return quoted;
+  }
+
+  const match = source.match(/([\w./-]+\.(?:mp4|mov|mkv|avi|webm|m4v))/i);
+  const candidate = match?.[1]?.trim();
+  return candidate && candidate.length > 0 ? candidate : null;
 }

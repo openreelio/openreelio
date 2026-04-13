@@ -49,7 +49,8 @@ const QUERY_ACTIONS = `## Query Actions (meta-tool: query)
 - get_analysis_cost_estimate(assetId) → cost estimate for cloud analysis
 - get_analysis_providers → available analysis backends
 - analyze_reference_video(assetId) → extract edit/style signals from a reference video
-- generate_source_analysis_report(assetId) → build a unified source-footage report (JSON + Markdown) with moments, chapters, candidate highlights, speaker turns, and visual artifacts like contact sheets
+- read_source_analysis_report(assetId|file, outputPath?) → read the canonical Markdown source-analysis report for a source video; auto-generates/refreshes analysis and saves "<asset-name>.analysis.md" beside the asset by default, or to outputPath when provided. Key outputs: data.content, data.relativePath
+- generate_source_analysis_report(assetId, outputPath?) → build/reuse the structured source-footage report (JSON + Markdown) and persist the Markdown report beside the asset by default. Key outputs: data.content, data.reportPath
 - import_external_diarization(assetId, inputPath) → import external diarization JSON and merge true speaker IDs into the cached transcript bundle
 - run_external_diarization(assetId, executable, args) → run an external diarization tool against normalized source audio and import the resulting JSON into the cached transcript bundle
 - search_source_analysis_report(assetId, query) → search report moments/chapters/highlights/speaker turns and return ranked source ranges
@@ -120,6 +121,8 @@ const TOOL_OUTPUT_CONTRACTS = buildToolOutputContractSection([
   'get_track_clips',
   'get_clips_at_time',
   'get_selected_clips',
+  'read_source_analysis_report',
+  'generate_source_analysis_report',
   'insert_clip',
   'insert_clip_from_file',
   'split_clip',
@@ -141,7 +144,9 @@ const COMMON_WORKFLOWS = `## Common Workflows
 5. Multi-step edit: issue ordered edit actions only when needed; backend-safe edit actions may be fused into one atomic backend plan
 6. Segment an inserted clip: insert_clip → split_clip using data.clipId for the first cut → later split_clip steps use the previous split's data.newClipId
 7. Track-specific clip lookup: get_track_clips(trackId) → reference clip IDs via data.clips[n].id
-8. Time-based clip lookup across tracks: get_clips_at_time(time) → reference clip IDs via data[n].id (never data[n].clipId)`;
+8. Time-based clip lookup across tracks: get_clips_at_time(time) → reference clip IDs via data[n].id (never data[n].clipId)
+9. Deep source inspection: find_workspace_file or get_asset_catalog → read_source_analysis_report (this already writes the default ".analysis.md" report beside the asset) → search_source_analysis_report / search_source_library → build_source_selects or edit actions
+10. If the user asks to save the analysis as a file but does not specify a location, do not add a separate write step: source-analysis tools already save "<asset-name>.analysis.md" beside the asset by default. Use write_workspace_document only for a custom second copy/path.`;
 
 const CLI_REFERENCE = `## CLI (headless alternative)
 openreelio-cli <group> <command> --path <dir> [--args]

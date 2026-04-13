@@ -72,6 +72,60 @@ function createContext(overrides: Partial<AgentContext> = {}): AgentContext {
 }
 
 describe('buildOrchestrationPlaybook', () => {
+  it('creates a source-analysis-read playbook without requiring an active sequence', () => {
+    const thought: Thought = {
+      understanding: 'Analyze this source video and read the report for broll.mp4',
+      requirements: ['inspect source footage'],
+      uncertainties: [],
+      approach: 'Read the canonical source analysis report first',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor(['read_source_analysis_report']);
+    const match = buildOrchestrationPlaybook(
+      thought,
+      createContext({ sequenceId: undefined }),
+      toolExecutor,
+    );
+
+    expect(match).not.toBeNull();
+    expect(match?.id).toBe('source_analysis_read');
+    expect(match?.plan.steps[0]).toMatchObject({
+      tool: 'read_source_analysis_report',
+      args: { assetId: 'asset-video-fallback' },
+    });
+  });
+
+  it('does not use the source-analysis-read playbook for mutating edit requests', () => {
+    const thought: Thought = {
+      understanding: 'Analyze this source video and insert the best moments onto the timeline',
+      requirements: ['source analysis', 'timeline edit'],
+      uncertainties: [],
+      approach: 'Inspect the footage and then place the results on the timeline',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor(['read_source_analysis_report']);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match).toBeNull();
+  });
+
+  it('uses the source-analysis-read playbook for report-generation requests', () => {
+    const thought: Thought = {
+      understanding: 'Generate a source analysis report for broll.mp4',
+      requirements: ['source analysis report'],
+      uncertainties: [],
+      approach: 'Produce the canonical analysis report for the source video',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor(['read_source_analysis_report']);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match?.id).toBe('source_analysis_read');
+  });
+
   it('creates B-roll/music/subtitles playbook with step references', () => {
     const thought: Thought = {
       understanding: 'Please add B-roll with background music and subtitles',
