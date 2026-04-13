@@ -316,7 +316,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Download release artifacts info
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         id: get-release
         with:
           script: |
@@ -418,7 +418,7 @@ jobs:
 
     steps:
       - name: Publish Release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             await github.rest.repos.updateRelease({
