@@ -2,10 +2,7 @@
  * Permission Store Tests
  */
 
-import {
-  usePermissionStore,
-  matchPattern,
-} from './permissionStore';
+import { usePermissionStore, matchPattern } from './permissionStore';
 
 beforeEach(() => {
   usePermissionStore.getState().loadDefaults();
@@ -41,6 +38,7 @@ describe('permissionStore', () => {
     expect(store.resolvePermission('get_clip')).toBe('allow');
     expect(store.resolvePermission('list_tracks')).toBe('allow');
     expect(store.resolvePermission('find_clip')).toBe('allow');
+    expect(store.resolvePermission('read_source_analysis_report')).toBe('allow');
     expect(store.resolvePermission('analyze_video')).toBe('allow');
     expect(store.resolvePermission('search_assets')).toBe('allow');
   });
@@ -104,7 +102,9 @@ describe('permissionStore', () => {
     const store = usePermissionStore.getState();
     store.addRule('workspace.**', 'deny', 'global');
 
-    expect(usePermissionStore.getState().resolvePermission('write_workspace_document')).toBe('deny');
+    expect(usePermissionStore.getState().resolvePermission('write_workspace_document')).toBe(
+      'deny',
+    );
     expect(usePermissionStore.getState().resolvePermission('read_workspace_document')).toBe('deny');
   });
 

@@ -213,6 +213,14 @@ const META_TOOLS: ToolDefinition[] = [
           type: 'boolean',
           description: 'Generate missing source analysis on demand when supported',
         },
+        refresh: {
+          type: 'boolean',
+          description: 'Force regeneration instead of reusing compatible cached analysis data',
+        },
+        includeAnnotation: {
+          type: 'boolean',
+          description: 'Include stored annotation/OCR/object summaries when available',
+        },
         useIndexedSearch: {
           type: 'boolean',
           description: 'Use indexed report-chunk retrieval when supported',
@@ -241,6 +249,10 @@ const META_TOOLS: ToolDefinition[] = [
         time: { type: 'number', description: 'Timeline position in seconds' },
         path: { type: 'string', description: 'File path or search pattern' },
         file: { type: 'string', description: 'Workspace-relative media file path' },
+        outputPath: {
+          type: 'string',
+          description: 'Optional workspace-relative output path for generated Markdown reports',
+        },
         kind: { type: 'string', description: 'Asset kind filter or media kind selector' },
         query: { type: 'string', description: 'Search query or filename substring' },
         provider: { type: 'string', description: 'Preferred analysis provider when supported' },

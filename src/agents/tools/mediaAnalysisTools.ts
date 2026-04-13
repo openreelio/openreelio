@@ -72,7 +72,7 @@ function findAssetIdInTree(
   return undefined;
 }
 
-async function resolveWorkspaceAsset(
+export async function resolveWorkspaceAsset(
   file: string,
 ): Promise<{ assetId: string; relativePath: string }> {
   const matches = findWorkspaceFile(file);

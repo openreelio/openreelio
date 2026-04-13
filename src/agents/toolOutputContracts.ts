@@ -96,6 +96,31 @@ function matchesSplitClipPath(path: string): boolean {
   );
 }
 
+function matchesSourceAnalysisReportPath(path: string): boolean {
+  return (
+    path === 'data' ||
+    path === 'data.content' ||
+    path === 'data.relativePath' ||
+    path === 'data.reportPath' ||
+    path === 'data.assetId' ||
+    path === 'data.assetName' ||
+    path === 'data.generatedAt' ||
+    path === 'data.summary' ||
+    path === 'data.persisted' ||
+    path === 'data.sizeBytes' ||
+    path === 'data.modifiedAtUnixSec' ||
+    path === 'data.bundleSource' ||
+    path === 'data.document' ||
+    path === 'data.document.content' ||
+    path === 'data.document.relativePath' ||
+    path === 'data.document.sizeBytes' ||
+    path === 'data.document.modifiedAtUnixSec' ||
+    path === 'data.document.persisted' ||
+    path === 'data.document.persistenceError' ||
+    path === 'data.markdown'
+  );
+}
+
 export const TOOL_OUTPUT_CONTRACTS: Record<string, ToolOutputContract> = {
   get_timeline_info: {
     summary:
@@ -136,6 +161,18 @@ export const TOOL_OUTPUT_CONTRACTS: Record<string, ToolOutputContract> = {
       'returns split result fields under data.* including data.newClipId for the newly created right-hand segment',
     examples: ['data.newClipId', 'data.sourceClipId', 'data.createdIds[0]'],
     validatePath: matchesSplitClipPath,
+  },
+  read_source_analysis_report: {
+    summary:
+      'returns the persisted Markdown report under data.content with its saved workspace path under data.relativePath/data.reportPath; nested mirror is also available at data.document.*',
+    examples: ['data.content', 'data.relativePath', 'data.document.content'],
+    validatePath: matchesSourceAnalysisReportPath,
+  },
+  generate_source_analysis_report: {
+    summary:
+      'returns structured report fields plus the persisted Markdown report under data.content/data.markdown and its saved workspace path under data.relativePath/data.reportPath',
+    examples: ['data.content', 'data.reportPath', 'data.document.relativePath'],
+    validatePath: matchesSourceAnalysisReportPath,
   },
 };
 

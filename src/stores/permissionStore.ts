@@ -76,11 +76,7 @@ export interface PermissionStoreState {
     sessionId: string,
     decisions: Array<Pick<PermissionDecision, 'id' | 'subject' | 'action' | 'createdAt'>>,
   ) => void;
-  addRule: (
-    pattern: string,
-    permission: ToolPermission,
-    scope: 'global' | 'session',
-  ) => void;
+  addRule: (pattern: string, permission: ToolPermission, scope: 'global' | 'session') => void;
   removeRule: (id: string) => void;
   allowAlways: (toolName: string, args?: Record<string, unknown>) => void;
   resetSessionRules: () => void;
@@ -110,6 +106,7 @@ const BALANCED_RULES: Omit<PermissionRule, 'id'>[] = [
   { pattern: 'get_*', permission: 'allow', scope: 'global' },
   { pattern: 'list_*', permission: 'allow', scope: 'global' },
   { pattern: 'find_*', permission: 'allow', scope: 'global' },
+  { pattern: 'read_*', permission: 'allow', scope: 'global' },
   { pattern: 'analyze_*', permission: 'allow', scope: 'global' },
   { pattern: 'search_*', permission: 'allow', scope: 'global' },
   { pattern: 'inspect_*', permission: 'allow', scope: 'global' },
@@ -120,6 +117,7 @@ const RESTRICTIVE_RULES: Omit<PermissionRule, 'id'>[] = [
   { pattern: '*', permission: 'ask', scope: 'global' },
   { pattern: 'get_*', permission: 'allow', scope: 'global' },
   { pattern: 'list_*', permission: 'allow', scope: 'global' },
+  { pattern: 'read_*', permission: 'allow', scope: 'global' },
 ];
 
 const PERMISSIVE_RULES: Omit<PermissionRule, 'id'>[] = [
@@ -189,10 +187,7 @@ function toResolution(
     permission: match?.rule.permission ?? 'ask',
     matchedRuleId: match?.rule.id ?? null,
     matchedPattern: match?.rule.pattern ?? null,
-    matchedScope:
-      match && match.rule.scope !== 'builtin'
-        ? match.rule.scope
-        : null,
+    matchedScope: match && match.rule.scope !== 'builtin' ? match.rule.scope : null,
     source,
   };
 }
@@ -221,7 +216,8 @@ function chooseBetterMatch(
     return candidate.insertionRank > current.insertionRank ? candidate : current;
   }
 
-  return PERMISSION_PRIORITY[candidate.rule.permission] >= PERMISSION_PRIORITY[current.rule.permission]
+  return PERMISSION_PRIORITY[candidate.rule.permission] >=
+    PERMISSION_PRIORITY[current.rule.permission]
     ? candidate
     : current;
 }
@@ -326,10 +322,7 @@ export const usePermissionStore = create<PermissionStoreState>()(
       sessionRules: [],
       hydratedSessionId: null,
 
-      resolvePermission: (
-        toolName: string,
-        args: Record<string, unknown> = {},
-      ): ToolPermission => {
+      resolvePermission: (toolName: string, args: Record<string, unknown> = {}): ToolPermission => {
         return get().resolvePermissionDetails(toolName, args).permission;
       },
 
@@ -364,11 +357,7 @@ export const usePermissionStore = create<PermissionStoreState>()(
         });
       },
 
-      addRule: (
-        pattern: string,
-        permission: ToolPermission,
-        scope: 'global' | 'session',
-      ) => {
+      addRule: (pattern: string, permission: ToolPermission, scope: 'global' | 'session') => {
         const rule: PermissionRule = {
           id: crypto.randomUUID(),
           pattern,

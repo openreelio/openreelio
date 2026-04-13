@@ -40,6 +40,11 @@ import {
 import { calculatePearsonCorrelation, getPrimaryTrackClips } from '@/utils/referenceComparison';
 import { useProjectStore } from '@/stores/projectStore';
 import { executeAgentCommand } from './commandExecutor';
+import {
+  readWorkspaceDocumentFromBackend,
+  writeWorkspaceDocumentToBackend,
+} from '@/services/workspaceGateway';
+import { resolveWorkspaceAsset } from './mediaAnalysisTools';
 
 const logger = createLogger('AnalysisTools');
 
@@ -1195,6 +1200,14 @@ function bundleSatisfiesOptions(bundle: AnalysisBundle, options: AnalysisOptions
 
 type SourceAnalysisReport = ReturnType<typeof buildSourceAnalysisReportPayload>;
 type SourceAnalysisSection = 'moments' | 'chapters' | 'highlights' | 'speakerTurns';
+type SourceAnalysisReportDocument = {
+  relativePath: string;
+  content: string;
+  sizeBytes: number;
+  modifiedAtUnixSec: number | null;
+  persisted: boolean;
+  persistenceError: string | null;
+};
 type SourceReportChunk = {
   id: string;
   sectionType: SourceAnalysisSection;
@@ -1220,6 +1233,8 @@ type IndexedSourceReportSearchResponse = {
   total: number;
   processingTimeMs: number;
 };
+
+const SOURCE_ANALYSIS_REPORT_SUFFIX = '.analysis.md';
 type RetrievalMemoryEntry = {
   assetId: string;
   sectionType: SourceAnalysisSection;
@@ -2238,6 +2253,7 @@ function buildSourceAnalysisReportPayload({
     assetName: asset?.name ?? bundle.assetId,
     assetKind: asset?.kind ?? 'video',
     assetUri: asset?.uri ?? '',
+    assetRelativePath: asset?.relativePath ?? null,
     generatedAt: new Date().toISOString(),
     analyzedAt: bundle.analyzedAt,
     bundleSource,
@@ -2554,6 +2570,125 @@ function buildSourceAnalysisMarkdown(
   }
 
   return lines.join('\n');
+}
+
+function stripFileExtension(fileName: string): string {
+  return fileName.replace(/\.[^.]+$/, '');
+}
+
+function sanitizeReportFileStem(value: string): string {
+  const sanitized = stripFileExtension(value)
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '');
+  return sanitized.length > 0 ? sanitized : 'source-analysis-report';
+}
+
+function buildSiblingSourceAnalysisReportRelativePath(relativePath: string): string {
+  const normalized = relativePath.replace(/\\/g, '/').trim().replace(/^\.\//, '');
+  const segments = normalized.split('/').filter(Boolean);
+  const fileName = segments.pop() ?? normalized;
+  const stem = sanitizeReportFileStem(fileName);
+  const reportFileName = `${stem}${SOURCE_ANALYSIS_REPORT_SUFFIX}`;
+  return segments.length > 0 ? `${segments.join('/')}/${reportFileName}` : reportFileName;
+}
+
+function buildDefaultSourceAnalysisReportRelativePath(report: SourceAnalysisReport): string {
+  if (typeof report.assetRelativePath === 'string' && report.assetRelativePath.trim().length > 0) {
+    return buildSiblingSourceAnalysisReportRelativePath(report.assetRelativePath);
+  }
+
+  return `analysis-reports/${sanitizeReportFileStem(report.assetName || report.assetId)}${SOURCE_ANALYSIS_REPORT_SUFFIX}`;
+}
+
+async function persistSourceAnalysisMarkdownReport(
+  report: SourceAnalysisReport,
+  requestedOutputPath?: string | null,
+): Promise<SourceAnalysisReportDocument> {
+  const relativePath =
+    typeof requestedOutputPath === 'string' && requestedOutputPath.trim().length > 0
+      ? requestedOutputPath.trim()
+      : buildDefaultSourceAnalysisReportRelativePath(report);
+  const content = buildSourceAnalysisMarkdown(report);
+
+  try {
+    await writeWorkspaceDocumentToBackend(relativePath, content, true);
+    const document = await readWorkspaceDocumentFromBackend(relativePath, {
+      failureLogLevel: 'debug',
+    });
+
+    return {
+      relativePath: document.relativePath,
+      content: document.content,
+      sizeBytes: document.sizeBytes,
+      modifiedAtUnixSec: document.modifiedAtUnixSec,
+      persisted: true,
+      persistenceError: null,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn('Failed to persist source analysis Markdown report', {
+      assetId: report.assetId,
+      relativePath,
+      error: message,
+    });
+
+    return {
+      relativePath,
+      content,
+      sizeBytes: content.length,
+      modifiedAtUnixSec: null,
+      persisted: false,
+      persistenceError: message,
+    };
+  }
+}
+
+async function prepareSourceAnalysisReportArtifacts(
+  args: Record<string, unknown>,
+): Promise<{ report: SourceAnalysisReport; document: SourceAnalysisReportDocument }> {
+  const report = await generateSourceAnalysisReportPayloadFromArgs(args);
+
+  try {
+    await indexSourceReportChunks(report);
+  } catch (error) {
+    logger.warn('source analysis report could not index report chunks', {
+      assetId: report.assetId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  const requestedOutputPath =
+    typeof args.outputPath === 'string' && args.outputPath.trim().length > 0
+      ? args.outputPath.trim()
+      : null;
+  const document = await persistSourceAnalysisMarkdownReport(report, requestedOutputPath);
+  return { report, document };
+}
+
+async function resolveSourceAnalysisArgs(
+  args: Record<string, unknown>,
+): Promise<{ resolvedArgs: Record<string, unknown>; requestedFile: string | null }> {
+  const assetId = typeof args.assetId === 'string' ? args.assetId.trim() : '';
+  if (assetId.length > 0) {
+    return { resolvedArgs: args, requestedFile: null };
+  }
+
+  const file = typeof args.file === 'string' ? args.file.trim() : '';
+  if (file.length === 0) {
+    throw new Error('assetId or file is required');
+  }
+
+  const resolved = await resolveWorkspaceAsset(file);
+  return {
+    resolvedArgs: {
+      ...args,
+      assetId: resolved.assetId,
+    },
+    requestedFile: resolved.relativePath,
+  };
 }
 
 // =============================================================================
@@ -3210,17 +3345,123 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
   },
 
   // ---------------------------------------------------------------------------
+  // Read Source Analysis Report
+  // ---------------------------------------------------------------------------
+  {
+    name: 'read_source_analysis_report',
+    description:
+      'Read the canonical Markdown source-analysis report for a video asset. If needed, generate or refresh the underlying analysis first and persist the report beside the asset by default (or to outputPath when provided)',
+    category: 'analysis',
+    outputContract: getToolOutputContract('read_source_analysis_report') ?? undefined,
+    parameters: {
+      type: 'object',
+      properties: {
+        assetId: {
+          type: 'string',
+          description: 'Asset ID of the source video to inspect',
+        },
+        file: {
+          type: 'string',
+          description: 'Workspace-relative media path or filename to resolve into an asset',
+        },
+        outputPath: {
+          type: 'string',
+          description:
+            'Optional workspace-relative Markdown output path. When omitted, the report is created next to the asset as <asset-name>.analysis.md',
+        },
+        refresh: {
+          type: 'boolean',
+          description: 'Force regeneration instead of reusing a compatible cached bundle',
+        },
+        includeAnnotation: {
+          type: 'boolean',
+          description:
+            'Include stored annotation/OCR/object summaries when available (default: true)',
+        },
+        options: {
+          type: 'object',
+          description: 'Optional analysis flags used if a new bundle must be generated',
+        },
+        shots: { type: 'boolean', description: 'Include shot detection (default: true)' },
+        transcript: { type: 'boolean', description: 'Include transcript (default: true)' },
+        audio: { type: 'boolean', description: 'Include audio profiling (default: true)' },
+        segments: { type: 'boolean', description: 'Include content segmentation (default: true)' },
+        visual: { type: 'boolean', description: 'Include visual analysis (default: true)' },
+        localOnly: {
+          type: 'boolean',
+          description: 'Skip Vision API work and use local analysis where supported',
+        },
+      },
+      required: [],
+    },
+    handler: async (args) => {
+      try {
+        const { resolvedArgs, requestedFile } = await resolveSourceAnalysisArgs(
+          args as Record<string, unknown>,
+        );
+        const { report, document } = await prepareSourceAnalysisReportArtifacts(resolvedArgs);
+
+        logger.debug('read_source_analysis_report completed', {
+          assetId: report.assetId,
+          requestedFile,
+          persisted: document.persisted,
+        });
+
+        return {
+          success: true,
+          result: {
+            assetId: report.assetId,
+            assetName: report.assetName,
+            requestedFile,
+            content: document.content,
+            relativePath: document.relativePath,
+            reportPath: document.relativePath,
+            sizeBytes: document.sizeBytes,
+            modifiedAtUnixSec: document.modifiedAtUnixSec,
+            persisted: document.persisted,
+            persistenceError: document.persistenceError,
+            bundleSource: report.bundleSource,
+            generatedAt: report.generatedAt,
+            summary: report.summary,
+            metadata: report.metadata,
+            coverage: report.coverage,
+            sectionCounts: {
+              moments: report.moments.count,
+              chapters: report.chapters.count,
+              highlights: report.highlights.count,
+              speakerTurns: report.speakerTurns.count,
+            },
+            warnings: report.warnings,
+            errors: report.errors,
+            document,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('read_source_analysis_report failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
   // Generate Source Analysis Report
   // ---------------------------------------------------------------------------
   {
     name: 'generate_source_analysis_report',
     description:
-      'Build a rich source-footage analysis report for one asset by combining bundle, annotation, and asset metadata into JSON plus Markdown with moments, chapters, and candidate highlights',
+      'Build a rich source-footage analysis report for one asset by combining bundle, annotation, and asset metadata into JSON plus Markdown with moments, chapters, and candidate highlights. Also persists the Markdown report beside the asset by default.',
     category: 'analysis',
+    outputContract: getToolOutputContract('generate_source_analysis_report') ?? undefined,
     parameters: {
       type: 'object',
       properties: {
         assetId: { type: 'string', description: 'Asset ID of the source video to inspect' },
+        outputPath: {
+          type: 'string',
+          description:
+            'Optional workspace-relative Markdown output path. When omitted, the report is created next to the asset as <asset-name>.analysis.md',
+        },
         refresh: {
           type: 'boolean',
           description: 'Force regeneration instead of reusing a compatible cached bundle',
@@ -3248,18 +3489,9 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const report = await generateSourceAnalysisReportPayloadFromArgs(
+        const { report, document } = await prepareSourceAnalysisReportArtifacts(
           args as Record<string, unknown>,
         );
-
-        try {
-          await indexSourceReportChunks(report);
-        } catch (error) {
-          logger.warn('generate_source_analysis_report could not index report chunks', {
-            assetId: report.assetId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
 
         logger.debug('generate_source_analysis_report completed', {
           assetId: report.assetId,
@@ -3272,7 +3504,15 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
           success: true,
           result: {
             ...report,
-            markdown: buildSourceAnalysisMarkdown(report),
+            content: document.content,
+            relativePath: document.relativePath,
+            markdown: document.content,
+            reportPath: document.relativePath,
+            sizeBytes: document.sizeBytes,
+            modifiedAtUnixSec: document.modifiedAtUnixSec,
+            persisted: document.persisted,
+            persistenceError: document.persistenceError,
+            document,
           },
         };
       } catch (error) {
