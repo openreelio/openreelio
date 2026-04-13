@@ -136,11 +136,15 @@ describe('analysisTools', () => {
     });
     vi.mocked(readWorkspaceDocumentFromBackend).mockImplementation(async (relativePath) => {
       const document = workspaceDocuments.get(relativePath);
+      if (!document) {
+        throw new Error(`Workspace document not found: ${relativePath}`);
+      }
+
       return {
         relativePath,
-        content: document?.content ?? '',
-        sizeBytes: document?.content.length ?? 0,
-        modifiedAtUnixSec: document?.modifiedAtUnixSec ?? 0,
+        content: document.content,
+        sizeBytes: document.content.length,
+        modifiedAtUnixSec: document.modifiedAtUnixSec,
       };
     });
 
@@ -165,6 +169,7 @@ describe('analysisTools', () => {
   });
 
   afterEach(() => {
+    workspaceDocuments.clear();
     unregisterAnalysisTools();
   });
 
@@ -1163,6 +1168,136 @@ describe('reference style transfer analysis tools', () => {
       const data = getToolResult<Record<string, any>>(result);
       expect(data.relativePath).toBe('reports/custom-output.md');
       expect(data.reportPath).toBe('reports/custom-output.md');
+    });
+
+    it('should reject a custom outputPath that would overwrite the source asset', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'read-source-overwrite',
+            name: 'overwrite.mp4',
+            kind: 'video',
+            uri: '/media/overwrite.mp4',
+            relativePath: 'media/overwrite.mp4',
+            durationSec: 5,
+            video: {
+              width: 1280,
+              height: 720,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'read-source-overwrite',
+          shots: [],
+          transcript: [],
+          audioProfile: {
+            bpm: null,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-20],
+            peakDb: -6,
+            silenceRegions: [],
+            speechRegions: [],
+          },
+          segments: [],
+          frameAnalysis: [],
+          contactSheet: null,
+          metadata: {
+            durationSec: 5,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: false,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('read_source_analysis_report', {
+        assetId: 'read-source-overwrite',
+        outputPath: 'media/overwrite.mp4',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('outputPath cannot overwrite the source asset');
+      expect(vi.mocked(writeWorkspaceDocumentToBackend)).not.toHaveBeenCalled();
+    });
+
+    it('should keep persisted true when the report cannot be re-read after writing', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'read-source-reread-fail',
+            name: 'reread.mp4',
+            kind: 'video',
+            uri: '/media/reread.mp4',
+            relativePath: 'media/reread.mp4',
+            durationSec: 5,
+            video: {
+              width: 1280,
+              height: 720,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'read-source-reread-fail',
+          shots: [],
+          transcript: [],
+          audioProfile: {
+            bpm: null,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-20],
+            peakDb: -6,
+            silenceRegions: [],
+            speechRegions: [],
+          },
+          segments: [],
+          frameAnalysis: [],
+          contactSheet: null,
+          metadata: {
+            durationSec: 5,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: false,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+      vi.mocked(writeWorkspaceDocumentToBackend).mockResolvedValueOnce({
+        relativePath: 'media/reread.analysis.md',
+        bytesWritten: 428,
+        created: true,
+      });
+
+      const result = await globalToolRegistry.execute('read_source_analysis_report', {
+        assetId: 'read-source-reread-fail',
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.persisted).toBe(true);
+      expect(typeof data.persistenceError).toBe('string');
+      expect(String(data.persistenceError).length).toBeGreaterThan(0);
+      expect(data.document.persisted).toBe(true);
+      expect(typeof data.document.persistenceError).toBe('string');
+      expect(String(data.document.persistenceError).length).toBeGreaterThan(0);
+      expect(data.relativePath).toBe('media/reread.analysis.md');
+      expect(data.sizeBytes).toBe(String(data.content).length);
     });
   });
 

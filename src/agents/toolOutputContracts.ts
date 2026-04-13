@@ -97,6 +97,8 @@ function matchesSplitClipPath(path: string): boolean {
 }
 
 function matchesSourceAnalysisReportPath(path: string): boolean {
+  const matchesObjectPath = (base: string): boolean => path === base || path.startsWith(`${base}.`);
+
   return (
     path === 'data' ||
     path === 'data.content' ||
@@ -104,19 +106,22 @@ function matchesSourceAnalysisReportPath(path: string): boolean {
     path === 'data.reportPath' ||
     path === 'data.assetId' ||
     path === 'data.assetName' ||
+    path === 'data.requestedFile' ||
     path === 'data.generatedAt' ||
     path === 'data.summary' ||
     path === 'data.persisted' ||
+    path === 'data.persistenceError' ||
     path === 'data.sizeBytes' ||
     path === 'data.modifiedAtUnixSec' ||
     path === 'data.bundleSource' ||
-    path === 'data.document' ||
-    path === 'data.document.content' ||
-    path === 'data.document.relativePath' ||
-    path === 'data.document.sizeBytes' ||
-    path === 'data.document.modifiedAtUnixSec' ||
-    path === 'data.document.persisted' ||
-    path === 'data.document.persistenceError' ||
+    matchesObjectPath('data.metadata') ||
+    matchesObjectPath('data.coverage') ||
+    matchesObjectPath('data.sectionCounts') ||
+    matchesObjectPath('data.document') ||
+    path === 'data.warnings' ||
+    /^data\.warnings\[\d+\]$/.test(path) ||
+    path === 'data.errors' ||
+    /^data\.errors\.[^.]+$/.test(path) ||
     path === 'data.markdown'
   );
 }

@@ -2586,8 +2586,12 @@ function sanitizeReportFileStem(value: string): string {
   return sanitized.length > 0 ? sanitized : 'source-analysis-report';
 }
 
+function normalizeWorkspaceRelativePath(relativePath: string): string {
+  return relativePath.replace(/\\/g, '/').trim().replace(/^\.\//, '');
+}
+
 function buildSiblingSourceAnalysisReportRelativePath(relativePath: string): string {
-  const normalized = relativePath.replace(/\\/g, '/').trim().replace(/^\.\//, '');
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
   const segments = normalized.split('/').filter(Boolean);
   const fileName = segments.pop() ?? normalized;
   const stem = sanitizeReportFileStem(fileName);
@@ -2611,22 +2615,54 @@ async function persistSourceAnalysisMarkdownReport(
     typeof requestedOutputPath === 'string' && requestedOutputPath.trim().length > 0
       ? requestedOutputPath.trim()
       : buildDefaultSourceAnalysisReportRelativePath(report);
+  const assetRelativePath =
+    typeof report.assetRelativePath === 'string' && report.assetRelativePath.trim().length > 0
+      ? report.assetRelativePath
+      : null;
+
+  if (
+    assetRelativePath &&
+    normalizeWorkspaceRelativePath(relativePath).toLowerCase() ===
+      normalizeWorkspaceRelativePath(assetRelativePath).toLowerCase()
+  ) {
+    throw new Error('outputPath cannot overwrite the source asset');
+  }
+
   const content = buildSourceAnalysisMarkdown(report);
 
   try {
     await writeWorkspaceDocumentToBackend(relativePath, content, true);
-    const document = await readWorkspaceDocumentFromBackend(relativePath, {
-      failureLogLevel: 'debug',
-    });
 
-    return {
-      relativePath: document.relativePath,
-      content: document.content,
-      sizeBytes: document.sizeBytes,
-      modifiedAtUnixSec: document.modifiedAtUnixSec,
-      persisted: true,
-      persistenceError: null,
-    };
+    try {
+      const document = await readWorkspaceDocumentFromBackend(relativePath, {
+        failureLogLevel: 'debug',
+      });
+
+      return {
+        relativePath: document.relativePath,
+        content: document.content,
+        sizeBytes: document.sizeBytes,
+        modifiedAtUnixSec: document.modifiedAtUnixSec,
+        persisted: true,
+        persistenceError: null,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn('Source analysis Markdown report was written but could not be re-read', {
+        assetId: report.assetId,
+        relativePath,
+        error: message,
+      });
+
+      return {
+        relativePath,
+        content,
+        sizeBytes: content.length,
+        modifiedAtUnixSec: null,
+        persisted: true,
+        persistenceError: message,
+      };
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.warn('Failed to persist source analysis Markdown report', {

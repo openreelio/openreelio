@@ -85,7 +85,9 @@ async fn resolve_asset_context(
             project.path.clone(),
             asset.uri.clone(),
             project.state.active_sequence_id.clone(),
-            asset.duration_sec.map(|duration| build_asset_video_metadata(duration, asset)),
+            asset
+                .duration_sec
+                .map(|duration| build_asset_video_metadata(duration, asset)),
         )
     };
 
@@ -121,10 +123,7 @@ fn resolve_asset_media_path(project_path: &PathBuf, asset_path: &str) -> PathBuf
     }
 }
 
-fn build_asset_video_metadata(
-    duration: f64,
-    asset: &crate::core::assets::Asset,
-) -> VideoMetadata {
+fn build_asset_video_metadata(duration: f64, asset: &crate::core::assets::Asset) -> VideoMetadata {
     let has_audio = asset.audio.is_some();
     asset.video.as_ref().map_or_else(
         || VideoMetadata::new(duration).with_audio(has_audio),
