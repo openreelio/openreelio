@@ -15,14 +15,32 @@ import {
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
+import { useWorkspaceStore } from '@/stores/workspaceStore';
 import type { Track, Clip, Asset, Sequence } from '@/types';
 import { createMockAsset, createMockClip, createMockTrack, createMockSequence } from '@/test/mocks';
 import { invoke } from '@tauri-apps/api/core';
 import { executeAgentCommand } from './commandExecutor';
+import {
+  readWorkspaceDocumentFromBackend,
+  writeWorkspaceDocumentToBackend,
+} from '@/services/workspaceGateway';
 
 vi.mock('./commandExecutor', () => ({
   executeAgentCommand: vi.fn(),
 }));
+
+vi.mock('@/services/workspaceGateway', () => ({
+  readWorkspaceDocumentFromBackend: vi.fn(),
+  writeWorkspaceDocumentToBackend: vi.fn(),
+}));
+
+const workspaceDocuments = new Map<
+  string,
+  {
+    content: string;
+    modifiedAtUnixSec: number;
+  }
+>();
 
 // =============================================================================
 // Test Helpers
@@ -103,9 +121,32 @@ function getToolResult<T>(result: ToolExecutionResult): T {
 describe('analysisTools', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    workspaceDocuments.clear();
     globalToolRegistry.clear();
     registerAnalysisTools();
     vi.mocked(executeAgentCommand).mockReset();
+    vi.mocked(writeWorkspaceDocumentToBackend).mockImplementation(async (relativePath, content) => {
+      const modifiedAtUnixSec = workspaceDocuments.size + 1;
+      workspaceDocuments.set(relativePath, { content, modifiedAtUnixSec });
+      return {
+        relativePath,
+        bytesWritten: content.length,
+        created: true,
+      };
+    });
+    vi.mocked(readWorkspaceDocumentFromBackend).mockImplementation(async (relativePath) => {
+      const document = workspaceDocuments.get(relativePath);
+      if (!document) {
+        throw new Error(`Workspace document not found: ${relativePath}`);
+      }
+
+      return {
+        relativePath,
+        content: document.content,
+        sizeBytes: document.content.length,
+        modifiedAtUnixSec: document.modifiedAtUnixSec,
+      };
+    });
 
     // Reset stores
     useProjectStore.setState({
@@ -121,9 +162,14 @@ describe('analysisTools', () => {
       currentTime: 0,
       duration: 0,
     });
+    useWorkspaceStore.setState({
+      fileTree: [],
+      error: null,
+    });
   });
 
   afterEach(() => {
+    workspaceDocuments.clear();
     unregisterAnalysisTools();
   });
 
@@ -151,7 +197,7 @@ describe('analysisTools', () => {
 
     it('should register tools in analysis category', () => {
       const analysisTools = globalToolRegistry.listByCategory('analysis');
-      expect(analysisTools.length).toBe(27);
+      expect(analysisTools.length).toBe(28);
     });
 
     it('should return correct tool names', () => {
@@ -165,6 +211,7 @@ describe('analysisTools', () => {
       expect(names).toContain('get_workspace_files');
       expect(names).toContain('find_workspace_file');
       expect(names).toContain('get_unregistered_files');
+      expect(names).toContain('read_source_analysis_report');
       expect(names).toContain('generate_source_analysis_report');
       expect(names).toContain('search_source_analysis_report');
       expect(names).toContain('search_source_library');
@@ -173,7 +220,7 @@ describe('analysisTools', () => {
       expect(names).toContain('search_indexed_source_library');
       expect(names).toContain('import_external_diarization');
       expect(names).toContain('run_external_diarization');
-      expect(names).toHaveLength(27);
+      expect(names).toHaveLength(28);
     });
 
     it('should unregister all tools', () => {
@@ -904,6 +951,357 @@ describe('reference style transfer analysis tools', () => {
   });
 
   // ===========================================================================
+  // read_source_analysis_report
+  // ===========================================================================
+
+  describe('read_source_analysis_report', () => {
+    it('should generate, persist, and return the canonical Markdown report document', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'read-source-1',
+            name: 'readable.mp4',
+            kind: 'video',
+            uri: '/media/readable.mp4',
+            relativePath: 'media/readable.mp4',
+            durationSec: 8,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'read-source-1',
+          shots: [{ startSec: 0, endSec: 4, confidence: 0.9, keyframePath: 'shots/0001.jpg' }],
+          transcript: [
+            {
+              startSec: 0,
+              endSec: 2,
+              text: 'A concise transcript excerpt',
+              confidence: 0.95,
+              language: 'en',
+              speakerId: 'speaker_1',
+            },
+          ],
+          audioProfile: {
+            bpm: 120,
+            spectralCentroidHz: 1400,
+            loudnessProfile: [-18.2],
+            peakDb: -4.2,
+            silenceRegions: [],
+            speechRegions: [{ startSec: 0, endSec: 4 }],
+          },
+          segments: [
+            { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
+          ],
+          frameAnalysis: [],
+          contactSheet: null,
+          metadata: {
+            durationSec: 8,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('read_source_analysis_report', {
+        assetId: 'read-source-1',
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.assetId).toBe('read-source-1');
+      expect(data.relativePath).toBe('media/readable.analysis.md');
+      expect(data.reportPath).toBe('media/readable.analysis.md');
+      expect(data.document.relativePath).toBe('media/readable.analysis.md');
+      expect(vi.mocked(writeWorkspaceDocumentToBackend)).toHaveBeenCalled();
+      expect(String(data.content)).toContain('# Source Analysis Report: readable.mp4');
+      expect(String(data.document.content)).toContain('# Source Analysis Report: readable.mp4');
+      expect(data.sectionCounts).toMatchObject({
+        moments: 1,
+        chapters: expect.any(Number),
+        highlights: expect.any(Number),
+        speakerTurns: 1,
+      });
+    });
+
+    it('should resolve a workspace file argument into an asset before reading', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'read-source-file',
+            name: 'library.mp4',
+            kind: 'video',
+            uri: '/media/library.mp4',
+            relativePath: 'media/library.mp4',
+            durationSec: 6,
+            video: {
+              width: 1280,
+              height: 720,
+              fps: { num: 24, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+      useWorkspaceStore.setState({
+        fileTree: [
+          {
+            name: 'library.mp4',
+            relativePath: 'media/library.mp4',
+            isDirectory: false,
+            fileSize: 1024,
+            kind: 'video',
+            assetId: 'read-source-file',
+            children: [],
+          },
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'read-source-file',
+          shots: [{ startSec: 0, endSec: 6, confidence: 0.9, keyframePath: null }],
+          transcript: [],
+          audioProfile: {
+            bpm: null,
+            spectralCentroidHz: 900,
+            loudnessProfile: [-19],
+            peakDb: -5,
+            silenceRegions: [],
+          },
+          segments: [
+            { startSec: 0, endSec: 6, segmentType: 'broll', confidence: 0.85, features: {} },
+          ],
+          frameAnalysis: [],
+          contactSheet: null,
+          metadata: {
+            durationSec: 6,
+            width: 1280,
+            height: 720,
+            fps: 24,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('read_source_analysis_report', {
+        file: 'library.mp4',
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.assetId).toBe('read-source-file');
+      expect(data.requestedFile).toBe('media/library.mp4');
+      expect(data.relativePath).toBe('media/library.analysis.md');
+    });
+
+    it('should honor a custom outputPath when provided', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'read-source-custom',
+            name: 'custom.mp4',
+            kind: 'video',
+            uri: '/media/custom.mp4',
+            relativePath: 'media/custom.mp4',
+            durationSec: 5,
+            video: {
+              width: 1280,
+              height: 720,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'read-source-custom',
+          shots: [],
+          transcript: [],
+          audioProfile: {
+            bpm: null,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-20],
+            peakDb: -6,
+            silenceRegions: [],
+            speechRegions: [],
+          },
+          segments: [],
+          frameAnalysis: [],
+          contactSheet: null,
+          metadata: {
+            durationSec: 5,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: false,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('read_source_analysis_report', {
+        assetId: 'read-source-custom',
+        outputPath: 'reports/custom-output.md',
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.relativePath).toBe('reports/custom-output.md');
+      expect(data.reportPath).toBe('reports/custom-output.md');
+    });
+
+    it('should reject a custom outputPath that would overwrite the source asset', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'read-source-overwrite',
+            name: 'overwrite.mp4',
+            kind: 'video',
+            uri: '/media/overwrite.mp4',
+            relativePath: 'media/overwrite.mp4',
+            durationSec: 5,
+            video: {
+              width: 1280,
+              height: 720,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'read-source-overwrite',
+          shots: [],
+          transcript: [],
+          audioProfile: {
+            bpm: null,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-20],
+            peakDb: -6,
+            silenceRegions: [],
+            speechRegions: [],
+          },
+          segments: [],
+          frameAnalysis: [],
+          contactSheet: null,
+          metadata: {
+            durationSec: 5,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: false,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('read_source_analysis_report', {
+        assetId: 'read-source-overwrite',
+        outputPath: 'media/overwrite.mp4',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('outputPath cannot overwrite the source asset');
+      expect(vi.mocked(writeWorkspaceDocumentToBackend)).not.toHaveBeenCalled();
+    });
+
+    it('should keep persisted true when the report cannot be re-read after writing', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'read-source-reread-fail',
+            name: 'reread.mp4',
+            kind: 'video',
+            uri: '/media/reread.mp4',
+            relativePath: 'media/reread.mp4',
+            durationSec: 5,
+            video: {
+              width: 1280,
+              height: 720,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'read-source-reread-fail',
+          shots: [],
+          transcript: [],
+          audioProfile: {
+            bpm: null,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-20],
+            peakDb: -6,
+            silenceRegions: [],
+            speechRegions: [],
+          },
+          segments: [],
+          frameAnalysis: [],
+          contactSheet: null,
+          metadata: {
+            durationSec: 5,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: false,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+      vi.mocked(writeWorkspaceDocumentToBackend).mockResolvedValueOnce({
+        relativePath: 'media/reread.analysis.md',
+        bytesWritten: 428,
+        created: true,
+      });
+
+      const result = await globalToolRegistry.execute('read_source_analysis_report', {
+        assetId: 'read-source-reread-fail',
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.persisted).toBe(true);
+      expect(typeof data.persistenceError).toBe('string');
+      expect(String(data.persistenceError).length).toBeGreaterThan(0);
+      expect(data.document.persisted).toBe(true);
+      expect(typeof data.document.persistenceError).toBe('string');
+      expect(String(data.document.persistenceError).length).toBeGreaterThan(0);
+      expect(data.relativePath).toBe('media/reread.analysis.md');
+      expect(data.sizeBytes).toBe(String(data.content).length);
+    });
+  });
+
+  // ===========================================================================
   // generate_source_analysis_report
   // ===========================================================================
 
@@ -916,6 +1314,7 @@ describe('reference style transfer analysis tools', () => {
             name: 'concert.mp4',
             kind: 'video',
             uri: '/media/concert.mp4',
+            relativePath: 'media/concert.mp4',
             durationSec: 12,
             video: {
               width: 1920,
@@ -1089,6 +1488,9 @@ describe('reference style transfer analysis tools', () => {
       expect(data.annotations.objectDetectionCount).toBe(1);
       expect(data.annotations.availableTypes).toContain('objects');
       expect(data.annotations.providers).toContain('google_cloud');
+      expect(data.relativePath).toBe('media/concert.analysis.md');
+      expect(data.reportPath).toBe('media/concert.analysis.md');
+      expect(String(data.content)).toContain('# Source Analysis Report: concert.mp4');
       expect(String(data.markdown)).toContain('# Source Analysis Report: concert.mp4');
       expect(String(data.markdown)).toContain('## Moments');
       expect(String(data.markdown)).toContain('## Visual Artifacts');

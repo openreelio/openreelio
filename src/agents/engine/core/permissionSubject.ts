@@ -28,10 +28,7 @@ export interface PermissionSubject {
 
 const META_TOOL_NAMES = new Set(['query', 'edit', 'audio', 'effects', 'text']);
 
-const EXACT_SUBJECTS: Record<
-  string,
-  { subjectType: PermissionSubjectType; subject: string }
-> = {
+const EXACT_SUBJECTS: Record<string, { subjectType: PermissionSubjectType; subject: string }> = {
   analyze_asset: {
     subjectType: 'asset',
     subject: 'asset.analysis.run',
@@ -55,6 +52,10 @@ const EXACT_SUBJECTS: Record<
   get_analysis_providers: {
     subjectType: 'external_provider',
     subject: 'external_provider.providers.read',
+  },
+  read_source_analysis_report: {
+    subjectType: 'asset',
+    subject: 'asset.analysis.report.read',
   },
   list_workspace_documents: {
     subjectType: 'workspace',
@@ -130,9 +131,7 @@ function matchLegacyPermissionPattern(pattern: string, value: string): boolean {
   }
 }
 
-function splitCanonicalSubject(
-  value: string,
-): { path: string; resource: string | null } {
+function splitCanonicalSubject(value: string): { path: string; resource: string | null } {
   const separatorIndex = value.indexOf('#');
   if (separatorIndex === -1) {
     return { path: value.trim(), resource: null };
@@ -270,11 +269,11 @@ function inferDomain(toolName: string): string {
   }
 
   if (
-    toolName.includes('audio')
-    || toolName.includes('volume')
-    || toolName.includes('fade')
-    || toolName.startsWith('mute_')
-    || toolName.startsWith('normalize_')
+    toolName.includes('audio') ||
+    toolName.includes('volume') ||
+    toolName.includes('fade') ||
+    toolName.startsWith('mute_') ||
+    toolName.startsWith('normalize_')
   ) {
     return 'audio';
   }
@@ -315,11 +314,19 @@ function inferAction(toolName: string): string {
     return 'analyze';
   }
 
-  if (toolName.startsWith('delete_') || toolName.startsWith('remove_') || toolName.startsWith('cancel_')) {
+  if (
+    toolName.startsWith('delete_') ||
+    toolName.startsWith('remove_') ||
+    toolName.startsWith('cancel_')
+  ) {
     return 'delete';
   }
 
-  if (toolName.startsWith('add_') || toolName.startsWith('insert_') || toolName.startsWith('create_')) {
+  if (
+    toolName.startsWith('add_') ||
+    toolName.startsWith('insert_') ||
+    toolName.startsWith('create_')
+  ) {
     return 'create';
   }
 
@@ -495,16 +502,13 @@ export function buildPermissionSubject(
   const resourceBinding = extractResourceBinding(args);
 
   if (exact) {
-    const subject = resourceBinding
-      && exact.subjectType !== 'approval'
-      && exact.subjectType !== 'system'
-      ? `${exact.subject}#${resourceBinding}`
-      : exact.subject;
+    const subject =
+      resourceBinding && exact.subjectType !== 'approval' && exact.subjectType !== 'system'
+        ? `${exact.subject}#${resourceBinding}`
+        : exact.subject;
     return {
       subjectType:
-        resourceBinding
-        && exact.subjectType !== 'approval'
-        && exact.subjectType !== 'system'
+        resourceBinding && exact.subjectType !== 'approval' && exact.subjectType !== 'system'
           ? 'resource'
           : exact.subjectType,
       subject,
@@ -524,11 +528,12 @@ export function buildPermissionSubject(
 
   const domain = inferDomain(normalizedToolName);
   const action = inferAction(normalizedToolName);
-  const subjectBase = domain === 'tool'
-    ? `tool.${normalizedToolName}`
-    : domain.endsWith(`.${action}`)
-      ? domain
-      : `${domain}.${action}`;
+  const subjectBase =
+    domain === 'tool'
+      ? `tool.${normalizedToolName}`
+      : domain.endsWith(`.${action}`)
+        ? domain
+        : `${domain}.${action}`;
   const subject = resourceBinding ? `${subjectBase}#${resourceBinding}` : subjectBase;
 
   return {

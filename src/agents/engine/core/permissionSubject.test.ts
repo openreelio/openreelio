@@ -91,11 +91,16 @@ describe('permissionSubject', () => {
       assetId: 'asset-7',
     });
     const providersSubject = buildPermissionSubject('get_analysis_providers');
+    const reportSubject = buildPermissionSubject('read_source_analysis_report', {
+      assetId: 'asset-9',
+    });
 
     expect(statusSubject.subject).toBe('asset.analysis.status.read#asset:asset-7');
     expect(statusSubject.subjectType).toBe('resource');
     expect(providersSubject.subject).toBe('external_provider.providers.read');
     expect(providersSubject.subjectType).toBe('external_provider');
+    expect(reportSubject.subject).toBe('asset.analysis.report.read#asset:asset-9');
+    expect(reportSubject.subjectType).toBe('resource');
   });
 
   it('builds a resource-aware canonical subject for meta-tool actions', () => {
@@ -135,9 +140,9 @@ describe('permissionSubject', () => {
     expect(isCanonicalPermissionPattern('timeline.clip.delete#clip:*')).toBe(true);
     expect(isExactPermissionPatternMatch('timeline.clip.delete#clip:clip-1', subject)).toBe(true);
     expect(isExactPermissionPatternMatch('timeline.clip.delete', subject)).toBe(true);
-    expect(
-      getPermissionPatternSpecificity('timeline.clip.delete#clip:clip-1'),
-    ).toBeGreaterThan(getPermissionPatternSpecificity('timeline.clip.*'));
+    expect(getPermissionPatternSpecificity('timeline.clip.delete#clip:clip-1')).toBeGreaterThan(
+      getPermissionPatternSpecificity('timeline.clip.*'),
+    );
   });
 
   it('keeps legacy tool globs working for meta-tool actions', () => {

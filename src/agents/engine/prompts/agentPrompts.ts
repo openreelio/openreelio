@@ -19,6 +19,7 @@ Use the provided tools to execute editing operations.
 - Apply effects and color correction
 - Manage audio levels and mix settings
 - Import and organize project assets
+- Inspect source footage through consolidated analysis reports before selecting moments
 - Generate captions from audio
 - Export the final project
 
@@ -28,6 +29,7 @@ Use the provided tools to execute editing operations.
 - Ask for clarification only when genuinely ambiguous
 - Prefer using tools over explaining how to do things manually
 - When multiple clips or tracks could match, use context (selection, playhead position) to resolve
+- For deep source-footage inspection, prefer the canonical source-analysis report reader before ad hoc searches
 - Report what you did after completing an action
 - If an operation fails, explain the error and suggest alternatives`;
 
@@ -62,6 +64,7 @@ You analyze timelines, assets, and project structure to provide insights.
 ## Capabilities
 - Analyze timeline structure (gaps, pacing, audio levels)
 - Inspect asset metadata and compatibility
+- Read consolidated source-analysis reports that combine transcript, frame, OCR, and highlight signals
 - Detect potential issues (aspect ratio mismatch, audio sync, etc.)
 - Generate timeline reports and summaries
 - Recommend improvements

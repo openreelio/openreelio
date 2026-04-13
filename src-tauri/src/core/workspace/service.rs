@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::core::assets::{Asset, AssetKind, AudioInfo, VideoInfo};
+use crate::core::assets::{Asset, AssetKind, MetadataExtractor};
 use crate::core::project::ProjectState;
 use crate::core::CoreResult;
 
@@ -62,6 +62,101 @@ pub struct WorkspaceService {
     event_tx: mpsc::UnboundedSender<WorkspaceEvent>,
     event_rx: Option<mpsc::UnboundedReceiver<WorkspaceEvent>>,
     ignore_rules: Arc<IgnoreRules>,
+}
+
+fn build_workspace_asset(entry: &IndexEntry, absolute_path: &std::path::Path) -> Asset {
+    let uri = absolute_path.to_string_lossy().to_string();
+    let name = entry
+        .relative_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&entry.relative_path);
+    let extracted_metadata = MetadataExtractor::extract(absolute_path).ok();
+
+    let resolved_file_size = extracted_metadata
+        .as_ref()
+        .map(|metadata| metadata.file_size)
+        .filter(|size| *size > 0)
+        .unwrap_or(entry.file_size);
+
+    let mut asset = match entry.kind {
+        AssetKind::Audio => Asset::new_audio(
+            name,
+            &uri,
+            extracted_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.audio.clone())
+                .unwrap_or_default(),
+        ),
+        AssetKind::Image => {
+            let (width, height) = extracted_metadata
+                .as_ref()
+                .and_then(|metadata| {
+                    metadata
+                        .video
+                        .as_ref()
+                        .map(|video| (video.width, video.height))
+                })
+                .unwrap_or((1920, 1080));
+            Asset::new_image(name, &uri, width, height)
+        }
+        _ => Asset::new_video(
+            name,
+            &uri,
+            extracted_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.video.clone())
+                .unwrap_or_default(),
+        ),
+    };
+
+    if let Some(metadata) = extracted_metadata.as_ref() {
+        if metadata.duration_sec > 0.0 {
+            asset = asset.with_duration(metadata.duration_sec);
+        }
+        if let Some(audio) = metadata.audio.clone() {
+            asset.audio = Some(audio);
+        }
+    }
+
+    asset.with_file_size(resolved_file_size)
+}
+
+fn refresh_existing_workspace_asset_metadata(
+    asset: &mut Asset,
+    entry: &IndexEntry,
+    absolute_path: &std::path::Path,
+) {
+    let needs_refresh = asset.duration_sec.is_none()
+        || asset.file_size == 0
+        || (matches!(asset.kind, AssetKind::Video)
+            && asset
+                .video
+                .as_ref()
+                .map(|video| video.codec.trim().is_empty())
+                .unwrap_or(true));
+
+    if !needs_refresh {
+        return;
+    }
+
+    let refreshed = build_workspace_asset(entry, absolute_path);
+    asset.duration_sec = asset.duration_sec.or(refreshed.duration_sec);
+    if refreshed.file_size > 0 {
+        asset.file_size = refreshed.file_size;
+    }
+    if asset.video.is_none()
+        || asset
+            .video
+            .as_ref()
+            .map(|video| video.codec.trim().is_empty())
+            .unwrap_or(true)
+    {
+        asset.video = refreshed.video;
+    }
+    if asset.audio.is_none() {
+        asset.audio = refreshed.audio;
+    }
 }
 
 impl WorkspaceService {
@@ -309,6 +404,10 @@ impl WorkspaceService {
                     .find(|a| a.relative_path.as_deref() == Some(&entry.relative_path))
                 {
                     let asset_id = asset.id.clone();
+                    if let Some(existing_asset) = state.assets.get_mut(&asset_id) {
+                        let abs_path = project_root.join(&entry.relative_path);
+                        refresh_existing_workspace_asset_metadata(existing_asset, entry, &abs_path);
+                    }
                     self.index
                         .mark_registered(&entry.relative_path, &asset_id)?;
                 }
@@ -316,38 +415,7 @@ impl WorkspaceService {
             }
 
             let abs_path = project_root.join(&entry.relative_path);
-            let uri = abs_path.to_string_lossy().to_string();
-
-            let asset = match entry.kind {
-                AssetKind::Audio => Asset::new_audio(
-                    entry
-                        .relative_path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&entry.relative_path),
-                    &uri,
-                    AudioInfo::default(),
-                ),
-                AssetKind::Image => Asset::new_image(
-                    entry
-                        .relative_path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&entry.relative_path),
-                    &uri,
-                    1920,
-                    1080,
-                ),
-                _ => Asset::new_video(
-                    entry
-                        .relative_path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&entry.relative_path),
-                    &uri,
-                    VideoInfo::default(),
-                ),
-            };
+            let asset = build_workspace_asset(entry, &abs_path);
 
             let asset = asset
                 .with_relative_path(&entry.relative_path)
@@ -368,18 +436,7 @@ impl WorkspaceService {
             if let Some(ref asset_id) = entry.asset_id {
                 if !state.assets.contains_key(asset_id) {
                     let abs_path = project_root.join(&entry.relative_path);
-                    let uri = abs_path.to_string_lossy().to_string();
-                    let name = entry
-                        .relative_path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&entry.relative_path);
-
-                    let mut asset = match entry.kind {
-                        AssetKind::Audio => Asset::new_audio(name, &uri, AudioInfo::default()),
-                        AssetKind::Image => Asset::new_image(name, &uri, 1920, 1080),
-                        _ => Asset::new_video(name, &uri, VideoInfo::default()),
-                    };
+                    let mut asset = build_workspace_asset(entry, &abs_path);
 
                     // Preserve the original asset_id from the index
                     asset.id = asset_id.clone();
@@ -508,7 +565,7 @@ fn get_direct_child_dir(prefix: &str, full_path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::assets::AssetKind;
+    use crate::core::assets::{AssetKind, AudioInfo};
 
     fn create_test_project(dir: &std::path::Path) {
         std::fs::create_dir_all(dir.join("footage")).unwrap();

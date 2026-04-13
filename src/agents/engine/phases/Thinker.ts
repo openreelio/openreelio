@@ -245,6 +245,7 @@ export class Thinker {
         'Source-Aware Policy:',
         '- Do not assume timeline clips are the only available media. Imported assets may exist without timeline placement.',
         '- When the request implies searching or selecting moments from source footage, prefer using source-discovery analysis tools before asking for clarification.',
+        '- For deep source-video inspection, prefer the canonical source-analysis report reader so transcript, frame, OCR, and highlight signals are consolidated in one read step.',
         '- Use timeline-only reasoning only when the request explicitly limits scope to existing timeline clips.',
       ].join('\n'),
     );

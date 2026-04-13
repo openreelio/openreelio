@@ -64,6 +64,8 @@ export interface AssetSnapshot {
   name: string;
   kind: Asset['kind'];
   uri: string;
+  relativePath?: string;
+  workspaceManaged?: boolean;
   durationSec?: number;
   videoWidth?: number;
   videoHeight?: number;
@@ -148,6 +150,8 @@ function assetToSnapshot(asset: Asset, timelineClipCount: number): AssetSnapshot
     name: asset.name,
     kind: asset.kind,
     uri: asset.uri,
+    relativePath: asset.relativePath,
+    workspaceManaged: asset.workspaceManaged,
     durationSec: asset.durationSec,
     videoWidth: asset.video?.width,
     videoHeight: asset.video?.height,

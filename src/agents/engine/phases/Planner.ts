@@ -471,7 +471,10 @@ export class Planner {
     parts.push('5. Provide a rollback strategy in case of failure');
     parts.push(`6. Maximum ${this.config.maxSteps} steps allowed`);
     parts.push(
-      '7. When the request references source footage discovery or selecting moments, include source-aware analysis steps before edit actions (for example: catalog/unused-asset checks).',
+      '7. When the request references source footage discovery or selecting moments, include source-aware analysis steps before edit actions. Prefer read_source_analysis_report for deep inspection, then search or selects tools as needed.',
+    );
+    parts.push(
+      '7a. read_source_analysis_report and generate_source_analysis_report already persist a Markdown file beside the asset by default. Do not add a separate write step unless the user asked for a second copy or a custom output path/name.',
     );
     parts.push(
       '8. Never invent or normalize IDs. Always copy exact IDs from analysis output (no placeholders like asset_id_from_catalog or aliases like video_1).',
