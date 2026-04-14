@@ -1,8 +1,16 @@
-import type { DelegationResultPayload } from './agentDelegationResult';
+import {
+  deriveDelegationReviewState,
+  resolveDelegationAutoVerificationLabel,
+  resolveDelegationVerificationLabel,
+  type DelegationResultPayload,
+} from './agentDelegationResult';
 
 interface DelegatedParentContext {
   parentLabel: string;
   delegatedGoal?: string | null;
+  delegationStatus?: 'requested' | 'running' | 'completed' | 'failed' | 'cancelled';
+  mergeStatus?: 'pending' | 'merged' | 'discarded';
+  errorMessage?: string | null;
   statusLabel?: string | null;
   resultPreview?: string | null;
   result?: DelegationResultPayload | null;
@@ -14,6 +22,9 @@ interface DelegatedChildItem {
   id: string;
   label: string;
   delegatedGoal?: string | null;
+  delegationStatus?: 'requested' | 'running' | 'completed' | 'failed' | 'cancelled';
+  mergeStatus?: 'pending' | 'merged' | 'discarded';
+  errorMessage?: string | null;
   statusLabel: string;
   resultPreview?: string | null;
   result?: DelegationResultPayload | null;
@@ -35,9 +46,24 @@ function formatDuration(durationMs: number): string {
   return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
-function HandoffMetricChip({ children }: { children: React.ReactNode }) {
+function HandoffMetricChip({
+  children,
+  tone = 'default',
+}: {
+  children: React.ReactNode;
+  tone?: 'default' | 'success' | 'warning' | 'danger';
+}) {
+  const toneClassName =
+    tone === 'success'
+      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+      : tone === 'warning'
+        ? 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+        : tone === 'danger'
+          ? 'border-rose-500/30 bg-rose-500/10 text-rose-200'
+          : 'border-border-subtle bg-surface-base text-text-secondary';
+
   return (
-    <span className="rounded-full border border-border-subtle bg-surface-base px-2 py-0.5 text-[10px] text-text-secondary">
+    <span className={`rounded-full border px-2 py-0.5 text-[10px] ${toneClassName}`}>
       {children}
     </span>
   );
@@ -46,13 +72,40 @@ function HandoffMetricChip({ children }: { children: React.ReactNode }) {
 function DelegationResultSummary({
   result,
   preview,
+  delegationStatus,
+  mergeStatus,
+  errorMessage,
 }: {
   result?: DelegationResultPayload | null;
   preview?: string | null;
+  delegationStatus?: 'requested' | 'running' | 'completed' | 'failed' | 'cancelled';
+  mergeStatus?: 'pending' | 'merged' | 'discarded';
+  errorMessage?: string | null;
 }) {
   if (!result && !preview) {
     return null;
   }
+
+  const reviewState = deriveDelegationReviewState(
+    result
+      ? {
+          status: delegationStatus ?? 'running',
+          mergeStatus: mergeStatus ?? 'pending',
+          errorMessage: errorMessage ?? null,
+        }
+      : null,
+    result,
+  );
+  const verificationLabel = reviewState?.label ?? resolveDelegationVerificationLabel(result);
+  const autoVerificationLabel = resolveDelegationAutoVerificationLabel(result);
+  const verificationTone =
+    reviewState?.phase === 'verified' || result?.verification.verdict === 'pass'
+      ? 'success'
+      : reviewState?.phase === 'rejected' ||
+          reviewState?.phase === 'failed' ||
+          result?.verification.verdict === 'fail'
+        ? 'danger'
+        : 'warning';
 
   return (
     <div className="mt-2 space-y-2">
@@ -64,6 +117,12 @@ function DelegationResultSummary({
             <HandoffMetricChip>
               {result.aborted ? 'aborted' : result.success ? 'success' : 'failed'}
             </HandoffMetricChip>
+            {verificationLabel && (
+              <HandoffMetricChip tone={verificationTone}>{verificationLabel}</HandoffMetricChip>
+            )}
+            {autoVerificationLabel && (
+              <HandoffMetricChip>{autoVerificationLabel}</HandoffMetricChip>
+            )}
             <HandoffMetricChip>{formatDuration(result.totalDuration)}</HandoffMetricChip>
             <HandoffMetricChip>{result.iterations} iter</HandoffMetricChip>
             <HandoffMetricChip>{result.executedSteps} steps</HandoffMetricChip>
@@ -145,6 +204,9 @@ export function AgentDelegationStrip({
             <DelegationResultSummary
               preview={delegatedFrom.resultPreview}
               result={delegatedFrom.result}
+              delegationStatus={delegatedFrom.delegationStatus}
+              mergeStatus={delegatedFrom.mergeStatus}
+              errorMessage={delegatedFrom.errorMessage}
             />
           </div>
           <div className="flex items-center gap-2">
@@ -200,7 +262,13 @@ export function AgentDelegationStrip({
                     {child.delegatedGoal}
                   </div>
                 )}
-                <DelegationResultSummary preview={child.resultPreview} result={child.result} />
+                <DelegationResultSummary
+                  preview={child.resultPreview}
+                  result={child.result}
+                  delegationStatus={child.delegationStatus}
+                  mergeStatus={child.mergeStatus}
+                  errorMessage={child.errorMessage}
+                />
                 <div className="mt-2 flex items-center gap-2">
                   <button
                     type="button"
