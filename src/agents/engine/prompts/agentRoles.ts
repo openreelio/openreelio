@@ -1,1 +1,8 @@
-export type AgentRole = 'editor' | 'planner' | 'analyst' | 'colorist' | 'audio' | 'captioner';
+export type AgentRole =
+  | 'editor'
+  | 'planner'
+  | 'analyst'
+  | 'verifier'
+  | 'colorist'
+  | 'audio'
+  | 'captioner';

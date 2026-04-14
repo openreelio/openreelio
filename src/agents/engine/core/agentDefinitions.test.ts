@@ -33,11 +33,13 @@ describe('agentDefinitions', () => {
     expect(subAgents.map((definition) => definition.id)).toEqual([
       'planner',
       'analyst',
+      'verifier',
       'colorist',
       'audio',
       'captioner',
     ]);
     expect(getExperimentalAgentDefinition('analyst')?.mode).toBe('subagent');
     expect(getExperimentalAgentDefinition('planner')?.role).toBe('planner');
+    expect(getExperimentalAgentDefinition('verifier')?.tools).toEqual(['query', 'workspace_read']);
   });
 });
