@@ -635,13 +635,28 @@ export const useConversationStore = create<ConversationStore>()(
 
     addSystemMessageToSession: (sessionId: string, content: string) => {
       const msg = createSystemMessage(content);
+      msg.sessionId = sessionId;
+      const isActiveTarget = get().activeSessionId === sessionId;
+
       set((state) => {
         if (state.activeSessionId === sessionId && state.activeConversation) {
           state.activeConversation.messages.push(msg);
           state.activeConversation.updatedAt = Date.now();
         }
       });
-      debouncedPersistMessage(sessionId, msg);
+
+      if (isActiveTarget) {
+        debouncedPersistMessage(sessionId, msg);
+      } else {
+        persistMessage(sessionId, msg).catch((err) => {
+          logger.error('Failed to persist system message for inactive session', {
+            sessionId,
+            messageId: msg.id,
+            err,
+          });
+        });
+      }
+
       return msg.id;
     },
 
