@@ -57,6 +57,18 @@ function createMockExecutor(): MockToolExecutor {
       parameters: { type: 'object' },
       result: { success: true, data: { ok: true }, duration: 3 },
     },
+    {
+      info: {
+        name: 'write_workspace_document',
+        description: 'Write a workspace file',
+        category: 'utility',
+        riskLevel: 'low',
+        supportsUndo: false,
+        parallelizable: false,
+      },
+      parameters: { type: 'object' },
+      result: { success: true, data: { ok: true }, duration: 4 },
+    },
   ]);
 
   return executor;
@@ -78,6 +90,7 @@ describe('ScopedToolExecutor', () => {
       'read_workspace_document',
     ]);
     expect(scoped.hasTool('edit')).toBe(false);
+    expect(scoped.hasTool('write_workspace_document')).toBe(false);
   });
 
   it('rejects tool execution outside the active agent profile scope', async () => {

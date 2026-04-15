@@ -17,7 +17,14 @@ import { buildToolOutputContractSection } from '@/agents/toolOutputContracts';
 // Role type (duplicated from system.ts to avoid circular dependency)
 // =============================================================================
 
-type ToolReferenceRole = 'editor' | 'planner' | 'analyst' | 'colorist' | 'audio' | 'captioner';
+type ToolReferenceRole =
+  | 'editor'
+  | 'planner'
+  | 'analyst'
+  | 'verifier'
+  | 'colorist'
+  | 'audio'
+  | 'captioner';
 
 // =============================================================================
 // Sections
@@ -111,6 +118,9 @@ const TEXT_ACTIONS = `## Text Actions (meta-tool: text, require sequenceId)
 - add_captions_from_transcription(segments, trackId?) → create captions from timed transcript segments
 - import_captions_from_file(relativePath, format?, trackId?) → import SRT/VTT subtitle files from the workspace`;
 
+const WORKSPACE_READ_TOOLS = `## Workspace Document Tools (read-only)
+- list_workspace_documents / read_workspace_document`;
+
 const WORKSPACE_TOOLS = `## Workspace Tools (always available, not behind meta-tools)
 - list_workspace_documents / read_workspace_document / write_workspace_document
 - replace_workspace_document_text / create_workspace_folder
@@ -182,13 +192,15 @@ function getSectionsForRole(role: ToolReferenceRole): string[] {
         AUDIO_ACTIONS,
         EFFECTS_ACTIONS,
         TEXT_ACTIONS,
-        WORKSPACE_TOOLS,
+        WORKSPACE_READ_TOOLS,
         EDITING_CONCEPTS,
         COMMON_WORKFLOWS,
         CLI_REFERENCE,
       ];
     case 'analyst':
-      return [QUERY_ACTIONS, TOOL_OUTPUT_CONTRACTS, WORKSPACE_TOOLS, CLI_REFERENCE];
+      return [QUERY_ACTIONS, TOOL_OUTPUT_CONTRACTS, WORKSPACE_READ_TOOLS, CLI_REFERENCE];
+    case 'verifier':
+      return [QUERY_ACTIONS, TOOL_OUTPUT_CONTRACTS, WORKSPACE_READ_TOOLS, CLI_REFERENCE];
     case 'colorist':
       return [
         QUERY_ACTIONS,

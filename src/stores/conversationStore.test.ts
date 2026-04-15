@@ -256,7 +256,12 @@ describe('ConversationStore', () => {
                 sessionId: 'session-existing',
                 role: 'assistant',
                 timestamp: now - 500,
-                parts: [{ partType: 'text', dataJson: JSON.stringify({ type: 'text', content: 'Older context' }) }],
+                parts: [
+                  {
+                    partType: 'text',
+                    dataJson: JSON.stringify({ type: 'text', content: 'Older context' }),
+                  },
+                ],
                 usageJson: null,
               },
             ],
@@ -783,6 +788,68 @@ describe('ConversationStore', () => {
       const msg = state.activeConversation!.messages[0];
       expect(msg.role).toBe('system');
       expect(msg.parts[0]).toEqual({ type: 'text', content: 'Operation cancelled' });
+    });
+
+    it('should add a system message to a specific active session', () => {
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+      useConversationStore.setState((state) => ({
+        ...state,
+        activeSessionId: 'session-1',
+        activeConversation: {
+          id: 'session-1',
+          projectId: 'project-1',
+          messages: [],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      }));
+
+      const msgId = store.addSystemMessageToSession('session-1', 'Verifier bootstrap');
+
+      const state = useConversationStore.getState();
+      expect(msgId).toBeTruthy();
+      expect(state.activeConversation?.messages[0]).toEqual(
+        expect.objectContaining({
+          role: 'system',
+          parts: [{ type: 'text', content: 'Verifier bootstrap' }],
+        }),
+      );
+      expect(state.activeConversation?.messages[0]?.sessionId).toBe('session-1');
+    });
+
+    it('should persist a system message immediately for an inactive target session', async () => {
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+      mockInvoke.mockReset().mockResolvedValue(undefined);
+      useConversationStore.setState((state) => ({
+        ...state,
+        activeSessionId: 'session-active',
+        activeConversation: {
+          id: 'session-active',
+          projectId: 'project-1',
+          messages: [],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      }));
+
+      const msgId = store.addSystemMessageToSession('session-child', 'Verifier bootstrap');
+
+      expect(useConversationStore.getState().activeConversation?.messages).toHaveLength(0);
+
+      await vi.waitFor(() => {
+        expect(mockInvoke).toHaveBeenCalledWith(
+          'save_ai_message',
+          expect.objectContaining({
+            input: expect.objectContaining({
+              id: msgId,
+              sessionId: 'session-child',
+              role: 'system',
+            }),
+          }),
+        );
+      });
     });
   });
 

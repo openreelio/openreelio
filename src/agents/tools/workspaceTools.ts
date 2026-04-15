@@ -351,7 +351,15 @@ export function unregisterWorkspaceTools(): void {
 
 /** Pre-computed workspace tool names (static after module load). */
 const WORKSPACE_TOOL_NAMES: readonly string[] = WORKSPACE_TOOLS.map((tool) => tool.name);
+const READ_ONLY_WORKSPACE_TOOL_NAMES: readonly string[] = [
+  'list_workspace_documents',
+  'read_workspace_document',
+];
 
 export function getWorkspaceToolNames(): readonly string[] {
   return WORKSPACE_TOOL_NAMES;
+}
+
+export function getReadOnlyWorkspaceToolNames(): readonly string[] {
+  return READ_ONLY_WORKSPACE_TOOL_NAMES;
 }

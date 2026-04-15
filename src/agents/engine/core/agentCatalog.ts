@@ -16,7 +16,10 @@ import { getEditingToolNames } from '@/agents/tools/editingTools';
 import { getEffectToolNames } from '@/agents/tools/effectTools';
 import { getMediaAnalysisToolNames } from '@/agents/tools/mediaAnalysisTools';
 import { getTransitionToolNames } from '@/agents/tools/transitionTools';
-import { getWorkspaceToolNames } from '@/agents/tools/workspaceTools';
+import {
+  getReadOnlyWorkspaceToolNames,
+  getWorkspaceToolNames,
+} from '@/agents/tools/workspaceTools';
 
 const TOOL_NAMES_BY_SCOPE: Record<Exclude<AgentToolScope, '*'>, Set<string>> = {
   query: new Set(['query', ...getAnalysisToolNames(), ...getMediaAnalysisToolNames()]),
@@ -25,6 +28,7 @@ const TOOL_NAMES_BY_SCOPE: Record<Exclude<AgentToolScope, '*'>, Set<string>> = {
   effects: new Set(['effects', ...getEffectToolNames(), ...getTransitionToolNames()]),
   text: new Set(['text', ...getCaptionToolNames()]),
   workspace: new Set(getWorkspaceToolNames()),
+  workspace_read: new Set(getReadOnlyWorkspaceToolNames()),
 };
 
 export function resolveAgentDefinition(agentId?: string | null): AgentDefinition | undefined {

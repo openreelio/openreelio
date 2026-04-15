@@ -12,7 +12,15 @@ import type { AgentRole } from '../prompts/agentRoles';
 // =============================================================================
 
 export type AgentMode = 'primary' | 'subagent';
-export type AgentToolScope = '*' | 'query' | 'edit' | 'audio' | 'effects' | 'text' | 'workspace';
+export type AgentToolScope =
+  | '*'
+  | 'query'
+  | 'edit'
+  | 'audio'
+  | 'effects'
+  | 'text'
+  | 'workspace'
+  | 'workspace_read';
 
 export interface AgentDefinition {
   /** Unique agent identifier */

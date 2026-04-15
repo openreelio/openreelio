@@ -42,11 +42,18 @@ import {
 } from '@/stores/workspaceLayoutStore';
 import { createLogger } from '@/services/logger';
 import {
+  buildCancelledDelegationPayload,
+  buildDelegationFailurePayload,
   buildDelegationResultPayload,
+  deriveDelegationReviewState,
   parseDelegationResultPayload,
   resolveDelegationReviewFocus,
   resolveDelegationSummaryMessageId,
 } from './agentDelegationResult';
+import {
+  buildDelegationContextPacket,
+  buildDelegationContractSystemMessage,
+} from './agentDelegationContract';
 
 const logger = createLogger('AgenticSidebarContent');
 const EMPTY_DELEGATIONS: readonly DelegationRecord[] = [];
@@ -161,6 +168,9 @@ export function AgenticSidebarContent({
   const switchSession = useConversationStore((state) => state.switchSession);
   const loadSessions = useConversationStore((state) => state.loadSessions);
   const addSystemMessage = useConversationStore((state) => state.addSystemMessage);
+  const addSystemMessageToSession = useConversationStore(
+    (state) => state.addSystemMessageToSession,
+  );
   const getLastUserInput = useConversationStore((state) => state.getLastUserInput);
   const clearQueuedMessages = useMessageQueueStore((state) => state.clear);
   const setArtifactReviewSelection = useAgentArtifactReviewStore((state) => state.setSelection);
@@ -359,6 +369,15 @@ export function AgenticSidebarContent({
       const parentRunId = resolveLatestParentRunId(parentSnapshot);
       const parentLabel =
         activeAgentDefinition?.name ?? getAgentDisplayName(activeAgentProfileId ?? 'editor');
+      const contextPacket = buildDelegationContextPacket({
+        parentSessionId: activeSessionId,
+        parentAgentId: activeAgentProfileId ?? DEFAULT_AGENT_PROFILE_ID,
+        parentAgentName: parentLabel,
+        delegatedGoal,
+        specialistId: agentProfileId,
+        specialistName: specialist.name,
+      });
+      const childBootstrapMessage = buildDelegationContractSystemMessage(contextPacket);
 
       addSystemMessage(`Delegated to ${specialist.name}: ${delegatedGoal}`);
 
@@ -373,14 +392,7 @@ export function AgenticSidebarContent({
             agentProfileId,
             title: `${specialist.name}: ${delegatedGoal.slice(0, 48)}`,
             delegatedGoal,
-            contextPacketJson: JSON.stringify({
-              source: 'agent-workspace',
-              parentSessionId: activeSessionId,
-              parentAgentId: activeAgentProfileId ?? DEFAULT_AGENT_PROFILE_ID,
-              parentAgentName: parentLabel,
-              delegatedGoal,
-              createdAt: Date.now(),
-            }),
+            contextPacketJson: JSON.stringify(contextPacket),
           });
 
         try {
@@ -394,9 +406,7 @@ export function AgenticSidebarContent({
 
         await loadSessions(currentProjectId);
         await switchSession(childSession.id);
-        useConversationStore
-          .getState()
-          .addSystemMessage(`Delegated from ${parentLabel}. Goal: ${delegatedGoal}`);
+        addSystemMessageToSession(childSession.id, childBootstrapMessage);
 
         if (delegationRecord) {
           await loadDelegations(childSession.id).catch(() => {});
@@ -404,6 +414,14 @@ export function AgenticSidebarContent({
           useConversationStore
             .getState()
             .addSystemMessage(`Delegation tracking unavailable: ${delegationErrorMessage}`);
+        }
+
+        if (useConversationStore.getState().activeSessionId !== childSession.id) {
+          useConversationStore
+            .getState()
+            .addSystemMessage(
+              `Delegated session '${childSession.title}' was created, but the workspace could not switch into it automatically. Open it from Sessions to continue.`,
+            );
         }
       });
     },
@@ -413,6 +431,7 @@ export function AgenticSidebarContent({
       activeAgentSnapshot,
       activeSessionId,
       addSystemMessage,
+      addSystemMessageToSession,
       abortCurrentSession,
       createDelegatedSession,
       createNewSession,
@@ -452,22 +471,32 @@ export function AgenticSidebarContent({
       .filter((record) => record.parentSessionId === activeSessionId)
       .map((record) => {
         const childSession = sessions.find((session) => session.id === record.childSessionId);
-        const resultPayload = parseDelegationResultPayload(record.resultJson);
+        const resultPayload = parseDelegationResultPayload(record.resultJson, {
+          contextPacketJson: record.contextPacketJson,
+          specialistId: record.agentProfileId,
+        });
+        const reviewState = deriveDelegationReviewState(record, resultPayload);
         return {
           id: record.id,
           label: childSession?.title || getAgentDisplayName(record.agentProfileId),
           delegatedGoal: record.delegatedGoal,
+          delegationStatus: record.status,
+          mergeStatus: record.mergeStatus,
+          errorMessage: record.errorMessage,
           statusLabel: formatDelegationStatus(record.status),
           resultPreview: resultPayload?.preview ?? resultPayload?.finalState ?? null,
           result: resultPayload,
           onOpen: () => handleSessionSwitch(record.childSessionId),
-          onReview: () =>
-            openDelegationReview({
-              conversationId: record.childSessionId,
-              title: childSession?.title || getAgentDisplayName(record.agentProfileId),
-              agentProfileId: record.agentProfileId,
-              resultJson: record.resultJson,
-            }),
+          onReview:
+            reviewState || resultPayload
+              ? () =>
+                  openDelegationReview({
+                    conversationId: record.childSessionId,
+                    title: childSession?.title || getAgentDisplayName(record.agentProfileId),
+                    agentProfileId: record.agentProfileId,
+                    resultJson: record.resultJson,
+                  })
+              : undefined,
         };
       });
   }, [activeSessionId, delegationRecords, handleSessionSwitch, openDelegationReview, sessions]);
@@ -478,25 +507,35 @@ export function AgenticSidebarContent({
     }
 
     const parentSession = sessions.find((session) => session.id === parentSessionId);
-    const resultPayload = parseDelegationResultPayload(activeDelegationRecord?.resultJson);
+    const resultPayload = parseDelegationResultPayload(activeDelegationRecord?.resultJson, {
+      contextPacketJson: activeDelegationRecord?.contextPacketJson,
+      specialistId: activeDelegationRecord?.agentProfileId,
+    });
+    const reviewState = deriveDelegationReviewState(activeDelegationRecord, resultPayload);
     return {
       parentLabel: parentSession?.title || getAgentDisplayName(parentSession?.agent ?? 'editor'),
       delegatedGoal: activeDelegationRecord?.delegatedGoal ?? null,
+      delegationStatus: activeDelegationRecord?.status,
+      mergeStatus: activeDelegationRecord?.mergeStatus,
+      errorMessage: activeDelegationRecord?.errorMessage ?? null,
       statusLabel: activeDelegationRecord
         ? formatDelegationStatus(activeDelegationRecord.status)
         : 'Delegated',
       resultPreview: resultPayload?.preview ?? resultPayload?.finalState ?? null,
       result: resultPayload,
-      onReview: () =>
-        openDelegationReview({
-          conversationId: activeSessionId ?? parentSessionId,
-          title:
-            sessions.find((session) => session.id === activeSessionId)?.title ||
-            activeAgentDefinition?.name ||
-            'Delegated Session',
-          agentProfileId: activeAgentProfileId ?? DEFAULT_AGENT_PROFILE_ID,
-          resultJson: activeDelegationRecord?.resultJson ?? null,
-        }),
+      onReview:
+        reviewState || resultPayload
+          ? () =>
+              openDelegationReview({
+                conversationId: activeSessionId ?? parentSessionId,
+                title:
+                  sessions.find((session) => session.id === activeSessionId)?.title ||
+                  activeAgentDefinition?.name ||
+                  'Delegated Session',
+                agentProfileId: activeAgentProfileId ?? DEFAULT_AGENT_PROFILE_ID,
+                resultJson: activeDelegationRecord?.resultJson ?? null,
+              })
+          : undefined,
       onReturnToParent: () => handleSessionSwitch(parentSessionId),
     };
   }, [
@@ -571,7 +610,10 @@ export function AgenticSidebarContent({
           activeDelegationRecord.childSessionId
             ? (useConversationStore.getState().activeConversation?.messages ?? EMPTY_MESSAGES)
             : activeConversationMessages;
-        const resultPayload = buildDelegationResultPayload(result, liveMessages);
+        const resultPayload = buildDelegationResultPayload(result, liveMessages, {
+          contextPacketJson: activeDelegationRecord.contextPacketJson,
+          specialistId: activeDelegationRecord.agentProfileId,
+        });
         void updateDelegationRecord({
           id: activeDelegationRecord.id,
           status: 'completed',
@@ -608,6 +650,7 @@ export function AgenticSidebarContent({
       id: activeDelegationRecord.id,
       status: 'cancelled',
       summaryMessageId: resolveDelegationSummaryMessageId(liveMessages),
+      resultJson: JSON.stringify(buildCancelledDelegationPayload('Cancelled by user.')),
       errorMessage: 'Cancelled by user.',
       completedAt: Date.now(),
     }).catch((error) => {
@@ -635,19 +678,7 @@ export function AgenticSidebarContent({
           id: activeDelegationRecord.id,
           status: 'failed',
           summaryMessageId: resolveDelegationSummaryMessageId(liveMessages),
-          resultJson: JSON.stringify({
-            success: false,
-            aborted: false,
-            totalDuration: 0,
-            iterations: 0,
-            finalState: null,
-            executedSteps: 0,
-            successfulSteps: 0,
-            failedSteps: 0,
-            preview: error.message,
-            recentTools: [],
-            recentFiles: [],
-          }),
+          resultJson: JSON.stringify(buildDelegationFailurePayload(error.message)),
           errorMessage: error.message,
           completedAt: Date.now(),
         }).catch((updateError) => {

@@ -18,7 +18,9 @@ let latestSessionListProps: Record<string, unknown> | null = null;
 let latestAgenticChatProps: Record<string, unknown> | null = null;
 
 vi.mock('./AgenticChat', () => ({
-  AgenticChat: forwardRef((props) => {
+  AgenticChat: forwardRef((_props, _ref) => {
+    void _ref;
+    const props = _props as Record<string, unknown>;
     latestAgenticChatProps = props as Record<string, unknown>;
     return <div data-testid="agentic-chat">TPAO Runtime</div>;
   }),
@@ -413,11 +415,12 @@ describe('AgenticSidebarContent', () => {
     });
     const loadSessions = vi.fn().mockResolvedValue(undefined);
     const switchSession = vi.fn().mockResolvedValue(undefined);
+    const addSystemMessageToSession = vi.fn();
     const loadAgentSession = vi
       .fn()
       .mockResolvedValue(useAgentSessionStore.getState().snapshotsById['session-1']);
 
-    useConversationStore.setState({ loadSessions, switchSession });
+    useConversationStore.setState({ loadSessions, switchSession, addSystemMessageToSession });
     useAgentSessionStore.setState({ loadSession: loadAgentSession });
     useAgentDelegationStore.setState((state) => ({
       ...state,
@@ -452,8 +455,30 @@ describe('AgenticSidebarContent', () => {
         agentProfileId: 'planner',
       }),
     );
+    expect(JSON.parse(createDelegatedSession.mock.calls[0][0].contextPacketJson as string)).toEqual(
+      expect.objectContaining({
+        parentSessionId: 'session-1',
+        parentAgentId: 'editor',
+        delegatedGoal: 'old',
+        taskContract: expect.objectContaining({
+          objective: 'old',
+          specialistId: 'planner',
+          specialistName: expect.any(String),
+          verificationSpec: expect.objectContaining({
+            requireStructuredHandoff: true,
+          }),
+          expectedDeliverables: expect.any(Array),
+          acceptanceChecklist: expect.any(Array),
+          handoffRequirement: expect.stringContaining('Parent verification is required'),
+        }),
+      }),
+    );
     expect(loadSessions).toHaveBeenCalledWith('project-1');
     expect(switchSession).toHaveBeenCalledWith('session-child');
+    expect(addSystemMessageToSession).toHaveBeenCalledWith(
+      'session-child',
+      expect.stringContaining('DELEGATION_HANDOFF'),
+    );
   });
 
   it('stores a delegation result summary when a child specialist session completes', async () => {
@@ -544,7 +569,35 @@ describe('AgenticSidebarContent', () => {
             parentRunId: 'run-parent',
             agentProfileId: 'planner',
             delegatedGoal: 'Review pacing',
-            contextPacketJson: '{}',
+            contextPacketJson: JSON.stringify({
+              source: 'agent-workspace',
+              parentSessionId: 'session-1',
+              parentAgentId: 'editor',
+              parentAgentName: 'Editor Session',
+              delegatedGoal: 'Review pacing',
+              createdAt: 2,
+              taskContract: {
+                objective: 'Review pacing',
+                specialistId: 'planner',
+                specialistName: 'Planner',
+                verificationSpec: {
+                  handoffSchemaVersion: 1,
+                  requireStructuredHandoff: true,
+                  requireSummary: true,
+                  requireEvidence: true,
+                  requireOpenIssuesStatement: true,
+                  minimumEvidenceCount: 1,
+                },
+                expectedDeliverables: [
+                  'Break down the goal into an execution-ready plan: Review pacing',
+                ],
+                acceptanceChecklist: [
+                  'Provide a parent-reviewable summary before declaring the task done.',
+                ],
+                handoffRequirement:
+                  'Parent verification is required before this delegated result can be merged.',
+              },
+            }),
             allowedToolsDeltaJson: null,
             permissionSnapshotJson: null,
             status: 'running',
@@ -591,8 +644,16 @@ describe('AgenticSidebarContent', () => {
         summaryMessageId: 'assistant-msg-1',
       }),
     );
-    expect(updateDelegationRecord.mock.calls[0][0].resultJson).toContain(
-      'Suggested a faster cold open.',
+    expect(JSON.parse(updateDelegationRecord.mock.calls[0][0].resultJson as string)).toEqual(
+      expect.objectContaining({
+        preview: 'Suggested a faster cold open.',
+        autoVerification: expect.objectContaining({
+          status: 'needs_follow_up',
+        }),
+        verification: expect.objectContaining({
+          verdict: 'unverified',
+        }),
+      }),
     );
   });
 
@@ -713,6 +774,14 @@ describe('AgenticSidebarContent', () => {
         status: 'cancelled',
         summaryMessageId: 'assistant-msg-cancel',
         errorMessage: 'Cancelled by user.',
+      }),
+    );
+    expect(JSON.parse(updateDelegationRecord.mock.calls[0][0].resultJson as string)).toEqual(
+      expect.objectContaining({
+        aborted: true,
+        autoVerification: expect.objectContaining({
+          status: 'fail',
+        }),
       }),
     );
   });

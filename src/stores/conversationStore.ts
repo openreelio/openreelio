@@ -109,6 +109,8 @@ export interface ConversationActions {
   finalizeMessage: (messageId: string, usage?: TokenUsage) => void;
   /** Add a system message */
   addSystemMessage: (content: string) => string;
+  /** Add a system message to a specific session */
+  addSystemMessageToSession: (sessionId: string, content: string) => string;
   /** Get messages formatted for LLM context */
   getMessagesForContext: (maxMessages?: number) => LLMMessage[];
   /** Get the last user input text */
@@ -617,14 +619,44 @@ export const useConversationStore = create<ConversationStore>()(
     },
 
     addSystemMessage: (content: string) => {
+      const sid = get().activeSessionId;
+      if (sid) {
+        return get().addSystemMessageToSession(sid, content);
+      }
+
       const msg = createSystemMessage(content);
       set((state) => {
         if (!state.activeConversation) return;
         state.activeConversation.messages.push(msg);
         state.activeConversation.updatedAt = Date.now();
       });
-      const sid = get().activeSessionId;
-      if (sid) debouncedPersistMessage(sid, msg);
+      return msg.id;
+    },
+
+    addSystemMessageToSession: (sessionId: string, content: string) => {
+      const msg = createSystemMessage(content);
+      msg.sessionId = sessionId;
+      const isActiveTarget = get().activeSessionId === sessionId;
+
+      set((state) => {
+        if (state.activeSessionId === sessionId && state.activeConversation) {
+          state.activeConversation.messages.push(msg);
+          state.activeConversation.updatedAt = Date.now();
+        }
+      });
+
+      if (isActiveTarget) {
+        debouncedPersistMessage(sessionId, msg);
+      } else {
+        persistMessage(sessionId, msg).catch((err) => {
+          logger.error('Failed to persist system message for inactive session', {
+            sessionId,
+            messageId: msg.id,
+            err,
+          });
+        });
+      }
+
       return msg.id;
     },
 

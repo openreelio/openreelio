@@ -14,7 +14,9 @@ describe('AgentDelegationStrip', () => {
         delegatedFrom={{
           parentLabel: 'Editor Session',
           delegatedGoal: 'Review the pacing and propose cuts.',
-          statusLabel: 'Running',
+          delegationStatus: 'completed',
+          mergeStatus: 'pending',
+          statusLabel: 'Completed',
           resultPreview: 'Suggested a faster cold open.',
           result: {
             success: true,
@@ -28,6 +30,38 @@ describe('AgentDelegationStrip', () => {
             preview: 'Suggested a faster cold open.',
             recentTools: ['query_timeline'],
             recentFiles: ['src/foo.ts'],
+            handoff: {
+              parseStatus: 'missing',
+              recommendation: null,
+              summary: 'Suggested a faster cold open.',
+              summaryProvided: false,
+              openIssues: [],
+              openIssuesDeclared: false,
+              evidence: [
+                { kind: 'summary', value: 'Suggested a faster cold open.' },
+                { kind: 'tool', value: 'query_timeline' },
+              ],
+            },
+            autoVerification: {
+              status: 'needs_follow_up',
+              summary:
+                'Automatic verification needs follow-up because the delegated handoff was not returned in the required structured format.',
+              missingRequirements: [
+                'Return a final DELEGATION_HANDOFF JSON block.',
+                'Declare open issues explicitly, even when none remain.',
+              ],
+              warnings: [],
+              checkedAt: 1,
+            },
+            verification: {
+              verdict: 'unverified',
+              summary: 'Completed child work remains pending until parent verification.',
+              verifiedAt: null,
+              evidence: [
+                { kind: 'summary', value: 'Suggested a faster cold open.' },
+                { kind: 'tool', value: 'query_timeline' },
+              ],
+            },
           },
           onReview,
           onReturnToParent,
@@ -38,6 +72,7 @@ describe('AgentDelegationStrip', () => {
     expect(screen.getByText('Delegated Session')).toBeInTheDocument();
     expect(screen.getByText('From Editor Session')).toBeInTheDocument();
     expect(screen.getByText('Latest result: Suggested a faster cold open.')).toBeInTheDocument();
+    expect(screen.getByText('Needs verification')).toBeInTheDocument();
     expect(screen.getByText('1.2s')).toBeInTheDocument();
     expect(screen.getByText('2 iter')).toBeInTheDocument();
     expect(screen.getByText('3 steps')).toBeInTheDocument();
@@ -63,6 +98,8 @@ describe('AgentDelegationStrip', () => {
             id: 'delegation-1',
             label: 'Planner: Review pacing',
             delegatedGoal: 'Review pacing',
+            delegationStatus: 'completed',
+            mergeStatus: 'merged',
             statusLabel: 'Completed',
             resultPreview: 'Suggested a shorter intro section.',
             result: {
@@ -77,6 +114,29 @@ describe('AgentDelegationStrip', () => {
               preview: 'Suggested a shorter intro section.',
               recentTools: ['query_timeline'],
               recentFiles: [],
+              handoff: {
+                parseStatus: 'parsed',
+                recommendation: null,
+                summary: 'Suggested a shorter intro section.',
+                summaryProvided: true,
+                openIssues: [],
+                openIssuesDeclared: true,
+                evidence: [{ kind: 'tool', value: 'query_timeline' }],
+              },
+              autoVerification: {
+                status: 'pass',
+                summary:
+                  'Automatic verification passed the delegated handoff against the stored task contract.',
+                missingRequirements: [],
+                warnings: [],
+                checkedAt: 10,
+              },
+              verification: {
+                verdict: 'pass',
+                summary: 'Verified by parent review and ready to merge.',
+                verifiedAt: 10,
+                evidence: [{ kind: 'tool', value: 'query_timeline' }],
+              },
             },
             onOpen: () => {},
             onReview,
@@ -89,6 +149,7 @@ describe('AgentDelegationStrip', () => {
     expect(screen.getByTestId('agent-delegated-child-delegation-1')).toHaveTextContent(
       'Suggested a shorter intro section.',
     );
+    expect(screen.getByText('Verified')).toBeInTheDocument();
     expect(screen.getByText('800ms')).toBeInTheDocument();
 
     await user.click(screen.getByTestId('agent-delegated-child-review-delegation-1'));

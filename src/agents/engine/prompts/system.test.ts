@@ -41,6 +41,16 @@ describe('assembleSystemPrompt', () => {
     expect(result).toContain('color grading');
   });
 
+  it('should include verifier prompt for verifier role', () => {
+    const result = assembleSystemPrompt({
+      role: 'verifier',
+      context: makeContext(),
+    });
+
+    expect(result).toContain('review whether a completed delegated result is ready to merge');
+    expect(result).toContain('merge, follow_up, or discard');
+  });
+
   it('should include audio prompt for audio role', () => {
     const result = assembleSystemPrompt({
       role: 'audio',
@@ -85,10 +95,23 @@ describe('assembleSystemPrompt', () => {
 
     expect(result).toContain('<tool_reference>');
     expect(result).toContain('## Query Actions');
+    expect(result).toContain('read_workspace_document');
+    expect(result).not.toContain('write_workspace_document');
     expect(result).not.toContain('## Edit Actions');
     expect(result).not.toContain('## Audio Actions');
     expect(result).not.toContain('## Effects Actions');
     expect(result).toContain('</tool_reference>');
+  });
+
+  it('should keep verifier workspace tools read-only', () => {
+    const result = assembleSystemPrompt({
+      role: 'verifier',
+      context: makeContext(),
+    });
+
+    expect(result).toContain('read_workspace_document');
+    expect(result).not.toContain('write_workspace_document');
+    expect(result).not.toContain('delete_workspace_entry');
   });
 
   it('should include knowledge entries when provided', () => {
