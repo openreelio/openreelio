@@ -96,7 +96,7 @@ function matchesSplitClipPath(path: string): boolean {
   );
 }
 
-function matchesSourceAnalysisReportPath(path: string): boolean {
+function matchesReadSourceAnalysisReportPath(path: string): boolean {
   const matchesObjectPath = (base: string): boolean => path === base || path.startsWith(`${base}.`);
 
   return (
@@ -121,8 +121,18 @@ function matchesSourceAnalysisReportPath(path: string): boolean {
     path === 'data.warnings' ||
     /^data\.warnings\[\d+\]$/.test(path) ||
     path === 'data.errors' ||
-    /^data\.errors\.[^.]+$/.test(path) ||
-    path === 'data.markdown'
+    /^data\.errors\.[^.]+$/.test(path)
+  );
+}
+
+function matchesGenerateSourceAnalysisReportPath(path: string): boolean {
+  return (
+    matchesReadSourceAnalysisReportPath(path) ||
+    path === 'data.markdown' ||
+    path === 'data.semantic' ||
+    path.startsWith('data.semantic.') ||
+    path === 'data.visual' ||
+    path.startsWith('data.visual.')
   );
 }
 
@@ -171,13 +181,13 @@ export const TOOL_OUTPUT_CONTRACTS: Record<string, ToolOutputContract> = {
     summary:
       'returns the persisted Markdown report under data.content with its saved workspace path under data.relativePath/data.reportPath; nested mirror is also available at data.document.*',
     examples: ['data.content', 'data.relativePath', 'data.document.content'],
-    validatePath: matchesSourceAnalysisReportPath,
+    validatePath: matchesReadSourceAnalysisReportPath,
   },
   generate_source_analysis_report: {
     summary:
-      'returns structured report fields plus the persisted Markdown report under data.content/data.markdown and its saved workspace path under data.relativePath/data.reportPath',
-    examples: ['data.content', 'data.reportPath', 'data.document.relativePath'],
-    validatePath: matchesSourceAnalysisReportPath,
+      'returns structured report fields plus semantic overview/timeline fields and the persisted Markdown report under data.content/data.markdown with its saved workspace path under data.relativePath/data.reportPath',
+    examples: ['data.content', 'data.reportPath', 'data.semantic.sceneTimeline[0].summary'],
+    validatePath: matchesGenerateSourceAnalysisReportPath,
   },
 };
 

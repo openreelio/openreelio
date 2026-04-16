@@ -1483,6 +1483,35 @@ describe('reference style transfer analysis tools', () => {
       expect(data.speakerTurns.count).toBe(1);
       expect(data.speakerTurns.items[0].label).toBe('speaker_1');
       expect(data.visual.contactSheet.path).toBe('/analysis/source-1/contact-sheet.jpg');
+      expect(data.visual.items).toEqual([
+        {
+          shotIndex: 0,
+          startSec: 0,
+          endSec: 4,
+          durationSec: 4,
+          keyframePath: 'shots/0001.jpg',
+          keyframeSelectionMethod: 'thumbnail',
+          cameraAngle: 'wide',
+          subjectPosition: 'center',
+          motionDirection: 'static',
+          visualComplexity: 0.42,
+          summary: 'Shot 1 | wide angle | center subject | static motion | complexity 0.42',
+        },
+      ]);
+      expect(String(data.summary)).toContain('Performance or stage moment');
+      expect(data.moments.items[0].sceneLabel).toBe('Performance moment');
+      expect(String(data.moments.items[0].summary)).toContain('Performance or stage moment');
+      expect(String(data.moments.items[0].summary)).toContain(
+        'People: at least one recurring face is visible',
+      );
+      expect(String(data.moments.items[0].summary)).toContain('Text: on-screen text reads "LIVE"');
+      expect(data.semantic.whatIsHappening.length).toBeGreaterThan(0);
+      expect(data.semantic.whoIsPresent.length).toBeGreaterThan(0);
+      expect(data.semantic.whatIsHeard.length).toBeGreaterThan(0);
+      expect(data.semantic.onScreenText.length).toBeGreaterThan(0);
+      expect(data.semantic.likelySetting).toContain('stage or live event setting');
+      expect(data.semantic.sceneTimeline[0].title).toBe('Performance moment');
+      expect(data.semantic.usefulMoments[0].kind).toBe('text');
       expect(data.chapters.count).toBeGreaterThan(0);
       expect(data.highlights.count).toBeGreaterThan(0);
       expect(data.annotations.objectDetectionCount).toBe(1);
@@ -1492,7 +1521,23 @@ describe('reference style transfer analysis tools', () => {
       expect(data.reportPath).toBe('media/concert.analysis.md');
       expect(String(data.content)).toContain('# Source Analysis Report: concert.mp4');
       expect(String(data.markdown)).toContain('# Source Analysis Report: concert.mp4');
+      expect(String(data.markdown)).toContain('## Executive Summary');
+      expect(String(data.markdown)).toContain('## Scene Timeline');
+      expect(String(data.markdown)).toContain('## Useful Moments');
+      expect(String(data.markdown)).toContain('## Who Is Present');
+      expect(String(data.markdown)).toContain('## What Is Heard');
+      expect(String(data.markdown)).toContain('## On-Screen Text');
+      expect(String(data.markdown)).toContain('## Visual / Setting Cues');
       expect(String(data.markdown)).toContain('## Moments');
+      expect(String(data.markdown)).toContain('What is happening:');
+      expect(String(data.markdown)).toContain('Likely setting: stage or live event setting');
+      expect(String(data.markdown)).toContain('Best usable moment: 00:00-00:03 | text |');
+      expect(String(data.markdown)).toContain('00:00-00:03 | Performance moment |');
+      expect(String(data.markdown)).toContain('## Visual Breakdown');
+      expect(String(data.markdown)).toContain(
+        '00:00-00:04 | Shot 1 | wide angle | center subject | static motion | complexity 0.42',
+      );
+      expect(String(data.markdown)).toContain('Keyframe: shots/0001.jpg');
       expect(String(data.markdown)).toContain('## Visual Artifacts');
       expect(String(data.markdown)).toContain('## Chapters');
       expect(String(data.markdown)).toContain('## Candidate Highlights');
@@ -1502,6 +1547,86 @@ describe('reference style transfer analysis tools', () => {
       expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(2, 'get_annotation', {
         assetId: 'source-1',
       });
+    });
+
+    it('should truncate visual breakdown markdown preview without truncating structured visual items', async () => {
+      const shots = Array.from({ length: 13 }, (_, index) => ({
+        startSec: index * 2,
+        endSec: index * 2 + 2,
+        confidence: 0.9,
+        keyframePath: `shots/${String(index + 1).padStart(4, '0')}.jpg`,
+        keyframeSelectionMethod: 'thumbnail',
+      }));
+
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'source-visual-preview',
+            name: 'visual-preview.mp4',
+            kind: 'video',
+            uri: '/media/visual-preview.mp4',
+            durationSec: 26,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'source-visual-preview',
+          shots,
+          transcript: [],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18],
+            peakDb: -4,
+            silenceRegions: [],
+            speechRegions: [{ startSec: 0, endSec: 26 }],
+          },
+          segments: [
+            { startSec: 0, endSec: 26, segmentType: 'performance', confidence: 0.9, features: {} },
+          ],
+          frameAnalysis: Array.from({ length: 13 }, (_, index) => ({
+            shotIndex: index,
+            cameraAngle: 'wide',
+            subjectPosition: 'center',
+            motionDirection: 'static',
+            visualComplexity: 0.5,
+          })),
+          contactSheet: null,
+          metadata: {
+            durationSec: 26,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('generate_source_analysis_report', {
+        assetId: 'source-visual-preview',
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.visual.items).toHaveLength(13);
+      expect(String(data.markdown)).toContain('## Visual Breakdown');
+      expect(String(data.markdown)).toContain(
+        '- ... 1 more visual entries omitted from Markdown preview',
+      );
+      expect(String(data.markdown)).not.toContain(
+        '00:24-00:26 | Shot 13 | wide angle | center subject | static motion | complexity 0.5',
+      );
     });
 
     it('should regenerate the bundle when cached coverage is incomplete', async () => {
@@ -2032,6 +2157,85 @@ describe('reference style transfer analysis tools', () => {
       expect(data.count).toBeGreaterThan(0);
       expect(data.matches[0].sectionType).toBe('speakerTurns');
       expect(String(data.matches[0].preview)).toContain('having me');
+    });
+
+    it('should search visual breakdown entries when requested', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'search-visual',
+            name: 'visual.mp4',
+            kind: 'video',
+            uri: '/media/visual.mp4',
+            durationSec: 6,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'search-visual',
+          shots: [
+            {
+              startSec: 0,
+              endSec: 6,
+              confidence: 0.9,
+              keyframePath: 'shots/0001.jpg',
+              keyframeSelectionMethod: 'thumbnail',
+            },
+          ],
+          transcript: [],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18.2],
+            peakDb: -4,
+            silenceRegions: [],
+          },
+          segments: [
+            { startSec: 0, endSec: 6, segmentType: 'performance', confidence: 0.9, features: {} },
+          ],
+          frameAnalysis: [
+            {
+              shotIndex: 0,
+              cameraAngle: 'wide',
+              subjectPosition: 'center',
+              motionDirection: 'static',
+              visualComplexity: 0.42,
+            },
+          ],
+          metadata: {
+            durationSec: 6,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('search_source_analysis_report', {
+        assetId: 'search-visual',
+        query: 'wide static center',
+        sections: ['visual'],
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.count).toBeGreaterThan(0);
+      expect(data.matches[0].sectionType).toBe('visual');
+      expect(data.matches[0].whyMatched).toContain('cameraAngle');
+      expect(data.matches[0].keyframePath).toBe('shots/0001.jpg');
+      expect(String(data.matches[0].preview)).toContain('wide angle');
     });
 
     it('should search moments beyond the twelfth shot', async () => {
@@ -2740,7 +2944,11 @@ describe('reference style transfer analysis tools', () => {
       expect(data.matches[0].rankingNotes).toContain('dialogue query prefers speaker turns');
       expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(3, 'index_source_report_chunks', {
         assetId: 'idx-1',
-        chunks: expect.any(Array),
+        chunks: expect.arrayContaining([
+          expect.objectContaining({
+            sectionType: 'speakerTurns',
+          }),
+        ]),
       });
       expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(4, 'search_source_report_chunks', {
         query: {
@@ -2814,10 +3022,124 @@ describe('reference style transfer analysis tools', () => {
         query: {
           query: 'semantic retrieval',
           assetIds: ['idx-semantic'],
-          sections: ['moments', 'chapters', 'highlights', 'speakerTurns'],
+          sections: ['moments', 'chapters', 'highlights', 'speakerTurns', 'visual'],
           limit: 40,
           useSemantic: true,
         },
+      });
+    });
+
+    it('should index visual chunks for visual retrieval', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'idx-visual',
+            name: 'visual-indexed.mp4',
+            kind: 'video',
+            uri: '/media/visual-indexed.mp4',
+            durationSec: 6,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'idx-visual',
+          shots: [
+            {
+              startSec: 0,
+              endSec: 6,
+              confidence: 0.9,
+              keyframePath: 'shots/0001.jpg',
+              keyframeSelectionMethod: 'thumbnail',
+            },
+          ],
+          transcript: [],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18],
+            peakDb: -4,
+            silenceRegions: [],
+            speechRegions: [{ startSec: 0, endSec: 6 }],
+          },
+          segments: [],
+          frameAnalysis: [
+            {
+              shotIndex: 0,
+              cameraAngle: 'wide',
+              subjectPosition: 'center',
+              motionDirection: 'static',
+              visualComplexity: 0.42,
+            },
+          ],
+          contactSheet: null,
+          metadata: {
+            durationSec: 6,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' })
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({
+          total: 1,
+          processingTimeMs: 2,
+          results: [
+            {
+              chunkId: 'idx-visual:visual:0',
+              assetId: 'idx-visual',
+              sectionType: 'visual',
+              sectionIndex: 0,
+              startSec: 0,
+              endSec: 6,
+              score: 0.8,
+              searchText: 'wide center static shot 1 complexity 0.42',
+              metadata: {
+                preview: 'Shot 1 | wide angle | center subject | static motion | complexity 0.42',
+                keyframePath: 'shots/0001.jpg',
+                cameraAngle: 'wide',
+                subjectPosition: 'center',
+                motionDirection: 'static',
+                durationSec: 6,
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce([]);
+
+      const result = await globalToolRegistry.execute('search_indexed_source_library', {
+        query: 'wide static shot',
+        sections: ['visual'],
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.count).toBe(1);
+      expect(data.matches[0].sectionType).toBe('visual');
+      expect(data.matches[0].keyframePath).toBe('shots/0001.jpg');
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(3, 'index_source_report_chunks', {
+        assetId: 'idx-visual',
+        chunks: expect.arrayContaining([
+          expect.objectContaining({
+            sectionType: 'visual',
+            metadata: expect.objectContaining({
+              keyframePath: 'shots/0001.jpg',
+              cameraAngle: 'wide',
+            }),
+          }),
+        ]),
       });
     });
 
