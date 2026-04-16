@@ -40,7 +40,7 @@ impl ImportAssetCommand {
             .unwrap_or_default();
 
         let asset = match extension.as_str() {
-            "mp3" | "wav" | "aac" | "flac" | "ogg" | "m4a" => {
+            "mp3" | "wav" | "aac" | "flac" | "ogg" | "m4a" | "oga" | "opus" | "weba" => {
                 Asset::new_audio(name, uri, AudioInfo::default())
             }
             "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" => {
@@ -506,6 +506,18 @@ mod tests {
         cmd.execute(&mut state).unwrap();
 
         assert_eq!(state.assets.len(), 1);
+    }
+
+    #[test]
+    fn test_import_asset_new_recognizes_common_audio_extensions() {
+        let command = ImportAssetCommand::new("voice.opus", "/tmp/voice.opus");
+        assert_eq!(command.asset.kind, crate::core::assets::AssetKind::Audio);
+
+        let command = ImportAssetCommand::new("ambience.oga", "/tmp/ambience.oga");
+        assert_eq!(command.asset.kind, crate::core::assets::AssetKind::Audio);
+
+        let command = ImportAssetCommand::new("podcast.weba", "/tmp/podcast.weba");
+        assert_eq!(command.asset.kind, crate::core::assets::AssetKind::Audio);
     }
 
     #[test]

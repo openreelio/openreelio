@@ -58,9 +58,12 @@ impl WorkspaceWatcher {
 
             loop {
                 // Check for stop signal
-                if stop_rx.try_recv().is_ok() {
-                    tracing::debug!("Workspace watcher stopped by signal");
-                    break;
+                match stop_rx.try_recv() {
+                    Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                        tracing::debug!("Workspace watcher stopped by signal");
+                        break;
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
                 }
 
                 // Poll for events with timeout
@@ -139,7 +142,9 @@ impl WorkspaceWatcher {
 
     /// Stop the watcher
     pub fn stop(&mut self) {
-        self._stop_tx.take(); // Dropping the sender signals the thread to stop
+        if let Some(stop_tx) = self._stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
     }
 }
 
@@ -162,6 +167,9 @@ fn is_media_extension(ext: &str) -> bool {
             | "flac"
             | "m4a"
             | "wma"
+            | "oga"
+            | "opus"
+            | "weba"
             | "jpg"
             | "jpeg"
             | "png"
@@ -191,6 +199,9 @@ mod tests {
         assert!(is_media_extension("mp4"));
         assert!(is_media_extension("MP4"));
         assert!(is_media_extension("wav"));
+        assert!(is_media_extension("opus"));
+        assert!(is_media_extension("oga"));
+        assert!(is_media_extension("weba"));
         assert!(is_media_extension("jpg"));
         assert!(is_media_extension("srt"));
         assert!(is_media_extension("ttf"));
