@@ -173,6 +173,37 @@ describe('usePreviewMode', () => {
     });
   });
 
+  describe('audio-only sequences', () => {
+    it('should report audio-only playback when only audio clips are active', () => {
+      const track = createMockTrack({
+        kind: 'audio',
+        name: 'Audio 1',
+        clips: [createMockClip({ assetId: 'audio-1' })],
+      });
+      const sequence = createMockSequence([track]);
+      const assets = new Map([
+        [
+          'audio-1',
+          createMockAsset({
+            id: 'audio-1',
+            kind: 'audio',
+            name: 'voiceover.m4a',
+            uri: '/path/to/voiceover.m4a',
+          }),
+        ],
+      ]);
+
+      const { result } = renderUsePreviewMode({
+        sequence,
+        assets,
+        currentTime: 2,
+      });
+
+      expect(result.current.mode).toBe('canvas');
+      expect(result.current.reason).toBe('Audio-only clips at playhead');
+    });
+  });
+
   describe('video mode selection', () => {
     it('should return video mode when all video clips have ready proxies', () => {
       const clip = createMockClip({

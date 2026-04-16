@@ -284,6 +284,21 @@ export function usePreviewMode({
     );
 
     if (videoClips.length === 0) {
+      const hasOnlyActiveAudioClips =
+        activeClips.length > 0 && activeClips.every(({ track }) => track.kind === 'audio');
+
+      if (hasOnlyActiveAudioClips) {
+        const result: PreviewModeResult = {
+          mode: 'canvas',
+          reason: 'Audio-only clips at playhead',
+          hasGeneratingProxy: false,
+          clipsNeedingProxy: 0,
+        };
+        previousResultRef.current = result;
+        previousTimeRef.current = currentTime;
+        return result;
+      }
+
       const hasRenderableTextOverlay = activeClips.some(
         ({ clip, track }) =>
           isTextClip(clip.assetId) && track.kind !== 'audio' && track.blendMode === 'normal',
