@@ -211,6 +211,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
 
   // Export dialog state
   const [showExportDialog, setShowExportDialog] = useState(false);
+  const [exportDialogKind, setExportDialogKind] = useState<'video' | 'audio'>('video');
 
   // Interchange export (EDL/FCPXML) — uses native file dialog directly
   const {
@@ -598,11 +599,17 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     onDeleteClips: () => {
       if (selectedClipIds.length > 0) handleDeleteClips?.(selectedClipIds);
     },
-    onExport: () => setShowExportDialog(true),
+    onExport: () => {
+      setExportDialogKind('video');
+      setShowExportDialog(true);
+    },
     onExportEdl: handleExportEdl,
     onExportFcpxml: handleExportFcpxml,
     onExportFrame: () => void handleExportFrame(),
-    onExportAudio: () => void handleExportAudio(),
+    onExportAudio: () => {
+      setExportDialogKind('audio');
+      setShowExportDialog(true);
+    },
     onMatchFrame: handleMatchFrame,
     onReverseMatchFrame: handleReverseMatchFrame,
     onCopyEffects: handleCopySelectedClipEffects,
@@ -622,7 +629,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       }
     },
     onSplitAtPlayhead: handleSplitAtPlayhead,
-    onExport: () => setShowExportDialog(true),
+    onExport: () => {
+      setExportDialogKind('video');
+      setShowExportDialog(true);
+    },
     onMatchFrame: handleMatchFrame,
     onReverseMatchFrame: handleReverseMatchFrame,
     onCopyEffects: handleCopySelectedClipEffects,
@@ -896,7 +906,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   );
 
   // Export handlers
-  const handleOpenExport = useCallback(() => {
+  const handleOpenExport = useCallback((kind: 'video' | 'audio' = 'video') => {
+    setExportDialogKind(kind);
     setShowExportDialog(true);
   }, []);
 
@@ -955,46 +966,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   }, [sequence?.id, currentTime]);
 
   // Audio-only export handler
-  const handleExportAudio = useCallback(async () => {
-    if (!sequence?.id) return;
-
-    try {
-      const { save: showSaveDialog } = await import('@tauri-apps/plugin-dialog');
-      const outputPath = await showSaveDialog({
-        title: 'Export Audio Only',
-        defaultPath: `${sequence.name ?? 'audio'}_audio.wav`,
-        filters: [
-          { name: 'WAV Audio', extensions: ['wav'] },
-          { name: 'MP3 Audio', extensions: ['mp3'] },
-          { name: 'FLAC Audio', extensions: ['flac'] },
-        ],
-      });
-
-      if (!outputPath) return;
-
-      const ext = outputPath.split('.').pop()?.toLowerCase() ?? 'wav';
-      const format = ext === 'mp3' ? 'mp3' : ext === 'flac' ? 'flac' : 'wav';
-
-      const result = await commands.exportAudioOnly(sequence.id, format, outputPath, null, null);
-
-      if (result.status === 'ok') {
-        useToastStore.getState().addToast({
-          variant: 'info',
-          message: `Audio export started: ${outputPath}`,
-        });
-      } else {
-        useToastStore.getState().addToast({
-          variant: 'error',
-          message: `Audio export failed: ${result.error}`,
-        });
-      }
-    } catch (error) {
-      useToastStore.getState().addToast({
-        variant: 'error',
-        message: `Audio export failed: ${String(error)}`,
-      });
-    }
-  }, [sequence?.id, sequence?.name]);
+  const handleExportAudio = useCallback(() => {
+    handleOpenExport('audio');
+  }, [handleOpenExport]);
 
   // Add Text handlers
   const handleOpenAddText = useCallback(() => {
@@ -1428,7 +1402,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
         onExportEdl={handleExportEdl}
         onExportFcpxml={handleExportFcpxml}
         onExportFrame={() => void handleExportFrame()}
-        onExportAudio={() => void handleExportAudio()}
+        onExportAudio={handleExportAudio}
         version={appVersion}
         utilityActions={
           <>
@@ -1478,6 +1452,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
           onClose={handleCloseExport}
           sequenceId={sequence?.id ?? null}
           sequenceName={sequence?.name}
+          initialExportKind={exportDialogKind}
         />
       </Suspense>
 

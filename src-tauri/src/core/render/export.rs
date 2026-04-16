@@ -376,6 +376,17 @@ impl ExportSettings {
         super::hardware::software_encoder_name(&self.video_codec)
     }
 
+    /// Get the resolved audio encoder name for FFmpeg.
+    pub fn audio_encoder_name(&self) -> &'static str {
+        match self.audio_codec {
+            AudioCodec::Aac => "aac",
+            AudioCodec::Mp3 => "libmp3lame",
+            AudioCodec::Opus => "libopus",
+            AudioCodec::Pcm => "pcm_s16le",
+            AudioCodec::Copy => "copy",
+        }
+    }
+
     /// Create settings from a preset
     pub fn from_preset(preset: ExportPreset, output_path: PathBuf) -> Self {
         match preset {
@@ -953,8 +964,12 @@ pub enum AudioExportFormat {
     Wav,
     /// MP3 (lossy, widely compatible)
     Mp3,
+    /// M4A (AAC in MP4 audio container)
+    M4a,
     /// FLAC (lossless compression)
     Flac,
+    /// OGG (Opus in Ogg container)
+    Ogg,
 }
 
 impl AudioExportFormat {
@@ -963,7 +978,9 @@ impl AudioExportFormat {
         match self {
             Self::Wav => "wav",
             Self::Mp3 => "mp3",
+            Self::M4a => "m4a",
             Self::Flac => "flac",
+            Self::Ogg => "ogg",
         }
     }
 
@@ -972,7 +989,9 @@ impl AudioExportFormat {
         match self {
             Self::Wav => "pcm_s16le",
             Self::Mp3 => "libmp3lame",
+            Self::M4a => "aac",
             Self::Flac => "flac",
+            Self::Ogg => "libopus",
         }
     }
 
@@ -981,6 +1000,8 @@ impl AudioExportFormat {
         match self {
             Self::Wav | Self::Flac => None,
             Self::Mp3 => Some("320k"),
+            Self::M4a => Some("256k"),
+            Self::Ogg => Some("192k"),
         }
     }
 }
@@ -1056,7 +1077,9 @@ impl AudioExportSettings {
             audio_codec: match self.format {
                 AudioExportFormat::Wav => AudioCodec::Pcm,
                 AudioExportFormat::Mp3 => AudioCodec::Mp3,
+                AudioExportFormat::M4a => AudioCodec::Aac,
                 AudioExportFormat::Flac => AudioCodec::Copy,
+                AudioExportFormat::Ogg => AudioCodec::Opus,
             },
             width: None,
             height: None,
@@ -1164,18 +1187,65 @@ fn append_output_time_range_args(
     }
 }
 
-fn effective_export_duration(
-    sequence: &Sequence,
-    start_time: Option<f64>,
-    end_time: Option<f64>,
-) -> f64 {
-    let full_duration = sequence
+fn sequence_timeline_duration(sequence: &Sequence) -> f64 {
+    sequence
         .tracks
         .iter()
         .flat_map(|track| track.clips.iter())
         .filter(|clip| clip.enabled)
         .map(|clip| clip.place.timeline_out_sec())
-        .fold(0.0_f64, f64::max);
+        .fold(0.0_f64, f64::max)
+}
+
+fn normalize_output_time_range(
+    sequence: &Sequence,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
+) -> Result<(Option<f64>, Option<f64>), ExportError> {
+    let full_duration = sequence_timeline_duration(sequence);
+
+    if full_duration <= 0.0 {
+        return Err(ExportError::InvalidSettings(
+            "Sequence has no exportable duration".to_string(),
+        ));
+    }
+
+    let normalized_start = start_time.map(|time| time.max(0.0).min(full_duration));
+    let normalized_end = end_time.map(|time| time.max(0.0).min(full_duration));
+
+    if let Some(start) = normalized_start {
+        if start >= full_duration {
+            return Err(ExportError::InvalidSettings(
+                "Start time is outside the sequence duration".to_string(),
+            ));
+        }
+    }
+
+    if let Some(end) = normalized_end {
+        if end <= 0.0 {
+            return Err(ExportError::InvalidSettings(
+                "End time is outside the sequence duration".to_string(),
+            ));
+        }
+    }
+
+    if let (Some(start), Some(end)) = (normalized_start, normalized_end) {
+        if end <= start {
+            return Err(ExportError::InvalidSettings(
+                "Selected export range is outside the sequence duration".to_string(),
+            ));
+        }
+    }
+
+    Ok((normalized_start, normalized_end))
+}
+
+fn effective_export_duration(
+    sequence: &Sequence,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
+) -> f64 {
+    let full_duration = sequence_timeline_duration(sequence);
 
     let normalized_start = start_time.unwrap_or(0.0).max(0.0).min(full_duration);
 
@@ -2291,14 +2361,7 @@ impl ExportEngine {
         settings: &ExportSettings,
     ) -> Vec<String> {
         let video_codec = settings.video_encoder_name();
-
-        let audio_codec = match settings.audio_codec {
-            AudioCodec::Aac => "aac",
-            AudioCodec::Mp3 => "libmp3lame",
-            AudioCodec::Opus => "libopus",
-            AudioCodec::Pcm => "pcm_s16le",
-            AudioCodec::Copy => "copy",
-        };
+        let audio_codec = settings.audio_encoder_name();
 
         let mut args = vec![
             "-i".to_string(),
@@ -2771,13 +2834,7 @@ impl ExportEngine {
         // Audio codec ONLY if we have audio
         if final_audio_label.is_some() {
             args.push("-c:a".to_string());
-            args.push(match settings.audio_codec {
-                AudioCodec::Aac => "aac".to_string(),
-                AudioCodec::Mp3 => "libmp3lame".to_string(),
-                AudioCodec::Opus => "libopus".to_string(),
-                AudioCodec::Pcm => "pcm_s16le".to_string(),
-                AudioCodec::Copy => "copy".to_string(),
-            });
+            args.push(settings.audio_encoder_name().to_string());
         }
 
         // Quality settings
@@ -3333,9 +3390,14 @@ impl ExportEngine {
         }
 
         let start_time = std::time::Instant::now();
+        let (normalized_start_time, normalized_end_time) =
+            normalize_output_time_range(sequence, settings.start_time, settings.end_time)?;
+        let mut normalized_settings = settings.clone();
+        normalized_settings.start_time = normalized_start_time;
+        normalized_settings.end_time = normalized_end_time;
 
         // Convert to video export settings, then build args using existing pipeline
-        let export_settings = settings.to_export_settings();
+        let export_settings = normalized_settings.to_export_settings();
 
         let mut args = self.build_complex_filter_args_with_audio_info(
             sequence,
@@ -3363,18 +3425,18 @@ impl ExportEngine {
         let mut output_options = vec![
             "-vn".to_string(),
             "-c:a".to_string(),
-            settings.format.codec().to_string(),
+            normalized_settings.format.codec().to_string(),
         ];
 
-        if let Some(ref bitrate) = settings.bitrate {
+        if let Some(ref bitrate) = normalized_settings.bitrate {
             output_options.push("-b:a".to_string());
             output_options.push(bitrate.clone());
-        } else if let Some(default_br) = settings.format.default_bitrate() {
+        } else if let Some(default_br) = normalized_settings.format.default_bitrate() {
             output_options.push("-b:a".to_string());
             output_options.push(default_br.to_string());
         }
 
-        if let Some(sr) = settings.sample_rate {
+        if let Some(sr) = normalized_settings.sample_rate {
             output_options.push("-ar".to_string());
             output_options.push(sr.to_string());
         }
@@ -3384,14 +3446,18 @@ impl ExportEngine {
         insert_output_option_args(&mut args, output_options)?;
 
         // Create output directory if needed
-        if let Some(parent) = settings.output_path.parent() {
+        if let Some(parent) = normalized_settings.output_path.parent() {
             if !parent.as_os_str().is_empty() {
                 tokio::fs::create_dir_all(parent).await?;
             }
         }
 
         // Calculate total duration for progress
-        let duration = effective_export_duration(sequence, settings.start_time, settings.end_time);
+        let duration = effective_export_duration(
+            sequence,
+            normalized_settings.start_time,
+            normalized_settings.end_time,
+        );
         let total_frames = (duration * sequence.format.fps.as_f64()).ceil() as u64;
 
         // Run FFmpeg with progress tracking
@@ -4168,13 +4234,7 @@ pub fn build_complex_filter_args_with_audio_info(
 
     if final_audio_label.is_some() {
         args.push("-c:a".to_string());
-        args.push(match settings.audio_codec {
-            AudioCodec::Aac => "aac".to_string(),
-            AudioCodec::Mp3 => "libmp3lame".to_string(),
-            AudioCodec::Opus => "libopus".to_string(),
-            AudioCodec::Pcm => "pcm_s16le".to_string(),
-            AudioCodec::Copy => "copy".to_string(),
-        });
+        args.push(settings.audio_encoder_name().to_string());
     }
 
     if let Some(ref bitrate) = settings.video_bitrate {
@@ -7955,7 +8015,9 @@ mod tests {
     fn audio_export_format_should_return_correct_extension() {
         assert_eq!(AudioExportFormat::Wav.extension(), "wav");
         assert_eq!(AudioExportFormat::Mp3.extension(), "mp3");
+        assert_eq!(AudioExportFormat::M4a.extension(), "m4a");
         assert_eq!(AudioExportFormat::Flac.extension(), "flac");
+        assert_eq!(AudioExportFormat::Ogg.extension(), "ogg");
     }
 
     /// Feature: Audio Export Format
@@ -7964,7 +8026,9 @@ mod tests {
     fn audio_export_format_should_return_correct_codec() {
         assert_eq!(AudioExportFormat::Wav.codec(), "pcm_s16le");
         assert_eq!(AudioExportFormat::Mp3.codec(), "libmp3lame");
+        assert_eq!(AudioExportFormat::M4a.codec(), "aac");
         assert_eq!(AudioExportFormat::Flac.codec(), "flac");
+        assert_eq!(AudioExportFormat::Ogg.codec(), "libopus");
     }
 
     /// Feature: Audio Export Format
@@ -7974,6 +8038,8 @@ mod tests {
         assert!(AudioExportFormat::Wav.default_bitrate().is_none());
         assert!(AudioExportFormat::Flac.default_bitrate().is_none());
         assert_eq!(AudioExportFormat::Mp3.default_bitrate(), Some("320k"));
+        assert_eq!(AudioExportFormat::M4a.default_bitrate(), Some("256k"));
+        assert_eq!(AudioExportFormat::Ogg.default_bitrate(), Some("192k"));
     }
 
     /// Feature: Audio Export Format
@@ -7983,7 +8049,9 @@ mod tests {
         let formats = vec![
             AudioExportFormat::Wav,
             AudioExportFormat::Mp3,
+            AudioExportFormat::M4a,
             AudioExportFormat::Flac,
+            AudioExportFormat::Ogg,
         ];
         for fmt in &formats {
             let json = serde_json::to_string(fmt).unwrap();
@@ -8038,8 +8106,8 @@ mod tests {
     #[test]
     fn audio_export_settings_should_convert_to_export_settings() {
         let settings = AudioExportSettings {
-            format: AudioExportFormat::Mp3,
-            output_path: PathBuf::from("/tmp/audio.mp3"),
+            format: AudioExportFormat::M4a,
+            output_path: PathBuf::from("/tmp/audio.m4a"),
             bitrate: Some("256k".to_string()),
             sample_rate: Some(44100),
             start_time: None,
@@ -8047,7 +8115,7 @@ mod tests {
         };
         let export = settings.to_export_settings();
 
-        assert_eq!(export.audio_codec, AudioCodec::Mp3);
+        assert_eq!(export.audio_codec, AudioCodec::Aac);
         assert_eq!(export.audio_bitrate, Some("256k".to_string()));
         assert_eq!(export.preset, ExportPreset::Custom);
         assert!(export.video_bitrate.is_none());
@@ -8059,15 +8127,15 @@ mod tests {
     #[test]
     fn audio_export_settings_should_use_default_bitrate_when_none() {
         let settings = AudioExportSettings {
-            format: AudioExportFormat::Mp3,
-            output_path: PathBuf::from("/tmp/audio.mp3"),
+            format: AudioExportFormat::Ogg,
+            output_path: PathBuf::from("/tmp/audio.ogg"),
             bitrate: None,
             sample_rate: None,
             start_time: None,
             end_time: None,
         };
         let export = settings.to_export_settings();
-        assert_eq!(export.audio_bitrate, Some("320k".to_string()));
+        assert_eq!(export.audio_bitrate, Some("192k".to_string()));
     }
 
     /// Feature: Audio Export Settings
@@ -8103,6 +8171,45 @@ mod tests {
             end_time: None,
         };
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn normalize_output_time_range_should_clamp_negative_start_time() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Audio", SequenceFormat::youtube_1080());
+        let mut track = Track::new_audio("Audio 1");
+        track.add_clip(
+            Clip::new("asset-1")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(track);
+        let (start, end) = normalize_output_time_range(&sequence, Some(-5.0), Some(4.0)).unwrap();
+
+        assert_eq!(start, Some(0.0));
+        assert_eq!(end, Some(4.0));
+    }
+
+    #[test]
+    fn normalize_output_time_range_should_reject_start_beyond_duration() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Audio", SequenceFormat::youtube_1080());
+        let mut track = Track::new_audio("Audio 1");
+        track.add_clip(
+            Clip::new("asset-1")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(track);
+
+        let result = normalize_output_time_range(&sequence, Some(10.0), Some(12.0));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("outside the sequence duration"));
     }
 
     /// Feature: Audio Export Result

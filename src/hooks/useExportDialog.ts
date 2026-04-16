@@ -10,12 +10,36 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { commands } from '@/bindings';
 import type {
+  AudioExportFormat,
+  ExportKind,
   ExportStatus,
   RenderProgressEvent,
   RenderCompleteEvent,
   RenderErrorEvent,
 } from '@/components/features/export/types';
-import { EXPORT_PRESETS, getPresetExtension } from '@/components/features/export/constants';
+import {
+  AUDIO_EXPORT_FORMATS,
+  EXPORT_PRESETS,
+  getAudioFormatExtension,
+  getAudioFormatOption,
+  getPresetExtension,
+} from '@/components/features/export/constants';
+
+function replaceOutputPathExtension(path: string, nextExtension: string): string {
+  const trimmedPath = path.trim();
+  if (!trimmedPath) {
+    return trimmedPath;
+  }
+
+  const lastSeparatorIndex = Math.max(trimmedPath.lastIndexOf('/'), trimmedPath.lastIndexOf('\\'));
+  const directory = lastSeparatorIndex >= 0 ? trimmedPath.slice(0, lastSeparatorIndex + 1) : '';
+  const fileName =
+    lastSeparatorIndex >= 0 ? trimmedPath.slice(lastSeparatorIndex + 1) : trimmedPath;
+  const lastDotIndex = fileName.lastIndexOf('.');
+  const baseName = lastDotIndex > 0 ? fileName.slice(0, lastDotIndex) : fileName;
+
+  return `${directory}${baseName}.${nextExtension}`;
+}
 
 // =============================================================================
 // Types
@@ -34,13 +58,23 @@ export interface UseExportDialogProps {
   inPoint?: number;
   /** Range end in seconds when `useRange` is enabled */
   outPoint?: number;
+  /** Which export mode to initialize when opening */
+  initialExportKind?: ExportKind;
 }
 
 export interface UseExportDialogResult {
+  /** Active export workflow kind */
+  exportKind: ExportKind;
+  /** Switch between video/audio export modes */
+  setExportKind: (kind: ExportKind) => void;
   /** Currently selected preset ID */
   selectedPreset: string;
   /** Set the selected preset */
   setSelectedPreset: (presetId: string) => void;
+  /** Currently selected audio format */
+  selectedAudioFormat: AudioExportFormat;
+  /** Set the selected audio format */
+  setSelectedAudioFormat: (format: AudioExportFormat) => void;
   /** Output file path */
   outputPath: string;
   /** Set the output path */
@@ -72,11 +106,16 @@ export function useExportDialog({
   useRange = false,
   inPoint = 0,
   outPoint = 0,
+  initialExportKind = 'video',
 }: UseExportDialogProps): UseExportDialogResult {
   // ===========================================================================
   // State
   // ===========================================================================
+  const [exportKind, setExportKind] = useState<ExportKind>(initialExportKind);
   const [selectedPreset, setSelectedPreset] = useState(EXPORT_PRESETS[0].id);
+  const [selectedAudioFormat, setSelectedAudioFormat] = useState<AudioExportFormat>(
+    AUDIO_EXPORT_FORMATS[0].id,
+  );
   const [outputPath, setOutputPath] = useState('');
   const [status, setStatus] = useState<ExportStatus>({ type: 'idle' });
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
@@ -92,18 +131,36 @@ export function useExportDialog({
   // ===========================================================================
   useEffect(() => {
     if (isOpen) {
+      setExportKind(initialExportKind);
       setSelectedPreset(EXPORT_PRESETS[0].id);
+      setSelectedAudioFormat(AUDIO_EXPORT_FORMATS[0].id);
       setOutputPath('');
       setStatus({ type: 'idle' });
       setCurrentJobId(null);
       currentJobIdRef.current = null;
     }
-  }, [isOpen]);
+  }, [initialExportKind, isOpen]);
 
   // Keep ref in sync with state
   useEffect(() => {
     currentJobIdRef.current = currentJobId;
   }, [currentJobId]);
+
+  useEffect(() => {
+    if (!outputPath) {
+      return;
+    }
+
+    const nextExtension =
+      exportKind === 'audio'
+        ? getAudioFormatExtension(selectedAudioFormat)
+        : getPresetExtension(selectedPreset);
+    const nextOutputPath = replaceOutputPathExtension(outputPath, nextExtension);
+
+    if (nextOutputPath !== outputPath) {
+      setOutputPath(nextOutputPath);
+    }
+  }, [exportKind, outputPath, selectedAudioFormat, selectedPreset]);
 
   // ===========================================================================
   // Tauri Event Listeners
@@ -190,6 +247,23 @@ export function useExportDialog({
    * Open file browser to select output location.
    */
   const handleBrowse = useCallback(async () => {
+    if (exportKind === 'audio') {
+      const option = getAudioFormatOption(selectedAudioFormat);
+      const extension = getAudioFormatExtension(selectedAudioFormat);
+
+      const selected = await save({
+        defaultPath: `${sequenceName}.${extension}`,
+        filters: [{ name: option.name, extensions: [extension] }],
+        title: 'Export Audio',
+      });
+
+      if (selected) {
+        setOutputPath(selected);
+      }
+
+      return;
+    }
+
     const extension = getPresetExtension(selectedPreset);
 
     const selected = await save({
@@ -201,7 +275,7 @@ export function useExportDialog({
     if (selected) {
       setOutputPath(selected);
     }
-  }, [selectedPreset, sequenceName]);
+  }, [exportKind, selectedAudioFormat, selectedPreset, sequenceName]);
 
   /**
    * Start the export process.
@@ -213,12 +287,27 @@ export function useExportDialog({
       return;
     }
 
-    setStatus({ type: 'exporting', progress: 0, message: 'Starting export...' });
+    setStatus({
+      type: 'exporting',
+      progress: 0,
+      message: exportKind === 'audio' ? 'Starting audio export...' : 'Starting export...',
+    });
 
     try {
-      const res = useRange
-        ? await commands.renderRange(sequenceId, outputPath, selectedPreset, inPoint, outPoint)
-        : await commands.startRender(sequenceId, outputPath, selectedPreset);
+      const res =
+        exportKind === 'audio'
+          ? await commands.exportAudioOnly(
+              sequenceId,
+              selectedAudioFormat,
+              outputPath,
+              null,
+              null,
+              useRange ? inPoint : null,
+              useRange ? outPoint : null,
+            )
+          : useRange
+            ? await commands.renderRange(sequenceId, outputPath, selectedPreset, inPoint, outPoint)
+            : await commands.startRender(sequenceId, outputPath, selectedPreset);
 
       if (res.status === 'error') {
         setStatus({ type: 'failed', error: String(res.error) });
@@ -246,7 +335,16 @@ export function useExportDialog({
       currentJobIdRef.current = null;
       setCurrentJobId(null);
     }
-  }, [sequenceId, outputPath, selectedPreset, useRange, inPoint, outPoint]);
+  }, [
+    exportKind,
+    inPoint,
+    outPoint,
+    outputPath,
+    selectedAudioFormat,
+    selectedPreset,
+    sequenceId,
+    useRange,
+  ]);
 
   /**
    * Reset to idle state for retry.
@@ -264,15 +362,19 @@ export function useExportDialog({
   const showSettings = status.type === 'idle';
   const canExport = useMemo(
     () => outputPath.length > 0 && sequenceId !== null,
-    [outputPath, sequenceId]
+    [outputPath, sequenceId],
   );
 
   // ===========================================================================
   // Return
   // ===========================================================================
   return {
+    exportKind,
+    setExportKind,
     selectedPreset,
     setSelectedPreset,
+    selectedAudioFormat,
+    setSelectedAudioFormat,
     outputPath,
     setOutputPath,
     status,
