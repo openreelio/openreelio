@@ -9,6 +9,8 @@ use std::sync::Arc;
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use tokio::sync::mpsc;
 
+use crate::core::assets::media_kind_from_extension;
+
 use super::ignore::IgnoreRules;
 
 /// Events emitted by the workspace watcher
@@ -150,44 +152,7 @@ impl WorkspaceWatcher {
 
 /// Check if a file extension is a recognized media type
 fn is_media_extension(ext: &str) -> bool {
-    matches!(
-        ext.to_lowercase().as_str(),
-        "mp4"
-            | "mov"
-            | "avi"
-            | "mkv"
-            | "webm"
-            | "m4v"
-            | "wmv"
-            | "flv"
-            | "mp3"
-            | "wav"
-            | "aac"
-            | "ogg"
-            | "flac"
-            | "m4a"
-            | "wma"
-            | "oga"
-            | "opus"
-            | "weba"
-            | "jpg"
-            | "jpeg"
-            | "png"
-            | "gif"
-            | "bmp"
-            | "webp"
-            | "tiff"
-            | "svg"
-            | "srt"
-            | "vtt"
-            | "ass"
-            | "ssa"
-            | "sub"
-            | "ttf"
-            | "otf"
-            | "woff"
-            | "woff2"
-    )
+    media_kind_from_extension(ext).is_some()
 }
 
 #[cfg(test)]

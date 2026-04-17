@@ -15,7 +15,7 @@ use std::time::UNIX_EPOCH;
 use tauri::State;
 use walkdir::{DirEntry, WalkDir};
 
-use crate::core::assets::AssetKind;
+use crate::core::assets::{media_kind_from_extension, AssetKind};
 use crate::core::workspace::{
     ignore::IgnoreRules,
     service::{FileTreeEntry, WorkspaceService},
@@ -322,15 +322,17 @@ fn kind_string_for_path(relative_path: &str) -> Option<String> {
         .and_then(|e| e.to_str())
         .unwrap_or("");
 
-    let kind = match ext.to_lowercase().as_str() {
-        "mp4" | "mov" | "avi" | "mkv" | "webm" | "m4v" | "wmv" | "flv" => "video",
-        "mp3" | "wav" | "aac" | "ogg" | "flac" | "m4a" | "wma" => "audio",
-        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tiff" | "svg" => "image",
-        "srt" | "vtt" | "ass" | "ssa" | "sub" => "subtitle",
-        "ttf" | "otf" | "woff" | "woff2" => "font",
-        _ => return None,
-    };
-    Some(kind.to_string())
+    media_kind_from_extension(ext).map(|kind| {
+        match kind {
+            AssetKind::Video => "video",
+            AssetKind::Audio => "audio",
+            AssetKind::Image => "image",
+            AssetKind::Subtitle => "subtitle",
+            AssetKind::Font => "font",
+            AssetKind::EffectPreset | AssetKind::MemePack => "other",
+        }
+        .to_string()
+    })
 }
 
 /// Get the workspace file tree with asset_id populated from project state
@@ -996,6 +998,22 @@ mod tests {
             "/tmp/file.txt"
         };
         assert!(validate_relative_path(absolute_candidate).is_err());
+    }
+
+    #[test]
+    fn kind_string_for_path_recognizes_extended_audio_extensions() {
+        assert_eq!(
+            kind_string_for_path("audio/voice.opus"),
+            Some("audio".to_string())
+        );
+        assert_eq!(
+            kind_string_for_path("audio/ambience.oga"),
+            Some("audio".to_string())
+        );
+        assert_eq!(
+            kind_string_for_path("audio/podcast.weba"),
+            Some("audio".to_string())
+        );
     }
 
     #[test]

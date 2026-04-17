@@ -3466,33 +3466,34 @@ fn build_report_visual_items(
     frame_analysis
         .iter()
         .enumerate()
-        .map(|(fallback_index, entry)| {
-            let shot_index = entry.shot_index.unwrap_or(fallback_index);
-            let shot = shots.get(shot_index).or_else(|| shots.get(fallback_index));
-            let start_sec = shot.map(|value| round_to(value.start_sec)).unwrap_or(0.0);
-            let end_sec = shot
-                .map(|value| round_to(value.end_sec))
-                .unwrap_or(start_sec);
+        .filter_map(|(fallback_index, entry)| {
+            let requested_shot_index = entry.shot_index.unwrap_or(fallback_index);
+            let (resolved_shot_index, shot) = shots
+                .get(requested_shot_index)
+                .map(|shot| (requested_shot_index, shot))
+                .or_else(|| shots.get(fallback_index).map(|shot| (fallback_index, shot)))?;
+            let start_sec = round_to(shot.start_sec);
+            let end_sec = round_to(shot.end_sec);
             let visual_complexity = round_to(entry.visual_complexity);
-            json!({
-                "shotIndex": shot_index,
+            Some(json!({
+                "shotIndex": resolved_shot_index,
                 "startSec": start_sec,
                 "endSec": end_sec,
                 "durationSec": round_to((end_sec - start_sec).max(0.0)),
-                "keyframePath": shot.and_then(|value| value.keyframe_path.clone()),
-                "keyframeSelectionMethod": shot.and_then(|value| value.keyframe_selection_method.clone()),
+                "keyframePath": shot.keyframe_path.clone(),
+                "keyframeSelectionMethod": shot.keyframe_selection_method.clone(),
                 "cameraAngle": entry.camera_angle,
                 "subjectPosition": entry.subject_position,
                 "motionDirection": entry.motion_direction,
                 "visualComplexity": visual_complexity,
                 "summary": build_visual_detail_summary(
-                    shot_index,
+                    resolved_shot_index,
                     &entry.camera_angle,
                     &entry.subject_position,
                     &entry.motion_direction,
                     visual_complexity,
                 ),
-            })
+            }))
         })
         .collect()
 }
@@ -4402,7 +4403,7 @@ fn build_markdown(
         }
     }
 
-    if !semantic_likely_setting.is_empty() || visual_sample_count > 0 {
+    if !semantic_likely_setting.is_empty() {
         lines.extend([
             String::new(),
             "## Visual / Setting Cues".to_string(),
@@ -4410,26 +4411,6 @@ fn build_markdown(
         ]);
         for bullet in &semantic_likely_setting {
             lines.push(format!("- {}", bullet));
-        }
-        if !top_camera_angles.is_empty() {
-            lines.push(format!(
-                "- Dominant camera angles: {}",
-                top_camera_angles
-                    .iter()
-                    .map(|(label, count)| format!("{} ({})", label, count))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        if !top_motion_directions.is_empty() {
-            lines.push(format!(
-                "- Dominant motion: {}",
-                top_motion_directions
-                    .iter()
-                    .map(|(label, count)| format!("{} ({})", label, count))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
         }
     }
 
@@ -5134,6 +5115,40 @@ mod tests {
     }
 
     #[test]
+    fn build_report_visual_items_should_skip_entries_without_matching_shots() {
+        let visual_items = build_report_visual_items(
+            &[CachedShotResult {
+                start_sec: 0.0,
+                end_sec: 4.0,
+                confidence: 0.9,
+                keyframe_path: Some("shots/0001.jpg".to_string()),
+                keyframe_selection_method: Some("thumbnail".to_string()),
+            }],
+            &[
+                CachedFrameAnalysis {
+                    shot_index: Some(99),
+                    camera_angle: "wide".to_string(),
+                    subject_position: "center".to_string(),
+                    motion_direction: "static".to_string(),
+                    visual_complexity: 0.42,
+                },
+                CachedFrameAnalysis {
+                    shot_index: Some(100),
+                    camera_angle: "close-up".to_string(),
+                    subject_position: "left".to_string(),
+                    motion_direction: "left_to_right".to_string(),
+                    visual_complexity: 0.66,
+                },
+            ],
+        );
+
+        assert_eq!(visual_items.len(), 1);
+        assert_eq!(visual_items[0]["shotIndex"], 0);
+        assert_eq!(visual_items[0]["startSec"], 0.0);
+        assert_eq!(visual_items[0]["endSec"], 4.0);
+    }
+
+    #[test]
     fn build_markdown_should_include_visual_breakdown() {
         let coverage = json!({
             "shots": true,
@@ -5259,6 +5274,11 @@ mod tests {
         assert!(markdown.contains(
             "00:00-00:04 | Shot 1 | wide angle | center subject | static motion | complexity 0.42"
         ));
+        assert_eq!(
+            markdown.matches("Dominant camera angles: wide (1)").count(),
+            1
+        );
+        assert_eq!(markdown.matches("Dominant motion: static (1)").count(), 1);
         assert!(markdown.contains("Keyframe: shots/0001.jpg"));
         assert!(markdown.contains("## Visual Artifacts"));
     }

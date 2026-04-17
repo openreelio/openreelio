@@ -1534,6 +1534,8 @@ describe('reference style transfer analysis tools', () => {
       expect(String(data.markdown)).toContain('Best usable moment: 00:00-00:03 | text |');
       expect(String(data.markdown)).toContain('00:00-00:03 | Performance moment |');
       expect(String(data.markdown)).toContain('## Visual Breakdown');
+      expect(String(data.markdown).match(/Dominant camera angles:/g)?.length ?? 0).toBe(1);
+      expect(String(data.markdown).match(/Dominant motion:/g)?.length ?? 0).toBe(1);
       expect(String(data.markdown)).toContain(
         '00:00-00:04 | Shot 1 | wide angle | center subject | static motion | complexity 0.42',
       );
@@ -1627,6 +1629,104 @@ describe('reference style transfer analysis tools', () => {
       expect(String(data.markdown)).not.toContain(
         '00:24-00:26 | Shot 13 | wide angle | center subject | static motion | complexity 0.5',
       );
+    });
+
+    it('should drop visual entries that cannot resolve to a matching shot', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'source-visual-alignment',
+            name: 'visual-alignment.mp4',
+            kind: 'video',
+            uri: '/media/visual-alignment.mp4',
+            durationSec: 4,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'source-visual-alignment',
+          shots: [
+            {
+              startSec: 0,
+              endSec: 4,
+              confidence: 0.9,
+              keyframePath: 'shots/0001.jpg',
+              keyframeSelectionMethod: 'thumbnail',
+            },
+          ],
+          transcript: [],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18],
+            peakDb: -4,
+            silenceRegions: [],
+            speechRegions: [{ startSec: 0, endSec: 4 }],
+          },
+          segments: [
+            { startSec: 0, endSec: 4, segmentType: 'performance', confidence: 0.9, features: {} },
+          ],
+          frameAnalysis: [
+            {
+              shotIndex: 99,
+              cameraAngle: 'wide',
+              subjectPosition: 'center',
+              motionDirection: 'static',
+              visualComplexity: 0.5,
+            },
+            {
+              shotIndex: 100,
+              cameraAngle: 'close-up',
+              subjectPosition: 'left',
+              motionDirection: 'left_to_right',
+              visualComplexity: 0.7,
+            },
+          ],
+          contactSheet: null,
+          metadata: {
+            durationSec: 4,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('generate_source_analysis_report', {
+        assetId: 'source-visual-alignment',
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.visual.items).toEqual([
+        {
+          shotIndex: 0,
+          startSec: 0,
+          endSec: 4,
+          durationSec: 4,
+          keyframePath: 'shots/0001.jpg',
+          keyframeSelectionMethod: 'thumbnail',
+          cameraAngle: 'wide',
+          subjectPosition: 'center',
+          motionDirection: 'static',
+          visualComplexity: 0.5,
+          summary: 'Shot 1 | wide angle | center subject | static motion | complexity 0.5',
+        },
+      ]);
+      expect(String(data.markdown)).not.toContain('00:00-00:00');
+      expect(String(data.markdown)).not.toContain('Shot 101');
     });
 
     it('should regenerate the bundle when cached coverage is incomplete', async () => {

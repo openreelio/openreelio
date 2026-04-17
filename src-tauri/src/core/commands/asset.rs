@@ -5,7 +5,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::{
-    assets::{Asset, AudioInfo, LicenseInfo, ProxyStatus, VideoInfo},
+    assets::{
+        media_kind_from_extension, Asset, AssetKind, AudioInfo, LicenseInfo, ProxyStatus, VideoInfo,
+    },
     commands::{Command, CommandResult, StateChange},
     fs::validate_local_input_path,
     project::ProjectState,
@@ -39,11 +41,9 @@ impl ImportAssetCommand {
             .map(|s| s.to_lowercase())
             .unwrap_or_default();
 
-        let asset = match extension.as_str() {
-            "mp3" | "wav" | "aac" | "flac" | "ogg" | "m4a" | "oga" | "opus" | "weba" => {
-                Asset::new_audio(name, uri, AudioInfo::default())
-            }
-            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" => {
+        let asset = match media_kind_from_extension(&extension) {
+            Some(AssetKind::Audio) => Asset::new_audio(name, uri, AudioInfo::default()),
+            Some(AssetKind::Image) => {
                 Asset::new_image(name, uri, 1920, 1080) // Default size, will be updated
             }
             _ => Asset::new_video(name, uri, VideoInfo::default()),

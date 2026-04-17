@@ -60,6 +60,7 @@ export function ExportDialog({
   });
   const dialogRef = useRef<HTMLDivElement>(null);
   const wasOpenRef = useRef(isOpen);
+  const wasBatchRenderingRef = useRef(isBatchRendering);
 
   useEffect(() => {
     if (!isOpen || exportKind !== 'video') {
@@ -83,11 +84,15 @@ export function ExportDialog({
   }, [exportKind, isOpen]);
 
   useEffect(() => {
-    if (wasOpenRef.current && !isOpen && !isBatchRendering) {
+    const dialogJustClosed = wasOpenRef.current && !isOpen;
+    const batchJustCompleted = wasBatchRenderingRef.current && !isBatchRendering;
+
+    if ((dialogJustClosed && !isBatchRendering) || (!isOpen && batchJustCompleted)) {
       resetQueue();
     }
 
     wasOpenRef.current = isOpen;
+    wasBatchRenderingRef.current = isBatchRendering;
   }, [isBatchRendering, isOpen, resetQueue]);
 
   const handleClose = useCallback(() => {

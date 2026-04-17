@@ -1740,28 +1740,35 @@ function buildReportVisualItems(
   visualComplexity: number;
   summary: string;
 }> {
-  return frameAnalysis.map((entry) => {
-    const shot = shots[entry.shotIndex];
-    const startSec = roundTo(shot?.startSec ?? 0) ?? 0;
-    const endSec = roundTo(shot?.endSec ?? shot?.startSec ?? 0) ?? startSec;
+  return frameAnalysis.flatMap((entry, fallbackIndex) => {
+    const resolvedShotIndex = shots[entry.shotIndex] ? entry.shotIndex : fallbackIndex;
+    const shot = shots[resolvedShotIndex];
+    if (!shot) {
+      return [];
+    }
+
+    const startSec = roundTo(shot.startSec) ?? 0;
+    const endSec = roundTo(shot.endSec) ?? startSec;
     const visualComplexity = roundTo(entry.visualComplexity) ?? 0;
     const item = {
-      shotIndex: entry.shotIndex,
+      shotIndex: resolvedShotIndex,
       startSec,
       endSec,
       durationSec: roundTo(Math.max(0, endSec - startSec)) ?? 0,
-      keyframePath: shot?.keyframePath ?? null,
-      keyframeSelectionMethod: shot?.keyframeSelectionMethod ?? null,
+      keyframePath: shot.keyframePath ?? null,
+      keyframeSelectionMethod: shot.keyframeSelectionMethod ?? null,
       cameraAngle: entry.cameraAngle,
       subjectPosition: entry.subjectPosition,
       motionDirection: entry.motionDirection,
       visualComplexity,
     };
 
-    return {
-      ...item,
-      summary: buildVisualDetailSummary(item),
-    };
+    return [
+      {
+        ...item,
+        summary: buildVisualDetailSummary(item),
+      },
+    ];
   });
 }
 
@@ -3464,20 +3471,10 @@ function buildSourceAnalysisMarkdown(
     }
   }
 
-  if (semantic.likelySetting.length > 0 || report.visual.sampleCount > 0) {
+  if (semantic.likelySetting.length > 0) {
     lines.push('', '## Visual / Setting Cues', '');
     for (const bullet of semantic.likelySetting) {
       lines.push(`- ${bullet}`);
-    }
-    if (report.visual.topCameraAngles.length > 0) {
-      lines.push(
-        `- Dominant camera angles: ${report.visual.topCameraAngles.map((entry) => `${entry.label} (${entry.count})`).join(', ')}`,
-      );
-    }
-    if (report.visual.topMotionDirections.length > 0) {
-      lines.push(
-        `- Dominant motion: ${report.visual.topMotionDirections.map((entry) => `${entry.label} (${entry.count})`).join(', ')}`,
-      );
     }
   }
 

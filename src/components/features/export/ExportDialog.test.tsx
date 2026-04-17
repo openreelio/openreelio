@@ -23,6 +23,8 @@ vi.mock('@/bindings', () => ({
 }));
 
 describe('ExportDialog', () => {
+  let exportDialogState: Record<string, unknown>;
+  let renderQueueState: Record<string, unknown>;
   const setExportKind = vi.fn();
   const setSelectedPreset = vi.fn();
   const setSelectedAudioFormat = vi.fn();
@@ -49,7 +51,7 @@ describe('ExportDialog', () => {
       },
     });
 
-    mockUseExportDialog.mockReturnValue({
+    exportDialogState = {
       exportKind: 'video',
       setExportKind,
       selectedPreset: 'youtube_1080p',
@@ -64,9 +66,10 @@ describe('ExportDialog', () => {
       handleBrowse,
       handleExport,
       handleRetry,
-    });
+    };
+    mockUseExportDialog.mockImplementation(() => exportDialogState);
 
-    mockUseRenderQueue.mockReturnValue({
+    renderQueueState = {
       queue: [],
       isBatchRendering: false,
       batchId: null,
@@ -83,7 +86,8 @@ describe('ExportDialog', () => {
       startBatchRender,
       cancelJob,
       resetQueue,
-    });
+    };
+    mockUseRenderQueue.mockImplementation(() => renderQueueState);
   });
 
   it('queries available encoders only once when opened in video mode', async () => {
@@ -106,6 +110,47 @@ describe('ExportDialog', () => {
 
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(resetQueue).not.toHaveBeenCalled();
+
+    rerender(
+      <ExportDialog
+        isOpen={false}
+        onClose={onClose}
+        sequenceId="sequence-1"
+        sequenceName="Sequence"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(resetQueue).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('resets queue when a background batch finishes after the dialog closes', async () => {
+    const onClose = vi.fn();
+    renderQueueState = {
+      ...renderQueueState,
+      isBatchRendering: true,
+    };
+
+    const { rerender } = render(
+      <ExportDialog isOpen onClose={onClose} sequenceId="sequence-1" sequenceName="Sequence" />,
+    );
+
+    rerender(
+      <ExportDialog
+        isOpen={false}
+        onClose={onClose}
+        sequenceId="sequence-1"
+        sequenceName="Sequence"
+      />,
+    );
+
+    expect(resetQueue).not.toHaveBeenCalled();
+
+    renderQueueState = {
+      ...renderQueueState,
+      isBatchRendering: false,
+    };
 
     rerender(
       <ExportDialog
