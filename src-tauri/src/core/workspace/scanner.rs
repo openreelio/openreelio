@@ -8,29 +8,9 @@ use std::time::SystemTime;
 
 use walkdir::WalkDir;
 
-use crate::core::assets::AssetKind;
+use crate::core::assets::{media_kind_from_extension, AssetKind};
 
 use super::ignore::IgnoreRules;
-
-/// Known media file extensions mapped to their asset kind.
-/// Returns `None` for unrecognized extensions (unlike `asset_kind_from_extension`
-/// which defaults to Video).
-fn media_kind_from_extension(ext: &str) -> Option<AssetKind> {
-    match ext.to_lowercase().as_str() {
-        // Video
-        "mp4" | "mov" | "avi" | "mkv" | "webm" | "m4v" | "wmv" | "flv" => Some(AssetKind::Video),
-        // Audio
-        "mp3" | "wav" | "aac" | "ogg" | "flac" | "m4a" | "wma" => Some(AssetKind::Audio),
-        // Image
-        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tiff" | "svg" => Some(AssetKind::Image),
-        // Subtitle
-        "srt" | "vtt" | "ass" | "ssa" | "sub" => Some(AssetKind::Subtitle),
-        // Font
-        "ttf" | "otf" | "woff" | "woff2" => Some(AssetKind::Font),
-        // Unknown extension — not a media file
-        _ => None,
-    }
-}
 
 /// A file discovered during workspace scanning
 #[derive(Debug, Clone)]
@@ -399,6 +379,9 @@ mod tests {
         assert_eq!(media_kind_from_extension("mp4"), Some(AssetKind::Video));
         assert_eq!(media_kind_from_extension("MP4"), Some(AssetKind::Video));
         assert_eq!(media_kind_from_extension("wav"), Some(AssetKind::Audio));
+        assert_eq!(media_kind_from_extension("opus"), Some(AssetKind::Audio));
+        assert_eq!(media_kind_from_extension("oga"), Some(AssetKind::Audio));
+        assert_eq!(media_kind_from_extension("weba"), Some(AssetKind::Audio));
         assert_eq!(media_kind_from_extension("jpg"), Some(AssetKind::Image));
         assert_eq!(media_kind_from_extension("srt"), Some(AssetKind::Subtitle));
         assert_eq!(media_kind_from_extension("ttf"), Some(AssetKind::Font));

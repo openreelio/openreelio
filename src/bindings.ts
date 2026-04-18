@@ -512,12 +512,12 @@ async exportFrame(sequenceId: string, timeSec: number, format: string, outputPat
  * Exports audio only from a sequence (no video).
  * 
  * Renders all audio tracks mixed down to a single audio file.
- * Supports WAV, MP3, and FLAC output formats. Reports progress via
+ * Supports WAV, MP3, M4A, FLAC, and OGG output formats. Reports progress via
  * Tauri events using the same `render-progress` event pattern.
  */
-async exportAudioOnly(sequenceId: string, format: string, outputPath: string, bitrate: string | null, sampleRate: number | null) : Promise<Result<RenderStartResult, string>> {
+async exportAudioOnly(sequenceId: string, format: string, outputPath: string, bitrate: string | null, sampleRate: number | null, startTime: number | null, endTime: number | null) : Promise<Result<RenderStartResult, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("export_audio_only", { sequenceId, format, outputPath, bitrate, sampleRate }) };
+    return { status: "ok", data: await TAURI_INVOKE("export_audio_only", { sequenceId, format, outputPath, bitrate, sampleRate, startTime, endTime }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }

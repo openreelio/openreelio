@@ -209,20 +209,7 @@ impl ThumbnailService {
 
 /// Detect asset kind from file extension
 pub fn asset_kind_from_extension(ext: &str) -> AssetKind {
-    match ext.to_lowercase().as_str() {
-        // Video formats
-        "mp4" | "mov" | "avi" | "mkv" | "webm" | "m4v" | "wmv" | "flv" => AssetKind::Video,
-        // Audio formats
-        "mp3" | "wav" | "aac" | "ogg" | "flac" | "m4a" | "wma" => AssetKind::Audio,
-        // Image formats
-        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tiff" | "svg" => AssetKind::Image,
-        // Subtitle formats
-        "srt" | "vtt" | "ass" | "ssa" | "sub" => AssetKind::Subtitle,
-        // Font formats
-        "ttf" | "otf" | "woff" | "woff2" => AssetKind::Font,
-        // Default to Video (most common case)
-        _ => AssetKind::Video,
-    }
+    super::media_kind_from_extension(ext).unwrap_or(AssetKind::Video)
 }
 
 /// Detect asset kind from file path
@@ -257,6 +244,9 @@ mod tests {
         assert_eq!(asset_kind_from_extension("mov"), AssetKind::Video);
         assert_eq!(asset_kind_from_extension("mp3"), AssetKind::Audio);
         assert_eq!(asset_kind_from_extension("wav"), AssetKind::Audio);
+        assert_eq!(asset_kind_from_extension("opus"), AssetKind::Audio);
+        assert_eq!(asset_kind_from_extension("oga"), AssetKind::Audio);
+        assert_eq!(asset_kind_from_extension("weba"), AssetKind::Audio);
         assert_eq!(asset_kind_from_extension("png"), AssetKind::Image);
         assert_eq!(asset_kind_from_extension("jpg"), AssetKind::Image);
         assert_eq!(asset_kind_from_extension("srt"), AssetKind::Subtitle);

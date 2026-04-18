@@ -9,6 +9,7 @@
  */
 
 import { memo, useMemo } from 'react';
+import { Music } from 'lucide-react';
 import { TimelinePreviewPlayer } from './TimelinePreviewPlayer';
 import { ProxyPreviewPlayer } from './ProxyPreviewPlayer';
 import { usePreviewMode } from '@/hooks/usePreviewMode';
@@ -75,6 +76,29 @@ export const UnifiedPreviewPlayer = memo(function UnifiedPreviewPlayer({
     sequenceCanvas && sequenceCanvas.width > 0 && sequenceCanvas.height > 0
       ? sequenceCanvas.width / sequenceCanvas.height
       : undefined;
+  const isAudioOnlySequence = useMemo(() => {
+    if (!sequence) {
+      return false;
+    }
+
+    let hasEnabledAudioClips = false;
+    let hasEnabledVisualClips = false;
+
+    for (const track of sequence.tracks) {
+      const hasEnabledClips = track.clips.some((clip) => clip.enabled !== false);
+      if (!hasEnabledClips) {
+        continue;
+      }
+
+      if (track.kind === 'audio') {
+        hasEnabledAudioClips = true;
+      } else {
+        hasEnabledVisualClips = true;
+      }
+    }
+
+    return hasEnabledAudioClips && !hasEnabledVisualClips;
+  }, [sequence]);
 
   // Render proxy-based player for video mode
   if (mode === 'video' && sequence) {
@@ -119,6 +143,18 @@ export const UnifiedPreviewPlayer = memo(function UnifiedPreviewPlayer({
         onEnded={onEnded}
         onFrameRender={onFrameRender}
       />
+
+      {isAudioOnlySequence && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-4">
+          <div className="rounded-xl border border-white/10 bg-black/60 px-4 py-3 text-center text-white shadow-lg backdrop-blur-sm">
+            <Music className="mx-auto mb-2 h-6 w-6 text-primary-300" />
+            <p className="text-sm font-medium">Audio-only sequence</p>
+            <p className="mt-1 text-xs text-white/70">
+              Use playback controls to monitor the mix while editing.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Proxy generating indicator */}
       {hasGeneratingProxy && (

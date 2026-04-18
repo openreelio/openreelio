@@ -9,22 +9,29 @@ import {
   Smartphone,
   Film,
   Globe,
+  Music,
   CheckCircle,
   XCircle,
   Loader2,
   X,
 } from 'lucide-react';
-import type { ExportPreset, ExportStatus, ExportPresetIcon, RenderQueueItem } from './types';
+import type {
+  ExportOptionIcon,
+  ExportStatus,
+  RenderQueueItem,
+  SelectableExportOption,
+} from './types';
 
 // =============================================================================
 // Icon Map
 // =============================================================================
 
-const PRESET_ICONS: Record<ExportPresetIcon, typeof Monitor> = {
+const PRESET_ICONS: Record<ExportOptionIcon, typeof Monitor> = {
   monitor: Monitor,
   smartphone: Smartphone,
   film: Film,
   globe: Globe,
+  audio: Music,
 };
 
 // =============================================================================
@@ -33,7 +40,7 @@ const PRESET_ICONS: Record<ExportPresetIcon, typeof Monitor> = {
 
 export interface PresetOptionProps {
   /** Preset to display */
-  preset: ExportPreset;
+  preset: SelectableExportOption;
   /** Whether this preset is currently selected */
   isSelected: boolean;
   /** Callback when preset is selected */
@@ -106,11 +113,7 @@ export interface ProgressDisplayProps {
 /**
  * Display export progress, completion, or error state.
  */
-export function ProgressDisplay({
-  status,
-  onClose,
-  onRetry,
-}: ProgressDisplayProps): JSX.Element {
+export function ProgressDisplay({ status, onClose, onRetry }: ProgressDisplayProps): JSX.Element {
   if (status.type === 'exporting') {
     // Validate and clamp progress value to 0-100 range
     const progress = Math.max(0, Math.min(100, Number(status.progress) || 0));
@@ -134,9 +137,10 @@ export function ProgressDisplay({
 
   if (status.type === 'completed') {
     // Safely format duration value
-    const duration = typeof status.duration === 'number' && !isNaN(status.duration)
-      ? status.duration.toFixed(1)
-      : '0.0';
+    const duration =
+      typeof status.duration === 'number' && !isNaN(status.duration)
+        ? status.duration.toFixed(1)
+        : '0.0';
 
     return (
       <div className="py-8 text-center" data-testid="export-completed">
@@ -145,9 +149,7 @@ export function ProgressDisplay({
         <p className="text-sm text-editor-text-muted mb-4">
           Saved to: <span className="text-editor-text">{status.outputPath}</span>
         </p>
-        <p className="text-xs text-editor-text-muted">
-          Duration: {duration}s
-        </p>
+        <p className="text-xs text-editor-text-muted">Duration: {duration}s</p>
         <button
           onClick={onClose}
           className="mt-6 px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors"
@@ -229,18 +231,26 @@ export interface OutputLocationFieldProps {
 }
 
 /** File output path display with Browse button. */
-export function OutputLocationField({ outputPath, onBrowse, disabled }: OutputLocationFieldProps): JSX.Element {
+export function OutputLocationField({
+  outputPath,
+  onBrowse,
+  disabled,
+}: OutputLocationFieldProps): JSX.Element {
   return (
     <div>
       <label className="block text-sm font-medium text-editor-text mb-2">Output File</label>
       <div className="flex gap-2">
         <input
-          type="text" value={outputPath} readOnly
+          type="text"
+          value={outputPath}
+          readOnly
           className="flex-1 px-3 py-2 bg-editor-bg border border-editor-border rounded-lg text-editor-text text-sm truncate"
           placeholder="Select output location"
         />
         <button
-          type="button" onClick={onBrowse} disabled={disabled}
+          type="button"
+          onClick={onBrowse}
+          disabled={disabled}
           className="px-4 py-2 bg-editor-sidebar border border-editor-border rounded-lg text-editor-text hover:bg-editor-bg transition-colors disabled:opacity-50"
         >
           Browse
@@ -266,8 +276,13 @@ export interface RangeControlsProps {
 
 /** Range export toggle and In/Out point inputs. */
 export function RangeControls({
-  useRange, onUseRangeChange, inPoint, onInPointChange,
-  outPoint, onOutPointChange, disabled,
+  useRange,
+  onUseRangeChange,
+  inPoint,
+  onInPointChange,
+  outPoint,
+  onOutPointChange,
+  disabled,
 }: RangeControlsProps): JSX.Element {
   return (
     <>
@@ -287,7 +302,10 @@ export function RangeControls({
           <div className="flex-1">
             <label className="block text-xs text-editor-text-muted mb-1">In (sec)</label>
             <input
-              type="number" min={0} step={0.1} value={inPoint}
+              type="number"
+              min={0}
+              step={0.1}
+              value={inPoint}
               onChange={(e) => onInPointChange(Number(e.target.value))}
               className="w-full px-2 py-1 bg-editor-bg border border-editor-border rounded text-editor-text text-sm"
               data-testid="range-in-point"
@@ -296,7 +314,10 @@ export function RangeControls({
           <div className="flex-1">
             <label className="block text-xs text-editor-text-muted mb-1">Out (sec)</label>
             <input
-              type="number" min={0} step={0.1} value={outPoint}
+              type="number"
+              min={0}
+              step={0.1}
+              value={outPoint}
               onChange={(e) => onOutPointChange(Number(e.target.value))}
               className="w-full px-2 py-1 bg-editor-bg border border-editor-border rounded text-editor-text text-sm"
               data-testid="range-out-point"
@@ -349,13 +370,21 @@ export function RenderQueuePanel({
             data-testid={`queue-item-${item.jobId}`}
           >
             {/* Status indicator */}
-            <div className="w-2 h-2 rounded-full flex-shrink-0" style={{
-              backgroundColor:
-                item.status === 'rendering' ? '#3b82f6' :
-                item.status === 'completed' ? '#22c55e' :
-                item.status === 'failed' ? '#ef4444' :
-                item.status === 'cancelled' ? '#eab308' : '#6b7280',
-            }} />
+            <div
+              className="w-2 h-2 rounded-full flex-shrink-0"
+              style={{
+                backgroundColor:
+                  item.status === 'rendering'
+                    ? '#3b82f6'
+                    : item.status === 'completed'
+                      ? '#22c55e'
+                      : item.status === 'failed'
+                        ? '#ef4444'
+                        : item.status === 'cancelled'
+                          ? '#eab308'
+                          : '#6b7280',
+              }}
+            />
 
             {/* Info */}
             <div className="flex-1 min-w-0">

@@ -22,6 +22,23 @@ pub enum AssetKind {
     MemePack,
 }
 
+/// Returns the known media kind for a file extension.
+///
+/// Unknown extensions return `None` so callers can ignore the file or apply a
+/// context-specific fallback.
+pub fn media_kind_from_extension(ext: &str) -> Option<AssetKind> {
+    match ext.to_lowercase().as_str() {
+        "mp4" | "mov" | "avi" | "mkv" | "webm" | "m4v" | "wmv" | "flv" => Some(AssetKind::Video),
+        "mp3" | "wav" | "aac" | "ogg" | "flac" | "m4a" | "wma" | "oga" | "opus" | "weba" => {
+            Some(AssetKind::Audio)
+        }
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tiff" | "svg" => Some(AssetKind::Image),
+        "srt" | "vtt" | "ass" | "ssa" | "sub" => Some(AssetKind::Subtitle),
+        "ttf" | "otf" | "woff" | "woff2" => Some(AssetKind::Font),
+        _ => None,
+    }
+}
+
 /// Proxy video generation status
 ///
 /// Tracks the lifecycle of proxy video generation for preview playback.
@@ -759,6 +776,18 @@ mod tests {
             let json = serde_json::to_string(&kind).unwrap();
             assert_eq!(json, expected);
         }
+    }
+
+    #[test]
+    fn test_media_kind_from_extension_recognizes_known_media_types() {
+        assert_eq!(media_kind_from_extension("mp4"), Some(AssetKind::Video));
+        assert_eq!(media_kind_from_extension("opus"), Some(AssetKind::Audio));
+        assert_eq!(media_kind_from_extension("oga"), Some(AssetKind::Audio));
+        assert_eq!(media_kind_from_extension("weba"), Some(AssetKind::Audio));
+        assert_eq!(media_kind_from_extension("png"), Some(AssetKind::Image));
+        assert_eq!(media_kind_from_extension("srt"), Some(AssetKind::Subtitle));
+        assert_eq!(media_kind_from_extension("ttf"), Some(AssetKind::Font));
+        assert_eq!(media_kind_from_extension("txt"), None);
     }
 
     #[test]

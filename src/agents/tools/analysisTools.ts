@@ -355,6 +355,442 @@ function buildAudioCue(
   return null;
 }
 
+function uniqueStrings(
+  values: Array<string | null | undefined>,
+  limit = Number.POSITIVE_INFINITY,
+): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const value of values) {
+    if (typeof value !== 'string') {
+      continue;
+    }
+
+    const normalized = normalizeText(value);
+    if (!normalized) {
+      continue;
+    }
+
+    const lookup = normalized.toLowerCase();
+    if (seen.has(lookup)) {
+      continue;
+    }
+
+    seen.add(lookup);
+    result.push(normalized);
+    if (result.length >= limit) {
+      break;
+    }
+  }
+
+  return result;
+}
+
+function formatNaturalList(values: string[], limit = 3): string {
+  const unique = uniqueStrings(values, limit);
+  if (unique.length === 0) {
+    return '';
+  }
+
+  if (unique.length === 1) {
+    return unique[0];
+  }
+
+  if (unique.length === 2) {
+    return `${unique[0]} and ${unique[1]}`;
+  }
+
+  return `${unique.slice(0, -1).join(', ')}, and ${unique[unique.length - 1]}`;
+}
+
+function ensureSentence(text: string | null | undefined): string | null {
+  const normalized = typeof text === 'string' ? normalizeText(text) : '';
+  if (!normalized) {
+    return null;
+  }
+
+  return /[.!?]$/.test(normalized) ? normalized : `${normalized}.`;
+}
+
+function quoteSnippet(text: string | null | undefined, maxLength = 96): string | null {
+  const normalized = typeof text === 'string' ? normalizeText(text) : '';
+  if (!normalized) {
+    return null;
+  }
+
+  const excerpt =
+    normalized.length <= maxLength
+      ? normalized
+      : `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
+  return `"${excerpt}"`;
+}
+
+function normalizeLookupValues(values: Array<string | null | undefined>): string[] {
+  return values
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => normalizeText(value).toLowerCase())
+    .filter(Boolean);
+}
+
+function includesAnyLookupValue(values: string[], keywords: string[]): boolean {
+  return values.some((value) => keywords.some((keyword) => value.includes(keyword)));
+}
+
+function humanizeSegmentType(segmentType: string | null | undefined): string | null {
+  switch (segmentType) {
+    case 'talk':
+      return 'spoken dialogue or presentation';
+    case 'performance':
+      return 'performance or music-led section';
+    case 'reaction':
+      return 'reaction or cutaway section';
+    case 'transition':
+      return 'transition section';
+    case 'establishing':
+      return 'establishing scene';
+    case 'montage':
+      return 'montage sequence';
+    default:
+      return segmentType ? `${segmentType} section` : null;
+  }
+}
+
+function buildPeopleSummary(args: {
+  topObjectLabels: string[];
+  faceDetections: Array<{ faceId?: string | null; emotions?: string[] }>;
+}): string | null {
+  const objectLookups = normalizeLookupValues(args.topObjectLabels);
+  const distinctFaceIds = uniqueStrings(args.faceDetections.map((entry) => entry.faceId ?? null));
+  const emotionCues = uniqueStrings(
+    args.faceDetections.flatMap((entry) => entry.emotions ?? []).map((emotion) => emotion),
+    2,
+  );
+  const hasAudienceCue = includesAnyLookupValue(objectLookups, ['audience', 'crowd', 'spectator']);
+  const hasPersonCue = includesAnyLookupValue(objectLookups, [
+    'person',
+    'people',
+    'speaker',
+    'singer',
+    'performer',
+    'man',
+    'woman',
+    'child',
+    'host',
+  ]);
+  const parts: string[] = [];
+
+  if (hasAudienceCue) {
+    parts.push('a crowd or audience is visible');
+  }
+
+  if (distinctFaceIds.length > 1) {
+    parts.push(`${distinctFaceIds.length} recurring faces are visible`);
+  } else if (distinctFaceIds.length === 1) {
+    parts.push('at least one recurring face is visible');
+  } else if (args.faceDetections.length > 1) {
+    parts.push('one or more faces are visible');
+  } else if (args.faceDetections.length === 1) {
+    parts.push('at least one face is visible');
+  } else if (hasPersonCue) {
+    parts.push('a person is visible on screen');
+  }
+
+  if (emotionCues.length > 0 && args.faceDetections.length > 0) {
+    parts.push(`facial emotion cues include ${formatNaturalList(emotionCues, 2)}`);
+  }
+
+  return parts.length > 0 ? parts.slice(0, 2).join('; ') : null;
+}
+
+function buildTextSummary(ocrTexts: string[]): string | null {
+  const uniqueTexts = uniqueStrings(ocrTexts, 3);
+  if (uniqueTexts.length === 0) {
+    return null;
+  }
+
+  if (uniqueTexts.length === 1) {
+    return `on-screen text reads ${quoteSnippet(uniqueTexts[0], 80)}`;
+  }
+
+  return `on-screen text includes ${uniqueTexts
+    .map((text) => quoteSnippet(text, 48))
+    .filter((value): value is string => Boolean(value))
+    .join(', ')}`;
+}
+
+function buildVisualCueSummary(args: {
+  cameraAngle?: string | null;
+  subjectPosition?: string | null;
+  motionDirection?: string | null;
+  visualComplexity?: number | null;
+}): string | null {
+  const parts: string[] = [];
+
+  if (args.cameraAngle && args.cameraAngle !== 'unknown') {
+    parts.push(`${args.cameraAngle} framing`);
+  }
+
+  if (args.subjectPosition && args.subjectPosition !== 'unknown') {
+    parts.push(`${args.subjectPosition} subject placement`);
+  }
+
+  if (args.motionDirection && args.motionDirection !== 'unknown') {
+    parts.push(
+      args.motionDirection === 'static' ? 'mostly static camera' : `${args.motionDirection} motion`,
+    );
+  }
+
+  if (typeof args.visualComplexity === 'number' && Number.isFinite(args.visualComplexity)) {
+    if (args.visualComplexity >= 0.7) {
+      parts.push('visually busy frame');
+    } else if (args.visualComplexity <= 0.25) {
+      parts.push('simple, uncluttered frame');
+    }
+  }
+
+  return parts.length > 0 ? parts.join(', ') : null;
+}
+
+function deriveSettingHints(args: {
+  dominantSegmentType: string | null;
+  topObjectLabels: string[];
+  ocrTexts: string[];
+  transcriptExcerpt: string | null;
+  visualCueSummary: string | null;
+}): string[] {
+  const lookups = normalizeLookupValues([
+    ...args.topObjectLabels,
+    ...args.ocrTexts,
+    args.transcriptExcerpt,
+    args.visualCueSummary,
+  ]);
+  const hints: string[] = [];
+
+  if (
+    args.dominantSegmentType === 'performance' ||
+    includesAnyLookupValue(lookups, [
+      'microphone',
+      'stage',
+      'concert',
+      'audience',
+      'crowd',
+      'guitar',
+      'drum',
+      'performer',
+      'podium',
+      'live',
+    ])
+  ) {
+    hints.push('stage or live event setting');
+  }
+
+  if (
+    args.dominantSegmentType === 'talk' &&
+    (includesAnyLookupValue(lookups, [
+      'office',
+      'desk',
+      'computer',
+      'monitor',
+      'presentation',
+      'podium',
+      'studio',
+      'host',
+      'interview',
+    ]) ||
+      lookups.some((value) => value.includes('center') || value.includes('static')))
+  ) {
+    hints.push('interview, presentation, or studio-style setup');
+  }
+
+  if (
+    includesAnyLookupValue(lookups, [
+      'tree',
+      'sky',
+      'road',
+      'street',
+      'car',
+      'mountain',
+      'grass',
+      'water',
+      'outdoor',
+      'nature',
+    ])
+  ) {
+    hints.push('outdoor or location-based setting');
+  }
+
+  if (
+    args.ocrTexts.length >= 2 ||
+    includesAnyLookupValue(lookups, ['screen', 'display', 'monitor', 'phone', 'tablet', 'sign'])
+  ) {
+    hints.push('screen, signage, or graphic-led frame');
+  }
+
+  if (includesAnyLookupValue(lookups, ['sofa', 'couch', 'bed', 'kitchen', 'room', 'table'])) {
+    hints.push('indoor room or home-like setting');
+  }
+
+  if (args.dominantSegmentType === 'establishing' || args.dominantSegmentType === 'montage') {
+    hints.push('environment or b-roll coverage');
+  }
+
+  return uniqueStrings(hints, 2);
+}
+
+function buildAudioSummary(args: {
+  dominantSegmentType: string | null;
+  transcriptExcerpt: string | null;
+  audioCue: string | null;
+  speakerIds: string[];
+}): string | null {
+  const quotedExcerpt = quoteSnippet(args.transcriptExcerpt, 96);
+  if (quotedExcerpt) {
+    if (args.dominantSegmentType === 'performance') {
+      return `audio suggests a performance, with lyrics or stage banter such as ${quotedExcerpt}`;
+    }
+
+    if (args.speakerIds.length === 1) {
+      return `${args.speakerIds[0]} is heard saying ${quotedExcerpt}`;
+    }
+
+    return `spoken audio includes ${quotedExcerpt}`;
+  }
+
+  if (args.dominantSegmentType === 'performance') {
+    return 'audio suggests music or a live performance';
+  }
+
+  if (args.audioCue === 'speech-heavy') {
+    return 'continuous speech is present';
+  }
+
+  if (args.audioCue === 'spoken content') {
+    return 'some spoken audio is present';
+  }
+
+  if (args.audioCue === 'long pause') {
+    return 'the moment contains a noticeable quiet pause';
+  }
+
+  if (args.audioCue === 'quiet gap') {
+    return 'there is a brief quiet gap in the audio';
+  }
+
+  return null;
+}
+
+function buildSceneLabel(args: {
+  dominantSegmentType: string | null;
+  transcriptExcerpt: string | null;
+  topObjectLabels: string[];
+  textSummary: string | null;
+}): string {
+  if (args.transcriptExcerpt && args.dominantSegmentType === 'performance') {
+    return 'Performance moment';
+  }
+
+  if (args.transcriptExcerpt && args.dominantSegmentType === 'talk') {
+    return 'Spoken moment';
+  }
+
+  if (args.transcriptExcerpt) {
+    return 'Transcript-led moment';
+  }
+
+  if (args.textSummary) {
+    return 'Text-led shot';
+  }
+
+  if (args.dominantSegmentType === 'establishing') {
+    return 'Establishing shot';
+  }
+
+  if (args.dominantSegmentType === 'reaction') {
+    return 'Reaction shot';
+  }
+
+  if (args.dominantSegmentType === 'performance') {
+    return 'Performance moment';
+  }
+
+  if (args.dominantSegmentType === 'montage') {
+    return 'Montage beat';
+  }
+
+  if (args.topObjectLabels.length > 0) {
+    return `${args.topObjectLabels[0]}-led visual moment`;
+  }
+
+  return 'Visual moment';
+}
+
+function buildSemanticMomentSummary(args: {
+  dominantSegmentType: string | null;
+  transcriptExcerpt: string | null;
+  topObjectLabels: string[];
+  peopleSummary: string | null;
+  audioSummary: string | null;
+  textSummary: string | null;
+  visualCueSummary: string | null;
+  settingHints: string[];
+}): string {
+  const quotedExcerpt = quoteSnippet(args.transcriptExcerpt, 96);
+  let primary = '';
+
+  if (quotedExcerpt) {
+    if (args.dominantSegmentType === 'performance') {
+      primary = `Performance or stage moment with captured lyrics or banter: ${quotedExcerpt}`;
+    } else if (args.dominantSegmentType === 'talk') {
+      primary = `Spoken moment: ${quotedExcerpt}`;
+    } else {
+      primary = `Transcript indicates: ${quotedExcerpt}`;
+    }
+  } else if (args.dominantSegmentType === 'performance') {
+    primary =
+      args.topObjectLabels.length > 0
+        ? `Performance-oriented moment featuring ${formatNaturalList(args.topObjectLabels, 3)}`
+        : 'Performance-oriented moment';
+  } else if (args.dominantSegmentType === 'reaction') {
+    primary = 'Reaction or cutaway moment';
+  } else if (args.dominantSegmentType === 'establishing') {
+    primary = 'Establishing shot of the scene';
+  } else if (args.dominantSegmentType === 'montage') {
+    primary = 'Montage or quick-cut sequence';
+  } else if (args.topObjectLabels.length > 0) {
+    primary = `Visual moment featuring ${formatNaturalList(args.topObjectLabels, 3)}`;
+  } else if (args.textSummary) {
+    primary = 'Text-led shot with visible graphics or signage';
+  } else {
+    primary =
+      humanizeSegmentType(args.dominantSegmentType) ?? 'Visual moment with limited semantic cues';
+  }
+
+  const sentences = [ensureSentence(primary)];
+
+  if (args.peopleSummary) {
+    sentences.push(ensureSentence(`People: ${args.peopleSummary}`));
+  }
+
+  if (!quotedExcerpt && args.audioSummary) {
+    sentences.push(ensureSentence(`Audio: ${args.audioSummary}`));
+  }
+
+  if (args.textSummary) {
+    sentences.push(ensureSentence(`Text: ${args.textSummary}`));
+  }
+
+  if (args.settingHints.length > 0) {
+    sentences.push(ensureSentence(`Likely setting: ${formatNaturalList(args.settingHints, 2)}`));
+  }
+
+  if (args.visualCueSummary) {
+    sentences.push(ensureSentence(`Framing: ${args.visualCueSummary}`));
+  }
+
+  return sentences.filter((value): value is string => Boolean(value)).join(' ');
+}
+
 function buildSourceReportChunks(report: SourceAnalysisReport): SourceReportChunk[] {
   return [
     ...report.moments.items.map((moment) => ({
@@ -364,10 +800,16 @@ function buildSourceReportChunks(report: SourceAnalysisReport): SourceReportChun
       startSec: moment.startSec,
       endSec: moment.endSec,
       searchText: [
+        moment.sceneLabel,
         moment.summary,
         moment.transcriptExcerpt,
+        moment.audioSummary,
+        moment.peopleSummary,
+        moment.textSummary,
+        moment.visualSummary,
         moment.audioCue,
         moment.dominantSegmentType,
+        moment.settingHints.join(' '),
         moment.topObjectLabels.join(' '),
         moment.ocrTextPreview.join(' '),
       ]
@@ -379,6 +821,10 @@ function buildSourceReportChunks(report: SourceAnalysisReport): SourceReportChun
         audioCue: moment.audioCue,
         durationSec: moment.durationSec,
         dominantSegmentType: moment.dominantSegmentType,
+        peopleSummary: moment.peopleSummary,
+        textSummary: moment.textSummary,
+        visualSummary: moment.visualSummary,
+        settingHints: moment.settingHints,
         topObjectLabels: moment.topObjectLabels,
         ocrTextPreview: moment.ocrTextPreview,
       },
@@ -435,6 +881,31 @@ function buildSourceReportChunks(report: SourceAnalysisReport): SourceReportChun
         wordCount: turn.wordCount,
         segmentCount: turn.segmentCount,
         dominantSegmentType: turn.dominantSegmentType,
+      },
+    })),
+    ...report.visual.items.map((item) => ({
+      id: `${report.assetId}:visual:${item.shotIndex}`,
+      sectionType: 'visual' as const,
+      sectionIndex: item.shotIndex,
+      startSec: item.startSec,
+      endSec: item.endSec,
+      searchText: [
+        item.summary,
+        item.cameraAngle,
+        item.subjectPosition,
+        item.motionDirection,
+        `complexity ${item.visualComplexity}`,
+      ]
+        .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        .join(' '),
+      metadata: {
+        preview: item.summary,
+        keyframePath: item.keyframePath,
+        durationSec: item.durationSec,
+        cameraAngle: item.cameraAngle,
+        subjectPosition: item.subjectPosition,
+        motionDirection: item.motionDirection,
+        visualComplexity: item.visualComplexity,
       },
     })),
   ];
@@ -1083,8 +1554,15 @@ function buildReportMoments(
   speechRegions: TimedRange[],
   silenceRegions: TimedRange[],
   objectDetections: Array<TimedPoint & { labels: string[] }>,
-  faceDetections: TimedPoint[],
+  faceDetections: Array<TimedPoint & { faceId?: string | null; emotions?: string[] }>,
   textDetections: Array<TimedPoint & { text: string }>,
+  frameAnalysis: Array<{
+    shotIndex: number;
+    cameraAngle: string;
+    subjectPosition: string;
+    motionDirection: string;
+    visualComplexity: number;
+  }>,
 ): Array<{
   index: number;
   startSec: number;
@@ -1100,6 +1578,12 @@ function buildReportMoments(
   silenceRegionCount: number;
   faceCount: number;
   objectCount: number;
+  sceneLabel: string;
+  audioSummary: string | null;
+  peopleSummary: string | null;
+  textSummary: string | null;
+  visualSummary: string | null;
+  settingHints: string[];
   summary: string;
 }> {
   return shots.map((shot, index) => {
@@ -1133,23 +1617,50 @@ function buildReportMoments(
       .map((entry) => normalizeText(entry.text))
       .filter(Boolean)
       .slice(0, 3);
-
-    const summaryParts = [];
-    if (transcriptExcerpt) {
-      summaryParts.push(transcriptExcerpt);
-    }
-    if (dominantSegmentType) {
-      summaryParts.push(`${dominantSegmentType} moment`);
-    }
-    if (audioCue) {
-      summaryParts.push(audioCue);
-    }
-    if (topObjectLabels.length > 0) {
-      summaryParts.push(`objects: ${topObjectLabels.join(', ')}`);
-    }
-    if (ocrTextPreview.length > 0) {
-      summaryParts.push(`text: ${ocrTextPreview.join(' | ')}`);
-    }
+    const speakerIds = uniqueStrings(
+      overlappingTranscript.map((segment) => segment.speakerId ?? null),
+    );
+    const visualEntry = frameAnalysis.find((entry) => entry.shotIndex === index) ?? null;
+    const peopleSummary = buildPeopleSummary({
+      topObjectLabels,
+      faceDetections: overlappingFaces,
+    });
+    const textSummary = buildTextSummary(ocrTextPreview);
+    const visualSummary = buildVisualCueSummary({
+      cameraAngle: visualEntry?.cameraAngle ?? null,
+      subjectPosition: visualEntry?.subjectPosition ?? null,
+      motionDirection: visualEntry?.motionDirection ?? null,
+      visualComplexity: visualEntry?.visualComplexity ?? null,
+    });
+    const settingHints = deriveSettingHints({
+      dominantSegmentType,
+      topObjectLabels,
+      ocrTexts: ocrTextPreview,
+      transcriptExcerpt,
+      visualCueSummary: visualSummary,
+    });
+    const audioSummary = buildAudioSummary({
+      dominantSegmentType,
+      transcriptExcerpt,
+      audioCue,
+      speakerIds,
+    });
+    const sceneLabel = buildSceneLabel({
+      dominantSegmentType,
+      transcriptExcerpt,
+      topObjectLabels,
+      textSummary,
+    });
+    const summary = buildSemanticMomentSummary({
+      dominantSegmentType,
+      transcriptExcerpt,
+      topObjectLabels,
+      peopleSummary,
+      audioSummary,
+      textSummary,
+      visualCueSummary: visualSummary,
+      settingHints,
+    });
 
     return {
       index,
@@ -1166,10 +1677,98 @@ function buildReportMoments(
       silenceRegionCount: overlappingSilenceRegions.length,
       faceCount: overlappingFaces.length,
       objectCount: overlappingObjects.length,
-      summary:
-        summaryParts.join(' | ') ||
-        `Shot ${index + 1} from ${formatTimecode(shot.startSec)} to ${formatTimecode(shot.endSec)}.`,
+      sceneLabel,
+      audioSummary,
+      peopleSummary,
+      textSummary,
+      visualSummary,
+      settingHints,
+      summary,
     };
+  });
+}
+
+function buildVisualDetailSummary(item: {
+  shotIndex: number;
+  cameraAngle: string;
+  subjectPosition: string;
+  motionDirection: string;
+  visualComplexity: number;
+}): string {
+  const parts = [`Shot ${item.shotIndex + 1}`];
+
+  if (item.cameraAngle !== 'unknown') {
+    parts.push(`${item.cameraAngle} angle`);
+  }
+
+  if (item.subjectPosition !== 'unknown') {
+    parts.push(`${item.subjectPosition} subject`);
+  }
+
+  if (item.motionDirection !== 'unknown') {
+    parts.push(`${item.motionDirection} motion`);
+  }
+
+  parts.push(`complexity ${item.visualComplexity}`);
+  return parts.join(' | ');
+}
+
+function buildReportVisualItems(
+  shots: Array<
+    TimedRange & {
+      keyframePath?: string | null;
+      keyframeSelectionMethod?: string | null;
+    }
+  >,
+  frameAnalysis: Array<{
+    shotIndex: number;
+    cameraAngle: string;
+    subjectPosition: string;
+    motionDirection: string;
+    visualComplexity: number;
+  }>,
+): Array<{
+  shotIndex: number;
+  startSec: number;
+  endSec: number;
+  durationSec: number;
+  keyframePath: string | null;
+  keyframeSelectionMethod: string | null;
+  cameraAngle: string;
+  subjectPosition: string;
+  motionDirection: string;
+  visualComplexity: number;
+  summary: string;
+}> {
+  return frameAnalysis.flatMap((entry, fallbackIndex) => {
+    const resolvedShotIndex = shots[entry.shotIndex] ? entry.shotIndex : fallbackIndex;
+    const shot = shots[resolvedShotIndex];
+    if (!shot) {
+      return [];
+    }
+
+    const startSec = roundTo(shot.startSec) ?? 0;
+    const endSec = roundTo(shot.endSec) ?? startSec;
+    const visualComplexity = roundTo(entry.visualComplexity) ?? 0;
+    const item = {
+      shotIndex: resolvedShotIndex,
+      startSec,
+      endSec,
+      durationSec: roundTo(Math.max(0, endSec - startSec)) ?? 0,
+      keyframePath: shot.keyframePath ?? null,
+      keyframeSelectionMethod: shot.keyframeSelectionMethod ?? null,
+      cameraAngle: entry.cameraAngle,
+      subjectPosition: entry.subjectPosition,
+      motionDirection: entry.motionDirection,
+      visualComplexity,
+    };
+
+    return [
+      {
+        ...item,
+        summary: buildVisualDetailSummary(item),
+      },
+    ];
   });
 }
 
@@ -1199,7 +1798,7 @@ function bundleSatisfiesOptions(bundle: AnalysisBundle, options: AnalysisOptions
 }
 
 type SourceAnalysisReport = ReturnType<typeof buildSourceAnalysisReportPayload>;
-type SourceAnalysisSection = 'moments' | 'chapters' | 'highlights' | 'speakerTurns';
+type SourceAnalysisSection = 'moments' | 'chapters' | 'highlights' | 'speakerTurns' | 'visual';
 type SourceAnalysisReportDocument = {
   relativePath: string;
   content: string;
@@ -1235,6 +1834,10 @@ type IndexedSourceReportSearchResponse = {
 };
 
 const SOURCE_ANALYSIS_REPORT_SUFFIX = '.analysis.md';
+const VISUAL_BREAKDOWN_MARKDOWN_LIMIT = 12;
+const SEMANTIC_SCENE_TIMELINE_LIMIT = 10;
+const SEMANTIC_USEFUL_MOMENT_LIMIT = 6;
+const SEMANTIC_OVERVIEW_LIMIT = 3;
 type RetrievalMemoryEntry = {
   assetId: string;
   sectionType: SourceAnalysisSection;
@@ -1266,6 +1869,15 @@ type SourceLibraryMatch = {
     wordCount?: number;
     segmentCount?: number;
     dominantSegmentType?: string | null;
+    sceneLabel?: string | null;
+    peopleSummary?: string | null;
+    textSummary?: string | null;
+    visualSummary?: string | null;
+    settingHints?: string[];
+    cameraAngle?: string | null;
+    subjectPosition?: string | null;
+    motionDirection?: string | null;
+    visualComplexity?: number;
   };
 };
 
@@ -1274,6 +1886,307 @@ type SourceLibrarySkip = {
   assetName: string;
   reason: string;
 };
+
+type SemanticUsefulMomentKind = 'quote' | 'action' | 'text' | 'reaction' | 'establishing' | 'pause';
+
+type ReportMoment = ReturnType<typeof buildReportMoments>[number];
+type ReportChapter = ReturnType<typeof buildReportChapters>[number];
+type ReportHighlight = ReturnType<typeof buildReportHighlights>[number];
+type ReportSpeakerTurn = ReturnType<typeof buildSpeakerTurns>[number];
+
+type SemanticReportInput = {
+  assetName: string;
+  transcript: {
+    excerpt: string | null;
+  };
+  audio: {
+    speechSharePercent: number;
+    silenceSharePercent: number;
+  };
+  segments: {
+    distribution: Array<{ label: string; sharePercent: number }>;
+  };
+  visual: {
+    topCameraAngles: Array<{ label: string; count: number }>;
+  };
+  speakerTurns: {
+    items: ReportSpeakerTurn[];
+  };
+  annotations: {
+    ocrPreview: string[];
+    topObjectLabels: Array<{ label: string; count: number }>;
+  };
+  moments: {
+    items: ReportMoment[];
+  };
+  chapters: {
+    items: ReportChapter[];
+  };
+  highlights: {
+    items: ReportHighlight[];
+  };
+};
+
+type SemanticSceneTimelineItem = {
+  index: number;
+  startSec: number;
+  endSec: number;
+  title: string;
+  summary: string;
+  keyframePath: string | null;
+};
+
+type SemanticUsefulMoment = {
+  index: number;
+  kind: SemanticUsefulMomentKind;
+  startSec: number;
+  endSec: number;
+  summary: string;
+  reason: string;
+  keyframePath: string | null;
+};
+
+type SemanticReportData = {
+  summaryLine: string;
+  whatIsHappening: string[];
+  whoIsPresent: string[];
+  whatIsHeard: string[];
+  onScreenText: string[];
+  likelySetting: string[];
+  sceneTimeline: SemanticSceneTimelineItem[];
+  usefulMoments: SemanticUsefulMoment[];
+};
+
+function truncateText(text: string, maxLength = 220): string {
+  const normalized = normalizeText(text);
+  if (!normalized || normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
+function buildSceneTimelineTitle(chapter: ReportChapter, moment?: ReportMoment): string {
+  if (moment?.sceneLabel) {
+    return moment.sceneLabel;
+  }
+
+  const humanizedSegmentType = humanizeSegmentType(chapter.dominantSegmentType);
+  if (humanizedSegmentType) {
+    return buildLabelFromText(humanizedSegmentType, chapter.title, 6);
+  }
+
+  return chapter.title;
+}
+
+function buildSceneTimelineSummary(
+  chapter: ReportChapter,
+  overlappingMoments: ReportMoment[],
+): string {
+  const primaryMoment = overlappingMoments[0];
+  if (primaryMoment?.summary) {
+    return truncateText(primaryMoment.summary, 260);
+  }
+
+  return truncateText(chapter.summary, 260);
+}
+
+function classifyUsefulMomentKind(args: {
+  highlight: ReportHighlight;
+  overlappingMoment: ReportMoment | null;
+}): SemanticUsefulMomentKind {
+  const { highlight, overlappingMoment } = args;
+
+  if (overlappingMoment?.textSummary || overlappingMoment?.ocrTextPreview.length) {
+    return 'text';
+  }
+
+  if (highlight.quote || overlappingMoment?.transcriptExcerpt) {
+    return 'quote';
+  }
+
+  if (overlappingMoment?.audioCue === 'long pause' || overlappingMoment?.audioCue === 'quiet gap') {
+    return overlappingMoment.faceCount > 0 ? 'reaction' : 'pause';
+  }
+
+  if (overlappingMoment?.dominantSegmentType === 'reaction') {
+    return 'reaction';
+  }
+
+  if (
+    overlappingMoment?.dominantSegmentType === 'establishing' ||
+    overlappingMoment?.settingHints.includes('outdoor or location-based setting') ||
+    overlappingMoment?.sceneLabel === 'Establishing shot'
+  ) {
+    return 'establishing';
+  }
+
+  return 'action';
+}
+
+function buildUsefulMomentSummary(args: {
+  kind: SemanticUsefulMomentKind;
+  highlight: ReportHighlight;
+  overlappingMoment: ReportMoment | null;
+}): string {
+  const { kind, highlight, overlappingMoment } = args;
+
+  switch (kind) {
+    case 'quote': {
+      const quote = quoteSnippet(
+        highlight.quote ?? overlappingMoment?.transcriptExcerpt ?? null,
+        96,
+      );
+      return quote
+        ? `Strong spoken line: ${quote}`
+        : (overlappingMoment?.summary ?? highlight.reason);
+    }
+    case 'text':
+      return overlappingMoment?.textSummary
+        ? `Text-bearing moment: ${overlappingMoment.textSummary}`
+        : (overlappingMoment?.summary ?? highlight.reason);
+    case 'reaction':
+      return overlappingMoment?.peopleSummary
+        ? `Reaction-friendly visual: ${overlappingMoment.peopleSummary}`
+        : (overlappingMoment?.summary ?? highlight.reason);
+    case 'establishing':
+      return overlappingMoment?.summary ?? highlight.reason;
+    case 'pause':
+      return overlappingMoment?.audioSummary
+        ? `Quiet gap useful for transitions: ${overlappingMoment.audioSummary}`
+        : 'Quiet gap or pause useful for resets and cutaways';
+    case 'action':
+    default:
+      return overlappingMoment?.summary ?? highlight.reason;
+  }
+}
+
+function buildSemanticReportData(report: SemanticReportInput): SemanticReportData {
+  const sceneTimeline = report.chapters.items
+    .slice(0, SEMANTIC_SCENE_TIMELINE_LIMIT)
+    .map((chapter) => {
+      const overlappingMoments = report.moments.items.filter(
+        (moment) =>
+          overlapDuration(moment.startSec, moment.endSec, chapter.startSec, chapter.endSec) > 0,
+      );
+      const primaryMoment = overlappingMoments[0];
+
+      return {
+        index: chapter.index,
+        startSec: chapter.startSec,
+        endSec: chapter.endSec,
+        title: buildSceneTimelineTitle(chapter, primaryMoment),
+        summary: buildSceneTimelineSummary(chapter, overlappingMoments),
+        keyframePath: primaryMoment?.keyframePath ?? null,
+      };
+    });
+
+  const usefulMoments = report.highlights.items
+    .slice(0, SEMANTIC_USEFUL_MOMENT_LIMIT)
+    .map((highlight, index) => {
+      const overlappingMoment =
+        report.moments.items.find(
+          (moment) =>
+            overlapDuration(moment.startSec, moment.endSec, highlight.startSec, highlight.endSec) >
+            0,
+        ) ?? null;
+      const kind = classifyUsefulMomentKind({ highlight, overlappingMoment });
+
+      return {
+        index,
+        kind,
+        startSec: highlight.startSec,
+        endSec: highlight.endSec,
+        summary: truncateText(
+          buildUsefulMomentSummary({ kind, highlight, overlappingMoment }),
+          220,
+        ),
+        reason: highlight.reason,
+        keyframePath: overlappingMoment?.keyframePath ?? null,
+      };
+    });
+
+  const whatIsHappening = uniqueStrings(
+    sceneTimeline.map((item) => item.summary),
+    SEMANTIC_OVERVIEW_LIMIT,
+  );
+  const likelySetting = uniqueStrings(
+    report.moments.items.flatMap((moment) => moment.settingHints),
+    SEMANTIC_OVERVIEW_LIMIT,
+  );
+  const whoIsPresent = uniqueStrings(
+    [
+      report.speakerTurns.items.length > 0
+        ? `Detected speaking voices or turns include ${formatNaturalList(
+            report.speakerTurns.items.slice(0, 3).map((turn) => turn.label),
+            3,
+          )}.`
+        : null,
+      ...report.moments.items
+        .map((moment) => moment.peopleSummary)
+        .filter((value): value is string => typeof value === 'string' && value.length > 0),
+      report.annotations.topObjectLabels.length > 0
+        ? `Recurring visible cues include ${formatNaturalList(
+            report.annotations.topObjectLabels.slice(0, 4).map((entry) => entry.label),
+            4,
+          )}.`
+        : null,
+    ],
+    SEMANTIC_OVERVIEW_LIMIT,
+  );
+  const whatIsHeard = uniqueStrings(
+    [
+      report.transcript.excerpt
+        ? `Transcript captures spoken content such as ${quoteSnippet(report.transcript.excerpt, 120)}.`
+        : null,
+      report.audio.speechSharePercent > 60
+        ? `Speech is present through about ${report.audio.speechSharePercent}% of the source.`
+        : report.audio.speechSharePercent > 15
+          ? `The source mixes speech with non-speech audio across about ${report.audio.speechSharePercent}% of runtime.`
+          : null,
+      report.audio.silenceSharePercent > 20
+        ? `Quiet pauses or low-activity gaps cover about ${report.audio.silenceSharePercent}% of runtime.`
+        : null,
+      report.segments.distribution[0]
+        ? `The dominant structural mode is ${humanizeSegmentType(report.segments.distribution[0].label) ?? report.segments.distribution[0].label}.`
+        : null,
+    ],
+    SEMANTIC_OVERVIEW_LIMIT,
+  );
+  const onScreenText = uniqueStrings(
+    [
+      report.annotations.ocrPreview.length > 0
+        ? `Detected text includes ${report.annotations.ocrPreview
+            .slice(0, 3)
+            .map((entry) => quoteSnippet(entry, 48))
+            .filter((value): value is string => Boolean(value))
+            .join(', ')}.`
+        : null,
+      ...report.moments.items
+        .map((moment) => moment.textSummary)
+        .filter((value): value is string => typeof value === 'string' && value.length > 0),
+    ],
+    SEMANTIC_OVERVIEW_LIMIT,
+  );
+
+  const summaryParts = [whatIsHappening[0], likelySetting[0], whatIsHeard[0]]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    .map((value) => value.replace(/[.]$/, ''));
+
+  return {
+    summaryLine:
+      summaryParts.length > 0
+        ? truncateText(summaryParts.join(' | '), 220)
+        : `Semantic source report for ${report.assetName}.`,
+    whatIsHappening,
+    whoIsPresent,
+    whatIsHeard,
+    onScreenText,
+    likelySetting,
+    sceneTimeline,
+    usefulMoments,
+  };
+}
 
 function normalizeSearchQuery(text: string): string {
   return text.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -1350,8 +2263,14 @@ function searchSourceAnalysisReport(
   if (sections.includes('moments')) {
     for (const moment of report.moments.items) {
       const match = scoreSearchTextFields(normalizedQuery, queryTokens, [
+        { field: 'sceneLabel', value: moment.sceneLabel, weight: 2 },
         { field: 'summary', value: moment.summary, weight: 3 },
         { field: 'transcriptExcerpt', value: moment.transcriptExcerpt, weight: 3 },
+        { field: 'audioSummary', value: moment.audioSummary, weight: 2 },
+        { field: 'peopleSummary', value: moment.peopleSummary, weight: 2 },
+        { field: 'textSummary', value: moment.textSummary, weight: 2 },
+        { field: 'visualSummary', value: moment.visualSummary, weight: 1 },
+        { field: 'settingHints', value: moment.settingHints, weight: 2 },
         { field: 'audioCue', value: moment.audioCue, weight: 2 },
         { field: 'topObjectLabels', value: moment.topObjectLabels, weight: 2 },
         { field: 'ocrTextPreview', value: moment.ocrTextPreview, weight: 2 },
@@ -1374,6 +2293,11 @@ function searchSourceAnalysisReport(
           audioCue: moment.audioCue,
           durationSec: moment.durationSec,
           dominantSegmentType: moment.dominantSegmentType,
+          sceneLabel: moment.sceneLabel,
+          peopleSummary: moment.peopleSummary,
+          textSummary: moment.textSummary,
+          visualSummary: moment.visualSummary,
+          settingHints: moment.settingHints,
         },
       });
     }
@@ -1462,6 +2386,39 @@ function searchSourceAnalysisReport(
           wordCount: turn.wordCount,
           segmentCount: turn.segmentCount,
           dominantSegmentType: turn.dominantSegmentType,
+        },
+      });
+    }
+  }
+
+  if (sections.includes('visual')) {
+    for (const item of report.visual.items) {
+      const match = scoreSearchTextFields(normalizedQuery, queryTokens, [
+        { field: 'summary', value: item.summary, weight: 3 },
+        { field: 'cameraAngle', value: item.cameraAngle, weight: 3 },
+        { field: 'subjectPosition', value: item.subjectPosition, weight: 2 },
+        { field: 'motionDirection', value: item.motionDirection, weight: 2 },
+        { field: 'visualComplexity', value: String(item.visualComplexity), weight: 1 },
+      ]);
+      if (match.score <= 0) {
+        continue;
+      }
+
+      candidates.push({
+        sectionType: 'visual',
+        index: item.shotIndex,
+        startSec: item.startSec,
+        endSec: item.endSec,
+        score: match.score,
+        whyMatched: match.whyMatched,
+        preview: item.summary,
+        keyframePath: item.keyframePath,
+        metadata: {
+          durationSec: item.durationSec,
+          cameraAngle: item.cameraAngle,
+          subjectPosition: item.subjectPosition,
+          motionDirection: item.motionDirection,
+          visualComplexity: item.visualComplexity,
         },
       });
     }
@@ -1565,11 +2522,14 @@ async function searchSourceLibraryMatches(args: Record<string, unknown>) {
           value === 'moments' ||
           value === 'chapters' ||
           value === 'highlights' ||
-          value === 'speakerTurns',
+          value === 'speakerTurns' ||
+          value === 'visual',
       )
     : [];
   const sections: SourceAnalysisSection[] =
-    rawSections.length > 0 ? rawSections : ['moments', 'chapters', 'highlights', 'speakerTurns'];
+    rawSections.length > 0
+      ? rawSections
+      : ['moments', 'chapters', 'highlights', 'speakerTurns', 'visual'];
   const limit =
     typeof args.limit === 'number' && Number.isFinite(args.limit) && args.limit > 0
       ? Math.min(Math.floor(args.limit), 50)
@@ -1657,11 +2617,14 @@ async function searchIndexedSourceLibraryMatches(args: Record<string, unknown>) 
           value === 'moments' ||
           value === 'chapters' ||
           value === 'highlights' ||
-          value === 'speakerTurns',
+          value === 'speakerTurns' ||
+          value === 'visual',
       )
     : [];
   const sections: SourceAnalysisSection[] =
-    rawSections.length > 0 ? rawSections : ['moments', 'chapters', 'highlights', 'speakerTurns'];
+    rawSections.length > 0
+      ? rawSections
+      : ['moments', 'chapters', 'highlights', 'speakerTurns', 'visual'];
   const limit =
     typeof args.limit === 'number' && Number.isFinite(args.limit) && args.limit > 0
       ? Math.min(Math.floor(args.limit), 50)
@@ -1827,8 +2790,11 @@ function rerankSourceLibraryMatches(
 
       if (intent.dialogue) {
         if (match.sectionType === 'speakerTurns') {
-          score += 3;
+          score += 4.5;
           rankingNotes.push('dialogue query prefers speaker turns');
+        } else if (match.sectionType === 'moments') {
+          score -= 1;
+          rankingNotes.push('dialogue query de-emphasizes broader moment summaries');
         }
         if (audioCue === 'speech-heavy') {
           score += 1.5;
@@ -1870,6 +2836,11 @@ function rerankSourceLibraryMatches(
       ) {
         score -= 0.75;
         rankingNotes.push('visual query slightly de-emphasizes speaker turns');
+      }
+
+      if (intent.visual && match.sectionType === 'visual') {
+        score += 2.5;
+        rankingNotes.push('visual query prefers visual breakdown');
       }
 
       if (durationSec >= 3 && durationSec <= 12) {
@@ -2093,6 +3064,7 @@ function buildSourceAnalysisReportPayload({
     : (annotationAnalysis?.transcript?.results ?? []);
   const segments = bundle.segments ?? [];
   const frameAnalysis = bundle.frameAnalysis ?? [];
+  const visualItems = buildReportVisualItems(shots, frameAnalysis);
   const audioProfile = bundle.audioProfile;
   const objectDetections = annotationAnalysis?.objects?.results ?? [];
   const faceDetections = annotationAnalysis?.faces?.results ?? [];
@@ -2216,6 +3188,7 @@ function buildSourceAnalysisReportPayload({
     objectDetections,
     faceDetections,
     textDetections,
+    frameAnalysis,
   );
   const warnings = Object.entries(bundle.errors ?? {}).map(
     ([analysisType, message]) => `${analysisType}: ${message}`,
@@ -2245,9 +3218,7 @@ function buildSourceAnalysisReportPayload({
     visual: frameAnalysis.length > 0,
     annotation: Boolean(annotation),
   };
-  const summary = `Source report for ${asset?.name ?? bundle.assetId}: ${shots.length} shots, ${transcriptSegments.length} transcript segments, ${speakerTurns.length} speaker turns, ${segments.length} content segments${objectDetections.length > 0 ? `, ${objectDetections.length} object detections` : ''}.`;
-
-  return {
+  const report = {
     reportVersion: '1.0',
     assetId: bundle.assetId,
     assetName: asset?.name ?? bundle.assetId,
@@ -2257,7 +3228,7 @@ function buildSourceAnalysisReportPayload({
     generatedAt: new Date().toISOString(),
     analyzedAt: bundle.analyzedAt,
     bundleSource,
-    summary,
+    summary: '',
     coverage,
     metadata: {
       durationSec: roundTo(durationSec),
@@ -2358,6 +3329,7 @@ function buildSourceAnalysisReportPayload({
       topCameraAngles,
       topMotionDirections,
       contactSheet: bundle.contactSheet ?? null,
+      items: visualItems,
     },
     moments: {
       count: moments.length,
@@ -2388,6 +3360,13 @@ function buildSourceAnalysisReportPayload({
     warnings,
     errors: bundle.errors ?? {},
   };
+
+  const semantic = buildSemanticReportData(report);
+  return {
+    ...report,
+    summary: semantic.summaryLine,
+    semantic,
+  };
 }
 
 function buildSourceAnalysisMarkdown(
@@ -2400,6 +3379,106 @@ function buildSourceAnalysisMarkdown(
     `- Bundle source: ${report.bundleSource}`,
     `- Generated at: ${report.generatedAt}`,
     `- Summary: ${report.summary}`,
+  ];
+
+  const semantic = report.semantic;
+
+  if (
+    semantic.whatIsHappening.length > 0 ||
+    semantic.whoIsPresent.length > 0 ||
+    semantic.whatIsHeard.length > 0 ||
+    semantic.onScreenText.length > 0 ||
+    semantic.likelySetting.length > 0 ||
+    semantic.usefulMoments.length > 0
+  ) {
+    lines.push('', '## Executive Summary', '');
+
+    for (const bullet of semantic.whatIsHappening) {
+      lines.push(`- What is happening: ${bullet}`);
+    }
+
+    for (const bullet of semantic.whoIsPresent) {
+      lines.push(`- Who is present: ${bullet}`);
+    }
+
+    for (const bullet of semantic.whatIsHeard) {
+      lines.push(`- What is heard: ${bullet}`);
+    }
+
+    for (const bullet of semantic.onScreenText) {
+      lines.push(`- On-screen text: ${bullet}`);
+    }
+
+    for (const bullet of semantic.likelySetting) {
+      lines.push(`- Likely setting: ${bullet}`);
+    }
+
+    for (const moment of semantic.usefulMoments.slice(0, 3)) {
+      lines.push(
+        `- Best usable moment: ${formatTimecode(moment.startSec)}-${formatTimecode(moment.endSec)} | ${moment.kind} | ${moment.summary}`,
+      );
+    }
+  }
+
+  if (semantic.sceneTimeline.length > 0) {
+    lines.push('', '## Scene Timeline', '');
+    for (const scene of semantic.sceneTimeline) {
+      lines.push(
+        `- ${formatTimecode(scene.startSec)}-${formatTimecode(scene.endSec)} | ${scene.title} | ${scene.summary}`,
+      );
+      if (scene.keyframePath) {
+        lines.push(`- Keyframe: ${scene.keyframePath}`);
+      }
+    }
+  }
+
+  if (semantic.usefulMoments.length > 0) {
+    lines.push('', '## Useful Moments', '');
+    for (const moment of semantic.usefulMoments) {
+      lines.push(
+        `- ${formatTimecode(moment.startSec)}-${formatTimecode(moment.endSec)} | ${moment.kind} | ${moment.summary}`,
+      );
+      if (moment.keyframePath) {
+        lines.push(`- Keyframe: ${moment.keyframePath}`);
+      }
+      lines.push(`- Why it stands out: ${moment.reason}`);
+    }
+  }
+
+  if (semantic.whoIsPresent.length > 0 || report.speakerTurns.count > 0) {
+    lines.push('', '## Who Is Present', '');
+    for (const bullet of semantic.whoIsPresent) {
+      lines.push(`- ${bullet}`);
+    }
+    for (const turn of report.speakerTurns.items.slice(0, 4)) {
+      lines.push(
+        `- ${formatTimecode(turn.startSec)}-${formatTimecode(turn.endSec)} | ${turn.label} | ${turn.excerpt}`,
+      );
+    }
+  }
+
+  if (semantic.whatIsHeard.length > 0 || report.speakerTurns.count > 0) {
+    lines.push('', '## What Is Heard', '');
+    for (const bullet of semantic.whatIsHeard) {
+      lines.push(`- ${bullet}`);
+    }
+  }
+
+  if (semantic.onScreenText.length > 0) {
+    lines.push('', '## On-Screen Text', '');
+    for (const bullet of semantic.onScreenText) {
+      lines.push(`- ${bullet}`);
+    }
+  }
+
+  if (semantic.likelySetting.length > 0) {
+    lines.push('', '## Visual / Setting Cues', '');
+    for (const bullet of semantic.likelySetting) {
+      lines.push(`- ${bullet}`);
+    }
+  }
+
+  lines.push(
     '',
     '## File Info',
     '',
@@ -2425,7 +3504,7 @@ function buildSourceAnalysisMarkdown(
     `- Average duration: ${report.shots.averageDurationSec ?? 'unknown'}s`,
     `- Fastest shot: ${report.shots.minDurationSec ?? 'unknown'}s`,
     `- Longest shot: ${report.shots.maxDurationSec ?? 'unknown'}s`,
-  ];
+  );
 
   if (report.transcript.segmentCount > 0) {
     lines.push('', '## Transcript Summary', '');
@@ -2507,6 +3586,23 @@ function buildSourceAnalysisMarkdown(
     if (report.visual.topMotionDirections.length > 0) {
       lines.push(
         `- Dominant motion: ${report.visual.topMotionDirections.map((entry) => `${entry.label} (${entry.count})`).join(', ')}`,
+      );
+    }
+  }
+
+  if (report.visual.items.length > 0) {
+    lines.push('', '## Visual Breakdown', '');
+    for (const item of report.visual.items.slice(0, VISUAL_BREAKDOWN_MARKDOWN_LIMIT)) {
+      lines.push(
+        `- ${formatTimecode(item.startSec)}-${formatTimecode(item.endSec)} | ${item.summary}`,
+      );
+      if (item.keyframePath) {
+        lines.push(`- Keyframe: ${item.keyframePath}`);
+      }
+    }
+    if (report.visual.items.length > VISUAL_BREAKDOWN_MARKDOWN_LIMIT) {
+      lines.push(
+        `- ... ${report.visual.items.length - VISUAL_BREAKDOWN_MARKDOWN_LIMIT} more visual entries omitted from Markdown preview`,
       );
     }
   }
@@ -3466,6 +4562,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
               chapters: report.chapters.count,
               highlights: report.highlights.count,
               speakerTurns: report.speakerTurns.count,
+              visual: report.visual.items.length,
             },
             warnings: report.warnings,
             errors: report.errors,
@@ -3695,7 +4792,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
   {
     name: 'search_source_analysis_report',
     description:
-      'Search moments, chapters, highlights, and speaker turns within a source analysis report to find the most relevant time ranges for a query',
+      'Search moments, chapters, highlights, speaker turns, and visual breakdown entries within a source analysis report to find the most relevant time ranges for a query',
     category: 'analysis',
     parameters: {
       type: 'object',
@@ -3704,7 +4801,8 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
         query: { type: 'string', description: 'Search text to match against report sections' },
         sections: {
           type: 'array',
-          description: 'Optional sections to search: moments, chapters, highlights, speakerTurns',
+          description:
+            'Optional sections to search: moments, chapters, highlights, speakerTurns, visual',
           items: { type: 'string' },
         },
         limit: { type: 'number', description: 'Maximum number of matches to return (default: 5)' },
@@ -3749,13 +4847,14 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
                 value === 'moments' ||
                 value === 'chapters' ||
                 value === 'highlights' ||
-                value === 'speakerTurns',
+                value === 'speakerTurns' ||
+                value === 'visual',
             )
           : [];
         const sections: SourceAnalysisSection[] =
           rawSections.length > 0
             ? rawSections
-            : ['moments', 'chapters', 'highlights', 'speakerTurns'];
+            : ['moments', 'chapters', 'highlights', 'speakerTurns', 'visual'];
         const limit =
           typeof args.limit === 'number' && Number.isFinite(args.limit) && args.limit > 0
             ? Math.min(Math.floor(args.limit), 50)
@@ -3794,7 +4893,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
   {
     name: 'search_source_library',
     description:
-      'Search moments, chapters, highlights, and speaker turns across multiple video assets to find the best source ranges for a query',
+      'Search moments, chapters, highlights, speaker turns, and visual breakdown entries across multiple video assets to find the best source ranges for a query',
     category: 'analysis',
     parameters: {
       type: 'object',
@@ -3814,7 +4913,8 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
         },
         sections: {
           type: 'array',
-          description: 'Optional sections to search: moments, chapters, highlights, speakerTurns',
+          description:
+            'Optional sections to search: moments, chapters, highlights, speakerTurns, visual',
           items: { type: 'string' },
         },
         limit: { type: 'number', description: 'Maximum number of matches to return (default: 8)' },
@@ -3901,7 +5001,8 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
         },
         sections: {
           type: 'array',
-          description: 'Optional sections to search: moments, chapters, highlights, speakerTurns',
+          description:
+            'Optional sections to search: moments, chapters, highlights, speakerTurns, visual',
           items: { type: 'string' },
         },
         limit: { type: 'number', description: 'Maximum number of matches to return (default: 8)' },
@@ -3988,7 +5089,8 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
         },
         sections: {
           type: 'array',
-          description: 'Optional sections to search: moments, chapters, highlights, speakerTurns',
+          description:
+            'Optional sections to search: moments, chapters, highlights, speakerTurns, visual',
           items: { type: 'string' },
         },
         limit: {

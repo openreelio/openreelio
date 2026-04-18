@@ -38,7 +38,7 @@ pub enum AnalysisAction {
         #[arg(long)]
         query: String,
 
-        /// Sections to search: moments, chapters, highlights, speakerTurns
+        /// Sections to search: moments, chapters, highlights, speakerTurns, visual
         #[arg(long, value_delimiter = ',')]
         sections: Vec<String>,
 
@@ -65,7 +65,7 @@ pub enum AnalysisAction {
         #[arg(long, default_value_t = false)]
         unused_only: bool,
 
-        /// Sections to search: moments, chapters, highlights, speakerTurns
+        /// Sections to search: moments, chapters, highlights, speakerTurns, visual
         #[arg(long, value_delimiter = ',')]
         sections: Vec<String>,
 
@@ -112,7 +112,7 @@ pub enum AnalysisAction {
         #[arg(long, default_value_t = false)]
         unused_only: bool,
 
-        /// Sections to search: moments, chapters, highlights, speakerTurns
+        /// Sections to search: moments, chapters, highlights, speakerTurns, visual
         #[arg(long, value_delimiter = ',')]
         sections: Vec<String>,
 
@@ -147,6 +147,11 @@ struct SourceLibrarySearchResult {
     matches: Vec<Value>,
 }
 
+const VISUAL_BREAKDOWN_MARKDOWN_LIMIT: usize = 12;
+const SEMANTIC_SCENE_TIMELINE_LIMIT: usize = 10;
+const SEMANTIC_USEFUL_MOMENT_LIMIT: usize = 6;
+const SEMANTIC_OVERVIEW_LIMIT: usize = 3;
+
 fn normalize_search_sections(sections: &[String]) -> Vec<String> {
     let filtered = sections
         .iter()
@@ -155,6 +160,7 @@ fn normalize_search_sections(sections: &[String]) -> Vec<String> {
             "chapters" => Some("chapters".to_string()),
             "highlights" => Some("highlights".to_string()),
             "speakerTurns" | "speaker-turns" | "speaker_turns" => Some("speakerTurns".to_string()),
+            "visual" => Some("visual".to_string()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -165,6 +171,7 @@ fn normalize_search_sections(sections: &[String]) -> Vec<String> {
             "chapters".to_string(),
             "highlights".to_string(),
             "speakerTurns".to_string(),
+            "visual".to_string(),
         ]
     } else {
         filtered
@@ -263,7 +270,13 @@ struct CachedContentSegment {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CachedFrameAnalysis {
+    #[serde(default)]
+    shot_index: Option<usize>,
+    #[serde(default)]
     camera_angle: String,
+    #[serde(default)]
+    subject_position: String,
+    #[serde(default)]
     motion_direction: String,
     visual_complexity: f64,
 }
@@ -288,6 +301,10 @@ struct CachedObjectDetection {
 #[serde(rename_all = "camelCase")]
 struct CachedFaceDetection {
     time_sec: f64,
+    #[serde(default)]
+    emotions: Vec<String>,
+    #[serde(default)]
+    face_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -295,6 +312,9 @@ struct CachedFaceDetection {
 struct CachedTextDetection {
     time_sec: f64,
     text: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    language: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1038,6 +1058,7 @@ fn build_source_analysis_report(
         &object_detections,
         &face_detections,
         &text_detections,
+        &frame_analysis,
     );
     let moments_count = moments.len();
     let moments_json = moments.clone();
@@ -1045,6 +1066,8 @@ fn build_source_analysis_report(
         build_speaker_turns(&transcript, &speech_regions, &silence_regions, &segments);
     let speaker_turn_count = speaker_turns.len();
     let speaker_turns_json = speaker_turns.clone();
+    let visual_items = build_report_visual_items(&shots, &frame_analysis);
+    let visual_items_json = visual_items.clone();
     let segment_distribution_json = segment_entries_to_json(segment_distribution.clone());
     let top_camera_angles_json = simple_count_entries_to_json(top_camera_angles.clone());
     let top_motion_directions_json = simple_count_entries_to_json(top_motion_directions.clone());
@@ -1067,7 +1090,7 @@ fn build_source_analysis_report(
         .unwrap_or_else(|| "unknown".to_string());
     let generated_at = Utc::now().to_rfc3339();
     let bundle_source = "cached";
-    let summary = if bundle.is_some() {
+    let fallback_summary = if bundle.is_some() {
         format!(
             "Source report for {}: {} shots, {} transcript segments, {} speaker turns, {} content segments{}.",
             asset.name,
@@ -1102,7 +1125,7 @@ fn build_source_analysis_report(
         "annotation": annotation.is_some(),
     });
 
-    let report = json!({
+    let mut report = json!({
         "reportVersion": "1.0",
         "assetId": asset_id,
         "assetName": asset.name,
@@ -1111,7 +1134,7 @@ fn build_source_analysis_report(
         "generatedAt": generated_at,
         "analyzedAt": analyzed_at,
         "bundleSource": bundle_source,
-        "summary": summary,
+        "summary": "",
         "coverage": coverage.clone(),
         "metadata": {
             "durationSec": duration_sec.map(round_to),
@@ -1196,6 +1219,7 @@ fn build_source_analysis_report(
             "averageComplexity": if frame_analysis.is_empty() { None } else { Some(round_to(frame_analysis.iter().map(|entry| entry.visual_complexity).sum::<f64>() / frame_analysis.len() as f64)) },
             "topCameraAngles": top_camera_angles_json,
             "topMotionDirections": top_motion_directions_json,
+            "items": visual_items_json,
             "contactSheet": contact_sheet.as_ref().map(|sheet| json!({
                 "path": sheet.path,
                 "frameCount": sheet.frame_count,
@@ -1231,61 +1255,121 @@ fn build_source_analysis_report(
         },
         "warnings": warnings,
         "errors": bundle.as_ref().map(|cached| cached.errors.clone()).unwrap_or_default(),
-        "markdown": build_markdown(
-            asset.name.as_str(),
-            asset_id,
-            bundle_source,
-            &generated_at,
-            &coverage,
-            &asset_kind,
-            &summary,
-            &format_duration_label(duration_sec),
-            width,
-            height,
-            fps.map(round_to),
-            codec.as_deref(),
-            bundle.as_ref().map(|cached| cached.metadata.has_audio).unwrap_or(asset.audio.is_some()),
-            shots.len(),
-            if shot_durations.is_empty() { None } else { Some(round_to(total_shot_duration / shot_durations.len() as f64)) },
-            shot_durations.iter().cloned().reduce(f64::min).map(round_to),
-            shot_durations.iter().cloned().reduce(f64::max).map(round_to),
-            transcript.len(),
-            transcript_word_count,
-            speaker_count,
-            speaker_turn_count,
-            &transcript_languages,
-            build_transcript_excerpt(&transcript).as_deref(),
-            audio_profile.as_ref().and_then(|profile| profile.bpm.map(round_to)),
-            audio_profile.as_ref().map(|profile| round_to(profile.peak_db)),
-            audio_profile.as_ref().map(|profile| round_to(profile.spectral_centroid_hz)),
-            silence_region_count,
-            round_to(silence_duration_sec),
-            speech_regions.len(),
-            round_to(speech_duration_sec),
-            duration_sec.filter(|value| *value > 0.0).map(|value| round_to(speech_duration_sec / value * 100.0)).unwrap_or(0.0),
-            duration_sec.filter(|value| *value > 0.0).map(|value| round_to(silence_duration_sec / value * 100.0)).unwrap_or(0.0),
-            speech_regions.iter().map(|region| region.end_sec - region.start_sec).reduce(f64::max).map(round_to),
-            silence_regions.iter().map(|region| region.end_sec - region.start_sec).reduce(f64::max).map(round_to),
-            &segment_distribution,
-            frame_analysis.len(),
-            if frame_analysis.is_empty() { None } else { Some(round_to(frame_analysis.iter().map(|entry| entry.visual_complexity).sum::<f64>() / frame_analysis.len() as f64)) },
-            &top_camera_angles,
-            &top_motion_directions,
-            contact_sheet.as_ref(),
-            &moments,
-            &chapters,
-            &highlights,
-            &speaker_turns,
-            &annotation_available_types,
-            &annotation_providers,
-            object_detection_count,
-            face_detection_count,
-            ocr_text_count,
-            &top_object_labels,
-            &ocr_preview,
-            &warnings,
-        ),
     });
+
+    let semantic = build_semantic_report_data(asset.name.as_str(), &report);
+    let summary = semantic
+        .get("summaryLine")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or(fallback_summary);
+    let markdown = build_markdown(
+        asset.name.as_str(),
+        asset_id,
+        bundle_source,
+        &generated_at,
+        &coverage,
+        &asset_kind,
+        &summary,
+        &semantic,
+        &format_duration_label(duration_sec),
+        width,
+        height,
+        fps.map(round_to),
+        codec.as_deref(),
+        bundle
+            .as_ref()
+            .map(|cached| cached.metadata.has_audio)
+            .unwrap_or(asset.audio.is_some()),
+        shots.len(),
+        if shot_durations.is_empty() {
+            None
+        } else {
+            Some(round_to(total_shot_duration / shot_durations.len() as f64))
+        },
+        shot_durations
+            .iter()
+            .cloned()
+            .reduce(f64::min)
+            .map(round_to),
+        shot_durations
+            .iter()
+            .cloned()
+            .reduce(f64::max)
+            .map(round_to),
+        transcript.len(),
+        transcript_word_count,
+        speaker_count,
+        speaker_turn_count,
+        &transcript_languages,
+        build_transcript_excerpt(&transcript).as_deref(),
+        audio_profile
+            .as_ref()
+            .and_then(|profile| profile.bpm.map(round_to)),
+        audio_profile
+            .as_ref()
+            .map(|profile| round_to(profile.peak_db)),
+        audio_profile
+            .as_ref()
+            .map(|profile| round_to(profile.spectral_centroid_hz)),
+        silence_region_count,
+        round_to(silence_duration_sec),
+        speech_regions.len(),
+        round_to(speech_duration_sec),
+        duration_sec
+            .filter(|value| *value > 0.0)
+            .map(|value| round_to(speech_duration_sec / value * 100.0))
+            .unwrap_or(0.0),
+        duration_sec
+            .filter(|value| *value > 0.0)
+            .map(|value| round_to(silence_duration_sec / value * 100.0))
+            .unwrap_or(0.0),
+        speech_regions
+            .iter()
+            .map(|region| region.end_sec - region.start_sec)
+            .reduce(f64::max)
+            .map(round_to),
+        silence_regions
+            .iter()
+            .map(|region| region.end_sec - region.start_sec)
+            .reduce(f64::max)
+            .map(round_to),
+        &segment_distribution,
+        frame_analysis.len(),
+        if frame_analysis.is_empty() {
+            None
+        } else {
+            Some(round_to(
+                frame_analysis
+                    .iter()
+                    .map(|entry| entry.visual_complexity)
+                    .sum::<f64>()
+                    / frame_analysis.len() as f64,
+            ))
+        },
+        &top_camera_angles,
+        &top_motion_directions,
+        &visual_items,
+        contact_sheet.as_ref(),
+        &moments,
+        &chapters,
+        &highlights,
+        &speaker_turns,
+        &annotation_available_types,
+        &annotation_providers,
+        object_detection_count,
+        face_detection_count,
+        ocr_text_count,
+        &top_object_labels,
+        &ocr_preview,
+        &warnings,
+    );
+
+    if let Some(object) = report.as_object_mut() {
+        object.insert("summary".to_string(), json!(summary));
+        object.insert("semantic".to_string(), semantic);
+        object.insert("markdown".to_string(), json!(markdown));
+    }
 
     Ok(report)
 }
@@ -1510,8 +1594,12 @@ fn rerank_source_library_matches(matches: Vec<Value>, query: &str) -> Vec<Value>
 
             if dialogue_intent {
                 if section_type == "speakerTurns" {
-                    score += 3.0;
+                    score += 4.5;
                     ranking_notes.push("dialogue query prefers speaker turns".to_string());
+                } else if section_type == "moments" {
+                    score -= 1.0;
+                    ranking_notes
+                        .push("dialogue query de-emphasizes broader moment summaries".to_string());
                 }
                 if audio_cue == Some("speech-heavy") {
                     score += 1.5;
@@ -1547,6 +1635,11 @@ fn rerank_source_library_matches(matches: Vec<Value>, query: &str) -> Vec<Value>
             {
                 score -= 0.75;
                 ranking_notes.push("visual query slightly de-emphasizes speaker turns".to_string());
+            }
+
+            if visual_intent && section_type == "visual" {
+                score += 2.5;
+                ranking_notes.push("visual query prefers visual breakdown".to_string());
             }
 
             if (3.0..=12.0).contains(&duration_sec) {
@@ -1592,6 +1685,8 @@ fn search_source_analysis_report_value(
             "moments".to_string(),
             "chapters".to_string(),
             "highlights".to_string(),
+            "speakerTurns".to_string(),
+            "visual".to_string(),
         ]
     } else {
         sections.to_vec()
@@ -1615,6 +1710,15 @@ fn search_source_analysis_report_value(
                 &query_tokens,
                 vec![
                     (
+                        "sceneLabel",
+                        vec![moment
+                            .get("sceneLabel")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()],
+                        2.0,
+                    ),
+                    (
                         "summary",
                         vec![moment
                             .get("summary")
@@ -1631,6 +1735,47 @@ fn search_source_analysis_report_value(
                             .unwrap_or_default()
                             .to_string()],
                         3.0,
+                    ),
+                    (
+                        "audioSummary",
+                        vec![moment
+                            .get("audioSummary")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()],
+                        2.0,
+                    ),
+                    (
+                        "peopleSummary",
+                        vec![moment
+                            .get("peopleSummary")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()],
+                        2.0,
+                    ),
+                    (
+                        "textSummary",
+                        vec![moment
+                            .get("textSummary")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()],
+                        2.0,
+                    ),
+                    (
+                        "visualSummary",
+                        vec![moment
+                            .get("visualSummary")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()],
+                        1.0,
+                    ),
+                    (
+                        "settingHints",
+                        value_string_array(moment.get("settingHints")),
+                        2.0,
                     ),
                     (
                         "audioCue",
@@ -1679,6 +1824,11 @@ fn search_source_analysis_report_value(
                     "audioCue": moment.get("audioCue").cloned().unwrap_or(Value::Null),
                     "durationSec": moment.get("durationSec").cloned().unwrap_or(Value::Null),
                     "dominantSegmentType": moment.get("dominantSegmentType").cloned().unwrap_or(Value::Null),
+                    "sceneLabel": moment.get("sceneLabel").cloned().unwrap_or(Value::Null),
+                    "peopleSummary": moment.get("peopleSummary").cloned().unwrap_or(Value::Null),
+                    "textSummary": moment.get("textSummary").cloned().unwrap_or(Value::Null),
+                    "visualSummary": moment.get("visualSummary").cloned().unwrap_or(Value::Null),
+                    "settingHints": moment.get("settingHints").cloned().unwrap_or(Value::Null),
                 },
             }));
         }
@@ -1891,6 +2041,89 @@ fn search_source_analysis_report_value(
         }
     }
 
+    if effective_sections.iter().any(|section| section == "visual") {
+        for item in report
+            .get("visual")
+            .and_then(|value| value.get("items"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let (score, why_matched) = score_search_fields(
+                &normalized_query,
+                &query_tokens,
+                vec![
+                    (
+                        "summary",
+                        vec![item
+                            .get("summary")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()],
+                        3.0,
+                    ),
+                    (
+                        "cameraAngle",
+                        vec![item
+                            .get("cameraAngle")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()],
+                        3.0,
+                    ),
+                    (
+                        "subjectPosition",
+                        vec![item
+                            .get("subjectPosition")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()],
+                        2.0,
+                    ),
+                    (
+                        "motionDirection",
+                        vec![item
+                            .get("motionDirection")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()],
+                        2.0,
+                    ),
+                    (
+                        "visualComplexity",
+                        vec![item
+                            .get("visualComplexity")
+                            .and_then(Value::as_f64)
+                            .map(|value| value.to_string())
+                            .unwrap_or_default()],
+                        1.0,
+                    ),
+                ],
+            );
+            if score <= 0.0 {
+                continue;
+            }
+
+            matches.push(json!({
+                "sectionType": "visual",
+                "index": item.get("shotIndex").and_then(Value::as_u64).unwrap_or(0),
+                "startSec": item.get("startSec").and_then(Value::as_f64).unwrap_or(0.0),
+                "endSec": item.get("endSec").and_then(Value::as_f64).unwrap_or(0.0),
+                "score": round_to(score),
+                "whyMatched": why_matched,
+                "preview": item.get("summary").and_then(Value::as_str).unwrap_or_default(),
+                "keyframePath": item.get("keyframePath").cloned().unwrap_or(Value::Null),
+                "metadata": {
+                    "durationSec": item.get("durationSec").cloned().unwrap_or(Value::Null),
+                    "cameraAngle": item.get("cameraAngle").cloned().unwrap_or(Value::Null),
+                    "subjectPosition": item.get("subjectPosition").cloned().unwrap_or(Value::Null),
+                    "motionDirection": item.get("motionDirection").cloned().unwrap_or(Value::Null),
+                    "visualComplexity": item.get("visualComplexity").cloned().unwrap_or(Value::Null),
+                },
+            }));
+        }
+    }
+
     rerank_source_library_matches(matches, query)
         .into_iter()
         .take(limit.clamp(1, 50))
@@ -2097,6 +2330,493 @@ fn build_audio_cue(
     }
 
     None
+}
+
+fn unique_strings_keep_order<I>(values: I, limit: usize) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut seen: Vec<String> = Vec::new();
+    let mut result = Vec::new();
+
+    for value in values {
+        let normalized = normalize_text(&value);
+        if normalized.is_empty() {
+            continue;
+        }
+
+        let lookup = normalized.to_lowercase();
+        if seen.iter().any(|entry| entry == &lookup) {
+            continue;
+        }
+
+        seen.push(lookup);
+        result.push(normalized);
+        if result.len() >= limit {
+            break;
+        }
+    }
+
+    result
+}
+
+fn format_natural_list(values: &[String], limit: usize) -> String {
+    let unique = unique_strings_keep_order(values.iter().cloned(), limit);
+    match unique.len() {
+        0 => String::new(),
+        1 => unique[0].clone(),
+        2 => format!("{} and {}", unique[0], unique[1]),
+        _ => format!(
+            "{}, and {}",
+            unique[..unique.len() - 1].join(", "),
+            unique[unique.len() - 1]
+        ),
+    }
+}
+
+fn ensure_sentence(text: &str) -> String {
+    let normalized = normalize_text(text);
+    if normalized.is_empty() {
+        return String::new();
+    }
+
+    if normalized.ends_with('.') || normalized.ends_with('!') || normalized.ends_with('?') {
+        normalized
+    } else {
+        format!("{}.", normalized)
+    }
+}
+
+fn truncate_text(text: &str, max_length: usize) -> String {
+    let normalized = normalize_text(text);
+    if normalized.chars().count() <= max_length {
+        return normalized;
+    }
+
+    let truncated = normalized
+        .chars()
+        .take(max_length.saturating_sub(3))
+        .collect::<String>();
+    format!("{}...", truncated.trim_end())
+}
+
+fn quote_snippet(text: Option<&str>, max_length: usize) -> Option<String> {
+    let normalized = normalize_text(text.unwrap_or_default());
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let excerpt = if normalized.chars().count() <= max_length {
+        normalized
+    } else {
+        let truncated = normalized
+            .chars()
+            .take(max_length.saturating_sub(3))
+            .collect::<String>();
+        format!("{}...", truncated.trim_end())
+    };
+    Some(format!("\"{}\"", excerpt))
+}
+
+fn normalize_lookup_values(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| normalize_text(value).to_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn includes_any_lookup_value(values: &[String], keywords: &[&str]) -> bool {
+    values
+        .iter()
+        .any(|value| keywords.iter().any(|keyword| value.contains(keyword)))
+}
+
+fn humanize_segment_type(segment_type: Option<&str>) -> Option<String> {
+    match segment_type {
+        Some("talk") => Some("spoken dialogue or presentation".to_string()),
+        Some("performance") => Some("performance or music-led section".to_string()),
+        Some("reaction") => Some("reaction or cutaway section".to_string()),
+        Some("transition") => Some("transition section".to_string()),
+        Some("establishing") => Some("establishing scene".to_string()),
+        Some("montage") => Some("montage sequence".to_string()),
+        Some(other) if !other.trim().is_empty() => Some(format!("{} section", other)),
+        _ => None,
+    }
+}
+
+fn build_people_summary(
+    top_object_labels: &[String],
+    face_detections: &[&CachedFaceDetection],
+) -> Option<String> {
+    let object_lookups = normalize_lookup_values(top_object_labels);
+    let distinct_face_ids = unique_strings_keep_order(
+        face_detections
+            .iter()
+            .filter_map(|entry| entry.face_id.clone())
+            .collect::<Vec<_>>(),
+        usize::MAX,
+    );
+    let emotion_cues = unique_strings_keep_order(
+        face_detections
+            .iter()
+            .flat_map(|entry| entry.emotions.iter().cloned())
+            .collect::<Vec<_>>(),
+        2,
+    );
+    let has_audience_cue =
+        includes_any_lookup_value(&object_lookups, &["audience", "crowd", "spectator"]);
+    let has_person_cue = includes_any_lookup_value(
+        &object_lookups,
+        &[
+            "person",
+            "people",
+            "speaker",
+            "singer",
+            "performer",
+            "man",
+            "woman",
+            "child",
+            "host",
+        ],
+    );
+    let mut parts = Vec::new();
+
+    if has_audience_cue {
+        parts.push("a crowd or audience is visible".to_string());
+    }
+
+    if distinct_face_ids.len() > 1 {
+        parts.push(format!(
+            "{} recurring faces are visible",
+            distinct_face_ids.len()
+        ));
+    } else if distinct_face_ids.len() == 1 {
+        parts.push("at least one recurring face is visible".to_string());
+    } else if face_detections.len() > 1 {
+        parts.push("one or more faces are visible".to_string());
+    } else if face_detections.len() == 1 {
+        parts.push("at least one face is visible".to_string());
+    } else if has_person_cue {
+        parts.push("a person is visible on screen".to_string());
+    }
+
+    if !emotion_cues.is_empty() && !face_detections.is_empty() {
+        parts.push(format!(
+            "facial emotion cues include {}",
+            format_natural_list(&emotion_cues, 2)
+        ));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.into_iter().take(2).collect::<Vec<_>>().join("; "))
+    }
+}
+
+fn build_text_summary(ocr_texts: &[String]) -> Option<String> {
+    let unique_texts = unique_strings_keep_order(ocr_texts.iter().cloned(), 3);
+    if unique_texts.is_empty() {
+        return None;
+    }
+
+    if unique_texts.len() == 1 {
+        return Some(format!(
+            "on-screen text reads {}",
+            quote_snippet(unique_texts.first().map(|value| value.as_str()), 80)
+                .unwrap_or_else(|| "\"\"".to_string())
+        ));
+    }
+
+    Some(format!(
+        "on-screen text includes {}",
+        unique_texts
+            .iter()
+            .filter_map(|text| quote_snippet(Some(text), 48))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+fn build_visual_cue_summary(frame_analysis: Option<&CachedFrameAnalysis>) -> Option<String> {
+    let Some(frame_analysis) = frame_analysis else {
+        return None;
+    };
+
+    let mut parts = Vec::new();
+    if !frame_analysis.camera_angle.trim().is_empty() && frame_analysis.camera_angle != "unknown" {
+        parts.push(format!("{} framing", frame_analysis.camera_angle));
+    }
+    if !frame_analysis.subject_position.trim().is_empty()
+        && frame_analysis.subject_position != "unknown"
+    {
+        parts.push(format!(
+            "{} subject placement",
+            frame_analysis.subject_position
+        ));
+    }
+    if !frame_analysis.motion_direction.trim().is_empty()
+        && frame_analysis.motion_direction != "unknown"
+    {
+        if frame_analysis.motion_direction == "static" {
+            parts.push("mostly static camera".to_string());
+        } else {
+            parts.push(format!("{} motion", frame_analysis.motion_direction));
+        }
+    }
+    if frame_analysis.visual_complexity >= 0.7 {
+        parts.push("visually busy frame".to_string());
+    } else if frame_analysis.visual_complexity <= 0.25 {
+        parts.push("simple, uncluttered frame".to_string());
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
+fn derive_setting_hints(
+    dominant_segment_type: Option<&str>,
+    top_object_labels: &[String],
+    ocr_texts: &[String],
+    transcript_excerpt: Option<&str>,
+    visual_cue_summary: Option<&str>,
+) -> Vec<String> {
+    let mut source_values = top_object_labels.to_vec();
+    source_values.extend_from_slice(ocr_texts);
+    if let Some(excerpt) = transcript_excerpt {
+        source_values.push(excerpt.to_string());
+    }
+    if let Some(visual_cue_summary) = visual_cue_summary {
+        source_values.push(visual_cue_summary.to_string());
+    }
+    let lookups = normalize_lookup_values(&source_values);
+    let mut hints = Vec::new();
+
+    if dominant_segment_type == Some("performance")
+        || includes_any_lookup_value(
+            &lookups,
+            &[
+                "microphone",
+                "stage",
+                "concert",
+                "audience",
+                "crowd",
+                "guitar",
+                "drum",
+                "performer",
+                "podium",
+                "live",
+            ],
+        )
+    {
+        hints.push("stage or live event setting".to_string());
+    }
+
+    if dominant_segment_type == Some("talk")
+        && (includes_any_lookup_value(
+            &lookups,
+            &[
+                "office",
+                "desk",
+                "computer",
+                "monitor",
+                "presentation",
+                "podium",
+                "studio",
+                "host",
+                "interview",
+            ],
+        ) || lookups
+            .iter()
+            .any(|value| value.contains("center") || value.contains("static")))
+    {
+        hints.push("interview, presentation, or studio-style setup".to_string());
+    }
+
+    if includes_any_lookup_value(
+        &lookups,
+        &[
+            "tree", "sky", "road", "street", "car", "mountain", "grass", "water", "outdoor",
+            "nature",
+        ],
+    ) {
+        hints.push("outdoor or location-based setting".to_string());
+    }
+
+    if ocr_texts.len() >= 2
+        || includes_any_lookup_value(
+            &lookups,
+            &["screen", "display", "monitor", "phone", "tablet", "sign"],
+        )
+    {
+        hints.push("screen, signage, or graphic-led frame".to_string());
+    }
+
+    if includes_any_lookup_value(
+        &lookups,
+        &["sofa", "couch", "bed", "kitchen", "room", "table"],
+    ) {
+        hints.push("indoor room or home-like setting".to_string());
+    }
+
+    if dominant_segment_type == Some("establishing") || dominant_segment_type == Some("montage") {
+        hints.push("environment or b-roll coverage".to_string());
+    }
+
+    unique_strings_keep_order(hints, 2)
+}
+
+fn build_audio_summary(
+    dominant_segment_type: Option<&str>,
+    transcript_excerpt: Option<&str>,
+    audio_cue: Option<&str>,
+    speaker_ids: &[String],
+) -> Option<String> {
+    let quoted_excerpt = quote_snippet(transcript_excerpt, 96);
+    if let Some(quoted_excerpt) = quoted_excerpt {
+        if dominant_segment_type == Some("performance") {
+            return Some(format!(
+                "audio suggests a performance, with lyrics or stage banter such as {}",
+                quoted_excerpt
+            ));
+        }
+
+        if speaker_ids.len() == 1 {
+            return Some(format!(
+                "{} is heard saying {}",
+                speaker_ids[0], quoted_excerpt
+            ));
+        }
+
+        return Some(format!("spoken audio includes {}", quoted_excerpt));
+    }
+
+    if dominant_segment_type == Some("performance") {
+        return Some("audio suggests music or a live performance".to_string());
+    }
+
+    match audio_cue {
+        Some("speech-heavy") => Some("continuous speech is present".to_string()),
+        Some("spoken content") => Some("some spoken audio is present".to_string()),
+        Some("long pause") => Some("the moment contains a noticeable quiet pause".to_string()),
+        Some("quiet gap") => Some("there is a brief quiet gap in the audio".to_string()),
+        _ => None,
+    }
+}
+
+fn build_scene_label(
+    dominant_segment_type: Option<&str>,
+    transcript_excerpt: Option<&str>,
+    top_object_labels: &[String],
+    text_summary: Option<&str>,
+) -> String {
+    if transcript_excerpt.is_some() && dominant_segment_type == Some("performance") {
+        return "Performance moment".to_string();
+    }
+    if transcript_excerpt.is_some() && dominant_segment_type == Some("talk") {
+        return "Spoken moment".to_string();
+    }
+    if transcript_excerpt.is_some() {
+        return "Transcript-led moment".to_string();
+    }
+    if text_summary.is_some() {
+        return "Text-led shot".to_string();
+    }
+    if dominant_segment_type == Some("establishing") {
+        return "Establishing shot".to_string();
+    }
+    if dominant_segment_type == Some("reaction") {
+        return "Reaction shot".to_string();
+    }
+    if dominant_segment_type == Some("performance") {
+        return "Performance moment".to_string();
+    }
+    if dominant_segment_type == Some("montage") {
+        return "Montage beat".to_string();
+    }
+    if let Some(first_label) = top_object_labels.first() {
+        return format!("{}-led visual moment", first_label);
+    }
+
+    "Visual moment".to_string()
+}
+
+fn build_semantic_moment_summary(
+    dominant_segment_type: Option<&str>,
+    transcript_excerpt: Option<&str>,
+    top_object_labels: &[String],
+    people_summary: Option<&str>,
+    audio_summary: Option<&str>,
+    text_summary: Option<&str>,
+    visual_cue_summary: Option<&str>,
+    setting_hints: &[String],
+) -> String {
+    let quoted_excerpt = quote_snippet(transcript_excerpt, 96);
+    let primary = if let Some(ref quoted_excerpt) = quoted_excerpt {
+        if dominant_segment_type == Some("performance") {
+            format!(
+                "Performance or stage moment with captured lyrics or banter: {}",
+                quoted_excerpt
+            )
+        } else if dominant_segment_type == Some("talk") {
+            format!("Spoken moment: {}", quoted_excerpt)
+        } else {
+            format!("Transcript indicates: {}", quoted_excerpt)
+        }
+    } else if dominant_segment_type == Some("performance") {
+        if top_object_labels.is_empty() {
+            "Performance-oriented moment".to_string()
+        } else {
+            format!(
+                "Performance-oriented moment featuring {}",
+                format_natural_list(top_object_labels, 3)
+            )
+        }
+    } else if dominant_segment_type == Some("reaction") {
+        "Reaction or cutaway moment".to_string()
+    } else if dominant_segment_type == Some("establishing") {
+        "Establishing shot of the scene".to_string()
+    } else if dominant_segment_type == Some("montage") {
+        "Montage or quick-cut sequence".to_string()
+    } else if !top_object_labels.is_empty() {
+        format!(
+            "Visual moment featuring {}",
+            format_natural_list(top_object_labels, 3)
+        )
+    } else if text_summary.is_some() {
+        "Text-led shot with visible graphics or signage".to_string()
+    } else {
+        humanize_segment_type(dominant_segment_type)
+            .unwrap_or_else(|| "Visual moment with limited semantic cues".to_string())
+    };
+
+    let mut sentences = vec![ensure_sentence(&primary)];
+    if let Some(people_summary) = people_summary {
+        sentences.push(ensure_sentence(&format!("People: {}", people_summary)));
+    }
+    if quoted_excerpt.is_none() {
+        if let Some(audio_summary) = audio_summary {
+            sentences.push(ensure_sentence(&format!("Audio: {}", audio_summary)));
+        }
+    }
+    if let Some(text_summary) = text_summary {
+        sentences.push(ensure_sentence(&format!("Text: {}", text_summary)));
+    }
+    if !setting_hints.is_empty() {
+        sentences.push(ensure_sentence(&format!(
+            "Likely setting: {}",
+            format_natural_list(setting_hints, 2)
+        )));
+    }
+    if let Some(visual_cue_summary) = visual_cue_summary {
+        sentences.push(ensure_sentence(&format!("Framing: {}", visual_cue_summary)));
+    }
+
+    sentences.join(" ")
 }
 
 fn ends_sentence(text: &str) -> bool {
@@ -2566,15 +3286,21 @@ fn build_report_moments(
     object_detections: &[CachedObjectDetection],
     face_detections: &[CachedFaceDetection],
     text_detections: &[CachedTextDetection],
+    frame_analysis: &[CachedFrameAnalysis],
 ) -> Vec<Value> {
-    shots.iter()
+    shots
+        .iter()
         .enumerate()
         .map(|(index, shot)| {
             let overlapping_transcript = transcript
                 .iter()
                 .filter(|segment| {
-                    overlap_duration(segment.start_sec, segment.end_sec, shot.start_sec, shot.end_sec)
-                        > 0.0
+                    overlap_duration(
+                        segment.start_sec,
+                        segment.end_sec,
+                        shot.start_sec,
+                        shot.end_sec,
+                    ) > 0.0
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -2585,28 +3311,42 @@ fn build_report_moments(
             let overlapping_faces = face_detections
                 .iter()
                 .filter(|entry| entry.time_sec >= shot.start_sec && entry.time_sec <= shot.end_sec)
-                .count();
+                .collect::<Vec<_>>();
             let overlapping_text = text_detections
                 .iter()
                 .filter(|entry| entry.time_sec >= shot.start_sec && entry.time_sec <= shot.end_sec)
                 .collect::<Vec<_>>();
             let transcript_excerpt = build_transcript_excerpt(&overlapping_transcript);
-            let dominant_segment_type = dominant_segment_type(segments, shot.start_sec, shot.end_sec);
+            let dominant_segment_type =
+                dominant_segment_type(segments, shot.start_sec, shot.end_sec);
             let overlapping_speech_regions = speech_regions
                 .iter()
                 .filter(|region| {
-                    overlap_duration(region.start_sec, region.end_sec, shot.start_sec, shot.end_sec)
-                        > 0.0
+                    overlap_duration(
+                        region.start_sec,
+                        region.end_sec,
+                        shot.start_sec,
+                        shot.end_sec,
+                    ) > 0.0
                 })
                 .count();
             let overlapping_silence_regions = silence_regions
                 .iter()
                 .filter(|region| {
-                    overlap_duration(region.start_sec, region.end_sec, shot.start_sec, shot.end_sec)
-                        > 0.0
+                    overlap_duration(
+                        region.start_sec,
+                        region.end_sec,
+                        shot.start_sec,
+                        shot.end_sec,
+                    ) > 0.0
                 })
                 .count();
-            let audio_cue = build_audio_cue(speech_regions, silence_regions, shot.start_sec, shot.end_sec);
+            let audio_cue = build_audio_cue(
+                speech_regions,
+                silence_regions,
+                shot.start_sec,
+                shot.end_sec,
+            );
             let top_object_labels = top_counts(
                 overlapping_objects
                     .iter()
@@ -2623,23 +3363,49 @@ fn build_report_moments(
                 .filter(|text| !text.is_empty())
                 .take(3)
                 .collect::<Vec<_>>();
-
-            let mut summary_parts = Vec::new();
-            if let Some(excerpt) = transcript_excerpt.clone() {
-                summary_parts.push(excerpt);
-            }
-            if let Some(segment_type) = dominant_segment_type.clone() {
-                summary_parts.push(format!("{} moment", segment_type));
-            }
-            if let Some(audio_cue) = audio_cue.clone() {
-                summary_parts.push(audio_cue);
-            }
-            if !top_object_labels.is_empty() {
-                summary_parts.push(format!("objects: {}", top_object_labels.join(", ")));
-            }
-            if !ocr_text_preview.is_empty() {
-                summary_parts.push(format!("text: {}", ocr_text_preview.join(" | ")));
-            }
+            let speaker_ids = unique_strings_keep_order(
+                overlapping_transcript
+                    .iter()
+                    .filter_map(|segment| segment.speaker_id.clone())
+                    .collect::<Vec<_>>(),
+                usize::MAX,
+            );
+            let visual_entry = frame_analysis
+                .iter()
+                .find(|entry| entry.shot_index == Some(index))
+                .or_else(|| frame_analysis.get(index));
+            let people_summary = build_people_summary(&top_object_labels, &overlapping_faces);
+            let text_summary = build_text_summary(&ocr_text_preview);
+            let visual_summary = build_visual_cue_summary(visual_entry);
+            let setting_hints = derive_setting_hints(
+                dominant_segment_type.as_deref(),
+                &top_object_labels,
+                &ocr_text_preview,
+                transcript_excerpt.as_deref(),
+                visual_summary.as_deref(),
+            );
+            let audio_summary = build_audio_summary(
+                dominant_segment_type.as_deref(),
+                transcript_excerpt.as_deref(),
+                audio_cue.as_deref(),
+                &speaker_ids,
+            );
+            let scene_label = build_scene_label(
+                dominant_segment_type.as_deref(),
+                transcript_excerpt.as_deref(),
+                &top_object_labels,
+                text_summary.as_deref(),
+            );
+            let summary = build_semantic_moment_summary(
+                dominant_segment_type.as_deref(),
+                transcript_excerpt.as_deref(),
+                &top_object_labels,
+                people_summary.as_deref(),
+                audio_summary.as_deref(),
+                text_summary.as_deref(),
+                visual_summary.as_deref(),
+                &setting_hints,
+            );
 
             json!({
                 "index": index,
@@ -2654,16 +3420,566 @@ fn build_report_moments(
                 "audioCue": audio_cue,
                 "speechRegionCount": overlapping_speech_regions,
                 "silenceRegionCount": overlapping_silence_regions,
-                "faceCount": overlapping_faces,
+                "faceCount": overlapping_faces.len(),
                 "objectCount": overlapping_objects.len(),
-                "summary": if summary_parts.is_empty() {
-                    format!("Shot {} from {} to {}.", index + 1, format_timecode(shot.start_sec), format_timecode(shot.end_sec))
-                } else {
-                    summary_parts.join(" | ")
-                },
+                "sceneLabel": scene_label,
+                "audioSummary": audio_summary,
+                "peopleSummary": people_summary,
+                "textSummary": text_summary,
+                "visualSummary": visual_summary,
+                "settingHints": setting_hints,
+                "summary": summary,
             })
         })
         .collect()
+}
+
+fn build_visual_detail_summary(
+    shot_index: usize,
+    camera_angle: &str,
+    subject_position: &str,
+    motion_direction: &str,
+    visual_complexity: f64,
+) -> String {
+    let mut parts = vec![format!("Shot {}", shot_index + 1)];
+
+    if !camera_angle.trim().is_empty() && camera_angle != "unknown" {
+        parts.push(format!("{} angle", camera_angle));
+    }
+
+    if !subject_position.trim().is_empty() && subject_position != "unknown" {
+        parts.push(format!("{} subject", subject_position));
+    }
+
+    if !motion_direction.trim().is_empty() && motion_direction != "unknown" {
+        parts.push(format!("{} motion", motion_direction));
+    }
+
+    parts.push(format!("complexity {}", round_to(visual_complexity)));
+    parts.join(" | ")
+}
+
+fn build_report_visual_items(
+    shots: &[CachedShotResult],
+    frame_analysis: &[CachedFrameAnalysis],
+) -> Vec<Value> {
+    frame_analysis
+        .iter()
+        .enumerate()
+        .filter_map(|(fallback_index, entry)| {
+            let requested_shot_index = entry.shot_index.unwrap_or(fallback_index);
+            let (resolved_shot_index, shot) = shots
+                .get(requested_shot_index)
+                .map(|shot| (requested_shot_index, shot))
+                .or_else(|| shots.get(fallback_index).map(|shot| (fallback_index, shot)))?;
+            let start_sec = round_to(shot.start_sec);
+            let end_sec = round_to(shot.end_sec);
+            let visual_complexity = round_to(entry.visual_complexity);
+            Some(json!({
+                "shotIndex": resolved_shot_index,
+                "startSec": start_sec,
+                "endSec": end_sec,
+                "durationSec": round_to((end_sec - start_sec).max(0.0)),
+                "keyframePath": shot.keyframe_path.clone(),
+                "keyframeSelectionMethod": shot.keyframe_selection_method.clone(),
+                "cameraAngle": entry.camera_angle,
+                "subjectPosition": entry.subject_position,
+                "motionDirection": entry.motion_direction,
+                "visualComplexity": visual_complexity,
+                "summary": build_visual_detail_summary(
+                    resolved_shot_index,
+                    &entry.camera_angle,
+                    &entry.subject_position,
+                    &entry.motion_direction,
+                    visual_complexity,
+                ),
+            }))
+        })
+        .collect()
+}
+
+fn build_scene_timeline_title(chapter: &Value, moment: Option<&Value>) -> String {
+    if let Some(scene_label) = moment
+        .and_then(|value| value.get("sceneLabel"))
+        .and_then(Value::as_str)
+    {
+        if !scene_label.trim().is_empty() {
+            return scene_label.to_string();
+        }
+    }
+
+    let humanized_segment_type =
+        humanize_segment_type(chapter.get("dominantSegmentType").and_then(Value::as_str));
+    if let Some(humanized_segment_type) = humanized_segment_type {
+        return build_label_from_text(
+            &humanized_segment_type,
+            chapter
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Section"),
+            6,
+        );
+    }
+
+    chapter
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("Untitled section")
+        .to_string()
+}
+
+fn build_scene_timeline_summary(chapter: &Value, overlapping_moments: &[&Value]) -> String {
+    if let Some(summary) = overlapping_moments
+        .first()
+        .and_then(|moment| moment.get("summary"))
+        .and_then(Value::as_str)
+    {
+        return truncate_text(summary, 260);
+    }
+
+    truncate_text(
+        chapter
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("scene summary unavailable"),
+        260,
+    )
+}
+
+fn classify_useful_moment_kind(
+    highlight: &Value,
+    overlapping_moment: Option<&Value>,
+) -> &'static str {
+    if overlapping_moment
+        .and_then(|moment| moment.get("textSummary"))
+        .and_then(Value::as_str)
+        .map(|text| !text.trim().is_empty())
+        .unwrap_or(false)
+        || overlapping_moment
+            .and_then(|moment| moment.get("ocrTextPreview"))
+            .and_then(Value::as_array)
+            .map(|entries| !entries.is_empty())
+            .unwrap_or(false)
+    {
+        return "text";
+    }
+
+    if highlight.get("quote").and_then(Value::as_str).is_some()
+        || overlapping_moment
+            .and_then(|moment| moment.get("transcriptExcerpt"))
+            .and_then(Value::as_str)
+            .is_some()
+    {
+        return "quote";
+    }
+
+    let audio_cue = overlapping_moment
+        .and_then(|moment| moment.get("audioCue"))
+        .and_then(Value::as_str);
+    if matches!(audio_cue, Some("long pause") | Some("quiet gap")) {
+        let face_count = overlapping_moment
+            .and_then(|moment| moment.get("faceCount"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        return if face_count > 0 { "reaction" } else { "pause" };
+    }
+
+    if overlapping_moment
+        .and_then(|moment| moment.get("dominantSegmentType"))
+        .and_then(Value::as_str)
+        == Some("reaction")
+    {
+        return "reaction";
+    }
+
+    let setting_hints = overlapping_moment
+        .and_then(|moment| moment.get("settingHints"))
+        .and_then(Value::as_array)
+        .map(|values| value_string_array(Some(&Value::Array(values.clone()))))
+        .unwrap_or_default();
+    if overlapping_moment
+        .and_then(|moment| moment.get("dominantSegmentType"))
+        .and_then(Value::as_str)
+        == Some("establishing")
+        || setting_hints
+            .iter()
+            .any(|hint| hint == "outdoor or location-based setting")
+        || overlapping_moment
+            .and_then(|moment| moment.get("sceneLabel"))
+            .and_then(Value::as_str)
+            == Some("Establishing shot")
+    {
+        return "establishing";
+    }
+
+    "action"
+}
+
+fn build_useful_moment_summary(
+    kind: &str,
+    highlight: &Value,
+    overlapping_moment: Option<&Value>,
+) -> String {
+    match kind {
+        "quote" => {
+            let quote = quote_snippet(
+                highlight.get("quote").and_then(Value::as_str).or_else(|| {
+                    overlapping_moment
+                        .and_then(|moment| moment.get("transcriptExcerpt"))
+                        .and_then(Value::as_str)
+                }),
+                96,
+            );
+            quote
+                .map(|quote| format!("Strong spoken line: {}", quote))
+                .unwrap_or_else(|| {
+                    overlapping_moment
+                        .and_then(|moment| moment.get("summary"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| {
+                            highlight
+                                .get("reason")
+                                .and_then(Value::as_str)
+                                .unwrap_or("useful moment")
+                        })
+                        .to_string()
+                })
+        }
+        "text" => overlapping_moment
+            .and_then(|moment| moment.get("textSummary"))
+            .and_then(Value::as_str)
+            .map(|text| format!("Text-bearing moment: {}", text))
+            .or_else(|| {
+                overlapping_moment
+                    .and_then(|moment| moment.get("summary"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| {
+                highlight
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("useful text moment")
+                    .to_string()
+            }),
+        "reaction" => overlapping_moment
+            .and_then(|moment| moment.get("peopleSummary"))
+            .and_then(Value::as_str)
+            .map(|text| format!("Reaction-friendly visual: {}", text))
+            .or_else(|| {
+                overlapping_moment
+                    .and_then(|moment| moment.get("summary"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| "Reaction-friendly visual moment".to_string()),
+        "pause" => overlapping_moment
+            .and_then(|moment| moment.get("audioSummary"))
+            .and_then(Value::as_str)
+            .map(|text| format!("Quiet gap useful for transitions: {}", text))
+            .unwrap_or_else(|| "Quiet gap or pause useful for resets and cutaways".to_string()),
+        _ => overlapping_moment
+            .and_then(|moment| moment.get("summary"))
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                highlight
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("useful visual moment")
+            })
+            .to_string(),
+    }
+}
+
+fn build_semantic_report_data(asset_name: &str, report: &Value) -> Value {
+    let moments = report
+        .get("moments")
+        .and_then(|value| value.get("items"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let chapters = report
+        .get("chapters")
+        .and_then(|value| value.get("items"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let highlights = report
+        .get("highlights")
+        .and_then(|value| value.get("items"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let speaker_turns = report
+        .get("speakerTurns")
+        .and_then(|value| value.get("items"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let ocr_preview = value_string_array(
+        report
+            .get("annotations")
+            .and_then(|value| value.get("ocrPreview")),
+    );
+    let top_object_labels = report
+        .get("annotations")
+        .and_then(|value| value.get("topObjectLabels"))
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("label"))
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let top_camera_angles = report
+        .get("visual")
+        .and_then(|value| value.get("topCameraAngles"))
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("label"))
+                .filter_map(Value::as_str)
+                .map(|label| format!("{} angle", label))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let speech_share_percent = report
+        .get("audio")
+        .and_then(|value| value.get("speechSharePercent"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let silence_share_percent = report
+        .get("audio")
+        .and_then(|value| value.get("silenceSharePercent"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let transcript_excerpt = report
+        .get("transcript")
+        .and_then(|value| value.get("excerpt"))
+        .and_then(Value::as_str);
+    let dominant_segment_label = report
+        .get("segments")
+        .and_then(|value| value.get("distribution"))
+        .and_then(Value::as_array)
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry.get("label"))
+        .and_then(Value::as_str);
+
+    let scene_timeline = chapters
+        .iter()
+        .take(SEMANTIC_SCENE_TIMELINE_LIMIT)
+        .enumerate()
+        .map(|(index, chapter)| {
+            let chapter_start = chapter.get("startSec").and_then(Value::as_f64).unwrap_or(0.0);
+            let chapter_end = chapter
+                .get("endSec")
+                .and_then(Value::as_f64)
+                .unwrap_or(chapter_start);
+            let overlapping_moments = moments
+                .iter()
+                .filter(|moment| {
+                    let moment_start = moment.get("startSec").and_then(Value::as_f64).unwrap_or(0.0);
+                    let moment_end = moment
+                        .get("endSec")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(moment_start);
+                    overlap_duration(moment_start, moment_end, chapter_start, chapter_end) > 0.0
+                })
+                .collect::<Vec<_>>();
+            let primary_moment = overlapping_moments.first().copied();
+            json!({
+                "index": index,
+                "startSec": chapter_start,
+                "endSec": chapter_end,
+                "title": build_scene_timeline_title(chapter, primary_moment),
+                "summary": build_scene_timeline_summary(chapter, &overlapping_moments),
+                "keyframePath": primary_moment.and_then(|moment| moment.get("keyframePath")).cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let useful_moments = highlights
+        .iter()
+        .take(SEMANTIC_USEFUL_MOMENT_LIMIT)
+        .enumerate()
+        .map(|(index, highlight)| {
+            let highlight_start = highlight.get("startSec").and_then(Value::as_f64).unwrap_or(0.0);
+            let highlight_end = highlight
+                .get("endSec")
+                .and_then(Value::as_f64)
+                .unwrap_or(highlight_start);
+            let overlapping_moment = moments.iter().find(|moment| {
+                let moment_start = moment.get("startSec").and_then(Value::as_f64).unwrap_or(0.0);
+                let moment_end = moment
+                    .get("endSec")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(moment_start);
+                overlap_duration(moment_start, moment_end, highlight_start, highlight_end) > 0.0
+            });
+            let kind = classify_useful_moment_kind(highlight, overlapping_moment);
+            json!({
+                "index": index,
+                "kind": kind,
+                "startSec": highlight_start,
+                "endSec": highlight_end,
+                "summary": truncate_text(&build_useful_moment_summary(kind, highlight, overlapping_moment), 220),
+                "reason": highlight.get("reason").and_then(Value::as_str).unwrap_or("useful moment"),
+                "keyframePath": overlapping_moment.and_then(|moment| moment.get("keyframePath")).cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let what_is_happening = unique_strings_keep_order(
+        scene_timeline
+            .iter()
+            .filter_map(|item| item.get("summary"))
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        SEMANTIC_OVERVIEW_LIMIT,
+    );
+    let who_is_present = unique_strings_keep_order(
+        [
+            if speaker_turns.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "Detected speaking voices or turns include {}.",
+                    format_natural_list(
+                        &speaker_turns
+                            .iter()
+                            .filter_map(|turn| turn.get("label"))
+                            .filter_map(Value::as_str)
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>(),
+                        3,
+                    )
+                ))
+            },
+            moments
+                .iter()
+                .filter_map(|moment| moment.get("peopleSummary"))
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .next(),
+            if top_object_labels.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "Recurring visible cues include {}.",
+                    format_natural_list(&top_object_labels, 4)
+                ))
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>(),
+        SEMANTIC_OVERVIEW_LIMIT,
+    );
+    let what_is_heard = unique_strings_keep_order(
+        [
+            transcript_excerpt.map(|excerpt| {
+                format!(
+                    "Transcript captures spoken content such as {}.",
+                    quote_snippet(Some(excerpt), 120).unwrap_or_else(|| "\"\"".to_string())
+                )
+            }),
+            if speech_share_percent > 60.0 {
+                Some(format!(
+                    "Speech is present through about {}% of the source.",
+                    round_to(speech_share_percent)
+                ))
+            } else if speech_share_percent > 15.0 {
+                Some(format!(
+                    "The source mixes speech with non-speech audio across about {}% of runtime.",
+                    round_to(speech_share_percent)
+                ))
+            } else {
+                None
+            },
+            if silence_share_percent > 20.0 {
+                Some(format!(
+                    "Quiet pauses or low-activity gaps cover about {}% of runtime.",
+                    round_to(silence_share_percent)
+                ))
+            } else {
+                None
+            },
+            dominant_segment_label.and_then(|label| {
+                humanize_segment_type(Some(label))
+                    .map(|value| format!("The dominant structural mode is {}.", value))
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>(),
+        SEMANTIC_OVERVIEW_LIMIT,
+    );
+    let on_screen_text = unique_strings_keep_order(
+        [
+            if ocr_preview.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "Detected text includes {}.",
+                    ocr_preview
+                        .iter()
+                        .take(3)
+                        .filter_map(|text| quote_snippet(Some(text), 48))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            },
+            moments
+                .iter()
+                .filter_map(|moment| moment.get("textSummary"))
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .next(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>(),
+        SEMANTIC_OVERVIEW_LIMIT,
+    );
+    let likely_setting = unique_strings_keep_order(
+        moments
+            .iter()
+            .filter_map(|moment| moment.get("settingHints"))
+            .flat_map(|value| value_string_array(Some(value)).into_iter())
+            .collect::<Vec<_>>(),
+        SEMANTIC_OVERVIEW_LIMIT,
+    );
+
+    let summary_parts = [
+        what_is_happening.first().cloned(),
+        likely_setting.first().map(|value| value.to_string()),
+        what_is_heard.first().cloned(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|value| value.trim_end_matches('.').to_string())
+    .collect::<Vec<_>>();
+
+    json!({
+        "summaryLine": if summary_parts.is_empty() {
+            format!("Semantic source report for {}.", asset_name)
+        } else {
+            truncate_text(&summary_parts.join(" | "), 220)
+        },
+        "whatIsHappening": what_is_happening,
+        "whoIsPresent": who_is_present,
+        "whatIsHeard": what_is_heard,
+        "onScreenText": on_screen_text,
+        "likelySetting": likely_setting,
+        "sceneTimeline": scene_timeline,
+        "usefulMoments": useful_moments,
+        "topCameraAngles": top_camera_angles,
+    })
 }
 
 fn unique_sorted_strings(values: Vec<String>) -> Vec<String> {
@@ -2838,6 +4154,7 @@ fn build_markdown(
     coverage: &Value,
     asset_kind: &str,
     summary: &str,
+    semantic: &Value,
     duration_label: &str,
     width: Option<u32>,
     height: Option<u32>,
@@ -2870,6 +4187,7 @@ fn build_markdown(
     average_complexity: Option<f64>,
     top_camera_angles: &[(String, usize)],
     top_motion_directions: &[(String, usize)],
+    visual_items: &[Value],
     contact_sheet: Option<&CachedContactSheet>,
     moments: &[Value],
     chapters: &[Value],
@@ -2891,6 +4209,212 @@ fn build_markdown(
         format!("- Bundle source: {}", bundle_source),
         format!("- Generated at: {}", generated_at),
         format!("- Summary: {}", summary),
+    ];
+
+    let semantic_what_is_happening = value_string_array(semantic.get("whatIsHappening"));
+    let semantic_who_is_present = value_string_array(semantic.get("whoIsPresent"));
+    let semantic_what_is_heard = value_string_array(semantic.get("whatIsHeard"));
+    let semantic_on_screen_text = value_string_array(semantic.get("onScreenText"));
+    let semantic_likely_setting = value_string_array(semantic.get("likelySetting"));
+    let semantic_scene_timeline = semantic
+        .get("sceneTimeline")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let semantic_useful_moments = semantic
+        .get("usefulMoments")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    if !semantic_what_is_happening.is_empty()
+        || !semantic_who_is_present.is_empty()
+        || !semantic_what_is_heard.is_empty()
+        || !semantic_on_screen_text.is_empty()
+        || !semantic_likely_setting.is_empty()
+        || !semantic_useful_moments.is_empty()
+    {
+        lines.extend([
+            String::new(),
+            "## Executive Summary".to_string(),
+            String::new(),
+        ]);
+        for bullet in &semantic_what_is_happening {
+            lines.push(format!("- What is happening: {}", bullet));
+        }
+        for bullet in &semantic_who_is_present {
+            lines.push(format!("- Who is present: {}", bullet));
+        }
+        for bullet in &semantic_what_is_heard {
+            lines.push(format!("- What is heard: {}", bullet));
+        }
+        for bullet in &semantic_on_screen_text {
+            lines.push(format!("- On-screen text: {}", bullet));
+        }
+        for bullet in &semantic_likely_setting {
+            lines.push(format!("- Likely setting: {}", bullet));
+        }
+        for moment in semantic_useful_moments.iter().take(3) {
+            let start_sec = moment
+                .get("startSec")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let end_sec = moment
+                .get("endSec")
+                .and_then(Value::as_f64)
+                .unwrap_or(start_sec);
+            let kind = moment
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("action");
+            let summary = moment
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("useful moment");
+            lines.push(format!(
+                "- Best usable moment: {}-{} | {} | {}",
+                format_timecode(start_sec),
+                format_timecode(end_sec),
+                kind,
+                summary,
+            ));
+        }
+    }
+
+    if !semantic_scene_timeline.is_empty() {
+        lines.extend([
+            String::new(),
+            "## Scene Timeline".to_string(),
+            String::new(),
+        ]);
+        for scene in &semantic_scene_timeline {
+            let start_sec = scene.get("startSec").and_then(Value::as_f64).unwrap_or(0.0);
+            let end_sec = scene
+                .get("endSec")
+                .and_then(Value::as_f64)
+                .unwrap_or(start_sec);
+            let title = scene
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Scene");
+            let summary = scene
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("scene summary unavailable");
+            lines.push(format!(
+                "- {}-{} | {} | {}",
+                format_timecode(start_sec),
+                format_timecode(end_sec),
+                title,
+                summary,
+            ));
+            if let Some(keyframe_path) = scene.get("keyframePath").and_then(Value::as_str) {
+                lines.push(format!("- Keyframe: {}", keyframe_path));
+            }
+        }
+    }
+
+    if !semantic_useful_moments.is_empty() {
+        lines.extend([
+            String::new(),
+            "## Useful Moments".to_string(),
+            String::new(),
+        ]);
+        for moment in &semantic_useful_moments {
+            let start_sec = moment
+                .get("startSec")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let end_sec = moment
+                .get("endSec")
+                .and_then(Value::as_f64)
+                .unwrap_or(start_sec);
+            let kind = moment
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("action");
+            let summary = moment
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("useful moment");
+            let reason = moment
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("why this moment stands out is unavailable");
+            lines.push(format!(
+                "- {}-{} | {} | {}",
+                format_timecode(start_sec),
+                format_timecode(end_sec),
+                kind,
+                summary,
+            ));
+            if let Some(keyframe_path) = moment.get("keyframePath").and_then(Value::as_str) {
+                lines.push(format!("- Keyframe: {}", keyframe_path));
+            }
+            lines.push(format!("- Why it stands out: {}", reason));
+        }
+    }
+
+    if !semantic_who_is_present.is_empty() || !speaker_turns.is_empty() {
+        lines.extend([
+            String::new(),
+            "## Who Is Present".to_string(),
+            String::new(),
+        ]);
+        for bullet in &semantic_who_is_present {
+            lines.push(format!("- {}", bullet));
+        }
+        for turn in speaker_turns.iter().take(4) {
+            let start_sec = turn.get("startSec").and_then(Value::as_f64).unwrap_or(0.0);
+            let end_sec = turn
+                .get("endSec")
+                .and_then(Value::as_f64)
+                .unwrap_or(start_sec);
+            let label = turn.get("label").and_then(Value::as_str).unwrap_or("Turn");
+            let excerpt = turn
+                .get("excerpt")
+                .and_then(Value::as_str)
+                .unwrap_or("no excerpt");
+            lines.push(format!(
+                "- {}-{} | {} | {}",
+                format_timecode(start_sec),
+                format_timecode(end_sec),
+                label,
+                excerpt,
+            ));
+        }
+    }
+
+    if !semantic_what_is_heard.is_empty() || !speaker_turns.is_empty() {
+        lines.extend([String::new(), "## What Is Heard".to_string(), String::new()]);
+        for bullet in &semantic_what_is_heard {
+            lines.push(format!("- {}", bullet));
+        }
+    }
+
+    if !semantic_on_screen_text.is_empty() {
+        lines.extend([
+            String::new(),
+            "## On-Screen Text".to_string(),
+            String::new(),
+        ]);
+        for bullet in &semantic_on_screen_text {
+            lines.push(format!("- {}", bullet));
+        }
+    }
+
+    if !semantic_likely_setting.is_empty() {
+        lines.extend([
+            String::new(),
+            "## Visual / Setting Cues".to_string(),
+            String::new(),
+        ]);
+        for bullet in &semantic_likely_setting {
+            lines.push(format!("- {}", bullet));
+        }
+    }
+
+    lines.extend([
         String::new(),
         "## File Info".to_string(),
         String::new(),
@@ -2985,7 +4509,7 @@ fn build_markdown(
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         ),
-    ];
+    ]);
 
     if transcript_segment_count > 0 {
         lines.extend([
@@ -3169,6 +4693,40 @@ fn build_markdown(
         }
     }
 
+    if !visual_items.is_empty() {
+        lines.extend([
+            String::new(),
+            "## Visual Breakdown".to_string(),
+            String::new(),
+        ]);
+        for item in visual_items.iter().take(VISUAL_BREAKDOWN_MARKDOWN_LIMIT) {
+            let start_sec = item.get("startSec").and_then(Value::as_f64).unwrap_or(0.0);
+            let end_sec = item
+                .get("endSec")
+                .and_then(Value::as_f64)
+                .unwrap_or(start_sec);
+            let summary = item
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("visual summary unavailable");
+            lines.push(format!(
+                "- {}-{} | {}",
+                format_timecode(start_sec),
+                format_timecode(end_sec),
+                summary,
+            ));
+            if let Some(keyframe_path) = item.get("keyframePath").and_then(Value::as_str) {
+                lines.push(format!("- Keyframe: {}", keyframe_path));
+            }
+        }
+        if visual_items.len() > VISUAL_BREAKDOWN_MARKDOWN_LIMIT {
+            lines.push(format!(
+                "- ... {} more visual entries omitted from Markdown preview",
+                visual_items.len() - VISUAL_BREAKDOWN_MARKDOWN_LIMIT
+            ));
+        }
+    }
+
     if let Some(contact_sheet) = contact_sheet {
         lines.extend([
             String::new(),
@@ -3306,11 +4864,12 @@ fn build_markdown(
 #[cfg(test)]
 mod tests {
     use super::{
-        annotation_typed_results, build_report_chapters, build_report_highlights,
-        build_report_moments, build_segment_distribution, build_transcript_excerpt,
-        format_duration_label, normalize_search_sections, search_source_analysis_report_value,
-        top_counts, CachedContentSegment, CachedFaceDetection, CachedObjectDetection,
-        CachedShotResult, CachedSpeechRegion, CachedTextDetection, CachedTranscriptSegment,
+        annotation_typed_results, build_markdown, build_report_chapters, build_report_highlights,
+        build_report_moments, build_report_visual_items, build_segment_distribution,
+        build_transcript_excerpt, format_duration_label, normalize_search_sections,
+        search_source_analysis_report_value, top_counts, CachedContactSheet, CachedContentSegment,
+        CachedFaceDetection, CachedFrameAnalysis, CachedObjectDetection, CachedShotResult,
+        CachedSpeechRegion, CachedTextDetection, CachedTranscriptSegment,
     };
     use serde_json::{json, Value};
 
@@ -3494,10 +5053,22 @@ mod tests {
                 time_sec: 1.0,
                 labels: vec!["person".to_string(), "microphone".to_string()],
             }],
-            &[CachedFaceDetection { time_sec: 1.2 }],
+            &[CachedFaceDetection {
+                time_sec: 1.2,
+                emotions: vec!["happy".to_string()],
+                face_id: Some("face-1".to_string()),
+            }],
             &[CachedTextDetection {
                 time_sec: 2.0,
                 text: "LIVE".to_string(),
+                language: Some("en".to_string()),
+            }],
+            &[CachedFrameAnalysis {
+                shot_index: Some(0),
+                camera_angle: "wide".to_string(),
+                subject_position: "center".to_string(),
+                motion_direction: "static".to_string(),
+                visual_complexity: 0.42,
             }],
         );
 
@@ -3505,10 +5076,320 @@ mod tests {
         assert_eq!(moments[0]["keyframePath"], "shots/0001.jpg");
         assert_eq!(moments[0]["faceCount"], 1);
         assert_eq!(moments[0]["objectCount"], 1);
+        assert_eq!(moments[0]["sceneLabel"], "Spoken moment");
         assert!(moments[0]["summary"]
             .as_str()
             .unwrap_or_default()
             .contains("Welcome"));
+    }
+
+    #[test]
+    fn build_report_visual_items_should_align_visual_entries_to_shots() {
+        let visual_items = build_report_visual_items(
+            &[CachedShotResult {
+                start_sec: 0.0,
+                end_sec: 4.0,
+                confidence: 0.9,
+                keyframe_path: Some("shots/0001.jpg".to_string()),
+                keyframe_selection_method: Some("thumbnail".to_string()),
+            }],
+            &[CachedFrameAnalysis {
+                shot_index: Some(0),
+                camera_angle: "wide".to_string(),
+                subject_position: "center".to_string(),
+                motion_direction: "static".to_string(),
+                visual_complexity: 0.42,
+            }],
+        );
+
+        assert_eq!(visual_items.len(), 1);
+        assert_eq!(visual_items[0]["startSec"], 0.0);
+        assert_eq!(visual_items[0]["endSec"], 4.0);
+        assert_eq!(visual_items[0]["cameraAngle"], "wide");
+        assert_eq!(visual_items[0]["subjectPosition"], "center");
+        assert_eq!(visual_items[0]["motionDirection"], "static");
+        assert_eq!(
+            visual_items[0]["summary"],
+            "Shot 1 | wide angle | center subject | static motion | complexity 0.42"
+        );
+    }
+
+    #[test]
+    fn build_report_visual_items_should_skip_entries_without_matching_shots() {
+        let visual_items = build_report_visual_items(
+            &[CachedShotResult {
+                start_sec: 0.0,
+                end_sec: 4.0,
+                confidence: 0.9,
+                keyframe_path: Some("shots/0001.jpg".to_string()),
+                keyframe_selection_method: Some("thumbnail".to_string()),
+            }],
+            &[
+                CachedFrameAnalysis {
+                    shot_index: Some(99),
+                    camera_angle: "wide".to_string(),
+                    subject_position: "center".to_string(),
+                    motion_direction: "static".to_string(),
+                    visual_complexity: 0.42,
+                },
+                CachedFrameAnalysis {
+                    shot_index: Some(100),
+                    camera_angle: "close-up".to_string(),
+                    subject_position: "left".to_string(),
+                    motion_direction: "left_to_right".to_string(),
+                    visual_complexity: 0.66,
+                },
+            ],
+        );
+
+        assert_eq!(visual_items.len(), 1);
+        assert_eq!(visual_items[0]["shotIndex"], 0);
+        assert_eq!(visual_items[0]["startSec"], 0.0);
+        assert_eq!(visual_items[0]["endSec"], 4.0);
+    }
+
+    #[test]
+    fn build_markdown_should_include_visual_breakdown() {
+        let coverage = json!({
+            "shots": true,
+            "transcript": false,
+            "audio": false,
+            "segments": false,
+            "visual": true,
+            "annotation": false,
+        });
+        let transcript_languages: Vec<String> = Vec::new();
+        let segment_distribution: Vec<(String, usize, f64, f64)> = Vec::new();
+        let top_camera_angles = vec![("wide".to_string(), 1)];
+        let top_motion_directions = vec![("static".to_string(), 1)];
+        let visual_items = vec![json!({
+            "shotIndex": 0,
+            "startSec": 0.0,
+            "endSec": 4.0,
+            "durationSec": 4.0,
+            "keyframePath": "shots/0001.jpg",
+            "cameraAngle": "wide",
+            "subjectPosition": "center",
+            "motionDirection": "static",
+            "visualComplexity": 0.42,
+            "summary": "Shot 1 | wide angle | center subject | static motion | complexity 0.42",
+        })];
+        let annotation_available_types: Vec<String> = Vec::new();
+        let annotation_providers: Vec<String> = Vec::new();
+        let top_object_labels: Vec<(String, usize)> = Vec::new();
+        let ocr_preview: Vec<String> = Vec::new();
+        let warnings: Vec<String> = Vec::new();
+        let semantic = json!({
+            "whatIsHappening": ["Performance or stage moment with captured lyrics or banter: \"Hello crowd and welcome back\"."],
+            "whoIsPresent": ["at least one recurring face is visible"],
+            "whatIsHeard": ["Transcript captures spoken content such as \"Hello crowd and welcome back\"."],
+            "onScreenText": ["Detected text includes \"LIVE\"."],
+            "likelySetting": ["stage or live event setting"],
+            "sceneTimeline": [{
+                "index": 0,
+                "startSec": 0.0,
+                "endSec": 4.0,
+                "title": "Performance moment",
+                "summary": "Performance or stage moment with captured lyrics or banter: \"Hello crowd and welcome back\".",
+                "keyframePath": "shots/0001.jpg"
+            }],
+            "usefulMoments": [{
+                "index": 0,
+                "kind": "text",
+                "startSec": 0.0,
+                "endSec": 3.0,
+                "summary": "Text-bearing moment: on-screen text reads \"LIVE\"",
+                "reason": "on-screen text",
+                "keyframePath": "shots/0001.jpg"
+            }]
+        });
+
+        let markdown = build_markdown(
+            "concert.mp4",
+            "asset-1",
+            "cached",
+            "2026-03-07T00:00:00Z",
+            &coverage,
+            "video",
+            "summary",
+            &semantic,
+            "4s",
+            Some(1920),
+            Some(1080),
+            Some(30.0),
+            Some("h264"),
+            true,
+            1,
+            Some(4.0),
+            Some(4.0),
+            Some(4.0),
+            0,
+            0,
+            0,
+            0,
+            &transcript_languages,
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.0,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+            None,
+            &segment_distribution,
+            1,
+            Some(0.42),
+            &top_camera_angles,
+            &top_motion_directions,
+            &visual_items,
+            Some(&CachedContactSheet {
+                path: "/analysis/contact-sheet.jpg".to_string(),
+                frame_count: 1,
+                columns: 1,
+                rows: 1,
+            }),
+            &[],
+            &[],
+            &[],
+            &[],
+            &annotation_available_types,
+            &annotation_providers,
+            0,
+            0,
+            0,
+            &top_object_labels,
+            &ocr_preview,
+            &warnings,
+        );
+
+        assert!(markdown.contains("## Executive Summary"));
+        assert!(markdown.contains("## Scene Timeline"));
+        assert!(markdown.contains("## Useful Moments"));
+        assert!(markdown.contains("## Visual Cues"));
+        assert!(markdown.contains("## Visual Breakdown"));
+        assert!(markdown.contains(
+            "00:00-00:04 | Shot 1 | wide angle | center subject | static motion | complexity 0.42"
+        ));
+        assert_eq!(
+            markdown.matches("Dominant camera angles: wide (1)").count(),
+            1
+        );
+        assert_eq!(markdown.matches("Dominant motion: static (1)").count(), 1);
+        assert!(markdown.contains("Keyframe: shots/0001.jpg"));
+        assert!(markdown.contains("## Visual Artifacts"));
+    }
+
+    #[test]
+    fn build_markdown_should_truncate_visual_breakdown_preview() {
+        let coverage = json!({
+            "shots": true,
+            "transcript": false,
+            "audio": false,
+            "segments": false,
+            "visual": true,
+            "annotation": false,
+        });
+        let transcript_languages: Vec<String> = Vec::new();
+        let segment_distribution: Vec<(String, usize, f64, f64)> = Vec::new();
+        let top_camera_angles = vec![("wide".to_string(), 13)];
+        let top_motion_directions = vec![("static".to_string(), 13)];
+        let visual_items = (0..13)
+            .map(|index| {
+                json!({
+                    "shotIndex": index,
+                    "startSec": (index * 2) as f64,
+                    "endSec": (index * 2 + 2) as f64,
+                    "durationSec": 2.0,
+                    "keyframePath": format!("shots/{:04}.jpg", index + 1),
+                    "cameraAngle": "wide",
+                    "subjectPosition": "center",
+                    "motionDirection": "static",
+                    "visualComplexity": 0.5,
+                    "summary": format!("Shot {} | wide angle | center subject | static motion | complexity 0.5", index + 1),
+                })
+            })
+            .collect::<Vec<_>>();
+        let annotation_available_types: Vec<String> = Vec::new();
+        let annotation_providers: Vec<String> = Vec::new();
+        let top_object_labels: Vec<(String, usize)> = Vec::new();
+        let ocr_preview: Vec<String> = Vec::new();
+        let warnings: Vec<String> = Vec::new();
+        let semantic = json!({
+            "whatIsHappening": ["Visual montage coverage"],
+            "whoIsPresent": [],
+            "whatIsHeard": [],
+            "onScreenText": [],
+            "likelySetting": ["environment or b-roll coverage"],
+            "sceneTimeline": [],
+            "usefulMoments": []
+        });
+
+        let markdown = build_markdown(
+            "visual-preview.mp4",
+            "asset-visual-preview",
+            "cached",
+            "2026-03-07T00:00:00Z",
+            &coverage,
+            "video",
+            "summary",
+            &semantic,
+            "26s",
+            Some(1920),
+            Some(1080),
+            Some(30.0),
+            Some("h264"),
+            true,
+            13,
+            Some(2.0),
+            Some(2.0),
+            Some(2.0),
+            0,
+            0,
+            0,
+            0,
+            &transcript_languages,
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.0,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+            None,
+            &segment_distribution,
+            13,
+            Some(0.5),
+            &top_camera_angles,
+            &top_motion_directions,
+            &visual_items,
+            None,
+            &[],
+            &[],
+            &[],
+            &[],
+            &annotation_available_types,
+            &annotation_providers,
+            0,
+            0,
+            0,
+            &top_object_labels,
+            &ocr_preview,
+            &warnings,
+        );
+
+        assert!(markdown.contains("## Visual Breakdown"));
+        assert!(markdown.contains("- ... 1 more visual entries omitted from Markdown preview"));
+        assert!(!markdown.contains(
+            "00:24-00:26 | Shot 13 | wide angle | center subject | static motion | complexity 0.5"
+        ));
     }
 
     #[test]
@@ -3547,6 +5428,47 @@ mod tests {
     }
 
     #[test]
+    fn search_source_analysis_report_value_should_rank_visual_matches() {
+        let report = json!({
+            "moments": { "items": [] },
+            "chapters": { "items": [] },
+            "highlights": { "items": [] },
+            "speakerTurns": { "items": [] },
+            "visual": {
+                "items": [
+                    {
+                        "shotIndex": 0,
+                        "startSec": 0.0,
+                        "endSec": 4.0,
+                        "durationSec": 4.0,
+                        "summary": "Shot 1 | wide angle | center subject | static motion | complexity 0.42",
+                        "cameraAngle": "wide",
+                        "subjectPosition": "center",
+                        "motionDirection": "static",
+                        "visualComplexity": 0.42,
+                        "keyframePath": "shots/0001.jpg"
+                    }
+                ]
+            }
+        });
+
+        let matches = search_source_analysis_report_value(
+            &report,
+            "wide static center",
+            &["visual".to_string()],
+            5,
+        );
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["sectionType"], "visual");
+        assert_eq!(matches[0]["keyframePath"], "shots/0001.jpg");
+        assert!(matches[0]["preview"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("wide angle"));
+    }
+
+    #[test]
     fn normalize_search_sections_should_fallback_to_defaults_for_invalid_input() {
         let normalized = normalize_search_sections(&["invalid".to_string()]);
         assert_eq!(
@@ -3555,7 +5477,8 @@ mod tests {
                 "moments".to_string(),
                 "chapters".to_string(),
                 "highlights".to_string(),
-                "speakerTurns".to_string()
+                "speakerTurns".to_string(),
+                "visual".to_string(),
             ]
         );
     }

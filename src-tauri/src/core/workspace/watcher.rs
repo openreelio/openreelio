@@ -9,6 +9,8 @@ use std::sync::Arc;
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use tokio::sync::mpsc;
 
+use crate::core::assets::media_kind_from_extension;
+
 use super::ignore::IgnoreRules;
 
 /// Events emitted by the workspace watcher
@@ -58,9 +60,12 @@ impl WorkspaceWatcher {
 
             loop {
                 // Check for stop signal
-                if stop_rx.try_recv().is_ok() {
-                    tracing::debug!("Workspace watcher stopped by signal");
-                    break;
+                match stop_rx.try_recv() {
+                    Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                        tracing::debug!("Workspace watcher stopped by signal");
+                        break;
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
                 }
 
                 // Poll for events with timeout
@@ -139,47 +144,15 @@ impl WorkspaceWatcher {
 
     /// Stop the watcher
     pub fn stop(&mut self) {
-        self._stop_tx.take(); // Dropping the sender signals the thread to stop
+        if let Some(stop_tx) = self._stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
     }
 }
 
 /// Check if a file extension is a recognized media type
 fn is_media_extension(ext: &str) -> bool {
-    matches!(
-        ext.to_lowercase().as_str(),
-        "mp4"
-            | "mov"
-            | "avi"
-            | "mkv"
-            | "webm"
-            | "m4v"
-            | "wmv"
-            | "flv"
-            | "mp3"
-            | "wav"
-            | "aac"
-            | "ogg"
-            | "flac"
-            | "m4a"
-            | "wma"
-            | "jpg"
-            | "jpeg"
-            | "png"
-            | "gif"
-            | "bmp"
-            | "webp"
-            | "tiff"
-            | "svg"
-            | "srt"
-            | "vtt"
-            | "ass"
-            | "ssa"
-            | "sub"
-            | "ttf"
-            | "otf"
-            | "woff"
-            | "woff2"
-    )
+    media_kind_from_extension(ext).is_some()
 }
 
 #[cfg(test)]
@@ -191,6 +164,9 @@ mod tests {
         assert!(is_media_extension("mp4"));
         assert!(is_media_extension("MP4"));
         assert!(is_media_extension("wav"));
+        assert!(is_media_extension("opus"));
+        assert!(is_media_extension("oga"));
+        assert!(is_media_extension("weba"));
         assert!(is_media_extension("jpg"));
         assert!(is_media_extension("srt"));
         assert!(is_media_extension("ttf"));

@@ -9,7 +9,7 @@ use specta::Type;
 use tauri::State;
 
 use crate::core::{
-    assets::{Asset, AudioInfo, ProxyStatus, VideoInfo},
+    assets::{Asset, AssetKind, AudioInfo, ProxyStatus, VideoInfo},
     commands::{ImportAssetCommand, RemoveAssetCommand, UpdateAssetCommand},
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::validate_path_id_component,
@@ -77,6 +77,75 @@ fn resolve_asset_uri(project_root: &Path, uri: &str) -> (String, Option<String>)
     } else {
         (uri.to_string(), None)
     }
+}
+
+fn build_audio_info(audio_stream: &crate::core::ffmpeg::AudioStreamInfo) -> AudioInfo {
+    AudioInfo {
+        sample_rate: audio_stream.sample_rate,
+        channels: audio_stream.channels,
+        codec: audio_stream.codec.clone(),
+        bitrate: audio_stream.bitrate,
+    }
+}
+
+fn build_import_command(
+    name: &str,
+    resolved_uri: &str,
+    media_info: Option<&crate::core::ffmpeg::MediaInfo>,
+) -> ImportAssetCommand {
+    let mut command = ImportAssetCommand::new(name, resolved_uri);
+
+    if let Some(info) = media_info {
+        let has_video = info.video.is_some();
+        let has_audio = info.audio.is_some();
+
+        command = match command.asset.kind {
+            AssetKind::Image => ImportAssetCommand::image(name, resolved_uri, 1920, 1080),
+            AssetKind::Audio => {
+                if let Some(audio_stream) = info.audio.as_ref() {
+                    ImportAssetCommand::audio(name, resolved_uri, build_audio_info(audio_stream))
+                } else {
+                    ImportAssetCommand::audio(name, resolved_uri, AudioInfo::default())
+                }
+            }
+            AssetKind::Video => {
+                if !has_video && has_audio {
+                    if let Some(audio_stream) = info.audio.as_ref() {
+                        ImportAssetCommand::audio(
+                            name,
+                            resolved_uri,
+                            build_audio_info(audio_stream),
+                        )
+                    } else {
+                        ImportAssetCommand::new(name, resolved_uri)
+                    }
+                } else if let Some(video_stream) = info.video.as_ref() {
+                    ImportAssetCommand::video(name, resolved_uri, build_video_info(video_stream))
+                } else {
+                    ImportAssetCommand::new(name, resolved_uri)
+                }
+            }
+            _ => ImportAssetCommand::new(name, resolved_uri),
+        };
+
+        command = command
+            .with_duration(info.duration_sec)
+            .with_file_size(info.size_bytes);
+
+        if matches!(command.asset.kind, AssetKind::Video) {
+            if let Some(video_stream) = info.video.as_ref() {
+                command = command.with_video_info(build_video_info(video_stream));
+            }
+        }
+
+        if matches!(command.asset.kind, AssetKind::Audio | AssetKind::Video) {
+            if let Some(audio_stream) = info.audio.as_ref() {
+                command = command.with_audio_info(build_audio_info(audio_stream));
+            }
+        }
+    }
+
+    command
 }
 
 fn build_video_info(video_stream: &crate::core::ffmpeg::VideoStreamInfo) -> VideoInfo {
@@ -177,31 +246,11 @@ pub async fn import_asset(
         }
     };
 
-    let mut command = ImportAssetCommand::new(&name, &resolved_uri);
+    let mut command = build_import_command(&name, &resolved_uri, media_info.as_ref());
     if let Some(ref rel_path) = relative_path {
         command = command.with_project_root(project_root.clone());
         command.asset.relative_path = Some(rel_path.clone());
         command.asset.workspace_managed = true;
-    }
-
-    if let Some(media_info) = media_info {
-        command = command
-            .with_duration(media_info.duration_sec)
-            .with_file_size(media_info.size_bytes);
-
-        if let Some(video_stream) = media_info.video.as_ref() {
-            command = command.with_video_info(build_video_info(video_stream));
-        }
-
-        if let Some(audio_stream) = media_info.audio {
-            let audio_info = AudioInfo {
-                sample_rate: audio_stream.sample_rate,
-                channels: audio_stream.channels,
-                codec: audio_stream.codec,
-                bitrate: audio_stream.bitrate,
-            };
-            command = command.with_audio_info(audio_info);
-        }
     }
 
     let asset_id = command.asset_id().to_string();
@@ -299,6 +348,19 @@ pub async fn import_asset(
 mod tests {
     use super::*;
 
+    fn mock_media_info(
+        video: Option<crate::core::ffmpeg::VideoStreamInfo>,
+        audio: Option<crate::core::ffmpeg::AudioStreamInfo>,
+    ) -> crate::core::ffmpeg::MediaInfo {
+        crate::core::ffmpeg::MediaInfo {
+            duration_sec: 12.0,
+            video,
+            audio,
+            format: "mock".to_string(),
+            size_bytes: 1024,
+        }
+    }
+
     #[test]
     fn test_build_video_info_preserves_hdr_metadata() {
         let video_stream = crate::core::ffmpeg::VideoStreamInfo {
@@ -326,6 +388,67 @@ mod tests {
 
         assert!(PathBuf::from(&resolved_uri).ends_with(Path::new("media/clip.mp4")));
         assert_eq!(relative_path.as_deref(), Some("media/clip.mp4"));
+    }
+
+    #[test]
+    fn test_build_import_command_keeps_image_kind_when_ffprobe_reports_video_stream() {
+        let media_info = mock_media_info(
+            Some(crate::core::ffmpeg::VideoStreamInfo {
+                width: 1920,
+                height: 1080,
+                fps: 1.0,
+                codec: "mjpeg".to_string(),
+                pixel_format: "yuvj420p".to_string(),
+                bitrate: None,
+                is_hdr: false,
+                color_transfer: None,
+            }),
+            None,
+        );
+
+        let command = build_import_command("cover.jpg", "/tmp/cover.jpg", Some(&media_info));
+        assert_eq!(command.asset.kind, AssetKind::Image);
+    }
+
+    #[test]
+    fn test_build_import_command_keeps_audio_kind_when_cover_art_is_present() {
+        let media_info = mock_media_info(
+            Some(crate::core::ffmpeg::VideoStreamInfo {
+                width: 600,
+                height: 600,
+                fps: 1.0,
+                codec: "mjpeg".to_string(),
+                pixel_format: "yuvj420p".to_string(),
+                bitrate: None,
+                is_hdr: false,
+                color_transfer: None,
+            }),
+            Some(crate::core::ffmpeg::AudioStreamInfo {
+                sample_rate: 44100,
+                channels: 2,
+                codec: "aac".to_string(),
+                bitrate: Some(192_000),
+            }),
+        );
+
+        let command = build_import_command("podcast.m4a", "/tmp/podcast.m4a", Some(&media_info));
+        assert_eq!(command.asset.kind, AssetKind::Audio);
+    }
+
+    #[test]
+    fn test_build_import_command_promotes_unknown_extension_audio_when_no_video_stream_exists() {
+        let media_info = mock_media_info(
+            None,
+            Some(crate::core::ffmpeg::AudioStreamInfo {
+                sample_rate: 48000,
+                channels: 1,
+                codec: "pcm_s16le".to_string(),
+                bitrate: None,
+            }),
+        );
+
+        let command = build_import_command("voice.track", "/tmp/voice.track", Some(&media_info));
+        assert_eq!(command.asset.kind, AssetKind::Audio);
     }
 }
 

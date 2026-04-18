@@ -909,7 +909,7 @@ pub async fn export_frame(
 /// Exports audio only from a sequence (no video).
 ///
 /// Renders all audio tracks mixed down to a single audio file.
-/// Supports WAV, MP3, and FLAC output formats. Reports progress via
+/// Supports WAV, MP3, M4A, FLAC, and OGG output formats. Reports progress via
 /// Tauri events using the same `render-progress` event pattern.
 #[tauri::command]
 #[specta::specta]
@@ -921,6 +921,8 @@ pub async fn export_audio_only(
     output_path: String,
     bitrate: Option<String>,
     sample_rate: Option<u32>,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
     state: State<'_, AppState>,
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
     app_handle: tauri::AppHandle,
@@ -932,7 +934,9 @@ pub async fn export_audio_only(
     let audio_format = match format.to_lowercase().as_str() {
         "wav" => AudioExportFormat::Wav,
         "mp3" => AudioExportFormat::Mp3,
+        "m4a" => AudioExportFormat::M4a,
         "flac" => AudioExportFormat::Flac,
+        "ogg" => AudioExportFormat::Ogg,
         _ => return Err(format!("Unsupported audio format: {}", format)),
     };
 
@@ -985,8 +989,8 @@ pub async fn export_audio_only(
         output_path: validated_output_path,
         bitrate,
         sample_rate,
-        start_time: None,
-        end_time: None,
+        start_time,
+        end_time,
     };
 
     let job_id = ulid::Ulid::new().to_string();

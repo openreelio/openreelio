@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { save } from '@tauri-apps/plugin-dialog';
 import { useExportDialog } from './useExportDialog';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
@@ -96,6 +97,114 @@ describe('useExportDialog', () => {
     expect(result.current.status).toEqual({
       type: 'failed',
       error: 'In point must be before Out point.',
+    });
+  });
+
+  it('should call export_audio_only when audio export is selected', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      jobId: 'job-1',
+      outputPath: '/tmp/out.m4a',
+      status: 'started',
+    });
+
+    const { result } = renderHook(() =>
+      useExportDialog({
+        isOpen: true,
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+        initialExportKind: 'audio',
+        useRange: true,
+        inPoint: 3,
+        outPoint: 7.5,
+      }),
+    );
+
+    act(() => {
+      result.current.setOutputPath('/tmp/out.m4a');
+      result.current.setSelectedAudioFormat('m4a');
+    });
+
+    await act(async () => {
+      await result.current.handleExport();
+    });
+
+    expect(invoke).toHaveBeenCalledWith('export_audio_only', {
+      sequenceId: 'sequence-1',
+      format: 'm4a',
+      outputPath: '/tmp/out.m4a',
+      bitrate: null,
+      sampleRate: null,
+      startTime: 3,
+      endTime: 7.5,
+    });
+  });
+
+  it('should browse with audio-specific filters when audio export is selected', async () => {
+    vi.mocked(save).mockResolvedValue('/tmp/out.ogg');
+
+    const { result } = renderHook(() =>
+      useExportDialog({
+        isOpen: true,
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+        initialExportKind: 'audio',
+      }),
+    );
+
+    act(() => {
+      result.current.setSelectedAudioFormat('ogg');
+    });
+
+    await act(async () => {
+      await result.current.handleBrowse();
+    });
+
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        defaultPath: 'Sequence.ogg',
+        title: 'Export Audio',
+        filters: [{ name: 'Ogg Audio', extensions: ['ogg'] }],
+      }),
+    );
+    expect(result.current.outputPath).toBe('/tmp/out.ogg');
+  });
+
+  it('should update the output extension when switching export kind', async () => {
+    const { result } = renderHook(() =>
+      useExportDialog({
+        isOpen: true,
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+      }),
+    );
+
+    act(() => {
+      result.current.setOutputPath('/tmp/final.mp4');
+      result.current.setExportKind('audio');
+    });
+
+    await waitFor(() => {
+      expect(result.current.outputPath).toBe('/tmp/final.wav');
+    });
+  });
+
+  it('should update the output extension when changing audio format', async () => {
+    const { result } = renderHook(() =>
+      useExportDialog({
+        isOpen: true,
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+        initialExportKind: 'audio',
+      }),
+    );
+
+    act(() => {
+      result.current.setOutputPath('/tmp/final.wav');
+      result.current.setSelectedAudioFormat('ogg');
+    });
+
+    await waitFor(() => {
+      expect(result.current.outputPath).toBe('/tmp/final.ogg');
     });
   });
 });

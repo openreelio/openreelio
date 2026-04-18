@@ -8,19 +8,34 @@
 // Export Preset Types
 // =============================================================================
 
-/** Export preset icon options */
-export type ExportPresetIcon = 'monitor' | 'smartphone' | 'film' | 'globe';
+/** Export workflow kind */
+export type ExportKind = 'video' | 'audio';
 
-/** Export preset configuration */
-export interface ExportPreset {
-  /** Unique preset identifier */
+/** Export option icon options */
+export type ExportOptionIcon = 'monitor' | 'smartphone' | 'film' | 'globe' | 'audio';
+
+/** Shared selectable export option shape */
+export interface SelectableExportOption {
+  /** Unique option identifier */
   id: string;
   /** Display name */
   name: string;
   /** Description of format/quality settings */
   description: string;
   /** Icon to display */
-  icon: ExportPresetIcon;
+  icon: ExportOptionIcon;
+}
+
+/** Export preset configuration */
+export type ExportPreset = SelectableExportOption;
+
+/** Audio export format IDs */
+export type AudioExportFormat = 'wav' | 'mp3' | 'm4a' | 'flac' | 'ogg';
+
+/** Audio export option configuration */
+export interface AudioFormatOption extends SelectableExportOption {
+  /** Audio format identifier */
+  id: AudioExportFormat;
 }
 
 // =============================================================================
@@ -78,6 +93,8 @@ export interface ExportDialogProps {
   sequenceId: string | null;
   /** Sequence name for display */
   sequenceName?: string;
+  /** Which export mode to show when the dialog opens */
+  initialExportKind?: ExportKind;
 }
 
 // =============================================================================
