@@ -319,6 +319,7 @@ export function useCommandPalette(
       action('settings.shortcuts', 'Settings: Keyboard Shortcuts', 'Settings', () =>
         openSettings('shortcuts'),
       ),
+      action('settings.terminal', 'Settings: Terminal', 'Settings', () => openSettings('terminal')),
       action('settings.ai', 'Settings: AI', 'Settings', () => openSettings('ai')),
       action('settings.developer', 'Settings: Developer', 'Settings', () =>
         openSettings('developer'),

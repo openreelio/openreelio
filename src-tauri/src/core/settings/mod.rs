@@ -67,6 +67,10 @@ pub struct AppSettings {
     /// AI settings
     #[serde(default)]
     pub ai: AISettings,
+
+    /// Integrated terminal settings
+    #[serde(default)]
+    pub terminal: TerminalSettings,
 }
 
 fn default_version() -> u32 {
@@ -86,6 +90,7 @@ impl Default for AppSettings {
             auto_save: AutoSaveSettings::default(),
             performance: PerformanceSettings::default(),
             ai: AISettings::default(),
+            terminal: TerminalSettings::default(),
         }
     }
 }
@@ -155,6 +160,8 @@ impl AppSettings {
 
         // Normalize AI settings
         self.ai.normalize();
+
+        self.terminal.normalize();
     }
 }
 
@@ -533,6 +540,60 @@ fn default_max_jobs() -> u32 {
 
 fn default_cache_size() -> u32 {
     1024 // 1GB
+}
+
+/// Integrated terminal settings
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSettings {
+    /// Explicit shell/terminal executable. None uses the OS default shell.
+    #[serde(default)]
+    pub default_shell_command: Option<String>,
+}
+
+impl TerminalSettings {
+    fn normalize(&mut self) {
+        self.default_shell_command = self.default_shell_command.take().and_then(|command| {
+            let trimmed = command.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+
+            let normalized = repair_legacy_terminal_command_line(trimmed);
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized.chars().take(512).collect())
+            }
+        });
+    }
+}
+
+fn repair_legacy_terminal_command_line(command: &str) -> String {
+    let trimmed = command.trim();
+    if trimmed.is_empty() || trimmed.starts_with('"') {
+        return trimmed.to_string();
+    }
+
+    let quote_count = trimmed.chars().filter(|ch| *ch == '"').count();
+    if quote_count % 2 == 1 {
+        if let Some(first_quote_index) = trimmed.find('"') {
+            let prefix = &trimmed[..first_quote_index];
+            let looks_windows_path = prefix.len() >= 3
+                && prefix.as_bytes()[1] == b':'
+                && matches!(prefix.as_bytes()[2], b'\\' | b'/');
+            let lower_prefix = prefix.to_ascii_lowercase();
+            let looks_executable = [".exe", ".cmd", ".bat", ".com"]
+                .iter()
+                .any(|extension| lower_prefix.ends_with(extension));
+
+            if looks_windows_path && looks_executable {
+                return format!("\"{trimmed}");
+            }
+        }
+    }
+
+    trimmed.to_string()
 }
 
 // ============================================================

@@ -10,6 +10,7 @@ import {
   createDefaultLayout,
   findPanelZone,
   findPreset,
+  revealWorkspacePanel,
   WORKSPACE_PRESETS,
   MIN_ZONE_SIZES,
   MAX_ZONE_SIZES,
@@ -126,6 +127,26 @@ describe('WorkspaceLayoutStore', () => {
       const { layout } = useWorkspaceLayoutStore.getState();
       expect(layout.zones.left.activePanelId).toBe('explorer');
     });
+
+    it('should restore the terminal panel into the bottom zone when requested', () => {
+      const store = useWorkspaceLayoutStore.getState();
+      store.restorePanel('terminal', 'bottom');
+
+      const { layout } = useWorkspaceLayoutStore.getState();
+      expect(layout.zones.bottom.panelIds).toContain('terminal');
+    });
+
+    it('should hide a panel and update the active tab when removed', () => {
+      const store = useWorkspaceLayoutStore.getState();
+      store.restorePanel('terminal', 'bottom');
+      store.setActivePanel('bottom', 'terminal');
+
+      store.hidePanel('terminal');
+
+      const { layout } = useWorkspaceLayoutStore.getState();
+      expect(layout.zones.bottom.panelIds).not.toContain('terminal');
+      expect(layout.zones.bottom.activePanelId).toBe('history');
+    });
   });
 
   describe('zone collapse', () => {
@@ -153,10 +174,14 @@ describe('WorkspaceLayoutStore', () => {
       const store = useWorkspaceLayoutStore.getState();
 
       store.setLeftWidth(100); // Below minimum
-      expect(useWorkspaceLayoutStore.getState().layout.sizes.leftWidth).toBe(MIN_ZONE_SIZES.sidebarWidth);
+      expect(useWorkspaceLayoutStore.getState().layout.sizes.leftWidth).toBe(
+        MIN_ZONE_SIZES.sidebarWidth,
+      );
 
       store.setLeftWidth(1000); // Above maximum
-      expect(useWorkspaceLayoutStore.getState().layout.sizes.leftWidth).toBe(MAX_ZONE_SIZES.sidebarWidth);
+      expect(useWorkspaceLayoutStore.getState().layout.sizes.leftWidth).toBe(
+        MAX_ZONE_SIZES.sidebarWidth,
+      );
 
       store.setLeftWidth(300); // Normal value
       expect(useWorkspaceLayoutStore.getState().layout.sizes.leftWidth).toBe(300);
@@ -166,7 +191,9 @@ describe('WorkspaceLayoutStore', () => {
       const store = useWorkspaceLayoutStore.getState();
 
       store.setRightWidth(50);
-      expect(useWorkspaceLayoutStore.getState().layout.sizes.rightWidth).toBe(MIN_ZONE_SIZES.sidebarWidth);
+      expect(useWorkspaceLayoutStore.getState().layout.sizes.rightWidth).toBe(
+        MIN_ZONE_SIZES.sidebarWidth,
+      );
 
       store.setRightWidth(400);
       expect(useWorkspaceLayoutStore.getState().layout.sizes.rightWidth).toBe(400);
@@ -176,10 +203,14 @@ describe('WorkspaceLayoutStore', () => {
       const store = useWorkspaceLayoutStore.getState();
 
       store.setCenterSplitRatio(0.1); // Below min
-      expect(useWorkspaceLayoutStore.getState().layout.sizes.centerSplitRatio).toBe(MIN_ZONE_SIZES.centerSplitMin);
+      expect(useWorkspaceLayoutStore.getState().layout.sizes.centerSplitRatio).toBe(
+        MIN_ZONE_SIZES.centerSplitMin,
+      );
 
       store.setCenterSplitRatio(0.9); // Above max
-      expect(useWorkspaceLayoutStore.getState().layout.sizes.centerSplitRatio).toBe(MIN_ZONE_SIZES.centerSplitMax);
+      expect(useWorkspaceLayoutStore.getState().layout.sizes.centerSplitRatio).toBe(
+        MIN_ZONE_SIZES.centerSplitMax,
+      );
 
       store.setCenterSplitRatio(0.6);
       expect(useWorkspaceLayoutStore.getState().layout.sizes.centerSplitRatio).toBe(0.6);
@@ -189,10 +220,14 @@ describe('WorkspaceLayoutStore', () => {
       const store = useWorkspaceLayoutStore.getState();
 
       store.setBottomHeight(10);
-      expect(useWorkspaceLayoutStore.getState().layout.sizes.bottomHeight).toBe(MIN_ZONE_SIZES.bottomHeight);
+      expect(useWorkspaceLayoutStore.getState().layout.sizes.bottomHeight).toBe(
+        MIN_ZONE_SIZES.bottomHeight,
+      );
 
       store.setBottomHeight(800);
-      expect(useWorkspaceLayoutStore.getState().layout.sizes.bottomHeight).toBe(MAX_ZONE_SIZES.bottomHeight);
+      expect(useWorkspaceLayoutStore.getState().layout.sizes.bottomHeight).toBe(
+        MAX_ZONE_SIZES.bottomHeight,
+      );
     });
   });
 
@@ -245,6 +280,33 @@ describe('WorkspaceLayoutStore', () => {
     it('should return null for panel not in any zone', () => {
       const layout = createDefaultLayout();
       expect(findPanelZone(layout, 'audio-mixer')).toBeNull();
+    });
+  });
+
+  describe('revealWorkspacePanel', () => {
+    it('should restore and activate a missing panel in the default zone', () => {
+      const zoneId = revealWorkspacePanel('terminal', 'bottom');
+
+      const { layout } = useWorkspaceLayoutStore.getState();
+      expect(zoneId).toBe('bottom');
+      expect(layout.zones.bottom.panelIds).toContain('terminal');
+      expect(layout.zones.bottom.activePanelId).toBe('terminal');
+      expect(layout.zones.bottom.collapsed).toBe(false);
+    });
+
+    it('should move a panel back to its canonical zone when requested', () => {
+      const store = useWorkspaceLayoutStore.getState();
+      store.movePanel('explorer', 'right');
+
+      const zoneId = revealWorkspacePanel('explorer', 'left', {
+        moveToDefaultZone: true,
+      });
+
+      const { layout } = useWorkspaceLayoutStore.getState();
+      expect(zoneId).toBe('left');
+      expect(layout.zones.left.panelIds).toContain('explorer');
+      expect(layout.zones.left.activePanelId).toBe('explorer');
+      expect(layout.zones.right.panelIds).not.toContain('explorer');
     });
   });
 
@@ -326,7 +388,7 @@ describe('WorkspaceLayoutStore', () => {
         const { layout, activePresetId } = useWorkspaceLayoutStore.getState();
         expect(activePresetId).toBe('assembly');
         expect(layout.zones.right.collapsed).toBe(true);
-        expect(layout.zones.right.panelIds).toEqual([]);
+        expect(layout.zones.right.panelIds).toEqual(['ai-assistant']);
         expect(layout.sizes.centerSplitRatio).toBe(0.65);
       });
 

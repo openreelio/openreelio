@@ -175,6 +175,9 @@ export type {
   WorkspaceLayoutStore,
 } from './workspaceLayoutStore';
 
+export { useTerminalStore, cleanupTerminalSessions, TERMINAL_PANEL_ID } from './terminalStore';
+export type { TerminalSessionRecord } from './terminalStore';
+
 export {
   useAgentStore,
   useHasActiveSession,

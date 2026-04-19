@@ -9,6 +9,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
+import { isVideoGenerationEnabled } from '@/config/featureFlags';
 
 // =============================================================================
 // Types
@@ -20,6 +21,7 @@ export type PanelId =
   | 'source-monitor'
   | 'program-monitor'
   | 'timeline'
+  | 'terminal'
   | 'inspector'
   | 'ai-assistant'
   | 'agent-review'
@@ -89,6 +91,7 @@ export const PANEL_REGISTRY: Record<PanelId, PanelMeta> = {
     minWidth: 300,
   },
   timeline: { id: 'timeline', label: 'Timeline', icon: 'Film', minHeight: 120 },
+  terminal: { id: 'terminal', label: 'Terminal', icon: 'Terminal', minHeight: 140 },
   inspector: { id: 'inspector', label: 'Inspector', icon: 'SlidersHorizontal', minWidth: 240 },
   'ai-assistant': { id: 'ai-assistant', label: 'AI Assistant', icon: 'Sparkles', minWidth: 280 },
   'agent-review': {
@@ -121,6 +124,9 @@ export const MIN_ZONE_SIZES = {
   centerSplitMax: 0.8,
 } as const;
 
+const DEFAULT_BOTTOM_PANEL_IDS: PanelId[] = ['history', 'transcript'];
+const DEFAULT_BOTTOM_ACTIVE_PANEL: PanelId = 'history';
+
 /** Maximum zone sizes */
 export const MAX_ZONE_SIZES = {
   sidebarWidth: 600,
@@ -152,8 +158,8 @@ export function createDefaultLayout(): WorkspaceLayout {
         collapsed: false,
       },
       bottom: {
-        panelIds: ['comparison', 'history', 'transcript', 'performance'],
-        activePanelId: 'comparison',
+        panelIds: [...DEFAULT_BOTTOM_PANEL_IDS],
+        activePanelId: DEFAULT_BOTTOM_ACTIVE_PANEL,
         collapsed: true,
       },
     },
@@ -201,8 +207,8 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
           collapsed: false,
         },
         bottom: {
-          panelIds: ['history', 'comparison'],
-          activePanelId: 'history',
+          panelIds: [...DEFAULT_BOTTOM_PANEL_IDS],
+          activePanelId: DEFAULT_BOTTOM_ACTIVE_PANEL,
           collapsed: true,
         },
       },
@@ -229,8 +235,8 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
           collapsed: false,
         },
         bottom: {
-          panelIds: ['history', 'performance'],
-          activePanelId: 'history',
+          panelIds: [...DEFAULT_BOTTOM_PANEL_IDS],
+          activePanelId: DEFAULT_BOTTOM_ACTIVE_PANEL,
           collapsed: true,
         },
       },
@@ -257,8 +263,8 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
           collapsed: false,
         },
         bottom: {
-          panelIds: ['performance', 'transcript'],
-          activePanelId: 'performance',
+          panelIds: [...DEFAULT_BOTTOM_PANEL_IDS],
+          activePanelId: DEFAULT_BOTTOM_ACTIVE_PANEL,
           collapsed: true,
         },
       },
@@ -285,8 +291,8 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
           collapsed: false,
         },
         bottom: {
-          panelIds: ['comparison', 'generation'],
-          activePanelId: 'comparison',
+          panelIds: [...DEFAULT_BOTTOM_PANEL_IDS],
+          activePanelId: DEFAULT_BOTTOM_ACTIVE_PANEL,
           collapsed: true,
         },
       },
@@ -309,8 +315,8 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
         'center-bottom': { panelIds: ['timeline'], activePanelId: 'timeline', collapsed: false },
         right: { panelIds: [], activePanelId: null, collapsed: true },
         bottom: {
-          panelIds: ['ai-assistant'],
-          activePanelId: 'ai-assistant',
+          panelIds: ['history'],
+          activePanelId: 'history',
           collapsed: true,
         },
       },
@@ -349,6 +355,8 @@ interface WorkspaceLayoutState {
 interface WorkspaceLayoutActions {
   /** Move a panel from its current zone to a target zone */
   movePanel: (panelId: PanelId, targetZoneId: DockZoneId) => void;
+  /** Remove a panel from its current zone without deleting its content definition */
+  hidePanel: (panelId: PanelId) => void;
   /** Restore a panel into the layout when it is missing from all zones */
   restorePanel: (panelId: PanelId, targetZoneId?: DockZoneId) => void;
   /** Set the active (visible) panel in a zone */
@@ -404,10 +412,44 @@ export function findPanelZone(layout: WorkspaceLayout, panelId: PanelId): DockZo
   return null;
 }
 
+export function revealWorkspacePanel(
+  panelId: PanelId,
+  defaultZoneId: DockZoneId,
+  options: { moveToDefaultZone?: boolean } = {},
+): DockZoneId | null {
+  let store = useWorkspaceLayoutStore.getState();
+  let targetZoneId = findPanelZone(store.layout, panelId);
+
+  if (options.moveToDefaultZone && targetZoneId && targetZoneId !== defaultZoneId) {
+    store.hidePanel(panelId);
+    store = useWorkspaceLayoutStore.getState();
+    targetZoneId = null;
+  }
+
+  if (!targetZoneId) {
+    store.restorePanel(panelId, defaultZoneId);
+    store = useWorkspaceLayoutStore.getState();
+    targetZoneId = findPanelZone(store.layout, panelId);
+  }
+
+  if (!targetZoneId) {
+    return null;
+  }
+
+  store.setActivePanel(targetZoneId, panelId);
+  store.setZoneCollapsed(targetZoneId, false);
+  return targetZoneId;
+}
+
 function normalizeZone(zone: DockZone): void {
   const seen = new Set<PanelId>();
+  const videoGenerationEnabled = isVideoGenerationEnabled();
+
   zone.panelIds = zone.panelIds.filter((panelId): panelId is PanelId => {
     if (!(panelId in PANEL_REGISTRY)) {
+      return false;
+    }
+    if (panelId === 'generation' && !videoGenerationEnabled) {
       return false;
     }
     if (seen.has(panelId)) {
@@ -448,6 +490,10 @@ function normalizeWorkspaceLayout(layout: WorkspaceLayout): WorkspaceLayout {
 
   for (const zone of Object.values(normalized.zones)) {
     normalizeZone(zone);
+    zone.panelIds = zone.panelIds.filter((panelId) => panelId !== 'terminal');
+    if (zone.activePanelId === 'terminal') {
+      zone.activePanelId = zone.panelIds[0] ?? null;
+    }
   }
 
   ensurePanelInLayout(normalized, 'ai-assistant', 'right');
@@ -502,8 +548,30 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
         });
       },
 
+      hidePanel: (panelId) => {
+        set((state) => {
+          const sourceZoneId = findPanelZone(state.layout, panelId);
+          if (!sourceZoneId) {
+            return;
+          }
+
+          const sourceZone = state.layout.zones[sourceZoneId];
+          sourceZone.panelIds = sourceZone.panelIds.filter((id) => id !== panelId);
+
+          if (sourceZone.activePanelId === panelId) {
+            sourceZone.activePanelId = sourceZone.panelIds[0] ?? null;
+          }
+
+          state.activePresetId = null;
+        });
+      },
+
       restorePanel: (panelId, targetZoneId = 'right') => {
         set((state) => {
+          if (panelId === 'generation' && !isVideoGenerationEnabled()) {
+            return;
+          }
+
           const existingZoneId = findPanelZone(state.layout, panelId);
           if (existingZoneId) {
             return;

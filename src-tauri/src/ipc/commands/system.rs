@@ -90,6 +90,7 @@ pub struct AppSettingsDto {
     pub auto_save: AutoSaveSettingsDto,
     pub performance: PerformanceSettingsDto,
     pub ai: AISettingsDto,
+    pub terminal: TerminalSettingsDto,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
@@ -168,6 +169,12 @@ pub struct PerformanceSettingsDto {
     pub max_concurrent_jobs: u32,
     pub memory_limit_mb: u32,
     pub cache_size_mb: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSettingsDto {
+    pub default_shell_command: Option<String>,
 }
 
 /// AI provider type for settings DTO
@@ -350,6 +357,9 @@ impl From<AppSettings> for AppSettingsDto {
                 video_gen_budget_cents: s.ai.video_gen_budget_cents,
                 video_gen_per_request_limit_cents: s.ai.video_gen_per_request_limit_cents,
             },
+            terminal: TerminalSettingsDto {
+                default_shell_command: s.terminal.default_shell_command,
+            },
         }
     }
 }
@@ -453,6 +463,9 @@ impl From<AppSettingsDto> for AppSettings {
                 video_gen_default_quality: dto.ai.video_gen_default_quality,
                 video_gen_budget_cents: dto.ai.video_gen_budget_cents,
                 video_gen_per_request_limit_cents: dto.ai.video_gen_per_request_limit_cents,
+            },
+            terminal: TerminalSettings {
+                default_shell_command: dto.terminal.default_shell_command,
             },
         }
     }
@@ -633,6 +646,8 @@ fn merge_json(base: &mut serde_json::Value, patch: serde_json::Value) {
 #[tracing::instrument(skip(_state))]
 pub async fn app_cleanup(_state: State<'_, AppState>) -> Result<AppCleanupResult, String> {
     tracing::info!("App cleanup requested");
+
+    crate::ipc::shutdown_all_terminal_sessions(&_state).await;
 
     // Currently the frontend handles prompting/saving unsaved projects.
     // Background workers are spawned as async tasks and will stop when the process exits.

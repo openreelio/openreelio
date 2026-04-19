@@ -14,6 +14,8 @@ pub mod core;
 pub mod ipc;
 
 use std::path::{Path, PathBuf};
+#[cfg(all(not(test), feature = "gui"))]
+use std::{collections::HashMap, sync::Arc};
 
 // NOTE: Unit tests in this repository intentionally avoid linking the Tauri runtime.
 // On some Windows environments, dynamic dependencies of the webview stack can prevent
@@ -839,6 +841,9 @@ pub struct AppState {
     /// The loop reads `WorkspaceEvent`s from the watcher channel, updates the
     /// asset index and project state, then emits Tauri events to the frontend.
     pub workspace_event_loop: Mutex<Option<tokio::task::JoinHandle<()>>>,
+
+    /// Active integrated terminal sessions keyed by session ID.
+    pub terminal_sessions: Mutex<HashMap<String, Arc<crate::ipc::terminal::TerminalSessionHandle>>>,
 }
 
 /// Runtime source monitor state for dual-viewer workflow.
@@ -967,6 +972,7 @@ impl AppState {
             workspace_watcher: Mutex::new(None),
             workspace_watcher_lifecycle: Mutex::new(()),
             workspace_event_loop: Mutex::new(None),
+            terminal_sessions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1331,6 +1337,13 @@ mod tauri_app {
                 $crate::ipc::read_agent_trace,
                 $crate::ipc::execute_agent_plan,
                 $crate::ipc::search_stock_media,
+                // Integrated terminal commands
+                $crate::ipc::list_terminal_profiles,
+                $crate::ipc::start_terminal_session,
+                $crate::ipc::write_terminal_input,
+                $crate::ipc::resize_terminal_session,
+                $crate::ipc::kill_terminal_session,
+                $crate::ipc::close_terminal_session,
                 // Agent memory commands
                 $crate::ipc::save_agent_memory,
                 $crate::ipc::get_agent_memory,
@@ -1771,6 +1784,13 @@ mod tauri_app {
             ipc::read_agent_trace,
             ipc::execute_agent_plan,
             ipc::search_stock_media,
+            // Integrated terminal commands
+            ipc::list_terminal_profiles,
+            ipc::start_terminal_session,
+            ipc::write_terminal_input,
+            ipc::resize_terminal_session,
+            ipc::kill_terminal_session,
+            ipc::close_terminal_session,
             // Agent memory commands
             ipc::save_agent_memory,
             ipc::get_agent_memory,

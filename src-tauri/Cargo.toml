@@ -119,6 +119,7 @@ notify = { version = "7", features = ["macos_fsevent"] }
 notify-debouncer-mini = "0.5"
 walkdir = "2"
 globset = "0.4"
+portable-pty = "0.9"
 
 # Filesystem operations (send to OS trash)
 trash = "5"

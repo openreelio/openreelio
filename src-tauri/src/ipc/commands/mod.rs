@@ -66,6 +66,9 @@ pub mod effect_presets;
 // Agent commands (trace writing, plan execution, memory persistence)
 pub mod agent;
 
+// Integrated terminal commands (PTY-backed shell sessions)
+pub mod terminal;
+
 // Interchange commands (EDL/FCPXML export)
 pub mod interchange;
 
@@ -103,6 +106,9 @@ pub use effect_presets::*;
 
 // Re-export agent commands
 pub use agent::*;
+
+// Re-export terminal commands
+pub use terminal::*;
 
 // Re-export interchange commands
 pub use interchange::*;

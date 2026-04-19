@@ -38,6 +38,7 @@ import { refreshProjectState, applyProjectState } from '@/utils/stateRefreshHelp
 import { useWorkspaceStore, setupWorkspaceEventListeners } from '@/stores/workspaceStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useCommandPaletteStore } from '@/stores/commandPaletteStore';
+import { cleanupTerminalSessions } from '@/stores/terminalStore';
 
 const logger = createLogger('ProjectStore');
 
@@ -402,6 +403,15 @@ export const useProjectStore = create<ProjectState>()(
         state.stateVersion += 1;
       });
       useCommandPaletteStore.getState().close();
+
+      try {
+        const cleanedUp = await cleanupTerminalSessions();
+        if (!cleanedUp) {
+          logger.warn('Some terminal sessions could not be closed during project close');
+        }
+      } catch (error) {
+        logger.warn('Terminal cleanup failed during project close', { error });
+      }
 
       logger.info('Project closed and state reset');
     },
