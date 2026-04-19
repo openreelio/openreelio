@@ -94,6 +94,12 @@ fn build_import_command(
     media_info: Option<&crate::core::ffmpeg::MediaInfo>,
 ) -> ImportAssetCommand {
     let mut command = ImportAssetCommand::new(name, resolved_uri);
+    let extension = std::path::Path::new(resolved_uri)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_ambiguous_ogg = extension == "ogg";
 
     if let Some(info) = media_info {
         let has_video = info.video.is_some();
@@ -102,7 +108,13 @@ fn build_import_command(
         command = match command.asset.kind {
             AssetKind::Image => ImportAssetCommand::image(name, resolved_uri, 1920, 1080),
             AssetKind::Audio => {
-                if let Some(audio_stream) = info.audio.as_ref() {
+                if is_ambiguous_ogg && has_video {
+                    ImportAssetCommand::video(
+                        name,
+                        resolved_uri,
+                        build_video_info(info.video.as_ref().expect("video stream checked above")),
+                    )
+                } else if let Some(audio_stream) = info.audio.as_ref() {
                     ImportAssetCommand::audio(name, resolved_uri, build_audio_info(audio_stream))
                 } else {
                     ImportAssetCommand::audio(name, resolved_uri, AudioInfo::default())
@@ -433,6 +445,31 @@ mod tests {
 
         let command = build_import_command("podcast.m4a", "/tmp/podcast.m4a", Some(&media_info));
         assert_eq!(command.asset.kind, AssetKind::Audio);
+    }
+
+    #[test]
+    fn test_build_import_command_promotes_ambiguous_ogg_with_video_stream_to_video() {
+        let media_info = mock_media_info(
+            Some(crate::core::ffmpeg::VideoStreamInfo {
+                width: 1280,
+                height: 720,
+                fps: 30.0,
+                codec: "theora".to_string(),
+                pixel_format: "yuv420p".to_string(),
+                bitrate: Some(2_000_000),
+                is_hdr: false,
+                color_transfer: None,
+            }),
+            Some(crate::core::ffmpeg::AudioStreamInfo {
+                sample_rate: 48000,
+                channels: 2,
+                codec: "opus".to_string(),
+                bitrate: Some(192_000),
+            }),
+        );
+
+        let command = build_import_command("clip.ogg", "/tmp/clip.ogg", Some(&media_info));
+        assert_eq!(command.asset.kind, AssetKind::Video);
     }
 
     #[test]

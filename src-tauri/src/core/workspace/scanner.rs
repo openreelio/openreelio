@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use walkdir::WalkDir;
 
-use crate::core::assets::{media_kind_from_extension, AssetKind};
+use crate::core::assets::{media_kind_from_extension, AssetKind, MetadataExtractor};
 
 use super::ignore::IgnoreRules;
 
@@ -32,6 +32,22 @@ pub struct WorkspaceScanner {
     project_root: PathBuf,
     ignore_rules: IgnoreRules,
     max_depth: usize,
+}
+
+fn media_kind_for_path(path: &Path, ext: &str) -> Option<AssetKind> {
+    if ext.eq_ignore_ascii_case("ogg") {
+        if let Ok(metadata) = MetadataExtractor::extract(path) {
+            if metadata.video.is_some() {
+                return Some(AssetKind::Video);
+            }
+
+            if metadata.audio.is_some() {
+                return Some(AssetKind::Audio);
+            }
+        }
+    }
+
+    media_kind_from_extension(ext)
 }
 
 impl WorkspaceScanner {
@@ -136,7 +152,7 @@ impl WorkspaceScanner {
 
         // Check extension for media type
         let ext = absolute_path.extension()?.to_str()?;
-        let kind = media_kind_from_extension(ext)?;
+        let kind = media_kind_for_path(absolute_path, ext)?;
 
         // Get file metadata
         let metadata = std::fs::metadata(absolute_path).ok()?;
@@ -388,5 +404,17 @@ mod tests {
         assert_eq!(media_kind_from_extension("txt"), None);
         assert_eq!(media_kind_from_extension("exe"), None);
         assert_eq!(media_kind_from_extension("rs"), None);
+    }
+
+    #[test]
+    fn test_media_kind_for_path_falls_back_to_extension_when_probe_fails() {
+        let dir = tempdir().unwrap();
+        let ogg_path = dir.path().join("mystery.ogg");
+        std::fs::write(&ogg_path, b"not a real ogg file").unwrap();
+
+        assert_eq!(
+            media_kind_for_path(&ogg_path, "ogg"),
+            Some(AssetKind::Audio)
+        );
     }
 }
