@@ -328,6 +328,34 @@ impl ProjectState {
             if let Some(proxy_url_value) = op.payload.get("proxyUrl") {
                 asset.proxy_url = proxy_url_value.as_str().map(|s| s.to_string());
             }
+
+            if let Some(relative_path_value) = op.payload.get("relativePath") {
+                asset.relative_path = relative_path_value.as_str().map(|s| s.to_string());
+            }
+
+            if let Some(workspace_managed_value) = op.payload.get("workspaceManaged") {
+                if let Some(workspace_managed) = workspace_managed_value.as_bool() {
+                    asset.workspace_managed = workspace_managed;
+                }
+            }
+
+            if let Some(missing_value) = op.payload.get("missing") {
+                if let Some(missing) = missing_value.as_bool() {
+                    asset.missing = missing;
+                }
+            }
+
+            if let Some(uri_value) = op.payload.get("uri") {
+                if let Some(uri) = uri_value.as_str() {
+                    asset.uri = uri.to_string();
+                }
+            }
+
+            if let Some(file_size_value) = op.payload.get("fileSize") {
+                if let Some(file_size) = file_size_value.as_u64() {
+                    asset.file_size = file_size;
+                }
+            }
         }
         Ok(())
     }
