@@ -18,6 +18,7 @@ export type SettingsTab =
   | 'performance'
   | 'appearance'
   | 'shortcuts'
+  | 'terminal'
   | 'ai'
   | 'permissions'
   | 'developer';

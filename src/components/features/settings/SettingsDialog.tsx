@@ -16,6 +16,7 @@ import {
   Wrench,
   Play,
   Gauge,
+  Terminal,
 } from 'lucide-react';
 import { useSettings } from '@/hooks/useSettings';
 import { useUIStore } from '@/stores';
@@ -27,6 +28,7 @@ import { AgentPermissionsSection } from './sections/AgentPermissionsSection';
 import { DeveloperSettings } from './sections/DeveloperSettings';
 import { PlaybackSettings } from './sections/PlaybackSettings';
 import { PerformanceSettings } from './sections/PerformanceSettings';
+import { TerminalSettings } from './sections/TerminalSettings';
 
 // =============================================================================
 // Types
@@ -43,6 +45,7 @@ type TabId =
   | 'performance'
   | 'appearance'
   | 'shortcuts'
+  | 'terminal'
   | 'ai'
   | 'permissions'
   | 'developer';
@@ -63,6 +66,7 @@ const TABS: Tab[] = [
   { id: 'performance', label: 'Performance', icon: <Gauge className="w-4 h-4" /> },
   { id: 'appearance', label: 'Appearance', icon: <Palette className="w-4 h-4" /> },
   { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard className="w-4 h-4" /> },
+  { id: 'terminal', label: 'Terminal', icon: <Terminal className="w-4 h-4" /> },
   { id: 'ai', label: 'AI', icon: <Bot className="w-4 h-4" /> },
   { id: 'permissions', label: 'Permissions', icon: <Shield className="w-4 h-4" /> },
   { id: 'developer', label: 'Developer', icon: <Wrench className="w-4 h-4" /> },
@@ -83,11 +87,13 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
     performance,
     appearance,
     ai,
+    terminal,
     updateGeneral,
     updatePlayback,
     updatePerformance,
     updateAppearance,
     updateAI,
+    updateTerminal,
     resetSettings,
     isSaving,
     error,
@@ -156,6 +162,13 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
       void updateAI(values);
     },
     [updateAI],
+  );
+
+  const handleTerminalUpdate = useCallback(
+    (values: Parameters<typeof updateTerminal>[0]) => {
+      void updateTerminal(values);
+    },
+    [updateTerminal],
   );
 
   if (!isOpen) {
@@ -262,6 +275,14 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
             )}
 
             {activeTab === 'shortcuts' && <ShortcutsSettings />}
+
+            {activeTab === 'terminal' && (
+              <TerminalSettings
+                settings={terminal}
+                onUpdate={handleTerminalUpdate}
+                disabled={isSaving}
+              />
+            )}
 
             {activeTab === 'ai' && (
               <AISettingsSection settings={ai} onUpdate={handleAIUpdate} disabled={isSaving} />

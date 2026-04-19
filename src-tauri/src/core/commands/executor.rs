@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
+    effects::EffectType,
     project::{OpKind, Operation, OpsLog, ProjectState},
     timeline::Clip,
     CoreError, CoreResult, OpId,
@@ -1381,26 +1382,78 @@ impl CommandExecutor {
                     CoreError::Internal("EffectUpdate payload missing effectId".to_string())
                 })?;
 
-                // Persist a canonical payload that ProjectState::apply_effect_update can replay.
-                // NOTE: Keep this schema stable over time; treat missing keys as no-ops.
-                let enabled = command_json
-                    .get("enabled")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let order = command_json
-                    .get("order")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let params = command_json
-                    .get("params")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
+                let is_mask_command = matches!(type_name, "AddMask" | "UpdateMask" | "RemoveMask");
+                let (enabled, order, params, masks) = if is_mask_command {
+                    let effect = state.effects.get(effect_id).ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "EffectUpdate could not find effect after {type_name}: {effect_id}"
+                        ))
+                    })?;
+
+                    (
+                        serde_json::Value::Bool(effect.enabled),
+                        serde_json::Value::Number(effect.order.into()),
+                        to_value(&effect.params)?,
+                        to_value(&effect.masks)?,
+                    )
+                } else {
+                    (
+                        command_json
+                            .get("enabled")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                        command_json
+                            .get("order")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                        command_json
+                            .get("params")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                        serde_json::Value::Null,
+                    )
+                };
 
                 Ok(serde_json::json!({
                     "effectId": effect_id,
                     "enabled": enabled,
                     "order": order,
                     "params": params,
+                    "masks": masks,
+                }))
+            }
+
+            OpKind::MarkerAdd => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("MarkerAdd payload missing sequenceId".to_string())
+                })?;
+                let marker_id = result.created_ids.first().ok_or_else(|| {
+                    CoreError::Internal("MarkerAdd missing created marker ID".to_string())
+                })?;
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!("MarkerAdd could not find sequence: {seq_id}"))
+                })?;
+                let marker = sequence.get_marker(marker_id).ok_or_else(|| {
+                    CoreError::Internal(format!("MarkerAdd could not find marker: {marker_id}"))
+                })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "marker": to_value(marker)?,
+                }))
+            }
+
+            OpKind::MarkerRemove => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("MarkerRemove payload missing sequenceId".to_string())
+                })?;
+                let marker_id = get_str(&command_json, "markerId").ok_or_else(|| {
+                    CoreError::Internal("MarkerRemove payload missing markerId".to_string())
+                })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "markerId": marker_id,
                 }))
             }
 
@@ -1447,6 +1500,109 @@ impl CommandExecutor {
             }
 
             OpKind::CaptionRemove | OpKind::CaptionUpdate => Ok(command_json),
+
+            OpKind::TextClipAdd => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("TextClipAdd payload missing sequenceId".to_string())
+                })?;
+                let track_id = get_str(&command_json, "trackId").ok_or_else(|| {
+                    CoreError::Internal("TextClipAdd payload missing trackId".to_string())
+                })?;
+                let clip_id = result.created_ids.first().ok_or_else(|| {
+                    CoreError::Internal("TextClipAdd missing created clip ID".to_string())
+                })?;
+                let effect_id = result.created_ids.get(1).ok_or_else(|| {
+                    CoreError::Internal("TextClipAdd missing created effect ID".to_string())
+                })?;
+
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!("TextClipAdd could not find sequence: {seq_id}"))
+                })?;
+                let track = sequence.get_track(track_id).ok_or_else(|| {
+                    CoreError::Internal(format!("TextClipAdd could not find track: {track_id}"))
+                })?;
+                let clip = track.get_clip(clip_id).ok_or_else(|| {
+                    CoreError::Internal(format!("TextClipAdd could not find clip: {clip_id}"))
+                })?;
+                let effect = state.effects.get(effect_id).ok_or_else(|| {
+                    CoreError::Internal(format!("TextClipAdd could not find effect: {effect_id}"))
+                })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": to_value(clip)?,
+                    "effect": to_value(effect)?,
+                }))
+            }
+
+            OpKind::TextClipUpdate => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("TextClipUpdate payload missing sequenceId".to_string())
+                })?;
+                let clip_id = get_str(&command_json, "clipId").ok_or_else(|| {
+                    CoreError::Internal("TextClipUpdate payload missing clipId".to_string())
+                })?;
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!("TextClipUpdate could not find sequence: {seq_id}"))
+                })?;
+                let (resolved_track_id, clip) = Self::find_clip_in_sequence(sequence, clip_id)
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "TextClipUpdate could not find clip: {clip_id}"
+                        ))
+                    })?;
+                let effect_id = clip
+                    .effects
+                    .iter()
+                    .find(|effect_id| {
+                        state
+                            .effects
+                            .get(*effect_id)
+                            .map(|effect| effect.effect_type == EffectType::TextOverlay)
+                            .unwrap_or(false)
+                    })
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "TextClipUpdate could not find text effect for clip: {clip_id}"
+                        ))
+                    })?;
+                let effect = state.effects.get(effect_id).ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "TextClipUpdate could not find effect in state: {effect_id}"
+                    ))
+                })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": resolved_track_id,
+                    "clipId": clip_id,
+                    "clip": to_value(clip)?,
+                    "effect": to_value(effect)?,
+                }))
+            }
+
+            OpKind::TextClipRemove => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("TextClipRemove payload missing sequenceId".to_string())
+                })?;
+                let track_id = get_str(&command_json, "trackId").ok_or_else(|| {
+                    CoreError::Internal("TextClipRemove payload missing trackId".to_string())
+                })?;
+                let clip_id = get_str(&command_json, "clipId").ok_or_else(|| {
+                    CoreError::Internal("TextClipRemove payload missing clipId".to_string())
+                })?;
+                let effect_id = result.deleted_ids.get(1).ok_or_else(|| {
+                    CoreError::Internal("TextClipRemove missing deleted effect ID".to_string())
+                })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clipId": clip_id,
+                    "effectId": effect_id,
+                }))
+            }
 
             OpKind::Batch => match type_name {
                 "InsertEdit" => Self::build_insert_edit_batch_payload(&command_json, result, state),
@@ -1686,10 +1842,15 @@ impl CommandExecutor {
             "UpdateAsset" => OpKind::AssetUpdate,
             "AddEffect" | "ApplyEffect" => OpKind::EffectAdd,
             "RemoveEffect" => OpKind::EffectRemove,
-            "UpdateEffect" => OpKind::EffectUpdate,
+            "UpdateEffect" | "AddMask" | "UpdateMask" | "RemoveMask" => OpKind::EffectUpdate,
+            "AddMarker" => OpKind::MarkerAdd,
+            "RemoveMarker" => OpKind::MarkerRemove,
             "AddCaption" => OpKind::CaptionAdd,
             "RemoveCaption" => OpKind::CaptionRemove,
             "UpdateCaption" => OpKind::CaptionUpdate,
+            "AddTextClip" => OpKind::TextClipAdd,
+            "UpdateText" | "UpdateTextClip" => OpKind::TextClipUpdate,
+            "RemoveTextClip" => OpKind::TextClipRemove,
             "CreateCaption" => OpKind::CaptionAdd,
             "DeleteCaption" => OpKind::CaptionRemove,
             "CreateSequence" => OpKind::SequenceCreate,
@@ -1837,15 +1998,17 @@ mod tests {
     use super::*;
     use crate::core::assets::{Asset, VideoInfo};
     use crate::core::commands::{
-        AddAudioKeyframeCommand, AddEffectCommand, CloseAllGapsCommand, CloseGapCommand,
-        CreateAdjustmentLayerCommand, CreateCompoundClipCommand, CreateSequenceCommand,
-        ExtractEditCommand, GroupClipsCommand, ImportAssetCommand, InsertClipCommand,
-        InsertEditCommand, LiftCommand, MoveClipCommand, OverwriteEditCommand, RippleDeleteCommand,
-        SetAudioFadeInCommand, SetAudioFadeOutCommand, SetClipBlendModeCommand,
-        SetMasterVolumeCommand, SetTrackBlendModeCommand, SplitClipCommand, StateChange,
-        TrimClipCommand, UngroupClipsCommand, UnnestCompoundClipCommand,
+        AddAudioKeyframeCommand, AddEffectCommand, AddMarkerCommand, AddMaskCommand,
+        AddTextClipCommand, CloseAllGapsCommand, CloseGapCommand, CreateAdjustmentLayerCommand,
+        CreateCompoundClipCommand, CreateSequenceCommand, ExtractEditCommand, GroupClipsCommand,
+        ImportAssetCommand, InsertClipCommand, InsertEditCommand, LiftCommand, MoveClipCommand,
+        OverwriteEditCommand, RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
+        SetClipBlendModeCommand, SetMasterVolumeCommand, SetTrackBlendModeCommand,
+        SplitClipCommand, StateChange, TrimClipCommand, UngroupClipsCommand,
+        UnnestCompoundClipCommand,
     };
     use crate::core::effects::{EffectType, ParamValue};
+    use crate::core::masks::{MaskShape, RectMask};
     use crate::core::project::{OpKind, Operation, OpsLog, ProjectMeta, ProjectState};
     use crate::core::timeline::{
         BlendMode, Clip, FadeType, Sequence, SequenceFormat, Track, TrackKind,
@@ -2121,6 +2284,179 @@ mod tests {
         assert_eq!(clip.effects[1], blur_id);
         assert!(replayed.effects.contains_key(&brightness_id));
         assert!(replayed.effects.contains_key(&blur_id));
+    }
+
+    #[test]
+    fn test_executor_persists_marker_add_payload_is_replayable() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+
+        let marker_result = executor
+            .execute(
+                Box::new(AddMarkerCommand::new(&seq_id, 3.5, "Hook")),
+                &mut state,
+            )
+            .unwrap();
+        let marker_id = marker_result.created_ids[0].clone();
+
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.kind, OpKind::MarkerAdd);
+        assert_eq!(
+            persisted.payload["sequenceId"].as_str(),
+            Some(seq_id.as_str())
+        );
+        assert_eq!(
+            persisted.payload["marker"]["id"].as_str(),
+            Some(marker_id.as_str())
+        );
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let sequence = replayed.get_sequence(&seq_id).unwrap();
+        assert!(sequence.markers.iter().any(|marker| marker.id == marker_id));
+    }
+
+    #[test]
+    fn test_executor_persists_text_clip_add_payload_is_replayable() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let text_result = executor
+            .execute(
+                Box::new(AddTextClipCommand::title(
+                    &seq_id,
+                    &track_id,
+                    1.0,
+                    2.5,
+                    "Title Card",
+                )),
+                &mut state,
+            )
+            .unwrap();
+        let clip_id = text_result.created_ids[0].clone();
+        let effect_id = text_result.created_ids[1].clone();
+
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.kind, OpKind::TextClipAdd);
+        assert_eq!(
+            persisted.payload["clip"]["id"].as_str(),
+            Some(clip_id.as_str())
+        );
+        assert_eq!(
+            persisted.payload["effect"]["id"].as_str(),
+            Some(effect_id.as_str())
+        );
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let sequence = replayed.get_sequence(&seq_id).unwrap();
+        let track = sequence.get_track(&track_id).unwrap();
+        let clip = track.get_clip(&clip_id).unwrap();
+
+        assert_eq!(clip.effects, vec![effect_id.clone()]);
+        assert!(replayed.effects.contains_key(&effect_id));
+    }
+
+    #[test]
+    fn test_executor_persists_mask_update_payload_is_replayable() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("mask-source.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+
+        let import_cmd = ImportAssetCommand::new("mask-source.mp4", &asset_uri).with_duration(10.0);
+        let import_result = executor.execute(Box::new(import_cmd), &mut state).unwrap();
+        let asset_id = import_result.created_ids[0].clone();
+
+        let insert_result = executor
+            .execute(
+                Box::new(InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)),
+                &mut state,
+            )
+            .unwrap();
+        let clip_id = insert_result.created_ids[0].clone();
+
+        let effect_result = executor
+            .execute(
+                Box::new(AddEffectCommand::new(
+                    &seq_id,
+                    &track_id,
+                    &clip_id,
+                    EffectType::GaussianBlur,
+                )),
+                &mut state,
+            )
+            .unwrap();
+        let effect_id = effect_result.created_ids[0].clone();
+
+        executor
+            .execute(
+                Box::new(AddMaskCommand::new(
+                    &seq_id,
+                    &track_id,
+                    &clip_id,
+                    &effect_id,
+                    MaskShape::Rectangle(RectMask::default()),
+                )),
+                &mut state,
+            )
+            .unwrap();
+
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.kind, OpKind::EffectUpdate);
+        assert_eq!(
+            persisted.payload["effectId"].as_str(),
+            Some(effect_id.as_str())
+        );
+        assert_eq!(
+            persisted.payload["masks"]["masks"].as_array().map(Vec::len),
+            Some(1)
+        );
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_effect = replayed.effects.get(&effect_id).unwrap();
+        assert_eq!(replayed_effect.masks.len(), 1);
     }
 
     #[test]

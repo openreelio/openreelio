@@ -23,6 +23,8 @@ import { ResizeHandle } from './ResizeHandle';
 export interface DockableEditorLayoutProps {
   /** Header element (fixed, not dockable) */
   header: ReactNode;
+  /** Optional actions rendered in the bottom dock header */
+  bottomZoneActions?: ReactNode;
   /** Map of panel ID → panel content */
   panelContent: Partial<Record<PanelId, ReactNode>>;
   /** Additional CSS classes */
@@ -44,6 +46,7 @@ const COLLAPSED_BOTTOM_HEIGHT = 32;
 
 export function DockableEditorLayout({
   header,
+  bottomZoneActions = null,
   panelContent,
   className = '',
 }: DockableEditorLayoutProps): JSX.Element {
@@ -195,7 +198,11 @@ export function DockableEditorLayout({
               <DockZone
                 zoneId="left"
                 panelIds={filteredLeft}
-                activePanelId={filteredLeft.includes(zones.left.activePanelId!) ? zones.left.activePanelId : filteredLeft[0] ?? null}
+                activePanelId={
+                  filteredLeft.includes(zones.left.activePanelId!)
+                    ? zones.left.activePanelId
+                    : (filteredLeft[0] ?? null)
+                }
                 collapsed={zones.left.collapsed}
                 onTabClick={makeTabClickHandler('left')}
                 onToggleCollapse={() => toggleZoneCollapse('left')}
@@ -212,17 +219,17 @@ export function DockableEditorLayout({
         )}
 
         {/* Center area (top + bottom split) */}
-        <main
-          ref={centerRef}
-          role="main"
-          className="flex min-w-0 flex-1 flex-col overflow-hidden"
-        >
+        <main ref={centerRef} role="main" className="flex min-w-0 flex-1 flex-col overflow-hidden">
           {/* Center top zone (monitors) */}
           <div style={{ flex: `${sizes.centerSplitRatio}` }} className="min-h-0 overflow-hidden">
             <DockZone
               zoneId="center-top"
               panelIds={filteredCenterTop}
-              activePanelId={filteredCenterTop.includes(zones['center-top'].activePanelId!) ? zones['center-top'].activePanelId : filteredCenterTop[0] ?? null}
+              activePanelId={
+                filteredCenterTop.includes(zones['center-top'].activePanelId!)
+                  ? zones['center-top'].activePanelId
+                  : (filteredCenterTop[0] ?? null)
+              }
               collapsed={zones['center-top'].collapsed}
               onTabClick={makeTabClickHandler('center-top')}
               onToggleCollapse={() => toggleZoneCollapse('center-top')}
@@ -243,7 +250,11 @@ export function DockableEditorLayout({
             <DockZone
               zoneId="center-bottom"
               panelIds={filteredCenterBottom}
-              activePanelId={filteredCenterBottom.includes(zones['center-bottom'].activePanelId!) ? zones['center-bottom'].activePanelId : filteredCenterBottom[0] ?? null}
+              activePanelId={
+                filteredCenterBottom.includes(zones['center-bottom'].activePanelId!)
+                  ? zones['center-bottom'].activePanelId
+                  : (filteredCenterBottom[0] ?? null)
+              }
               collapsed={zones['center-bottom'].collapsed}
               onTabClick={makeTabClickHandler('center-bottom')}
               onToggleCollapse={() => toggleZoneCollapse('center-bottom')}
@@ -264,7 +275,11 @@ export function DockableEditorLayout({
               <DockZone
                 zoneId="right"
                 panelIds={filteredRight}
-                activePanelId={filteredRight.includes(zones.right.activePanelId!) ? zones.right.activePanelId : filteredRight[0] ?? null}
+                activePanelId={
+                  filteredRight.includes(zones.right.activePanelId!)
+                    ? zones.right.activePanelId
+                    : (filteredRight[0] ?? null)
+                }
                 collapsed={zones.right.collapsed}
                 onTabClick={makeTabClickHandler('right')}
                 onToggleCollapse={() => toggleZoneCollapse('right')}
@@ -290,12 +305,17 @@ export function DockableEditorLayout({
             <DockZone
               zoneId="bottom"
               panelIds={filteredBottom}
-              activePanelId={filteredBottom.includes(zones.bottom.activePanelId!) ? zones.bottom.activePanelId : filteredBottom[0] ?? null}
+              activePanelId={
+                filteredBottom.includes(zones.bottom.activePanelId!)
+                  ? zones.bottom.activePanelId
+                  : (filteredBottom[0] ?? null)
+              }
               collapsed={zones.bottom.collapsed}
               onTabClick={makeTabClickHandler('bottom')}
               onToggleCollapse={() => toggleZoneCollapse('bottom')}
               onDrop={makeDropHandler('bottom')}
               className="h-full border-t border-editor-border"
+              headerActions={bottomZoneActions}
               {...sharedZoneProps}
             />
           </footer>

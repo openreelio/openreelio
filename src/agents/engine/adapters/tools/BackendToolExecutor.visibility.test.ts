@@ -8,19 +8,20 @@ import type {
 } from '../../ports/IToolExecutor';
 import type { RiskLevel, ValidationResult } from '../../core/types';
 
-const {
-  mockIsMetaToolsEnabled,
-  mockGetVisibleMetaToolNames,
-  mockGetWorkspaceToolNames,
-} = vi.hoisted(() => ({
-  mockIsMetaToolsEnabled: vi.fn(),
-  mockGetVisibleMetaToolNames: vi.fn(),
-  mockGetWorkspaceToolNames: vi.fn(),
-}));
+const { mockIsMetaToolsEnabled, mockGetVisibleMetaToolNames, mockGetWorkspaceToolNames } =
+  vi.hoisted(() => ({
+    mockIsMetaToolsEnabled: vi.fn(),
+    mockGetVisibleMetaToolNames: vi.fn(),
+    mockGetWorkspaceToolNames: vi.fn(),
+  }));
 
-vi.mock('@/config/featureFlags', () => ({
-  isMetaToolsEnabled: mockIsMetaToolsEnabled,
-}));
+vi.mock('@/config/featureFlags', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/config/featureFlags')>();
+  return {
+    ...actual,
+    isMetaToolsEnabled: mockIsMetaToolsEnabled,
+  };
+});
 
 vi.mock('@/agents/tools/metaTools', () => ({
   getVisibleMetaToolNames: mockGetVisibleMetaToolNames,
@@ -45,15 +46,19 @@ function createToolInfo(name: string, category: string): ToolInfo {
 function createFrontendExecutor(tools: ToolInfo[]): IToolExecutor {
   return {
     execute: vi.fn(async () => ({ success: true, duration: 1 })),
-    executeBatch: vi.fn(async () => ({
-      success: true,
-      results: [],
-      totalDuration: 1,
-      successCount: 0,
-      failureCount: 0,
-    }) as BatchExecutionResult),
+    executeBatch: vi.fn(
+      async () =>
+        ({
+          success: true,
+          results: [],
+          totalDuration: 1,
+          successCount: 0,
+          failureCount: 0,
+        }) as BatchExecutionResult,
+    ),
     getAvailableTools: vi.fn((category?: string) =>
-      category ? tools.filter((tool) => tool.category === category) : tools),
+      category ? tools.filter((tool) => tool.category === category) : tools,
+    ),
     getToolDefinition: vi.fn((name: string) =>
       tools.find((tool) => tool.name === name)
         ? ({
@@ -66,7 +71,8 @@ function createFrontendExecutor(tools: ToolInfo[]): IToolExecutor {
             supportsUndo: false,
             parallelizable: false,
           } as ToolDefinition)
-        : null),
+        : null,
+    ),
     validateArgs: vi.fn(() => ({ valid: true, errors: [] }) as ValidationResult),
     hasTool: vi.fn((name: string) => tools.some((tool) => tool.name === name)),
     getToolsByCategory: vi.fn(() => new Map()),

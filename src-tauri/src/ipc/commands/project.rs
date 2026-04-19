@@ -605,35 +605,18 @@ pub async fn close_project(
 #[specta::specta]
 #[tracing::instrument(skip(state))]
 pub async fn save_project(state: State<'_, AppState>) -> Result<(), String> {
-    use crate::core::project::Snapshot;
-
     let started_at = std::time::Instant::now();
-    let (snapshot_path, meta_path, state_snapshot, last_op_id_before) = {
-        let guard = state.project.lock().await;
+    let prepared = {
+        let mut guard = state.project.lock().await;
         let project = guard
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
-        (
-            project.snapshot_path.clone(),
-            project.meta_path.clone(),
-            project.state.clone(),
-            project.state.last_op_id.clone(),
-        )
+        project.prepare_save().map_err(|e| e.to_ipc_error())?
     };
+    let saved_last_op_id = prepared.saved_last_op_id.clone();
 
-    // Perform disk IO on a blocking worker thread.
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        Snapshot::save(
-            &snapshot_path,
-            &state_snapshot,
-            state_snapshot.last_op_id.as_deref(),
-        )
-        .map_err(|e| e.to_ipc_error())?;
-
-        crate::core::fs::atomic_write_json_pretty(&meta_path, &state_snapshot.meta)
-            .map_err(|e| e.to_ipc_error())?;
-
-        Ok(())
+        ActiveProject::write_prepared_save(&prepared).map_err(|e| e.to_ipc_error())
     })
     .await
     .map_err(|e| format!("Project save task failed: {e}"))??;
@@ -644,12 +627,12 @@ pub async fn save_project(state: State<'_, AppState>) -> Result<(), String> {
         .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    if project.state.last_op_id == last_op_id_before {
+    if project.state.last_op_id == saved_last_op_id {
         project.state.is_dirty = false;
         tracing::debug!("Project saved successfully, is_dirty reset to false");
     } else {
         tracing::warn!(
-            last_op_id_before = ?last_op_id_before,
+            last_op_id_before = ?saved_last_op_id,
             last_op_id_after = ?project.state.last_op_id,
             "Project state changed during save; keeping is_dirty=true"
         );

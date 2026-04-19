@@ -10,11 +10,7 @@
 
 import { useCallback, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronUp, ChevronLeft, ChevronRight, GripVertical } from 'lucide-react';
-import {
-  PANEL_REGISTRY,
-  type DockZoneId,
-  type PanelId,
-} from '@/stores/workspaceLayoutStore';
+import { PANEL_REGISTRY, type DockZoneId, type PanelId } from '@/stores/workspaceLayoutStore';
 
 // =============================================================================
 // Types
@@ -51,6 +47,8 @@ export interface DockZoneProps {
   collapseDirection?: 'horizontal' | 'vertical';
   /** Additional CSS classes for the container */
   className?: string;
+  /** Optional actions rendered on the right side of the tab bar */
+  headerActions?: ReactNode;
 }
 
 // =============================================================================
@@ -73,6 +71,7 @@ export function DockZone({
   showTabs = true,
   collapseDirection = 'vertical',
   className = '',
+  headerActions = null,
 }: DockZoneProps): JSX.Element {
   const [isDropTarget, setIsDropTarget] = useState(false);
 
@@ -140,9 +139,15 @@ export function DockZone({
   const CollapseIcon =
     collapseDirection === 'horizontal'
       ? zoneId === 'right'
-        ? collapsed ? ChevronLeft : ChevronRight
-        : collapsed ? ChevronRight : ChevronLeft
-      : collapsed ? ChevronUp : ChevronDown;
+        ? collapsed
+          ? ChevronLeft
+          : ChevronRight
+        : collapsed
+          ? ChevronRight
+          : ChevronLeft
+      : collapsed
+        ? ChevronUp
+        : ChevronDown;
 
   const dropHighlight = isDropTarget ? 'ring-2 ring-primary-500 ring-inset' : '';
 
@@ -165,11 +170,12 @@ export function DockZone({
             {panelIds.map((panelId) => {
               const meta = PANEL_REGISTRY[panelId];
               const isActive = activePanelId === panelId && !collapsed;
+              const isDraggable = panelId !== 'terminal';
               return (
                 <button
                   key={panelId}
-                  draggable
-                  onDragStart={(e) => handleTabDragStart(e, panelId)}
+                  draggable={isDraggable}
+                  onDragStart={isDraggable ? (e) => handleTabDragStart(e, panelId) : undefined}
                   onDragEnd={handleTabDragEnd}
                   onClick={() => onTabClick(panelId)}
                   className={`flex shrink-0 items-center gap-1 rounded-t px-2 py-1 text-xs font-medium transition-colors ${
@@ -180,21 +186,24 @@ export function DockZone({
                   role="tab"
                   aria-selected={isActive}
                   aria-controls={`dock-panel-${panelId}`}
-                  title={`${meta.label} (drag to move)`}
+                  title={isDraggable ? `${meta.label} (drag to move)` : meta.label}
                 >
-                  <GripVertical className="w-3 h-3 opacity-40" />
+                  {isDraggable && <GripVertical className="w-3 h-3 opacity-40" />}
                   <span className="whitespace-nowrap">{meta.label}</span>
                 </button>
               );
             })}
           </div>
-          <button
-            onClick={onToggleCollapse}
-            className="shrink-0 rounded p-1 text-editor-text-muted transition-colors hover:bg-editor-border hover:text-editor-text"
-            aria-label={collapsed ? 'Expand panel' : 'Collapse panel'}
-          >
-            <CollapseIcon className="w-3.5 h-3.5" />
-          </button>
+          <div className="flex shrink-0 items-center gap-1">
+            {headerActions}
+            <button
+              onClick={onToggleCollapse}
+              className="shrink-0 rounded p-1 text-editor-text-muted transition-colors hover:bg-editor-border hover:text-editor-text"
+              aria-label={collapsed ? 'Expand panel' : 'Collapse panel'}
+            >
+              <CollapseIcon className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       )}
 

@@ -11,15 +11,19 @@
  * - Seamless seek handling with source rescheduling
  */
 
-import { useRef, useCallback, useEffect } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { useRef, useCallback, useEffect, useState } from 'react';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { playbackController } from '@/services/PlaybackController';
 import type { Sequence, Asset, Clip } from '@/types';
 import { createLogger } from '@/services/logger';
 import { collectPlaybackAudioClips } from '@/utils/audioPlayback';
 import { clampClipPan, clampClipVolumeDb, getClipFadeFactor } from '@/utils/clipAudio';
-import { normalizeFileUriToPath } from '@/utils/uri';
+import {
+  assetMatchesWorkspaceRelativePath,
+  clearCachedAudioPreview,
+  decodeAssetAudioBuffer,
+} from '@/utils/audioPreview';
 
 const logger = createLogger('AudioPlayback');
 
@@ -126,6 +130,9 @@ export function useAudioPlayback({
   const masterGainRef = useRef<GainNode | null>(null);
   const isAudioReadyRef = useRef(false);
   const lastScheduleTimeRef = useRef(0);
+  const [isAudioReady, setIsAudioReady] = useState(false);
+  const [failedAssetIds, setFailedAssetIds] = useState<string[]>([]);
+  const rescheduleAudioRef = useRef<() => void>(() => {});
 
   /**
    * Track failed audio loads for retry mechanism.
@@ -140,21 +147,14 @@ export function useAudioPlayback({
 
   // Playback state from store
   const { currentTime, isPlaying, volume, isMuted, playbackRate } = usePlaybackStore();
-  const isPlayingRef = useRef(isPlaying);
 
   const getLiveIsPlaying = useCallback((): boolean => {
     return usePlaybackStore.getState().isPlaying;
   }, []);
 
-  const getAudioSourceUri = useCallback((asset: Asset): string => {
-    // Audio preview should always read from original media source.
-    // Video proxies may be generated without embedded audio tracks.
-    return asset.uri;
+  const syncFailedAssetIds = useCallback(() => {
+    setFailedAssetIds(Array.from(failedLoadsRef.current.keys()));
   }, []);
-
-  useEffect(() => {
-    isPlayingRef.current = isPlaying;
-  }, [isPlaying]);
 
   /**
    * Initialize AudioContext on user interaction
@@ -166,6 +166,7 @@ export function useAudioPlayback({
         await audioContextRef.current.resume();
       }
       isAudioReadyRef.current = true;
+      setIsAudioReady(true);
       return;
     }
 
@@ -182,6 +183,7 @@ export function useAudioPlayback({
     }
 
     isAudioReadyRef.current = true;
+    setIsAudioReady(true);
   }, []);
 
   /**
@@ -201,12 +203,15 @@ export function useAudioPlayback({
    * - Failed load tracking for UI feedback
    */
   const loadAudioBuffer = useCallback(
-    async (assetId: string, assetUri: string, isRetry = false): Promise<AudioBuffer | null> => {
+    async (asset: Asset, isRetry = false): Promise<AudioBuffer | null> => {
+      const assetId = asset.id;
       // Check cache first
       const cached = audioBuffersRef.current.get(assetId);
       if (cached) {
         // Clear any failed state if we have a cached buffer
-        failedLoadsRef.current.delete(assetId);
+        if (failedLoadsRef.current.delete(assetId)) {
+          syncFailedAssetIds();
+        }
         return cached;
       }
 
@@ -220,26 +225,22 @@ export function useAudioPlayback({
       }
 
       try {
-        // Convert to Tauri asset URL
-        let url = normalizeFileUriToPath(assetUri.trim());
-        if (!url.startsWith('asset://') && (url.startsWith('/') || url.match(/^[A-Za-z]:[\\/]/))) {
-          url = convertFileSrc(url);
-        }
-
         logger.debug('Loading audio buffer', { assetId, isRetry });
 
-        // Fetch and decode audio
-        const response = await fetch(url);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-
-        const arrayBuffer = await response.arrayBuffer();
-        const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
+        const { buffer: audioBuffer, usedPreview } = await decodeAssetAudioBuffer(
+          audioContextRef.current,
+          asset,
+        );
 
         // Cache the buffer and clear failed state
         audioBuffersRef.current.set(assetId, audioBuffer);
-        failedLoadsRef.current.delete(assetId);
+        if (failedLoadsRef.current.delete(assetId)) {
+          syncFailedAssetIds();
+        }
+
+        if (usedPreview) {
+          logger.warn('Using generated audio preview fallback for playback', { assetId });
+        }
 
         logger.debug('Audio buffer loaded successfully', { assetId });
 
@@ -255,6 +256,7 @@ export function useAudioPlayback({
           attemptCount: currentAttempt,
           error: errorMessage,
         });
+        syncFailedAssetIds();
 
         logger.error('Failed to load audio for asset', {
           assetId,
@@ -281,7 +283,7 @@ export function useAudioPlayback({
           // Schedule retry
           const timeoutId = setTimeout(() => {
             retryTimeoutsRef.current.delete(assetId);
-            void loadAudioBuffer(assetId, assetUri, true);
+            void loadAudioBuffer(asset, true);
           }, retryDelay);
 
           retryTimeoutsRef.current.set(assetId, timeoutId);
@@ -290,7 +292,7 @@ export function useAudioPlayback({
         return null;
       }
     },
-    [getRetryDelay],
+    [getRetryDelay, syncFailedAssetIds],
   );
 
   /**
@@ -307,6 +309,7 @@ export function useAudioPlayback({
 
       // Reset failure tracking
       failedLoadsRef.current.delete(assetId);
+      syncFailedAssetIds();
 
       // Clear any pending retry
       const existingTimeout = retryTimeoutsRef.current.get(assetId);
@@ -315,12 +318,11 @@ export function useAudioPlayback({
         retryTimeoutsRef.current.delete(assetId);
       }
 
-      const audioUrl = getAudioSourceUri(asset);
-      const buffer = await loadAudioBuffer(assetId, audioUrl, true);
+      const buffer = await loadAudioBuffer(asset, true);
 
       return buffer !== null;
     },
-    [assets, loadAudioBuffer, getAudioSourceUri],
+    [assets, loadAudioBuffer],
   );
 
   /**
@@ -451,8 +453,7 @@ export function useAudioPlayback({
           if (scheduledSourcesRef.current.has(clip.id)) continue;
 
           // Load audio buffer
-          const audioUrl = getAudioSourceUri(asset);
-          const audioBuffer = await loadAudioBuffer(asset.id, audioUrl);
+          const audioBuffer = await loadAudioBuffer(asset);
           if (!audioBuffer) continue;
 
           // Abort stale async scheduling work (pause/seek/unmount may have happened
@@ -483,7 +484,7 @@ export function useAudioPlayback({
           const clipVolume = calculateClipVolume(clip, trackVolume);
           const clipOffset = Math.max(0, currentTime - clip.place.timelineInSec);
           const fadeFactor = getClipFadeFactor(clip, clipOffset);
-          gainNode.gain.value = (isMuted ? 0 : volume * clipVolume) * fadeFactor;
+          gainNode.gain.value = clipVolume * fadeFactor;
 
           const pannerNode = ctx.createStereoPanner();
           pannerNode.pan.value = clampClipPan(clip.audio?.pan ?? 0);
@@ -534,19 +535,40 @@ export function useAudioPlayback({
           continue;
         }
 
-        // Update volume on existing sources
-        scheduledSourcesRef.current.forEach((scheduled) => {
+        // Update volume on existing sources and stop sources that are no longer valid.
+        const staleClipIds: string[] = [];
+        scheduledSourcesRef.current.forEach((scheduled, clipId) => {
           const clipData = audioClips.find((c) => c.clip.id === scheduled.clipId);
           if (clipData) {
             const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolume);
             const clipOffset = Math.max(0, currentTime - clipData.clip.place.timelineInSec);
             const fadeFactor = getClipFadeFactor(clipData.clip, clipOffset);
-            scheduled.gainNode.gain.value = (isMuted ? 0 : volume * clipVolume) * fadeFactor;
+            scheduled.gainNode.gain.value = clipVolume * fadeFactor;
             scheduled.pannerNode.pan.value = clampClipPan(clipData.clip.audio?.pan ?? 0);
             const updateSpeed = clipData.clip.speed > 0 ? clipData.clip.speed : 1;
             scheduled.source.playbackRate.value = playbackRate * updateSpeed;
+          } else {
+            staleClipIds.push(clipId);
           }
         });
+
+        for (const clipId of staleClipIds) {
+          const scheduled = scheduledSourcesRef.current.get(clipId);
+          if (!scheduled) {
+            continue;
+          }
+
+          try {
+            scheduled.source.stop();
+          } catch {
+            // Source may already be ending.
+          }
+
+          scheduled.source.disconnect();
+          scheduled.gainNode.disconnect();
+          scheduled.pannerNode.disconnect();
+          scheduledSourcesRef.current.delete(clipId);
+        }
 
         // Report audio time to PlaybackController for A/V sync tracking
         if (ctx && scheduledSourcesRef.current.size > 0) {
@@ -579,10 +601,83 @@ export function useAudioPlayback({
     getAudioClips,
     loadAudioBuffer,
     calculateClipVolume,
-    getAudioSourceUri,
     getScheduleAheadTime,
     getLiveIsPlaying,
   ]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlistenModified: UnlistenFn | null = null;
+    let unlistenRemoved: UnlistenFn | null = null;
+
+    const clearCachedAssets = (relativePath: string) => {
+      const affectedAssetIds = Array.from(assets.values())
+        .filter((asset) => assetMatchesWorkspaceRelativePath(asset, relativePath))
+        .map((asset) => asset.id);
+
+      if (affectedAssetIds.length === 0) {
+        return;
+      }
+
+      for (const assetId of affectedAssetIds) {
+        audioBuffersRef.current.delete(assetId);
+        clearCachedAudioPreview(assetId);
+        failedLoadsRef.current.delete(assetId);
+
+        const retryTimeout = retryTimeoutsRef.current.get(assetId);
+        if (retryTimeout) {
+          clearTimeout(retryTimeout);
+          retryTimeoutsRef.current.delete(assetId);
+        }
+      }
+
+      syncFailedAssetIds();
+      stopAllSources();
+
+      if (enabled && getLiveIsPlaying()) {
+        rescheduleAudioRef.current();
+      }
+    };
+
+    const setupListeners = async (): Promise<void> => {
+      try {
+        unlistenModified = await listen<{ relativePath: string }>(
+          'workspace:file-modified',
+          ({ payload }) => {
+            clearCachedAssets(payload.relativePath);
+          },
+        );
+        unlistenRemoved = await listen<{ relativePath: string }>(
+          'workspace:file-removed',
+          ({ payload }) => {
+            clearCachedAssets(payload.relativePath);
+          },
+        );
+      } catch {
+        // Workspace listeners are only available in the desktop runtime.
+      }
+
+      if (disposed) {
+        unlistenModified?.();
+        unlistenRemoved?.();
+      }
+    };
+
+    void setupListeners();
+
+    return () => {
+      disposed = true;
+      unlistenModified?.();
+      unlistenRemoved?.();
+    };
+  }, [assets, enabled, getLiveIsPlaying, stopAllSources, syncFailedAssetIds]);
+
+  useEffect(() => {
+    rescheduleAudioRef.current = () => {
+      lastScheduleTimeRef.current = 0;
+      void scheduleAudioClips();
+    };
+  }, [scheduleAudioClips]);
 
   // Handle play/pause and enabled toggle
   useEffect(() => {
@@ -732,8 +827,8 @@ export function useAudioPlayback({
 
   return {
     initAudio,
-    isAudioReady: isAudioReadyRef.current,
+    isAudioReady,
     retryLoad,
-    failedAssets: Array.from(failedLoadsRef.current.keys()),
+    failedAssets: failedAssetIds,
   };
 }

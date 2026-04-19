@@ -16,13 +16,14 @@ use tauri::State;
 use walkdir::{DirEntry, WalkDir};
 
 use crate::core::assets::{media_kind_from_extension, AssetKind};
+use crate::core::project::{OpKind, Operation};
 use crate::core::workspace::{
     ignore::IgnoreRules,
     service::{FileTreeEntry, WorkspaceService},
     watcher::{WorkspaceEvent, WorkspaceWatcher},
 };
 use crate::core::CoreError;
-use crate::AppState;
+use crate::{ActiveProject, AppState};
 use tauri::{Emitter, Manager};
 
 // =============================================================================
@@ -100,6 +101,60 @@ const MAX_DOCUMENT_BYTES: usize = 512 * 1024;
 const DEFAULT_DOCUMENT_LIST_LIMIT: usize = 500;
 const MAX_DOCUMENT_LIST_LIMIT: usize = 2_000;
 
+fn record_workspace_operation(
+    project: &mut ActiveProject,
+    operation: Operation,
+) -> Result<(), String> {
+    project
+        .ops_log
+        .append(&operation)
+        .map_err(|e| e.to_ipc_error())?;
+    project.state.last_op_id = Some(operation.id.clone());
+    project.state.op_count += 1;
+    project.state.is_dirty = true;
+    project.state.meta.touch_at(&operation.timestamp);
+    Ok(())
+}
+
+fn record_workspace_asset_imports(
+    project: &mut ActiveProject,
+    asset_ids: &[String],
+) -> Result<(), String> {
+    for asset_id in asset_ids {
+        let asset =
+            project.state.assets.get(asset_id).cloned().ok_or_else(|| {
+                format!("Workspace asset not found after registration: {asset_id}")
+            })?;
+        let payload = serde_json::to_value(&asset)
+            .map_err(|e| format!("Failed to serialize workspace asset import payload: {e}"))?;
+        record_workspace_operation(project, Operation::new(OpKind::AssetImport, payload))?;
+    }
+    Ok(())
+}
+
+fn record_workspace_asset_updates(
+    project: &mut ActiveProject,
+    asset_ids: &[String],
+) -> Result<(), String> {
+    for asset_id in asset_ids {
+        let asset = project
+            .state
+            .assets
+            .get(asset_id)
+            .ok_or_else(|| format!("Workspace asset not found for update: {asset_id}"))?;
+        let payload = serde_json::json!({
+            "assetId": asset.id,
+            "uri": asset.uri,
+            "fileSize": asset.file_size,
+            "relativePath": asset.relative_path,
+            "workspaceManaged": asset.workspace_managed,
+            "missing": asset.missing,
+        });
+        record_workspace_operation(project, Operation::new(OpKind::AssetUpdate, payload))?;
+    }
+    Ok(())
+}
+
 // =============================================================================
 // IPC Commands
 // =============================================================================
@@ -120,6 +175,9 @@ pub async fn scan_workspace(state: State<'_, AppState>) -> Result<WorkspaceScanR
             .as_mut()
             .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
+        let existing_asset_ids: std::collections::HashSet<String> =
+            project.state.assets.keys().cloned().collect();
+
         project_root = project.path.clone();
         let service = WorkspaceService::open(project_root.clone()).map_err(|e| e.to_ipc_error())?;
 
@@ -129,6 +187,16 @@ pub async fn scan_workspace(state: State<'_, AppState>) -> Result<WorkspaceScanR
         let auto_registered = service
             .auto_register_discovered_files(&mut project.state, &project_root)
             .map_err(|e| e.to_ipc_error())?;
+
+        let new_asset_ids: Vec<String> = project
+            .state
+            .assets
+            .keys()
+            .filter(|asset_id| !existing_asset_ids.contains(*asset_id))
+            .cloned()
+            .collect();
+
+        record_workspace_asset_imports(project, &new_asset_ids)?;
 
         // Allow the asset protocol to serve newly registered files
         for asset in project.state.assets.values() {
@@ -225,24 +293,42 @@ async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Res
                 if let Some(project) = guard.as_mut() {
                     match &event {
                         WorkspaceEvent::FileRemoved(rel_path) => {
+                            let mut updated_asset_ids = Vec::new();
                             for asset in project.state.assets.values_mut() {
-                                if asset.relative_path.as_deref() == Some(rel_path.as_str()) {
+                                if !asset.missing
+                                    && asset.relative_path.as_deref() == Some(rel_path.as_str())
+                                {
                                     asset.missing = true;
+                                    updated_asset_ids.push(asset.id.clone());
                                     tracing::info!(
                                         path = %rel_path,
                                         "Asset marked missing (file removed externally)"
                                     );
                                 }
                             }
+
+                            if let Err(e) =
+                                record_workspace_asset_updates(project, &updated_asset_ids)
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Workspace watcher: failed to persist missing-asset updates"
+                                );
+                            }
                         }
                         WorkspaceEvent::FileAdded(rel_path)
                         | WorkspaceEvent::FileModified(rel_path) => {
+                            let existing_asset_ids: std::collections::HashSet<String> =
+                                project.state.assets.keys().cloned().collect();
+                            let mut updated_asset_ids = Vec::new();
+
                             // Reconnect previously missing assets at this path
                             for asset in project.state.assets.values_mut() {
                                 if asset.missing
                                     && asset.relative_path.as_deref() == Some(rel_path.as_str())
                                 {
                                     asset.missing = false;
+                                    updated_asset_ids.push(asset.id.clone());
                                     tracing::info!(
                                         path = %rel_path,
                                         "Asset reconnected (file re-appeared)"
@@ -259,6 +345,32 @@ async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Res
                                     "Workspace watcher: failed to auto-register files"
                                 );
                             }
+
+                            let new_asset_ids: Vec<String> = project
+                                .state
+                                .assets
+                                .keys()
+                                .filter(|asset_id| !existing_asset_ids.contains(*asset_id))
+                                .cloned()
+                                .collect();
+
+                            if let Err(e) = record_workspace_asset_imports(project, &new_asset_ids)
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Workspace watcher: failed to persist auto-registered assets"
+                                );
+                            }
+
+                            if let Err(e) =
+                                record_workspace_asset_updates(project, &updated_asset_ids)
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Workspace watcher: failed to persist asset reconnection updates"
+                                );
+                            }
+
                             // Allow asset-protocol access for all managed assets
                             for asset in project.state.assets.values() {
                                 if asset.workspace_managed {

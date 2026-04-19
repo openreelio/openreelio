@@ -257,7 +257,7 @@ impl EditCommand {
 
     /// Creates an AddTrack command
     pub fn add_track(track_type: &str, name: Option<&str>) -> Self {
-        let mut params = serde_json::json!({ "type": track_type });
+        let mut params = serde_json::json!({ "kind": track_type });
 
         if let Some(n) = name {
             params["name"] = serde_json::json!(n);
@@ -269,7 +269,7 @@ impl EditCommand {
     /// Creates a MuteTrack command
     pub fn mute_track(track_id: &str, muted: bool) -> Self {
         Self::new(
-            "MuteTrack",
+            "ToggleTrackMute",
             serde_json::json!({
                 "trackId": track_id,
                 "muted": muted
@@ -751,7 +751,7 @@ mod tests {
         let cmd = EditCommand::add_track("video", Some("Main Video"));
 
         assert_eq!(cmd.command_type, "AddTrack");
-        assert_eq!(cmd.params["type"], "video");
+        assert_eq!(cmd.params["kind"], "video");
         assert_eq!(cmd.params["name"], "Main Video");
     }
 
@@ -760,7 +760,7 @@ mod tests {
         let cmd = EditCommand::add_track("audio", None);
 
         assert_eq!(cmd.command_type, "AddTrack");
-        assert_eq!(cmd.params["type"], "audio");
+        assert_eq!(cmd.params["kind"], "audio");
         assert!(cmd.params.get("name").is_none());
     }
 
@@ -768,7 +768,7 @@ mod tests {
     fn test_edit_command_mute_track() {
         let cmd = EditCommand::mute_track("track_1", true);
 
-        assert_eq!(cmd.command_type, "MuteTrack");
+        assert_eq!(cmd.command_type, "ToggleTrackMute");
         assert_eq!(cmd.params["trackId"], "track_1");
         assert_eq!(cmd.params["muted"], true);
     }

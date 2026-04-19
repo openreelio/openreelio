@@ -174,6 +174,12 @@ export interface WorkspaceSettings {
   scanDepthLimit: number;
 }
 
+/** Terminal settings for the integrated shell panel */
+export interface TerminalSettings {
+  /** Explicit shell/terminal executable. Null uses the OS default shell. */
+  defaultShellCommand: string | null;
+}
+
 /** Complete application settings */
 export interface AppSettings {
   version: number;
@@ -187,6 +193,7 @@ export interface AppSettings {
   performance: PerformanceSettings;
   ai: AISettings;
   workspace: WorkspaceSettings;
+  terminal: TerminalSettings;
 }
 
 type SettingsSectionKey = Exclude<keyof AppSettings, 'version'>;
@@ -322,6 +329,9 @@ const DEFAULT_SETTINGS: AppSettings = {
     autoRegisterOnUse: true,
     scanDepthLimit: 10,
   },
+  terminal: {
+    defaultShellCommand: null,
+  },
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -363,6 +373,10 @@ function coerceAppSettings(value: unknown): AppSettings {
     workspace: {
       ...DEFAULT_SETTINGS.workspace,
       ...(isRecord(value.workspace) ? value.workspace : {}),
+    },
+    terminal: {
+      ...DEFAULT_SETTINGS.terminal,
+      ...(isRecord(value.terminal) ? value.terminal : {}),
     },
   } as AppSettings;
 }
@@ -833,6 +847,9 @@ export const selectPerformanceSettings = (state: SettingsState) => state.setting
 
 /** Select AI settings */
 export const selectAISettings = (state: SettingsState) => state.settings.ai;
+
+/** Select terminal settings */
+export const selectTerminalSettings = (state: SettingsState) => state.settings.terminal;
 
 // =============================================================================
 // Export default for convenience

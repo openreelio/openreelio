@@ -34,12 +34,7 @@ import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
 import { useMessageQueueStore } from '@/stores/messageQueueStore';
-import {
-  findPanelZone,
-  useWorkspaceLayoutStore,
-  type DockZoneId,
-  type PanelId,
-} from '@/stores/workspaceLayoutStore';
+import { revealWorkspacePanel, type DockZoneId, type PanelId } from '@/stores/workspaceLayoutStore';
 import { createLogger } from '@/services/logger';
 import {
   buildCancelledDelegationPayload,
@@ -175,9 +170,6 @@ export function AgenticSidebarContent({
   const clearQueuedMessages = useMessageQueueStore((state) => state.clear);
   const setArtifactReviewSelection = useAgentArtifactReviewStore((state) => state.setSelection);
   const clearArtifactReviewSelection = useAgentArtifactReviewStore((state) => state.clearSelection);
-  const restorePanel = useWorkspaceLayoutStore((state) => state.restorePanel);
-  const setActivePanel = useWorkspaceLayoutStore((state) => state.setActivePanel);
-  const setZoneCollapsed = useWorkspaceLayoutStore((state) => state.setZoneCollapsed);
   const agentSnapshotsById = useAgentSessionStore((state) => state.snapshotsById);
   const loadAgentSession = useAgentSessionStore((state) => state.loadSession);
   const delegationRecords = useAgentDelegationStore((state): readonly DelegationRecord[] =>
@@ -247,20 +239,8 @@ export function AgenticSidebarContent({
   );
 
   const openAgentReviewPanel = useCallback(() => {
-    let targetZoneId = findPanelZone(
-      useWorkspaceLayoutStore.getState().layout,
-      AGENT_REVIEW_PANEL_ID,
-    );
-    if (!targetZoneId) {
-      restorePanel(AGENT_REVIEW_PANEL_ID, DEFAULT_AGENT_REVIEW_ZONE);
-      targetZoneId =
-        findPanelZone(useWorkspaceLayoutStore.getState().layout, AGENT_REVIEW_PANEL_ID) ??
-        DEFAULT_AGENT_REVIEW_ZONE;
-    }
-
-    setActivePanel(targetZoneId, AGENT_REVIEW_PANEL_ID);
-    setZoneCollapsed(targetZoneId, false);
-  }, [restorePanel, setActivePanel, setZoneCollapsed]);
+    revealWorkspacePanel(AGENT_REVIEW_PANEL_ID, DEFAULT_AGENT_REVIEW_ZONE);
+  }, []);
 
   const openDelegationReview = useCallback(
     (input: {

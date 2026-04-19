@@ -20,12 +20,7 @@ import { useConversationStore } from '@/stores/conversationStore';
 import { useMessageQueueStore } from '@/stores/messageQueueStore';
 import { useProjectStore } from '@/stores';
 import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
-import {
-  findPanelZone,
-  useWorkspaceLayoutStore,
-  type DockZoneId,
-  type PanelId,
-} from '@/stores/workspaceLayoutStore';
+import { revealWorkspacePanel, type DockZoneId, type PanelId } from '@/stores/workspaceLayoutStore';
 import { ChatMessageList, type ChatMessageListProps } from './ChatMessageList';
 import { ChatInputArea } from './ChatInputArea';
 import { AgentArtifactFocusBanner } from './AgentArtifactFocusBanner';
@@ -132,9 +127,6 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
     const artifactSelection = useAgentArtifactReviewStore((state) => state.selection);
     const setArtifactSelection = useAgentArtifactReviewStore((state) => state.setSelection);
     const clearArtifactSelection = useAgentArtifactReviewStore((state) => state.clearSelection);
-    const restorePanel = useWorkspaceLayoutStore((state) => state.restorePanel);
-    const setActivePanel = useWorkspaceLayoutStore((state) => state.setActivePanel);
-    const setZoneCollapsed = useWorkspaceLayoutStore((state) => state.setZoneCollapsed);
     const previousProjectIdRef = useRef(currentProjectId);
 
     const artifactFocus = useMemo(() => {
@@ -269,20 +261,8 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
     }, [clearQueue, clearQueueOnUnmount, onUnmount]);
 
     const openAgentReviewPanel = useCallback(() => {
-      let targetZoneId = findPanelZone(
-        useWorkspaceLayoutStore.getState().layout,
-        AGENT_REVIEW_PANEL_ID,
-      );
-      if (!targetZoneId) {
-        restorePanel(AGENT_REVIEW_PANEL_ID, DEFAULT_AGENT_REVIEW_ZONE);
-        targetZoneId =
-          findPanelZone(useWorkspaceLayoutStore.getState().layout, AGENT_REVIEW_PANEL_ID) ??
-          DEFAULT_AGENT_REVIEW_ZONE;
-      }
-
-      setActivePanel(targetZoneId, AGENT_REVIEW_PANEL_ID);
-      setZoneCollapsed(targetZoneId, false);
-    }, [restorePanel, setActivePanel, setZoneCollapsed]);
+      revealWorkspacePanel(AGENT_REVIEW_PANEL_ID, DEFAULT_AGENT_REVIEW_ZONE);
+    }, []);
 
     const handleArtifactFocus = useCallback(
       (focus: AgentArtifactFocus) => {

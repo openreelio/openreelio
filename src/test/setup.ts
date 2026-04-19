@@ -15,6 +15,7 @@ import { cleanup } from '@testing-library/react';
 // Mock @tauri-apps/api/core invoke function
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
+  convertFileSrc: vi.fn((path: string) => `asset://localhost${path}`),
 }));
 
 // Mock @tauri-apps/api/event for event listeners

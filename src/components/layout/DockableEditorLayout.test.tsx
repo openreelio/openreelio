@@ -10,10 +10,8 @@ const panelContent = {
   timeline: <div>Timeline</div>,
   inspector: <div>Inspector</div>,
   'ai-assistant': <div>AI</div>,
-  comparison: <div>Comparison</div>,
   history: <div>History</div>,
   transcript: <div>Transcript</div>,
-  performance: <div>Performance</div>,
 };
 
 describe('DockableEditorLayout', () => {
@@ -42,10 +40,8 @@ describe('DockableEditorLayout', () => {
 
   it('should render an empty bottom drop zone while dragging after the zone is emptied', () => {
     const store = useWorkspaceLayoutStore.getState();
-    store.movePanel('comparison', 'right');
     store.movePanel('history', 'right');
     store.movePanel('transcript', 'right');
-    store.movePanel('performance', 'right');
     store.startDrag('timeline');
 
     render(<DockableEditorLayout header={<div>Header</div>} panelContent={panelContent} />);

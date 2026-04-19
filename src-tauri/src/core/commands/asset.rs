@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{
     assets::{
-        media_kind_from_extension, Asset, AssetKind, AudioInfo, LicenseInfo, ProxyStatus, VideoInfo,
+        media_kind_from_extension, Asset, AssetKind, AudioInfo, LicenseInfo, MetadataExtractor,
+        ProxyStatus, VideoInfo,
     },
     commands::{Command, CommandResult, StateChange},
     fs::validate_local_input_path,
@@ -41,7 +42,24 @@ impl ImportAssetCommand {
             .map(|s| s.to_lowercase())
             .unwrap_or_default();
 
-        let asset = match media_kind_from_extension(&extension) {
+        let inferred_kind = if extension == "ogg" {
+            validate_local_input_path(uri, "asset.uri")
+                .ok()
+                .and_then(|validated_uri| MetadataExtractor::extract(validated_uri).ok())
+                .and_then(|metadata| {
+                    if metadata.video.is_some() {
+                        Some(AssetKind::Video)
+                    } else if metadata.audio.is_some() {
+                        Some(AssetKind::Audio)
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        };
+
+        let asset = match inferred_kind.or_else(|| media_kind_from_extension(&extension)) {
             Some(AssetKind::Audio) => Asset::new_audio(name, uri, AudioInfo::default()),
             Some(AssetKind::Image) => {
                 Asset::new_image(name, uri, 1920, 1080) // Default size, will be updated

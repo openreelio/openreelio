@@ -1,18 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const {
-  mockIsMetaToolsEnabled,
-  mockGetVisibleMetaToolNames,
-  mockGetWorkspaceToolNames,
-} = vi.hoisted(() => ({
-  mockIsMetaToolsEnabled: vi.fn(),
-  mockGetVisibleMetaToolNames: vi.fn(),
-  mockGetWorkspaceToolNames: vi.fn(),
-}));
+const { mockIsMetaToolsEnabled, mockGetVisibleMetaToolNames, mockGetWorkspaceToolNames } =
+  vi.hoisted(() => ({
+    mockIsMetaToolsEnabled: vi.fn(),
+    mockGetVisibleMetaToolNames: vi.fn(),
+    mockGetWorkspaceToolNames: vi.fn(),
+  }));
 
-vi.mock('@/config/featureFlags', () => ({
-  isMetaToolsEnabled: mockIsMetaToolsEnabled,
-}));
+vi.mock('@/config/featureFlags', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/config/featureFlags')>();
+  return {
+    ...actual,
+    isMetaToolsEnabled: mockIsMetaToolsEnabled,
+  };
+});
 
 vi.mock('@/agents/tools/metaTools', () => ({
   getVisibleMetaToolNames: mockGetVisibleMetaToolNames,
@@ -23,17 +24,9 @@ vi.mock('@/agents/tools/workspaceTools', () => ({
 }));
 
 import { createToolRegistryAdapter } from './ToolRegistryAdapter';
-import {
-  ToolRegistry,
-  type ToolCategory,
-  type ToolDefinition,
-} from '@/agents/ToolRegistry';
+import { ToolRegistry, type ToolCategory, type ToolDefinition } from '@/agents/ToolRegistry';
 
-function createTool(
-  name: string,
-  category: ToolCategory,
-  description = name,
-): ToolDefinition {
+function createTool(name: string, category: ToolCategory, description = name): ToolDefinition {
   return {
     name,
     description,

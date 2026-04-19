@@ -14,6 +14,8 @@ pub mod core;
 pub mod ipc;
 
 use std::path::{Path, PathBuf};
+#[cfg(all(not(test), feature = "gui"))]
+use std::{collections::HashMap, sync::Arc};
 
 // NOTE: Unit tests in this repository intentionally avoid linking the Tauri runtime.
 // On some Windows environments, dynamic dependencies of the webview stack can prevent
@@ -70,6 +72,15 @@ pub struct ActiveProject {
     pub history: ProjectHistory,
 }
 
+pub struct PreparedProjectSave {
+    pub snapshot_path: PathBuf,
+    pub meta_path: PathBuf,
+    pub history_path: PathBuf,
+    pub state_snapshot: ProjectState,
+    pub history_snapshot: ProjectHistory,
+    pub saved_last_op_id: Option<String>,
+}
+
 impl ActiveProject {
     fn history_command_type(op_kind: &crate::core::project::OpKind) -> &'static str {
         match op_kind {
@@ -93,9 +104,14 @@ impl ActiveProject {
             crate::core::project::OpKind::EffectAdd => "AddEffect",
             crate::core::project::OpKind::EffectRemove => "RemoveEffect",
             crate::core::project::OpKind::EffectUpdate => "UpdateEffect",
+            crate::core::project::OpKind::MarkerAdd => "AddMarker",
+            crate::core::project::OpKind::MarkerRemove => "RemoveMarker",
             crate::core::project::OpKind::CaptionAdd => "AddCaption",
             crate::core::project::OpKind::CaptionRemove => "RemoveCaption",
             crate::core::project::OpKind::CaptionUpdate => "UpdateCaption",
+            crate::core::project::OpKind::TextClipAdd => "AddTextClip",
+            crate::core::project::OpKind::TextClipUpdate => "UpdateTextClip",
+            crate::core::project::OpKind::TextClipRemove => "RemoveTextClip",
             crate::core::project::OpKind::SequenceCreate => "CreateSequence",
             crate::core::project::OpKind::SequenceUpdate => "UpdateSequence",
             crate::core::project::OpKind::SequenceRemove => "RemoveSequence",
@@ -561,25 +577,47 @@ impl ActiveProject {
     /// After a successful save, the `is_dirty` flag is reset to `false`.
     /// This ensures the project can be closed or replaced without warnings.
     pub fn save(&mut self) -> crate::core::CoreResult<()> {
-        self.sync_history_with_ops_log()?;
-        self.state.last_op_id = self.history.current_head().map(str::to_string);
-        self.state.op_count = self.history.applied_op_ids.len();
-
-        // Save snapshot
-        Snapshot::save(
-            &self.snapshot_path,
-            &self.state,
-            self.state.last_op_id.as_deref(),
-        )?;
-
-        // Save project metadata
-        crate::core::fs::atomic_write_json_pretty(&self.meta_path, &self.state.meta)?;
-        self.history.save(&self.history_path)?;
+        let prepared = self.prepare_save()?;
+        Self::write_prepared_save(&prepared)?;
 
         // Reset dirty flag after successful save
         self.state.is_dirty = false;
         tracing::debug!("Project saved successfully, is_dirty reset to false");
 
+        Ok(())
+    }
+
+    pub fn prepare_save(&mut self) -> crate::core::CoreResult<PreparedProjectSave> {
+        self.sync_history_with_ops_log()?;
+        self.state.last_op_id = self.history.current_head().map(str::to_string);
+        self.state.op_count = self.history.applied_op_ids.len();
+        let mut state_snapshot = self.state.clone();
+        state_snapshot.is_dirty = false;
+
+        Ok(PreparedProjectSave {
+            snapshot_path: self.snapshot_path.clone(),
+            meta_path: self.meta_path.clone(),
+            history_path: self.history_path.clone(),
+            state_snapshot,
+            history_snapshot: self.history.clone(),
+            saved_last_op_id: self.state.last_op_id.clone(),
+        })
+    }
+
+    pub(crate) fn write_prepared_save(
+        prepared: &PreparedProjectSave,
+    ) -> crate::core::CoreResult<()> {
+        Snapshot::save(
+            &prepared.snapshot_path,
+            &prepared.state_snapshot,
+            prepared.state_snapshot.last_op_id.as_deref(),
+        )?;
+
+        crate::core::fs::atomic_write_json_pretty(
+            &prepared.meta_path,
+            &prepared.state_snapshot.meta,
+        )?;
+        prepared.history_snapshot.save(&prepared.history_path)?;
         Ok(())
     }
 
@@ -839,6 +877,9 @@ pub struct AppState {
     /// The loop reads `WorkspaceEvent`s from the watcher channel, updates the
     /// asset index and project state, then emits Tauri events to the frontend.
     pub workspace_event_loop: Mutex<Option<tokio::task::JoinHandle<()>>>,
+
+    /// Active integrated terminal sessions keyed by session ID.
+    pub terminal_sessions: Mutex<HashMap<String, Arc<crate::ipc::terminal::TerminalSessionHandle>>>,
 }
 
 /// Runtime source monitor state for dual-viewer workflow.
@@ -967,6 +1008,7 @@ impl AppState {
             workspace_watcher: Mutex::new(None),
             workspace_watcher_lifecycle: Mutex::new(()),
             workspace_event_loop: Mutex::new(None),
+            terminal_sessions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1138,6 +1180,7 @@ mod tauri_app {
                 $crate::ipc::update_asset_proxy,
                 $crate::ipc::get_waveform_data,
                 $crate::ipc::generate_waveform_for_asset,
+                $crate::ipc::ensure_audio_preview_for_asset,
                 // Timeline commands
                 $crate::ipc::get_sequences,
                 $crate::ipc::create_sequence,
@@ -1331,6 +1374,13 @@ mod tauri_app {
                 $crate::ipc::read_agent_trace,
                 $crate::ipc::execute_agent_plan,
                 $crate::ipc::search_stock_media,
+                // Integrated terminal commands
+                $crate::ipc::list_terminal_profiles,
+                $crate::ipc::start_terminal_session,
+                $crate::ipc::write_terminal_input,
+                $crate::ipc::resize_terminal_session,
+                $crate::ipc::kill_terminal_session,
+                $crate::ipc::close_terminal_session,
                 // Agent memory commands
                 $crate::ipc::save_agent_memory,
                 $crate::ipc::get_agent_memory,
@@ -1577,6 +1627,7 @@ mod tauri_app {
             ipc::update_asset_proxy,
             ipc::get_waveform_data,
             ipc::generate_waveform_for_asset,
+            ipc::ensure_audio_preview_for_asset,
             // Timeline commands
             ipc::get_sequences,
             ipc::create_sequence,
@@ -1771,6 +1822,13 @@ mod tauri_app {
             ipc::read_agent_trace,
             ipc::execute_agent_plan,
             ipc::search_stock_media,
+            // Integrated terminal commands
+            ipc::list_terminal_profiles,
+            ipc::start_terminal_session,
+            ipc::write_terminal_input,
+            ipc::resize_terminal_session,
+            ipc::kill_terminal_session,
+            ipc::close_terminal_session,
             // Agent memory commands
             ipc::save_agent_memory,
             ipc::get_agent_memory,

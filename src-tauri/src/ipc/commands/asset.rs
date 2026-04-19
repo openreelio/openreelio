@@ -94,6 +94,12 @@ fn build_import_command(
     media_info: Option<&crate::core::ffmpeg::MediaInfo>,
 ) -> ImportAssetCommand {
     let mut command = ImportAssetCommand::new(name, resolved_uri);
+    let extension = std::path::Path::new(resolved_uri)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_ambiguous_ogg = extension == "ogg";
 
     if let Some(info) = media_info {
         let has_video = info.video.is_some();
@@ -102,7 +108,13 @@ fn build_import_command(
         command = match command.asset.kind {
             AssetKind::Image => ImportAssetCommand::image(name, resolved_uri, 1920, 1080),
             AssetKind::Audio => {
-                if let Some(audio_stream) = info.audio.as_ref() {
+                if is_ambiguous_ogg && has_video {
+                    ImportAssetCommand::video(
+                        name,
+                        resolved_uri,
+                        build_video_info(info.video.as_ref().expect("video stream checked above")),
+                    )
+                } else if let Some(audio_stream) = info.audio.as_ref() {
                     ImportAssetCommand::audio(name, resolved_uri, build_audio_info(audio_stream))
                 } else {
                     ImportAssetCommand::audio(name, resolved_uri, AudioInfo::default())
@@ -433,6 +445,31 @@ mod tests {
 
         let command = build_import_command("podcast.m4a", "/tmp/podcast.m4a", Some(&media_info));
         assert_eq!(command.asset.kind, AssetKind::Audio);
+    }
+
+    #[test]
+    fn test_build_import_command_promotes_ambiguous_ogg_with_video_stream_to_video() {
+        let media_info = mock_media_info(
+            Some(crate::core::ffmpeg::VideoStreamInfo {
+                width: 1280,
+                height: 720,
+                fps: 30.0,
+                codec: "theora".to_string(),
+                pixel_format: "yuv420p".to_string(),
+                bitrate: Some(2_000_000),
+                is_hdr: false,
+                color_transfer: None,
+            }),
+            Some(crate::core::ffmpeg::AudioStreamInfo {
+                sample_rate: 48000,
+                channels: 2,
+                codec: "opus".to_string(),
+                bitrate: Some(192_000),
+            }),
+        );
+
+        let command = build_import_command("clip.ogg", "/tmp/clip.ogg", Some(&media_info));
+        assert_eq!(command.asset.kind, AssetKind::Video);
     }
 
     #[test]
@@ -893,6 +930,125 @@ pub async fn generate_waveform_for_asset(
             Err(format!("Waveform generation failed: {}", e))
         }
     }
+}
+
+/// Ensures a browser-decodable audio preview file exists for an asset.
+///
+/// Generates an MP3 cache file on demand for audio/video assets whose original
+/// container or codec may not decode reliably in the embedded webview.
+#[tauri::command]
+#[specta::specta]
+pub async fn ensure_audio_preview_for_asset(
+    asset_id: String,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+) -> Result<Option<String>, String> {
+    validate_path_id_component(&asset_id, "assetId")?;
+
+    let (asset_path, project_path, asset_kind) = {
+        let guard = state.project.lock().await;
+
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        let asset = project
+            .state
+            .assets
+            .get(&asset_id)
+            .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
+
+        (asset.uri.clone(), project.path.clone(), asset.kind.clone())
+    };
+
+    if !matches!(asset_kind, AssetKind::Audio | AssetKind::Video) {
+        return Ok(None);
+    }
+
+    let input_path = PathBuf::from(&asset_path);
+    let preview_dir = project_path
+        .join(".openreelio")
+        .join("cache")
+        .join("audio_previews");
+    tokio::fs::create_dir_all(&preview_dir)
+        .await
+        .map_err(|e| format!("Failed to create audio preview cache directory: {}", e))?;
+
+    let preview_path = preview_dir.join(format!("{}.mp3", asset_id));
+
+    let input_metadata = tokio::fs::metadata(&input_path)
+        .await
+        .map_err(|e| format!("Failed to stat asset for audio preview: {}", e))?;
+
+    let preview_is_fresh = match tokio::fs::metadata(&preview_path).await {
+        Ok(metadata) if metadata.len() > 0 => {
+            let preview_modified = metadata.modified().ok();
+            let input_modified = input_metadata.modified().ok();
+            preview_modified
+                .zip(input_modified)
+                .map(|(preview, input)| preview >= input)
+                == Some(true)
+        }
+        _ => false,
+    };
+
+    if !preview_is_fresh {
+        let ffmpeg_guard = ffmpeg_state.read().await;
+        let ffmpeg = ffmpeg_guard
+            .runner()
+            .ok_or_else(|| "FFmpeg not initialized".to_string())?;
+        let temp_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let temp_preview_path = preview_dir.join(format!("{}.{}.tmp.mp3", asset_id, temp_suffix));
+        let input_path_string = input_path.to_string_lossy().to_string();
+        let temp_preview_path_string = temp_preview_path.to_string_lossy().to_string();
+
+        let mut cmd = tokio::process::Command::new(&ffmpeg.info().ffmpeg_path);
+        crate::core::process::configure_tokio_command(&mut cmd);
+        cmd.args([
+            "-v",
+            "error",
+            "-i",
+            &input_path_string,
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            "-y",
+            &temp_preview_path_string,
+        ]);
+
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| format!("Failed to generate audio preview: {}", e))?;
+
+        if !output.status.success() {
+            let _ = tokio::fs::remove_file(&temp_preview_path).await;
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "Audio preview generation failed: {}",
+                stderr.trim()
+            ));
+        }
+
+        let _ = tokio::fs::remove_file(&preview_path).await;
+        tokio::fs::rename(&temp_preview_path, &preview_path)
+            .await
+            .map_err(|e| format!("Failed to finalize audio preview: {}", e))?;
+    }
+
+    state.allow_asset_protocol_file(&preview_path);
+    Ok(Some(preview_path.to_string_lossy().to_string()))
 }
 
 /// Removes an asset from the project

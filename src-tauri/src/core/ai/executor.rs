@@ -418,11 +418,13 @@ impl EditScriptExecutor {
                         }
                     }
                     "MoveClip" => {
-                        if cmd.params.get("newStart").is_none() {
+                        let has_new_start = cmd.params.get("newStart").is_some();
+                        let has_new_timeline_in = cmd.params.get("newTimelineIn").is_some();
+                        if !has_new_start && !has_new_timeline_in {
                             errors.push(ValidationError::for_command(
                                 index,
                                 "MISSING_NEW_START",
-                                "MoveClip requires newStart",
+                                "MoveClip requires newStart or newTimelineIn",
                             ));
                         }
                     }
@@ -680,9 +682,12 @@ impl EditScriptExecutor {
                 let new_start = cmd
                     .params
                     .get("newStart")
+                    .or_else(|| cmd.params.get("newTimelineIn"))
                     .and_then(|v| v.as_f64())
                     .ok_or_else(|| {
-                        CoreError::ValidationError("MoveClip missing newStart".to_string())
+                        CoreError::ValidationError(
+                            "MoveClip missing newStart/newTimelineIn".to_string(),
+                        )
                     })?;
                 let new_track_id = cmd
                     .params

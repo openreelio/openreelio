@@ -21,6 +21,7 @@ import {
 import { registerAllTools, globalToolRegistry } from '@/agents';
 import { registerDefaultCompoundExpanders } from '@/agents/engine/adapters/tools/registerDefaultCompoundExpanders';
 import { useConversationStore } from './conversationStore';
+import { useProjectStore } from './projectStore';
 
 const logger = createLogger('AIStore');
 
@@ -709,6 +710,8 @@ export const useAIStore = create<AIState>()(
             }>('apply_edit_script', { editScript });
 
             if (result.success) {
+              await useProjectStore.getState().refreshFromBackendMutation();
+
               set((state) => {
                 if (state.currentProposal) {
                   const id = state.currentProposal.id;
@@ -729,6 +732,8 @@ export const useAIStore = create<AIState>()(
                 }
               });
             } else {
+              await useProjectStore.getState().refreshFromBackendMutation();
+
               set((state) => {
                 if (state.currentProposal) {
                   const id = state.currentProposal.id;

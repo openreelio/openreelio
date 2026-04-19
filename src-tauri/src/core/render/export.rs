@@ -57,6 +57,13 @@ fn track_included_in_export(track: &Track) -> bool {
     }
 }
 
+fn track_included_in_media_collection(track: &Track) -> bool {
+    match track.kind {
+        TrackKind::Video | TrackKind::Audio => !track.muted,
+        TrackKind::Overlay | TrackKind::Caption => track.visible && !track.muted,
+    }
+}
+
 fn asset_has_playable_audio(
     asset: &Asset,
     track_kind: &TrackKind,
@@ -66,7 +73,7 @@ fn asset_has_playable_audio(
         AssetKind::Audio => true,
         AssetKind::Video => {
             if matches!(track_kind, TrackKind::Audio) {
-                return true;
+                return audio_info.map(|info| info.has_audio).unwrap_or(true);
             }
 
             audio_info
@@ -2213,7 +2220,7 @@ fn collect_enabled_clips_sorted(sequence: &Sequence) -> Vec<(&Clip, &Track)> {
     let mut all_clips: Vec<(&Clip, &Track)> = Vec::new();
 
     for track in &sequence.tracks {
-        if !track_included_in_export(track) {
+        if !track_included_in_media_collection(track) {
             continue;
         }
 
@@ -2597,6 +2604,11 @@ impl ExportEngine {
                         &audio_companion_keys,
                     );
 
+            let contributes_visual_output = matches!(track.kind, TrackKind::Video) && track.visible;
+            if !contributes_visual_output && !clip_has_audio {
+                continue;
+            }
+
             // Add input (using validated path)
             args.push("-i".to_string());
             args.push(validated_path.to_string_lossy().to_string());
@@ -2616,40 +2628,47 @@ impl ExportEngine {
             // Build filters based on track type
             match track.kind {
                 TrackKind::Video => {
-                    // Video processing: trim → [reverse] → [speed] → effects → [tonemap] → output
-                    let trim_label = format!("trim{}", input_index);
-                    let video_out_label = format!("v{}", input_index);
+                    if track.visible {
+                        // Video processing: trim → [reverse] → [speed] → effects → [tonemap] → output
+                        let trim_label = format!("trim{}", input_index);
+                        let video_out_label = format!("v{}", input_index);
 
-                    let effects_out_label = if tonemap_filter.is_some() {
-                        format!("vfx{}", input_index)
-                    } else {
-                        video_out_label.clone()
-                    };
+                        let effects_out_label = if tonemap_filter.is_some() {
+                            format!("vfx{}", input_index)
+                        } else {
+                            video_out_label.clone()
+                        };
 
-                    // Step 1: Video trim with speed/reverse/freeze support
-                    build_video_trim_filter(clip, input_index, &trim_label, &mut filter_complex);
+                        // Step 1: Video trim with speed/reverse/freeze support
+                        build_video_trim_filter(
+                            clip,
+                            input_index,
+                            &trim_label,
+                            &mut filter_complex,
+                        );
 
-                    // Step 2: Apply video effects if any
-                    if clip_filter_graph.has_video_effects() {
-                        let effects_filter = clip_filter_graph
-                            .to_video_filter_complex(&trim_label, &effects_out_label);
-                        filter_complex.push_str(&effects_filter);
-                        filter_complex.push(';');
-                    } else {
-                        filter_complex
-                            .push_str(&format!("[{}]null[{}];", trim_label, effects_out_label));
+                        // Step 2: Apply video effects if any
+                        if clip_filter_graph.has_video_effects() {
+                            let effects_filter = clip_filter_graph
+                                .to_video_filter_complex(&trim_label, &effects_out_label);
+                            filter_complex.push_str(&effects_filter);
+                            filter_complex.push(';');
+                        } else {
+                            filter_complex
+                                .push_str(&format!("[{}]null[{}];", trim_label, effects_out_label));
+                        }
+
+                        // Step 3: Apply tonemapping if needed (HDR → SDR)
+                        if let Some(ref tm_filter) = tonemap_filter {
+                            filter_complex.push_str(&format!(
+                                "[{}]{}[{}];",
+                                effects_out_label, tm_filter, video_out_label
+                            ));
+                        }
+
+                        video_streams.push(format!("[{}]", video_out_label));
+                        video_transitions.push(find_transition_effect(clip, effects));
                     }
-
-                    // Step 3: Apply tonemapping if needed (HDR → SDR)
-                    if let Some(ref tm_filter) = tonemap_filter {
-                        filter_complex.push_str(&format!(
-                            "[{}]{}[{}];",
-                            effects_out_label, tm_filter, video_out_label
-                        ));
-                    }
-
-                    video_streams.push(format!("[{}]", video_out_label));
-                    video_transitions.push(find_transition_effect(clip, effects));
 
                     // Audio processing: ONLY if this asset has audio
                     // Freeze frame clips have muted audio, so skip
@@ -2867,6 +2886,117 @@ impl ExportEngine {
         args.push("-y".to_string());
 
         // Output
+        args.push(settings.output_path.to_string_lossy().to_string());
+
+        Ok(args)
+    }
+
+    fn build_audio_only_filter_args_with_audio_info(
+        &self,
+        sequence: &Sequence,
+        assets: &std::collections::HashMap<String, Asset>,
+        effects: &std::collections::HashMap<String, Effect>,
+        audio_info: &std::collections::HashMap<String, AssetAudioInfo>,
+        settings: &ExportSettings,
+    ) -> Result<Vec<String>, ExportError> {
+        let mut args = Vec::new();
+        let mut input_index = 0;
+        let mut filter_complex = String::new();
+        let mut audio_streams = Vec::new();
+        let audio_companion_keys = collect_audio_companion_keys(sequence, assets, audio_info);
+        let all_clips = collect_enabled_clips_sorted(sequence);
+
+        if all_clips.is_empty() {
+            return Err(ExportError::NoClips);
+        }
+
+        for (clip, track) in &all_clips {
+            if !matches!(track.kind, TrackKind::Video | TrackKind::Audio) {
+                continue;
+            }
+
+            if clip.is_adjustment_layer()
+                || is_text_clip(clip)
+                || clip.freeze_frame
+                || clip.audio.muted
+            {
+                continue;
+            }
+
+            let asset = assets.get(&clip.asset_id).ok_or_else(|| {
+                ExportError::InvalidSettings(format!("Asset not found: {}", clip.asset_id))
+            })?;
+
+            let clip_has_audio =
+                asset_has_playable_audio(asset, &track.kind, audio_info.get(&clip.asset_id))
+                    && !clip_audio_is_suppressed_by_companion(
+                        clip,
+                        track,
+                        asset,
+                        &audio_companion_keys,
+                    );
+
+            if !clip_has_audio {
+                continue;
+            }
+
+            let validated_path = validate_local_input_path(&asset.uri, "Asset file")
+                .map_err(ExportError::InvalidSettings)?;
+
+            args.push("-i".to_string());
+            args.push(validated_path.to_string_lossy().to_string());
+
+            let clip_filter_graph = self.build_clip_filter_graph(clip, effects, None, None);
+            let audio_trim_label = format!("atrim{}", input_index);
+            let audio_out_label = format!("a{}", input_index);
+
+            let audio_effects_input =
+                build_audio_trim_filter(clip, input_index, &audio_trim_label, &mut filter_complex);
+
+            if clip_filter_graph.has_audio_effects() {
+                let effects_filter = clip_filter_graph
+                    .to_audio_filter_complex(&audio_effects_input, &audio_out_label);
+                filter_complex.push_str(&effects_filter);
+                filter_complex.push(';');
+            } else {
+                filter_complex.push_str(&format!(
+                    "[{}]anull[{}];",
+                    audio_effects_input, audio_out_label
+                ));
+            }
+
+            let mixed_audio_label = apply_audio_mix_settings(
+                clip,
+                track,
+                input_index,
+                &audio_out_label,
+                &mut filter_complex,
+            );
+
+            audio_streams.push(format!("[{}]", mixed_audio_label));
+            input_index += 1;
+        }
+
+        if filter_complex.ends_with(';') {
+            filter_complex.pop();
+        }
+
+        let final_audio_label = append_master_audio_output(
+            &mut filter_complex,
+            &audio_streams,
+            sequence.master_volume_db,
+        )
+        .ok_or_else(|| {
+            ExportError::InvalidSettings("No audio tracks found in sequence".to_string())
+        })?;
+
+        args.push("-filter_complex".to_string());
+        args.push(filter_complex);
+        args.push("-map".to_string());
+        args.push(final_audio_label);
+
+        append_output_time_range_args(&mut args, settings.start_time, settings.end_time);
+        args.push("-y".to_string());
         args.push(settings.output_path.to_string_lossy().to_string());
 
         Ok(args)
@@ -3396,10 +3526,10 @@ impl ExportEngine {
         normalized_settings.start_time = normalized_start_time;
         normalized_settings.end_time = normalized_end_time;
 
-        // Convert to video export settings, then build args using existing pipeline
+        // Convert to export settings so we can reuse range handling/output path wiring.
         let export_settings = normalized_settings.to_export_settings();
 
-        let mut args = self.build_complex_filter_args_with_audio_info(
+        let mut args = self.build_audio_only_filter_args_with_audio_info(
             sequence,
             assets,
             effects,
@@ -3800,7 +3930,7 @@ pub fn validate_export_settings(
 
     // Check all clip assets exist (except virtual text clips) and are safe to read.
     for track in &sequence.tracks {
-        if !track_included_in_export(track) {
+        if !track_included_in_media_collection(track) {
             continue;
         }
 
@@ -4050,6 +4180,11 @@ pub fn build_complex_filter_args_with_audio_info(
                     &audio_companion_keys,
                 );
 
+        let contributes_visual_output = matches!(track.kind, TrackKind::Video) && track.visible;
+        if !contributes_visual_output && !clip_has_audio {
+            continue;
+        }
+
         // Validate asset URI before passing to FFmpeg
         let validated_path = validate_local_input_path(&asset.uri, "Asset file")
             .map_err(ExportError::InvalidSettings)?;
@@ -4067,34 +4202,36 @@ pub fn build_complex_filter_args_with_audio_info(
         // Build filters based on track type
         match track.kind {
             TrackKind::Video => {
-                let trim_label = format!("trim{}", input_index);
-                let video_out_label = format!("v{}", input_index);
-                let effects_out_label = if tonemap_filter.is_some() {
-                    format!("vfx{}", input_index)
-                } else {
-                    video_out_label.clone()
-                };
+                if track.visible {
+                    let trim_label = format!("trim{}", input_index);
+                    let video_out_label = format!("v{}", input_index);
+                    let effects_out_label = if tonemap_filter.is_some() {
+                        format!("vfx{}", input_index)
+                    } else {
+                        video_out_label.clone()
+                    };
 
-                build_video_trim_filter(clip, input_index, &trim_label, &mut filter_complex);
+                    build_video_trim_filter(clip, input_index, &trim_label, &mut filter_complex);
 
-                if clip_filter_graph.has_video_effects() {
-                    let effects_filter =
-                        clip_filter_graph.to_video_filter_complex(&trim_label, &effects_out_label);
-                    filter_complex.push_str(&effects_filter);
-                    filter_complex.push(';');
-                } else {
-                    filter_complex
-                        .push_str(&format!("[{}]null[{}];", trim_label, effects_out_label));
+                    if clip_filter_graph.has_video_effects() {
+                        let effects_filter = clip_filter_graph
+                            .to_video_filter_complex(&trim_label, &effects_out_label);
+                        filter_complex.push_str(&effects_filter);
+                        filter_complex.push(';');
+                    } else {
+                        filter_complex
+                            .push_str(&format!("[{}]null[{}];", trim_label, effects_out_label));
+                    }
+
+                    if let Some(ref tm_filter) = tonemap_filter {
+                        filter_complex.push_str(&format!(
+                            "[{}]{}[{}];",
+                            effects_out_label, tm_filter, video_out_label
+                        ));
+                    }
+
+                    video_streams.push(format!("[{}]", video_out_label));
                 }
-
-                if let Some(ref tm_filter) = tonemap_filter {
-                    filter_complex.push_str(&format!(
-                        "[{}]{}[{}];",
-                        effects_out_label, tm_filter, video_out_label
-                    ));
-                }
-
-                video_streams.push(format!("[{}]", video_out_label));
 
                 if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
                     let audio_trim_label = format!("atrim{}", input_index);
@@ -5453,6 +5590,226 @@ mod tests {
             }
             other => panic!("Expected InvalidSettings, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_audio_only_filter_builder_accepts_pure_audio_sequences() {
+        use crate::core::assets::AudioInfo;
+        use crate::core::ffmpeg::{FFmpegInfo, FFmpegRunner};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Audio Only", SequenceFormat::youtube_1080());
+        let mut audio_track = Track::new_audio("Audio 1");
+        audio_track.add_clip(
+            Clip::new("audio_asset")
+                .with_source_range(0.0, 4.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(audio_track);
+
+        let audio_path = create_temp_media_file("audio_only_builder.mp3");
+        let mut audio_asset =
+            Asset::new_audio("audio_only_builder.mp3", &audio_path, AudioInfo::default())
+                .with_duration(4.0)
+                .with_file_size(1_000_000);
+        audio_asset.id = "audio_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert(audio_asset.id.clone(), audio_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "audio_asset".to_string(),
+            AssetAudioInfo { has_audio: true },
+        );
+
+        let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
+            ffmpeg_path: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
+            version: "test".to_string(),
+            is_bundled: false,
+        }));
+        let settings = AudioExportSettings {
+            format: AudioExportFormat::Mp3,
+            output_path: PathBuf::from("/tmp/audio-only.mp3"),
+            bitrate: None,
+            sample_rate: None,
+            start_time: None,
+            end_time: None,
+        }
+        .to_export_settings();
+
+        let args = engine
+            .build_audio_only_filter_args_with_audio_info(
+                &sequence,
+                &assets,
+                &std::collections::HashMap::new(),
+                &audio_info_map,
+                &settings,
+            )
+            .expect("audio-only export args should build");
+
+        let args_str = args.join(" ");
+        assert!(args_str.contains("-map [outa_base]") || args_str.contains("-map [outa]"));
+        assert!(!args_str.contains("Sequence has no visual clips to export"));
+    }
+
+    #[test]
+    fn test_audio_only_filter_builder_skips_visual_assets_without_audio() {
+        use crate::core::assets::{AudioInfo, VideoInfo};
+        use crate::core::ffmpeg::{FFmpegInfo, FFmpegRunner};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Audio Mix", SequenceFormat::youtube_1080());
+
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("broken_video")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut audio_track = Track::new_audio("Audio 1");
+        audio_track.add_clip(
+            Clip::new("voiceover")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(audio_track);
+
+        let mut broken_video = Asset::new_video(
+            "broken_visual.mp4",
+            "/missing/broken_visual.mp4",
+            VideoInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_file_size(5_000_000);
+        broken_video.id = "broken_video".to_string();
+        broken_video.audio = None;
+
+        let voiceover_path = create_temp_media_file("audio_only_voiceover.wav");
+        let mut voiceover = Asset::new_audio(
+            "audio_only_voiceover.wav",
+            &voiceover_path,
+            AudioInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_file_size(1_000_000);
+        voiceover.id = "voiceover".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert(broken_video.id.clone(), broken_video);
+        assets.insert(voiceover.id.clone(), voiceover);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "broken_video".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+        audio_info_map.insert("voiceover".to_string(), AssetAudioInfo { has_audio: true });
+
+        let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
+            ffmpeg_path: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
+            version: "test".to_string(),
+            is_bundled: false,
+        }));
+        let settings = AudioExportSettings {
+            format: AudioExportFormat::Wav,
+            output_path: PathBuf::from("/tmp/audio-only.wav"),
+            bitrate: None,
+            sample_rate: None,
+            start_time: None,
+            end_time: None,
+        }
+        .to_export_settings();
+
+        let args = engine
+            .build_audio_only_filter_args_with_audio_info(
+                &sequence,
+                &assets,
+                &std::collections::HashMap::new(),
+                &audio_info_map,
+                &settings,
+            )
+            .expect("visual-only broken assets should not block audio-only export");
+
+        let args_str = args.join(" ");
+        assert!(args_str.contains(&voiceover_path));
+        assert!(!args_str.contains("/missing/broken_visual.mp4"));
+    }
+
+    #[test]
+    fn test_build_filter_keeps_audio_from_hidden_video_tracks() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Hidden Video Audio", SequenceFormat::youtube_1080());
+
+        let visible_video_path = create_temp_media_file("visible_video.mp4");
+        let hidden_video_path = create_temp_media_file("hidden_video.mp4");
+
+        let mut visible_track = Track::new_video("Visible Video");
+        visible_track.add_clip(
+            Clip::new("visible_video")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(visible_track);
+
+        let mut hidden_track = Track::new_video("Hidden Video");
+        hidden_track.visible = false;
+        hidden_track.add_clip(
+            Clip::new("hidden_video")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(hidden_track);
+
+        let mut visible_asset = Asset::new_video(
+            "visible_video.mp4",
+            &visible_video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_file_size(5_000_000);
+        visible_asset.id = "visible_video".to_string();
+        visible_asset.audio = None;
+
+        let mut hidden_asset =
+            Asset::new_video("hidden_video.mp4", &hidden_video_path, VideoInfo::default())
+                .with_duration(5.0)
+                .with_file_size(5_000_000);
+        hidden_asset.id = "hidden_video".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert(visible_asset.id.clone(), visible_asset);
+        assets.insert(hidden_asset.id.clone(), hidden_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "visible_video".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+        audio_info_map.insert(
+            "hidden_video".to_string(),
+            AssetAudioInfo { has_audio: true },
+        );
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &audio_info_map,
+            &ExportSettings::default(),
+        )
+        .expect("hidden video track audio should remain in the export mix");
+
+        let args_str = args.join(" ");
+        assert!(args_str.contains(&visible_video_path));
+        assert!(args_str.contains(&hidden_video_path));
+        assert!(args_str.contains("-map [outa_base]") || args_str.contains("-map [outa]"));
     }
 
     #[test]

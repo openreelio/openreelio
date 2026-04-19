@@ -17,6 +17,7 @@ import {
   selectAutoSaveSettings,
   selectPerformanceSettings,
   selectAISettings,
+  selectTerminalSettings,
   type AppSettings,
   type GeneralSettings,
   type EditorSettings,
@@ -27,6 +28,7 @@ import {
   type AutoSaveSettings,
   type PerformanceSettings,
   type AISettings,
+  type TerminalSettings,
 } from '@/stores/settingsStore';
 
 export interface UseSettingsOptions {
@@ -51,6 +53,7 @@ export interface UseSettingsReturn {
   autoSave: AutoSaveSettings;
   performance: PerformanceSettings;
   ai: AISettings;
+  terminal: TerminalSettings;
 
   // Actions
   loadSettings: () => Promise<void>;
@@ -64,6 +67,7 @@ export interface UseSettingsReturn {
   updateAutoSave: (values: Partial<AutoSaveSettings>) => Promise<void>;
   updatePerformance: (values: Partial<PerformanceSettings>) => Promise<void>;
   updateAI: (values: Partial<AISettings>) => Promise<void>;
+  updateTerminal: (values: Partial<TerminalSettings>) => Promise<void>;
   resetSettings: () => Promise<void>;
   clearError: () => void;
 }
@@ -90,6 +94,7 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsReturn
   const autoSaveSettings = useSettingsStore(selectAutoSaveSettings);
   const performance = useSettingsStore(selectPerformanceSettings);
   const ai = useSettingsStore(selectAISettings);
+  const terminal = useSettingsStore(selectTerminalSettings);
 
   // Actions
   const loadSettings = useSettingsStore((state) => state.loadSettings);
@@ -101,47 +106,52 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsReturn
   // Section update helpers
   const updateGeneral = useCallback(
     (values: Partial<GeneralSettings>) => updateSettings('general', values),
-    [updateSettings]
+    [updateSettings],
   );
 
   const updateEditor = useCallback(
     (values: Partial<EditorSettings>) => updateSettings('editor', values),
-    [updateSettings]
+    [updateSettings],
   );
 
   const updatePlayback = useCallback(
     (values: Partial<PlaybackSettings>) => updateSettings('playback', values),
-    [updateSettings]
+    [updateSettings],
   );
 
   const updateExport = useCallback(
     (values: Partial<ExportSettings>) => updateSettings('export', values),
-    [updateSettings]
+    [updateSettings],
   );
 
   const updateAppearance = useCallback(
     (values: Partial<AppearanceSettings>) => updateSettings('appearance', values),
-    [updateSettings]
+    [updateSettings],
   );
 
   const updateShortcuts = useCallback(
     (values: Partial<ShortcutSettings>) => updateSettings('shortcuts', values),
-    [updateSettings]
+    [updateSettings],
   );
 
   const updateAutoSave = useCallback(
     (values: Partial<AutoSaveSettings>) => updateSettings('autoSave', values),
-    [updateSettings]
+    [updateSettings],
   );
 
   const updatePerformance = useCallback(
     (values: Partial<PerformanceSettings>) => updateSettings('performance', values),
-    [updateSettings]
+    [updateSettings],
   );
 
   const updateAI = useCallback(
     (values: Partial<AISettings>) => updateSettings('ai', values),
-    [updateSettings]
+    [updateSettings],
+  );
+
+  const updateTerminal = useCallback(
+    (values: Partial<TerminalSettings>) => updateSettings('terminal', values),
+    [updateSettings],
   );
 
   // Auto-load on mount
@@ -168,6 +178,7 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsReturn
     autoSave: autoSaveSettings,
     performance,
     ai,
+    terminal,
 
     // Actions
     loadSettings,
@@ -181,6 +192,7 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsReturn
     updateAutoSave,
     updatePerformance,
     updateAI,
+    updateTerminal,
     resetSettings,
     clearError,
   };
