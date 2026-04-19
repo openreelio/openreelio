@@ -1490,9 +1490,13 @@ impl ProjectState {
                 .get_track_mut(track_id)
                 .ok_or_else(|| CoreError::NotFound(format!("Track not found: {track_id}")))?;
 
+            let previous_clips = track.clips.clone();
             track.add_clip(clip);
             Self::sort_track_clips(track);
-            Self::validate_track_no_overlap(track)?;
+            if let Err(error) = Self::validate_track_no_overlap(track) {
+                track.clips = previous_clips;
+                return Err(error);
+            }
         }
 
         self.effects.insert(effect.id.clone(), effect);
@@ -1522,13 +1526,17 @@ impl ProjectState {
             let track = sequence
                 .get_track_mut(track_id)
                 .ok_or_else(|| CoreError::NotFound(format!("Track not found: {track_id}")))?;
+            let previous_clips = track.clips.clone();
             let existing_clip = track
                 .get_clip_mut(clip_id)
                 .ok_or_else(|| CoreError::NotFound(format!("Clip not found: {clip_id}")))?;
 
             *existing_clip = clip;
             Self::sort_track_clips(track);
-            Self::validate_track_no_overlap(track)?;
+            if let Err(error) = Self::validate_track_no_overlap(track) {
+                track.clips = previous_clips;
+                return Err(error);
+            }
         }
 
         self.effects.insert(effect.id.clone(), effect);
@@ -1558,6 +1566,9 @@ impl ProjectState {
                 .get_track_mut(track_id)
                 .ok_or_else(|| CoreError::NotFound(format!("Track not found: {track_id}")))?;
 
+            if track.get_clip(clip_id).is_none() {
+                return Err(CoreError::NotFound(format!("Clip not found: {clip_id}")));
+            }
             track.remove_clip(&clip_id.to_string());
         }
 

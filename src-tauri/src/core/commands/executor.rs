@@ -1382,46 +1382,36 @@ impl CommandExecutor {
                     CoreError::Internal("EffectUpdate payload missing effectId".to_string())
                 })?;
 
-                let effect = state.effects.get(effect_id);
+                let is_mask_command = matches!(type_name, "AddMask" | "UpdateMask" | "RemoveMask");
+                let (enabled, order, params, masks) = if is_mask_command {
+                    let effect = state.effects.get(effect_id).ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "EffectUpdate could not find effect after {type_name}: {effect_id}"
+                        ))
+                    })?;
 
-                let enabled = if matches!(type_name, "AddMask" | "UpdateMask" | "RemoveMask") {
-                    effect
-                        .map(|effect| serde_json::Value::Bool(effect.enabled))
-                        .unwrap_or(serde_json::Value::Null)
+                    (
+                        serde_json::Value::Bool(effect.enabled),
+                        serde_json::Value::Number(effect.order.into()),
+                        to_value(&effect.params)?,
+                        to_value(&effect.masks)?,
+                    )
                 } else {
-                    command_json
-                        .get("enabled")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null)
-                };
-                let order = if matches!(type_name, "AddMask" | "UpdateMask" | "RemoveMask") {
-                    effect
-                        .map(|effect| serde_json::Value::Number(effect.order.into()))
-                        .unwrap_or(serde_json::Value::Null)
-                } else {
-                    command_json
-                        .get("order")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null)
-                };
-                let params = if matches!(type_name, "AddMask" | "UpdateMask" | "RemoveMask") {
-                    effect
-                        .map(|effect| to_value(&effect.params))
-                        .transpose()?
-                        .unwrap_or(serde_json::Value::Null)
-                } else {
-                    command_json
-                        .get("params")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null)
-                };
-                let masks = if matches!(type_name, "AddMask" | "UpdateMask" | "RemoveMask") {
-                    effect
-                        .map(|effect| to_value(&effect.masks))
-                        .transpose()?
-                        .unwrap_or(serde_json::Value::Null)
-                } else {
-                    serde_json::Value::Null
+                    (
+                        command_json
+                            .get("enabled")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                        command_json
+                            .get("order")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                        command_json
+                            .get("params")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                        serde_json::Value::Null,
+                    )
                 };
 
                 Ok(serde_json::json!({

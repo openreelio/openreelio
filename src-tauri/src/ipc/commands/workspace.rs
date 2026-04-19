@@ -101,7 +101,10 @@ const MAX_DOCUMENT_BYTES: usize = 512 * 1024;
 const DEFAULT_DOCUMENT_LIST_LIMIT: usize = 500;
 const MAX_DOCUMENT_LIST_LIMIT: usize = 2_000;
 
-fn record_workspace_operation(project: &mut ActiveProject, operation: Operation) -> Result<(), String> {
+fn record_workspace_operation(
+    project: &mut ActiveProject,
+    operation: Operation,
+) -> Result<(), String> {
     project
         .ops_log
         .append(&operation)
@@ -118,12 +121,10 @@ fn record_workspace_asset_imports(
     asset_ids: &[String],
 ) -> Result<(), String> {
     for asset_id in asset_ids {
-        let asset = project
-            .state
-            .assets
-            .get(asset_id)
-            .cloned()
-            .ok_or_else(|| format!("Workspace asset not found after registration: {asset_id}"))?;
+        let asset =
+            project.state.assets.get(asset_id).cloned().ok_or_else(|| {
+                format!("Workspace asset not found after registration: {asset_id}")
+            })?;
         let payload = serde_json::to_value(&asset)
             .map_err(|e| format!("Failed to serialize workspace asset import payload: {e}"))?;
         record_workspace_operation(project, Operation::new(OpKind::AssetImport, payload))?;
@@ -306,7 +307,9 @@ async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Res
                                 }
                             }
 
-                            if let Err(e) = record_workspace_asset_updates(project, &updated_asset_ids) {
+                            if let Err(e) =
+                                record_workspace_asset_updates(project, &updated_asset_ids)
+                            {
                                 tracing::warn!(
                                     error = %e,
                                     "Workspace watcher: failed to persist missing-asset updates"
@@ -351,14 +354,17 @@ async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Res
                                 .cloned()
                                 .collect();
 
-                            if let Err(e) = record_workspace_asset_imports(project, &new_asset_ids) {
+                            if let Err(e) = record_workspace_asset_imports(project, &new_asset_ids)
+                            {
                                 tracing::warn!(
                                     error = %e,
                                     "Workspace watcher: failed to persist auto-registered assets"
                                 );
                             }
 
-                            if let Err(e) = record_workspace_asset_updates(project, &updated_asset_ids) {
+                            if let Err(e) =
+                                record_workspace_asset_updates(project, &updated_asset_ids)
+                            {
                                 tracing::warn!(
                                     error = %e,
                                     "Workspace watcher: failed to persist asset reconnection updates"

@@ -334,7 +334,15 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       return;
     }
 
+    let started = false;
     const handleAudioGesture = () => {
+      if (started) {
+        return;
+      }
+
+      started = true;
+      window.removeEventListener('pointerdown', handleAudioGesture, true);
+      window.removeEventListener('keydown', handleAudioGesture, true);
       void initAudio().catch((error) => {
         logger.warn('Deferred audio initialization failed', { error });
       });

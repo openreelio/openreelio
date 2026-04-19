@@ -652,7 +652,7 @@ pub trait ExportPlugin {
 
 ### Priority 1: Text & Title System
 
-**The Problem**: OpenReelio has NO text/title capability. Users cannot add any text to their videos.
+**The Problem**: OpenReelio now has a core text/title workflow, but it still lacks the depth, polish, and production hardening expected from professional title systems.
 
 **Industry Reference**: Every NLE from iMovie to DaVinci Resolve includes title generation.
 

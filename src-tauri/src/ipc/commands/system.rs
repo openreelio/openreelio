@@ -90,6 +90,7 @@ pub struct AppSettingsDto {
     pub auto_save: AutoSaveSettingsDto,
     pub performance: PerformanceSettingsDto,
     pub ai: AISettingsDto,
+    #[serde(default)]
     pub terminal: TerminalSettingsDto,
 }
 
@@ -1172,5 +1173,15 @@ mod system_metrics_tests {
             metrics.disk_available_bytes <= metrics.disk_total_bytes,
             "available disk should not exceed total"
         );
+    }
+
+    #[test]
+    fn should_deserialize_legacy_settings_without_terminal_field() {
+        let mut value = serde_json::to_value(AppSettingsDto::from(AppSettings::default())).unwrap();
+        value.as_object_mut().unwrap().remove("terminal");
+
+        let deserialized: AppSettingsDto = serde_json::from_value(value).unwrap();
+
+        assert_eq!(deserialized.terminal, TerminalSettingsDto::default());
     }
 }

@@ -73,9 +73,7 @@ fn asset_has_playable_audio(
         AssetKind::Audio => true,
         AssetKind::Video => {
             if matches!(track_kind, TrackKind::Audio) {
-                return audio_info
-                    .map(|info| info.has_audio)
-                    .unwrap_or(true);
+                return audio_info.map(|info| info.has_audio).unwrap_or(true);
             }
 
             audio_info
@@ -2642,7 +2640,12 @@ impl ExportEngine {
                         };
 
                         // Step 1: Video trim with speed/reverse/freeze support
-                        build_video_trim_filter(clip, input_index, &trim_label, &mut filter_complex);
+                        build_video_trim_filter(
+                            clip,
+                            input_index,
+                            &trim_label,
+                            &mut filter_complex,
+                        );
 
                         // Step 2: Apply video effects if any
                         if clip_filter_graph.has_video_effects() {
@@ -2912,7 +2915,11 @@ impl ExportEngine {
                 continue;
             }
 
-            if clip.is_adjustment_layer() || is_text_clip(clip) || clip.freeze_frame || clip.audio.muted {
+            if clip.is_adjustment_layer()
+                || is_text_clip(clip)
+                || clip.freeze_frame
+                || clip.audio.muted
+            {
                 continue;
             }
 
@@ -2920,13 +2927,14 @@ impl ExportEngine {
                 ExportError::InvalidSettings(format!("Asset not found: {}", clip.asset_id))
             })?;
 
-            let clip_has_audio = asset_has_playable_audio(asset, &track.kind, audio_info.get(&clip.asset_id))
-                && !clip_audio_is_suppressed_by_companion(
-                    clip,
-                    track,
-                    asset,
-                    &audio_companion_keys,
-                );
+            let clip_has_audio =
+                asset_has_playable_audio(asset, &track.kind, audio_info.get(&clip.asset_id))
+                    && !clip_audio_is_suppressed_by_companion(
+                        clip,
+                        track,
+                        asset,
+                        &audio_companion_keys,
+                    );
 
             if !clip_has_audio {
                 continue;
@@ -2942,12 +2950,8 @@ impl ExportEngine {
             let audio_trim_label = format!("atrim{}", input_index);
             let audio_out_label = format!("a{}", input_index);
 
-            let audio_effects_input = build_audio_trim_filter(
-                clip,
-                input_index,
-                &audio_trim_label,
-                &mut filter_complex,
-            );
+            let audio_effects_input =
+                build_audio_trim_filter(clip, input_index, &audio_trim_label, &mut filter_complex);
 
             if clip_filter_graph.has_audio_effects() {
                 let effects_filter = clip_filter_graph
@@ -2982,7 +2986,9 @@ impl ExportEngine {
             &audio_streams,
             sequence.master_volume_db,
         )
-        .ok_or_else(|| ExportError::InvalidSettings("No audio tracks found in sequence".to_string()))?;
+        .ok_or_else(|| {
+            ExportError::InvalidSettings("No audio tracks found in sequence".to_string())
+        })?;
 
         args.push("-filter_complex".to_string());
         args.push(filter_complex);
@@ -5612,7 +5618,10 @@ mod tests {
         assets.insert(audio_asset.id.clone(), audio_asset);
 
         let mut audio_info_map = std::collections::HashMap::new();
-        audio_info_map.insert("audio_asset".to_string(), AssetAudioInfo { has_audio: true });
+        audio_info_map.insert(
+            "audio_asset".to_string(),
+            AssetAudioInfo { has_audio: true },
+        );
 
         let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
             ffmpeg_path: PathBuf::from("/usr/bin/ffmpeg"),
@@ -5680,10 +5689,13 @@ mod tests {
         broken_video.audio = None;
 
         let voiceover_path = create_temp_media_file("audio_only_voiceover.wav");
-        let mut voiceover =
-            Asset::new_audio("audio_only_voiceover.wav", &voiceover_path, AudioInfo::default())
-                .with_duration(5.0)
-                .with_file_size(1_000_000);
+        let mut voiceover = Asset::new_audio(
+            "audio_only_voiceover.wav",
+            &voiceover_path,
+            AudioInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_file_size(1_000_000);
         voiceover.id = "voiceover".to_string();
 
         let mut assets = std::collections::HashMap::new();
@@ -5691,7 +5703,10 @@ mod tests {
         assets.insert(voiceover.id.clone(), voiceover);
 
         let mut audio_info_map = std::collections::HashMap::new();
-        audio_info_map.insert("broken_video".to_string(), AssetAudioInfo { has_audio: false });
+        audio_info_map.insert(
+            "broken_video".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
         audio_info_map.insert("voiceover".to_string(), AssetAudioInfo { has_audio: true });
 
         let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
@@ -5762,13 +5777,10 @@ mod tests {
         visible_asset.id = "visible_video".to_string();
         visible_asset.audio = None;
 
-        let mut hidden_asset = Asset::new_video(
-            "hidden_video.mp4",
-            &hidden_video_path,
-            VideoInfo::default(),
-        )
-        .with_duration(5.0)
-        .with_file_size(5_000_000);
+        let mut hidden_asset =
+            Asset::new_video("hidden_video.mp4", &hidden_video_path, VideoInfo::default())
+                .with_duration(5.0)
+                .with_file_size(5_000_000);
         hidden_asset.id = "hidden_video".to_string();
 
         let mut assets = std::collections::HashMap::new();
@@ -5776,8 +5788,14 @@ mod tests {
         assets.insert(hidden_asset.id.clone(), hidden_asset);
 
         let mut audio_info_map = std::collections::HashMap::new();
-        audio_info_map.insert("visible_video".to_string(), AssetAudioInfo { has_audio: false });
-        audio_info_map.insert("hidden_video".to_string(), AssetAudioInfo { has_audio: true });
+        audio_info_map.insert(
+            "visible_video".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+        audio_info_map.insert(
+            "hidden_video".to_string(),
+            AssetAudioInfo { has_audio: true },
+        );
 
         let args = build_complex_filter_args_with_audio_info(
             &sequence,

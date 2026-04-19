@@ -591,12 +591,14 @@ impl ActiveProject {
         self.sync_history_with_ops_log()?;
         self.state.last_op_id = self.history.current_head().map(str::to_string);
         self.state.op_count = self.history.applied_op_ids.len();
+        let mut state_snapshot = self.state.clone();
+        state_snapshot.is_dirty = false;
 
         Ok(PreparedProjectSave {
             snapshot_path: self.snapshot_path.clone(),
             meta_path: self.meta_path.clone(),
             history_path: self.history_path.clone(),
-            state_snapshot: self.state.clone(),
+            state_snapshot,
             history_snapshot: self.history.clone(),
             saved_last_op_id: self.state.last_op_id.clone(),
         })

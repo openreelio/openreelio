@@ -4,10 +4,10 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex as StdMutex};
-use std::{collections::HashSet, fs};
 #[cfg(windows)]
 use std::process::Command;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::{collections::HashSet, fs};
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
@@ -262,7 +262,13 @@ fn sanitize_profile_id(label: &str, source: &str, command_line: &str) -> String 
     let seed = format!("{source}-{label}-{command_line}");
     let sanitized: String = seed
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     sanitized.trim_matches('-').to_string()
 }
@@ -298,7 +304,13 @@ fn push_profile(
 fn decode_command_output(bytes: &[u8]) -> String {
     let looks_utf16 = bytes.len() >= 2
         && bytes.len() % 2 == 0
-        && bytes.iter().skip(1).step_by(2).filter(|byte| **byte == 0).count() > bytes.len() / 8;
+        && bytes
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .filter(|byte| **byte == 0)
+            .count()
+            > bytes.len() / 8;
 
     if looks_utf16 {
         let units: Vec<u16> = bytes
@@ -363,9 +375,11 @@ fn detect_windows_terminal_profiles(
     };
 
     let candidates = [
-        local_app_data.join("Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"),
         local_app_data
-            .join("Packages/Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe/LocalState/settings.json"),
+            .join("Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"),
+        local_app_data.join(
+            "Packages/Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe/LocalState/settings.json",
+        ),
         local_app_data.join("Microsoft/Windows Terminal/settings.json"),
     ];
 
@@ -568,10 +582,11 @@ fn list_available_terminal_profiles() -> Vec<DetectedTerminalProfile> {
     detect_unix_profiles(&mut profiles, &mut seen, &default_command_line);
 
     profiles.sort_by(|left, right| {
-        right
-            .is_default
-            .cmp(&left.is_default)
-            .then_with(|| left.label.to_ascii_lowercase().cmp(&right.label.to_ascii_lowercase()))
+        right.is_default.cmp(&left.is_default).then_with(|| {
+            left.label
+                .to_ascii_lowercase()
+                .cmp(&right.label.to_ascii_lowercase())
+        })
     });
 
     profiles
@@ -599,7 +614,7 @@ fn spawn_terminal_reader(
     session_id: String,
     session_handle: Arc<TerminalSessionHandle>,
     mut reader: Box<dyn Read + Send>,
-) {
+) -> Result<(), String> {
     std::thread::Builder::new()
         .name(format!("terminal-reader-{session_id}"))
         .spawn(move || {
@@ -667,7 +682,8 @@ fn spawn_terminal_reader(
                 state.terminal_sessions.lock().await.remove(&session_id);
             });
         })
-        .unwrap_or_else(|error| panic!("Failed to spawn terminal reader thread: {error}"));
+        .map(|_| ())
+        .map_err(|error| format!("Failed to spawn terminal reader thread: {error}"))
 }
 
 pub async fn shutdown_all_terminal_sessions(state: &AppState) {
@@ -686,7 +702,9 @@ pub async fn shutdown_all_terminal_sessions(state: &AppState) {
 #[tauri::command]
 #[specta::specta]
 pub async fn list_terminal_profiles() -> Result<Vec<DetectedTerminalProfile>, String> {
-    Ok(list_available_terminal_profiles())
+    tokio::task::spawn_blocking(list_available_terminal_profiles)
+        .await
+        .map_err(|error| format!("Terminal profile enumeration failed: {error}"))
 }
 
 #[tauri::command]
@@ -762,7 +780,13 @@ pub async fn start_terminal_session(
         sessions.insert(session_id.clone(), Arc::clone(&session_handle));
     }
 
-    spawn_terminal_reader(app, session_id.clone(), session_handle, reader);
+    if let Err(error) =
+        spawn_terminal_reader(app, session_id.clone(), Arc::clone(&session_handle), reader)
+    {
+        state.terminal_sessions.lock().await.remove(&session_id);
+        let _ = session_handle.terminate();
+        return Err(error);
+    }
 
     Ok(TerminalSessionStartResult {
         session_id,

@@ -984,7 +984,9 @@ pub async fn ensure_audio_preview_for_asset(
         Ok(metadata) if metadata.len() > 0 => {
             let preview_modified = metadata.modified().ok();
             let input_modified = input_metadata.modified().ok();
-            preview_modified.zip(input_modified).map(|(preview, input)| preview >= input)
+            preview_modified
+                .zip(input_modified)
+                .map(|(preview, input)| preview >= input)
                 == Some(true)
         }
         _ => false,
@@ -995,8 +997,13 @@ pub async fn ensure_audio_preview_for_asset(
         let ffmpeg = ffmpeg_guard
             .runner()
             .ok_or_else(|| "FFmpeg not initialized".to_string())?;
+        let temp_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let temp_preview_path = preview_dir.join(format!("{}.{}.tmp.mp3", asset_id, temp_suffix));
         let input_path_string = input_path.to_string_lossy().to_string();
-        let preview_path_string = preview_path.to_string_lossy().to_string();
+        let temp_preview_path_string = temp_preview_path.to_string_lossy().to_string();
 
         let mut cmd = tokio::process::Command::new(&ffmpeg.info().ffmpeg_path);
         crate::core::process::configure_tokio_command(&mut cmd);
@@ -1017,7 +1024,7 @@ pub async fn ensure_audio_preview_for_asset(
             "-b:a",
             "192k",
             "-y",
-            &preview_path_string,
+            &temp_preview_path_string,
         ]);
 
         let output = cmd
@@ -1026,9 +1033,18 @@ pub async fn ensure_audio_preview_for_asset(
             .map_err(|e| format!("Failed to generate audio preview: {}", e))?;
 
         if !output.status.success() {
+            let _ = tokio::fs::remove_file(&temp_preview_path).await;
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Audio preview generation failed: {}", stderr.trim()));
+            return Err(format!(
+                "Audio preview generation failed: {}",
+                stderr.trim()
+            ));
         }
+
+        let _ = tokio::fs::remove_file(&preview_path).await;
+        tokio::fs::rename(&temp_preview_path, &preview_path)
+            .await
+            .map_err(|e| format!("Failed to finalize audio preview: {}", e))?;
     }
 
     state.allow_asset_protocol_file(&preview_path);

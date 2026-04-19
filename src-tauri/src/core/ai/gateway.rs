@@ -858,7 +858,7 @@ Return JSON array of edit scripts."#;
                             )),
                         },
                     }
-                },
+                }
                 "ToggleTrackMute" => {
                     if cmd.params.get("sequenceId").is_none() {
                         issues.push(format!("ToggleTrackMute command {} missing sequenceId", i));
@@ -876,7 +876,7 @@ Return JSON array of edit scripts."#;
                         }
                         _ => {}
                     }
-                },
+                }
                 "DeleteTrack" | "LockTrack" => {
                     if cmd.params.get("sequenceId").is_none() {
                         issues.push(format!(

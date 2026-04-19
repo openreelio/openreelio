@@ -559,11 +559,12 @@ impl TerminalSettings {
                 return None;
             }
 
-            let normalized = repair_legacy_terminal_command_line(trimmed);
+            let clamped: String = trimmed.chars().take(512).collect();
+            let normalized = repair_legacy_terminal_command_line(&clamped);
             if normalized.is_empty() {
                 None
             } else {
-                Some(normalized.chars().take(512).collect())
+                Some(normalized)
             }
         });
     }

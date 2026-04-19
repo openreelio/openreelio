@@ -43,15 +43,18 @@ impl ImportAssetCommand {
             .unwrap_or_default();
 
         let inferred_kind = if extension == "ogg" {
-            MetadataExtractor::extract(uri).ok().and_then(|metadata| {
-                if metadata.video.is_some() {
-                    Some(AssetKind::Video)
-                } else if metadata.audio.is_some() {
-                    Some(AssetKind::Audio)
-                } else {
-                    None
-                }
-            })
+            validate_local_input_path(uri, "asset.uri")
+                .ok()
+                .and_then(|validated_uri| MetadataExtractor::extract(validated_uri).ok())
+                .and_then(|metadata| {
+                    if metadata.video.is_some() {
+                        Some(AssetKind::Video)
+                    } else if metadata.audio.is_some() {
+                        Some(AssetKind::Audio)
+                    } else {
+                        None
+                    }
+                })
         } else {
             None
         };

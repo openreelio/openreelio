@@ -607,6 +607,49 @@ impl RemoveTextClipCommand {
 
 impl Command for RemoveTextClipCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let (clip_idx, text_effect_id) = {
+            let sequence = state
+                .sequences
+                .get(&self.sequence_id)
+                .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+            let track = sequence
+                .get_track(&self.track_id)
+                .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+            let clip_idx = track
+                .clips
+                .iter()
+                .position(|c| c.id == self.clip_id)
+                .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+            let clip = &track.clips[clip_idx];
+            if !clip.asset_id.starts_with(TEXT_ASSET_PREFIX) {
+                return Err(CoreError::ValidationError(
+                    "Clip is not a text clip".to_string(),
+                ));
+            }
+
+            let text_effect_id = clip
+                .effects
+                .iter()
+                .find(|effect_id| {
+                    state
+                        .effects
+                        .get(*effect_id)
+                        .map(|effect| effect.effect_type == EffectType::TextOverlay)
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    CoreError::ValidationError(
+                        "Text clip is missing TextOverlay effect".to_string(),
+                    )
+                })?;
+
+            (clip_idx, text_effect_id)
+        };
+
         // 1. Find the clip
         let sequence = state
             .sequences
@@ -617,36 +660,19 @@ impl Command for RemoveTextClipCommand {
             .get_track_mut(&self.track_id)
             .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
 
-        // 2. Find and remove the clip
-        let clip_idx = track
-            .clips
-            .iter()
-            .position(|c| c.id == self.clip_id)
-            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
-
+        // 2. Remove the validated clip
         let clip = track.clips.remove(clip_idx);
 
-        // 3. Verify this is a text clip
-        if !clip.asset_id.starts_with(TEXT_ASSET_PREFIX) {
-            // Restore the clip - this is not a text clip
-            track.clips.insert(clip_idx, clip);
-            return Err(CoreError::ValidationError(
-                "Clip is not a text clip".to_string(),
-            ));
-        }
-
-        // 4. Store for undo
+        // 3. Store for undo
         self.removed_clip = Some(clip.clone());
 
-        // 5. Remove the TextOverlay effect
-        for effect_id in &clip.effects {
-            if let Some(effect) = state.effects.get(effect_id) {
-                if effect.effect_type == EffectType::TextOverlay {
-                    self.removed_effect = state.effects.remove(effect_id);
-                    break;
-                }
-            }
-        }
+        // 4. Remove the validated TextOverlay effect
+        self.removed_effect = Some(
+            state
+                .effects
+                .remove(&text_effect_id)
+                .ok_or_else(|| CoreError::EffectNotFound(text_effect_id.clone()))?,
+        );
 
         let op_id = ulid::Ulid::new().to_string();
         let mut result = CommandResult::new(&op_id)
@@ -1379,6 +1405,40 @@ mod tests {
             1
         );
         assert_eq!(state.effects.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_text_clip_fails_when_text_effect_is_missing() {
+        let mut state = create_test_state();
+
+        let mut add_cmd =
+            AddTextClipCommand::new("seq-1", "video-track", 0.0, 5.0, TextClipData::new("Test"));
+        add_cmd.execute(&mut state).unwrap();
+        let clip_id = add_cmd.created_clip_id.clone().unwrap();
+
+        let effect_id = state
+            .get_sequence("seq-1")
+            .unwrap()
+            .get_track("video-track")
+            .unwrap()
+            .get_clip(&clip_id)
+            .unwrap()
+            .effects[0]
+            .clone();
+        state.effects.remove(&effect_id);
+
+        let mut remove_cmd = RemoveTextClipCommand::new("seq-1", "video-track", &clip_id);
+        let result = remove_cmd.execute(&mut state);
+
+        assert!(result.is_err());
+        assert!(state.effects.is_empty());
+        assert!(state
+            .get_sequence("seq-1")
+            .unwrap()
+            .get_track("video-track")
+            .unwrap()
+            .get_clip(&clip_id)
+            .is_some());
     }
 
     // -------------------------------------------------------------------------

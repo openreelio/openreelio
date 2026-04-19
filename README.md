@@ -196,9 +196,9 @@ Notes:
 
 ### v0.2.0
 
-- [x] AI provider integration (OpenAI, Anthropic, Ollama)
-- [x] Speech-to-text transcription (Whisper)
-- [x] Smart asset search
+- [ ] AI provider integration hardening
+- [ ] Speech-to-text transcription (Whisper, optional build feature)
+- [ ] Smart asset search (optional build feature)
 - [ ] Release and distribution
 
 ### Future

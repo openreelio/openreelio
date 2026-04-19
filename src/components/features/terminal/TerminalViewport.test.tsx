@@ -30,6 +30,8 @@ class MockResizeObserver {
   disconnect = vi.fn();
 }
 
+const originalResizeObserver = globalThis.ResizeObserver;
+
 function getTerminalInstances(): MockTerminalLike[] {
   return terminalInstances as MockTerminalLike[];
 }
@@ -96,6 +98,11 @@ describe('TerminalViewport', () => {
       await cleanupTerminalSessions();
     });
     globalThis[DESKTOP_RUNTIME_TEST_FLAG] = undefined;
+    if (originalResizeObserver) {
+      globalThis.ResizeObserver = originalResizeObserver;
+    } else {
+      Reflect.deleteProperty(globalThis, 'ResizeObserver');
+    }
   });
 
   it('should continue rendering new output after older chunks are pruned from scrollback', async () => {
