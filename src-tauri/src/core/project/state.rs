@@ -11,8 +11,9 @@ use crate::core::{
     assets::Asset,
     commands::{Command as _, GroupClipsCommand, UngroupClipsCommand},
     effects::Effect,
+    masks::MaskGroup,
     project::{OpKind, Operation, OpsLog},
-    timeline::{AudioSettings, BlendMode, Clip, Sequence, Track},
+    timeline::{AudioSettings, BlendMode, Clip, Marker, Sequence, Track},
     AssetId, CoreError, CoreResult, EffectId, SequenceId,
 };
 
@@ -231,10 +232,19 @@ impl ProjectState {
             OpKind::EffectRemove => self.apply_effect_remove(op)?,
             OpKind::EffectUpdate => self.apply_effect_update(op)?,
 
+            // Marker operations
+            OpKind::MarkerAdd => self.apply_marker_add(op)?,
+            OpKind::MarkerRemove => self.apply_marker_remove(op)?,
+
             // Caption operations
             OpKind::CaptionAdd => self.apply_caption_add(op)?,
             OpKind::CaptionRemove => self.apply_caption_remove(op)?,
             OpKind::CaptionUpdate => self.apply_caption_update(op)?,
+
+            // Text clip operations
+            OpKind::TextClipAdd => self.apply_text_clip_add(op)?,
+            OpKind::TextClipUpdate => self.apply_text_clip_update(op)?,
+            OpKind::TextClipRemove => self.apply_text_clip_remove(op)?,
 
             // Project operations
             OpKind::ProjectCreate => self.apply_project_create(op)?,
@@ -1396,6 +1406,162 @@ impl ProjectState {
             }
         }
 
+        if let Some(masks_value) = op.payload.get("masks") {
+            if !masks_value.is_null() {
+                let masks =
+                    serde_json::from_value::<MaskGroup>(masks_value.clone()).map_err(|e| {
+                        CoreError::InvalidCommand(format!("Invalid masks payload: {e}"))
+                    })?;
+                effect.masks = masks;
+            }
+        }
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Marker Operation Handlers
+    // =========================================================================
+
+    fn apply_marker_add(&mut self, op: &Operation) -> CoreResult<()> {
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let marker: Marker = serde_json::from_value(op.payload["marker"].clone())
+            .map_err(|e| CoreError::InvalidCommand(format!("Invalid marker data: {e}")))?;
+
+        let sequence = self
+            .sequences
+            .get_mut(seq_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {seq_id}")))?;
+
+        if let Some(existing) = sequence
+            .markers
+            .iter_mut()
+            .find(|existing| existing.id == marker.id)
+        {
+            *existing = marker;
+        } else {
+            sequence.add_marker(marker);
+        }
+
+        Ok(())
+    }
+
+    fn apply_marker_remove(&mut self, op: &Operation) -> CoreResult<()> {
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let marker_id = op.payload["markerId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing markerId".to_string()))?;
+
+        let sequence = self
+            .sequences
+            .get_mut(seq_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {seq_id}")))?;
+
+        sequence.remove_marker(marker_id);
+        Ok(())
+    }
+
+    // =========================================================================
+    // Text Clip Operation Handlers
+    // =========================================================================
+
+    fn apply_text_clip_add(&mut self, op: &Operation) -> CoreResult<()> {
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let track_id = op.payload["trackId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing trackId".to_string()))?;
+        let clip: Clip = serde_json::from_value(op.payload["clip"].clone())
+            .map_err(|e| CoreError::InvalidCommand(format!("Invalid text clip data: {e}")))?;
+        let effect: Effect = serde_json::from_value(op.payload["effect"].clone())
+            .map_err(|e| CoreError::InvalidCommand(format!("Invalid text effect data: {e}")))?;
+
+        {
+            let sequence = self
+                .sequences
+                .get_mut(seq_id)
+                .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {seq_id}")))?;
+            let track = sequence
+                .get_track_mut(track_id)
+                .ok_or_else(|| CoreError::NotFound(format!("Track not found: {track_id}")))?;
+
+            track.add_clip(clip);
+            Self::sort_track_clips(track);
+            Self::validate_track_no_overlap(track)?;
+        }
+
+        self.effects.insert(effect.id.clone(), effect);
+        Ok(())
+    }
+
+    fn apply_text_clip_update(&mut self, op: &Operation) -> CoreResult<()> {
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let track_id = op.payload["trackId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing trackId".to_string()))?;
+        let clip_id = op.payload["clipId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing clipId".to_string()))?;
+        let clip: Clip = serde_json::from_value(op.payload["clip"].clone())
+            .map_err(|e| CoreError::InvalidCommand(format!("Invalid text clip data: {e}")))?;
+        let effect: Effect = serde_json::from_value(op.payload["effect"].clone())
+            .map_err(|e| CoreError::InvalidCommand(format!("Invalid text effect data: {e}")))?;
+
+        {
+            let sequence = self
+                .sequences
+                .get_mut(seq_id)
+                .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {seq_id}")))?;
+            let track = sequence
+                .get_track_mut(track_id)
+                .ok_or_else(|| CoreError::NotFound(format!("Track not found: {track_id}")))?;
+            let existing_clip = track
+                .get_clip_mut(clip_id)
+                .ok_or_else(|| CoreError::NotFound(format!("Clip not found: {clip_id}")))?;
+
+            *existing_clip = clip;
+            Self::sort_track_clips(track);
+            Self::validate_track_no_overlap(track)?;
+        }
+
+        self.effects.insert(effect.id.clone(), effect);
+        Ok(())
+    }
+
+    fn apply_text_clip_remove(&mut self, op: &Operation) -> CoreResult<()> {
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let track_id = op.payload["trackId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing trackId".to_string()))?;
+        let clip_id = op.payload["clipId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing clipId".to_string()))?;
+        let effect_id = op.payload["effectId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing effectId".to_string()))?;
+
+        {
+            let sequence = self
+                .sequences
+                .get_mut(seq_id)
+                .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {seq_id}")))?;
+            let track = sequence
+                .get_track_mut(track_id)
+                .ok_or_else(|| CoreError::NotFound(format!("Track not found: {track_id}")))?;
+
+            track.remove_clip(&clip_id.to_string());
+        }
+
+        self.effects.remove(effect_id);
         Ok(())
     }
 

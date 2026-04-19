@@ -48,10 +48,19 @@ pub enum OpKind {
     EffectRemove,
     EffectUpdate,
 
+    // Marker operations
+    MarkerAdd,
+    MarkerRemove,
+
     // Caption operations
     CaptionAdd,
     CaptionRemove,
     CaptionUpdate,
+
+    // Text clip operations
+    TextClipAdd,
+    TextClipUpdate,
+    TextClipRemove,
 
     // Sequence operations
     SequenceCreate,

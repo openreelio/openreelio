@@ -649,11 +649,17 @@ impl Command for RemoveTextClipCommand {
         }
 
         let op_id = ulid::Ulid::new().to_string();
-        Ok(CommandResult::new(&op_id)
+        let mut result = CommandResult::new(&op_id)
             .with_change(StateChange::ClipDeleted {
                 clip_id: self.clip_id.clone(),
             })
-            .with_deleted_id(&self.clip_id))
+            .with_deleted_id(&self.clip_id);
+
+        if let Some(effect) = &self.removed_effect {
+            result = result.with_deleted_id(&effect.id);
+        }
+
+        Ok(result)
     }
 
     fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
