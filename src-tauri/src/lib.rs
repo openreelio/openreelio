@@ -1144,6 +1144,7 @@ mod tauri_app {
                 $crate::ipc::update_asset_proxy,
                 $crate::ipc::get_waveform_data,
                 $crate::ipc::generate_waveform_for_asset,
+                $crate::ipc::ensure_audio_preview_for_asset,
                 // Timeline commands
                 $crate::ipc::get_sequences,
                 $crate::ipc::create_sequence,
@@ -1590,6 +1591,7 @@ mod tauri_app {
             ipc::update_asset_proxy,
             ipc::get_waveform_data,
             ipc::generate_waveform_for_asset,
+            ipc::ensure_audio_preview_for_asset,
             // Timeline commands
             ipc::get_sequences,
             ipc::create_sequence,

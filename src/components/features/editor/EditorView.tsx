@@ -320,7 +320,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   // Audio playback integration
   // The hook handles audio scheduling, volume control, and clip synchronization
   // It uses Web Audio API for precise timing and responds to playback store changes
-  const { initAudio, isAudioReady } = useAudioPlayback({
+  const { initAudio, isAudioReady, failedAssets } = useAudioPlayback({
     sequence,
     assets,
     enabled: true, // Always enabled when in editor view
@@ -329,6 +329,49 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   // Audio scrubbing: plays short snippets when dragging playhead while paused
   useAudioScrubbing({ sequence, assets });
 
+  useEffect(() => {
+    if (isAudioReady) {
+      return;
+    }
+
+    const handleAudioGesture = () => {
+      void initAudio().catch((error) => {
+        logger.warn('Deferred audio initialization failed', { error });
+      });
+    };
+
+    window.addEventListener('pointerdown', handleAudioGesture, true);
+    window.addEventListener('keydown', handleAudioGesture, true);
+
+    return () => {
+      window.removeEventListener('pointerdown', handleAudioGesture, true);
+      window.removeEventListener('keydown', handleAudioGesture, true);
+    };
+  }, [initAudio, isAudioReady]);
+
+  const notifiedAudioFailuresRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const activeFailures = new Set(failedAssets);
+
+    for (const assetId of failedAssets) {
+      if (notifiedAudioFailuresRef.current.has(assetId)) {
+        continue;
+      }
+
+      const asset = assets.get(assetId);
+      useToastStore.getState().addToast({
+        variant: 'error',
+        message: `Audio preview unavailable for ${asset?.name ?? assetId}. The app could not decode the source or generate a compatible preview.`,
+      });
+      notifiedAudioFailuresRef.current.add(assetId);
+    }
+
+    for (const assetId of Array.from(notifiedAudioFailuresRef.current)) {
+      if (!activeFailures.has(assetId)) {
+        notifiedAudioFailuresRef.current.delete(assetId);
+      }
+    }
+  }, [assets, failedAssets]);
 
   // Initialize audio context on first play interaction
   // Web Audio API requires user gesture to create AudioContext

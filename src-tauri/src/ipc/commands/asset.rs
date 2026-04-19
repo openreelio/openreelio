@@ -932,6 +932,109 @@ pub async fn generate_waveform_for_asset(
     }
 }
 
+/// Ensures a browser-decodable audio preview file exists for an asset.
+///
+/// Generates an MP3 cache file on demand for audio/video assets whose original
+/// container or codec may not decode reliably in the embedded webview.
+#[tauri::command]
+#[specta::specta]
+pub async fn ensure_audio_preview_for_asset(
+    asset_id: String,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+) -> Result<Option<String>, String> {
+    validate_path_id_component(&asset_id, "assetId")?;
+
+    let (asset_path, project_path, asset_kind) = {
+        let guard = state.project.lock().await;
+
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        let asset = project
+            .state
+            .assets
+            .get(&asset_id)
+            .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
+
+        (asset.uri.clone(), project.path.clone(), asset.kind.clone())
+    };
+
+    if !matches!(asset_kind, AssetKind::Audio | AssetKind::Video) {
+        return Ok(None);
+    }
+
+    let input_path = PathBuf::from(&asset_path);
+    let preview_dir = project_path
+        .join(".openreelio")
+        .join("cache")
+        .join("audio_previews");
+    tokio::fs::create_dir_all(&preview_dir)
+        .await
+        .map_err(|e| format!("Failed to create audio preview cache directory: {}", e))?;
+
+    let preview_path = preview_dir.join(format!("{}.mp3", asset_id));
+
+    let input_metadata = tokio::fs::metadata(&input_path)
+        .await
+        .map_err(|e| format!("Failed to stat asset for audio preview: {}", e))?;
+
+    let preview_is_fresh = match tokio::fs::metadata(&preview_path).await {
+        Ok(metadata) if metadata.len() > 0 => {
+            let preview_modified = metadata.modified().ok();
+            let input_modified = input_metadata.modified().ok();
+            preview_modified.zip(input_modified).map(|(preview, input)| preview >= input)
+                == Some(true)
+        }
+        _ => false,
+    };
+
+    if !preview_is_fresh {
+        let ffmpeg_guard = ffmpeg_state.read().await;
+        let ffmpeg = ffmpeg_guard
+            .runner()
+            .ok_or_else(|| "FFmpeg not initialized".to_string())?;
+        let input_path_string = input_path.to_string_lossy().to_string();
+        let preview_path_string = preview_path.to_string_lossy().to_string();
+
+        let mut cmd = tokio::process::Command::new(&ffmpeg.info().ffmpeg_path);
+        crate::core::process::configure_tokio_command(&mut cmd);
+        cmd.args([
+            "-v",
+            "error",
+            "-i",
+            &input_path_string,
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            "-y",
+            &preview_path_string,
+        ]);
+
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| format!("Failed to generate audio preview: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Audio preview generation failed: {}", stderr.trim()));
+        }
+    }
+
+    state.allow_asset_protocol_file(&preview_path);
+    Ok(Some(preview_path.to_string_lossy().to_string()))
+}
+
 /// Removes an asset from the project
 #[tauri::command]
 #[specta::specta]

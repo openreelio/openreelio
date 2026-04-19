@@ -13,12 +13,16 @@
  */
 
 import { useRef, useEffect, useCallback } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { collectPlaybackAudioClips } from '@/utils/audioPlayback';
 import { clampClipVolumeDb, clampClipPan } from '@/utils/clipAudio';
-import { normalizeFileUriToPath } from '@/utils/uri';
+import {
+  assetMatchesWorkspaceRelativePath,
+  clearCachedAudioPreview,
+  decodeAssetAudioBuffer,
+} from '@/utils/audioPreview';
 import type { Sequence, Asset } from '@/types';
 
 // =============================================================================
@@ -46,6 +50,8 @@ export interface UseAudioScrubbingOptions {
   sequence: Sequence | null;
   /** Assets map for looking up audio sources */
   assets: Map<string, Asset>;
+  /** Whether scrubbing audio is allowed to initialize */
+  enabled?: boolean;
 }
 
 interface ActiveSnippet {
@@ -61,6 +67,7 @@ interface ActiveSnippet {
 export function useAudioScrubbing({
   sequence,
   assets,
+  enabled = true,
 }: UseAudioScrubbingOptions): void {
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioBuffersRef = useRef<Map<string, AudioBuffer>>(new Map());
@@ -69,9 +76,7 @@ export function useAudioScrubbing({
   const prevTimeRef = useRef<number>(-1);
   const scrubRequestIdRef = useRef<number>(0);
 
-  const audioScrubbing = useSettingsStore(
-    (state) => state.settings.playback.audioScrubbing,
-  );
+  const audioScrubbing = useSettingsStore((state) => state.settings.playback.audioScrubbing);
 
   const currentTime = usePlaybackStore((s) => s.currentTime);
   const isPlaying = usePlaybackStore((s) => s.isPlaying);
@@ -83,6 +88,10 @@ export function useAudioScrubbing({
    * Returns null if creation fails (e.g., browser restrictions).
    */
   const getAudioContext = useCallback((): AudioContext | null => {
+    if (!enabled) {
+      return null;
+    }
+
     if (!audioContextRef.current) {
       try {
         audioContextRef.current = new AudioContext();
@@ -100,35 +109,23 @@ export function useAudioScrubbing({
     }
 
     return audioContextRef.current;
-  }, []);
+  }, [enabled]);
 
   /**
    * Load and cache an audio buffer for an asset.
    * Uses the same URL resolution logic as useAudioPlayback.
    */
   const loadBuffer = useCallback(
-    async (assetId: string, assetUri: string): Promise<AudioBuffer | null> => {
-      const cached = audioBuffersRef.current.get(assetId);
+    async (asset: Asset): Promise<AudioBuffer | null> => {
+      const cached = audioBuffersRef.current.get(asset.id);
       if (cached) return cached;
 
       const ctx = getAudioContext();
       if (!ctx) return null;
 
       try {
-        let url = normalizeFileUriToPath(assetUri.trim());
-        if (
-          !url.startsWith('asset://') &&
-          (url.startsWith('/') || url.match(/^[A-Za-z]:[\\/]/))
-        ) {
-          url = convertFileSrc(url);
-        }
-
-        const response = await fetch(url);
-        if (!response.ok) return null;
-
-        const arrayBuffer = await response.arrayBuffer();
-        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-        audioBuffersRef.current.set(assetId, audioBuffer);
+        const { buffer: audioBuffer } = await decodeAssetAudioBuffer(ctx, asset);
+        audioBuffersRef.current.set(asset.id, audioBuffer);
         return audioBuffer;
       } catch {
         return null;
@@ -176,8 +173,7 @@ export function useAudioScrubbing({
 
       for (const { clip, asset, trackVolume } of audioClips) {
         const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-        const clipDuration =
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+        const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
         const clipEnd = clip.place.timelineInSec + clipDuration;
 
         // Skip clips that don't overlap with the scrub position
@@ -187,7 +183,7 @@ export function useAudioScrubbing({
         const timeIntoClip = time - clip.place.timelineInSec;
         const sourceOffset = clip.range.sourceInSec + timeIntoClip * safeSpeed;
 
-        const buffer = await loadBuffer(asset.id, asset.uri);
+        const buffer = await loadBuffer(asset);
         // Bail if a newer request has superseded this one
         if (scrubRequestIdRef.current !== requestId) return;
         if (!buffer || sourceOffset >= buffer.duration) continue;
@@ -251,11 +247,66 @@ export function useAudioScrubbing({
     [getAudioContext, sequence, assets, loadBuffer, stopSnippets, volume, isMuted],
   );
 
+  useEffect(() => {
+    let disposed = false;
+    let unlistenModified: UnlistenFn | null = null;
+    let unlistenRemoved: UnlistenFn | null = null;
+
+    const clearCachedAssets = (relativePath: string) => {
+      const affectedAssetIds = Array.from(assets.values())
+        .filter((asset) => assetMatchesWorkspaceRelativePath(asset, relativePath))
+        .map((asset) => asset.id);
+
+      if (affectedAssetIds.length === 0) {
+        return;
+      }
+
+      for (const assetId of affectedAssetIds) {
+        audioBuffersRef.current.delete(assetId);
+        clearCachedAudioPreview(assetId);
+      }
+
+      stopSnippets();
+    };
+
+    const setupListeners = async (): Promise<void> => {
+      try {
+        unlistenModified = await listen<{ relativePath: string }>(
+          'workspace:file-modified',
+          ({ payload }) => {
+            clearCachedAssets(payload.relativePath);
+          },
+        );
+        unlistenRemoved = await listen<{ relativePath: string }>(
+          'workspace:file-removed',
+          ({ payload }) => {
+            clearCachedAssets(payload.relativePath);
+          },
+        );
+      } catch {
+        // Workspace listeners are only available in the desktop runtime.
+      }
+
+      if (disposed) {
+        unlistenModified?.();
+        unlistenRemoved?.();
+      }
+    };
+
+    void setupListeners();
+
+    return () => {
+      disposed = true;
+      unlistenModified?.();
+      unlistenRemoved?.();
+    };
+  }, [assets, stopSnippets]);
+
   // Main effect: detect scrubbing and play audio snippets.
   // Scrubbing = currentTime changing while playback is paused.
   useEffect(() => {
     // Don't scrub when disabled or during normal playback
-    if (!audioScrubbing || isPlaying) {
+    if (!enabled || !audioScrubbing || isPlaying) {
       prevTimeRef.current = currentTime;
       return;
     }
@@ -278,9 +329,15 @@ export function useAudioScrubbing({
     lastScrubTimestampRef.current = now;
 
     void playScrubSnippet(currentTime);
-  }, [currentTime, isPlaying, audioScrubbing, playScrubSnippet]);
+  }, [currentTime, enabled, isPlaying, audioScrubbing, playScrubSnippet]);
 
   // Stop snippets when playback resumes (scrubbing ended)
+  useEffect(() => {
+    if (!enabled) {
+      stopSnippets();
+    }
+  }, [enabled, stopSnippets]);
+
   useEffect(() => {
     if (isPlaying) {
       stopSnippets();
