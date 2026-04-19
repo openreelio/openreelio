@@ -178,7 +178,7 @@ const SYSTEM_PROMPT_BASE: &str = r#"You are an AI video editing assistant for Op
 ## Timeline Commands
 
 ### InsertClip - Add asset to timeline
-{ "commandType": "InsertClip", "params": { "trackId": "required", "assetId": "required", "timelineStart": number, "sourceIn"?: number, "sourceOut"?: number }}
+{ "commandType": "InsertClip", "params": { "sequenceId": "required", "trackId": "required", "assetId": "required", "timelineStart": number, "sourceIn"?: number, "sourceOut"?: number }}
 
 ### InsertEdit - Insert asset and ripple downstream clips
 { "commandType": "InsertEdit", "params": { "sequenceId": "required", "trackId": "required", "assetId": "required", "timelinePosition": number, "sourceIn"?: number, "sourceOut"?: number }}
@@ -187,55 +187,44 @@ const SYSTEM_PROMPT_BASE: &str = r#"You are an AI video editing assistant for Op
 { "commandType": "OverwriteEdit", "params": { "sequenceId": "required", "trackId": "required", "assetId": "required", "timelinePosition": number, "sourceIn"?: number, "sourceOut"?: number }}
 
 ### SplitClip - Split clip at time (creates {id}_split)
-{ "commandType": "SplitClip", "params": { "clipId": "required", "atTimelineSec": number }}
+{ "commandType": "SplitClip", "params": { "sequenceId": "required", "trackId": "required", "clipId": "required", "atTimelineSec": number }}
 
 ### DeleteClip - Remove clip (leaves gap)
-{ "commandType": "DeleteClip", "params": { "clipId": "required" }}
+{ "commandType": "DeleteClip", "params": { "sequenceId": "required", "trackId": "required", "clipId": "required" }}
 
 ### RippleDelete - Delete and close gap
-{ "commandType": "RippleDelete", "params": { "clipId": "required", "affectAllTracks"?: boolean }}
+{ "commandType": "RippleDelete", "params": { "sequenceId": "required", "trackId": "required", "clipId": "required", "affectAllTracks"?: boolean }}
 
 ### TrimClip - Adjust in/out points
-{ "commandType": "TrimClip", "params": { "clipId": "required", "newSourceIn"?: number, "newSourceOut"?: number, "newTimelineIn"?: number }}
+{ "commandType": "TrimClip", "params": { "sequenceId": "required", "trackId": "required", "clipId": "required", "newSourceIn"?: number, "newSourceOut"?: number, "newTimelineIn"?: number }}
 
 ### MoveClip - Reposition clip
-{ "commandType": "MoveClip", "params": { "clipId": "required", "newTimelineIn": number, "newTrackId"?: string }}
-
-### DuplicateClip - Clone clip
-{ "commandType": "DuplicateClip", "params": { "clipId": "required", "targetTrackId"?: string, "offset"?: number }}
+{ "commandType": "MoveClip", "params": { "sequenceId": "required", "trackId": "required", "clipId": "required", "newTimelineIn": number, "newTrackId"?: string }}
 
 ## Track Commands
 
 ### AddTrack
-{ "commandType": "AddTrack", "params": { "type": "video|audio", "name"?: string }}
+{ "commandType": "AddTrack", "params": { "sequenceId": "required", "kind": "video|audio|caption|overlay", "name": string }}
 
-### MuteTrack
-{ "commandType": "MuteTrack", "params": { "trackId": "required", "muted": boolean }}
+### ToggleTrackMute
+{ "commandType": "ToggleTrackMute", "params": { "sequenceId": "required", "trackId": "required", "muted": boolean }}
 
 ## Effect Commands
 
 ### AddEffect
-{ "commandType": "AddEffect", "params": { "clipId": "required", "effectType": string, "params": object }}
+{ "commandType": "AddEffect", "params": { "sequenceId": "required", "trackId": "required", "clipId": "required", "effectType": string, "params": object }}
 
 Effect types: brightness/contrast/saturation (-100 to 100), blur (radius: 0-100), opacity (0-100), fadeIn/fadeOut (duration: seconds), scale (x/y: %), rotate (angle: degrees)
 
-## Keyframe Commands (ALWAYS need 2+ keyframes for animation)
+## Marker Commands
 
-### AddKeyframe
-{ "commandType": "AddKeyframe", "params": { "clipId": "required", "paramPath": "e.g. opacity", "time": number, "value": any, "easing"?: "linear|easeIn|easeOut|easeInOut" }}
-
-## Transition Commands (clips must be adjacent)
-
-### AddTransition
-{ "commandType": "AddTransition", "params": { "clipAId": "required", "clipBId": "required", "type": "crossfade|dissolve|wipe|fade", "duration": number }}
+### AddMarker
+{ "commandType": "AddMarker", "params": { "sequenceId": "required", "timeSec": number, "label": string }}
 
 ## Common Patterns
 
 Remove section 10s-15s:
 [SplitClip at 10s] -> [SplitClip at 15s on _split] -> [RippleDelete _split]
-
-Fade in over 2s:
-[AddKeyframe opacity=0 at t=0] -> [AddKeyframe opacity=100 at t=2 easeOut]
 
 ## FORBIDDEN
 - Inventing IDs not in context
@@ -298,16 +287,17 @@ When actions are needed, use this format:
 ```
 
 ## AVAILABLE COMMANDS
-- **SplitClip**: { "clipId": "required", "splitTime": seconds }
-- **MoveClip**: { "clipId": "required", "newTimelineIn": seconds }
-- **DeleteClip**: { "clipId": "required" }
-- **TrimClip**: { "clipId": "required", "newSourceIn"?: seconds, "newSourceOut"?: seconds }
-- **InsertClip**: { "assetId": "required", "trackId": "required", "timelineStart": seconds }
+- **SplitClip**: { "sequenceId": "required", "trackId": "required", "clipId": "required", "splitTime": seconds }
+- **MoveClip**: { "sequenceId": "required", "trackId": "required", "clipId": "required", "newTimelineIn": seconds }
+- **DeleteClip**: { "sequenceId": "required", "trackId": "required", "clipId": "required" }
+- **TrimClip**: { "sequenceId": "required", "trackId": "required", "clipId": "required", "newSourceIn"?: seconds, "newSourceOut"?: seconds }
+- **InsertClip**: { "sequenceId": "required", "assetId": "required", "trackId": "required", "timelineStart": seconds }
 - **InsertEdit**: { "sequenceId": "required", "assetId": "required", "trackId": "required", "timelinePosition": seconds }
 - **OverwriteEdit**: { "sequenceId": "required", "assetId": "required", "trackId": "required", "timelinePosition": seconds }
-- **AddTrack**: { "type": "video|audio", "name"?: string }
-- **MuteTrack**: { "trackId": "required", "muted": boolean }
-- **AddEffect**: { "clipId": "required", "effectType": string, "params": object }
+- **AddTrack**: { "sequenceId": "required", "kind": "video|audio|caption|overlay", "name": string }
+- **ToggleTrackMute**: { "sequenceId": "required", "trackId": "required", "muted": boolean }
+- **AddEffect**: { "sequenceId": "required", "trackId": "required", "clipId": "required", "effectType": string, "params": object }
+- **AddMarker**: { "sequenceId": "required", "timeSec": seconds, "label": string }
 
 ## CRITICAL RULES
 1. **Only use IDs from context** - Never invent UUIDs. Only reference IDs provided.
@@ -676,7 +666,7 @@ Return JSON array of edit scripts."#;
                     } else {
                         "timelinePosition"
                     };
-                    if cmd.command_type != "InsertClip" && cmd.params.get("sequenceId").is_none() {
+                    if cmd.params.get("sequenceId").is_none() {
                         issues.push(format!(
                             "{} command {} missing sequenceId",
                             cmd.command_type, i
@@ -709,6 +699,12 @@ Return JSON array of edit scripts."#;
                     }
                 }
                 "SplitClip" => {
+                    if cmd.params.get("sequenceId").is_none() {
+                        issues.push(format!("SplitClip command {} missing sequenceId", i));
+                    }
+                    if cmd.params.get("trackId").is_none() {
+                        issues.push(format!("SplitClip command {} missing trackId", i));
+                    }
                     if cmd.params.get("clipId").is_none() {
                         issues.push(format!("SplitClip command {} missing clipId", i));
                     }
@@ -732,6 +728,12 @@ Return JSON array of edit scripts."#;
                     }
                 }
                 "RippleDelete" => {
+                    if cmd.params.get("sequenceId").is_none() {
+                        issues.push(format!("RippleDelete command {} missing sequenceId", i));
+                    }
+                    if cmd.params.get("trackId").is_none() {
+                        issues.push(format!("RippleDelete command {} missing trackId", i));
+                    }
                     let has_clip_id = cmd.params.get("clipId").and_then(|v| v.as_str()).is_some();
                     let has_clip_ids = match cmd.params.get("clipIds") {
                         Some(value) => match value.as_array() {
@@ -770,12 +772,24 @@ Return JSON array of edit scripts."#;
                         ));
                     }
                 }
-                "DeleteClip" | "DuplicateClip" => {
+                "DeleteClip" => {
+                    if cmd.params.get("sequenceId").is_none() {
+                        issues.push(format!("DeleteClip command {} missing sequenceId", i));
+                    }
+                    if cmd.params.get("trackId").is_none() {
+                        issues.push(format!("DeleteClip command {} missing trackId", i));
+                    }
                     if cmd.params.get("clipId").is_none() {
                         issues.push(format!("{} command {} missing clipId", cmd.command_type, i));
                     }
                 }
                 "TrimClip" => {
+                    if cmd.params.get("sequenceId").is_none() {
+                        issues.push(format!("TrimClip command {} missing sequenceId", i));
+                    }
+                    if cmd.params.get("trackId").is_none() {
+                        issues.push(format!("TrimClip command {} missing trackId", i));
+                    }
                     if cmd.params.get("clipId").is_none() {
                         issues.push(format!("TrimClip command {} missing clipId", i));
                     }
@@ -806,6 +820,12 @@ Return JSON array of edit scripts."#;
                     }
                 }
                 "MoveClip" => {
+                    if cmd.params.get("sequenceId").is_none() {
+                        issues.push(format!("MoveClip command {} missing sequenceId", i));
+                    }
+                    if cmd.params.get("trackId").is_none() {
+                        issues.push(format!("MoveClip command {} missing trackId", i));
+                    }
                     if cmd.params.get("clipId").is_none() {
                         issues.push(format!("MoveClip command {} missing clipId", i));
                     }
@@ -821,32 +841,49 @@ Return JSON array of edit scripts."#;
                         },
                     }
                 }
-                "AddTrack" => match cmd.params.get("type") {
-                    None => issues.push(format!("AddTrack command {} missing type", i)),
-                    Some(v) => match v.as_str() {
-                        Some("video") | Some("audio") => {}
-                        _ => issues.push(format!(
-                            "AddTrack command {} invalid type (must be 'video' or 'audio')",
-                            i
-                        )),
-                    },
+                "AddTrack" => {
+                    if cmd.params.get("sequenceId").is_none() {
+                        issues.push(format!("AddTrack command {} missing sequenceId", i));
+                    }
+                    if cmd.params.get("name").is_none() {
+                        issues.push(format!("AddTrack command {} missing name", i));
+                    }
+                    match cmd.params.get("kind") {
+                        None => issues.push(format!("AddTrack command {} missing kind", i)),
+                        Some(v) => match v.as_str() {
+                            Some("video") | Some("audio") | Some("caption") | Some("overlay") => {}
+                            _ => issues.push(format!(
+                                "AddTrack command {} invalid kind (must be 'video', 'audio', 'caption', or 'overlay')",
+                                i
+                            )),
+                        },
+                    }
                 },
-                "MuteTrack" => {
+                "ToggleTrackMute" => {
+                    if cmd.params.get("sequenceId").is_none() {
+                        issues.push(format!("ToggleTrackMute command {} missing sequenceId", i));
+                    }
                     if cmd.params.get("trackId").is_none() {
-                        issues.push(format!("MuteTrack command {} missing trackId", i));
+                        issues.push(format!("ToggleTrackMute command {} missing trackId", i));
                     }
                     match cmd.params.get("muted") {
-                        None => issues.push(format!("MuteTrack command {} missing muted", i)),
+                        None => issues.push(format!("ToggleTrackMute command {} missing muted", i)),
                         Some(v) if !v.is_boolean() => {
                             issues.push(format!(
-                                "MuteTrack command {} invalid muted (must be boolean)",
+                                "ToggleTrackMute command {} invalid muted (must be boolean)",
                                 i
                             ));
                         }
                         _ => {}
                     }
-                }
+                },
                 "DeleteTrack" | "LockTrack" => {
+                    if cmd.params.get("sequenceId").is_none() {
+                        issues.push(format!(
+                            "{} command {} missing sequenceId",
+                            cmd.command_type, i
+                        ));
+                    }
                     if cmd.params.get("trackId").is_none() {
                         issues.push(format!(
                             "{} command {} missing trackId",
@@ -855,6 +892,12 @@ Return JSON array of edit scripts."#;
                     }
                 }
                 "AddEffect" => {
+                    if cmd.params.get("sequenceId").is_none() {
+                        issues.push(format!("AddEffect command {} missing sequenceId", i));
+                    }
+                    if cmd.params.get("trackId").is_none() {
+                        issues.push(format!("AddEffect command {} missing trackId", i));
+                    }
                     if cmd.params.get("clipId").is_none() {
                         issues.push(format!("AddEffect command {} missing clipId", i));
                     }
@@ -863,50 +906,6 @@ Return JSON array of edit scripts."#;
                     }
                     if cmd.params.get("params").is_none() {
                         issues.push(format!("AddEffect command {} missing params", i));
-                    }
-                }
-                "AddKeyframe" => {
-                    if cmd.params.get("clipId").is_none() {
-                        issues.push(format!("AddKeyframe command {} missing clipId", i));
-                    }
-                    if cmd.params.get("paramPath").is_none() {
-                        issues.push(format!("AddKeyframe command {} missing paramPath", i));
-                    }
-                    match cmd.params.get("time") {
-                        None => issues.push(format!("AddKeyframe command {} missing time", i)),
-                        Some(v) => match v.as_f64() {
-                            Some(t) if t.is_finite() && t >= 0.0 => {}
-                            _ => issues.push(format!(
-                                "AddKeyframe command {} invalid time (must be non-negative number)",
-                                i
-                            )),
-                        },
-                    }
-                    if cmd.params.get("value").is_none() {
-                        issues.push(format!("AddKeyframe command {} missing value", i));
-                    }
-                }
-                "AddTransition" => {
-                    if cmd.params.get("clipAId").is_none() {
-                        issues.push(format!("AddTransition command {} missing clipAId", i));
-                    }
-                    if cmd.params.get("clipBId").is_none() {
-                        issues.push(format!("AddTransition command {} missing clipBId", i));
-                    }
-                    if cmd.params.get("type").is_none() {
-                        issues.push(format!("AddTransition command {} missing type", i));
-                    }
-                    match cmd.params.get("duration") {
-                        None => {
-                            issues.push(format!("AddTransition command {} missing duration", i))
-                        }
-                        Some(v) => match v.as_f64() {
-                            Some(d) if d.is_finite() && d > 0.0 => {}
-                            _ => issues.push(format!(
-                                "AddTransition command {} invalid duration (must be positive)",
-                                i
-                            )),
-                        },
                     }
                 }
                 "UpdateEffect" | "RemoveEffect" | "UpdateKeyframe" | "DeleteKeyframe"
@@ -1319,8 +1318,15 @@ mod tests {
     #[tokio::test]
     async fn test_validate_valid_script() {
         let gateway = AIGateway::with_defaults();
-        let script = EditScript::new("Add clip")
-            .add_command(EditCommand::insert_clip("track_1", "asset_1", 0.0));
+        let script = EditScript::new("Add clip").add_command(EditCommand::new(
+            "InsertClip",
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_1",
+                "assetId": "asset_1",
+                "timelineStart": 0.0
+            }),
+        ));
 
         let result = gateway.validate_script(&script).await.unwrap();
 
@@ -1467,8 +1473,14 @@ This will add the clip."#;
     #[tokio::test]
     async fn test_validate_add_track_valid() {
         let gateway = AIGateway::with_defaults();
-        let script =
-            EditScript::new("Add track").add_command(EditCommand::add_track("video", Some("Main")));
+        let script = EditScript::new("Add track").add_command(EditCommand::new(
+            "AddTrack",
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "kind": "video",
+                "name": "Main"
+            }),
+        ));
 
         let result = gateway.validate_script(&script).await.unwrap();
         assert!(result.is_valid);
@@ -1480,19 +1492,29 @@ This will add the clip."#;
         let mut script = EditScript::new("Test");
         script.commands.push(EditCommand::new(
             "AddTrack",
-            serde_json::json!({ "type": "invalid" }),
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "kind": "invalid",
+                "name": "Scratch"
+            }),
         ));
 
         let result = gateway.validate_script(&script).await.unwrap();
         assert!(!result.is_valid);
-        assert!(result.issues.iter().any(|i| i.contains("invalid type")));
+        assert!(result.issues.iter().any(|i| i.contains("invalid kind")));
     }
 
     #[tokio::test]
     async fn test_validate_mute_track_valid() {
         let gateway = AIGateway::with_defaults();
-        let script =
-            EditScript::new("Mute track").add_command(EditCommand::mute_track("track_1", true));
+        let script = EditScript::new("Mute track").add_command(EditCommand::new(
+            "ToggleTrackMute",
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_1",
+                "muted": true
+            }),
+        ));
 
         let result = gateway.validate_script(&script).await.unwrap();
         assert!(result.is_valid);
@@ -1503,8 +1525,8 @@ This will add the clip."#;
         let gateway = AIGateway::with_defaults();
         let mut script = EditScript::new("Test");
         script.commands.push(EditCommand::new(
-            "MuteTrack",
-            serde_json::json!({ "trackId": "track_1" }),
+            "ToggleTrackMute",
+            serde_json::json!({ "sequenceId": "seq_1", "trackId": "track_1" }),
         ));
 
         let result = gateway.validate_script(&script).await.unwrap();
@@ -1515,10 +1537,15 @@ This will add the clip."#;
     #[tokio::test]
     async fn test_validate_add_effect_valid() {
         let gateway = AIGateway::with_defaults();
-        let script = EditScript::new("Add effect").add_command(EditCommand::add_effect(
-            "clip_1",
-            "brightness",
-            serde_json::json!({ "value": 20 }),
+        let script = EditScript::new("Add effect").add_command(EditCommand::new(
+            "AddEffect",
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_1",
+                "clipId": "clip_1",
+                "effectType": "brightness",
+                "params": { "value": 20 }
+            }),
         ));
 
         let result = gateway.validate_script(&script).await.unwrap();
@@ -1531,7 +1558,12 @@ This will add the clip."#;
         let mut script = EditScript::new("Test");
         script.commands.push(EditCommand::new(
             "AddEffect",
-            serde_json::json!({ "clipId": "clip_1", "effectType": "brightness" }),
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_1",
+                "clipId": "clip_1",
+                "effectType": "brightness"
+            }),
         ));
 
         let result = gateway.validate_script(&script).await.unwrap();
@@ -1540,77 +1572,17 @@ This will add the clip."#;
     }
 
     #[tokio::test]
-    async fn test_validate_add_keyframe_valid() {
-        let gateway = AIGateway::with_defaults();
-        let script = EditScript::new("Add keyframe").add_command(EditCommand::add_keyframe(
-            "clip_1",
-            "opacity",
-            0.0,
-            serde_json::json!(0),
-            None,
-        ));
-
-        let result = gateway.validate_script(&script).await.unwrap();
-        assert!(result.is_valid);
-    }
-
-    #[tokio::test]
-    async fn test_validate_add_keyframe_negative_time() {
-        let gateway = AIGateway::with_defaults();
-        let mut script = EditScript::new("Test");
-        script.commands.push(EditCommand::new(
-            "AddKeyframe",
-            serde_json::json!({
-                "clipId": "clip_1",
-                "paramPath": "opacity",
-                "time": -1.0,
-                "value": 100
-            }),
-        ));
-
-        let result = gateway.validate_script(&script).await.unwrap();
-        assert!(!result.is_valid);
-        assert!(result.issues.iter().any(|i| i.contains("invalid time")));
-    }
-
-    #[tokio::test]
-    async fn test_validate_add_transition_valid() {
-        let gateway = AIGateway::with_defaults();
-        let script = EditScript::new("Add transition").add_command(EditCommand::add_transition(
-            "clip_1",
-            "clip_2",
-            "crossfade",
-            1.0,
-        ));
-
-        let result = gateway.validate_script(&script).await.unwrap();
-        assert!(result.is_valid);
-    }
-
-    #[tokio::test]
-    async fn test_validate_add_transition_zero_duration() {
-        let gateway = AIGateway::with_defaults();
-        let mut script = EditScript::new("Test");
-        script.commands.push(EditCommand::new(
-            "AddTransition",
-            serde_json::json!({
-                "clipAId": "clip_1",
-                "clipBId": "clip_2",
-                "type": "crossfade",
-                "duration": 0.0
-            }),
-        ));
-
-        let result = gateway.validate_script(&script).await.unwrap();
-        assert!(!result.is_valid);
-        assert!(result.issues.iter().any(|i| i.contains("invalid duration")));
-    }
-
-    #[tokio::test]
     async fn test_validate_move_clip_valid() {
         let gateway = AIGateway::with_defaults();
-        let script =
-            EditScript::new("Move clip").add_command(EditCommand::move_clip("clip_1", 10.0, None));
+        let script = EditScript::new("Move clip").add_command(EditCommand::new(
+            "MoveClip",
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_1",
+                "clipId": "clip_1",
+                "newTimelineIn": 10.0
+            }),
+        ));
 
         let result = gateway.validate_script(&script).await.unwrap();
         assert!(result.is_valid);
@@ -1619,8 +1591,15 @@ This will add the clip."#;
     #[tokio::test]
     async fn test_validate_split_clip_valid() {
         let gateway = AIGateway::with_defaults();
-        let script =
-            EditScript::new("Split clip").add_command(EditCommand::split_clip("clip_1", 5.0));
+        let script = EditScript::new("Split clip").add_command(EditCommand::new(
+            "SplitClip",
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_1",
+                "clipId": "clip_1",
+                "atTimelineSec": 5.0
+            }),
+        ));
 
         let result = gateway.validate_script(&script).await.unwrap();
         assert!(result.is_valid);
@@ -1632,6 +1611,8 @@ This will add the clip."#;
         let script = EditScript::new("Split clip").add_command(EditCommand::new(
             "SplitClip",
             serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_1",
                 "clipId": "clip_1",
                 "splitTime": 5.0
             }),
@@ -1644,8 +1625,15 @@ This will add the clip."#;
     #[tokio::test]
     async fn test_validate_ripple_delete_valid() {
         let gateway = AIGateway::with_defaults();
-        let script = EditScript::new("Ripple delete")
-            .add_command(EditCommand::ripple_delete("clip_1", true));
+        let script = EditScript::new("Ripple delete").add_command(EditCommand::new(
+            "RippleDelete",
+            serde_json::json!({
+                "sequenceId": "seq_1",
+                "trackId": "track_1",
+                "clipId": "clip_1",
+                "affectAllTracks": true
+            }),
+        ));
 
         let result = gateway.validate_script(&script).await.unwrap();
         assert!(result.is_valid);
@@ -1657,6 +1645,7 @@ This will add the clip."#;
         let script = EditScript::new("Ripple delete").add_command(EditCommand::new(
             "RippleDelete",
             serde_json::json!({
+                "sequenceId": "seq_1",
                 "trackId": "track_1",
                 "clipIds": ["clip_1", "clip_2"]
             }),
@@ -1677,8 +1666,8 @@ This will add the clip."#;
         assert!(prompt.contains("InsertClip"));
         assert!(prompt.contains("SplitClip"));
         assert!(prompt.contains("RippleDelete"));
-        assert!(prompt.contains("AddKeyframe"));
-        assert!(prompt.contains("AddTransition"));
+        assert!(prompt.contains("AddTrack"));
+        assert!(prompt.contains("ToggleTrackMute"));
     }
 
     #[test]
