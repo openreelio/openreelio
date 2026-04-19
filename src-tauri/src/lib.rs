@@ -72,6 +72,15 @@ pub struct ActiveProject {
     pub history: ProjectHistory,
 }
 
+pub struct PreparedProjectSave {
+    pub snapshot_path: PathBuf,
+    pub meta_path: PathBuf,
+    pub history_path: PathBuf,
+    pub state_snapshot: ProjectState,
+    pub history_snapshot: ProjectHistory,
+    pub saved_last_op_id: Option<String>,
+}
+
 impl ActiveProject {
     fn history_command_type(op_kind: &crate::core::project::OpKind) -> &'static str {
         match op_kind {
@@ -563,25 +572,45 @@ impl ActiveProject {
     /// After a successful save, the `is_dirty` flag is reset to `false`.
     /// This ensures the project can be closed or replaced without warnings.
     pub fn save(&mut self) -> crate::core::CoreResult<()> {
-        self.sync_history_with_ops_log()?;
-        self.state.last_op_id = self.history.current_head().map(str::to_string);
-        self.state.op_count = self.history.applied_op_ids.len();
-
-        // Save snapshot
-        Snapshot::save(
-            &self.snapshot_path,
-            &self.state,
-            self.state.last_op_id.as_deref(),
-        )?;
-
-        // Save project metadata
-        crate::core::fs::atomic_write_json_pretty(&self.meta_path, &self.state.meta)?;
-        self.history.save(&self.history_path)?;
+        let prepared = self.prepare_save()?;
+        Self::write_prepared_save(&prepared)?;
 
         // Reset dirty flag after successful save
         self.state.is_dirty = false;
         tracing::debug!("Project saved successfully, is_dirty reset to false");
 
+        Ok(())
+    }
+
+    pub fn prepare_save(&mut self) -> crate::core::CoreResult<PreparedProjectSave> {
+        self.sync_history_with_ops_log()?;
+        self.state.last_op_id = self.history.current_head().map(str::to_string);
+        self.state.op_count = self.history.applied_op_ids.len();
+
+        Ok(PreparedProjectSave {
+            snapshot_path: self.snapshot_path.clone(),
+            meta_path: self.meta_path.clone(),
+            history_path: self.history_path.clone(),
+            state_snapshot: self.state.clone(),
+            history_snapshot: self.history.clone(),
+            saved_last_op_id: self.state.last_op_id.clone(),
+        })
+    }
+
+    pub(crate) fn write_prepared_save(
+        prepared: &PreparedProjectSave,
+    ) -> crate::core::CoreResult<()> {
+        Snapshot::save(
+            &prepared.snapshot_path,
+            &prepared.state_snapshot,
+            prepared.state_snapshot.last_op_id.as_deref(),
+        )?;
+
+        crate::core::fs::atomic_write_json_pretty(
+            &prepared.meta_path,
+            &prepared.state_snapshot.meta,
+        )?;
+        prepared.history_snapshot.save(&prepared.history_path)?;
         Ok(())
     }
 
