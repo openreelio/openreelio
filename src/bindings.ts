@@ -2793,7 +2793,7 @@ export type AppCleanupResult = { projectSaved: boolean; workersShutdown: boolean
 /**
  * DTO for app settings (mirrors Rust AppSettings)
  */
-export type AppSettingsDto = { version: number; general: GeneralSettingsDto; editor: EditorSettingsDto; playback: PlaybackSettingsDto; export: ExportSettingsDto; appearance: AppearanceSettingsDto; shortcuts: ShortcutSettingsDto; autoSave: AutoSaveSettingsDto; performance: PerformanceSettingsDto; ai: AISettingsDto; terminal: TerminalSettingsDto }
+export type AppSettingsDto = { version: number; general: GeneralSettingsDto; editor: EditorSettingsDto; playback: PlaybackSettingsDto; export: ExportSettingsDto; appearance: AppearanceSettingsDto; shortcuts: ShortcutSettingsDto; autoSave: AutoSaveSettingsDto; performance: PerformanceSettingsDto; ai: AISettingsDto; terminal?: TerminalSettingsDto }
 export type AppearanceSettingsDto = { theme: string; accentColor: string; uiScale: number; showStatusBar: boolean; compactMode: boolean }
 /**
  * Payload for the audio ducking IPC command.
