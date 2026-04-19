@@ -2,7 +2,7 @@
 
 > **Last Updated**: 2026-02-03
 > **Version**: v0.1.0 → v1.0.0 Planning
-> **Status**: MVP v0.1.0 at 99% | v0.2.0 AI at 98% | v0.3.0 Effects at 90% | **v0.5.0 PRO at 100%** | **v0.6.0 ADV at 95%** | **v0.7.0 VFX at 85%**
+> **Status**: MVP v0.1.0 mostly implemented | v0.2.0 AI partially shipped | v0.3.0 Effects partially shipped | **v0.5.0 PRO foundations in progress** | **v0.6.0 ADV prototypes in progress** | **v0.7.0 VFX exploratory**
 > **Strategic Goal**: Professional-grade NLE matching DaVinci Resolve / Premiere Pro standards
 > **Gap Analysis**: See [GAP_ANALYSIS.md](./GAP_ANALYSIS.md) for detailed feature comparison
 
@@ -44,40 +44,40 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 └───────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-| Milestone | Focus | Key Deliverables | Status |
-|-----------|-------|------------------|--------|
-| **v0.1.0** | Core Editor | Timeline, Preview, Export | ✅ Ready (99%) |
-| **v0.2.0** | AI Integration | Whisper, Meilisearch, AI Sidebar | ✅ Ready (98%) |
-| **v0.3.0** | Effects & Animation | Transitions, Keyframes, Audio FX | ✅ Ready (90%) |
-| **v0.4.0** | Plugin Ecosystem | WASM Host, Marketplace | 📋 Planned (60%) |
-| **v0.5.0** | **Professional Foundation** | Titles, Color Wheels, Scopes, Audio Mixer | ✅ **Complete (100%)** |
-| **v0.6.0** | **Advanced Editing** | Multicam, Keying, Tracking, Noise Reduction | ✅ **Complete (95%)** |
-| **v0.7.0** | **Color & VFX** | Qualifiers, HDR, Advanced Motion Graphics | 🚧 In Progress (85%) |
-| **v1.0.0** | Production | Performance, Stability, Cross-platform | 📋 Planned |
+| Milestone  | Focus                       | Key Deliverables                            | Status                       |
+| ---------- | --------------------------- | ------------------------------------------- | ---------------------------- |
+| **v0.1.0** | Core Editor                 | Timeline, Preview, Export                   | 🚧 Stabilization needed      |
+| **v0.2.0** | AI Integration              | Whisper, Meilisearch, AI Sidebar            | 🚧 Partial / feature-flagged |
+| **v0.3.0** | Effects & Animation         | Transitions, Keyframes, Audio FX            | 🚧 Partial                   |
+| **v0.4.0** | Plugin Ecosystem            | WASM Host, Marketplace                      | 📋 Planned (60%)             |
+| **v0.5.0** | **Professional Foundation** | Titles, Color Wheels, Scopes, Audio Mixer   | 🚧 In progress               |
+| **v0.6.0** | **Advanced Editing**        | Multicam, Keying, Tracking, Noise Reduction | 🚧 Prototype stage           |
+| **v0.7.0** | **Color & VFX**             | Qualifiers, HDR, Advanced Motion Graphics   | 📋 Early exploration         |
+| **v1.0.0** | Production                  | Performance, Stability, Cross-platform      | 📋 Planned                   |
 
 ### Critical Gap Summary (Updated 2026-02-03)
 
-| Category | Current | Industry Standard | Gap |
-|----------|---------|-------------------|-----|
-| Color Grading | **85%** | Professional tools (Resolve) | ✅ Color Wheels, Scopes implemented |
-| Audio Post | **80%** | DAW-level (Fairlight) | ✅ Mixer, Meters, Effects implemented |
-| Titles/Motion GFX | **90%** | Full title system | ✅ TextClip, Presets, Inspector implemented |
-| Compositing/VFX | **70%** | Keying, Tracking | ✅ ChromaKey, Motion Tracking implemented |
-| Multicam | **80%** | Full multicam workflow | ✅ MulticamAngleViewer, useMulticam implemented |
+| Category          | Current | Industry Standard            | Gap                                                        |
+| ----------------- | ------- | ---------------------------- | ---------------------------------------------------------- |
+| Color Grading     | **85%** | Professional tools (Resolve) | ⚠️ Core panels exist, product integration incomplete       |
+| Audio Post        | **80%** | DAW-level (Fairlight)        | ⚠️ Mixer UI exists, playback/render integration incomplete |
+| Titles/Motion GFX | **90%** | Full title system            | ⚠️ Core text workflow exists, still needs hardening        |
+| Compositing/VFX   | **70%** | Keying, Tracking             | ⚠️ Controls exist, render/export support is incomplete     |
+| Multicam          | **80%** | Full multicam workflow       | ⚠️ Viewer/hooks exist, end-to-end workflow incomplete      |
 
 ### Distribution Infrastructure Status
 
-| Component | Priority | Status |
-|-----------|----------|--------|
-| Auto-Update System (tauri-plugin-updater) | HIGH | ✅ Complete (UpdateBanner, useUpdate hook) |
-| Settings Persistence | HIGH | ✅ Complete (settingsStore, useSettings, backend) |
-| Version Sync Script | HIGH | ✅ Complete (scripts/sync-version.ts + tests) |
-| Update Manifest Generation | HIGH | ✅ Complete |
-| First-Run Setup Wizard | HIGH | ✅ Complete (SetupWizard.tsx) |
-| Windows Code Signing (Authenticode) | OPTIONAL | ⏳ Deferred (users can bypass SmartScreen) |
-| macOS Notarization | OPTIONAL | ⏳ Deferred (users can bypass Gatekeeper) |
-| Installer Customization | LOW | ⏳ Pending |
-| Crash Reporting | LOW | ⏳ Pending |
+| Component                                 | Priority | Status                                            |
+| ----------------------------------------- | -------- | ------------------------------------------------- |
+| Auto-Update System (tauri-plugin-updater) | HIGH     | ✅ Complete (UpdateBanner, useUpdate hook)        |
+| Settings Persistence                      | HIGH     | ✅ Complete (settingsStore, useSettings, backend) |
+| Version Sync Script                       | HIGH     | ✅ Complete (scripts/sync-version.ts + tests)     |
+| Update Manifest Generation                | HIGH     | ✅ Complete                                       |
+| First-Run Setup Wizard                    | HIGH     | ✅ Complete (SetupWizard.tsx)                     |
+| Windows Code Signing (Authenticode)       | OPTIONAL | ⏳ Deferred (users can bypass SmartScreen)        |
+| macOS Notarization                        | OPTIONAL | ⏳ Deferred (users can bypass Gatekeeper)         |
+| Installer Customization                   | LOW      | ⏳ Pending                                        |
+| Crash Reporting                           | LOW      | ⏳ Pending                                        |
 
 > **Note**: Code signing is OPTIONAL for open source projects. Users can bypass OS warnings.
 
@@ -91,18 +91,19 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 
 > **Last Updated**: 2026-01-23
 
-| Phase | Description | Status | Completion |
-|-------|-------------|--------|------------|
-| Phase 0 | Build Environment | ✅ Complete | 100% |
-| Phase 1 | Project & Assets | ✅ Complete | 100% |
-| Phase 2 | Timeline Core | ✅ Complete | 100% |
-| Phase 3 | Preview System | ✅ Complete | 100% |
-| Phase 4 | Export Pipeline | ✅ Complete | 95% |
-| Phase 5 | Polish & UX | ✅ Complete | 90% |
+| Phase   | Description       | Status      | Completion |
+| ------- | ----------------- | ----------- | ---------- |
+| Phase 0 | Build Environment | ✅ Complete | 100%       |
+| Phase 1 | Project & Assets  | ✅ Complete | 100%       |
+| Phase 2 | Timeline Core     | ✅ Complete | 100%       |
+| Phase 3 | Preview System    | ✅ Complete | 100%       |
+| Phase 4 | Export Pipeline   | ✅ Complete | 95%        |
+| Phase 5 | Polish & UX       | ✅ Complete | 90%        |
 
 ### Phase 2 Detailed Status
 
 **Completed:**
+
 - ✅ Single clip drag & trim (`useClipDrag` hook)
 - ✅ Grid snapping for clip operations
 - ✅ Selection box (drag-to-select)
@@ -118,6 +119,7 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 - ✅ Specta Type integration for IPC (commit 507588c)
 
 **Pending:**
+
 - ✅ Drop validity feedback - COMPLETE (DragPreviewLayer with isValidDrop)
 - ⏳ Track reordering (drag track headers)
 
@@ -125,12 +127,13 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 
 **Remaining Tasks:**
 
-| Task | Description | Priority | Status |
-|------|-------------|----------|--------|
-| Drop Feedback | Visual feedback for valid/invalid drop | LOW | ✅ Complete |
-| Track Reordering | Drag track headers to reorder | LOW | ⏳ Pending |
+| Task             | Description                            | Priority | Status      |
+| ---------------- | -------------------------------------- | -------- | ----------- |
+| Drop Feedback    | Visual feedback for valid/invalid drop | LOW      | ✅ Complete |
+| Track Reordering | Drag track headers to reorder          | LOW      | ⏳ Pending  |
 
 **Technical Requirements:**
+
 - Virtual scrolling for 1000+ clips performance
 - 60fps drag interaction
 - Undo/redo for all operations
@@ -138,6 +141,7 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 ### Phase 3: Preview System (90% Complete)
 
 **Completed:**
+
 - ✅ Frame extraction via FFmpeg (`useFrameExtractor` hook)
 - ✅ Playback loop with RAF-based 30fps (`usePlaybackLoop` hook)
 - ✅ Audio sync with Web Audio API (`useAudioPlayback` hook)
@@ -148,13 +152,14 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 
 **Remaining Tasks:**
 
-| Task | Description | Priority | Status |
-|------|-------------|----------|--------|
-| Proxy Playback | Use proxy videos for smooth preview | HIGH | ✅ Complete (ProxyPreviewPlayer) |
+| Task           | Description                         | Priority | Status                           |
+| -------------- | ----------------------------------- | -------- | -------------------------------- |
+| Proxy Playback | Use proxy videos for smooth preview | HIGH     | ✅ Complete (ProxyPreviewPlayer) |
 
 ### Phase 5: Polish & UX
 
 **Completed:**
+
 - ✅ Keyboard Shortcuts (useKeyboardShortcuts.ts expanded with 20+ shortcuts)
 - ✅ Toast Notifications (Toast.tsx, useToast hook)
 - ✅ Settings Dialog (SettingsDialog.tsx with all sections)
@@ -167,10 +172,10 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 
 **Remaining Tasks:**
 
-| Task | Description | Priority | Status |
-|------|-------------|----------|--------|
-| Error Boundaries | Graceful error handling | MEDIUM | ✅ Complete (ErrorBoundary + withErrorBoundary HOC) |
-| Loading States | Skeleton loaders, progress indicators | LOW | ✅ Complete (10+ skeleton variants + Spinner) |
+| Task             | Description                           | Priority | Status                                              |
+| ---------------- | ------------------------------------- | -------- | --------------------------------------------------- |
+| Error Boundaries | Graceful error handling               | MEDIUM   | ✅ Complete (ErrorBoundary + withErrorBoundary HOC) |
+| Loading States   | Skeleton loaders, progress indicators | LOW      | ✅ Complete (10+ skeleton variants + Spinner)       |
 
 ### MVP Definition of Done
 
@@ -194,6 +199,7 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 ### Current Progress (as of 2026-01-27)
 
 **Completed:**
+
 - ✅ AI Provider Architecture (OpenAI, Anthropic, Local providers)
 - ✅ AI Gateway with edit script executor
 - ✅ AI Settings Panel (AISettingsPanel.tsx) with dialog integration
@@ -257,6 +263,7 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 - ✅ **Error Boundaries** (AIErrorBoundary for graceful error handling)
 
 **Pending:**
+
 - ✅ whisper.cpp (whisper-rs) integration for offline transcription
 - ⏳ Shot detection with candle ML
 - ✅ Caption export to SRT/VTT formats
@@ -266,6 +273,7 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 #### 1. Auto-Captioning with whisper.cpp
 
 **Integration Plan:**
+
 ```rust
 // Cargo.toml addition
 whisper-rs = "0.13"  // Rust bindings for whisper.cpp
@@ -297,6 +305,7 @@ impl TranscriptionEngine {
 | medium | 1.5GB | Slow | Excellent | Final transcripts |
 
 **User Experience:**
+
 - One-click captioning from asset context menu
 - Real-time progress with word count
 - Edit captions in Inspector panel
@@ -305,6 +314,7 @@ impl TranscriptionEngine {
 #### 2. Smart Asset Search with Meilisearch
 
 **Integration Architecture:**
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ Frontend (React)                                                │
@@ -323,17 +333,20 @@ impl TranscriptionEngine {
 ```
 
 **Cargo.toml Addition:**
+
 ```toml
 meilisearch-sdk = "0.27"
 ```
 
 **Search Features:**
+
 - Typo-tolerant search ("brithday" → "birthday")
 - Faceted filtering (by type, date, duration)
 - Transcript search ("find where I say hello")
 - Ranking by relevance and recency
 
 **Deployment Strategy:**
+
 1. Bundle Meilisearch binary (~50MB) as Tauri sidecar
 2. Start on app launch, stop on exit
 3. Data stored in `{project}/.openreelio/search/`
@@ -341,6 +354,7 @@ meilisearch-sdk = "0.27"
 #### 3. Shot Detection with candle
 
 **Integration Plan:**
+
 ```rust
 // Cargo.toml addition
 candle-core = "0.8"
@@ -363,6 +377,7 @@ impl ShotDetector {
 ```
 
 **Output:**
+
 ```rust
 pub struct Shot {
     pub id: String,
@@ -376,18 +391,18 @@ pub struct Shot {
 
 ### v0.2.0 Task Breakdown
 
-| Task | Dependencies | Priority | Status |
-|------|--------------|----------|--------|
-| whisper-rs integration | None | HIGH | ✅ Complete |
-| Caption UI (edit, export) | whisper-rs | HIGH | ✅ Complete |
-| Meilisearch sidecar setup | None | HIGH | ✅ Complete |
-| Asset indexing pipeline | Meilisearch | HIGH | ✅ Complete |
-| Search UI component | Asset indexing | MEDIUM | ✅ Complete |
-| Transcript search | whisper-rs, Meilisearch | MEDIUM | ✅ Infrastructure Ready |
-| candle setup | None | MEDIUM | ⏳ Pending |
-| Shot detection impl | candle | MEDIUM | ⏳ Pending |
-| Shot UI (markers, navigation) | Shot detection | LOW | ⏳ Pending |
-| Caption export SRT/VTT | Caption UI | LOW | ✅ Complete |
+| Task                          | Dependencies            | Priority | Status                  |
+| ----------------------------- | ----------------------- | -------- | ----------------------- |
+| whisper-rs integration        | None                    | HIGH     | ✅ Complete             |
+| Caption UI (edit, export)     | whisper-rs              | HIGH     | ✅ Complete             |
+| Meilisearch sidecar setup     | None                    | HIGH     | ✅ Complete             |
+| Asset indexing pipeline       | Meilisearch             | HIGH     | ✅ Complete             |
+| Search UI component           | Asset indexing          | MEDIUM   | ✅ Complete             |
+| Transcript search             | whisper-rs, Meilisearch | MEDIUM   | ✅ Infrastructure Ready |
+| candle setup                  | None                    | MEDIUM   | ⏳ Pending              |
+| Shot detection impl           | candle                  | MEDIUM   | ⏳ Pending              |
+| Shot UI (markers, navigation) | Shot detection          | LOW      | ⏳ Pending              |
+| Caption export SRT/VTT        | Caption UI              | LOW      | ✅ Complete             |
 
 ### v0.2.0 Definition of Done
 
@@ -410,29 +425,30 @@ pub struct Shot {
 
 ### Current Progress
 
-| Component | Status | Tests |
-|-----------|--------|-------|
-| FFmpeg Transition Filters | ✅ Complete | 38 tests |
-| Effect Commands (Add/Remove/Update) | ✅ Complete | 19 tests |
-| IPC Integration | ✅ Complete | - |
-| Frontend Types | ✅ Complete | - |
-| EffectsBrowser UI | ✅ Complete | 28 tests |
-| TransitionPicker UI | ✅ Complete | 28 tests |
-| EffectInspector UI | ✅ Complete | 21 tests |
-| TransitionZone Component | ✅ Complete | 30 tests |
-| useTransitionZones Hook | ✅ Complete | 12 tests |
-| Timeline Integration | ✅ Complete | 5 tests |
-| Keyframe Interpolation | ✅ Complete | 28 tests |
-| useKeyframeAnimation Hook | ✅ Complete | 11 tests |
-| KeyframeEditor UI | ✅ Complete | 20+ tests |
-| Audio Effects Factory | ✅ Complete | 36 tests |
-| CurveEditor Component | ✅ Complete | 19 tests |
+| Component                           | Status      | Tests     |
+| ----------------------------------- | ----------- | --------- |
+| FFmpeg Transition Filters           | ✅ Complete | 38 tests  |
+| Effect Commands (Add/Remove/Update) | ✅ Complete | 19 tests  |
+| IPC Integration                     | ✅ Complete | -         |
+| Frontend Types                      | ✅ Complete | -         |
+| EffectsBrowser UI                   | ✅ Complete | 28 tests  |
+| TransitionPicker UI                 | ✅ Complete | 28 tests  |
+| EffectInspector UI                  | ✅ Complete | 21 tests  |
+| TransitionZone Component            | ✅ Complete | 30 tests  |
+| useTransitionZones Hook             | ✅ Complete | 12 tests  |
+| Timeline Integration                | ✅ Complete | 5 tests   |
+| Keyframe Interpolation              | ✅ Complete | 28 tests  |
+| useKeyframeAnimation Hook           | ✅ Complete | 11 tests  |
+| KeyframeEditor UI                   | ✅ Complete | 20+ tests |
+| Audio Effects Factory               | ✅ Complete | 36 tests  |
+| CurveEditor Component               | ✅ Complete | 19 tests  |
 
 ### Core Features
 
 #### 1. Video Effects Pipeline
 
 **Already Implemented (filter_builder.rs):**
+
 - Brightness, Contrast, Saturation
 - Blur, Sharpen
 - Color grading (RGB curves)
@@ -449,6 +465,7 @@ pub struct Shot {
 #### 2. Transition System
 
 **✅ Implemented (filter_builder.rs):**
+
 ```rust
 // build_cross_dissolve_filter() - xfade=transition=dissolve
 // build_wipe_filter() - xfade with wipeleft/wiperight/wipeup/wipedown
@@ -457,6 +474,7 @@ pub struct Shot {
 ```
 
 **✅ Effect Commands (effect.rs):**
+
 ```rust
 pub struct AddEffectCommand { ... }     // Add effect to clip
 pub struct RemoveEffectCommand { ... }  // Remove effect with undo support
@@ -464,6 +482,7 @@ pub struct UpdateEffectCommand { ... }  // Update effect parameters
 ```
 
 **✅ UI Components:**
+
 - `EffectsBrowser` - 45+ effects across 8 categories with search
 - `TransitionPicker` - Duration, direction, zoom type configuration
 - `EffectInspector` - Parameter editing with reset/delete actions
@@ -473,6 +492,7 @@ pub struct UpdateEffectCommand { ... }  // Update effect parameters
 #### 3. Keyframe Animation
 
 **Data Model:**
+
 ```rust
 pub struct Keyframe {
     pub time: f64,
@@ -495,6 +515,7 @@ pub enum EasingFunction {
 ```
 
 **UI Components:**
+
 - Keyframe editor in Inspector
 - Curve editor for Bezier easing
 - Copy/paste keyframes
@@ -502,31 +523,31 @@ pub enum EasingFunction {
 
 #### 4. Audio Effects
 
-| Effect | Description | Priority |
-|--------|-------------|----------|
-| Volume | Gain control with keyframes | HIGH |
-| Fade In/Out | Audio fade transitions | HIGH |
-| EQ | Basic equalization | MEDIUM |
-| Compressor | Dynamic range compression | MEDIUM |
-| Noise Reduction | Basic noise gate | LOW |
+| Effect          | Description                 | Priority |
+| --------------- | --------------------------- | -------- |
+| Volume          | Gain control with keyframes | HIGH     |
+| Fade In/Out     | Audio fade transitions      | HIGH     |
+| EQ              | Basic equalization          | MEDIUM   |
+| Compressor      | Dynamic range compression   | MEDIUM   |
+| Noise Reduction | Basic noise gate            | LOW      |
 
 ### v0.3.0 Task Breakdown
 
-| Task | Priority | Status | Effort |
-|------|----------|--------|--------|
-| Transition data model | HIGH | ✅ Complete | 2 days |
-| Transition FFmpeg generation | HIGH | ✅ Complete | 1 week |
-| Effect Commands (Add/Remove/Update) | HIGH | ✅ Complete | 2 days |
-| EffectsBrowser UI | HIGH | ✅ Complete | 1 day |
-| TransitionPicker UI | HIGH | ✅ Complete | 1 day |
-| EffectInspector UI | HIGH | ✅ Complete | 1 day |
-| Transition UI (TransitionZone) | HIGH | ✅ Complete | - |
-| Keyframe data model | HIGH | ✅ Complete | - |
-| Keyframe interpolation | HIGH | ✅ Complete | - |
-| Keyframe UI (KeyframeEditor) | HIGH | ✅ Complete | - |
-| Curve editor component | MEDIUM | ✅ Complete | - |
-| LUT support | MEDIUM | ✅ Complete | - |
-| Audio effects pipeline | MEDIUM | ✅ Complete | - |
+| Task                                | Priority | Status      | Effort |
+| ----------------------------------- | -------- | ----------- | ------ |
+| Transition data model               | HIGH     | ✅ Complete | 2 days |
+| Transition FFmpeg generation        | HIGH     | ✅ Complete | 1 week |
+| Effect Commands (Add/Remove/Update) | HIGH     | ✅ Complete | 2 days |
+| EffectsBrowser UI                   | HIGH     | ✅ Complete | 1 day  |
+| TransitionPicker UI                 | HIGH     | ✅ Complete | 1 day  |
+| EffectInspector UI                  | HIGH     | ✅ Complete | 1 day  |
+| Transition UI (TransitionZone)      | HIGH     | ✅ Complete | -      |
+| Keyframe data model                 | HIGH     | ✅ Complete | -      |
+| Keyframe interpolation              | HIGH     | ✅ Complete | -      |
+| Keyframe UI (KeyframeEditor)        | HIGH     | ✅ Complete | -      |
+| Curve editor component              | MEDIUM   | ✅ Complete | -      |
+| LUT support                         | MEDIUM   | ✅ Complete | -      |
+| Audio effects pipeline              | MEDIUM   | ✅ Complete | -      |
 
 ### v0.3.0 Definition of Done
 
@@ -553,6 +574,7 @@ pub enum EasingFunction {
 #### 1. WASM Plugin Host (Already Implemented)
 
 **Current State:**
+
 - Wasmtime 27 integration
 - Permission system (FS, Network, Models, Project)
 - Plugin manifest parsing
@@ -570,11 +592,13 @@ pub enum EasingFunction {
 #### 2. Built-in Plugins
 
 **Asset Providers (Partially Implemented):**
+
 - Stock media (Unsplash, Pexels)
 - Audio library integration
 - Meme pack provider
 
 **To Add:**
+
 - Freesound.org integration
 - Google Fonts for text effects
 - Giphy integration
@@ -582,6 +606,7 @@ pub enum EasingFunction {
 #### 3. Effect Plugins
 
 **Plugin Interface:**
+
 ```rust
 pub trait EffectPlugin {
     fn manifest(&self) -> EffectManifest;
@@ -593,6 +618,7 @@ pub trait EffectPlugin {
 #### 4. Export Plugins
 
 **Plugin Interface:**
+
 ```rust
 pub trait ExportPlugin {
     fn manifest(&self) -> ExportManifest;
@@ -602,6 +628,7 @@ pub trait ExportPlugin {
 ```
 
 **Example Plugins:**
+
 - YouTube preset optimizer
 - Instagram Reels formatter
 - GIF exporter
@@ -629,15 +656,16 @@ pub trait ExportPlugin {
 
 **Industry Reference**: Every NLE from iMovie to DaVinci Resolve includes title generation.
 
-| Feature | Priority | FFmpeg Filter | Notes |
-|---------|----------|---------------|-------|
-| Basic text clip | CRITICAL | `drawtext` | Font, size, color, position |
-| Text styling | HIGH | `drawtext` | Shadow, outline, background |
-| Lower thirds preset | HIGH | Template | Common broadcast element |
-| Text animation | MEDIUM | Keyframes | Fade in/out, position |
-| Text-on-path | LOW | Complex | Curved text |
+| Feature             | Priority | FFmpeg Filter | Notes                       |
+| ------------------- | -------- | ------------- | --------------------------- |
+| Basic text clip     | CRITICAL | `drawtext`    | Font, size, color, position |
+| Text styling        | HIGH     | `drawtext`    | Shadow, outline, background |
+| Lower thirds preset | HIGH     | Template      | Common broadcast element    |
+| Text animation      | MEDIUM   | Keyframes     | Fade in/out, position       |
+| Text-on-path        | LOW      | Complex       | Curved text                 |
 
 **Data Model:**
+
 ```typescript
 interface TextClip extends Clip {
   kind: 'text';
@@ -656,6 +684,7 @@ interface TextClip extends Clip {
 ```
 
 **FFmpeg Implementation:**
+
 ```bash
 # Basic text
 -vf "drawtext=fontfile=/path/font.ttf:text='Hello':fontsize=48:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2"
@@ -672,14 +701,15 @@ interface TextClip extends Clip {
 
 #### 2.1 Color Wheels (Lift/Gamma/Gain)
 
-| Wheel | Controls | FFmpeg Implementation |
-|-------|----------|----------------------|
-| Lift (Shadows) | RGB + Master | `colorlevels`, `curves` |
-| Gamma (Midtones) | RGB + Master | `eq`, `curves` |
-| Gain (Highlights) | RGB + Master | `colorlevels`, `curves` |
-| Offset | Global RGB shift | `colorbalance` |
+| Wheel             | Controls         | FFmpeg Implementation   |
+| ----------------- | ---------------- | ----------------------- |
+| Lift (Shadows)    | RGB + Master     | `colorlevels`, `curves` |
+| Gamma (Midtones)  | RGB + Master     | `eq`, `curves`          |
+| Gain (Highlights) | RGB + Master     | `colorlevels`, `curves` |
+| Offset            | Global RGB shift | `colorbalance`          |
 
 **UI Component**: `ColorWheels.tsx`
+
 - Circular wheel interface with RGB picker
 - Master luminance slider per wheel
 - Reset buttons
@@ -687,14 +717,15 @@ interface TextClip extends Clip {
 
 #### 2.2 Video Scopes
 
-| Scope | Purpose | Implementation |
-|-------|---------|----------------|
-| Waveform | Luminance distribution | Canvas + WebGL |
-| Vectorscope | Color saturation/hue | Canvas + WebGL |
-| RGB Parade | Per-channel levels | Canvas + WebGL |
-| Histogram | Tonal distribution | Canvas |
+| Scope       | Purpose                | Implementation |
+| ----------- | ---------------------- | -------------- |
+| Waveform    | Luminance distribution | Canvas + WebGL |
+| Vectorscope | Color saturation/hue   | Canvas + WebGL |
+| RGB Parade  | Per-channel levels     | Canvas + WebGL |
+| Histogram   | Tonal distribution     | Canvas         |
 
 **Technical Approach:**
+
 - Extract frame data via ImageData
 - Process in WebGL shader for performance
 - Update at 10-15fps during playback
@@ -716,6 +747,7 @@ interface TextClip extends Clip {
 | Master bus | HIGH | Final output level |
 
 **UI Component**: `AudioMixer.tsx`
+
 - Channel strip per audio track
 - Fader, meter, pan, mute/solo
 - Master output with limiter indicator
@@ -749,20 +781,20 @@ interface TextClip extends Clip {
 
 ### v0.5.0 Task Breakdown
 
-| Task | Priority | Estimated Effort | Dependencies |
-|------|----------|------------------|--------------|
-| Text clip data model | CRITICAL | 2 days | None |
-| Text rendering (FFmpeg) | CRITICAL | 3 days | Data model |
-| Title Inspector UI | CRITICAL | 3 days | Data model |
-| Title templates | HIGH | 2 days | Inspector |
-| Color Wheels component | CRITICAL | 5 days | None |
-| Waveform scope | CRITICAL | 3 days | WebGL setup |
-| Vectorscope | CRITICAL | 3 days | WebGL setup |
-| RGB Parade | HIGH | 2 days | Waveform |
-| Audio Mixer panel | CRITICAL | 5 days | None |
-| Audio meters | HIGH | 2 days | Mixer |
-| Bins in Project Explorer | HIGH | 3 days | None |
-| Shortcut settings UI | HIGH | 3 days | None |
+| Task                     | Priority | Estimated Effort | Dependencies |
+| ------------------------ | -------- | ---------------- | ------------ |
+| Text clip data model     | CRITICAL | 2 days           | None         |
+| Text rendering (FFmpeg)  | CRITICAL | 3 days           | Data model   |
+| Title Inspector UI       | CRITICAL | 3 days           | Data model   |
+| Title templates          | HIGH     | 2 days           | Inspector    |
+| Color Wheels component   | CRITICAL | 5 days           | None         |
+| Waveform scope           | CRITICAL | 3 days           | WebGL setup  |
+| Vectorscope              | CRITICAL | 3 days           | WebGL setup  |
+| RGB Parade               | HIGH     | 2 days           | Waveform     |
+| Audio Mixer panel        | CRITICAL | 5 days           | None         |
+| Audio meters             | HIGH     | 2 days           | Mixer        |
+| Bins in Project Explorer | HIGH     | 3 days           | None         |
+| Shortcut settings UI     | HIGH     | 3 days           | None         |
 
 ### v0.5.0 Definition of Done
 
@@ -796,6 +828,7 @@ interface TextClip extends Clip {
 | Keyboard switching | HIGH | 1-9 keys for angles |
 
 **Data Model:**
+
 ```typescript
 interface MulticamClip extends Clip {
   kind: 'multicam';
@@ -816,6 +849,7 @@ interface MulticamClip extends Clip {
 **The Problem**: No green screen support. Users cannot do basic compositing.
 
 **FFmpeg Filters:**
+
 ```bash
 # Chroma key (green screen)
 -vf "chromakey=color=0x00FF00:similarity=0.3:blend=0.1"
@@ -825,6 +859,7 @@ interface MulticamClip extends Clip {
 ```
 
 **UI Component**: `KeyingControls.tsx`
+
 - Color picker for key color
 - Similarity/tolerance sliders
 - Spill suppression
@@ -835,6 +870,7 @@ interface MulticamClip extends Clip {
 **The Problem**: No tracking capability. Users cannot attach elements to moving objects.
 
 **Implementation Options:**
+
 1. **FFmpeg vidstabdetect** - Basic stabilization/tracking
 2. **OpenCV via WASM** - More advanced tracking
 3. **Manual keyframing** - Fallback approach
@@ -846,6 +882,7 @@ interface MulticamClip extends Clip {
 **The Problem**: Audio effects exist but no noise reduction. Essential for dialogue.
 
 **FFmpeg Filters:**
+
 ```bash
 # Noise reduction
 -af "anlmdn=s=7:p=0.002:r=0.002"  # Non-local means
@@ -888,17 +925,18 @@ interface MulticamClip extends Clip {
 
 ### Advanced Color Grading
 
-| Feature | Priority | Status | Notes |
-|---------|----------|--------|-------|
-| **Power Windows** | HIGH | ✅ Backend Complete | Shape-based masking (62 tests) |
-| **Qualifier (HSL keying)** | HIGH | ✅ Backend Complete | Selective color correction (28 tests) |
-| Color Match | MEDIUM | 📋 Planned | Match between shots |
-| **HDR Support** | MEDIUM | ✅ Backend Complete | Color spaces, tonemapping, metadata (35 tests) |
-| ACES Workflow | LOW | 📋 Planned | Professional color management |
+| Feature                    | Priority | Status              | Notes                                          |
+| -------------------------- | -------- | ------------------- | ---------------------------------------------- |
+| **Power Windows**          | HIGH     | ✅ Backend Complete | Shape-based masking (62 tests)                 |
+| **Qualifier (HSL keying)** | HIGH     | ✅ Backend Complete | Selective color correction (28 tests)          |
+| Color Match                | MEDIUM   | 📋 Planned          | Match between shots                            |
+| **HDR Support**            | MEDIUM   | ✅ Backend Complete | Color spaces, tonemapping, metadata (35 tests) |
+| ACES Workflow              | LOW      | 📋 Planned          | Professional color management                  |
 
 #### Power Windows Implementation Details
 
 Backend Complete:
+
 - ✅ Mask data models (Rectangle, Ellipse, Polygon, Bezier) - 23 tests
 - ✅ Mask commands (Add/Update/Remove with undo/redo) - 9 tests
 - ✅ Effect integration (MaskGroup on Effect struct)
@@ -906,6 +944,7 @@ Backend Complete:
 - ✅ IPC payloads and command handling - 6 tests
 
 Frontend Pending:
+
 - 📋 MaskEditor component
 - 📋 MaskList component
 - 📋 MaskPropertyPanel
@@ -913,6 +952,7 @@ Frontend Pending:
 #### HSL Qualifier Implementation Details
 
 Backend Complete:
+
 - ✅ QualifierParams (hue/sat/lum ranges, softness, invert) - 10 tests
 - ✅ ColorAdjustments (hue_shift, sat_adjust, lum_adjust) - 3 tests
 - ✅ build_qualifier_filter() - True selective color correction
@@ -922,6 +962,7 @@ Backend Complete:
 - ✅ Updated HSLQualifier effect to use selective system - 10 tests
 
 Frontend Pending:
+
 - 📋 QualifierPanel component
 - 📋 HSL picker/wheel UI
 - 📋 Qualifier preview mode toggle
@@ -929,6 +970,7 @@ Frontend Pending:
 #### HDR Workflow Implementation Details
 
 Backend Complete (35 tests):
+
 - ✅ Color primaries: BT.709, BT.2020, DCI-P3, Display P3
 - ✅ Transfer functions: sRGB, BT.709, PQ (HDR10), HLG
 - ✅ ColorSpace struct combining primaries, transfer, matrix
@@ -940,22 +982,24 @@ Backend Complete (35 tests):
 - ✅ Color space conversion filters
 
 Frontend Pending:
+
 - 📋 HDR indicator badge on assets
 - 📋 HDR preview mode toggle
 - 📋 HDR export settings UI
 
 ### Advanced Motion Graphics
 
-| Feature | Priority | Status | Notes |
-|---------|----------|--------|-------|
-| **Shape layers** | HIGH | ✅ Backend Complete | Rectangle, ellipse, polygon, paths (36 tests) |
-| **Motion Graphics Templates** | HIGH | ✅ Backend Complete | Lower thirds, title cards, callouts (26 tests) |
-| Advanced text animation | HIGH | 📋 Planned | Per-character effects |
-| Motion paths | LOW | 📋 Planned | Animate along bezier curves |
+| Feature                       | Priority | Status              | Notes                                          |
+| ----------------------------- | -------- | ------------------- | ---------------------------------------------- |
+| **Shape layers**              | HIGH     | ✅ Backend Complete | Rectangle, ellipse, polygon, paths (36 tests)  |
+| **Motion Graphics Templates** | HIGH     | ✅ Backend Complete | Lower thirds, title cards, callouts (26 tests) |
+| Advanced text animation       | HIGH     | 📋 Planned          | Per-character effects                          |
+| Motion paths                  | LOW      | 📋 Planned          | Animate along bezier curves                    |
 
 #### Shape Layers Implementation Details
 
 Backend Complete:
+
 - ✅ Shape types: Rectangle, Ellipse, Line, Polygon (3-100 sides), Path
 - ✅ ShapeFill: None, Solid, LinearGradient, RadialGradient
 - ✅ ShapeStroke: color, width, cap, join, dash patterns
@@ -964,6 +1008,7 @@ Backend Complete:
 - ✅ Full validation and serialization
 
 Frontend/Commands Pending:
+
 - 📋 Shape commands (Add/Update/Remove)
 - 📋 FFmpeg filter generation
 - 📋 Shape editor UI
@@ -971,6 +1016,7 @@ Frontend/Commands Pending:
 #### Motion Graphics Template System (26 tests)
 
 Backend Complete:
+
 - ✅ TemplateCategory: LowerThird, TitleCard, Callout, EndScreen, Transition
 - ✅ TemplateParamType: Text, Color, Number, Toggle, Choice
 - ✅ TemplateElement with parameter bindings
@@ -980,17 +1026,18 @@ Backend Complete:
 - ✅ 6 built-in templates: lower_third_simple, lower_third_modern, title_card_centered, callout_box, end_screen_subscribe, highlight_circle
 
 Frontend Pending:
+
 - 📋 Template browser panel
 - 📋 Template parameter editor
 - 📋 Template preview renderer
 
 ### Advanced Audio
 
-| Feature | Priority | Notes |
-|---------|----------|-------|
-| Surround sound (5.1) | LOW | Multi-channel output |
-| Voice isolation | MEDIUM | AI-powered |
-| Loudness metering (LUFS) | HIGH | Broadcast compliance |
+| Feature                  | Priority | Notes                |
+| ------------------------ | -------- | -------------------- |
+| Surround sound (5.1)     | LOW      | Multi-channel output |
+| Voice isolation          | MEDIUM   | AI-powered           |
+| Loudness metering (LUFS) | HIGH     | Broadcast compliance |
 
 ### v0.7.0 Definition of Done
 
@@ -1012,15 +1059,16 @@ Frontend Pending:
 
 #### 1. Performance Optimization
 
-| Area | Target | Current |
-|------|--------|---------|
-| Startup time | < 2s | TBD |
-| Timeline scroll | 60fps | TBD |
-| Preview latency | < 100ms | TBD |
-| Export speed | Real-time+ | TBD |
-| Memory usage | < 500MB base | TBD |
+| Area            | Target       | Current |
+| --------------- | ------------ | ------- |
+| Startup time    | < 2s         | TBD     |
+| Timeline scroll | 60fps        | TBD     |
+| Preview latency | < 100ms      | TBD     |
+| Export speed    | Real-time+   | TBD     |
+| Memory usage    | < 500MB base | TBD     |
 
 **Optimization Tasks:**
+
 - Profile and optimize hot paths
 - Implement frame caching strategy
 - GPU acceleration validation
@@ -1035,12 +1083,12 @@ Frontend Pending:
 
 #### 3. Cross-Platform
 
-| Platform | Priority | Status |
-|----------|----------|--------|
-| Windows 10/11 | HIGH | Primary target |
-| macOS (Intel) | HIGH | Planned |
-| macOS (Apple Silicon) | HIGH | Planned |
-| Linux (Ubuntu) | MEDIUM | Planned |
+| Platform              | Priority | Status         |
+| --------------------- | -------- | -------------- |
+| Windows 10/11         | HIGH     | Primary target |
+| macOS (Intel)         | HIGH     | Planned        |
+| macOS (Apple Silicon) | HIGH     | Planned        |
+| Linux (Ubuntu)        | MEDIUM   | Planned        |
 
 #### 4. Documentation
 
@@ -1065,26 +1113,26 @@ Frontend Pending:
 
 ### Adopted Technologies
 
-| Technology | Purpose | Integration Point | Version |
-|------------|---------|-------------------|---------|
-| **whisper.cpp** | Speech-to-text | `core/indexing/transcripts.rs` | via whisper-rs 0.13 |
-| **Meilisearch** | Full-text search | Tauri sidecar + `core/search/` | 1.6+ |
-| **candle** | ML inference | `core/indexing/shots.rs` | 0.8 |
-| **FFmpeg** | Video processing | `core/ffmpeg/` | 6.0+ |
-| **Wasmtime** | Plugin runtime | `core/plugin/host.rs` | 27 |
+| Technology      | Purpose          | Integration Point              | Version             |
+| --------------- | ---------------- | ------------------------------ | ------------------- |
+| **whisper.cpp** | Speech-to-text   | `core/indexing/transcripts.rs` | via whisper-rs 0.13 |
+| **Meilisearch** | Full-text search | Tauri sidecar + `core/search/` | 1.6+                |
+| **candle**      | ML inference     | `core/indexing/shots.rs`       | 0.8                 |
+| **FFmpeg**      | Video processing | `core/ffmpeg/`                 | 6.0+                |
+| **Wasmtime**    | Plugin runtime   | `core/plugin/host.rs`          | 27                  |
 
 ### Evaluated but Not Adopted
 
-| Technology | Reason for Rejection |
-|------------|----------------------|
-| **MLT Framework** | C/C++ integration complexity; FFmpeg direct control preferred |
-| **Vis.js Timeline** | Not specialized for video editing; missing trim/layer features |
-| **React-Timeline-9000** | Already have custom implementation; would require migration |
+| Technology              | Reason for Rejection                                           |
+| ----------------------- | -------------------------------------------------------------- |
+| **MLT Framework**       | C/C++ integration complexity; FFmpeg direct control preferred  |
+| **Vis.js Timeline**     | Not specialized for video editing; missing trim/layer features |
+| **React-Timeline-9000** | Already have custom implementation; would require migration    |
 
 ### Reference Projects (For Inspiration Only)
 
-| Project | Reference Use |
-|---------|--------------|
+| Project    | Reference Use                                              |
+| ---------- | ---------------------------------------------------------- |
 | **Editly** | JSON-based edit definition structure for EditScript design |
 
 ---
@@ -1093,29 +1141,29 @@ Frontend Pending:
 
 ### Technical Risks
 
-| Risk | Impact | Probability | Mitigation |
-|------|--------|-------------|------------|
-| FFmpeg compatibility issues | HIGH | MEDIUM | Bundle specific version; extensive testing |
-| Whisper model size | MEDIUM | LOW | Offer model selection; lazy download |
-| Meilisearch memory usage | MEDIUM | LOW | Configure limits; monitor usage |
-| WASM plugin security | HIGH | LOW | Strict permission system; sandboxing |
-| Cross-platform differences | MEDIUM | MEDIUM | CI/CD on all platforms; abstraction layers |
+| Risk                        | Impact | Probability | Mitigation                                 |
+| --------------------------- | ------ | ----------- | ------------------------------------------ |
+| FFmpeg compatibility issues | HIGH   | MEDIUM      | Bundle specific version; extensive testing |
+| Whisper model size          | MEDIUM | LOW         | Offer model selection; lazy download       |
+| Meilisearch memory usage    | MEDIUM | LOW         | Configure limits; monitor usage            |
+| WASM plugin security        | HIGH   | LOW         | Strict permission system; sandboxing       |
+| Cross-platform differences  | MEDIUM | MEDIUM      | CI/CD on all platforms; abstraction layers |
 
 ### Resource Risks
 
-| Risk | Impact | Probability | Mitigation |
-|------|--------|-------------|------------|
-| Large video file handling | HIGH | HIGH | Proxy generation; streaming architecture |
-| Memory exhaustion | HIGH | MEDIUM | Memory monitoring; cache eviction; limits |
-| CPU overload during render | MEDIUM | LOW | Worker pool; background processing |
+| Risk                       | Impact | Probability | Mitigation                                |
+| -------------------------- | ------ | ----------- | ----------------------------------------- |
+| Large video file handling  | HIGH   | HIGH        | Proxy generation; streaming architecture  |
+| Memory exhaustion          | HIGH   | MEDIUM      | Memory monitoring; cache eviction; limits |
+| CPU overload during render | MEDIUM | LOW         | Worker pool; background processing        |
 
 ### Dependency Risks
 
-| Risk | Impact | Probability | Mitigation |
-|------|--------|-------------|------------|
-| Tauri breaking changes | HIGH | LOW | Pin versions; follow upgrade guides |
-| Rust ecosystem changes | MEDIUM | LOW | Lock Cargo.lock; conservative updates |
-| AI model licensing | MEDIUM | LOW | Use permissive models (MIT/Apache) |
+| Risk                   | Impact | Probability | Mitigation                            |
+| ---------------------- | ------ | ----------- | ------------------------------------- |
+| Tauri breaking changes | HIGH   | LOW         | Pin versions; follow upgrade guides   |
+| Rust ecosystem changes | MEDIUM | LOW         | Lock Cargo.lock; conservative updates |
+| AI model licensing     | MEDIUM | LOW         | Use permissive models (MIT/Apache)    |
 
 ---
 
@@ -1162,4 +1210,4 @@ src-tauri/src/core/
 
 ---
 
-*This roadmap is a living document. Updates will be made as development progresses and priorities shift.*
+_This roadmap is a living document. Updates will be made as development progresses and priorities shift._

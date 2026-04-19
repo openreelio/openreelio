@@ -28,6 +28,7 @@ OpenReelio is an AI-powered desktop video editor designed for content creators. 
 ## Features
 
 ### Core Editing
+
 - Non-linear timeline with multi-track support
 - Clip splitting, trimming, and repositioning
 - Effects and transitions
@@ -35,26 +36,27 @@ OpenReelio is an AI-powered desktop video editor designed for content creators. 
 - Caption/subtitle support with styling
 
 ### AI Integration
+
 - Natural language edit commands
-- Automatic scene detection
-- Speech-to-text transcription
-- Smart asset search (text + semantic)
+- Automatic scene detection foundation
+- Speech-to-text transcription (optional build feature)
+- Smart asset search (optional build feature)
 - AI-generated edit suggestions
 
 ### Plugin System
-- WASM-based sandboxed plugins
-- Asset providers (stock media, memes, audio)
-- Custom effect presets
-- Template providers
+
+- WASM-based plugin runtime foundation
+- Provider interfaces for assets, presets, and templates
+- Backend integration groundwork for future plugin UX
 
 ### Quality Control
-- Automated QC rules (7 built-in)
-- Black frame detection
-- Audio peak monitoring
-- Caption safe area checking
-- Auto-fix suggestions
+
+- QC framework with built-in rule scaffolding
+- Black frame, audio peak, and caption checks are currently heuristic/early-stage
+- Auto-fix suggestion plumbing for future hardening
 
 ### Performance
+
 - GPU-accelerated encoding (NVENC, AMF, QSV, VideoToolbox)
 - Parallel proxy generation
 - Efficient memory pooling
@@ -62,16 +64,16 @@ OpenReelio is an AI-powered desktop video editor designed for content creators. 
 
 ## Tech Stack
 
-| Layer | Technology |
-|-------|------------|
+| Layer     | Technology                      |
+| --------- | ------------------------------- |
 | Framework | [Tauri](https://tauri.app/) 2.x |
-| Backend | Rust |
-| Frontend | React 18 + TypeScript |
-| State | Zustand + Immer |
-| Styling | Tailwind CSS |
-| Video | FFmpeg |
-| Plugins | WebAssembly (Wasmtime) |
-| Database | SQLite |
+| Backend   | Rust                            |
+| Frontend  | React 18 + TypeScript           |
+| State     | Zustand + Immer                 |
+| Styling   | Tailwind CSS                    |
+| Video     | FFmpeg                          |
+| Plugins   | WebAssembly (Wasmtime)          |
+| Database  | SQLite                          |
 
 ## Installation
 
@@ -180,23 +182,27 @@ cargo clippy
 ```
 
 Notes:
+
 - Windows PowerShell may block `npm` due to `npm.ps1` execution policy. Use `npm.cmd ...` (or adjust PowerShell execution policy) if you see `PSSecurityException`.
 
 ## Roadmap
 
 ### v0.1.0 (Current)
+
 - [x] Core timeline editing
 - [x] Effects and transitions
 - [x] Audio mixing
 - [x] Export pipeline (7 presets)
 
 ### v0.2.0
+
 - [x] AI provider integration (OpenAI, Anthropic, Ollama)
 - [x] Speech-to-text transcription (Whisper)
 - [x] Smart asset search
 - [ ] Release and distribution
 
 ### Future
+
 - [ ] Video generation (Sora, Runway)
 - [ ] Collaboration features
 - [ ] Cloud project sync
