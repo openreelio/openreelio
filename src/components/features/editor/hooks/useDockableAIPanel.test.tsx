@@ -41,7 +41,9 @@ describe('useDockableAIPanel', () => {
     });
 
     expect(result.current.isOpen).toBe(true);
-    expect(useWorkspaceLayoutStore.getState().layout.zones.right.activePanelId).toBe('ai-assistant');
+    expect(useWorkspaceLayoutStore.getState().layout.zones.right.activePanelId).toBe(
+      'ai-assistant',
+    );
 
     act(() => {
       window.dispatchEvent(new KeyboardEvent('keydown', { ctrlKey: true, key: '/' }));
@@ -52,9 +54,7 @@ describe('useDockableAIPanel', () => {
   });
 
   it('should restore the previous panel when the AI panel closes', () => {
-    const { result } = renderHook(() =>
-      useDockableAIPanel({ autoCollapseBreakpoint: 1200 }),
-    );
+    const { result } = renderHook(() => useDockableAIPanel({ autoCollapseBreakpoint: 1200 }));
 
     act(() => {
       useWorkspaceLayoutStore.getState().setActivePanel('right', 'ai-assistant');
@@ -70,9 +70,7 @@ describe('useDockableAIPanel', () => {
   });
 
   it('should auto-close the AI panel when the viewport shrinks below the breakpoint', () => {
-    const { result } = renderHook(() =>
-      useDockableAIPanel({ autoCollapseBreakpoint: 1200 }),
-    );
+    const { result } = renderHook(() => useDockableAIPanel({ autoCollapseBreakpoint: 1200 }));
 
     act(() => {
       result.current.toggle();
@@ -89,16 +87,16 @@ describe('useDockableAIPanel', () => {
   it('should allow manually opening the AI panel on a narrow viewport', () => {
     setViewportWidth(900);
 
-    const { result } = renderHook(() =>
-      useDockableAIPanel({ autoCollapseBreakpoint: 1200 }),
-    );
+    const { result } = renderHook(() => useDockableAIPanel({ autoCollapseBreakpoint: 1200 }));
 
     act(() => {
       result.current.toggle();
     });
 
     expect(result.current.isOpen).toBe(true);
-    expect(useWorkspaceLayoutStore.getState().layout.zones.right.activePanelId).toBe('ai-assistant');
+    expect(useWorkspaceLayoutStore.getState().layout.zones.right.activePanelId).toBe(
+      'ai-assistant',
+    );
     expect(useWorkspaceLayoutStore.getState().layout.zones.right.collapsed).toBe(false);
   });
 
@@ -111,23 +109,26 @@ describe('useDockableAIPanel', () => {
           ...state.layout.zones,
           right: {
             ...state.layout.zones.right,
-            panelIds: state.layout.zones.right.panelIds.filter((panelId) => panelId !== 'ai-assistant'),
+            panelIds: state.layout.zones.right.panelIds.filter(
+              (panelId) => panelId !== 'ai-assistant',
+            ),
             activePanelId: 'inspector',
           },
           bottom: {
             ...state.layout.zones.bottom,
-            panelIds: state.layout.zones.bottom.panelIds.filter((panelId) => panelId !== 'ai-assistant'),
-            activePanelId: state.layout.zones.bottom.activePanelId === 'ai-assistant'
-              ? 'comparison'
-              : state.layout.zones.bottom.activePanelId,
+            panelIds: state.layout.zones.bottom.panelIds.filter(
+              (panelId) => panelId !== 'ai-assistant',
+            ),
+            activePanelId:
+              state.layout.zones.bottom.activePanelId === 'ai-assistant'
+                ? 'history'
+                : state.layout.zones.bottom.activePanelId,
           },
         },
       },
     }));
 
-    const { result } = renderHook(() =>
-      useDockableAIPanel({ autoCollapseBreakpoint: 1200 }),
-    );
+    const { result } = renderHook(() => useDockableAIPanel({ autoCollapseBreakpoint: 1200 }));
 
     act(() => {
       result.current.toggle();
@@ -142,11 +143,9 @@ describe('useDockableAIPanel', () => {
   it('should target the zone that currently owns the AI panel', () => {
     const store = useWorkspaceLayoutStore.getState();
     store.movePanel('ai-assistant', 'bottom');
-    store.setActivePanel('bottom', 'comparison');
+    store.setActivePanel('bottom', 'history');
 
-    const { result } = renderHook(() =>
-      useDockableAIPanel({ autoCollapseBreakpoint: 1200 }),
-    );
+    const { result } = renderHook(() => useDockableAIPanel({ autoCollapseBreakpoint: 1200 }));
 
     act(() => {
       result.current.toggle();
