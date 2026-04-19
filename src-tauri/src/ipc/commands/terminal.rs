@@ -486,7 +486,7 @@ fn detect_windows_profiles(
 
 #[cfg(not(windows))]
 fn detect_windows_profiles(
-    _profiles: &mut Vec<DetectedTerminalProfile>,
+    _profiles: &mut [DetectedTerminalProfile],
     _seen: &mut HashSet<String>,
     _default_command_line: &str,
 ) {
