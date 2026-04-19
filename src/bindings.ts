@@ -235,6 +235,19 @@ async generateWaveformForAsset(assetId: string, samplesPerSecond: number | null)
 }
 },
 /**
+ * Ensures a browser-decodable audio preview file exists for an asset.
+ * 
+ * Generates an MP3 cache file on demand for audio/video assets whose original
+ * container or codec may not decode reliably in the embedded webview.
+ */
+async ensureAudioPreviewForAsset(assetId: string) : Promise<Result<string | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ensure_audio_preview_for_asset", { assetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Gets all sequences in the project
  */
 async getSequences() : Promise<Result<Sequence[], string>> {
@@ -2046,6 +2059,48 @@ async searchStockMedia(query: string, assetType: string | null, limit: number | 
     return { status: "error", error: e  as any };
 }
 },
+async listTerminalProfiles() : Promise<Result<DetectedTerminalProfile[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_terminal_profiles") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async startTerminalSession(input: StartTerminalSessionInput) : Promise<Result<TerminalSessionStartResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_terminal_session", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async writeTerminalInput(input: TerminalInputWrite) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("write_terminal_input", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async resizeTerminalSession(input: TerminalResizeInput) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resize_terminal_session", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async killTerminalSession(input: TerminalSessionInput) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("kill_terminal_session", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async closeTerminalSession(input: TerminalSessionInput) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("close_terminal_session", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
 /**
  * Save (upsert) an agent memory entry.
  * 
@@ -2738,7 +2793,7 @@ export type AppCleanupResult = { projectSaved: boolean; workersShutdown: boolean
 /**
  * DTO for app settings (mirrors Rust AppSettings)
  */
-export type AppSettingsDto = { version: number; general: GeneralSettingsDto; editor: EditorSettingsDto; playback: PlaybackSettingsDto; export: ExportSettingsDto; appearance: AppearanceSettingsDto; shortcuts: ShortcutSettingsDto; autoSave: AutoSaveSettingsDto; performance: PerformanceSettingsDto; ai: AISettingsDto }
+export type AppSettingsDto = { version: number; general: GeneralSettingsDto; editor: EditorSettingsDto; playback: PlaybackSettingsDto; export: ExportSettingsDto; appearance: AppearanceSettingsDto; shortcuts: ShortcutSettingsDto; autoSave: AutoSaveSettingsDto; performance: PerformanceSettingsDto; ai: AISettingsDto; terminal: TerminalSettingsDto }
 export type AppearanceSettingsDto = { theme: string; accentColor: string; uiScale: number; showStatusBar: boolean; compactMode: boolean }
 /**
  * Payload for the audio ducking IPC command.
@@ -3789,6 +3844,7 @@ regionType: RegionType;
  * Human-readable label (e.g., "um", "silence")
  */
 label: string }
+export type DetectedTerminalProfile = { id: string; label: string; commandLine: string; source: string; isDefault: boolean }
 export type DiarizationImportSummary = { assetId: string; transcriptSegmentCount: number; speakerCount: number; speakerTurnCount: number }
 /**
  * Response for download_generated_video
@@ -5833,6 +5889,7 @@ transformsPath: string }
  * Input payload for starting a new agent run.
  */
 export type StartAgentRunInput = { sessionId: string; runtimeKind: string | null; trigger: string | null; maxIterations: number | null; maxToolCalls: number | null; plannedStepCount: number | null; inputMessageId: string | null; traceId: string | null; id: string | null }
+export type StartTerminalSessionInput = { sessionId: string; cwd: string | null; cols: number | null; rows: number | null; shell: string | null; shellArgs?: string[] | null }
 /**
  * State change types for event broadcasting.
  */
@@ -6204,6 +6261,11 @@ export type TempoClassification =
  * Mean shot duration > 5.0s
  */
 "slow"
+export type TerminalInputWrite = { sessionId: string; data: string }
+export type TerminalResizeInput = { sessionId: string; cols: number; rows: number }
+export type TerminalSessionInput = { sessionId: string }
+export type TerminalSessionStartResult = { sessionId: string; cwd: string; shell: string }
+export type TerminalSettingsDto = { defaultShellCommand: string | null }
 /**
  * Text alignment options for horizontal text positioning.
  */
