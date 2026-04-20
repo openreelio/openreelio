@@ -19,7 +19,7 @@ import type { PlayheadHandle } from './Playhead';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
-import { RAZOR_CURSOR, useEditorToolStore } from '@/stores/editorToolStore';
+import { useEditorToolStore } from '@/stores/editorToolStore';
 import { useTimelineEngine } from '@/hooks/useTimelineEngine';
 import { useScrubbing } from '@/hooks/useScrubbing';
 import { useTimelineCoordinates } from '@/hooks/useTimelineCoordinates';
@@ -42,22 +42,14 @@ import { useEdgeAutoScroll } from '@/hooks/useEdgeAutoScroll';
 import { useTimelinePan } from '@/hooks/useTimelinePan';
 import { useRenderCache } from '@/hooks/useRenderCache';
 import { createLogger } from '@/services/logger';
-import { TimeRuler } from './TimeRuler';
-import { CacheStatusBar } from './CacheStatusBar';
-import { Track } from './Track';
-import { CaptionTrack } from './CaptionTrack';
-import { Playhead, PLAYHEAD_LINE_HIT_AREA_WIDTH, PLAYHEAD_RULER_HEIGHT } from './Playhead';
+import { PLAYHEAD_LINE_HIT_AREA_WIDTH } from './Playhead';
 import { EnhancedTimelineToolbar } from './EnhancedTimelineToolbar';
-import { DragPreviewLayer } from './DragPreviewLayer';
-import { SnapIndicator, type SnapPoint } from './SnapIndicator';
-import { SelectionBox } from './SelectionBox';
-import { ShotMarkers } from './ShotMarkers';
 import { CaptionEditor } from '@/components/features/captions';
 import { CaptionExportDialog } from '@/components/features/export/CaptionExportDialog';
 import { TimelineOperationsProvider, type TimelineOperations } from './TimelineOperationsContext';
 import type { ClipWaveformConfig, ClipThumbnailConfig, ClipAudioSettingsPatch } from './Clip';
 import type { TimelineProps } from './types';
-import type { CaptionTrack as CaptionTrackType, Caption } from '@/types';
+import type { Caption } from '@/types';
 import {
   TRACK_HEADER_WIDTH,
   TRACK_HEIGHT,
@@ -65,7 +57,6 @@ import {
   DEFAULT_FPS,
 } from './constants';
 import { resolveTrackDropTarget } from '@/utils/trackDropTarget';
-import { getTrackSwapTargets, isProtectedBaseTrack } from '@/utils/trackReorder';
 import {
   expandClipIdsWithLinkedCompanions,
   findClipReference,
@@ -74,6 +65,16 @@ import {
 import { getClipTimelineDuration } from '@/hooks/timelineActions/helpers';
 import { getPlayheadRazorSplitTarget } from '@/utils/playheadRazor';
 import type { PendingAssetDrop } from './types';
+import {
+  TimelineEmptyState,
+  TimelineHeaderLayer,
+  TimelinePlayheadLayer,
+  TimelineTrackOverlays,
+  type PendingDropOverlay,
+  type RazorGuideState,
+} from './TimelineRenderLayers';
+import { TimelineTrackRows } from './TimelineTrackRows';
+import type { SnapPoint } from './SnapIndicator';
 
 // Re-export types for backward compatibility
 export type {
@@ -105,11 +106,6 @@ interface EmptyAreaPanGesture {
   startY: number;
   startScrollX: number;
   didPan: boolean;
-}
-
-interface RazorGuideState {
-  x: number;
-  trackCenterY: number;
 }
 
 function firstFiniteNumber(...candidates: unknown[]): number | null {
@@ -159,49 +155,6 @@ function getPointerClientPoint(e: PointerEvent<HTMLDivElement>): { x: number; y:
   }
 
   return { x, y };
-}
-
-// Adapter to convert Track (with clips) to CaptionTrack (with captions)
-function adaptTrackToCaptionTrack(track: TrackType): CaptionTrackType {
-  const captions: Caption[] = track.clips.map((clip) => ({
-    id: clip.id,
-    startSec: clip.place.timelineInSec,
-    endSec:
-      clip.place.timelineInSec +
-      (clip.range.sourceOutSec - clip.range.sourceInSec) / (clip.speed > 0 ? clip.speed : 1),
-    text: clip.label || '',
-    speaker: undefined,
-    styleOverride: clip.captionStyle,
-    positionOverride: clip.captionPosition,
-    metadata: {},
-  }));
-
-  return {
-    id: track.id,
-    name: track.name,
-    language: 'en',
-    visible: track.visible,
-    locked: track.locked,
-    captions,
-    defaultStyle: {
-      fontFamily: 'Arial',
-      fontSize: 48,
-      fontWeight: 'normal',
-      color: { r: 255, g: 255, b: 255, a: 255 },
-      outlineColor: { r: 0, g: 0, b: 0, a: 255 },
-      outlineWidth: 2,
-      shadowColor: { r: 0, g: 0, b: 0, a: 128 },
-      shadowOffset: 2,
-      alignment: 'center',
-      italic: false,
-      underline: false,
-    },
-    defaultPosition: {
-      type: 'preset',
-      vertical: 'bottom',
-      marginPercent: 5,
-    },
-  };
 }
 
 export function Timeline({
@@ -1221,16 +1174,7 @@ export function Timeline({
 
   const pendingDropOverlays = useMemo(() => {
     if (!sequence || pendingAssetDrops.length === 0) {
-      return [] as Array<{
-        id: string;
-        left: number;
-        top: number;
-        width: number;
-        label: string;
-        statusLabel: string;
-        statusClassName: string;
-        progressPercent: number;
-      }>;
+      return [] as PendingDropOverlay[];
     }
 
     const trackIndexById = new Map(sequence.tracks.map((track, index) => [track.id, index]));
@@ -1948,30 +1892,7 @@ export function Timeline({
   // Render
   // ===========================================================================
   if (!sequence) {
-    return (
-      <div
-        data-testid="timeline"
-        className="h-full flex flex-col items-center justify-center text-editor-text-muted bg-editor-panel"
-      >
-        <svg
-          className="w-16 h-16 mb-4 text-editor-text-muted/50"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={1.5}
-            d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"
-          />
-        </svg>
-        <p className="text-lg font-medium mb-1">No sequence loaded</p>
-        <p className="text-sm text-editor-text-muted/70">
-          Import media or create a new sequence to start editing
-        </p>
-      </div>
-    );
+    return <TimelineEmptyState />;
   }
 
   // Determine cursor style based on active tool and interaction state
@@ -2037,36 +1958,16 @@ export function Timeline({
           duration={duration}
         />
 
-        {/* Main timeline area with ruler and tracks - relative container for playhead */}
         {/* isolation: isolate creates a stacking context so playhead z-index doesn't escape to overlap modals */}
         <div className="flex-1 flex flex-col relative isolate">
-          {/* Ruler row */}
-          <div className="flex border-b border-editor-border flex-shrink-0">
-            {/* Track header area label */}
-            <div className="w-48 flex-shrink-0 bg-editor-sidebar border-r border-editor-border flex items-center justify-center">
-              <span className="text-xs text-editor-text-muted font-medium uppercase tracking-wider select-none">
-                Tracks
-              </span>
-            </div>
-            <div className="flex-1 overflow-hidden" onWheel={handleWheel}>
-              <div
-                data-testid="timeline-ruler-scroll-layer"
-                style={{ transform: `translateX(-${scrollX}px)` }}
-              >
-                <TimeRuler duration={duration} zoom={zoom} scrollX={scrollX} onSeek={handleSeek} />
-              </div>
-            </div>
-          </div>
-
-          {/* Render cache indicator */}
-          {cacheSegments.length > 0 && (
-            <CacheStatusBar
-              segments={cacheSegments}
-              duration={duration}
-              zoom={zoom}
-              scrollX={scrollX}
-            />
-          )}
+          <TimelineHeaderLayer
+            cacheSegments={cacheSegments}
+            duration={duration}
+            zoom={zoom}
+            scrollX={scrollX}
+            onSeek={handleSeek}
+            onWheel={handleWheel}
+          />
 
           {/* Tracks area */}
           <div
@@ -2092,204 +1993,91 @@ export function Timeline({
               data-testid="timeline-tracks-scroll-layer"
               style={{ transform: `translateY(-${scrollY}px)` }}
             >
-              {sequence.tracks.map((track) => {
-                const swapTargets = getTrackSwapTargets(sequence.tracks, track.id);
-
-                if (track.kind === 'caption') {
-                  const captionTrack = adaptTrackToCaptionTrack(track);
-                  return (
-                    <CaptionTrack
-                      key={track.id}
-                      track={captionTrack}
-                      zoom={zoom}
-                      scrollX={scrollX}
-                      duration={duration}
-                      viewportWidth={viewportWidth}
-                      selectedCaptionIds={selectedClipIds}
-                      onLockToggle={createTrackHandler(onTrackLockToggle)}
-                      onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
-                      onDeleteTrack={createTrackHandler(onTrackDelete)}
-                      canDeleteTrack={!isProtectedBaseTrack(sequence.tracks, track.id)}
-                      swapTargets={swapTargets}
-                      onSwapTracks={handleTrackSwap}
-                      onCaptionClick={handleClipClick}
-                      onCaptionDoubleClick={createCaptionDoubleClickHandler(track.id)}
-                      onExportClick={handleCaptionExportClick}
-                    />
-                  );
-                }
-
-                return (
-                  <Track
-                    key={track.id}
-                    track={track}
-                    sequenceId={sequence.id}
-                    clips={getTrackClips(track.id)}
-                    zoom={zoom}
-                    scrollX={scrollX}
-                    duration={duration}
-                    viewportWidth={viewportWidth}
-                    selectedClipIds={selectedClipIds}
-                    getClipWaveformConfig={getClipWaveformConfig}
-                    getClipThumbnailConfig={getClipThumbnailConfig}
-                    snapPoints={snapEnabled ? snapPoints : []}
-                    snapThreshold={snapEnabled ? snapThreshold : 0}
-                    onClipClick={handleClipClick}
-                    onClipRazorClick={handleClipRazorClick}
-                    onClipDragStart={handleClipDragStart}
-                    onClipDrag={handleClipDrag}
-                    onClipDragEnd={handleClipDragEnd}
-                    onClipAudioSettingsChange={handleClipAudioSettingsChange}
-                    onSnapPointChange={setActiveSnapPoint}
-                    isEditTarget={track.id === editTargetTrackId}
-                    onMuteToggle={createTrackHandler(onTrackMuteToggle)}
-                    onLockToggle={createTrackHandler(onTrackLockToggle)}
-                    onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
-                    onDeleteTrack={createTrackHandler(onTrackDelete)}
-                    canDeleteTrack={!isProtectedBaseTrack(sequence.tracks, track.id)}
-                    swapTargets={swapTargets}
-                    onSwapTracks={handleTrackSwap}
-                    onClipSpeedChange={onClipSpeedChange}
-                    onClipReverse={onClipReverse}
-                    onClipFreezeFrame={onClipFreezeFrame}
-                    onClipToggleEnabled={onClipToggleEnabled}
-                    onClipLink={onClipLink}
-                    onClipUnlink={onClipUnlink}
-                    onClipDetachAudio={onClipDetachAudio}
-                    onCreateCompoundClip={onCreateCompoundClip}
-                    onUnnestCompoundClip={onUnnestCompoundClip}
-                    onCreateAdjustmentLayer={onCreateAdjustmentLayer}
-                    onClipDoubleClick={onClipDoubleClick}
-                    resolveLinkedClipRefs={resolveLinkedClipRefs}
-                    onClipGroup={onClipGroup}
-                    onClipUngroup={onClipUngroup}
-                    resolveGroupClipRefs={effectiveResolveGroupClipRefs}
-                    onCopyEffects={onCopyEffects}
-                    onPasteEffects={onPasteEffects}
-                    onPasteAttributes={onPasteAttributes}
-                    onRemoveAttributes={onRemoveAttributes}
-                  />
-                );
-              })}
-            </div>
-            <DragPreviewLayer
-              dragPreview={dragPreview}
-              trackHeaderWidth={TRACK_HEADER_WIDTH}
-              trackHeight={TRACK_HEIGHT}
-              scrollX={scrollX}
-            />
-            {isRazorActive && razorGuide && (
-              <>
-                <div
-                  data-testid="razor-guide-vertical"
-                  className="absolute top-0 bottom-0 w-px border-l border-dashed border-amber-200/70 pointer-events-none z-20"
-                  style={{ left: `${razorGuide.x}px` }}
-                />
-                <div
-                  data-testid="razor-guide-horizontal"
-                  className="absolute h-px border-t border-dashed border-amber-200/40 pointer-events-none z-20"
-                  style={{
-                    top: `${razorGuide.trackCenterY}px`,
-                    left: `${TRACK_HEADER_WIDTH}px`,
-                    right: 0,
-                  }}
-                />
-              </>
-            )}
-            {pendingDropOverlays.map((overlay) => (
-              <div
-                key={overlay.id}
-                data-testid="pending-workspace-drop"
-                className={`absolute border border-dashed rounded-md pointer-events-none z-10 px-2 py-1 shadow-sm ${overlay.statusClassName}`}
-                style={{
-                  left: `${overlay.left}px`,
-                  top: `${overlay.top + PENDING_DROP_VERTICAL_INSET_PX}px`,
-                  width: `${overlay.width}px`,
-                  height: `${PENDING_DROP_HEIGHT_PX}px`,
-                }}
-              >
-                <div className="text-[11px] leading-tight truncate font-medium">
-                  {overlay.label}
-                </div>
-                <div className="text-[10px] mt-1 opacity-90 flex items-center justify-between gap-2">
-                  <span>{overlay.statusLabel}</span>
-                  <span>{overlay.progressPercent}%</span>
-                </div>
-                <div className="mt-1 h-1 rounded-full bg-black/25 overflow-hidden">
-                  <div
-                    className="h-full bg-current/90"
-                    style={{ width: `${overlay.progressPercent}%` }}
-                  />
-                </div>
-              </div>
-            ))}
-            <SnapIndicator
-              snapPoint={activeSnapPoint}
-              isActive={isScrubbing || isDraggingPlayhead || isClipDragging}
-              zoom={zoom}
-              trackHeaderWidth={TRACK_HEADER_WIDTH}
-              scrollX={scrollX}
-            />
-            {/* Shot Markers - show detected shot boundaries for selected video clip */}
-            {shotMarkers.length > 0 && (
-              <ShotMarkers
-                shots={shotMarkers}
+              <TimelineTrackRows
+                sequence={sequence}
                 zoom={zoom}
                 scrollX={scrollX}
-                viewportWidth={viewportWidth}
                 duration={duration}
-                trackHeaderWidth={TRACK_HEADER_WIDTH}
-                onSeek={setPlayhead}
+                viewportWidth={viewportWidth}
+                selectedClipIds={selectedClipIds}
+                getTrackClips={getTrackClips}
+                getClipWaveformConfig={getClipWaveformConfig}
+                getClipThumbnailConfig={getClipThumbnailConfig}
+                snapEnabled={snapEnabled}
+                snapPoints={snapPoints}
+                snapThreshold={snapThreshold}
+                onClipClick={handleClipClick}
+                onClipRazorClick={handleClipRazorClick}
+                onClipDragStart={handleClipDragStart}
+                onClipDrag={handleClipDrag}
+                onClipDragEnd={handleClipDragEnd}
+                onClipAudioSettingsChange={handleClipAudioSettingsChange}
+                onSnapPointChange={setActiveSnapPoint}
+                editTargetTrackId={editTargetTrackId}
+                createTrackHandler={createTrackHandler}
+                onTrackMuteToggle={onTrackMuteToggle}
+                onTrackLockToggle={onTrackLockToggle}
+                onTrackVisibilityToggle={onTrackVisibilityToggle}
+                onTrackDelete={onTrackDelete}
+                onTrackSwap={handleTrackSwap}
+                onClipSpeedChange={onClipSpeedChange}
+                onClipReverse={onClipReverse}
+                onClipFreezeFrame={onClipFreezeFrame}
+                onClipToggleEnabled={onClipToggleEnabled}
+                onClipLink={onClipLink}
+                onClipUnlink={onClipUnlink}
+                onClipDetachAudio={onClipDetachAudio}
+                onCreateCompoundClip={onCreateCompoundClip}
+                onUnnestCompoundClip={onUnnestCompoundClip}
+                onCreateAdjustmentLayer={onCreateAdjustmentLayer}
+                onClipDoubleClick={onClipDoubleClick}
+                resolveLinkedClipRefs={resolveLinkedClipRefs}
+                onClipGroup={onClipGroup}
+                onClipUngroup={onClipUngroup}
+                resolveGroupClipRefs={effectiveResolveGroupClipRefs}
+                onCopyEffects={onCopyEffects}
+                onPasteEffects={onPasteEffects}
+                onPasteAttributes={onPasteAttributes}
+                onRemoveAttributes={onRemoveAttributes}
+                createCaptionDoubleClickHandler={createCaptionDoubleClickHandler}
+                onCaptionExportClick={handleCaptionExportClick}
               />
-            )}
-            {isDraggingOver && (
-              <div
-                data-testid="drop-indicator"
-                className="absolute inset-0 bg-primary-500/10 border-2 border-dashed border-primary-500 pointer-events-none flex items-center justify-center"
-              >
-                <div className="text-primary-400 text-sm font-medium">Drop asset here</div>
-              </div>
-            )}
-            <SelectionBox rect={selectionRect} isActive={isSelecting} />
-          </div>
-
-          {/* Playhead container - clips playhead to timeline area (not track header) */}
-          <div
-            ref={playheadViewportRef}
-            className="absolute top-0 bottom-0 overflow-hidden pointer-events-none"
-            style={{
-              left: `${TRACK_HEADER_WIDTH}px`,
-              right: 0,
-            }}
-          >
-            {isRazorActive && (
-              <div
-                data-testid="playhead-razor-hit-area"
-                className="absolute select-none touch-none z-40"
-                style={{
-                  top: `${PLAYHEAD_RULER_HEIGHT}px`,
-                  bottom: 0,
-                  left: `${playheadLineHitAreaLeft}px`,
-                  width: `${PLAYHEAD_LINE_HIT_AREA_WIDTH}px`,
-                  cursor: RAZOR_CURSOR,
-                  pointerEvents: 'auto',
-                }}
-                onPointerDown={handlePlayheadRazorPointerDown}
-              />
-            )}
-            {/* Playhead - repositioned relative to clipping container */}
-            <Playhead
-              ref={playheadRef}
-              position={playhead}
+            </div>
+            <TimelineTrackOverlays
+              dragPreview={dragPreview}
+              razorGuide={razorGuide}
+              isRazorActive={isRazorActive}
+              pendingDropOverlays={pendingDropOverlays}
+              pendingDropVerticalInsetPx={PENDING_DROP_VERTICAL_INSET_PX}
+              pendingDropHeightPx={PENDING_DROP_HEIGHT_PX}
+              activeSnapPoint={activeSnapPoint}
+              isSnapIndicatorActive={isScrubbing || isDraggingPlayhead || isClipDragging}
               zoom={zoom}
               scrollX={scrollX}
-              trackHeaderWidth={0} // No offset needed - container handles it
-              isPlaying={isPlaying}
-              isDragging={isDraggingPlayhead}
-              onDragStart={isRazorActive ? undefined : handlePlayheadDragStart}
-              onPointerDown={isRazorActive ? undefined : handlePlayheadPointerDown}
+              shotMarkers={shotMarkers}
+              viewportWidth={viewportWidth}
+              duration={duration}
+              onSeekShotMarker={setPlayhead}
+              isDraggingOver={isDraggingOver}
+              selectionRect={selectionRect}
+              isSelecting={isSelecting}
             />
           </div>
+
+          <TimelinePlayheadLayer
+            playheadViewportRef={playheadViewportRef}
+            isRazorActive={isRazorActive}
+            playheadLineHitAreaLeft={playheadLineHitAreaLeft}
+            onPlayheadRazorPointerDown={handlePlayheadRazorPointerDown}
+            playheadRef={playheadRef}
+            position={playhead}
+            zoom={zoom}
+            scrollX={scrollX}
+            isPlaying={isPlaying}
+            isDraggingPlayhead={isDraggingPlayhead}
+            onPlayheadDragStart={handlePlayheadDragStart}
+            onPlayheadPointerDown={handlePlayheadPointerDown}
+          />
         </div>
 
         {/* Caption Editor Modal */}
