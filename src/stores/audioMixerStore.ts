@@ -5,7 +5,8 @@
  * Handles track volume, pan, mute, solo states and real-time audio levels.
  *
  * This store provides the state layer for the audio mixer UI.
- * The actual Web Audio API integration is handled by useAudioMixer hook.
+ * The canonical Web Audio routing now lives in `useAudioPlayback` and
+ * `useAudioScrubbing` so playback, meters, and mixer controls share one path.
  *
  * @module stores/audioMixerStore
  */
@@ -23,7 +24,7 @@ enableMapSet();
 
 /** Audio level data for stereo channels */
 export interface StereoLevels {
-  left: number;  // dB value (-60 to 0+)
+  left: number; // dB value (-60 to 0+)
   right: number; // dB value (-60 to 0+)
 }
 
@@ -152,7 +153,7 @@ function clampPan(pan: number): number {
  */
 function getOrCreateTrackState(
   trackStates: Map<string, TrackMixerState>,
-  trackId: string
+  trackId: string,
 ): TrackMixerState {
   if (!trackStates.has(trackId)) {
     trackStates.set(trackId, { ...DEFAULT_TRACK_STATE });
@@ -345,7 +346,7 @@ export const useAudioMixerStore = create<AudioMixerStore>()(
         masterState: { ...DEFAULT_MASTER_STATE },
       }));
     },
-  }))
+  })),
 );
 
 // =============================================================================
@@ -357,20 +358,16 @@ export const selectIsTrackSoloed = (state: AudioMixerState, trackId: string): bo
   state.soloedTrackIds.has(trackId);
 
 /** Check if any track is soloed (for determining if solo mode is active) */
-export const selectHasAnySolo = (state: AudioMixerState): boolean =>
-  state.soloedTrackIds.size > 0;
+export const selectHasAnySolo = (state: AudioMixerState): boolean => state.soloedTrackIds.size > 0;
 
 /** Get the count of soloed tracks */
-export const selectSoloedCount = (state: AudioMixerState): number =>
-  state.soloedTrackIds.size;
+export const selectSoloedCount = (state: AudioMixerState): number => state.soloedTrackIds.size;
 
 /** Get track mixer state by ID */
 export const selectTrackState = (
   state: AudioMixerState,
-  trackId: string
-): TrackMixerState | undefined =>
-  state.trackStates.get(trackId);
+  trackId: string,
+): TrackMixerState | undefined => state.trackStates.get(trackId);
 
 /** Select master state */
-export const selectMasterState = (state: AudioMixerState): MasterMixerState =>
-  state.masterState;
+export const selectMasterState = (state: AudioMixerState): MasterMixerState => state.masterState;

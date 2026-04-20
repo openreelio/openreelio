@@ -23,7 +23,6 @@ import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useAudioPlayback } from '@/hooks/useAudioPlayback';
 import { useTextClip } from '@/hooks/useTextClip';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
-import { useAudioMixer } from '@/hooks/useAudioMixer';
 import { useMulticamSession } from '@/hooks/useMulticamSession';
 import { useBlendMode } from '@/hooks/useBlendMode';
 import { useAudioDucking } from '@/hooks/useAudioDucking';
@@ -190,23 +189,15 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     soloedTrackIds,
     masterState: mixerMasterState,
     initializeTrack,
+    removeTrack,
     setTrackVolume,
     setTrackPan,
+    setMuted,
     toggleMute: toggleTrackMute,
     toggleSolo,
     setMasterVolume: setMixerMasterVolume,
     toggleMasterMute,
   } = mixerStore;
-
-  // Audio mixer Web Audio integration
-  const {
-    isReady: isAudioMixerReady,
-    initialize: initAudioMixer,
-    connectTrack,
-    disconnectTrack,
-    startMetering,
-    stopMetering,
-  } = useAudioMixer({ enabled: true });
 
   // Convert store state to props for AudioMixerPanel
   const trackLevels = useMemo(() => {
@@ -390,49 +381,35 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     }
   }, [isPlaying, isAudioReady, initAudio]);
 
-  // Initialize audio mixer on first play
-  useEffect(() => {
-    if (isPlaying && !isAudioMixerReady) {
-      void initAudioMixer();
-    }
-  }, [isPlaying, isAudioMixerReady, initAudioMixer]);
-
   useEffect(() => {
     setMixerMasterVolume(sequence?.masterVolumeDb ?? 0);
   }, [sequence?.id, sequence?.masterVolumeDb, setMixerMasterVolume]);
 
-  // Initialize mixer tracks when sequence changes
+  // Keep live mixer track state aligned with the active sequence without
+  // overriding session-local mixer controls like pan/solo.
   useEffect(() => {
-    if (!sequence) return;
+    const currentTrackStates = useAudioMixerStore.getState().trackStates;
+    const activeTrackIds = new Set(sequence?.tracks.map((track) => track.id) ?? []);
 
-    // Initialize each track in the mixer store
+    if (!sequence) {
+      for (const trackId of Array.from(currentTrackStates.keys())) {
+        removeTrack(trackId);
+      }
+      return;
+    }
+
     for (const track of sequence.tracks) {
       const volumeDb = linearToDb(track.volume);
       initializeTrack(track.id, volumeDb, 0);
-
-      // Connect to audio mixer if ready
-      if (isAudioMixerReady) {
-        connectTrack(track.id);
-      }
+      setMuted(track.id, track.muted);
     }
 
-    // Cleanup: disconnect removed tracks
-    return () => {
-      if (!sequence) return;
-      for (const track of sequence.tracks) {
-        disconnectTrack(track.id);
+    for (const trackId of Array.from(currentTrackStates.keys())) {
+      if (!activeTrackIds.has(trackId)) {
+        removeTrack(trackId);
       }
-    };
-  }, [sequence, isAudioMixerReady, initializeTrack, connectTrack, disconnectTrack]);
-
-  // Start/stop metering based on playback state
-  useEffect(() => {
-    if (isPlaying && isAudioMixerReady) {
-      startMetering();
-    } else {
-      stopMetering();
     }
-  }, [isPlaying, isAudioMixerReady, startMetering, stopMetering]);
+  }, [sequence, initializeTrack, removeTrack, setMuted]);
 
   // Keep backend runtime playhead state aligned while editor is active.
   useEffect(() => {

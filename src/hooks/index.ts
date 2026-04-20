@@ -349,9 +349,6 @@ export type {
   UseRollEditReturn,
 } from './useRollEdit';
 
-export { useAudioMixer } from './useAudioMixer';
-export type { UseAudioMixerOptions, UseAudioMixerReturn } from './useAudioMixer';
-
 export { useFileOperations } from './useFileOperations';
 export type { UseFileOperationsReturn } from './useFileOperations';
 
@@ -432,8 +429,4 @@ export type { UseSourceMonitorReturn } from './useSourceMonitor';
 
 // JKL Shuttle control hook
 export { useJKLShuttle, SHUTTLE_SPEEDS, SHUTTLE_STOP_INDEX } from './useJKLShuttle';
-export type {
-  ShuttleSpeed,
-  UseJKLShuttleOptions,
-  UseJKLShuttleReturn,
-} from './useJKLShuttle';
+export type { ShuttleSpeed, UseJKLShuttleOptions, UseJKLShuttleReturn } from './useJKLShuttle';

@@ -14,16 +14,23 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { usePlaybackStore } from '@/stores/playbackStore';
+import { useAudioMixerStore, type StereoLevels } from '@/stores/audioMixerStore';
 import { playbackController } from '@/services/PlaybackController';
 import type { Sequence, Asset, Clip } from '@/types';
 import { createLogger } from '@/services/logger';
 import { collectPlaybackAudioClips } from '@/utils/audioPlayback';
 import { clampClipPan, clampClipVolumeDb, getClipFadeFactor } from '@/utils/clipAudio';
+import { calculatePeak, linearToDb } from '@/utils/audioMeter';
 import {
   assetMatchesWorkspaceRelativePath,
   clearCachedAudioPreview,
   decodeAssetAudioBuffer,
 } from '@/utils/audioPreview';
+import {
+  connectSourceToDestination,
+  resolveMasterOutputGain,
+  resolveTrackPlaybackRouting,
+} from '@/utils/audioRouting';
 
 const logger = createLogger('AudioPlayback');
 
@@ -57,6 +64,17 @@ interface ScheduledSource {
   pannerNode: StereoPannerNode;
   clipId: string;
   startTime: number;
+}
+
+interface TrackAudioChain {
+  inputGain: GainNode;
+  volumeGain: GainNode;
+  panner: StereoPannerNode;
+  splitter: ChannelSplitterNode;
+  leftAnalyser: AnalyserNode;
+  rightAnalyser: AnalyserNode;
+  leftBuffer: Uint8Array<ArrayBuffer>;
+  rightBuffer: Uint8Array<ArrayBuffer>;
 }
 
 interface FailedLoadInfo {
@@ -112,6 +130,15 @@ const RETRY_BASE_DELAY_MS = 1000;
 /** Maximum delay between retries (ms) */
 const RETRY_MAX_DELAY_MS = 10000;
 
+/** Level metering update interval in ms */
+const METER_UPDATE_INTERVAL_MS = 50;
+
+/** FFT size for level analyzers */
+const ANALYSER_FFT_SIZE = 2048;
+
+/** Silence floor used by mixer meters */
+const SILENCE_DB = -60;
+
 // =============================================================================
 // Hook
 // =============================================================================
@@ -128,6 +155,13 @@ export function useAudioPlayback({
   const isSchedulingRef = useRef(false);
   const rescheduleRequestedRef = useRef(false);
   const masterGainRef = useRef<GainNode | null>(null);
+  const masterSplitterRef = useRef<ChannelSplitterNode | null>(null);
+  const masterLeftAnalyserRef = useRef<AnalyserNode | null>(null);
+  const masterRightAnalyserRef = useRef<AnalyserNode | null>(null);
+  const masterLeftBufferRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const masterRightBufferRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const trackChainsRef = useRef<Map<string, TrackAudioChain>>(new Map());
+  const meteringIntervalRef = useRef<number | null>(null);
   const isAudioReadyRef = useRef(false);
   const lastScheduleTimeRef = useRef(0);
   const [isAudioReady, setIsAudioReady] = useState(false);
@@ -147,6 +181,21 @@ export function useAudioPlayback({
 
   // Playback state from store
   const { currentTime, isPlaying, volume, isMuted, playbackRate } = usePlaybackStore();
+  const trackRoutingSnapshot = useAudioMixerStore((state) =>
+    Array.from(state.trackStates.entries())
+      .map(
+        ([trackId, trackState]) =>
+          `${trackId}:${trackState.volumeDb}:${trackState.pan}:${trackState.muted ? 1 : 0}`,
+      )
+      .join('|'),
+  );
+  const soloedTrackIdsSnapshot = useAudioMixerStore((state) =>
+    Array.from(state.soloedTrackIds).sort().join('|'),
+  );
+  const mixerMasterVolumeDb = useAudioMixerStore((state) => state.masterState.volumeDb);
+  const mixerMasterMuted = useAudioMixerStore((state) => state.masterState.muted);
+  const updateTrackLevels = useAudioMixerStore((state) => state.updateTrackLevels);
+  const updateMasterLevels = useAudioMixerStore((state) => state.updateMasterLevels);
 
   const getLiveIsPlaying = useCallback((): boolean => {
     return usePlaybackStore.getState().isPlaying;
@@ -155,6 +204,102 @@ export function useAudioPlayback({
   const syncFailedAssetIds = useCallback(() => {
     setFailedAssetIds(Array.from(failedLoadsRef.current.keys()));
   }, []);
+
+  const getFallbackTrackVolume = useCallback(
+    (trackId: string): number =>
+      sequence?.tracks.find((track) => track.id === trackId)?.volume ?? 1,
+    [sequence],
+  );
+
+  const ensureTrackChain = useCallback((trackId: string): TrackAudioChain | null => {
+    if (!audioContextRef.current || !masterGainRef.current) {
+      return null;
+    }
+
+    const existing = trackChainsRef.current.get(trackId);
+    if (existing) {
+      return existing;
+    }
+
+    const ctx = audioContextRef.current;
+    const inputGain = ctx.createGain();
+    const volumeGain = ctx.createGain();
+    const panner = ctx.createStereoPanner();
+    const splitter = ctx.createChannelSplitter(2);
+    const leftAnalyser = ctx.createAnalyser();
+    const rightAnalyser = ctx.createAnalyser();
+
+    leftAnalyser.fftSize = ANALYSER_FFT_SIZE;
+    rightAnalyser.fftSize = ANALYSER_FFT_SIZE;
+
+    const bufferLength = leftAnalyser.frequencyBinCount;
+    const leftBuffer = new Uint8Array(new ArrayBuffer(bufferLength));
+    const rightBuffer = new Uint8Array(new ArrayBuffer(bufferLength));
+
+    inputGain.connect(volumeGain);
+    volumeGain.connect(panner);
+    panner.connect(splitter);
+    splitter.connect(leftAnalyser, 0);
+    splitter.connect(rightAnalyser, 1);
+    panner.connect(masterGainRef.current);
+
+    const chain: TrackAudioChain = {
+      inputGain,
+      volumeGain,
+      panner,
+      splitter,
+      leftAnalyser,
+      rightAnalyser,
+      leftBuffer,
+      rightBuffer,
+    };
+
+    trackChainsRef.current.set(trackId, chain);
+    return chain;
+  }, []);
+
+  const disconnectTrackChain = useCallback((trackId: string) => {
+    const chain = trackChainsRef.current.get(trackId);
+    if (!chain) {
+      return;
+    }
+
+    try {
+      chain.inputGain.disconnect();
+      chain.volumeGain.disconnect();
+      chain.panner.disconnect();
+      chain.splitter.disconnect();
+      chain.leftAnalyser.disconnect();
+      chain.rightAnalyser.disconnect();
+    } catch {
+      // Nodes may already be disconnected.
+    }
+
+    trackChainsRef.current.delete(trackId);
+  }, []);
+
+  const updateTrackChainState = useCallback(
+    (trackId: string) => {
+      const chain = trackChainsRef.current.get(trackId);
+      if (!chain) {
+        return;
+      }
+
+      const { trackStates, soloedTrackIds, masterState } = useAudioMixerStore.getState();
+
+      const routing = resolveTrackPlaybackRouting({
+        trackId,
+        fallbackTrackVolume: getFallbackTrackVolume(trackId),
+        trackStates,
+        soloedTrackIds,
+        masterMuted: masterState.muted,
+      });
+
+      chain.volumeGain.gain.value = routing.trackGain;
+      chain.panner.pan.value = routing.trackPan;
+    },
+    [getFallbackTrackVolume],
+  );
 
   /**
    * Initialize AudioContext on user interaction
@@ -173,8 +318,26 @@ export function useAudioPlayback({
     // Create new AudioContext
     audioContextRef.current = new AudioContext();
 
-    // Create master gain node
+    // Create master output chain with split analyzers so mixer meters reflect
+    // the same signal path that reaches the speakers.
     masterGainRef.current = audioContextRef.current.createGain();
+    masterGainRef.current.gain.value = resolveMasterOutputGain(volume, isMuted, {
+      volumeDb: mixerMasterVolumeDb,
+      muted: mixerMasterMuted,
+      levels: { left: SILENCE_DB, right: SILENCE_DB },
+    });
+    masterSplitterRef.current = audioContextRef.current.createChannelSplitter(2);
+    masterLeftAnalyserRef.current = audioContextRef.current.createAnalyser();
+    masterRightAnalyserRef.current = audioContextRef.current.createAnalyser();
+    masterLeftAnalyserRef.current.fftSize = ANALYSER_FFT_SIZE;
+    masterRightAnalyserRef.current.fftSize = ANALYSER_FFT_SIZE;
+    const bufferLength = masterLeftAnalyserRef.current.frequencyBinCount;
+    masterLeftBufferRef.current = new Uint8Array(new ArrayBuffer(bufferLength));
+    masterRightBufferRef.current = new Uint8Array(new ArrayBuffer(bufferLength));
+
+    masterGainRef.current.connect(masterSplitterRef.current);
+    masterSplitterRef.current.connect(masterLeftAnalyserRef.current, 0);
+    masterSplitterRef.current.connect(masterRightAnalyserRef.current, 1);
     masterGainRef.current.connect(audioContextRef.current.destination);
 
     // Resume if needed
@@ -184,7 +347,7 @@ export function useAudioPlayback({
 
     isAudioReadyRef.current = true;
     setIsAudioReady(true);
-  }, []);
+  }, [isMuted, mixerMasterMuted, mixerMasterVolumeDb, volume]);
 
   /**
    * Calculate retry delay with exponential backoff.
@@ -331,11 +494,59 @@ export function useAudioPlayback({
   const getAudioClips = useCallback((): Array<{
     clip: Clip;
     asset: Asset;
+    trackId: string;
     trackVolume: number;
     trackMuted: boolean;
   }> => {
     return collectPlaybackAudioClips(sequence, assets);
   }, [sequence, assets]);
+
+  useEffect(() => {
+    if (!isAudioReady) {
+      return;
+    }
+
+    const activeTrackIds = new Set(sequence?.tracks.map((track) => track.id) ?? []);
+
+    for (const trackId of activeTrackIds) {
+      ensureTrackChain(trackId);
+      updateTrackChainState(trackId);
+    }
+
+    for (const trackId of Array.from(trackChainsRef.current.keys())) {
+      if (!activeTrackIds.has(trackId)) {
+        disconnectTrackChain(trackId);
+      }
+    }
+  }, [disconnectTrackChain, ensureTrackChain, isAudioReady, sequence, updateTrackChainState]);
+
+  useEffect(() => {
+    if (!isAudioReady) {
+      return;
+    }
+
+    for (const trackId of trackChainsRef.current.keys()) {
+      updateTrackChainState(trackId);
+    }
+  }, [
+    isAudioReady,
+    trackRoutingSnapshot,
+    soloedTrackIdsSnapshot,
+    mixerMasterMuted,
+    updateTrackChainState,
+  ]);
+
+  useEffect(() => {
+    if (!masterGainRef.current) {
+      return;
+    }
+
+    masterGainRef.current.gain.value = resolveMasterOutputGain(volume, isMuted, {
+      volumeDb: mixerMasterVolumeDb,
+      muted: mixerMasterMuted,
+      levels: { left: SILENCE_DB, right: SILENCE_DB },
+    });
+  }, [isMuted, mixerMasterMuted, mixerMasterVolumeDb, volume]);
 
   /**
    * Stop all scheduled sources
@@ -361,19 +572,76 @@ export function useAudioPlayback({
   }, []);
 
   /**
-   * Calculate clip volume from various sources
-   * Track volume is linear (0.0-2.0), clip volumeDb is in dB
+   * Calculate clip-local gain.
+   * Track/master gain is applied by the shared routing graph so the playback
+   * signal and mixer meters stay on the same path.
    */
-  const calculateClipVolume = useCallback((clip: Clip, trackVolume: number): number => {
+  const calculateClipVolume = useCallback((clip: Clip): number => {
     // Apply clip mute first
     if (clip.audio?.muted) return 0;
 
-    // Convert clip dB to linear and multiply with track volume
+    // Convert clip dB to linear gain
     const clipVolumeDb = clampClipVolumeDb(clip.audio?.volumeDb ?? 0);
-    const clipLinearVolume = Math.pow(10, clipVolumeDb / 20);
-
-    return trackVolume * clipLinearVolume;
+    return Math.pow(10, clipVolumeDb / 20);
   }, []);
+
+  const updateLevels = useCallback(() => {
+    for (const [trackId, chain] of trackChainsRef.current) {
+      chain.leftAnalyser.getByteTimeDomainData(chain.leftBuffer);
+      chain.rightAnalyser.getByteTimeDomainData(chain.rightBuffer);
+
+      const levels: StereoLevels = {
+        left: linearToDb(calculatePeak(chain.leftBuffer), SILENCE_DB),
+        right: linearToDb(calculatePeak(chain.rightBuffer), SILENCE_DB),
+      };
+
+      updateTrackLevels(trackId, levels);
+    }
+
+    if (
+      masterLeftAnalyserRef.current &&
+      masterRightAnalyserRef.current &&
+      masterLeftBufferRef.current &&
+      masterRightBufferRef.current
+    ) {
+      masterLeftAnalyserRef.current.getByteTimeDomainData(masterLeftBufferRef.current);
+      masterRightAnalyserRef.current.getByteTimeDomainData(masterRightBufferRef.current);
+      updateMasterLevels({
+        left: linearToDb(calculatePeak(masterLeftBufferRef.current), SILENCE_DB),
+        right: linearToDb(calculatePeak(masterRightBufferRef.current), SILENCE_DB),
+      });
+    }
+  }, [updateMasterLevels, updateTrackLevels]);
+
+  const stopMetering = useCallback(() => {
+    if (meteringIntervalRef.current !== null) {
+      window.clearInterval(meteringIntervalRef.current);
+      meteringIntervalRef.current = null;
+    }
+
+    for (const trackId of trackChainsRef.current.keys()) {
+      updateTrackLevels(trackId, { left: SILENCE_DB, right: SILENCE_DB });
+    }
+    updateMasterLevels({ left: SILENCE_DB, right: SILENCE_DB });
+  }, [updateMasterLevels, updateTrackLevels]);
+
+  useEffect(() => {
+    if (!enabled || !isPlaying || !isAudioReady) {
+      stopMetering();
+      return;
+    }
+
+    if (meteringIntervalRef.current !== null) {
+      return;
+    }
+
+    updateLevels();
+    meteringIntervalRef.current = window.setInterval(updateLevels, METER_UPDATE_INTERVAL_MS);
+
+    return () => {
+      stopMetering();
+    };
+  }, [enabled, isAudioReady, isPlaying, stopMetering, updateLevels]);
 
   // Track seek velocity for dynamic scheduling window (ref used across effects)
   const seekVelocityRef = useRef(0);
@@ -433,10 +701,24 @@ export function useAudioPlayback({
 
         const audioClips = getAudioClips();
         const scheduleAheadTime = getScheduleAheadTime();
+        const { trackStates, soloedTrackIds, masterState } = useAudioMixerStore.getState();
 
         // Find clips that need to be scheduled
-        for (const { clip, asset, trackVolume, trackMuted } of audioClips) {
+        for (const { clip, asset, trackId, trackVolume, trackMuted } of audioClips) {
           if (trackMuted) continue;
+
+          const trackRouting = resolveTrackPlaybackRouting({
+            trackId,
+            fallbackTrackVolume: trackVolume,
+            trackStates,
+            soloedTrackIds,
+            masterMuted: masterState.muted,
+          });
+          if (!trackRouting.isAudible) continue;
+
+          const trackChain = ensureTrackChain(trackId);
+          if (!trackChain) continue;
+          updateTrackChainState(trackId);
 
           // Calculate clip timing
           const safeSpeed = clip.speed > 0 ? clip.speed : 1;
@@ -481,7 +763,7 @@ export function useAudioPlayback({
 
           // Create gain node for this clip
           const gainNode = ctx.createGain();
-          const clipVolume = calculateClipVolume(clip, trackVolume);
+          const clipVolume = calculateClipVolume(clip);
           const clipOffset = Math.max(0, currentTime - clip.place.timelineInSec);
           const fadeFactor = getClipFadeFactor(clip, clipOffset);
           gainNode.gain.value = clipVolume * fadeFactor;
@@ -489,10 +771,7 @@ export function useAudioPlayback({
           const pannerNode = ctx.createStereoPanner();
           pannerNode.pan.value = clampClipPan(clip.audio?.pan ?? 0);
 
-          // Connect: source -> gainNode -> pannerNode -> masterGain -> destination
-          source.connect(gainNode);
-          gainNode.connect(pannerNode);
-          pannerNode.connect(masterGainRef.current);
+          connectSourceToDestination(source, gainNode, pannerNode, trackChain.inputGain);
 
           // Calculate start timing
           const timeIntoClip = Math.max(0, currentTime - clip.place.timelineInSec);
@@ -540,7 +819,7 @@ export function useAudioPlayback({
         scheduledSourcesRef.current.forEach((scheduled, clipId) => {
           const clipData = audioClips.find((c) => c.clip.id === scheduled.clipId);
           if (clipData) {
-            const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolume);
+            const clipVolume = calculateClipVolume(clipData.clip);
             const clipOffset = Math.max(0, currentTime - clipData.clip.place.timelineInSec);
             const fadeFactor = getClipFadeFactor(clipData.clip, clipOffset);
             scheduled.gainNode.gain.value = clipVolume * fadeFactor;
@@ -595,14 +874,14 @@ export function useAudioPlayback({
     enabled,
     isPlaying,
     currentTime,
-    volume,
-    isMuted,
     playbackRate,
     getAudioClips,
     loadAudioBuffer,
     calculateClipVolume,
     getScheduleAheadTime,
     getLiveIsPlaying,
+    ensureTrackChain,
+    updateTrackChainState,
   ]);
 
   useEffect(() => {
@@ -792,22 +1071,17 @@ export function useAudioPlayback({
     }
   }, [enabled, currentTime, isPlaying, playbackRate, stopAllSources, scheduleAudioClips]);
 
-  // Update master volume
-  useEffect(() => {
-    if (masterGainRef.current) {
-      masterGainRef.current.gain.value = isMuted ? 0 : volume;
-    }
-  }, [volume, isMuted]);
-
   // Cleanup on unmount
   useEffect(() => {
     // Capture ref values at effect creation time for safe cleanup access
     const audioBuffers = audioBuffersRef.current;
     const retryTimeouts = retryTimeoutsRef.current;
     const failedLoads = failedLoadsRef.current;
+    const trackChains = trackChainsRef.current;
 
     return () => {
       stopAllSources();
+      stopMetering();
 
       // Clear all pending retry timeouts
       for (const timeoutId of retryTimeouts.values()) {
@@ -815,15 +1089,35 @@ export function useAudioPlayback({
       }
       retryTimeouts.clear();
 
+      for (const trackId of Array.from(trackChains.keys())) {
+        disconnectTrackChain(trackId);
+      }
+
+      try {
+        masterGainRef.current?.disconnect();
+        masterSplitterRef.current?.disconnect();
+        masterLeftAnalyserRef.current?.disconnect();
+        masterRightAnalyserRef.current?.disconnect();
+      } catch {
+        // Nodes may already be disconnected.
+      }
+
       if (audioContextRef.current) {
         audioContextRef.current.close();
         audioContextRef.current = null;
       }
+      masterGainRef.current = null;
+      masterSplitterRef.current = null;
+      masterLeftAnalyserRef.current = null;
+      masterRightAnalyserRef.current = null;
+      masterLeftBufferRef.current = null;
+      masterRightBufferRef.current = null;
       audioBuffers.clear();
       failedLoads.clear();
       isAudioReadyRef.current = false;
+      setIsAudioReady(false);
     };
-  }, [stopAllSources]);
+  }, [disconnectTrackChain, stopAllSources, stopMetering]);
 
   return {
     initAudio,
