@@ -11,6 +11,7 @@ import { getAgentDisplayName } from '@/agents/engine/core/agentCatalog';
 import type { DelegationRecord } from '@/agents/engine/core/agentSession';
 import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
 import { useConversationStore } from '@/stores/conversationStore';
+import { formatDelegationStatus } from './agentDelegationUi';
 
 // =============================================================================
 // Types
@@ -37,23 +38,6 @@ function formatRelativeTime(timestamp: number): string {
   if (hours > 0) return `${hours}h ago`;
   if (minutes > 0) return `${minutes}m ago`;
   return 'just now';
-}
-
-function formatDelegationStatus(status: DelegationRecord['status']): string {
-  switch (status) {
-    case 'requested':
-      return 'Requested';
-    case 'running':
-      return 'Running';
-    case 'completed':
-      return 'Completed';
-    case 'failed':
-      return 'Failed';
-    case 'cancelled':
-      return 'Cancelled';
-    default:
-      return status;
-  }
 }
 
 function summarizeDelegationView(

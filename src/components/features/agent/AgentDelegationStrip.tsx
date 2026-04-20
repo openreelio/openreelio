@@ -5,7 +5,7 @@ import {
   type DelegationResultPayload,
 } from './agentDelegationResult';
 
-interface DelegatedParentContext {
+export interface DelegatedParentContext {
   parentLabel: string;
   delegatedGoal?: string | null;
   delegationStatus?: 'requested' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -18,7 +18,7 @@ interface DelegatedParentContext {
   onReturnToParent?: () => void;
 }
 
-interface DelegatedChildItem {
+export interface DelegatedChildItem {
   id: string;
   label: string;
   delegatedGoal?: string | null;
