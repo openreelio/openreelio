@@ -348,7 +348,11 @@ export function Inspector({
 
   if (selectedCaption) {
     return (
-      <CaptionInspectorPanel selectedCaption={selectedCaption} onCaptionChange={onCaptionChange} />
+      <CaptionInspectorPanel
+        selectedCaption={selectedCaption}
+        onCaptionChange={onCaptionChange}
+        readOnly={readOnly}
+      />
     );
   }
 

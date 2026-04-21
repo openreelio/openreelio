@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Clock,
   FileText,
@@ -39,7 +39,7 @@ function getAssetIcon(kind: SelectedAsset['kind']): JSX.Element {
   }
 }
 
-export function normalizeCaptionPosition(position: CaptionPosition | undefined): CaptionPosition {
+function normalizeCaptionPosition(position: CaptionPosition | undefined): CaptionPosition {
   if (!position) {
     return {
       type: 'preset',
@@ -82,14 +82,10 @@ function SpeedInput({
   disabled?: boolean;
 }) {
   const [localValue, setLocalValue] = useState(() => Math.round((speed || 1) * 100));
-  const prevSpeed = useRef(speed);
 
   useEffect(() => {
-    if (speed !== prevSpeed.current) {
-      prevSpeed.current = speed;
-      setLocalValue(Math.round((speed || 1) * 100));
-    }
-  }, [speed]);
+    setLocalValue(Math.round((speed || 1) * 100));
+  }, [speed, clipId, trackId]);
 
   const commit = useCallback(() => {
     if (localValue >= 10 && localValue <= 10000 && onClipSpeedChange) {
@@ -312,6 +308,7 @@ export function ClipInspectorPanel({
           onToggleEffect={onToggleEffect}
           onRemoveEffect={onRemoveEffect}
           onAddEffect={onAddEffect}
+          readOnly={readOnly || !canEditEffects}
         />
 
         {selectedEffect && !readOnly && (
@@ -418,13 +415,16 @@ export function AssetInspectorPanel({ selectedAsset }: AssetInspectorPanelProps)
 export interface CaptionInspectorPanelProps {
   selectedCaption: SelectedCaption;
   onCaptionChange?: (captionId: string, property: string, value: unknown) => void;
+  readOnly?: boolean;
 }
 
 export function CaptionInspectorPanel({
   selectedCaption,
   onCaptionChange,
+  readOnly = false,
 }: CaptionInspectorPanelProps): JSX.Element {
   const captionPosition = normalizeCaptionPosition(selectedCaption.position);
+  const isReadOnly = readOnly || !onCaptionChange;
 
   const commitCaptionPosition = (position: CaptionPosition): void => {
     onCaptionChange?.(selectedCaption.id, 'position', position);
@@ -476,6 +476,7 @@ export function CaptionInspectorPanel({
             value={selectedCaption.text}
             onChange={(e) => onCaptionChange?.(selectedCaption.id, 'text', e.target.value)}
             placeholder="Enter caption text..."
+            disabled={isReadOnly}
           />
         </div>
 
@@ -506,6 +507,7 @@ export function CaptionInspectorPanel({
             value={captionPosition.type === 'custom' ? 'custom' : captionPosition.vertical}
             className="w-full bg-editor-input bg-opacity-50 border border-editor-border rounded p-2 text-sm text-editor-text focus:border-primary-500 focus:ring-1 focus:ring-primary-500 focus:outline-none"
             onChange={(event) => handlePositionModeChange(event.target.value)}
+            disabled={isReadOnly}
           >
             <option value="top">Top</option>
             <option value="center">Center</option>
@@ -530,6 +532,7 @@ export function CaptionInspectorPanel({
                     marginPercent: Number(event.target.value),
                   });
                 }}
+                disabled={isReadOnly}
               />
             </div>
           ) : (
@@ -550,6 +553,7 @@ export function CaptionInspectorPanel({
                       yPercent: captionPosition.yPercent,
                     });
                   }}
+                  disabled={isReadOnly}
                 />
               </div>
               <div className="space-y-1">
@@ -568,6 +572,7 @@ export function CaptionInspectorPanel({
                       yPercent: Number(event.target.value),
                     });
                   }}
+                  disabled={isReadOnly}
                 />
               </div>
             </div>

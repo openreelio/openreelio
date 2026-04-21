@@ -434,6 +434,10 @@ export function Timeline({
     (time: number) => setPlayhead(time, 'timeline-ruler'),
     [setPlayhead],
   );
+  const seekFromShotMarker = useCallback(
+    (time: number) => setPlayhead(time, 'timeline-shot-marker'),
+    [setPlayhead],
+  );
 
   // ===========================================================================
   // Shot Markers
@@ -442,7 +446,7 @@ export function Timeline({
     assetId: selectedAssetInfo?.assetId ?? null,
     videoPath: selectedAssetInfo?.videoPath ?? null,
     autoLoad: true,
-    onSeek: (time) => setPlayhead(time, 'timeline-shot-marker'),
+    onSeek: seekFromShotMarker,
   });
 
   // ===========================================================================
@@ -2057,7 +2061,7 @@ export function Timeline({
               shotMarkers={shotMarkers}
               viewportWidth={viewportWidth}
               duration={duration}
-              onSeekShotMarker={setPlayhead}
+              onSeekShotMarker={seekFromShotMarker}
               isDraggingOver={isDraggingOver}
               selectionRect={selectionRect}
               isSelecting={isSelecting}

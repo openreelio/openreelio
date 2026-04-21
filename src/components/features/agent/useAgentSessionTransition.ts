@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 export type SessionTransitionLabel = 'new' | 'switch' | 'delegate' | null;
 
@@ -18,8 +18,10 @@ export function useAgentSessionTransition(): UseAgentSessionTransitionResult {
   const [isSessionTransitionPending, setIsSessionTransitionPending] = useState(false);
   const [sessionTransitionLabel, setSessionTransitionLabel] =
     useState<SessionTransitionLabel>(null);
+  const latestInvocationIdRef = useRef(0);
 
   const resetSessionTransition = useCallback((options?: { bumpChatSurfaceKey?: boolean }) => {
+    latestInvocationIdRef.current += 1;
     if (options?.bumpChatSurfaceKey) {
       setChatSurfaceKey((prev) => prev + 1);
     }
@@ -29,6 +31,8 @@ export function useAgentSessionTransition(): UseAgentSessionTransitionResult {
 
   const runSessionTransition = useCallback(
     async (label: Exclude<SessionTransitionLabel, null>, action: () => Promise<unknown>) => {
+      const invocationId = latestInvocationIdRef.current + 1;
+      latestInvocationIdRef.current = invocationId;
       setIsSessionTransitionPending(true);
       setSessionTransitionLabel(label);
       setChatSurfaceKey((prev) => prev + 1);
@@ -36,8 +40,10 @@ export function useAgentSessionTransition(): UseAgentSessionTransitionResult {
       try {
         await action();
       } finally {
-        setIsSessionTransitionPending(false);
-        setSessionTransitionLabel(null);
+        if (latestInvocationIdRef.current === invocationId) {
+          setIsSessionTransitionPending(false);
+          setSessionTransitionLabel(null);
+        }
       }
     },
     [],
