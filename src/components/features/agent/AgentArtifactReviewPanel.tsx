@@ -25,6 +25,7 @@ import {
   type DelegationRecommendation,
 } from './agentDelegationContract';
 import { buildVerifierPacket } from './agentVerifierPacket';
+import { formatDelegationStatus } from './agentDelegationUi';
 
 interface ReviewSourceNavItem {
   conversationId: string;
@@ -34,23 +35,6 @@ interface ReviewSourceNavItem {
   sourceKind: 'current' | 'delegated' | 'parent';
   statusLabel?: string | null;
   defaultFocus: AgentArtifactFocus | null;
-}
-
-function formatDelegationStatus(status: string): string {
-  switch (status) {
-    case 'requested':
-      return 'Requested';
-    case 'running':
-      return 'Running';
-    case 'completed':
-      return 'Completed';
-    case 'failed':
-      return 'Failed';
-    case 'cancelled':
-      return 'Cancelled';
-    default:
-      return status;
-  }
 }
 
 function formatDelegationMergeStatus(status: string): string {

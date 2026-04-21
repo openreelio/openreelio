@@ -3,6 +3,7 @@ import type { Asset, Clip, Sequence, Track } from '@/types';
 export interface PlaybackAudioClipEntry {
   clip: Clip;
   asset: Asset;
+  trackId: string;
   trackVolume: number;
   trackMuted: boolean;
 }
@@ -108,6 +109,7 @@ export function collectPlaybackAudioClips(
       audioClips.push({
         clip,
         asset,
+        trackId: track.id,
         trackVolume: track.volume,
         trackMuted: track.muted,
       });

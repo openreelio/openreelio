@@ -15,9 +15,15 @@
 import { useRef, useEffect, useCallback } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { usePlaybackStore } from '@/stores/playbackStore';
+import { useAudioMixerStore } from '@/stores/audioMixerStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { collectPlaybackAudioClips } from '@/utils/audioPlayback';
 import { clampClipVolumeDb, clampClipPan } from '@/utils/clipAudio';
+import {
+  connectSourceToDestination,
+  resolveMasterOutputGain,
+  resolveTrackPlaybackRouting,
+} from '@/utils/audioRouting';
 import {
   assetMatchesWorkspaceRelativePath,
   clearCachedAudioPreview,
@@ -56,8 +62,11 @@ export interface UseAudioScrubbingOptions {
 
 interface ActiveSnippet {
   source: AudioBufferSourceNode;
-  gainNode: GainNode;
-  pannerNode: StereoPannerNode;
+  clipGainNode: GainNode;
+  clipPannerNode: StereoPannerNode;
+  trackGainNode: GainNode;
+  trackPannerNode: StereoPannerNode;
+  masterGainNode: GainNode;
 }
 
 // =============================================================================
@@ -144,8 +153,11 @@ export function useAudioScrubbing({
       try {
         snippet.source.stop();
         snippet.source.disconnect();
-        snippet.gainNode.disconnect();
-        snippet.pannerNode.disconnect();
+        snippet.clipGainNode.disconnect();
+        snippet.clipPannerNode.disconnect();
+        snippet.trackGainNode.disconnect();
+        snippet.trackPannerNode.disconnect();
+        snippet.masterGainNode.disconnect();
       } catch {
         // Already stopped or disconnected
       }
@@ -169,9 +181,21 @@ export function useAudioScrubbing({
       const requestId = scrubRequestIdRef.current;
 
       const audioClips = collectPlaybackAudioClips(sequence, assets);
-      const masterVolume = isMuted ? 0 : volume;
+      const { trackStates, soloedTrackIds, masterState } = useAudioMixerStore.getState();
+      const masterVolume = resolveMasterOutputGain(volume, isMuted, masterState);
 
-      for (const { clip, asset, trackVolume } of audioClips) {
+      for (const { clip, asset, trackId, trackVolume, trackMuted } of audioClips) {
+        if (trackMuted) continue;
+
+        const trackRouting = resolveTrackPlaybackRouting({
+          trackId,
+          fallbackTrackVolume: trackVolume,
+          trackStates,
+          soloedTrackIds,
+          masterMuted: masterState.muted,
+        });
+        if (!trackRouting.isAudible) continue;
+
         const safeSpeed = clip.speed > 0 ? clip.speed : 1;
         const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
         const clipEnd = clip.place.timelineInSec + clipDuration;
@@ -197,28 +221,34 @@ export function useAudioScrubbing({
         const clipVolumeDb = clampClipVolumeDb(clip.audio?.volumeDb ?? 0);
         const clipLinearVolume = Math.pow(10, clipVolumeDb / 20);
         const clipMuted = clip.audio?.muted ?? false;
-        const clipVolume = clipMuted ? 0 : trackVolume * clipLinearVolume;
-        const finalVolume = masterVolume * clipVolume;
+        const clipVolume = clipMuted ? 0 : clipLinearVolume;
+        const finalVolume = masterVolume * trackRouting.trackGain * clipVolume;
 
         // Create gain node with fade envelope to prevent click artifacts
-        const gainNode = ctx.createGain();
+        const clipGainNode = ctx.createGain();
         const now = ctx.currentTime;
-        gainNode.gain.setValueAtTime(0, now);
-        gainNode.gain.linearRampToValueAtTime(finalVolume, now + SNIPPET_FADE_SEC);
+        clipGainNode.gain.setValueAtTime(0, now);
+        clipGainNode.gain.linearRampToValueAtTime(finalVolume, now + SNIPPET_FADE_SEC);
         const sustainEnd = now + SCRUB_SNIPPET_DURATION_SEC - SNIPPET_FADE_SEC;
         if (sustainEnd > now + SNIPPET_FADE_SEC) {
-          gainNode.gain.setValueAtTime(finalVolume, sustainEnd);
+          clipGainNode.gain.setValueAtTime(finalVolume, sustainEnd);
         }
-        gainNode.gain.linearRampToValueAtTime(0, now + SCRUB_SNIPPET_DURATION_SEC);
+        clipGainNode.gain.linearRampToValueAtTime(0, now + SCRUB_SNIPPET_DURATION_SEC);
 
-        // Create panner node
-        const pannerNode = ctx.createStereoPanner();
-        pannerNode.pan.value = clampClipPan(clip.audio?.pan ?? 0);
+        // Build a short-lived chain that mirrors clip -> track -> master routing.
+        const clipPannerNode = ctx.createStereoPanner();
+        clipPannerNode.pan.value = clampClipPan(clip.audio?.pan ?? 0);
+        const trackGainNode = ctx.createGain();
+        trackGainNode.gain.value = 1;
+        const trackPannerNode = ctx.createStereoPanner();
+        trackPannerNode.pan.value = trackRouting.trackPan;
+        const masterGainNode = ctx.createGain();
+        masterGainNode.gain.value = 1;
 
-        // Connect: source -> gain -> panner -> destination
-        source.connect(gainNode);
-        gainNode.connect(pannerNode);
-        pannerNode.connect(ctx.destination);
+        connectSourceToDestination(source, clipGainNode, clipPannerNode, trackGainNode);
+        trackGainNode.connect(trackPannerNode);
+        trackPannerNode.connect(masterGainNode);
+        masterGainNode.connect(ctx.destination);
 
         // Calculate available source duration (capped by buffer end)
         const availableDuration = Math.min(
@@ -229,7 +259,14 @@ export function useAudioScrubbing({
 
         source.start(0, sourceOffset, availableDuration);
 
-        const snippet: ActiveSnippet = { source, gainNode, pannerNode };
+        const snippet: ActiveSnippet = {
+          source,
+          clipGainNode,
+          clipPannerNode,
+          trackGainNode,
+          trackPannerNode,
+          masterGainNode,
+        };
         activeSnippetsRef.current.push(snippet);
 
         // Auto-cleanup when snippet finishes
@@ -239,8 +276,11 @@ export function useAudioScrubbing({
             activeSnippetsRef.current.splice(idx, 1);
           }
           source.disconnect();
-          gainNode.disconnect();
-          pannerNode.disconnect();
+          clipGainNode.disconnect();
+          clipPannerNode.disconnect();
+          trackGainNode.disconnect();
+          trackPannerNode.disconnect();
+          masterGainNode.disconnect();
         };
       }
     },

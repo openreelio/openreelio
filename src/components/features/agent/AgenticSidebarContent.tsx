@@ -6,11 +6,9 @@
  */
 
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
-import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { AgenticChat } from './AgenticChat';
 import type { AgentRuntimeChatHandle } from './AgentRuntimeChatShell';
-import { SessionList } from './SessionList';
-import { AgentDelegationStrip } from './AgentDelegationStrip';
+import { AgenticSidebarWorkspace } from './AgenticSidebarWorkspace';
 import { DEFAULT_AGENT_PROFILE_ID, type AgentRunResult } from '@/agents/engine';
 import type { DelegationRecord } from '@/agents/engine/core/agentSession';
 import type { ConversationMessage } from '@/agents/engine/core/conversation';
@@ -40,7 +38,6 @@ import {
   buildCancelledDelegationPayload,
   buildDelegationFailurePayload,
   buildDelegationResultPayload,
-  deriveDelegationReviewState,
   parseDelegationResultPayload,
   resolveDelegationReviewFocus,
   resolveDelegationSummaryMessageId,
@@ -49,16 +46,19 @@ import {
   buildDelegationContextPacket,
   buildDelegationContractSystemMessage,
 } from './agentDelegationContract';
+import {
+  buildDelegatedChildItems,
+  buildDelegatedFromContext,
+  type OpenDelegationReviewInput,
+} from './agentSidebarDelegationViewModels';
+import { resolveLatestParentRunId } from './agentDelegationUi';
+import { useAgentSessionTransition } from './useAgentSessionTransition';
 
 const logger = createLogger('AgenticSidebarContent');
 const EMPTY_DELEGATIONS: readonly DelegationRecord[] = [];
 const EMPTY_MESSAGES: readonly ConversationMessage[] = [];
 const AGENT_REVIEW_PANEL_ID: PanelId = 'agent-review';
 const DEFAULT_AGENT_REVIEW_ZONE: DockZoneId = 'bottom';
-
-// =============================================================================
-// Types
-// =============================================================================
 
 export interface AgenticSidebarContentProps {
   /** Whether the component is visible */
@@ -69,40 +69,6 @@ export interface AgenticSidebarContentProps {
   onRegisterNewChat?: (handler: () => void, canCreate: boolean) => void;
   /** Optional className */
   className?: string;
-}
-
-function resolveLatestParentRunId(
-  snapshot: {
-    session: { currentRunId: string | null };
-    runs: Array<{ id: string; updatedAt: number }>;
-  } | null,
-): string | null {
-  if (!snapshot) {
-    return null;
-  }
-
-  if (snapshot.session.currentRunId) {
-    return snapshot.session.currentRunId;
-  }
-
-  return [...snapshot.runs].sort((left, right) => right.updatedAt - left.updatedAt)[0]?.id ?? null;
-}
-
-function formatDelegationStatus(status: string): string {
-  switch (status) {
-    case 'requested':
-      return 'Requested';
-    case 'running':
-      return 'Running';
-    case 'completed':
-      return 'Completed';
-    case 'failed':
-      return 'Failed';
-    case 'cancelled':
-      return 'Cancelled';
-    default:
-      return status;
-  }
 }
 
 // =============================================================================
@@ -116,11 +82,6 @@ export function AgenticSidebarContent({
   className = '',
 }: AgenticSidebarContentProps) {
   const [showSessionList, setShowSessionList] = useState(false);
-  const [chatSurfaceKey, setChatSurfaceKey] = useState(0);
-  const [isSessionTransitionPending, setIsSessionTransitionPending] = useState(false);
-  const [sessionTransitionLabel, setSessionTransitionLabel] = useState<
-    'new' | 'switch' | 'delegate' | null
-  >(null);
   const [projectPromptContext, setProjectPromptContext] = useState<ProjectPromptContext>({
     knowledge: [],
   });
@@ -150,6 +111,13 @@ export function AgenticSidebarContent({
   // ===========================================================================
 
   const chatHandleRef = useRef<AgentRuntimeChatHandle>(null);
+  const {
+    chatSurfaceKey,
+    isSessionTransitionPending,
+    sessionTransitionLabel,
+    runSessionTransition,
+    resetSessionTransition,
+  } = useAgentSessionTransition();
   const runtimePolicy = useSidebarRuntimePolicy();
   const currentProjectId = useProjectStore((state) => state.meta?.id ?? null);
   const currentProjectPath = useProjectStore((state) => state.meta?.path ?? null);
@@ -217,38 +185,15 @@ export function AgenticSidebarContent({
 
     abortCurrentSession();
     clearArtifactReviewSelection();
-    setChatSurfaceKey((prev) => prev + 1);
-    setIsSessionTransitionPending(false);
-    setSessionTransitionLabel(null);
-  }, [abortCurrentSession, clearArtifactReviewSelection, currentProjectId]);
-
-  const runSessionTransition = useCallback(
-    async (label: 'new' | 'switch' | 'delegate', action: () => Promise<unknown>) => {
-      setIsSessionTransitionPending(true);
-      setSessionTransitionLabel(label);
-      setChatSurfaceKey((prev) => prev + 1);
-
-      try {
-        await action();
-      } finally {
-        setIsSessionTransitionPending(false);
-        setSessionTransitionLabel(null);
-      }
-    },
-    [],
-  );
+    resetSessionTransition({ bumpChatSurfaceKey: true });
+  }, [abortCurrentSession, clearArtifactReviewSelection, currentProjectId, resetSessionTransition]);
 
   const openAgentReviewPanel = useCallback(() => {
     revealWorkspacePanel(AGENT_REVIEW_PANEL_ID, DEFAULT_AGENT_REVIEW_ZONE);
   }, []);
 
   const openDelegationReview = useCallback(
-    (input: {
-      conversationId: string;
-      title: string;
-      agentProfileId: string;
-      resultJson?: string | null;
-    }) => {
+    (input: OpenDelegationReviewInput) => {
       if (!currentProjectId) {
         return;
       }
@@ -442,92 +387,40 @@ export function AgenticSidebarContent({
     () => delegationRecords.find((record) => record.childSessionId === activeSessionId) ?? null,
     [activeSessionId, delegationRecords],
   );
-  const delegatedChildItems = useMemo(() => {
-    if (!activeSessionId) {
-      return [];
-    }
-
-    return delegationRecords
-      .filter((record) => record.parentSessionId === activeSessionId)
-      .map((record) => {
-        const childSession = sessions.find((session) => session.id === record.childSessionId);
-        const resultPayload = parseDelegationResultPayload(record.resultJson, {
-          contextPacketJson: record.contextPacketJson,
-          specialistId: record.agentProfileId,
-        });
-        const reviewState = deriveDelegationReviewState(record, resultPayload);
-        return {
-          id: record.id,
-          label: childSession?.title || getAgentDisplayName(record.agentProfileId),
-          delegatedGoal: record.delegatedGoal,
-          delegationStatus: record.status,
-          mergeStatus: record.mergeStatus,
-          errorMessage: record.errorMessage,
-          statusLabel: formatDelegationStatus(record.status),
-          resultPreview: resultPayload?.preview ?? resultPayload?.finalState ?? null,
-          result: resultPayload,
-          onOpen: () => handleSessionSwitch(record.childSessionId),
-          onReview:
-            reviewState || resultPayload
-              ? () =>
-                  openDelegationReview({
-                    conversationId: record.childSessionId,
-                    title: childSession?.title || getAgentDisplayName(record.agentProfileId),
-                    agentProfileId: record.agentProfileId,
-                    resultJson: record.resultJson,
-                  })
-              : undefined,
-        };
-      });
-  }, [activeSessionId, delegationRecords, handleSessionSwitch, openDelegationReview, sessions]);
-  const delegatedFromContext = useMemo(() => {
-    const parentSessionId = activeAgentSnapshot?.session.lineage.parentSessionId;
-    if (!parentSessionId) {
-      return null;
-    }
-
-    const parentSession = sessions.find((session) => session.id === parentSessionId);
-    const resultPayload = parseDelegationResultPayload(activeDelegationRecord?.resultJson, {
-      contextPacketJson: activeDelegationRecord?.contextPacketJson,
-      specialistId: activeDelegationRecord?.agentProfileId,
-    });
-    const reviewState = deriveDelegationReviewState(activeDelegationRecord, resultPayload);
-    return {
-      parentLabel: parentSession?.title || getAgentDisplayName(parentSession?.agent ?? 'editor'),
-      delegatedGoal: activeDelegationRecord?.delegatedGoal ?? null,
-      delegationStatus: activeDelegationRecord?.status,
-      mergeStatus: activeDelegationRecord?.mergeStatus,
-      errorMessage: activeDelegationRecord?.errorMessage ?? null,
-      statusLabel: activeDelegationRecord
-        ? formatDelegationStatus(activeDelegationRecord.status)
-        : 'Delegated',
-      resultPreview: resultPayload?.preview ?? resultPayload?.finalState ?? null,
-      result: resultPayload,
-      onReview:
-        reviewState || resultPayload
-          ? () =>
-              openDelegationReview({
-                conversationId: activeSessionId ?? parentSessionId,
-                title:
-                  sessions.find((session) => session.id === activeSessionId)?.title ||
-                  activeAgentDefinition?.name ||
-                  'Delegated Session',
-                agentProfileId: activeAgentProfileId ?? DEFAULT_AGENT_PROFILE_ID,
-                resultJson: activeDelegationRecord?.resultJson ?? null,
-              })
-          : undefined,
-      onReturnToParent: () => handleSessionSwitch(parentSessionId),
-    };
-  }, [
-    activeAgentDefinition?.name,
-    activeAgentProfileId,
-    activeAgentSnapshot,
-    activeDelegationRecord,
-    activeSessionId,
-    handleSessionSwitch,
-    openDelegationReview,
-    sessions,
-  ]);
+  const delegatedChildItems = useMemo(
+    () =>
+      buildDelegatedChildItems({
+        activeSessionId,
+        delegationRecords,
+        sessions,
+        handleSessionSwitch,
+        openDelegationReview,
+      }),
+    [activeSessionId, delegationRecords, sessions, handleSessionSwitch, openDelegationReview],
+  );
+  const delegatedFromContext = useMemo(
+    () =>
+      buildDelegatedFromContext({
+        activeAgentDefinitionName: activeAgentDefinition?.name,
+        activeAgentProfileId,
+        activeAgentSnapshot,
+        activeDelegationRecord,
+        activeSessionId,
+        sessions,
+        handleSessionSwitch,
+        openDelegationReview,
+      }),
+    [
+      activeAgentDefinition?.name,
+      activeAgentProfileId,
+      activeAgentSnapshot,
+      activeDelegationRecord,
+      activeSessionId,
+      sessions,
+      handleSessionSwitch,
+      openDelegationReview,
+    ],
+  );
 
   // Register new chat handler with parent (AISidebar)
   useEffect(() => {
@@ -699,100 +592,43 @@ export function AgenticSidebarContent({
   }
 
   return (
-    <div
-      data-testid="agentic-sidebar-content"
-      className={`flex flex-row flex-1 overflow-hidden ${className}`}
+    <AgenticSidebarWorkspace
+      className={className}
+      showSessionList={showSessionList}
+      onToggleSessionList={() => setShowSessionList((prev) => !prev)}
+      onNewSession={createNewSession}
+      onSwitchSession={handleSessionSwitch}
+      activeAgentName={activeAgentDefinition?.name}
+      delegatedFrom={delegatedFromContext}
+      delegatedChildren={delegatedChildItems}
+      runtimeState={
+        runtimePolicy.selectedRuntime === 'disabled'
+          ? 'disabled'
+          : isSessionTransitionPending
+            ? 'transitioning'
+            : 'ready'
+      }
+      sessionTransitionLabel={sessionTransitionLabel}
     >
-      {/* Session List Panel */}
-      {showSessionList && (
-        <div className="w-[38%] max-w-[160px] min-w-[120px] flex-shrink-0 border-r border-border-subtle bg-surface-base">
-          <SessionList onNewSession={createNewSession} onSwitchSession={handleSessionSwitch} />
-        </div>
-      )}
-
-      {/* Main Chat Area */}
-      <div className="flex flex-col flex-1 overflow-hidden">
-        {/* Session toggle bar */}
-        <div className="flex items-center px-2 py-1 border-b border-border-subtle bg-surface-base">
-          <button
-            onClick={() => setShowSessionList((prev) => !prev)}
-            className="p-1 rounded hover:bg-surface-active transition-colors"
-            aria-label={showSessionList ? 'Hide sessions' : 'Show sessions'}
-            title={showSessionList ? 'Hide sessions' : 'Show sessions'}
-            data-testid="toggle-sessions-btn"
-          >
-            {showSessionList ? (
-              <PanelLeftClose className="w-3.5 h-3.5 text-text-tertiary" />
-            ) : (
-              <PanelLeftOpen className="w-3.5 h-3.5 text-text-tertiary" />
-            )}
-          </button>
-          <div className="flex-1 flex min-w-0 overflow-hidden items-center gap-2">
-            <span className="text-xs text-text-tertiary">Agent Workspace</span>
-            {activeAgentDefinition && (
-              <span className="rounded-full border border-border-subtle bg-surface-elevated px-1.5 py-0.5 text-[10px] font-medium text-text-secondary truncate">
-                {activeAgentDefinition.name}
-              </span>
-            )}
-          </div>
-        </div>
-        <AgentDelegationStrip
-          delegatedFrom={delegatedFromContext}
-          delegatedChildren={delegatedChildItems}
-        />
-
-        {runtimePolicy.selectedRuntime === 'disabled' ? (
-          <div
-            data-testid="agent-runtime-disabled-state"
-            className="flex flex-1 items-center justify-center px-6 py-8"
-          >
-            <div className="max-w-sm text-center">
-              <p className="text-sm font-medium text-text-primary">AI runtime is disabled</p>
-              <p className="mt-2 text-xs text-text-secondary">
-                Enable `USE_AGENTIC_ENGINE` to restore the canonical TPAO runtime.
-              </p>
-            </div>
-          </div>
-        ) : isSessionTransitionPending ? (
-          <div
-            data-testid="agent-session-transition-state"
-            className="flex flex-1 items-center justify-center px-6 py-8"
-          >
-            <div className="max-w-sm text-center">
-              <p className="text-sm font-medium text-text-primary">
-                {sessionTransitionLabel === 'switch'
-                  ? 'Opening session...'
-                  : sessionTransitionLabel === 'delegate'
-                    ? 'Delegating to specialist...'
-                    : 'Starting new session...'}
-              </p>
-              <p className="mt-2 text-xs text-text-secondary">
-                Preparing a clean agent workspace before the next turn.
-              </p>
-            </div>
-          </div>
-        ) : (
-          <AgenticChat
-            key={`agent-workspace-${chatSurfaceKey}`}
-            ref={chatHandleRef}
-            llmClient={llmClient}
-            toolExecutor={toolExecutor}
-            config={chatPromptConfig}
-            onSubmit={handleSubmit}
-            onComplete={handleComplete}
-            onAbort={handleAbort}
-            onError={handleError}
-            placeholder={promptPlaceholder}
-            disabled={isSessionTransitionPending}
-            currentAgentName={activeAgentDefinition?.name ?? 'Editor'}
-            currentAgentDescription={activeAgentDefinition?.description}
-            isExperimentalSession={activeAgentDefinition?.mode === 'subagent'}
-            specialistDefinitions={specialistDefinitions}
-            onStartSession={handleTrayStartSession}
-            className="flex-1"
-          />
-        )}
-      </div>
-    </div>
+      <AgenticChat
+        key={`agent-workspace-${chatSurfaceKey}`}
+        ref={chatHandleRef}
+        llmClient={llmClient}
+        toolExecutor={toolExecutor}
+        config={chatPromptConfig}
+        onSubmit={handleSubmit}
+        onComplete={handleComplete}
+        onAbort={handleAbort}
+        onError={handleError}
+        placeholder={promptPlaceholder}
+        disabled={isSessionTransitionPending}
+        currentAgentName={activeAgentDefinition?.name ?? 'Editor'}
+        currentAgentDescription={activeAgentDefinition?.description}
+        isExperimentalSession={activeAgentDefinition?.mode === 'subagent'}
+        specialistDefinitions={specialistDefinitions}
+        onStartSession={handleTrayStartSession}
+        className="flex-1"
+      />
+    </AgenticSidebarWorkspace>
   );
 }

@@ -314,6 +314,165 @@ describe('Inspector', () => {
     expect(handleCaptionChange).toHaveBeenCalledWith('cap-1', 'text', 'Hello World');
   });
 
+  it('disables caption editing controls when readOnly is true', () => {
+    const selectedCaption = {
+      id: 'cap-1',
+      text: 'Hello',
+      startSec: 0,
+      endSec: 5,
+      position: {
+        type: 'preset' as const,
+        vertical: 'bottom' as const,
+        marginPercent: 5,
+      },
+      style: {
+        fontFamily: 'Arial',
+        fontSize: 24,
+        fontWeight: 'normal' as const,
+        color: { r: 255, g: 255, b: 255, a: 255 },
+        outlineColor: { r: 0, g: 0, b: 0, a: 255 },
+        outlineWidth: 2,
+        shadowColor: { r: 0, g: 0, b: 0, a: 128 },
+        shadowOffset: 2,
+        alignment: 'center' as const,
+        italic: false,
+        underline: false,
+      },
+    };
+
+    render(
+      <Inspector selectedCaption={selectedCaption} onCaptionChange={vi.fn()} readOnly={true} />,
+    );
+
+    expect(screen.getByDisplayValue('Hello')).toBeDisabled();
+    expect(screen.getByTestId('caption-position-mode')).toBeDisabled();
+    expect(screen.getByTestId('caption-position-margin')).toBeDisabled();
+  });
+
+  it('hides effect actions when clip inspector is readOnly', () => {
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          name: 'Test Clip',
+          assetId: 'asset-1',
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+          },
+          effects: [
+            {
+              id: 'effect-1',
+              effectType: 'brightness',
+              enabled: true,
+              params: { value: 0.5 },
+              keyframes: {},
+              order: 0,
+            },
+          ],
+        }}
+        onAddEffect={vi.fn()}
+        onEffectToggle={vi.fn()}
+        onEffectRemove={vi.fn()}
+        onEffectChange={vi.fn()}
+        readOnly={true}
+      />,
+    );
+
+    expect(screen.queryByTestId('add-effect-button')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('toggle-effect-effect-1')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('remove-effect-effect-1')).not.toBeInTheDocument();
+  });
+
+  it('resets the speed input when the selected clip changes with the same speed', () => {
+    const onClipSpeedChange = vi.fn();
+    const { rerender } = render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          name: 'Clip One',
+          assetId: 'asset-1',
+          speed: 1,
+          reverse: false,
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+          },
+        }}
+        onClipSpeedChange={onClipSpeedChange}
+      />,
+    );
+
+    const input = screen.getByTestId('speed-input');
+    fireEvent.change(input, { target: { value: '250' } });
+    expect(input).toHaveValue(250);
+
+    rerender(
+      <Inspector
+        selectedClip={{
+          id: 'clip-2',
+          name: 'Clip Two',
+          assetId: 'asset-2',
+          speed: 1,
+          reverse: false,
+          range: {
+            sourceInSec: 5,
+            sourceOutSec: 15,
+          },
+          place: {
+            trackId: 'track-2',
+            timelineInSec: 10,
+          },
+        }}
+        onClipSpeedChange={onClipSpeedChange}
+      />,
+    );
+
+    expect(screen.getByTestId('speed-input')).toHaveValue(100);
+  });
+
+  it('resets invalid speed input back to the committed value on blur', () => {
+    const onClipSpeedChange = vi.fn();
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          name: 'Clip One',
+          assetId: 'asset-1',
+          speed: 1,
+          reverse: false,
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+          },
+        }}
+        onClipSpeedChange={onClipSpeedChange}
+      />,
+    );
+
+    const input = screen.getByTestId('speed-input');
+    fireEvent.change(input, { target: { value: '5' } });
+    expect(input).toHaveValue(5);
+
+    fireEvent.blur(input);
+
+    expect(onClipSpeedChange).not.toHaveBeenCalled();
+    expect(screen.getByTestId('speed-input')).toHaveValue(100);
+  });
+
   // ===========================================================================
   // Accessibility Tests
   // ===========================================================================
