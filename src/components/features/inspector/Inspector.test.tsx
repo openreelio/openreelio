@@ -439,6 +439,40 @@ describe('Inspector', () => {
     expect(screen.getByTestId('speed-input')).toHaveValue(100);
   });
 
+  it('resets invalid speed input back to the committed value on blur', () => {
+    const onClipSpeedChange = vi.fn();
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          name: 'Clip One',
+          assetId: 'asset-1',
+          speed: 1,
+          reverse: false,
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+          },
+        }}
+        onClipSpeedChange={onClipSpeedChange}
+      />,
+    );
+
+    const input = screen.getByTestId('speed-input');
+    fireEvent.change(input, { target: { value: '5' } });
+    expect(input).toHaveValue(5);
+
+    fireEvent.blur(input);
+
+    expect(onClipSpeedChange).not.toHaveBeenCalled();
+    expect(screen.getByTestId('speed-input')).toHaveValue(100);
+  });
+
   // ===========================================================================
   // Accessibility Tests
   // ===========================================================================

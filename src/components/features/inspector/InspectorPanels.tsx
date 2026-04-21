@@ -88,10 +88,18 @@ function SpeedInput({
   }, [speed, clipId, trackId]);
 
   const commit = useCallback(() => {
-    if (localValue >= 10 && localValue <= 10000 && onClipSpeedChange) {
+    if (
+      Number.isFinite(localValue) &&
+      localValue >= 10 &&
+      localValue <= 10000 &&
+      onClipSpeedChange
+    ) {
       onClipSpeedChange(clipId, trackId, localValue / 100, reverse);
+      return;
     }
-  }, [localValue, clipId, trackId, reverse, onClipSpeedChange]);
+
+    setLocalValue(Math.round((speed || 1) * 100));
+  }, [localValue, clipId, trackId, reverse, speed, onClipSpeedChange]);
 
   return (
     <input
