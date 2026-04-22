@@ -41,6 +41,7 @@ interface TimelineState {
   // Actions - Selection
   selectClip: (clipId: string, addToSelection?: boolean) => void;
   selectClips: (clipIds: string[]) => void;
+  sanitizeSelection: (validClipIds: string[], validTrackIds?: string[]) => void;
   deselectClip: (clipId: string) => void;
   clearClipSelection: () => void;
   selectTrack: (trackId: string) => void;
@@ -117,6 +118,18 @@ export const useTimelineStore = create<TimelineState>()(
     selectClips: (clipIds: string[]) => {
       set((state) => {
         state.selectedClipIds = [...clipIds];
+      });
+    },
+
+    sanitizeSelection: (validClipIds, validTrackIds = []) => {
+      set((state) => {
+        const validClipIdSet = new Set(validClipIds);
+        const validTrackIdSet = new Set(validTrackIds);
+
+        state.selectedClipIds = state.selectedClipIds.filter((clipId) => validClipIdSet.has(clipId));
+        state.selectedTrackIds = state.selectedTrackIds.filter((trackId) =>
+          validTrackIdSet.has(trackId),
+        );
       });
     },
 

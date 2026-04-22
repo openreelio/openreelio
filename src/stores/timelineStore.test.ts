@@ -128,6 +128,31 @@ describe('timelineStore', () => {
       });
     });
 
+    describe('sanitizeSelection', () => {
+      it('should remove clip and track ids that are no longer present', () => {
+        useTimelineStore.setState({
+          selectedClipIds: ['clip_001', 'clip_stale'],
+          selectedTrackIds: ['track_001', 'track_stale'],
+        });
+
+        const { sanitizeSelection } = useTimelineStore.getState();
+        sanitizeSelection(['clip_001', 'clip_002'], ['track_001']);
+
+        const state = useTimelineStore.getState();
+        expect(state.selectedClipIds).toEqual(['clip_001']);
+        expect(state.selectedTrackIds).toEqual(['track_001']);
+      });
+
+      it('should clear track selection when no valid track ids are provided', () => {
+        useTimelineStore.setState({ selectedTrackIds: ['track_001'] });
+
+        const { sanitizeSelection } = useTimelineStore.getState();
+        sanitizeSelection(['clip_001']);
+
+        expect(useTimelineStore.getState().selectedTrackIds).toEqual([]);
+      });
+    });
+
     describe('deselectClip', () => {
       it('should remove clip from selection', () => {
         useTimelineStore.setState({ selectedClipIds: ['clip_001', 'clip_002'] });

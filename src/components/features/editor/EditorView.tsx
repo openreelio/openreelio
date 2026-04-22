@@ -131,6 +131,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   const { selectedAssetId, assets, effects, executeCommand } = useProjectStore();
   const currentTime = usePlaybackStore((state) => state.currentTime);
   const { selectedClipIds, linkedSelectionEnabled } = useTimelineStore();
+  const sanitizeSelection = useTimelineStore((state) => state.sanitizeSelection);
   const aiPanelZoneId = useWorkspaceLayoutStore(
     (state) => findPanelZone(state.layout, 'ai-assistant') ?? 'right',
   );
@@ -162,6 +163,12 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   // Mixer visibility state (toggled from timeline header)
   const [showMixer, setShowMixer] = useState(false);
   const handleToggleMixer = useCallback(() => setShowMixer((prev) => !prev), []);
+
+  useEffect(() => {
+    const validClipIds = sequence?.tracks.flatMap((track) => track.clips.map((clip) => clip.id)) ?? [];
+    const validTrackIds = sequence?.tracks.map((track) => track.id) ?? [];
+    sanitizeSelection(validClipIds, validTrackIds);
+  }, [sanitizeSelection, sequence]);
 
   // AI Sidebar state
   const {
