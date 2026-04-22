@@ -33,6 +33,7 @@ describe('WorkspaceLayoutStore', () => {
     it('should initialize with monitors in center-top zone', () => {
       const { layout } = useWorkspaceLayoutStore.getState();
       expect(layout.zones['center-top'].panelIds).toEqual(['source-monitor', 'program-monitor']);
+      expect(layout.zones['center-top'].activePanelId).toBe('source-monitor');
     });
 
     it('should initialize with timeline in center-bottom zone', () => {
@@ -344,6 +345,7 @@ describe('WorkspaceLayoutStore', () => {
         const { layout, activePresetId } = useWorkspaceLayoutStore.getState();
         expect(activePresetId).toBe('editing');
         expect(layout.zones.left.panelIds).toEqual(['explorer']);
+        expect(layout.zones['center-top'].activePanelId).toBe('source-monitor');
         expect(layout.sizes.centerSplitRatio).toBe(0.4);
       });
 
