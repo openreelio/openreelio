@@ -12,6 +12,7 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { applyProjectState, refreshProjectState } from '@/utils/stateRefreshHelper';
+import { getClipSourceTimeAtTimelineTime, getClipTimelineTimeAtSourceTime } from '@/utils/clipTiming';
 
 const logger = createLogger('useTranscriptEditing');
 
@@ -104,6 +105,7 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
           sourceOutSec: clip.range.sourceOutSec,
           speed: clip.speed,
           timelineInSec: clip.place.timelineInSec,
+          clip,
         };
       }
     }
@@ -173,8 +175,7 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
     if (visibleWords.length === 0 || !clipInfo) return -1;
 
     // Convert timeline time to source time
-    const sourceTime =
-      clipInfo.sourceInSec + (currentTime - clipInfo.timelineInSec) * clipInfo.speed;
+    const sourceTime = getClipSourceTimeAtTimelineTime(clipInfo.clip, currentTime);
 
     for (let i = 0; i < visibleWords.length; i++) {
       if (sourceTime >= visibleWords[i].startSec && sourceTime < visibleWords[i].endSec) {
@@ -190,8 +191,7 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
       if (wordIndex < 0 || wordIndex >= visibleWords.length || !clipInfo) return;
       const word = visibleWords[wordIndex];
       // Convert source time to timeline time
-      const timelineTime =
-        clipInfo.timelineInSec + (word.startSec - clipInfo.sourceInSec) / clipInfo.speed;
+      const timelineTime = getClipTimelineTimeAtSourceTime(clipInfo.clip, word.startSec);
       seek(timelineTime, 'transcript-word');
     },
     [visibleWords, clipInfo, seek],
@@ -254,8 +254,7 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
       if (!startWord || !endWord || !targetWord) return;
 
       // Convert target word's source time to timeline position
-      const targetTimelineSec =
-        clipInfo.timelineInSec + (targetWord.startSec - clipInfo.sourceInSec) / clipInfo.speed;
+      const targetTimelineSec = getClipTimelineTimeAtSourceTime(clipInfo.clip, targetWord.startSec);
 
       mutationInFlightRef.current = true;
       setError(null);

@@ -31,6 +31,7 @@ import {
   resolveMasterOutputGain,
   resolveTrackPlaybackRouting,
 } from '@/utils/audioRouting';
+import { getClipSourceTimeAtTimelineTime, getClipTimelineEndSec } from '@/utils/clipTiming';
 
 const logger = createLogger('AudioPlayback');
 
@@ -722,8 +723,7 @@ export function useAudioPlayback({
 
           // Calculate clip timing
           const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-          const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-          const clipEnd = clip.place.timelineInSec + clipDuration;
+          const clipEnd = getClipTimelineEndSec(clip);
 
           // Skip clips that have ended
           if (currentTime >= clipEnd) continue;
@@ -774,8 +774,7 @@ export function useAudioPlayback({
           connectSourceToDestination(source, gainNode, pannerNode, trackChain.inputGain);
 
           // Calculate start timing
-          const timeIntoClip = Math.max(0, currentTime - clip.place.timelineInSec);
-          const sourceOffset = clip.range.sourceInSec + timeIntoClip * safeSpeed;
+          const sourceOffset = getClipSourceTimeAtTimelineTime(clip, currentTime);
           const startDelay = Math.max(0, clip.place.timelineInSec - currentTime);
 
           // Calculate duration to stop at clip's source out point
@@ -853,10 +852,7 @@ export function useAudioPlayback({
         if (ctx && scheduledSourcesRef.current.size > 0) {
           // Find the first active clip to calculate audio timeline position
           const firstActiveClip = audioClips.find((c) => {
-            const syncSpeed = c.clip.speed > 0 ? c.clip.speed : 1;
-            const clipEnd =
-              c.clip.place.timelineInSec +
-              (c.clip.range.sourceOutSec - c.clip.range.sourceInSec) / syncSpeed;
+            const clipEnd = getClipTimelineEndSec(c.clip);
             return currentTime >= c.clip.place.timelineInSec && currentTime < clipEnd;
           });
 

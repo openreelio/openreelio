@@ -19,6 +19,7 @@ import type { Sequence, Asset, Clip, Effect } from '@/types';
 import { createLogger } from '@/services/logger';
 import { collectPlaybackAudioClips } from '@/utils/audioPlayback';
 import { clampClipPan, clampClipVolumeDb, getClipFadeFactor } from '@/utils/clipAudio';
+import { getClipSourceTimeAtTimelineTime, getClipTimelineEndSec } from '@/utils/clipTiming';
 import { normalizeFileUriToPath } from '@/utils/uri';
 import {
   createAudioEffectNode,
@@ -448,8 +449,7 @@ export function useAudioPlaybackWithEffects({
           if (trackMuted) continue;
 
           const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-          const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-          const clipEnd = clip.place.timelineInSec + clipDuration;
+          const clipEnd = getClipTimelineEndSec(clip);
 
           if (currentTime >= clipEnd) continue;
           if (clip.place.timelineInSec > currentTime + SCHEDULE_AHEAD_TIME) continue;
@@ -499,8 +499,7 @@ export function useAudioPlaybackWithEffects({
             pannerNode.connect(masterGainRef.current);
           }
 
-          const timeIntoClip = Math.max(0, currentTime - clip.place.timelineInSec);
-          const sourceOffset = clip.range.sourceInSec + timeIntoClip * safeSpeed;
+          const sourceOffset = getClipSourceTimeAtTimelineTime(clip, currentTime);
           const startDelay = Math.max(0, clip.place.timelineInSec - currentTime);
           const remainingSourceDuration = clip.range.sourceOutSec - sourceOffset;
           const audioDuration = Math.max(0, remainingSourceDuration);

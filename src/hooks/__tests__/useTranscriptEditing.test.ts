@@ -12,6 +12,7 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { refreshProjectState } from '@/utils/stateRefreshHelper';
+import type { Clip } from '@/types';
 
 vi.mock('@/utils/stateRefreshHelper', () => ({
   refreshProjectState: vi.fn().mockResolvedValue({
@@ -39,7 +40,7 @@ function createMockWords(count: number): TranscriptWord[] {
 }
 
 // Helper: set up a selected clip in stores
-function setupClipSelection(assetId = 'asset_1'): void {
+function setupClipSelection(assetId = 'asset_1', clipOverrides: Partial<Clip> = {}): void {
   const clipId = 'clip_1';
   const trackId = 'track_1';
   const seqId = 'seq_1';
@@ -58,18 +59,19 @@ function setupClipSelection(assetId = 'asset_1'): void {
               id: trackId,
               kind: 'video',
               clips: [
-                {
-                  id: clipId,
-                  assetId,
-                  range: { sourceInSec: 0.0, sourceOutSec: 10.0 },
-                  place: { timelineInSec: 0.0, durationSec: 10.0 },
-                  speed: 1.0,
-                  effects: [],
-                  audio: {},
-                  transform: {},
-                  opacity: 1.0,
-                  blendMode: 'Normal',
-                },
+                      {
+                        id: clipId,
+                        assetId,
+                        range: { sourceInSec: 0.0, sourceOutSec: 10.0 },
+                        place: { timelineInSec: 0.0, durationSec: 10.0 },
+                        speed: 1.0,
+                        effects: [],
+                        audio: {},
+                        transform: {},
+                        opacity: 1.0,
+                        blendMode: 'Normal',
+                        ...clipOverrides,
+                      },
               ],
               name: 'Video 1',
               muted: false,
@@ -310,6 +312,28 @@ describe('useTranscriptEditing', () => {
       });
 
       expect(usePlaybackStore.getState().currentTime).toBe(3.0);
+    });
+
+    it('should map transcript seeks through reverse clips', async () => {
+      const mockWords = createMockWords(5);
+      mockInvoke.mockResolvedValueOnce(mockWords);
+      setupClipSelection('asset_1', {
+        reverse: true,
+        range: { sourceInSec: 0, sourceOutSec: 10 },
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
+
+      const { result } = renderHook(() => useTranscriptEditing());
+
+      await waitFor(() => {
+        expect(result.current.words).toHaveLength(5);
+      });
+
+      act(() => {
+        result.current.seekToWord(3);
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBe(7);
     });
   });
 
