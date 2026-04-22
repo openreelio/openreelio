@@ -16,6 +16,7 @@ import {
   getPrimaryTrackClips,
   type OutputStructureSegment,
 } from '@/utils/referenceComparison';
+import { getClipTimelineDurationSec } from '@/utils/clipTiming';
 
 export interface UseReferenceComparisonReturn {
   /** Loaded ESD document */
@@ -165,7 +166,7 @@ export function useReferenceComparison(esdId?: string): UseReferenceComparisonRe
         track.clips.map((clip) => ({
           trackId: track.id,
           timelineInSec: clip.place.timelineInSec,
-          durationSec: clip.place.durationSec,
+          durationSec: getClipTimelineDurationSec(clip),
         })),
       ),
     );
