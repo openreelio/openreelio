@@ -385,11 +385,7 @@ export function Timeline({
     if (!sequence) return DEFAULT_TIMELINE_DURATION;
 
     const clipEndTimes = sequence.tracks.flatMap((track) =>
-      track.clips.map(
-        (clip) =>
-          clip.place.timelineInSec +
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / (clip.speed > 0 ? clip.speed : 1),
-      ),
+      track.clips.map((clip) => clip.place.timelineInSec + getClipTimelineDuration(clip)),
     );
 
     if (clipEndTimes.length === 0) {
@@ -1686,9 +1682,7 @@ export function Timeline({
       const caption: Caption = {
         id: clip.id,
         startSec: clip.place.timelineInSec,
-        endSec:
-          clip.place.timelineInSec +
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / (clip.speed > 0 ? clip.speed : 1),
+        endSec: clip.place.timelineInSec + getClipTimelineDuration(clip),
         text: clip.label || '',
         speaker: undefined,
       };

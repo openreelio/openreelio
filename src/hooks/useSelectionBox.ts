@@ -7,6 +7,7 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { Track } from '@/types';
+import { getClipTimelineDurationSec } from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -130,9 +131,7 @@ export function useSelectionBox({
         track.clips.forEach((clip) => {
           // Calculate clip position in pixels
           const clipLeft = clip.place.timelineInSec * currentZoom - currentScrollX + trackHeaderWidth;
-          const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-          const clipDuration =
-            (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+          const clipDuration = getClipTimelineDurationSec(clip);
           const clipWidth = clipDuration * currentZoom;
           const clipRight = clipLeft + clipWidth;
 

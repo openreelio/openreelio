@@ -137,6 +137,18 @@ describe('SnapPointManager', () => {
       const stats = manager.getStats();
       expect(stats.clipCount).toBe(3);
     });
+
+    it('should honor explicit clip duration when generating snap points', () => {
+      const clip = createMockClip('clip-freeze', 5, 0);
+      clip.range = { sourceInSec: 4, sourceOutSec: 4 };
+      clip.place = { timelineInSec: 5, durationSec: 4 } as Clip['place'];
+      clip.freezeFrame = true;
+
+      manager.updateClip(clip);
+
+      const snapPoints = manager.getSnapPoints();
+      expect(snapPoints).toContainEqual(expect.objectContaining({ time: 9, type: 'clip-end' }));
+    });
   });
 
   describe('Playhead', () => {

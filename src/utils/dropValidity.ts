@@ -6,6 +6,7 @@
  */
 
 import type { Track, Clip, Asset, AssetKind, TrackKind } from '@/types';
+import { getClipTimelineEndSec } from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -117,9 +118,7 @@ export function checkClipOverlap(
     if (excludeClipId && clip.id === excludeClipId) continue;
 
     const clipStart = clip.place.timelineInSec;
-    const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-    const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-    const clipEnd = clipStart + clipDuration;
+    const clipEnd = getClipTimelineEndSec(clip);
 
     // Check for overlap
     if (startTime < clipEnd && endTime > clipStart) {

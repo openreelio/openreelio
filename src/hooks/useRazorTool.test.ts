@@ -131,4 +131,48 @@ describe('useRazorTool', () => {
 
     expect(result.current.getCursorStyle()).toContain('url(');
   });
+
+  it('should find freeze-frame clips using their explicit timeline duration', () => {
+    useEditorToolStore.setState({ activeTool: 'razor' });
+    const onSplit = vi.fn();
+    const freezeSequence: Sequence = {
+      ...mockSequence,
+      tracks: [
+        {
+          ...mockSequence.tracks[0],
+          clips: [
+            {
+              ...mockSequence.tracks[0].clips[0],
+              id: 'clip_freeze',
+              range: { sourceInSec: 5, sourceOutSec: 5 },
+              place: { timelineInSec: 10, durationSec: 4 },
+              freezeFrame: true,
+            },
+          ],
+        },
+      ],
+    };
+
+    const { result } = renderHook(() =>
+      useRazorTool({
+        sequence: freezeSequence,
+        zoom: 100,
+        scrollX: 0,
+        trackHeaderWidth: 192,
+        trackHeight: 48,
+        onSplit,
+      }),
+    );
+
+    const handled = result.current.handleTimelineClick(1392, 40, mockRect);
+
+    expect(handled).toBe(true);
+    expect(onSplit).toHaveBeenCalledWith({
+      sequenceId: 'seq_001',
+      trackId: 'track_001',
+      clipId: 'clip_freeze',
+      splitTime: 12,
+      ignoreLinkedSelection: false,
+    });
+  });
 });

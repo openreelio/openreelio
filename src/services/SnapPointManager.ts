@@ -16,6 +16,7 @@
 import type { SnapPoint, Clip, Sequence } from '@/types';
 import { createLogger } from '@/services/logger';
 import { calculateSnapThreshold } from '@/constants/precision';
+import { getClipTimelineEndSec } from '@/utils/clipTiming';
 
 const logger = createLogger('SnapPointManager');
 
@@ -158,8 +159,7 @@ export class SnapPointManager {
   updateClip(clip: Clip): void {
     const clipId = clip.id;
     const inTime = clip.place.timelineInSec;
-    const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-    const outTime = inTime + (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+    const outTime = getClipTimelineEndSec(clip);
 
     const snapPoints: ManagedSnapPoint[] = [
       {
@@ -209,8 +209,7 @@ export class SnapPointManager {
     for (const track of sequence.tracks) {
       for (const clip of track.clips) {
         const inTime = clip.place.timelineInSec;
-        const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-        const outTime = inTime + (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+        const outTime = getClipTimelineEndSec(clip);
 
         const snapPoints: ManagedSnapPoint[] = [
           {

@@ -11,6 +11,7 @@ import { X, Type } from 'lucide-react';
 import type { Track, TextClipData, TrackKind } from '@/types';
 import { TextPresetPicker } from './TextPresetPicker';
 import { getPresetById, presetToTextClipData, type TextPreset } from '@/data/textPresets';
+import { getClipTimelineDurationSec as resolveClipTimelineDurationSec } from '@/utils/clipTiming';
 
 /** Payload for adding a text clip */
 export interface AddTextPayload {
@@ -60,16 +61,7 @@ const DEFAULT_TEXT_STYLE: TextClipData['style'] = {
 const TEXT_SUPPORTED_TRACK_KINDS: TrackKind[] = ['video', 'overlay'];
 
 function getClipTimelineDurationSec(clip: Track['clips'][number]): number {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  const sourceDuration = clip.range.sourceOutSec - clip.range.sourceInSec;
-
-  if (Number.isFinite(sourceDuration) && sourceDuration > 0) {
-    return sourceDuration / safeSpeed;
-  }
-
-  return Number.isFinite(clip.place.durationSec) && clip.place.durationSec > 0
-    ? clip.place.durationSec
-    : 0;
+  return resolveClipTimelineDurationSec(clip);
 }
 
 function trackHasOverlap(track: Track, timelineIn: number, durationSec: number): boolean {

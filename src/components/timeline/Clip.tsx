@@ -12,6 +12,7 @@ import { useEditorToolStore } from '@/stores/editorToolStore';
 import { useClipDrag, type DragPreviewPosition, type ClipDragData } from '@/hooks/useClipDrag';
 import { useWaveformPeaks } from '@/hooks/useWaveformPeaks';
 import type { Clip as ClipType, SnapPoint, Asset, TrackKind } from '@/types';
+import { getClipTimelineDurationSec } from '@/utils/clipTiming';
 import { isTextClip, hasActiveTimeRemap } from '@/types';
 import { AudioClipWaveform } from './AudioClipWaveform';
 import { WaveformPeaksDisplay } from './WaveformPeaksDisplay';
@@ -179,8 +180,7 @@ export function Clip({
       };
     }
 
-    const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-    const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+    const duration = getClipTimelineDurationSec(clip);
     return {
       duration,
       left: clip.place.timelineInSec * zoom,

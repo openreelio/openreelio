@@ -162,6 +162,31 @@ describe('useClipboard', () => {
       expect(onCopy).toHaveBeenCalled();
     });
 
+    it('should preserve explicit timeline duration when copying freeze-frame clips', () => {
+      const clip = createTestClip({
+        id: 'clip-freeze',
+        range: { sourceInSec: 5, sourceOutSec: 5 },
+        place: { timelineInSec: 4, durationSec: 3 },
+        freezeFrame: true,
+      });
+      const track = createTestTrack([clip]);
+      const sequence = createTestSequence([track]);
+
+      const { result } = renderHook(() =>
+        useClipboard({
+          sequence,
+          selectedClipIds: ['clip-freeze'],
+        })
+      );
+
+      act(() => {
+        result.current.copy();
+      });
+
+      const clipboardItem = useEditorToolStore.getState().clipboard?.[0];
+      expect(clipboardItem?.clipData.durationSec).toBe(3);
+    });
+
     it('should copy multiple clips', () => {
       const clip1 = createTestClip({ id: 'clip-1' });
       const clip2 = createTestClip({ id: 'clip-2', place: { timelineInSec: 5, durationSec: 5 } });
@@ -405,8 +430,8 @@ describe('useClipboard', () => {
         result.current.duplicate();
       });
 
-      // clip-2 ends at 5 + 4 = 9
-      expect(onDuplicate).toHaveBeenCalledWith(['clip-1', 'clip-2'], 9);
+      // clip-2 ends at 5 + explicit duration 5 = 10
+      expect(onDuplicate).toHaveBeenCalledWith(['clip-1', 'clip-2'], 10);
     });
 
     it('should fail when no clips selected', () => {

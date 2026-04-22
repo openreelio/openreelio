@@ -7,6 +7,7 @@
 
 import { useMemo } from 'react';
 import type { Clip } from '@/types';
+import { getClipTimelineDurationSec, getClipTimelineEndSec } from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -49,12 +50,12 @@ function safeNumber(value: unknown, fallback: number): number {
  * Validates that a clip has valid numeric place data.
  */
 function hasValidPlaceData(clip: Clip): boolean {
-  const { timelineInSec, durationSec } = clip?.place ?? {};
+  const timelineInSec = clip?.place?.timelineInSec;
+  const durationSec = getClipTimelineDurationSec(clip);
   return (
     typeof timelineInSec === 'number' &&
     Number.isFinite(timelineInSec) &&
     timelineInSec >= 0 &&
-    typeof durationSec === 'number' &&
     Number.isFinite(durationSec) &&
     durationSec > 0
   );
@@ -78,9 +79,7 @@ function sortClipsByPosition(clips: Clip[]): Clip[] {
  * Get the end time of a clip on the timeline with validation.
  */
 function getClipEndTime(clip: Clip): number {
-  const start = safeNumber(clip.place.timelineInSec, 0);
-  const duration = safeNumber(clip.place.durationSec, 0);
-  return start + duration;
+  return getClipTimelineEndSec(clip);
 }
 
 /**

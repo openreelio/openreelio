@@ -37,6 +37,7 @@ import { useDockableAIPanel } from './hooks/useDockableAIPanel';
 import { dbToLinear, linearToDb } from '@/utils/audioMeter';
 import { resolveAutoDuckTargets } from '@/utils/audioDucking';
 import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
+import { getClipTimelineDurationSec, getClipTimelineEndSec } from '@/utils/clipTiming';
 import { commands } from '@/bindings';
 import { createLogger } from '@/services/logger';
 import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
@@ -681,6 +682,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
         place: {
           trackId: track.id,
           timelineInSec: clip.place.timelineInSec,
+          durationSec: clip.place.durationSec,
         },
         effects: clip.effects
           .map((effectId) => effects.get(effectId))
@@ -688,6 +690,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
         blendMode: clip.blendMode,
         speed: clip.speed,
         reverse: clip.reverse,
+        freezeFrame: clip.freezeFrame,
         hasTimeRemap: hasActiveTimeRemap(clip),
       };
     }
@@ -768,15 +771,11 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       if (track.kind === 'caption') {
         const clip = track.clips.find((c) => c.id === clipId);
         if (clip) {
-          // Calculate duration adjusting for speed
-          const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-          const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-
           return {
             id: clip.id,
             text: clip.label || '', // Using label as text storage for now
             startSec: clip.place.timelineInSec,
-            endSec: clip.place.timelineInSec + duration,
+            endSec: getClipTimelineEndSec(clip),
             style: clip.captionStyle,
             position: clip.captionPosition,
           };
@@ -807,14 +806,11 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
         return undefined;
       }
 
-      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-      const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-
       return {
         id: clip.id,
         textData,
         timelineInSec: clip.place.timelineInSec,
-        durationSec: duration,
+        durationSec: getClipTimelineDurationSec(clip),
       };
     }
 

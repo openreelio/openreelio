@@ -97,4 +97,27 @@ describe('getPlayheadRazorSplitTarget', () => {
 
     expect(getPlayheadRazorSplitTarget(sequence, 0, 4)).toBeNull();
   });
+
+  it('uses explicit clip timeline duration for freeze-frame clips', () => {
+    const sequence = createSequence([
+      createTrack({
+        id: 'track_v1',
+        kind: 'video',
+        clips: [
+          createClip({
+            id: 'clip_freeze',
+            range: { sourceInSec: 5, sourceOutSec: 5 },
+            place: { timelineInSec: 10, durationSec: 4 },
+            freezeFrame: true,
+          }),
+        ],
+      }),
+    ]);
+
+    expect(getPlayheadRazorSplitTarget(sequence, 0, 12)).toEqual({
+      trackId: 'track_v1',
+      clipId: 'clip_freeze',
+      splitTime: 12,
+    });
+  });
 });

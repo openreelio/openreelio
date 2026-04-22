@@ -412,6 +412,47 @@ describe('AddTextDialog', () => {
       expect(onAdd).not.toHaveBeenCalled();
       expect(screen.getByText(/already has a clip at this time/i)).toBeInTheDocument();
     });
+
+    it('should detect overlap against freeze-frame clips using explicit timeline duration', async () => {
+      const user = userEvent.setup();
+      const onAdd = vi.fn().mockResolvedValue(undefined);
+      const tracksWithFreezeConflict: Track[] = [
+        {
+          ...mockTracks[0],
+          clips: [
+            {
+              id: 'clip-freeze',
+              assetId: 'asset-freeze',
+              range: { sourceInSec: 5, sourceOutSec: 5 },
+              place: { timelineInSec: 4, durationSec: 4 },
+              transform: {
+                position: { x: 0.5, y: 0.5 },
+                scale: { x: 1, y: 1 },
+                rotationDeg: 0,
+                anchor: { x: 0.5, y: 0.5 },
+              },
+              opacity: 1,
+              speed: 1,
+              freezeFrame: true,
+              effects: [],
+              audio: {
+                volumeDb: 0,
+                pan: 0,
+                muted: false,
+              },
+            },
+          ],
+        },
+        ...mockTracks.slice(1),
+      ];
+
+      render(<AddTextDialog {...defaultProps} onAdd={onAdd} tracks={tracksWithFreezeConflict} currentTime={6} />);
+
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+      expect(onAdd).not.toHaveBeenCalled();
+      expect(screen.getByText(/already has a clip at this time/i)).toBeInTheDocument();
+    });
   });
 
   // ===========================================================================

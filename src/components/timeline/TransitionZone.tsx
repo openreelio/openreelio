@@ -12,6 +12,7 @@ import { memo, useCallback, useMemo, type KeyboardEvent, type MouseEvent } from 
 import { Layers, X, Plus } from 'lucide-react';
 import type { Clip, Effect, EffectId } from '@/types';
 import { EFFECT_TYPE_LABELS } from '@/types';
+import { getClipTimelineEndSec } from '@/utils/clipTiming';
 
 // =============================================================================
 // Security Helpers
@@ -110,7 +111,7 @@ const TRANSITION_WIDTH_MAX = 10000; // Max visual width for transition indicator
  * Check if two clips are adjacent (touching or overlapping within tolerance)
  */
 function areClipsAdjacent(clipA: Clip, clipB: Clip, tolerance: number): boolean {
-  const clipAEnd = clipA.place.timelineInSec + clipA.place.durationSec;
+  const clipAEnd = getClipTimelineEndSec(clipA);
   const clipBStart = clipB.place.timelineInSec;
   const gap = clipBStart - clipAEnd;
 
@@ -122,7 +123,7 @@ function areClipsAdjacent(clipA: Clip, clipB: Clip, tolerance: number): boolean 
  * Get junction point between two clips in seconds
  */
 function getJunctionPoint(clipA: Clip, clipB: Clip): number {
-  const clipAEnd = clipA.place.timelineInSec + clipA.place.durationSec;
+  const clipAEnd = getClipTimelineEndSec(clipA);
   const clipBStart = clipB.place.timelineInSec;
   // Return the midpoint if overlapping, otherwise clipA end
   return clipAEnd <= clipBStart ? clipAEnd : (clipAEnd + clipBStart) / 2;

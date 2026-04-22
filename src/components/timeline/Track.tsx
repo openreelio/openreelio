@@ -48,6 +48,7 @@ import type { DropValidity } from '@/utils/dropValidity';
 import { TRACK_HEIGHT } from './constants';
 import { getTrackHeaderControls } from './trackHeaderControls';
 import { PasteAttributesDialog, RemoveAttributesDialog } from '@/components/features/effects';
+import { getClipTimelineEndSec } from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -630,7 +631,7 @@ export function Track({
       const sortedClips = [...clips].sort((a, b) => a.place.timelineInSec - b.place.timelineInSec);
 
       for (let i = 0; i < sortedClips.length - 1; i++) {
-        const currentEnd = sortedClips[i].place.timelineInSec + sortedClips[i].place.durationSec;
+        const currentEnd = getClipTimelineEndSec(sortedClips[i]);
         const nextStart = sortedClips[i + 1].place.timelineInSec;
 
         if (nextStart > currentEnd && timeSec >= currentEnd && timeSec < nextStart) {
