@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useClipDrag, type UseClipDragOptions } from './useClipDrag';
+import type { Clip } from '@/types';
 
 // =============================================================================
 // Test Setup
@@ -28,6 +29,24 @@ const createMouseEvent = (
 };
 
 describe('useClipDrag', () => {
+  const createClip = (overrides: Partial<Clip> = {}): Clip =>
+    ({
+      id: 'clip-1',
+      assetId: 'asset-1',
+      range: { sourceInSec: 0, sourceOutSec: 10 },
+      place: { timelineInSec: 5, durationSec: 10 },
+      transform: {
+        position: { x: 0, y: 0 },
+        scale: { x: 1, y: 1 },
+        rotationDeg: 0,
+      },
+      opacity: 1,
+      speed: 1,
+      effects: [],
+      audio: { volumeDb: 0, muted: false, pan: 0 },
+      ...overrides,
+    }) as Clip;
+
   const defaultOptions: UseClipDragOptions = {
     clipId: 'clip-1',
     initialTimelineIn: 5,
@@ -347,6 +366,45 @@ describe('useClipDrag', () => {
       // sourceIn should be clamped to 0 (can extend to source start)
       expect(result.current.previewPosition?.sourceIn).toBeGreaterThanOrEqual(0);
     });
+
+    it('updates sourceOut when trimming the left edge of a reverse clip', () => {
+      const reverseClip = createClip({
+        range: { sourceInSec: 2, sourceOutSec: 8 },
+        place: { timelineInSec: 5, durationSec: 6 },
+        reverse: true,
+      });
+
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          clip: reverseClip,
+          initialTimelineIn: reverseClip.place.timelineInSec,
+          initialSourceIn: reverseClip.range.sourceInSec,
+          initialSourceOut: reverseClip.range.sourceOutSec,
+          maxSourceDuration: 10,
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'trim-left');
+      });
+
+      act(() => {
+        const event = createMouseEvent('mousemove', 110);
+        document.dispatchEvent(event);
+      });
+
+      act(() => {
+        const event = createMouseEvent('mousemove', 200);
+        document.dispatchEvent(event);
+      });
+
+      expect(result.current.previewPosition?.timelineIn).toBeCloseTo(6, 5);
+      expect(result.current.previewPosition?.sourceOut).toBeCloseTo(7, 5);
+      expect(result.current.previewPosition?.sourceIn).toBe(2);
+      expect(result.current.previewPosition?.duration).toBeCloseTo(5, 5);
+    });
   });
 
   // ===========================================================================
@@ -421,6 +479,45 @@ describe('useClipDrag', () => {
       });
 
       expect(result.current.previewPosition?.duration).toBeGreaterThanOrEqual(1);
+    });
+
+    it('updates sourceIn when trimming the right edge of a reverse clip', () => {
+      const reverseClip = createClip({
+        range: { sourceInSec: 2, sourceOutSec: 8 },
+        place: { timelineInSec: 5, durationSec: 6 },
+        reverse: true,
+      });
+
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          clip: reverseClip,
+          initialTimelineIn: reverseClip.place.timelineInSec,
+          initialSourceIn: reverseClip.range.sourceInSec,
+          initialSourceOut: reverseClip.range.sourceOutSec,
+          maxSourceDuration: 10,
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 500);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'trim-right');
+      });
+
+      act(() => {
+        const event = createMouseEvent('mousemove', 490);
+        document.dispatchEvent(event);
+      });
+
+      act(() => {
+        const event = createMouseEvent('mousemove', 300);
+        document.dispatchEvent(event);
+      });
+
+      expect(result.current.previewPosition?.timelineIn).toBe(5);
+      expect(result.current.previewPosition?.sourceIn).toBeCloseTo(4, 5);
+      expect(result.current.previewPosition?.sourceOut).toBe(8);
+      expect(result.current.previewPosition?.duration).toBeCloseTo(4, 5);
     });
   });
 

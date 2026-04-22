@@ -629,6 +629,58 @@ describe('useTimelineClipOperations', () => {
         }),
       );
     });
+
+    it('should trim reverse clips by updating sourceOut and timelineIn', () => {
+      const onClipTrim = vi.fn();
+      const reverseSequence: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [{ ...mockClip, reverse: true, range: { sourceInSec: 2, sourceOutSec: 8 } }],
+          },
+          mockSequence.tracks[1],
+        ],
+      };
+
+      const { result } = renderHook(() =>
+        useTimelineClipOperations({
+          sequence: reverseSequence,
+          zoom: 100,
+          onClipMove: undefined,
+          onClipTrim,
+        }),
+      );
+
+      const dragData: ClipDragData = {
+        clipId: 'clip_001',
+        type: 'trim-left',
+        startX: 500,
+        startY: 0,
+        originalTimelineIn: 5,
+        originalSourceIn: 2,
+        originalSourceOut: 8,
+      };
+
+      const finalPosition: DragPreviewPosition = {
+        timelineIn: 7,
+        sourceIn: 2,
+        sourceOut: 6,
+        duration: 4,
+      };
+
+      act(() => {
+        result.current.handleClipDragEnd('track_001', dragData, finalPosition);
+      });
+
+      expect(onClipTrim).toHaveBeenCalledWith({
+        sequenceId: 'seq_001',
+        trackId: 'track_001',
+        clipId: 'clip_001',
+        newSourceOut: 6,
+        newTimelineIn: 7,
+      } satisfies ClipTrimData);
+    });
   });
 
   describe('handleClipDragEnd for trim-right', () => {
@@ -669,6 +721,57 @@ describe('useTimelineClipOperations', () => {
         trackId: 'track_001',
         clipId: 'clip_001',
         newSourceOut: 8,
+      } satisfies ClipTrimData);
+    });
+
+    it('should trim reverse clips by updating sourceIn', () => {
+      const onClipTrim = vi.fn();
+      const reverseSequence: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [{ ...mockClip, reverse: true, range: { sourceInSec: 2, sourceOutSec: 8 } }],
+          },
+          mockSequence.tracks[1],
+        ],
+      };
+
+      const { result } = renderHook(() =>
+        useTimelineClipOperations({
+          sequence: reverseSequence,
+          zoom: 100,
+          onClipMove: undefined,
+          onClipTrim,
+        }),
+      );
+
+      const dragData: ClipDragData = {
+        clipId: 'clip_001',
+        type: 'trim-right',
+        startX: 500,
+        startY: 0,
+        originalTimelineIn: 5,
+        originalSourceIn: 2,
+        originalSourceOut: 8,
+      };
+
+      const finalPosition: DragPreviewPosition = {
+        timelineIn: 5,
+        sourceIn: 4,
+        sourceOut: 8,
+        duration: 4,
+      };
+
+      act(() => {
+        result.current.handleClipDragEnd('track_001', dragData, finalPosition);
+      });
+
+      expect(onClipTrim).toHaveBeenCalledWith({
+        sequenceId: 'seq_001',
+        trackId: 'track_001',
+        clipId: 'clip_001',
+        newSourceIn: 4,
       } satisfies ClipTrimData);
     });
   });

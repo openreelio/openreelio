@@ -12,6 +12,14 @@ import { useCallback, useRef, useState } from 'react';
 import { useEditorToolStore } from '@/stores/editorToolStore';
 import type { Clip } from '@/types';
 import { MIN_CLIP_DURATION_SEC } from '@/constants/editing';
+import {
+  buildLeftTrimChange,
+  buildRightTrimChange,
+  getClipLeftTrimDeltaBoundsSec,
+  getClipRightTrimDeltaBoundsSec,
+  getClipTimelineEndSec,
+  type ClipTrimChange,
+} from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -47,21 +55,13 @@ export interface RollEditResult {
   /** New edit time */
   newEditTime: number;
   /** Changes to outgoing clip */
-  outgoingClipChange: {
-    clipId: string;
-    sourceOut: number;
-    timelineOut: number;
-  };
+  outgoingClipChange: ClipTrimChange;
   /** Changes to incoming clip */
-  incomingClipChange: {
-    clipId: string;
-    sourceIn: number;
-    timelineIn: number;
-  };
+  incomingClipChange: ClipTrimChange;
   /** Whether the roll was constrained */
   constrained: boolean;
   /** Constraint reason if constrained */
-  constraintReason?: 'outgoing-min' | 'incoming-min' | 'outgoing-source' | 'incoming-source';
+  constraintReason?: 'outgoing-min' | 'incoming-min' | 'outgoing-source' | 'incoming-source' | 'unsupported';
 }
 
 export interface UseRollEditOptions {
@@ -100,17 +100,8 @@ export interface UseRollEditReturn {
   calculateRollConstraints: (editPoint: EditPoint) => { minOffset: number; maxOffset: number };
 }
 
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-function getClipDuration(clip: Clip): number {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  return (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-}
-
 function getClipEndTime(clip: Clip): number {
-  return clip.place.timelineInSec + getClipDuration(clip);
+  return getClipTimelineEndSec(clip);
 }
 
 // =============================================================================
@@ -213,28 +204,19 @@ export function useRollEdit(options: UseRollEditOptions = {}): UseRollEditReturn
    */
   const calculateRollConstraints = useCallback(
     (editPoint: EditPoint): { minOffset: number; maxOffset: number } => {
-      const { outgoingClip, incomingClip, outgoingSourceDuration } = editPoint;
+      const outgoingBounds = getClipRightTrimDeltaBoundsSec(
+        editPoint.outgoingClip,
+        editPoint.outgoingSourceDuration,
+        MIN_CLIP_DURATION_SEC,
+      );
+      const incomingBounds = getClipLeftTrimDeltaBoundsSec(
+        editPoint.incomingClip,
+        editPoint.incomingSourceDuration,
+        MIN_CLIP_DURATION_SEC,
+      );
 
-      // Minimum offset (rolling left, shortening outgoing)
-      const outgoingDuration = getClipDuration(outgoingClip);
-      const minByOutgoingDuration = -(outgoingDuration - MIN_CLIP_DURATION_SEC);
-
-      // Maximum offset (rolling right, extending outgoing)
-      const incomingDuration = getClipDuration(incomingClip);
-      const maxByIncomingDuration = incomingDuration - MIN_CLIP_DURATION_SEC;
-
-      // Can't roll right past source availability of outgoing
-      const outgoingSourceRemaining = outgoingSourceDuration - outgoingClip.range.sourceOutSec;
-      const safeOutgoingSpeed = outgoingClip.speed > 0 ? outgoingClip.speed : 1;
-      const maxByOutgoingSource = outgoingSourceRemaining / safeOutgoingSpeed;
-
-      // Can't roll left past source availability of incoming
-      const incomingSourceRemaining = incomingClip.range.sourceInSec;
-      const safeIncomingSpeed = incomingClip.speed > 0 ? incomingClip.speed : 1;
-      const minByIncomingSource = -(incomingSourceRemaining / safeIncomingSpeed);
-
-      const minOffset = Math.max(minByOutgoingDuration, minByIncomingSource);
-      const maxOffset = Math.min(maxByIncomingDuration, maxByOutgoingSource);
+      const minOffset = Math.max(outgoingBounds.minDeltaSec, incomingBounds.minDeltaSec);
+      const maxOffset = Math.min(outgoingBounds.maxDeltaSec, incomingBounds.maxDeltaSec);
 
       return { minOffset, maxOffset };
     },
@@ -273,30 +255,27 @@ export function useRollEdit(options: UseRollEditOptions = {}): UseRollEditReturn
 
       let constraintReason: RollEditResult['constraintReason'];
       if (constrained) {
-        if (offset < minOffset) {
-          constraintReason = offset < -(getClipDuration(editPoint.outgoingClip) - MIN_CLIP_DURATION_SEC)
-            ? 'outgoing-min'
-            : 'incoming-source';
+        if (
+          buildRightTrimChange(editPoint.outgoingClip, getClipEndTime(editPoint.outgoingClip)) === null ||
+          buildLeftTrimChange(editPoint.incomingClip, editPoint.incomingClip.place.timelineInSec) === null
+        ) {
+          constraintReason = 'unsupported';
+        } else if (offset < minOffset) {
+          constraintReason = 'incoming-source';
         } else {
-          constraintReason = offset > (getClipDuration(editPoint.incomingClip) - MIN_CLIP_DURATION_SEC)
-            ? 'incoming-min'
-            : 'outgoing-source';
+          constraintReason = 'outgoing-source';
         }
       }
 
       const newEditTime = editPoint.editTime + constrainedOffset;
 
       // Calculate changes to clips
-      const outgoingClipChange = {
+      const outgoingClipChange = buildRightTrimChange(editPoint.outgoingClip, newEditTime) ?? {
         clipId: editPoint.outgoingClip.id,
-        sourceOut: editPoint.outgoingClip.range.sourceOutSec + (constrainedOffset * editPoint.outgoingClip.speed),
-        timelineOut: newEditTime,
       };
 
-      const incomingClipChange = {
+      const incomingClipChange = buildLeftTrimChange(editPoint.incomingClip, newEditTime) ?? {
         clipId: editPoint.incomingClip.id,
-        sourceIn: editPoint.incomingClip.range.sourceInSec + (constrainedOffset * editPoint.incomingClip.speed),
-        timelineIn: newEditTime,
       };
 
       return {

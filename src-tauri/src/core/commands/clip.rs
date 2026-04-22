@@ -2753,6 +2753,13 @@ impl Command for TrimClipCommand {
 
         let original = sequence.tracks[track_idx].clips[clip_idx].clone();
 
+        if original.freeze_frame || original.has_time_remap() {
+            return Err(CoreError::ValidationError(
+                "TrimClip does not yet support freeze-frame or time-remapped clips"
+                    .to_string(),
+            ));
+        }
+
         // Store old values for undo BEFORE modification
         self.old_source_in = Some(original.range.source_in_sec);
         self.old_source_out = Some(original.range.source_out_sec);
@@ -7235,6 +7242,66 @@ mod tests {
         let clip = &state.sequences[&seq_id].tracks[0].clips[0];
         assert_eq!(clip.range.source_in_sec, 2.0);
         assert_eq!(clip.range.source_out_sec, 8.0);
+    }
+
+    #[test]
+    fn test_trim_clip_rejects_freeze_frame() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip = &mut state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0];
+        clip.freeze_frame = true;
+        clip.range.source_out_sec = 0.04;
+        clip.place.duration_sec = 2.0;
+        let clip_id = clip.id.clone();
+
+        let mut trim_cmd = TrimClipCommand::new_simple(&seq_id, &clip_id).with_source_out(0.08);
+        assert!(matches!(
+            trim_cmd.execute(&mut state),
+            Err(CoreError::ValidationError(message))
+                if message.contains("freeze-frame")
+        ));
+    }
+
+    #[test]
+    fn test_trim_clip_rejects_time_remapped_clip() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip = &mut state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0];
+        clip.time_remap = Some(TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 4.0,
+                source_time: 10.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]));
+        clip.place.duration_sec = 4.0;
+        let clip_id = clip.id.clone();
+
+        let mut trim_cmd = TrimClipCommand::new_simple(&seq_id, &clip_id).with_source_out(8.0);
+        assert!(matches!(
+            trim_cmd.execute(&mut state),
+            Err(CoreError::ValidationError(message))
+                if message.contains("time-remapped")
+        ));
     }
 
     #[test]

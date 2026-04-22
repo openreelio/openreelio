@@ -312,7 +312,7 @@ describe('useSlideEdit', () => {
       const prevClip: AdjacentClip = {
         clip: createTestClip({
           id: 'prev',
-          range: { sourceInSec: 0, sourceOutSec: 5 },
+          range: { sourceInSec: 2, sourceOutSec: 7 },
         }),
         side: 'before',
         sourceDuration: 10,
@@ -321,7 +321,7 @@ describe('useSlideEdit', () => {
       const nextClip: AdjacentClip = {
         clip: createTestClip({
           id: 'next',
-          range: { sourceInSec: 0, sourceOutSec: 5 },
+          range: { sourceInSec: 2, sourceOutSec: 7 },
         }),
         side: 'after',
         sourceDuration: 10,
@@ -615,10 +615,12 @@ describe('useRollEdit', () => {
       const editPoint = {
         outgoingClip: createTestClip({
           id: 'outgoing',
+          place: { timelineInSec: 0, durationSec: 5 },
           range: { sourceInSec: 0, sourceOutSec: 5 },
         }),
         incomingClip: createTestClip({
           id: 'incoming',
+          place: { timelineInSec: 5, durationSec: 5 },
           range: { sourceInSec: 0, sourceOutSec: 5 },
         }),
         trackId: 'track-1',

@@ -1,5 +1,12 @@
 import type { Clip, Sequence, Track, TrackKind } from '@/types';
 import type { ClipTrimData } from '@/components/timeline/types';
+import {
+  buildLeftTrimChange,
+  buildRightTrimChange,
+  getClipTimelineEndSec,
+  isClipActiveAtTime,
+  supportsSourceBoundaryTrimming,
+} from '@/utils/clipTiming';
 
 const LINK_KEY_PRECISION = 6;
 
@@ -55,12 +62,7 @@ function isVisualTrackKind(trackKind: TrackKind): boolean {
 }
 
 function clipContainsTime(clip: Clip, time: number): boolean {
-  const safeSpeed = getSafeSpeed(clip);
-  const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-  const clipStart = clip.place.timelineInSec;
-  const clipEnd = clipStart + duration;
-
-  return time > clipStart && time < clipEnd;
+  return isClipActiveAtTime(clip, time) && time > clip.place.timelineInSec && time < getClipTimelineEndSec(clip);
 }
 
 export function findClipReference(sequence: Sequence, clipId: string): ClipReference | null {
@@ -224,6 +226,11 @@ export function buildLinkedTrimTargets(sequence: Sequence, trimData: ClipTrimDat
 
   const sourceClip = sourceRef.clip;
 
+  const isLeftTrim = typeof trimData.newTimelineIn === 'number';
+  const timelineInDelta =
+    typeof trimData.newTimelineIn === 'number'
+      ? trimData.newTimelineIn - sourceClip.place.timelineInSec
+      : undefined;
   const sourceInDelta =
     typeof trimData.newSourceIn === 'number'
       ? trimData.newSourceIn - sourceClip.range.sourceInSec
@@ -232,15 +239,21 @@ export function buildLinkedTrimTargets(sequence: Sequence, trimData: ClipTrimDat
     typeof trimData.newSourceOut === 'number'
       ? trimData.newSourceOut - sourceClip.range.sourceOutSec
       : undefined;
-  const timelineInDelta =
-    typeof trimData.newTimelineIn === 'number'
-      ? trimData.newTimelineIn - sourceClip.place.timelineInSec
-      : undefined;
+
+  const rightTrimTimelineDelta =
+    !isLeftTrim && typeof sourceOutDelta === 'number'
+      ? sourceOutDelta / getSafeSpeed(sourceClip)
+      : !isLeftTrim && typeof sourceInDelta === 'number'
+        ? -sourceInDelta / getSafeSpeed(sourceClip)
+        : undefined;
 
   const targets: ClipTrimData[] = [];
   for (const companionId of companionIds) {
     const companionRef = findClipReference(sequence, companionId);
     if (!companionRef) {
+      continue;
+    }
+    if (!supportsSourceBoundaryTrimming(companionRef.clip)) {
       continue;
     }
 
@@ -250,16 +263,29 @@ export function buildLinkedTrimTargets(sequence: Sequence, trimData: ClipTrimDat
       clipId: companionRef.clip.id,
     };
 
-    if (typeof sourceInDelta === 'number') {
-      companionTrim.newSourceIn = companionRef.clip.range.sourceInSec + sourceInDelta;
-    }
+    if (isLeftTrim && typeof timelineInDelta === 'number') {
+      const linkedLeftTrim = buildLeftTrimChange(
+        companionRef.clip,
+        companionRef.clip.place.timelineInSec + timelineInDelta,
+      );
+      if (!linkedLeftTrim) {
+        continue;
+      }
 
-    if (typeof sourceOutDelta === 'number') {
-      companionTrim.newSourceOut = companionRef.clip.range.sourceOutSec + sourceOutDelta;
-    }
+      companionTrim.newTimelineIn = linkedLeftTrim.timelineIn;
+      companionTrim.newSourceIn = linkedLeftTrim.sourceIn;
+      companionTrim.newSourceOut = linkedLeftTrim.sourceOut;
+    } else if (!isLeftTrim && typeof rightTrimTimelineDelta === 'number') {
+      const linkedRightTrim = buildRightTrimChange(
+        companionRef.clip,
+        getClipTimelineEndSec(companionRef.clip) + rightTrimTimelineDelta,
+      );
+      if (!linkedRightTrim) {
+        continue;
+      }
 
-    if (typeof timelineInDelta === 'number') {
-      companionTrim.newTimelineIn = companionRef.clip.place.timelineInSec + timelineInDelta;
+      companionTrim.newSourceIn = linkedRightTrim.sourceIn;
+      companionTrim.newSourceOut = linkedRightTrim.sourceOut;
     }
 
     targets.push(companionTrim);
