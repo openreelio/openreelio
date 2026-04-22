@@ -77,6 +77,8 @@ interface ActiveClipInfo {
   asset: Asset | undefined;
 }
 
+type DrawableVisual = HTMLImageElement | HTMLCanvasElement;
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -84,6 +86,7 @@ interface ActiveClipInfo {
 const DEFAULT_ASPECT_RATIO = 16 / 9;
 const DEFAULT_WIDTH = 640;
 const DEFAULT_HEIGHT = 360;
+const MAX_COMPOUND_RENDER_DEPTH = 6;
 
 /** Map BlendMode to Canvas globalCompositeOperation.
  * Canvas 2D only supports a subset of blend modes natively.
@@ -169,6 +172,45 @@ function applyClipTransformToTextData(textData: TextClipData, transform: Transfo
   };
 }
 
+function drawVisualWithClipTransform(
+  ctx: CanvasRenderingContext2D,
+  visual: DrawableVisual,
+  clip: Clip,
+  blendMode: BlendMode,
+  canvasWidth: number,
+  canvasHeight: number,
+): void {
+  const transform = clip.transform;
+  const sourceWidth = Math.max(1, visual.width);
+  const sourceHeight = Math.max(1, visual.height);
+
+  ctx.save();
+  ctx.globalAlpha = clip.opacity;
+  ctx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] || 'source-over';
+
+  const baseScaleX = canvasWidth / sourceWidth;
+  const baseScaleY = canvasHeight / sourceHeight;
+  const baseScale = Math.min(baseScaleX, baseScaleY);
+
+  const scaledWidth = sourceWidth * baseScale * transform.scale.x;
+  const scaledHeight = sourceHeight * baseScale * transform.scale.y;
+
+  const centerX = transform.position.x * canvasWidth;
+  const centerY = transform.position.y * canvasHeight;
+
+  const anchorOffsetX = transform.anchor.x * scaledWidth;
+  const anchorOffsetY = transform.anchor.y * scaledHeight;
+
+  ctx.translate(centerX, centerY);
+
+  if (transform.rotationDeg !== 0) {
+    ctx.rotate((transform.rotationDeg * Math.PI) / 180);
+  }
+
+  ctx.drawImage(visual, -anchorOffsetX, -anchorOffsetY, scaledWidth, scaledHeight);
+  ctx.restore();
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -220,10 +262,6 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     return activeSequenceId ? sequences.get(activeSequenceId) : undefined;
   }, [activeSequenceId, sequences]);
 
-  const tracks: Track[] = useMemo(() => {
-    return activeSequence?.tracks ?? [];
-  }, [activeSequence]);
-
   const textClipDataById = useSequenceTextClipData(activeSequence ?? null);
 
   // Note: Sequence format canvas dimensions are available via activeSequence?.format.canvas
@@ -238,10 +276,14 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
    * sorted by layer order (higher track index = further back, rendered first).
    */
   const getActiveClipsAtTime = useCallback(
-    (time: number): ActiveClipInfo[] => {
+    (sequence: Sequence | undefined, time: number): ActiveClipInfo[] => {
+      if (!sequence) {
+        return [];
+      }
+
       const activeClips: ActiveClipInfo[] = [];
 
-      tracks.forEach((track, trackIndex) => {
+      sequence.tracks.forEach((track, trackIndex) => {
         // Skip non-renderable tracks (audio), hidden tracks, and muted tracks.
         // Video, overlay, and caption tracks can render visuals in canvas mode.
         const isRenderableTrack =
@@ -285,20 +327,24 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       return activeClips;
     },
-    [tracks, assets],
+    [assets],
   );
 
   // Get active clip info for the legacy single-asset frame extractor
   // (used for prefetching on the topmost visible clip)
   const getClipAtTime = useCallback(
     (time: number): { clip: Clip; sourceTime: number } | null => {
-      const activeClips = getActiveClipsAtTime(time);
+      if (!activeSequence) {
+        return null;
+      }
+
+      const activeClips = getActiveClipsAtTime(activeSequence, time);
       if (activeClips.length === 0) return null;
       // Return the topmost clip (last in sorted array)
       const topClip = activeClips[activeClips.length - 1];
       return { clip: topClip.clip, sourceTime: topClip.sourceTime };
     },
-    [getActiveClipsAtTime],
+    [activeSequence, getActiveClipsAtTime],
   );
 
   // Get active clip info for frame extraction (legacy hook compatibility)
@@ -377,10 +423,212 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         return;
       }
 
-      const activeClips = getActiveClipsAtTime(time);
+      const renderSequenceToCanvas = async (
+        targetCtx: CanvasRenderingContext2D,
+        sequence: Sequence,
+        timelineTime: number,
+        requestTime: number,
+        visitedSequenceIds: Set<string>,
+        depth: number,
+      ): Promise<boolean> => {
+        if (depth > MAX_COMPOUND_RENDER_DEPTH) {
+          console.warn('[TimelinePreviewPlayer] Skipped nested compound render beyond depth limit', {
+            sequenceId: sequence.id,
+            depth,
+          });
+          return true;
+        }
+
+        const activeClips = getActiveClipsAtTime(sequence, timelineTime);
+        if (activeClips.length === 0) {
+          return true;
+        }
+
+        const mediaClips = activeClips.filter(({ clip, track, asset }) => {
+          if (clip.compoundSequenceId) {
+            return false;
+          }
+
+          return !isCaptionLikeClip(track, clip, asset) && !isTextClip(clip.assetId);
+        });
+
+        const frameResults = await Promise.all(
+          mediaClips.map(async (clipInfo) => {
+            if (!clipInfo.asset) {
+              return { clipInfo, imgUrl: null as string | null };
+            }
+
+            if (clipInfo.asset.kind === 'image') {
+              return {
+                clipInfo,
+                imgUrl: convertFileSrc(clipInfo.asset.uri),
+              };
+            }
+
+            const frameUrl = await extractFrameForAsset(
+              clipInfo.asset.id,
+              clipInfo.asset.uri,
+              clipInfo.sourceTime,
+            );
+
+            return { clipInfo, imgUrl: frameUrl };
+          }),
+        );
+
+        if (requestTime !== lastRenderTimeRef.current) {
+          return false;
+        }
+
+        const loadedFrames = await Promise.all(
+          frameResults.map(async ({ clipInfo, imgUrl }) => {
+            if (!imgUrl) {
+              return { clipInfo, img: null as HTMLImageElement | null };
+            }
+
+            return new Promise<{ clipInfo: ActiveClipInfo; img: HTMLImageElement | null }>(
+              (resolve) => {
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = () => resolve({ clipInfo, img });
+                img.onerror = () => resolve({ clipInfo, img: null });
+                img.src = imgUrl;
+              },
+            );
+          }),
+        );
+
+        if (requestTime !== lastRenderTimeRef.current) {
+          return false;
+        }
+
+        const mediaFrameByClipId = new Map<string, HTMLImageElement>();
+        for (const { clipInfo, img } of loadedFrames) {
+          if (img) {
+            mediaFrameByClipId.set(clipInfo.clip.id, img);
+          }
+        }
+
+        for (const clipInfo of activeClips) {
+          const { clip, track, asset } = clipInfo;
+          const blendMode = getEffectiveBlendMode(clip.blendMode, track.blendMode);
+
+          if (clip.compoundSequenceId) {
+            if (visitedSequenceIds.has(clip.compoundSequenceId)) {
+              console.warn('[TimelinePreviewPlayer] Skipped cyclic compound clip render', {
+                clipId: clip.id,
+                compoundSequenceId: clip.compoundSequenceId,
+              });
+              continue;
+            }
+
+            const nestedSequence = sequences.get(clip.compoundSequenceId);
+            if (!nestedSequence) {
+              continue;
+            }
+
+            const nestedCanvas = targetCtx.canvas.ownerDocument.createElement('canvas');
+            nestedCanvas.width = targetCtx.canvas.width;
+            nestedCanvas.height = targetCtx.canvas.height;
+
+            const nestedCtx = nestedCanvas.getContext('2d');
+            if (!nestedCtx) {
+              continue;
+            }
+
+            const nestedTime = getClipSourceTimeAtTimelineTime(clip, timelineTime);
+            const completed = await renderSequenceToCanvas(
+              nestedCtx,
+              nestedSequence,
+              nestedTime,
+              requestTime,
+              new Set([...visitedSequenceIds, clip.compoundSequenceId]),
+              depth + 1,
+            );
+
+            if (!completed) {
+              return false;
+            }
+
+            drawVisualWithClipTransform(
+              targetCtx,
+              nestedCanvas,
+              clip,
+              blendMode,
+              targetCtx.canvas.width,
+              targetCtx.canvas.height,
+            );
+            continue;
+          }
+
+          if (isCaptionLikeClip(track, clip, asset)) {
+            const text = clip.label?.trim();
+            if (!text) {
+              continue;
+            }
+
+            targetCtx.save();
+            targetCtx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] || 'source-over';
+            renderCaptionClipToCanvas(
+              targetCtx,
+              clip,
+              track.kind,
+              text,
+              targetCtx.canvas.width,
+              targetCtx.canvas.height,
+            );
+            targetCtx.restore();
+            continue;
+          }
+
+          if (isTextClip(clip.assetId)) {
+            const textData = extractTextDataFromClipWithMap(clip, textClipDataById);
+            if (!textData) {
+              continue;
+            }
+
+            const transformedTextData = applyClipTransformToTextData(textData, clip.transform);
+
+            targetCtx.save();
+            targetCtx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] || 'source-over';
+            renderTextToCanvas(
+              targetCtx,
+              transformedTextData,
+              targetCtx.canvas.width,
+              targetCtx.canvas.height,
+              clip.opacity,
+            );
+            targetCtx.restore();
+            continue;
+          }
+
+          const img = mediaFrameByClipId.get(clip.id);
+          if (!img) {
+            continue;
+          }
+
+          drawVisualWithClipTransform(
+            targetCtx,
+            img,
+            clip,
+            blendMode,
+            targetCtx.canvas.width,
+            targetCtx.canvas.height,
+          );
+        }
+
+        return true;
+      };
+
+      const activeClips = getActiveClipsAtTime(activeSequence, time);
 
       if (activeClips.length === 0) {
         // No clips at this time - clear canvas and show black
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        return;
+      }
+
+      if (!activeSequence) {
         ctx.fillStyle = '#000000';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         return;
@@ -394,145 +642,20 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         setIsMultiFrameLoading(true);
       }
 
-      // Only media clips require frame extraction.
-      const mediaClips = activeClips.filter(
-        (clipInfo) =>
-          !isCaptionLikeClip(clipInfo.track, clipInfo.clip, clipInfo.asset) &&
-          !isTextClip(clipInfo.clip.assetId),
-      );
-
-      // Load all frames in parallel (only for media clips)
-      const framePromises = mediaClips.map(async (clipInfo) => {
-        if (!clipInfo.asset) return { clipInfo, img: null };
-
-        // For images, use the asset URI directly
-        if (clipInfo.asset.kind === 'image') {
-          return {
-            clipInfo,
-            imgUrl: convertFileSrc(clipInfo.asset.uri),
-          };
-        }
-
-        // For videos, extract the frame
-        const frameUrl = await extractFrameForAsset(
-          clipInfo.asset.id,
-          clipInfo.asset.uri,
-          clipInfo.sourceTime,
-        );
-
-        return { clipInfo, imgUrl: frameUrl };
-      });
-
-      const frameResults = await Promise.all(framePromises);
-
-      // Check if this is still the latest request (race condition prevention)
-      if (time !== lastRenderTimeRef.current) {
-        // Don't clear loading state here - a newer request is in progress
-        // and will manage its own loading state
-        return;
-      }
-
-      // Load all images
-      const loadedFrames = await Promise.all(
-        frameResults.map(async (result) => {
-          // Type guard: check if imgUrl exists and is a string
-          const imgUrl = 'imgUrl' in result ? result.imgUrl : null;
-          if (!imgUrl || typeof imgUrl !== 'string') {
-            return { clipInfo: result.clipInfo, img: null };
-          }
-
-          return new Promise<{ clipInfo: ActiveClipInfo; img: HTMLImageElement | null }>(
-            (resolve) => {
-              const img = new Image();
-              img.crossOrigin = 'anonymous';
-              img.onload = () => resolve({ clipInfo: result.clipInfo, img });
-              img.onerror = () => resolve({ clipInfo: result.clipInfo, img: null });
-              img.src = imgUrl;
-            },
-          );
-        }),
-      );
-
-      // Check again for race condition after async image loading
-      if (time !== lastRenderTimeRef.current) {
-        // Don't clear loading state here - a newer request is in progress
-        // and will manage its own loading state
-        return;
-      }
-
-      const mediaFrameByClipId = new Map<string, HTMLImageElement>();
-      for (const { clipInfo, img } of loadedFrames) {
-        if (img) {
-          mediaFrameByClipId.set(clipInfo.clip.id, img);
-        }
-      }
-
       // Clear canvas before compositing
       ctx.fillStyle = '#000000';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const completed = await renderSequenceToCanvas(
+        ctx,
+        activeSequence,
+        time,
+        time,
+        new Set([activeSequence.id]),
+        0,
+      );
 
-      // Render each clip in z-order (back to front) regardless of clip type.
-      for (const clipInfo of activeClips) {
-        const { clip, track, asset } = clipInfo;
-        const blendMode = getEffectiveBlendMode(clip.blendMode, track.blendMode);
-
-        if (isCaptionLikeClip(track, clip, asset)) {
-          const text = clip.label?.trim();
-          if (!text) {
-            continue;
-          }
-
-          renderCaptionClipToCanvas(ctx, clip, track.kind, text, canvas.width, canvas.height);
-          continue;
-        }
-
-        if (isTextClip(clip.assetId)) {
-          const textData = extractTextDataFromClipWithMap(clip, textClipDataById);
-          if (!textData) {
-            continue;
-          }
-
-          const transformedTextData = applyClipTransformToTextData(textData, clip.transform);
-
-          ctx.save();
-          ctx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] || 'source-over';
-          renderTextToCanvas(ctx, transformedTextData, canvas.width, canvas.height, clip.opacity);
-          ctx.restore();
-          continue;
-        }
-
-        const img = mediaFrameByClipId.get(clip.id);
-        if (!img) {
-          continue;
-        }
-
-        const transform = clip.transform;
-
-        ctx.save();
-        ctx.globalAlpha = clip.opacity;
-        ctx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] || 'source-over';
-
-        const baseScaleX = canvas.width / img.width;
-        const baseScaleY = canvas.height / img.height;
-        const baseScale = Math.min(baseScaleX, baseScaleY);
-
-        const scaledWidth = img.width * baseScale * transform.scale.x;
-        const scaledHeight = img.height * baseScale * transform.scale.y;
-
-        const centerX = transform.position.x * canvas.width;
-        const centerY = transform.position.y * canvas.height;
-
-        const anchorOffsetX = transform.anchor.x * scaledWidth;
-        const anchorOffsetY = transform.anchor.y * scaledHeight;
-
-        ctx.translate(centerX, centerY);
-
-        if (transform.rotationDeg !== 0) {
-          ctx.rotate((transform.rotationDeg * Math.PI) / 180);
-        }
-
-        ctx.drawImage(img, -anchorOffsetX, -anchorOffsetY, scaledWidth, scaledHeight);
-        ctx.restore();
+      if (!completed) {
+        return;
       }
 
       // Clear multi-frame loading state (only if mounted and was loading)
@@ -544,7 +667,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       onFrameRender?.(time);
     },
-    [getActiveClipsAtTime, extractFrameForAsset, onFrameRender, textClipDataById],
+    [activeSequence, getActiveClipsAtTime, extractFrameForAsset, onFrameRender, sequences, textClipDataById],
   );
 
   // Playback loop integration

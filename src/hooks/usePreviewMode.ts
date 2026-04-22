@@ -170,6 +170,10 @@ function getCanvasFallbackReason({ clip, track, asset }: ActiveClipInfo): string
     return 'Overlay/caption compositing requires canvas mode';
   }
 
+  if (clip.compoundSequenceId) {
+    return 'Compound clips require canvas compositing';
+  }
+
   if (!asset) {
     return 'Active clip asset is unavailable - using frame extraction';
   }
