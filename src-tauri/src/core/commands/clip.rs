@@ -2755,8 +2755,7 @@ impl Command for TrimClipCommand {
 
         if original.freeze_frame || original.has_time_remap() {
             return Err(CoreError::ValidationError(
-                "TrimClip does not yet support freeze-frame or time-remapped clips"
-                    .to_string(),
+                "TrimClip does not yet support freeze-frame or time-remapped clips".to_string(),
             ));
         }
 
@@ -7501,8 +7500,9 @@ mod tests {
 
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
 
-        // Set speed to 2.0
-        state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0].speed = 2.0;
+        // Set speed to 2.0 and update the clip's explicit timeline duration.
+        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, &track_id, &clip_id, 2.0, false);
+        speed_cmd.execute(&mut state).unwrap();
 
         // Timeline duration should be 10 sec (20 source sec / 2.0 speed)
         let clip = &state.sequences[&seq_id].tracks[0].clips[0];
@@ -7531,6 +7531,7 @@ mod tests {
         let clip = &state.sequences[&seq_id].tracks[0].clips[0];
         assert_eq!(clip.range.source_in_sec, 0.0);
         assert_eq!(clip.range.source_out_sec, 20.0);
+        assert_eq!(clip.place.duration_sec, 10.0);
         assert_eq!(clip.speed, 2.0);
     }
 

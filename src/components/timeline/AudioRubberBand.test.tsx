@@ -291,10 +291,11 @@ describe('AudioRubberBand', () => {
       expect(container.querySelector('[data-testid="audio-rubber-band"]')).not.toBeInTheDocument();
     });
 
-    it('should not render when clip has zero source duration', () => {
+    it('should not render when clip resolves to zero timeline duration', () => {
       const actions = createMockActions();
       const zeroDurationClip: Clip = {
         ...mockClip,
+        place: { timelineInSec: 0, durationSec: 0 },
         range: { sourceInSec: 5, sourceOutSec: 5 },
       };
 
@@ -310,6 +311,7 @@ describe('AudioRubberBand', () => {
       const fastClip: Clip = {
         ...mockClip,
         speed: 2,
+        place: { timelineInSec: 0, durationSec: 0 },
         audio: {
           volumeDb: 0,
           pan: 0,
@@ -323,7 +325,6 @@ describe('AudioRubberBand', () => {
 
       render(<AudioRubberBand clip={fastClip} width={500} actions={actions} />);
 
-      // Clip duration = (10-0)/2 = 5s; has 2 keyframes and width >= 40 => should render
       expect(screen.getByTestId('audio-rubber-band')).toBeInTheDocument();
     });
   });

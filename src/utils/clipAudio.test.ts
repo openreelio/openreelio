@@ -60,13 +60,25 @@ describe('clipAudio utils', () => {
   });
 
   describe('getClipTimelineDurationSec', () => {
-    it('returns speed-adjusted clip duration', () => {
+    it('returns explicit timeline duration when present', () => {
       const clip = createClip({ speed: 2, range: { sourceInSec: 0, sourceOutSec: 8 } });
+      expect(getClipTimelineDurationSec(clip)).toBe(10);
+    });
+
+    it('returns speed-adjusted clip duration when explicit duration is unavailable', () => {
+      const clip = createClip({
+        speed: 2,
+        range: { sourceInSec: 0, sourceOutSec: 8 },
+        place: { timelineInSec: 0, durationSec: 0 },
+      });
       expect(getClipTimelineDurationSec(clip)).toBe(4);
     });
 
-    it('returns 0 for invalid clip duration', () => {
-      const clip = createClip({ range: { sourceInSec: 10, sourceOutSec: 0 } });
+    it('returns 0 for invalid clip duration when explicit duration is unavailable', () => {
+      const clip = createClip({
+        range: { sourceInSec: 10, sourceOutSec: 0 },
+        place: { timelineInSec: 0, durationSec: 0 },
+      });
       expect(getClipTimelineDurationSec(clip)).toBe(0);
     });
   });

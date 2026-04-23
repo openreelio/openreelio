@@ -181,7 +181,7 @@ function invertTimeRemapCurve(
 }
 
 export function getClipTimelineDurationSec(clip: Clip): number {
-  const placeDuration = clip.place.durationSec;
+  const placeDuration = clip.place?.durationSec;
   if (Number.isFinite(placeDuration) && placeDuration > 0) {
     return placeDuration;
   }
@@ -202,8 +202,13 @@ export function getClipTimelineDurationSec(clip: Clip): number {
   return 0;
 }
 
+function getClipTimelineInSec(clip: Clip): number | null {
+  const timelineInSec = clip.place?.timelineInSec;
+  return Number.isFinite(timelineInSec) ? timelineInSec : null;
+}
+
 export function getClipTimelineEndSec(clip: Clip): number {
-  return clip.place.timelineInSec + getClipTimelineDurationSec(clip);
+  return (getClipTimelineInSec(clip) ?? 0) + getClipTimelineDurationSec(clip);
 }
 
 export function isClipActiveAtTime(clip: Clip, timelineTimeSec: number, epsilonSec = 0): boolean {
@@ -215,7 +220,12 @@ export function isClipActiveAtTime(clip: Clip, timelineTimeSec: number, epsilonS
     return false;
   }
 
-  const clipStart = clip.place.timelineInSec - epsilonSec;
+  const clipTimelineInSec = getClipTimelineInSec(clip);
+  if (clipTimelineInSec == null) {
+    return false;
+  }
+
+  const clipStart = clipTimelineInSec - epsilonSec;
   const clipEnd = getClipTimelineEndSec(clip) + epsilonSec;
   if (clipEnd - clipStart <= MIN_DURATION_EPSILON_SEC) {
     return false;
@@ -226,7 +236,8 @@ export function isClipActiveAtTime(clip: Clip, timelineTimeSec: number, epsilonS
 
 export function getClipSourceTimeAtTimelineTime(clip: Clip, timelineTimeSec: number): number {
   const durationSec = getClipTimelineDurationSec(clip);
-  const offsetInTimeline = clamp(timelineTimeSec - clip.place.timelineInSec, 0, durationSec);
+  const clipTimelineInSec = getClipTimelineInSec(clip) ?? 0;
+  const offsetInTimeline = clamp(timelineTimeSec - clipTimelineInSec, 0, durationSec);
 
   if (clip.freezeFrame) {
     return clip.range.sourceInSec;
@@ -245,18 +256,20 @@ export function getClipSourceTimeAtTimelineTime(clip: Clip, timelineTimeSec: num
 }
 
 export function getClipTimelineTimeAtSourceTime(clip: Clip, sourceTimeSec: number): number {
+  const clipTimelineInSec = getClipTimelineInSec(clip) ?? 0;
+
   if (clip.freezeFrame) {
-    return clip.place.timelineInSec;
+    return clipTimelineInSec;
   }
 
   const durationSec = getClipTimelineDurationSec(clip);
   if (durationSec <= 0) {
-    return clip.place.timelineInSec;
+    return clipTimelineInSec;
   }
 
   if (hasActiveTimeRemap(clip) && clip.timeRemap) {
     const timelineOffset = invertTimeRemapCurve(clip.timeRemap, sourceTimeSec, durationSec);
-    return clip.place.timelineInSec + clamp(timelineOffset, 0, durationSec);
+    return clipTimelineInSec + clamp(timelineOffset, 0, durationSec);
   }
 
   const clampedSourceTime = clamp(sourceTimeSec, clip.range.sourceInSec, clip.range.sourceOutSec);
@@ -265,7 +278,7 @@ export function getClipTimelineTimeAtSourceTime(clip: Clip, sourceTimeSec: numbe
     ? clip.range.sourceOutSec - clampedSourceTime
     : clampedSourceTime - clip.range.sourceInSec;
 
-  return clip.place.timelineInSec + clamp(offsetInSource / safeSpeed, 0, durationSec);
+  return clipTimelineInSec + clamp(offsetInSource / safeSpeed, 0, durationSec);
 }
 
 export interface ClipTrimChange {

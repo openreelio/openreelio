@@ -1503,7 +1503,7 @@ mod tests {
     fn test_clip_speed() {
         let mut clip = Clip::with_range("asset_123", 0.0, 10.0);
         clip.speed = 2.0;
-        clip.place.duration_sec = clip.duration();
+        clip.place.duration_sec = 0.0;
 
         assert_eq!(clip.duration(), 5.0); // 10 seconds at 2x speed
     }
@@ -2008,6 +2008,7 @@ mod tests {
                 interpolation: KeyframeInterpolation::Linear,
             },
         ]));
+        clip.place.duration_sec = 0.0;
         assert!((clip.duration() - 5.0).abs() < 1e-6);
     }
 
