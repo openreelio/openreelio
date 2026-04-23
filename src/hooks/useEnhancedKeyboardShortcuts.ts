@@ -16,6 +16,7 @@ import { PLAYBACK } from '@/constants/preview';
 import type { Sequence, Clip, Track } from '@/types';
 import { isTextClip } from '@/types';
 import { extractTextDataFromClip } from '@/utils/textRenderer';
+import { getClipTimelineDurationSec, getClipTimelineEndSec } from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -121,8 +122,7 @@ function findClipInSequence(
 }
 
 function getClipDuration(clip: Clip): number {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  return (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+  return getClipTimelineDurationSec(clip);
 }
 
 // =============================================================================
@@ -236,7 +236,7 @@ export function useEnhancedKeyboardShortcuts(options: UseEnhancedKeyboardShortcu
                 ? {
                     text: clip.label || '',
                     startSec: clip.place.timelineInSec,
-                    endSec: clip.place.timelineInSec + getClipDuration(clip),
+                    endSec: getClipTimelineEndSec(clip),
                     style: clip.captionStyle,
                     position: clip.captionPosition,
                   }

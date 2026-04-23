@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isClipActiveAtTime } from './clipTiming';
+import { getClipTimelineDurationSec, isClipActiveAtTime } from './clipTiming';
 import type { Clip } from '@/types';
 
 function createClip(overrides: Partial<Clip> = {}): Clip {
@@ -39,6 +39,49 @@ describe('isClipActiveAtTime', () => {
   it('should return false when the clip is disabled even if the time overlaps', () => {
     const clip = createClip({ enabled: false });
 
+    expect(isClipActiveAtTime(clip, 5)).toBe(false);
+  });
+});
+
+describe('getClipTimelineDurationSec', () => {
+  it('should prefer explicit timeline duration to match backend clip duration rules', () => {
+    const clip = createClip({
+      speed: 2,
+      range: {
+        sourceInSec: 0,
+        sourceOutSec: 8,
+      },
+      place: {
+        timelineInSec: 0,
+        durationSec: 10,
+      },
+    });
+
+    expect(getClipTimelineDurationSec(clip)).toBe(10);
+  });
+
+  it('should fall back to speed-adjusted source duration when explicit duration is invalid', () => {
+    const clip = createClip({
+      speed: 2,
+      range: {
+        sourceInSec: 0,
+        sourceOutSec: 8,
+      },
+      place: {
+        timelineInSec: 0,
+        durationSec: 0,
+      },
+    });
+
+    expect(getClipTimelineDurationSec(clip)).toBe(4);
+  });
+
+  it('should derive duration safely when malformed clips are missing place data', () => {
+    const clip = createClip({
+      place: undefined as unknown as Clip['place'],
+    });
+
+    expect(getClipTimelineDurationSec(clip)).toBe(10);
     expect(isClipActiveAtTime(clip, 5)).toBe(false);
   });
 });

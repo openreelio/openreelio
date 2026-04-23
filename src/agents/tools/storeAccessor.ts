@@ -14,6 +14,7 @@ import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import type { Asset, AssetKind, Clip, FileTreeEntry, Track, Sequence } from '@/types';
+import { getClipTimelineDurationSec, getClipTimelineEndSec, isClipActiveAtTime } from '@/utils/clipTiming';
 
 // =============================================================================
 // Snapshot Types
@@ -99,7 +100,7 @@ function clipToSnapshot(clip: Clip, trackId: string): ClipSnapshot {
     assetId: clip.assetId,
     trackId,
     timelineIn: clip.place.timelineInSec,
-    duration: clip.place.durationSec,
+    duration: getClipTimelineDurationSec(clip),
     sourceIn: clip.range.sourceInSec,
     sourceOut: clip.range.sourceOutSec,
     speed: clip.speed,
@@ -332,9 +333,7 @@ export function getClipsAtTime(time: number): ClipSnapshot[] {
   const result: ClipSnapshot[] = [];
   for (const track of activeSequence.tracks) {
     for (const clip of track.clips) {
-      const clipStart = clip.place.timelineInSec;
-      const clipEnd = clipStart + clip.place.durationSec;
-      if (time >= clipStart && time < clipEnd) {
+      if (isClipActiveAtTime(clip, time)) {
         result.push(clipToSnapshot(clip, track.id));
       }
     }
@@ -383,7 +382,7 @@ export function findGaps(
     const sorted = [...track.clips].sort((a, b) => a.place.timelineInSec - b.place.timelineInSec);
 
     if (sorted.length === 0) continue;
-    let maxEndTime = sorted[0].place.timelineInSec + sorted[0].place.durationSec;
+    let maxEndTime = getClipTimelineEndSec(sorted[0]);
 
     for (let i = 1; i < sorted.length; i++) {
       const nextStart = sorted[i].place.timelineInSec;
@@ -399,7 +398,7 @@ export function findGaps(
       }
       maxEndTime = Math.max(
         maxEndTime,
-        sorted[i].place.timelineInSec + sorted[i].place.durationSec,
+        getClipTimelineEndSec(sorted[i]),
       );
     }
   }
@@ -440,9 +439,9 @@ export function findOverlaps(trackId?: string): Array<{
     for (let i = 0; i < sorted.length; i++) {
       for (let j = i + 1; j < sorted.length; j++) {
         const aStart = sorted[i].place.timelineInSec;
-        const aEnd = aStart + sorted[i].place.durationSec;
+        const aEnd = getClipTimelineEndSec(sorted[i]);
         const bStart = sorted[j].place.timelineInSec;
-        const bEnd = bStart + sorted[j].place.durationSec;
+        const bEnd = getClipTimelineEndSec(sorted[j]);
 
         const overlapStart = Math.max(aStart, bStart);
         const overlapEnd = Math.min(aEnd, bEnd);

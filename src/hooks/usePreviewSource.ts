@@ -11,6 +11,7 @@ import { useProjectStore } from '@/stores';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import type { Sequence, Clip } from '@/types';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { getClipSourceTimeAtTimelineTime, isClipActiveAtTime } from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -47,13 +48,7 @@ function findClipAtTime(sequence: Sequence, time: number): Clip | null {
     if (track.muted || !track.visible) continue;
 
     for (const clip of track.clips) {
-      const clipStart = clip.place.timelineInSec;
-      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-      const clipDuration =
-        (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-      const clipEnd = clipStart + clipDuration;
-
-      if (time >= clipStart && time < clipEnd) {
+      if (isClipActiveAtTime(clip, time)) {
         return clip;
       }
     }
@@ -65,11 +60,7 @@ function findClipAtTime(sequence: Sequence, time: number): Clip | null {
  * Calculate the source time for a clip at a given timeline position
  */
 function getSourceTimeForClip(clip: Clip, timelineTime: number): number {
-  const clipStart = clip.place.timelineInSec;
-  const timeInClip = timelineTime - clipStart;
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  const sourceTime = clip.range.sourceInSec + timeInClip * safeSpeed;
-  return sourceTime;
+  return getClipSourceTimeAtTimelineTime(clip, timelineTime);
 }
 
 // =============================================================================

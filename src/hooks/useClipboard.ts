@@ -12,6 +12,7 @@ import { useEditorToolStore, type ClipboardItem } from '@/stores/editorToolStore
 import { usePlaybackStore } from '@/stores/playbackStore';
 import type { Sequence, Clip, Track, TextClipData } from '@/types';
 import { MAX_CLIPBOARD_ITEMS } from '@/constants/editing';
+import { getClipTimelineDurationSec, getClipTimelineEndSec } from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -91,8 +92,7 @@ function findClipInSequence(
  * Calculate clip duration
  */
 function getClipDuration(clip: Clip): number {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  return (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+  return getClipTimelineDurationSec(clip);
 }
 
 /**
@@ -126,7 +126,7 @@ function clipToClipboardItem(clip: Clip, track: Track, textData?: TextClipData):
           ? {
               text: clip.label || '',
               startSec: clip.place.timelineInSec,
-              endSec: clip.place.timelineInSec + durationSec,
+              endSec: getClipTimelineEndSec(clip),
               style: clip.captionStyle,
               position: clip.captionPosition,
             }

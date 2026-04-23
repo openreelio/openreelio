@@ -385,11 +385,7 @@ export function Timeline({
     if (!sequence) return DEFAULT_TIMELINE_DURATION;
 
     const clipEndTimes = sequence.tracks.flatMap((track) =>
-      track.clips.map(
-        (clip) =>
-          clip.place.timelineInSec +
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / (clip.speed > 0 ? clip.speed : 1),
-      ),
+      track.clips.map((clip) => clip.place.timelineInSec + getClipTimelineDuration(clip)),
     );
 
     if (clipEndTimes.length === 0) {
@@ -584,69 +580,72 @@ export function Timeline({
     },
   });
 
+  const applyAdvancedTrimChange = useCallback(
+    (change: {
+      clipId: string;
+      sourceIn?: number;
+      sourceOut?: number;
+      timelineIn?: number;
+    } | null) => {
+      if (
+        !sequence ||
+        !onClipTrim ||
+        !change ||
+        (typeof change.sourceIn !== 'number' &&
+          typeof change.sourceOut !== 'number' &&
+          typeof change.timelineIn !== 'number')
+      ) {
+        return;
+      }
+
+      for (const track of sequence.tracks) {
+        if (!track.clips.some((clip) => clip.id === change.clipId)) {
+          continue;
+        }
+
+        onClipTrim({
+          sequenceId: sequence.id,
+          trackId: track.id,
+          clipId: change.clipId,
+          newSourceIn: change.sourceIn,
+          newSourceOut: change.sourceOut,
+          newTimelineIn: change.timelineIn,
+        });
+        break;
+      }
+    },
+    [sequence, onClipTrim],
+  );
+
   const { isSlideToolActive } = useSlideEdit({
     onSlideEnd: (result) => {
-      if (!sequence || !onClipMove || !onClipTrim) return;
-      // Apply changes to previous clip (find correct track)
-      if (result.previousClipChange) {
-        for (const track of sequence.tracks) {
-          if (track.clips.some((c) => c.id === result.previousClipChange!.clipId)) {
-            onClipTrim({
-              sequenceId: sequence.id,
-              trackId: track.id,
-              clipId: result.previousClipChange.clipId,
-              newSourceOut: result.previousClipChange.sourceOut,
-            });
-            break;
-          }
+      if (!sequence || !onClipMove) return;
+
+      for (const track of sequence.tracks) {
+        if (!track.clips.some((clip) => clip.id === result.clipId)) {
+          continue;
         }
+
+        onClipMove({
+          sequenceId: sequence.id,
+          trackId: track.id,
+          clipId: result.clipId,
+          newTimelineIn: result.newTimelineIn,
+        });
+        break;
       }
-      // Apply changes to next clip (find correct track)
-      if (result.nextClipChange) {
-        for (const track of sequence.tracks) {
-          if (track.clips.some((c) => c.id === result.nextClipChange!.clipId)) {
-            onClipTrim({
-              sequenceId: sequence.id,
-              trackId: track.id,
-              clipId: result.nextClipChange.clipId,
-              newSourceIn: result.nextClipChange.sourceIn,
-            });
-            break;
-          }
-        }
-      }
+
+      applyAdvancedTrimChange(result.previousClipChange);
+      applyAdvancedTrimChange(result.nextClipChange);
     },
   });
 
   const { isRollToolActive } = useRollEdit({
     onRollEnd: (result) => {
-      if (!sequence || !onClipTrim) return;
-      // Apply roll changes to both clips
-      for (const track of sequence.tracks) {
-        if (
-          track.clips.some(
-            (c) =>
-              c.id === result.outgoingClipChange.clipId ||
-              c.id === result.incomingClipChange.clipId,
-          )
-        ) {
-          // Update outgoing clip
-          onClipTrim({
-            sequenceId: sequence.id,
-            trackId: track.id,
-            clipId: result.outgoingClipChange.clipId,
-            newSourceOut: result.outgoingClipChange.sourceOut,
-          });
-          // Update incoming clip
-          onClipTrim({
-            sequenceId: sequence.id,
-            trackId: track.id,
-            clipId: result.incomingClipChange.clipId,
-            newSourceIn: result.incomingClipChange.sourceIn,
-          });
-          break;
-        }
-      }
+      if (!sequence) return;
+
+      applyAdvancedTrimChange(result.outgoingClipChange);
+      applyAdvancedTrimChange(result.incomingClipChange);
     },
   });
 
@@ -1686,9 +1685,7 @@ export function Timeline({
       const caption: Caption = {
         id: clip.id,
         startSec: clip.place.timelineInSec,
-        endSec:
-          clip.place.timelineInSec +
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / (clip.speed > 0 ? clip.speed : 1),
+        endSec: clip.place.timelineInSec + getClipTimelineDuration(clip),
         text: clip.label || '',
         speaker: undefined,
       };

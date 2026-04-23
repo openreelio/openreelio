@@ -179,6 +179,9 @@ export function DockableEditorLayout({
   const leftZoneWidth = leftHasPanels ? leftWidth : MIN_ZONE_SIZES.sidebarWidth;
   const rightZoneWidth = rightHasPanels ? rightWidth : MIN_ZONE_SIZES.sidebarWidth;
   const bottomZoneHeight = bottomHasPanels ? bottomHeight : MIN_ZONE_SIZES.bottomHeight;
+  const centerTopActivePanelId = filteredCenterTop.includes(zones['center-top'].activePanelId!)
+    ? zones['center-top'].activePanelId
+    : (filteredCenterTop[0] ?? null);
 
   return (
     <div
@@ -225,11 +228,7 @@ export function DockableEditorLayout({
             <DockZone
               zoneId="center-top"
               panelIds={filteredCenterTop}
-              activePanelId={
-                filteredCenterTop.includes(zones['center-top'].activePanelId!)
-                  ? zones['center-top'].activePanelId
-                  : (filteredCenterTop[0] ?? null)
-              }
+              activePanelId={centerTopActivePanelId}
               collapsed={zones['center-top'].collapsed}
               onTabClick={makeTabClickHandler('center-top')}
               onToggleCollapse={() => toggleZoneCollapse('center-top')}

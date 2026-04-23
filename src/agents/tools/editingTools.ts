@@ -14,6 +14,7 @@ import { executeAgentCommand } from './commandExecutor';
 import { useProjectStore } from '@/stores/projectStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { probeMedia } from '@/utils/ffmpeg';
+import { getClipTimelineEndSec } from '@/utils/clipTiming';
 import { applyProjectState, refreshProjectState } from '@/utils/stateRefreshHelper';
 import {
   buildRippleEditPlan,
@@ -113,7 +114,7 @@ function buildTimelineIntervalSplitOperations(
 
     for (const clip of track.clips) {
       const clipStart = clip.place.timelineInSec;
-      const clipEnd = clipStart + clip.place.durationSec;
+      const clipEnd = getClipTimelineEndSec(clip);
       const boundaries = buildIntervalBoundaries(
         clipStart,
         clipEnd,
@@ -170,7 +171,7 @@ function estimateTimelineIntervalSplitOperations(
 
     for (const clip of track.clips) {
       const clipStart = clip.place.timelineInSec;
-      const clipEnd = clipStart + clip.place.durationSec;
+      const clipEnd = getClipTimelineEndSec(clip);
       const effectiveStart = Math.max(clipStart, startTime);
       const effectiveEnd = Math.min(clipEnd, endTime);
 
@@ -279,7 +280,7 @@ function trackHasOverlap(track: Track, timelineIn: number, durationSec: number):
   const end = timelineIn + durationSec;
   return track.clips.some((clip) => {
     const clipStart = clip.place.timelineInSec;
-    const clipEnd = clip.place.timelineInSec + clip.place.durationSec;
+    const clipEnd = getClipTimelineEndSec(clip);
     return timelineIn < clipEnd && end > clipStart;
   });
 }

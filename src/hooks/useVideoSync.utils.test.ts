@@ -21,12 +21,20 @@ function makeClip(overrides: Partial<{
   sourceIn: number;
   sourceOut: number;
   timelineIn: number;
+  placeDuration: number;
+  reverse: boolean;
+  freezeFrame: boolean;
+  timeRemap: Clip['timeRemap'];
 }>): Clip {
   const {
     speed = 1,
     sourceIn = 0,
     sourceOut = 10,
     timelineIn = 0,
+    placeDuration,
+    reverse = false,
+    freezeFrame = false,
+    timeRemap = null,
   } = overrides;
 
   return {
@@ -40,7 +48,11 @@ function makeClip(overrides: Partial<{
     },
     place: {
       timelineInSec: timelineIn,
+      durationSec: placeDuration,
     },
+    reverse,
+    freezeFrame,
+    timeRemap,
   } as unknown as Clip;
 }
 
@@ -87,6 +99,45 @@ describe('calculateTimelineTime', () => {
   it('should return timelineIn when sourceTime equals sourceIn', () => {
     const clip = makeClip({ timelineIn: 20, sourceIn: 5, sourceOut: 15, speed: 1 });
     expect(calculateTimelineTime(clip, 5)).toBe(20);
+  });
+
+  it('should invert reverse playback using sourceOut as the timeline origin', () => {
+    const clip = makeClip({
+      timelineIn: 10,
+      sourceIn: 2,
+      sourceOut: 12,
+      reverse: true,
+      placeDuration: 10,
+    });
+
+    expect(calculateTimelineTime(clip, 9)).toBe(13);
+  });
+
+  it('should anchor freeze-frame clips at the timeline start', () => {
+    const clip = makeClip({
+      timelineIn: 7,
+      sourceIn: 5,
+      sourceOut: 5,
+      freezeFrame: true,
+      placeDuration: 4,
+    });
+
+    expect(calculateTimelineTime(clip, 5)).toBe(7);
+  });
+
+  it('should invert linear time-remap curves back to timeline time', () => {
+    const clip = makeClip({
+      timelineIn: 3,
+      placeDuration: 4,
+      timeRemap: {
+        keyframes: [
+          { timelineTime: 0, sourceTime: 2, interpolation: 'linear' },
+          { timelineTime: 4, sourceTime: 10, interpolation: 'linear' },
+        ],
+      },
+    });
+
+    expect(calculateTimelineTime(clip, 6)).toBeCloseTo(5, 6);
   });
 });
 
@@ -135,6 +186,19 @@ describe('isTimeInClip', () => {
     expect(isTimeInClip(clip, 5)).toBe(true);
     expect(isTimeInClip(clip, 10)).toBe(false);
   });
+
+  it('should use explicit place duration for freeze-frame clips', () => {
+    const clip = makeClip({
+      timelineIn: 1,
+      sourceIn: 5,
+      sourceOut: 5,
+      freezeFrame: true,
+      placeDuration: 3,
+    });
+
+    expect(isTimeInClip(clip, 3.999)).toBe(true);
+    expect(isTimeInClip(clip, 4)).toBe(false);
+  });
 });
 
 // =============================================================================
@@ -175,5 +239,29 @@ describe('getClipTimelineDuration', () => {
   it('should return 0 when sourceIn equals sourceOut', () => {
     const clip = makeClip({ sourceIn: 5, sourceOut: 5, speed: 1 });
     expect(getClipTimelineDuration(clip)).toBe(0);
+  });
+
+  it('should prefer explicit place duration for freeze-frame clips', () => {
+    const clip = makeClip({
+      sourceIn: 5,
+      sourceOut: 5,
+      freezeFrame: true,
+      placeDuration: 3.5,
+    });
+
+    expect(getClipTimelineDuration(clip)).toBe(3.5);
+  });
+
+  it('should derive duration from time-remap keyframes when place duration is absent', () => {
+    const clip = makeClip({
+      timeRemap: {
+        keyframes: [
+          { timelineTime: 0, sourceTime: 0, interpolation: 'linear' },
+          { timelineTime: 6, sourceTime: 8, interpolation: 'linear' },
+        ],
+      },
+    });
+
+    expect(getClipTimelineDuration(clip)).toBe(6);
   });
 });

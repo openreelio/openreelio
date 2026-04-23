@@ -22,6 +22,15 @@ import {
 import { snapToGrid, clampTime, MIN_CLIP_DURATION } from '@/utils/timeline';
 import { snapToNearestPoint, type SnapPoint } from '@/utils/gridSnapping';
 import { createLogger } from '@/services/logger';
+import type { Clip } from '@/types';
+import {
+  buildLeftTrimChange,
+  buildRightTrimChange,
+  getClipLeftTrimDeltaBoundsSec,
+  getClipRightTrimDeltaBoundsSec,
+  getClipTimelineDurationSec,
+  supportsSourceBoundaryTrimming,
+} from '@/utils/clipTiming';
 
 const logger = createLogger('useClipDrag');
 
@@ -70,6 +79,8 @@ export interface DragPreviewPosition {
  * Hook options
  */
 export interface UseClipDragOptions {
+  /** Full clip data when timing-aware trim behavior is required */
+  clip?: Clip;
   /** Clip identifier */
   clipId: string;
   /** Initial timeline position in seconds */
@@ -217,10 +228,14 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
       const clipGridInterval = opts.gridInterval ?? 0;
       const clipMinDuration = opts.minDuration ?? MIN_CLIP_DURATION;
       const clipMaxSourceDuration = opts.maxSourceDuration;
+      const clipDuration = opts.clip
+        ? getClipTimelineDurationSec(opts.clip)
+        : calculateDuration(origSourceIn, origSourceOut, clipSpeed);
 
       let newTimelineIn = origTimelineIn;
       let newSourceIn = origSourceIn;
       let newSourceOut = origSourceOut;
+      let previewDuration = clipDuration;
 
       if (type === 'move') {
         // Move: adjust timeline position only
@@ -229,54 +244,123 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
           newTimelineIn = snapToGrid(newTimelineIn, clipGridInterval);
         }
       } else if (type === 'trim-left') {
+        if (opts.clip && !supportsSourceBoundaryTrimming(opts.clip)) {
+          return {
+            timelineIn: origTimelineIn,
+            sourceIn: origSourceIn,
+            sourceOut: origSourceOut,
+            duration: clipDuration,
+          };
+        }
+
         // Trim left: adjust both sourceIn and timelineIn
         const rawDelta = deltaTime;
 
-        // Calculate max trim (can't go past source start or leave less than minDuration)
-        const maxTrimLeft = -origSourceIn; // Can extend to source start
-        const maxTrimRight = (origSourceOut - origSourceIn) / clipSpeed - clipMinDuration;
-        const clampedDelta = clampTime(rawDelta, maxTrimLeft, maxTrimRight);
+        const sourceDurationSec = clipMaxSourceDuration ?? Number.POSITIVE_INFINITY;
+        const { minDeltaSec, maxDeltaSec } = opts.clip
+          ? getClipLeftTrimDeltaBoundsSec(opts.clip, sourceDurationSec, clipMinDuration)
+          : {
+              minDeltaSec: -origSourceIn,
+              maxDeltaSec: calculateDuration(origSourceIn, origSourceOut, clipSpeed) - clipMinDuration,
+            };
+        const clampedDelta = clampTime(rawDelta, minDeltaSec, maxDeltaSec);
 
-        newSourceIn = origSourceIn + clampedDelta * clipSpeed;
         newTimelineIn = origTimelineIn + clampedDelta;
 
-        // Ensure sourceIn doesn't go negative
-        if (newSourceIn < 0) {
-          newSourceIn = 0;
-          newTimelineIn = origTimelineIn - origSourceIn / clipSpeed;
+        if (opts.clip) {
+          const trimChange = buildLeftTrimChange(opts.clip, newTimelineIn);
+          newSourceIn = trimChange?.sourceIn ?? origSourceIn;
+          newSourceOut = trimChange?.sourceOut ?? origSourceOut;
+        } else {
+          newSourceIn = origSourceIn + clampedDelta * clipSpeed;
+
+          // Ensure sourceIn doesn't go negative
+          if (newSourceIn < 0) {
+            newSourceIn = 0;
+            newTimelineIn = origTimelineIn - origSourceIn / clipSpeed;
+          }
         }
 
         if (clipGridInterval > 0) {
           newTimelineIn = snapToGrid(newTimelineIn, clipGridInterval);
-          // Recalculate sourceIn based on snapped timelineIn
-          const timelineDelta = newTimelineIn - origTimelineIn;
-          newSourceIn = origSourceIn + timelineDelta * clipSpeed;
+
+          if (opts.clip) {
+            const trimChange = buildLeftTrimChange(opts.clip, newTimelineIn);
+            newSourceIn = trimChange?.sourceIn ?? origSourceIn;
+            newSourceOut = trimChange?.sourceOut ?? origSourceOut;
+          } else {
+            // Recalculate sourceIn based on snapped timelineIn
+            const timelineDelta = newTimelineIn - origTimelineIn;
+            newSourceIn = origSourceIn + timelineDelta * clipSpeed;
+          }
         }
+
+        previewDuration = Math.max(0, origTimelineIn + clipDuration - newTimelineIn);
       } else if (type === 'trim-right') {
+        if (opts.clip && !supportsSourceBoundaryTrimming(opts.clip)) {
+          return {
+            timelineIn: origTimelineIn,
+            sourceIn: origSourceIn,
+            sourceOut: origSourceOut,
+            duration: clipDuration,
+          };
+        }
+
         // Trim right: adjust sourceOut only
-        const rawDelta = deltaTime * clipSpeed;
+        const sourceDurationSec = clipMaxSourceDuration ?? Number.POSITIVE_INFINITY;
+        const { minDeltaSec, maxDeltaSec } = opts.clip
+          ? getClipRightTrimDeltaBoundsSec(opts.clip, sourceDurationSec, clipMinDuration)
+          : {
+              minDeltaSec:
+                -(calculateDuration(origSourceIn, origSourceOut, clipSpeed) - clipMinDuration),
+              maxDeltaSec:
+                ((clipMaxSourceDuration ?? Number.POSITIVE_INFINITY) - origSourceOut) / clipSpeed,
+            };
+        const clampedDelta = clampTime(deltaTime, minDeltaSec, maxDeltaSec);
+        let newTimelineOut = origTimelineIn + clipDuration + clampedDelta;
 
-        // Calculate bounds
-        const minSourceOut = origSourceIn + clipMinDuration * clipSpeed;
-        const maxSourceOut = clipMaxSourceDuration ?? Number.POSITIVE_INFINITY;
-
-        newSourceOut = clampTime(origSourceOut + rawDelta, minSourceOut, maxSourceOut);
+        if (opts.clip) {
+          const trimChange = buildRightTrimChange(opts.clip, newTimelineOut);
+          newSourceIn = trimChange?.sourceIn ?? origSourceIn;
+          newSourceOut = trimChange?.sourceOut ?? origSourceOut;
+        } else {
+          const rawDelta = clampedDelta * clipSpeed;
+          const minSourceOut = origSourceIn + clipMinDuration * clipSpeed;
+          const maxSourceOut = clipMaxSourceDuration ?? Number.POSITIVE_INFINITY;
+          newSourceOut = clampTime(origSourceOut + rawDelta, minSourceOut, maxSourceOut);
+        }
 
         if (clipGridInterval > 0) {
-          const duration = calculateDuration(origSourceIn, newSourceOut, clipSpeed);
+          const duration = opts.clip
+            ? Math.max(clipMinDuration, newTimelineOut - origTimelineIn)
+            : calculateDuration(origSourceIn, newSourceOut, clipSpeed);
           const snappedDuration = snapToGrid(duration, clipGridInterval);
-          newSourceOut = origSourceIn + snappedDuration * clipSpeed;
+          newTimelineOut = origTimelineIn + snappedDuration;
 
-          // Re-clamp after snapping
-          newSourceOut = clampTime(newSourceOut, minSourceOut, maxSourceOut);
+          if (opts.clip) {
+            const trimChange = buildRightTrimChange(opts.clip, newTimelineOut);
+            newSourceIn = trimChange?.sourceIn ?? origSourceIn;
+            newSourceOut = trimChange?.sourceOut ?? origSourceOut;
+          } else {
+            const minSourceOut = origSourceIn + clipMinDuration * clipSpeed;
+            const maxSourceOut = clipMaxSourceDuration ?? Number.POSITIVE_INFINITY;
+            newSourceOut = origSourceIn + snappedDuration * clipSpeed;
+
+            // Re-clamp after snapping
+            newSourceOut = clampTime(newSourceOut, minSourceOut, maxSourceOut);
+          }
         }
+
+        previewDuration = Math.max(0, newTimelineOut - origTimelineIn);
+      } else {
+        previewDuration = clipDuration;
       }
 
       return {
         timelineIn: newTimelineIn,
         sourceIn: newSourceIn,
         sourceOut: newSourceOut,
-        duration: calculateDuration(newSourceIn, newSourceOut, clipSpeed),
+        duration: opts.clip ? previewDuration : calculateDuration(newSourceIn, newSourceOut, clipSpeed),
       };
     },
     [calculateDuration],

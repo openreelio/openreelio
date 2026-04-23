@@ -1,4 +1,5 @@
 import type { Clip } from '@/types';
+import { getClipTimelineDurationSec as resolveClipTimelineDurationSec } from '@/utils/clipTiming';
 
 export const CLIP_AUDIO_MIN_VOLUME_DB = -60;
 export const CLIP_AUDIO_MAX_VOLUME_DB = 6;
@@ -15,14 +16,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 export function getClipTimelineDurationSec(clip: Clip): number {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  const rawDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-
-  if (!Number.isFinite(rawDuration) || rawDuration <= 0) {
-    return 0;
-  }
-
-  return rawDuration;
+  return resolveClipTimelineDurationSec(clip);
 }
 
 export function clampClipVolumeDb(volumeDb: number): number {

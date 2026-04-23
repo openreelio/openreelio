@@ -30,6 +30,7 @@ import {
   decodeAssetAudioBuffer,
 } from '@/utils/audioPreview';
 import type { Sequence, Asset } from '@/types';
+import { getClipSourceTimeAtTimelineTime, getClipTimelineEndSec } from '@/utils/clipTiming';
 
 // =============================================================================
 // Constants
@@ -197,15 +198,13 @@ export function useAudioScrubbing({
         if (!trackRouting.isAudible) continue;
 
         const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-        const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-        const clipEnd = clip.place.timelineInSec + clipDuration;
+        const clipEnd = getClipTimelineEndSec(clip);
 
         // Skip clips that don't overlap with the scrub position
         if (time < clip.place.timelineInSec || time >= clipEnd) continue;
 
         // Calculate the source offset corresponding to timeline time
-        const timeIntoClip = time - clip.place.timelineInSec;
-        const sourceOffset = clip.range.sourceInSec + timeIntoClip * safeSpeed;
+        const sourceOffset = getClipSourceTimeAtTimelineTime(clip, time);
 
         const buffer = await loadBuffer(asset);
         // Bail if a newer request has superseded this one

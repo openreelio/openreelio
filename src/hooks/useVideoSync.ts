@@ -11,6 +11,12 @@ import { useEffect, useCallback, useRef } from 'react';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { SYNC_THRESHOLDS } from '@/constants/precision';
 import type { Clip, Asset } from '@/types';
+import {
+  getClipSourceTimeAtTimelineTime,
+  getClipTimelineDurationSec,
+  getClipTimelineTimeAtSourceTime,
+  isClipActiveAtTime,
+} from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -82,9 +88,7 @@ export function useVideoSync({
    * Calculate the source time for a clip given a timeline time
    */
   const calculateSourceTime = useCallback((clip: Clip, timelineTime: number): number => {
-    const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-    const offsetInClip = timelineTime - clip.place.timelineInSec;
-    return clip.range.sourceInSec + (offsetInClip * safeSpeed);
+    return getClipSourceTimeAtTimelineTime(clip, timelineTime);
   }, []);
 
   /**
@@ -260,25 +264,19 @@ export function useVideoSync({
  * Calculate timeline time from a video's current time
  */
 export function calculateTimelineTime(clip: Clip, sourceTime: number): number {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  const offsetInSource = sourceTime - clip.range.sourceInSec;
-  return clip.place.timelineInSec + (offsetInSource / safeSpeed);
+  return getClipTimelineTimeAtSourceTime(clip, sourceTime);
 }
 
 /**
  * Check if a timeline time falls within a clip's range
  */
 export function isTimeInClip(clip: Clip, timelineTime: number): boolean {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-  const clipEnd = clip.place.timelineInSec + clipDuration;
-  return timelineTime >= clip.place.timelineInSec && timelineTime < clipEnd;
+  return isClipActiveAtTime(clip, timelineTime);
 }
 
 /**
  * Get the duration of a clip on the timeline
  */
 export function getClipTimelineDuration(clip: Clip): number {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  return (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+  return getClipTimelineDurationSec(clip);
 }

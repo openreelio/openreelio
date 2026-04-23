@@ -38,6 +38,7 @@ import {
   findWorkspaceFile,
 } from './storeAccessor';
 import { calculatePearsonCorrelation, getPrimaryTrackClips } from '@/utils/referenceComparison';
+import { getClipTimelineEndSec } from '@/utils/clipTiming';
 import { useProjectStore } from '@/stores/projectStore';
 import { executeAgentCommand } from './commandExecutor';
 import {
@@ -5201,7 +5202,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
                 ? Math.max(
                     0,
                     ...existingTrack.clips.map(
-                      (clip) => clip.place.timelineInSec + clip.place.durationSec,
+                      (clip) => getClipTimelineEndSec(clip),
                     ),
                   )
                 : 0;
@@ -5277,7 +5278,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
                   ? Math.max(
                       0,
                       ...targetTrack.clips.map(
-                        (clip) => clip.place.timelineInSec + clip.place.durationSec,
+                        (clip) => getClipTimelineEndSec(clip),
                       ),
                     )
                   : 0;

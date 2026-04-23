@@ -45,6 +45,7 @@ export interface SelectedClip {
   place: {
     trackId: string;
     timelineInSec: number;
+    durationSec?: number;
   };
   /** Effects applied to this clip */
   effects?: Effect[];
@@ -54,6 +55,8 @@ export interface SelectedClip {
   speed?: number;
   /** Whether clip plays in reverse */
   reverse?: boolean;
+  /** Whether clip is a freeze frame */
+  freezeFrame?: boolean;
   /** Whether clip has time remap active */
   hasTimeRemap?: boolean;
 }
@@ -155,7 +158,14 @@ export function Inspector({
 
   const clipDuration = useMemo(() => {
     if (!selectedClip) return null;
-    return selectedClip.range.sourceOutSec - selectedClip.range.sourceInSec;
+    const explicitDuration = selectedClip.place.durationSec ?? 0;
+    if (Number.isFinite(explicitDuration) && explicitDuration > 0) {
+      return explicitDuration;
+    }
+
+    const safeSpeed =
+      typeof selectedClip.speed === 'number' && selectedClip.speed > 0 ? selectedClip.speed : 1;
+    return (selectedClip.range.sourceOutSec - selectedClip.range.sourceInSec) / safeSpeed;
   }, [selectedClip]);
 
   const selectedEffect = useMemo(() => {

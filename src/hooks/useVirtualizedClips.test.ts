@@ -173,6 +173,21 @@ describe('useVirtualizedClips', () => {
 
       expect(result.current.visibleClips[0].durationSec).toBe(10);
     });
+
+    it('should prefer explicit timeline duration for freeze-frame style clips', () => {
+      const clips = [
+        createMockClip('freeze', 2, 5, 5, 1),
+      ];
+      clips[0].freezeFrame = true;
+      clips[0].place.durationSec = 4;
+
+      const { result } = renderHook(() =>
+        useVirtualizedClips(clips, defaultConfig)
+      );
+
+      expect(result.current.visibleClips[0].durationSec).toBe(4);
+      expect(result.current.visibleClips[0].widthPx).toBe(400);
+    });
   });
 
   // ===========================================================================

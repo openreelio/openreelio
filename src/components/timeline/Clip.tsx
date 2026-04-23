@@ -13,6 +13,7 @@ import { useClipDrag, type DragPreviewPosition, type ClipDragData } from '@/hook
 import { useWaveformPeaks } from '@/hooks/useWaveformPeaks';
 import type { Clip as ClipType, SnapPoint, Asset, TrackKind } from '@/types';
 import { isTextClip, hasActiveTimeRemap } from '@/types';
+import { getClipTimelineDurationSec, supportsSourceBoundaryTrimming } from '@/utils/clipTiming';
 import { AudioClipWaveform } from './AudioClipWaveform';
 import { WaveformPeaksDisplay } from './WaveformPeaksDisplay';
 import { LazyThumbnailStrip } from './LazyThumbnailStrip';
@@ -144,6 +145,7 @@ export function Clip({
   const isRazorToolActive = activeTool === 'razor';
 
   const { isDragging, previewPosition, activeSnapPoint, handleMouseDown } = useClipDrag({
+    clip,
     clipId: clip.id,
     initialTimelineIn: clip.place.timelineInSec,
     initialSourceIn: clip.range.sourceInSec,
@@ -179,8 +181,7 @@ export function Clip({
       };
     }
 
-    const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-    const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+    const duration = getClipTimelineDurationSec(clip);
     return {
       duration,
       left: clip.place.timelineInSec * zoom,
@@ -271,7 +272,7 @@ export function Clip({
 
   // Handle mouse down on left trim handle
   const handleLeftTrimMouseDown = (e: MouseEvent) => {
-    if (isRazorToolActive) {
+    if (isRazorToolActive || trimHandlesDisabled) {
       return;
     }
 
@@ -281,7 +282,7 @@ export function Clip({
 
   // Handle mouse down on right trim handle
   const handleRightTrimMouseDown = (e: MouseEvent) => {
-    if (isRazorToolActive) {
+    if (isRazorToolActive || trimHandlesDisabled) {
       return;
     }
 
@@ -293,6 +294,7 @@ export function Clip({
   const hasSpeedChange = clip.speed !== 1;
   const isReversed = clip.reverse === true;
   const hasTimeRemap = hasActiveTimeRemap(clip);
+  const trimHandlesDisabled = disabled || !supportsSourceBoundaryTrimming(clip);
 
   // Determine if this is a text clip or adjustment layer
   const isText = isTextClip(clip.assetId);
@@ -560,19 +562,21 @@ export function Clip({
       <div
         data-testid="resize-handle-left"
         className={`
-          absolute left-0 top-0 w-2 h-full cursor-ew-resize
+          absolute left-0 top-0 w-2 h-full ${trimHandlesDisabled ? 'cursor-not-allowed' : 'cursor-ew-resize'}
           ${selected ? 'bg-primary-400 bg-opacity-50' : 'bg-white bg-opacity-0 hover:bg-opacity-20'}
         `}
         style={{ cursor: isRazorToolActive ? 'inherit' : undefined }}
+        title={trimHandlesDisabled ? 'Trim is unavailable for freeze-frame and time-remapped clips' : undefined}
         onMouseDown={handleLeftTrimMouseDown}
       />
       <div
         data-testid="resize-handle-right"
         className={`
-          absolute right-0 top-0 w-2 h-full cursor-ew-resize
+          absolute right-0 top-0 w-2 h-full ${trimHandlesDisabled ? 'cursor-not-allowed' : 'cursor-ew-resize'}
           ${selected ? 'bg-primary-400 bg-opacity-50' : 'bg-white bg-opacity-0 hover:bg-opacity-20'}
         `}
         style={{ cursor: isRazorToolActive ? 'inherit' : undefined }}
+        title={trimHandlesDisabled ? 'Trim is unavailable for freeze-frame and time-remapped clips' : undefined}
         onMouseDown={handleRightTrimMouseDown}
       />
     </div>

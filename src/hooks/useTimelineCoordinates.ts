@@ -20,6 +20,7 @@ import {
 } from '@/utils/gridSnapping';
 import { getGridIntervalForZoom } from '@/utils/timeline';
 import type { Sequence, SnapPoint } from '@/types';
+import { getClipTimelineEndSec } from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -112,10 +113,7 @@ export function useTimelineCoordinates({
     const points: SnapPoint[] = [];
     for (const track of sequence.tracks) {
       for (const clip of track.clips) {
-        const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-        const endTime =
-          clip.place.timelineInSec +
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+        const endTime = getClipTimelineEndSec(clip);
         points.push(...createClipSnapPoints(clip.id, clip.place.timelineInSec, endTime));
       }
     }

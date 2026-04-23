@@ -12,6 +12,7 @@ import { useCallback } from 'react';
 import { useEditorToolStore } from '@/stores/editorToolStore';
 import type { Sequence, Clip, Track } from '@/types';
 import { MIN_CLIP_GAP_SEC } from '@/constants/editing';
+import { getClipTimelineDurationSec, getClipTimelineEndSec } from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -76,15 +77,14 @@ export interface UseRippleEditReturn {
  * Calculate clip duration accounting for speed
  */
 function getClipDuration(clip: Clip): number {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  return (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+  return getClipTimelineDurationSec(clip);
 }
 
 /**
  * Get the end time of a clip
  */
 function getClipEndTime(clip: Clip): number {
-  return clip.place.timelineInSec + getClipDuration(clip);
+  return getClipTimelineEndSec(clip);
 }
 
 /**

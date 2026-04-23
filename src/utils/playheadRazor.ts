@@ -1,5 +1,6 @@
 import { RAZOR_EDGE_THRESHOLD_SEC } from '@/constants/editing';
 import type { Clip, Sequence } from '@/types';
+import { getClipTimelineEndSec } from '@/utils/clipTiming';
 
 export interface PlayheadRazorSplitTarget {
   trackId: string;
@@ -8,8 +9,7 @@ export interface PlayheadRazorSplitTarget {
 }
 
 function getClipEndTime(clip: Clip): number {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  return clip.place.timelineInSec + (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+  return getClipTimelineEndSec(clip);
 }
 
 export function getPlayheadRazorSplitTarget(

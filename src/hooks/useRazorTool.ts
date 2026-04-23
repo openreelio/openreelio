@@ -11,6 +11,7 @@ import { useCallback, useEffect } from 'react';
 import { RAZOR_CURSOR, useEditorToolStore, type EditorTool } from '@/stores/editorToolStore';
 import { RAZOR_EDGE_THRESHOLD_SEC } from '@/constants/editing';
 import type { Sequence, Clip } from '@/types';
+import { getClipTimelineDurationSec } from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -142,8 +143,7 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
    * Get clip duration
    */
   const getClipDuration = useCallback((clip: Clip): number => {
-    const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-    return (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+    return getClipTimelineDurationSec(clip);
   }, []);
 
   /**

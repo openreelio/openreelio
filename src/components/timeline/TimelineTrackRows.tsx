@@ -6,6 +6,7 @@ import type {
   Track as TrackType,
 } from '@/types';
 import { getTrackSwapTargets, isProtectedBaseTrack } from '@/utils/trackReorder';
+import { getClipTimelineEndSec } from '@/utils/clipTiming';
 import { CaptionTrack } from './CaptionTrack';
 import { Track } from './Track';
 
@@ -13,9 +14,7 @@ function adaptTrackToCaptionTrack(track: TrackType): CaptionTrackType {
   const captions: Caption[] = track.clips.map((clip) => ({
     id: clip.id,
     startSec: clip.place.timelineInSec,
-    endSec:
-      clip.place.timelineInSec +
-      (clip.range.sourceOutSec - clip.range.sourceInSec) / (clip.speed > 0 ? clip.speed : 1),
+    endSec: getClipTimelineEndSec(clip),
     text: clip.label || '',
     speaker: undefined,
     styleOverride: clip.captionStyle,

@@ -12,6 +12,14 @@ import { useCallback, useState } from 'react';
 import { useEditorToolStore } from '@/stores/editorToolStore';
 import type { Clip, Track } from '@/types';
 import { MIN_CLIP_DURATION_SEC } from '@/constants/editing';
+import {
+  buildLeftTrimChange,
+  buildRightTrimChange,
+  getClipLeftTrimDeltaBoundsSec,
+  getClipRightTrimDeltaBoundsSec,
+  getClipTimelineEndSec,
+  type ClipTrimChange,
+} from '@/utils/clipTiming';
 
 // =============================================================================
 // Types
@@ -39,22 +47,18 @@ export interface SlideEditState {
 }
 
 export interface SlideEditResult {
+  /** Clip being slid */
+  clipId: string;
   /** New timeline position for the sliding clip */
   newTimelineIn: number;
   /** Changes to apply to previous clip (if any) */
-  previousClipChange: {
-    clipId: string;
-    sourceOut: number;
-  } | null;
+  previousClipChange: ClipTrimChange | null;
   /** Changes to apply to next clip (if any) */
-  nextClipChange: {
-    clipId: string;
-    sourceIn: number;
-  } | null;
+  nextClipChange: ClipTrimChange | null;
   /** Whether the slide was constrained */
   constrained: boolean;
   /** Constraint reason if constrained */
-  constraintReason?: 'no-previous' | 'no-next' | 'min-duration' | 'source-limit';
+  constraintReason?: 'no-previous' | 'no-next' | 'min-duration' | 'source-limit' | 'unsupported';
 }
 
 export interface UseSlideEditOptions {
@@ -92,15 +96,6 @@ export interface UseSlideEditReturn {
     previousClip: AdjacentClip | null,
     nextClip: AdjacentClip | null
   ) => { minOffset: number; maxOffset: number };
-}
-
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-function getClipDuration(clip: Clip): number {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  return (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
 }
 
 // =============================================================================
@@ -165,22 +160,24 @@ export function useSlideEdit(options: UseSlideEditOptions = {}): UseSlideEditRet
 
       // Constraint from previous clip
       if (previousClip) {
-        const prevDuration = getClipDuration(previousClip.clip);
-        // Can't slide left more than would reduce previous clip below min duration
-        minOffset = Math.max(minOffset, -(prevDuration - MIN_CLIP_DURATION_SEC));
-
-        // Source headroom constraint (for future enhancement)
-        // const prevSourceRemaining = previousClip.sourceDuration - previousClip.clip.range.sourceOutSec;
+        const previousBounds = getClipRightTrimDeltaBoundsSec(
+          previousClip.clip,
+          previousClip.sourceDuration,
+          MIN_CLIP_DURATION_SEC,
+        );
+        minOffset = Math.max(minOffset, previousBounds.minDeltaSec);
+        maxOffset = Math.min(maxOffset, previousBounds.maxDeltaSec);
       }
 
       // Constraint from next clip
       if (nextClip) {
-        const nextDuration = getClipDuration(nextClip.clip);
-        // Can't slide right more than would reduce next clip below min duration
-        maxOffset = Math.min(maxOffset, nextDuration - MIN_CLIP_DURATION_SEC);
-
-        // Source headroom constraint (for future enhancement)
-        // const nextSourceIn = nextClip.clip.range.sourceInSec;
+        const nextBounds = getClipLeftTrimDeltaBoundsSec(
+          nextClip.clip,
+          nextClip.sourceDuration,
+          MIN_CLIP_DURATION_SEC,
+        );
+        minOffset = Math.max(minOffset, nextBounds.minDeltaSec);
+        maxOffset = Math.min(maxOffset, nextBounds.maxDeltaSec);
       }
 
       // If no adjacent clips, constrain heavily
@@ -228,6 +225,7 @@ export function useSlideEdit(options: UseSlideEditOptions = {}): UseSlideEditRet
    */
   const calculateSlideResult = useCallback(
     (
+      clipId: string,
       originalTimelineIn: number,
       offset: number,
       previousClip: AdjacentClip | null,
@@ -243,32 +241,36 @@ export function useSlideEdit(options: UseSlideEditOptions = {}): UseSlideEditRet
       if (constrained) {
         if (!previousClip && offset < 0) constraintReason = 'no-previous';
         else if (!nextClip && offset > 0) constraintReason = 'no-next';
-        else constraintReason = 'min-duration';
+        else if (
+          (previousClip &&
+            buildRightTrimChange(previousClip.clip, getClipTimelineEndSec(previousClip.clip))) ===
+            null ||
+          (nextClip && buildLeftTrimChange(nextClip.clip, nextClip.clip.place.timelineInSec) === null)
+        ) {
+          constraintReason = 'unsupported';
+        } else {
+          constraintReason = 'min-duration';
+        }
       }
 
       const newTimelineIn = originalTimelineIn + constrainedOffset;
 
       // Calculate changes to adjacent clips
-      let previousClipChange: SlideEditResult['previousClipChange'] = null;
-      let nextClipChange: SlideEditResult['nextClipChange'] = null;
+      const previousClipChange =
+        previousClip && constrainedOffset !== 0
+          ? buildRightTrimChange(
+              previousClip.clip,
+              getClipTimelineEndSec(previousClip.clip) + constrainedOffset,
+            )
+          : null;
 
-      if (previousClip && constrainedOffset !== 0) {
-        // Extend or shorten previous clip's out point
-        previousClipChange = {
-          clipId: previousClip.clip.id,
-          sourceOut: previousClip.clip.range.sourceOutSec + constrainedOffset,
-        };
-      }
-
-      if (nextClip && constrainedOffset !== 0) {
-        // Extend or shorten next clip's in point
-        nextClipChange = {
-          clipId: nextClip.clip.id,
-          sourceIn: nextClip.clip.range.sourceInSec + constrainedOffset,
-        };
-      }
+      const nextClipChange =
+        nextClip && constrainedOffset !== 0
+          ? buildLeftTrimChange(nextClip.clip, nextClip.clip.place.timelineInSec + constrainedOffset)
+          : null;
 
       return {
+        clipId,
         newTimelineIn,
         previousClipChange,
         nextClipChange,
@@ -291,6 +293,7 @@ export function useSlideEdit(options: UseSlideEditOptions = {}): UseSlideEditRet
       const newOffset = slideState.slideOffset + deltaSeconds;
 
       const result = calculateSlideResult(
+        slideState.clipId,
         slideState.originalTimelineIn,
         newOffset,
         slideState.previousClip,
@@ -320,6 +323,7 @@ export function useSlideEdit(options: UseSlideEditOptions = {}): UseSlideEditRet
     }
 
     const result = calculateSlideResult(
+      slideState.clipId,
       slideState.originalTimelineIn,
       slideState.slideOffset,
       slideState.previousClip,

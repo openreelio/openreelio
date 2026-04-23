@@ -1263,6 +1263,9 @@ impl Clip {
     /// When a valid time remap curve is active, the timeline duration comes from
     /// the curve. Otherwise falls back to `source_duration / speed`.
     pub fn duration(&self) -> TimeSec {
+        if self.place.duration_sec.is_finite() && self.place.duration_sec > 0.0 {
+            return self.place.duration_sec;
+        }
         if let Some(ref remap) = self.time_remap {
             if remap.is_valid() {
                 return remap.timeline_duration();
@@ -1293,7 +1296,10 @@ impl Clip {
     /// When a valid time remap curve is active, evaluates the curve to find the
     /// source time. Otherwise uses the constant speed mapping.
     pub fn timeline_to_source(&self, timeline_sec: TimeSec) -> TimeSec {
-        let offset = timeline_sec - self.place.timeline_in_sec;
+        let offset = (timeline_sec - self.place.timeline_in_sec).clamp(0.0, self.duration());
+        if self.freeze_frame {
+            return self.range.source_in_sec;
+        }
         if let Some(ref remap) = self.time_remap {
             if remap.is_valid() {
                 return remap.evaluate(offset);
@@ -1497,9 +1503,17 @@ mod tests {
     fn test_clip_speed() {
         let mut clip = Clip::with_range("asset_123", 0.0, 10.0);
         clip.speed = 2.0;
-        clip.place.duration_sec = clip.duration();
+        clip.place.duration_sec = 0.0;
 
         assert_eq!(clip.duration(), 5.0); // 10 seconds at 2x speed
+    }
+
+    #[test]
+    fn test_clip_duration_prefers_explicit_place_duration() {
+        let mut clip = Clip::with_range("asset_123", 1.0, 2.0);
+        clip.place.duration_sec = 4.0;
+
+        assert_eq!(clip.duration(), 4.0);
     }
 
     #[test]
@@ -1554,6 +1568,19 @@ mod tests {
         assert_eq!(clip.timeline_to_source(5.0), 20.0);
         assert_eq!(clip.timeline_to_source(10.0), 15.0);
         assert_eq!(clip.timeline_to_source(15.0), 10.0);
+    }
+
+    #[test]
+    fn test_timeline_to_source_with_freeze_frame() {
+        let mut clip = Clip::new("asset_123")
+            .with_source_range(10.0, 10.04)
+            .place_at(5.0);
+        clip.freeze_frame = true;
+        clip.place.duration_sec = 3.0;
+
+        assert_eq!(clip.timeline_to_source(5.0), 10.0);
+        assert_eq!(clip.timeline_to_source(6.5), 10.0);
+        assert_eq!(clip.timeline_to_source(8.0), 10.0);
     }
 
     #[test]
@@ -1981,6 +2008,7 @@ mod tests {
                 interpolation: KeyframeInterpolation::Linear,
             },
         ]));
+        clip.place.duration_sec = 0.0;
         assert!((clip.duration() - 5.0).abs() < 1e-6);
     }
 

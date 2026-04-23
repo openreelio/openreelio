@@ -197,6 +197,16 @@ describe('checkClipOverlap', () => {
     const result = checkClipOverlap(clips, 10, 20);
     expect(result).toBeNull();
   });
+
+  it('should use explicit clip duration for freeze-frame overlap checks', () => {
+    const freezeClip = createTestClip('freeze', 10, 5, 5, {
+      freezeFrame: true,
+      place: { timelineInSec: 10, durationSec: 4 },
+    });
+
+    const result = checkClipOverlap([freezeClip], 13, 15);
+    expect(result?.id).toBe('freeze');
+  });
 });
 
 // =============================================================================

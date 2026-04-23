@@ -216,6 +216,100 @@ describe('clipLinking utilities', () => {
     ]);
   });
 
+  it('maps linked left trims through reverse companions using timeline edge movement', () => {
+    const sequence = createSequence([
+      createTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [
+          createClip({
+            id: 'video-clip',
+            assetId: 'asset-1',
+            range: { sourceInSec: 2, sourceOutSec: 8 },
+            place: { timelineInSec: 10, durationSec: 6 },
+          }),
+        ],
+      }),
+      createTrack({
+        id: 'audio-track',
+        kind: 'audio',
+        clips: [
+          createClip({
+            id: 'audio-clip',
+            assetId: 'asset-1',
+            range: { sourceInSec: 2, sourceOutSec: 8 },
+            place: { timelineInSec: 10, durationSec: 6 },
+            reverse: true,
+          }),
+        ],
+      }),
+    ]);
+
+    expect(
+      buildLinkedTrimTargets(sequence, {
+        sequenceId: 'seq-1',
+        trackId: 'video-track',
+        clipId: 'video-clip',
+        newSourceIn: 3,
+        newTimelineIn: 11,
+      }),
+    ).toEqual([
+      {
+        sequenceId: 'seq-1',
+        trackId: 'audio-track',
+        clipId: 'audio-clip',
+        newSourceOut: 7,
+        newTimelineIn: 11,
+      },
+    ]);
+  });
+
+  it('maps linked right trims through reverse companions using timeline edge movement', () => {
+    const sequence = createSequence([
+      createTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [
+          createClip({
+            id: 'video-clip',
+            assetId: 'asset-1',
+            range: { sourceInSec: 2, sourceOutSec: 8 },
+            place: { timelineInSec: 10, durationSec: 6 },
+          }),
+        ],
+      }),
+      createTrack({
+        id: 'audio-track',
+        kind: 'audio',
+        clips: [
+          createClip({
+            id: 'audio-clip',
+            assetId: 'asset-1',
+            range: { sourceInSec: 2, sourceOutSec: 8 },
+            place: { timelineInSec: 10, durationSec: 6 },
+            reverse: true,
+          }),
+        ],
+      }),
+    ]);
+
+    expect(
+      buildLinkedTrimTargets(sequence, {
+        sequenceId: 'seq-1',
+        trackId: 'video-track',
+        clipId: 'video-clip',
+        newSourceOut: 7,
+      }),
+    ).toEqual([
+      {
+        sequenceId: 'seq-1',
+        trackId: 'audio-track',
+        clipId: 'audio-clip',
+        newSourceIn: 3,
+      },
+    ]);
+  });
+
   it('returns linked split targets that contain split time', () => {
     const sequence = createSequence([
       createTrack({

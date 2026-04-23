@@ -11,6 +11,10 @@ import type { ClipMoveData, ClipTrimData } from '@/components/timeline/types';
 import type { ClipDragData, DragPreviewPosition } from '@/components/timeline/Clip';
 import type { DragPreviewState } from '@/components/timeline/DragPreviewLayer';
 import { useToastStore } from '@/hooks/useToast';
+import {
+  getClipTimelineDurationSec,
+  supportsSourceBoundaryTrimming,
+} from '@/utils/clipTiming';
 
 // =============================================================================
 // Helper Functions
@@ -216,9 +220,7 @@ export function useTimelineClipOperations({
         const clipInfo = findClip(data.clipId);
 
         if (clipInfo && trackIndex >= 0) {
-          const clipDuration =
-            (data.originalSourceOut - data.originalSourceIn) /
-            (clipInfo.clip.speed > 0 ? clipInfo.clip.speed : 1);
+          const clipDuration = getClipTimelineDurationSec(clipInfo.clip);
 
           setDragPreview({
             clipId: data.clipId,
@@ -363,14 +365,27 @@ export function useTimelineClipOperations({
 
         onClipMove(moveData);
       } else if ((data.type === 'trim-left' || data.type === 'trim-right') && onClipTrim) {
+        const clipInfo = sequence.tracks
+          .flatMap((track) => track.clips)
+          .find((clip) => clip.id === data.clipId);
+        if (!clipInfo || !supportsSourceBoundaryTrimming(clipInfo)) {
+          setDragPreview(null);
+          return;
+        }
+
         if (data.type === 'trim-left') {
           const trimData: ClipTrimData = {
             sequenceId: sequence.id,
             trackId,
             clipId: data.clipId,
-            newSourceIn: safeSourceIn,
             newTimelineIn: safeTimelineIn,
           };
+
+          if (clipInfo.reverse) {
+            trimData.newSourceOut = safeSourceOut;
+          } else {
+            trimData.newSourceIn = safeSourceIn;
+          }
 
           if (data.ignoreLinkedSelection) {
             trimData.ignoreLinkedSelection = true;
@@ -382,8 +397,13 @@ export function useTimelineClipOperations({
             sequenceId: sequence.id,
             trackId,
             clipId: data.clipId,
-            newSourceOut: safeSourceOut,
           };
+
+          if (clipInfo.reverse) {
+            trimData.newSourceIn = safeSourceIn;
+          } else {
+            trimData.newSourceOut = safeSourceOut;
+          }
 
           if (data.ignoreLinkedSelection) {
             trimData.ignoreLinkedSelection = true;
