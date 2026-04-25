@@ -6,7 +6,7 @@
  * panels in their assigned zones with resize handles and drag-drop support.
  */
 
-import { useCallback, useMemo, useRef, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   MIN_ZONE_SIZES,
   useWorkspaceLayoutStore,
@@ -39,6 +39,76 @@ export interface DockableEditorLayoutProps {
 const COLLAPSED_WIDTH = 40;
 /** Collapsed bottom panel height in pixels */
 const COLLAPSED_BOTTOM_HEIGHT = 32;
+/** Minimum center workspace width before responsive side panels collapse */
+const MIN_CENTER_WORKSPACE_WIDTH = 420;
+/** Viewports below this width collapse both side zones */
+const COMPACT_WORKSPACE_BREAKPOINT = 760;
+/** Viewports below this width collapse the right zone first */
+const RIGHT_ZONE_AUTO_COLLAPSE_BREAKPOINT = 1100;
+/** Maximum share of the viewport a single expanded side zone may occupy */
+const MAX_SIDE_ZONE_VIEWPORT_SHARE = 0.34;
+/** ResizeHandle thickness from Tailwind w-1 / h-1 */
+const RESIZE_HANDLE_SIZE = 4;
+
+interface ViewportSize {
+  width: number;
+  height: number;
+}
+
+function getInitialViewportSize(): ViewportSize {
+  if (typeof window === 'undefined') {
+    return { width: 0, height: 0 };
+  }
+
+  return { width: window.innerWidth, height: window.innerHeight };
+}
+
+function useViewportSize(): ViewportSize {
+  const [size, setSize] = useState<ViewportSize>(() => getInitialViewportSize());
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const handleResize = () => setSize(getInitialViewportSize());
+
+    handleResize();
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, []);
+
+  return size;
+}
+
+function getResponsiveSideWidth(width: number, viewportWidth: number): number {
+  if (viewportWidth <= 0) {
+    return width;
+  }
+
+  const maxResponsiveWidth = Math.max(
+    MIN_ZONE_SIZES.sidebarWidth,
+    Math.floor(viewportWidth * MAX_SIDE_ZONE_VIEWPORT_SHARE),
+  );
+
+  return Math.min(width, maxResponsiveWidth);
+}
+
+function getResponsiveBottomHeight(height: number, viewportHeight: number): number {
+  if (viewportHeight <= 0) {
+    return height;
+  }
+
+  const maxResponsiveHeight = Math.max(
+    MIN_ZONE_SIZES.bottomHeight,
+    Math.floor(viewportHeight * 0.35),
+  );
+
+  return Math.min(height, maxResponsiveHeight);
+}
 
 // =============================================================================
 // Component
@@ -66,6 +136,7 @@ export function DockableEditorLayout({
 
   const centerRef = useRef<HTMLElement>(null);
   const { zones, sizes } = layout;
+  const viewportSize = useViewportSize();
 
   // Filter zone panelIds to only those with renderable content (e.g. feature-flagged panels)
   const availablePanelIds = useMemo(() => {
@@ -165,20 +236,79 @@ export function DockableEditorLayout({
   const filteredRight = filterZonePanels(zones.right.panelIds);
   const filteredBottom = filterZonePanels(zones.bottom.panelIds);
 
-  // Compute actual widths/heights
-  const leftWidth = zones.left.collapsed ? COLLAPSED_WIDTH : sizes.leftWidth;
-  const rightWidth = zones.right.collapsed ? COLLAPSED_WIDTH : sizes.rightWidth;
-  const bottomHeight = zones.bottom.collapsed ? COLLAPSED_BOTTOM_HEIGHT : sizes.bottomHeight;
-
   const leftHasPanels = filteredLeft.length > 0;
   const rightHasPanels = filteredRight.length > 0;
   const bottomHasPanels = filteredBottom.length > 0;
   const showLeftZone = leftHasPanels || isDragging;
   const showRightZone = rightHasPanels || isDragging;
   const showBottomZone = bottomHasPanels || isDragging;
-  const leftZoneWidth = leftHasPanels ? leftWidth : MIN_ZONE_SIZES.sidebarWidth;
-  const rightZoneWidth = rightHasPanels ? rightWidth : MIN_ZONE_SIZES.sidebarWidth;
-  const bottomZoneHeight = bottomHasPanels ? bottomHeight : MIN_ZONE_SIZES.bottomHeight;
+
+  // Compute responsive side sizes. The right utility zone collapses first so
+  // the timeline/preview workspace stays usable on laptop and tablet widths.
+  const leftResponsiveWidth = getResponsiveSideWidth(sizes.leftWidth, viewportSize.width);
+  const rightResponsiveWidth = getResponsiveSideWidth(sizes.rightWidth, viewportSize.width);
+  let leftExpanded =
+    leftHasPanels && !zones.left.collapsed && viewportSize.width >= COMPACT_WORKSPACE_BREAKPOINT;
+  let rightExpanded =
+    rightHasPanels &&
+    !zones.right.collapsed &&
+    viewportSize.width >= RIGHT_ZONE_AUTO_COLLAPSE_BREAKPOINT;
+
+  const getProjectedCenterWidth = (nextLeftExpanded: boolean, nextRightExpanded: boolean) => {
+    const leftWidthForProjection = !showLeftZone
+      ? 0
+      : leftHasPanels && nextLeftExpanded
+        ? leftResponsiveWidth
+        : leftHasPanels
+          ? COLLAPSED_WIDTH
+          : MIN_ZONE_SIZES.sidebarWidth;
+    const rightWidthForProjection = !showRightZone
+      ? 0
+      : rightHasPanels && nextRightExpanded
+        ? rightResponsiveWidth
+        : rightHasPanels
+          ? COLLAPSED_WIDTH
+          : MIN_ZONE_SIZES.sidebarWidth;
+    const handleWidth =
+      (leftHasPanels && nextLeftExpanded ? RESIZE_HANDLE_SIZE : 0) +
+      (rightHasPanels && nextRightExpanded ? RESIZE_HANDLE_SIZE : 0);
+
+    return viewportSize.width - leftWidthForProjection - rightWidthForProjection - handleWidth;
+  };
+
+  if (
+    viewportSize.width > 0 &&
+    rightExpanded &&
+    getProjectedCenterWidth(leftExpanded, rightExpanded) < MIN_CENTER_WORKSPACE_WIDTH
+  ) {
+    rightExpanded = false;
+  }
+
+  if (
+    viewportSize.width > 0 &&
+    leftExpanded &&
+    getProjectedCenterWidth(leftExpanded, rightExpanded) < MIN_CENTER_WORKSPACE_WIDTH
+  ) {
+    leftExpanded = false;
+  }
+
+  const effectiveLeftCollapsed = leftHasPanels && !leftExpanded;
+  const effectiveRightCollapsed = rightHasPanels && !rightExpanded;
+  const leftZoneWidth = leftHasPanels
+    ? leftExpanded
+      ? leftResponsiveWidth
+      : COLLAPSED_WIDTH
+    : MIN_ZONE_SIZES.sidebarWidth;
+  const rightZoneWidth = rightHasPanels
+    ? rightExpanded
+      ? rightResponsiveWidth
+      : COLLAPSED_WIDTH
+    : MIN_ZONE_SIZES.sidebarWidth;
+  const bottomZoneHeight = bottomHasPanels
+    ? zones.bottom.collapsed
+      ? COLLAPSED_BOTTOM_HEIGHT
+      : getResponsiveBottomHeight(sizes.bottomHeight, viewportSize.height)
+    : MIN_ZONE_SIZES.bottomHeight;
   const centerTopActivePanelId = filteredCenterTop.includes(zones['center-top'].activePanelId!)
     ? zones['center-top'].activePanelId
     : (filteredCenterTop[0] ?? null);
@@ -206,7 +336,7 @@ export function DockableEditorLayout({
                     ? zones.left.activePanelId
                     : (filteredLeft[0] ?? null)
                 }
-                collapsed={zones.left.collapsed}
+                collapsed={effectiveLeftCollapsed}
                 onTabClick={makeTabClickHandler('left')}
                 onToggleCollapse={() => toggleZoneCollapse('left')}
                 onDrop={makeDropHandler('left')}
@@ -215,7 +345,7 @@ export function DockableEditorLayout({
                 {...sharedZoneProps}
               />
             </div>
-            {leftHasPanels && !zones.left.collapsed && (
+            {leftHasPanels && leftExpanded && (
               <ResizeHandle orientation="horizontal" onResize={handleLeftResize} />
             )}
           </>
@@ -267,7 +397,7 @@ export function DockableEditorLayout({
         {/* Right sidebar zone */}
         {showRightZone && (
           <>
-            {rightHasPanels && !zones.right.collapsed && (
+            {rightHasPanels && rightExpanded && (
               <ResizeHandle orientation="horizontal" onResize={handleRightResize} />
             )}
             <div style={{ width: `${rightZoneWidth}px` }} className="shrink-0">
@@ -279,7 +409,7 @@ export function DockableEditorLayout({
                     ? zones.right.activePanelId
                     : (filteredRight[0] ?? null)
                 }
-                collapsed={zones.right.collapsed}
+                collapsed={effectiveRightCollapsed}
                 onTabClick={makeTabClickHandler('right')}
                 onToggleCollapse={() => toggleZoneCollapse('right')}
                 onDrop={makeDropHandler('right')}
