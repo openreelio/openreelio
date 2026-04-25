@@ -9,7 +9,27 @@
  */
 
 import { useCallback, useState, type ReactNode } from 'react';
-import { ChevronDown, ChevronUp, ChevronLeft, ChevronRight, GripVertical } from 'lucide-react';
+import {
+  Activity,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  ClipboardList,
+  FileText,
+  Film,
+  FolderOpen,
+  GitCompareArrows,
+  GripVertical,
+  History,
+  Monitor,
+  Play,
+  Sliders,
+  SlidersHorizontal,
+  Sparkles,
+  Terminal,
+  type LucideIcon,
+} from 'lucide-react';
 import { PANEL_REGISTRY, type DockZoneId, type PanelId } from '@/stores/workspaceLayoutStore';
 
 // =============================================================================
@@ -54,6 +74,23 @@ export interface DockZoneProps {
 // =============================================================================
 // Component
 // =============================================================================
+
+const PANEL_ICONS: Record<PanelId, LucideIcon> = {
+  explorer: FolderOpen,
+  'source-monitor': Monitor,
+  'program-monitor': Play,
+  timeline: Film,
+  terminal: Terminal,
+  inspector: SlidersHorizontal,
+  'ai-assistant': Sparkles,
+  'agent-review': ClipboardList,
+  'audio-mixer': Sliders,
+  history: History,
+  transcript: FileText,
+  performance: Activity,
+  comparison: GitCompareArrows,
+  generation: Sparkles,
+};
 
 export function DockZone({
   zoneId,
@@ -150,6 +187,16 @@ export function DockZone({
         : ChevronDown;
 
   const dropHighlight = isDropTarget ? 'ring-2 ring-primary-500 ring-inset' : '';
+  const isHorizontalCollapsed = collapsed && collapseDirection === 'horizontal';
+  const tabBarClasses = isHorizontalCollapsed
+    ? 'flex h-full w-full shrink-0 flex-col items-center justify-between border-b-0 px-1 py-1'
+    : 'flex h-8 shrink-0 items-center justify-between border-b border-editor-border px-1';
+  const tabListClasses = isHorizontalCollapsed
+    ? 'flex min-h-0 flex-col items-center gap-1 overflow-y-auto'
+    : 'flex min-w-0 items-center gap-0.5 overflow-x-auto';
+  const actionClasses = isHorizontalCollapsed
+    ? 'flex shrink-0 flex-col items-center gap-1'
+    : 'flex shrink-0 items-center gap-1';
 
   return (
     <div
@@ -161,14 +208,16 @@ export function DockZone({
     >
       {/* Tab bar */}
       {showTabs && (
-        <div className="flex h-8 shrink-0 items-center justify-between border-b border-editor-border px-1">
+        <div className={tabBarClasses}>
           <div
-            className="flex min-w-0 items-center gap-0.5 overflow-x-auto"
+            className={tabListClasses}
             role="tablist"
             aria-label={`${zoneId} panels`}
+            aria-orientation={isHorizontalCollapsed ? 'vertical' : 'horizontal'}
           >
             {panelIds.map((panelId) => {
               const meta = PANEL_REGISTRY[panelId];
+              const PanelIcon = PANEL_ICONS[panelId];
               const isActive = activePanelId === panelId && !collapsed;
               const isDraggable = panelId !== 'terminal';
               return (
@@ -178,23 +227,38 @@ export function DockZone({
                   onDragStart={isDraggable ? (e) => handleTabDragStart(e, panelId) : undefined}
                   onDragEnd={handleTabDragEnd}
                   onClick={() => onTabClick(panelId)}
-                  className={`flex shrink-0 items-center gap-1 rounded-t px-2 py-1 text-xs font-medium transition-colors ${
-                    isActive
-                      ? 'bg-editor-bg text-editor-text'
-                      : 'text-editor-text-muted hover:text-editor-text hover:bg-editor-border/50'
+                  className={`flex shrink-0 items-center gap-1 text-xs font-medium transition-colors ${
+                    isHorizontalCollapsed
+                      ? `h-7 w-7 justify-center rounded ${
+                          isActive
+                            ? 'bg-editor-bg text-editor-text'
+                            : 'text-editor-text-muted hover:bg-editor-border/50 hover:text-editor-text'
+                        }`
+                      : `rounded-t px-2 py-1 ${
+                          isActive
+                            ? 'bg-editor-bg text-editor-text'
+                            : 'text-editor-text-muted hover:text-editor-text hover:bg-editor-border/50'
+                        }`
                   }`}
                   role="tab"
                   aria-selected={isActive}
                   aria-controls={`dock-panel-${panelId}`}
+                  aria-label={isHorizontalCollapsed ? meta.label : undefined}
                   title={isDraggable ? `${meta.label} (drag to move)` : meta.label}
                 >
-                  {isDraggable && <GripVertical className="w-3 h-3 opacity-40" />}
-                  <span className="whitespace-nowrap">{meta.label}</span>
+                  {isHorizontalCollapsed ? (
+                    <PanelIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                  ) : (
+                    <>
+                      {isDraggable && <GripVertical className="w-3 h-3 opacity-40" />}
+                      <span className="whitespace-nowrap">{meta.label}</span>
+                    </>
+                  )}
                 </button>
               );
             })}
           </div>
-          <div className="flex shrink-0 items-center gap-1">
+          <div className={actionClasses}>
             {headerActions}
             <button
               onClick={onToggleCollapse}

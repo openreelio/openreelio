@@ -81,6 +81,21 @@ describe('DockZone', () => {
       render(<DockZone {...createDefaultProps({ collapsed: true })} />);
       expect(screen.getByLabelText('Expand panel')).toBeInTheDocument();
     });
+
+    it('should render a compact icon rail when a horizontal zone is collapsed', () => {
+      render(
+        <DockZone
+          {...createDefaultProps({
+            collapsed: true,
+            collapseDirection: 'horizontal',
+          })}
+        />,
+      );
+
+      expect(screen.getByRole('tablist')).toHaveAttribute('aria-orientation', 'vertical');
+      expect(screen.getByRole('tab', { name: /Project Explorer/i })).toBeInTheDocument();
+      expect(screen.queryByText('Project Explorer')).not.toBeInTheDocument();
+    });
   });
 
   describe('drag and drop', () => {
