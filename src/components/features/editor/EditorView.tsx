@@ -57,7 +57,6 @@ import type { AddTextPayload } from '@/components/features/text';
 import type { AudioMixerPanelProps, ChannelLevels } from '@/components/features/mixer';
 import type { MulticamGroup } from '@/utils/multicam';
 import { isTextClip, hasActiveTimeRemap } from '@/types';
-import { findPanelZone, useWorkspaceLayoutStore } from '@/stores/workspaceLayoutStore';
 import { createEditorPanelContent } from './EditorPanels';
 import { BottomTerminalControls } from './BottomTerminalControls';
 
@@ -132,9 +131,6 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   const currentTime = usePlaybackStore((state) => state.currentTime);
   const { selectedClipIds, linkedSelectionEnabled } = useTimelineStore();
   const sanitizeSelection = useTimelineStore((state) => state.sanitizeSelection);
-  const aiPanelZoneId = useWorkspaceLayoutStore(
-    (state) => findPanelZone(state.layout, 'ai-assistant') ?? 'right',
-  );
   const sequenceNavigationStack = useProjectStore((s) => s.sequenceNavigationStack);
   const sequences = useProjectStore((s) => s.sequences);
   const popSequence = useProjectStore((s) => s.popSequence);
@@ -172,14 +168,11 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
 
   // AI Sidebar state
   const {
-    width: aiSidebarWidth,
-    setWidth: setAiSidebarWidth,
     toggle: toggleAiSidebar,
   } = useDockableAIPanel({
     autoCollapseBreakpoint: AI_AUTO_COLLAPSE_BREAKPOINT,
     initialWidth: 320,
   });
-  const aiSidebarLayoutMode = aiPanelZoneId === 'right' ? 'sidebar' : 'panel';
 
   // Multicam session state
   const [multicamGroup, setMulticamGroup] = useState<MulticamGroup | null>(null);
@@ -1208,11 +1201,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     () => ({
       collapsed: false,
       onToggle: toggleAiSidebar,
-      width: aiSidebarLayoutMode === 'sidebar' ? aiSidebarWidth : undefined,
-      onWidthChange: aiSidebarLayoutMode === 'sidebar' ? setAiSidebarWidth : undefined,
-      layoutMode: aiSidebarLayoutMode,
+      layoutMode: 'panel',
     }),
-    [toggleAiSidebar, aiSidebarLayoutMode, aiSidebarWidth, setAiSidebarWidth],
+    [toggleAiSidebar],
   );
 
   const panelContent = useMemo(
