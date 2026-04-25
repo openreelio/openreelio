@@ -49,15 +49,15 @@ export function AgenticSidebarWorkspace({
   return (
     <div
       data-testid="agentic-sidebar-content"
-      className={`flex flex-row flex-1 overflow-hidden ${className}`}
+      className={`relative flex min-w-0 flex-1 overflow-hidden ${className}`}
     >
       {showSessionList && (
-        <div className="w-[38%] max-w-[160px] min-w-[120px] flex-shrink-0 border-r border-border-subtle bg-surface-base">
+        <div className="absolute inset-y-0 left-0 z-20 w-[82%] max-w-[240px] border-r border-border-subtle bg-surface-base shadow-xl">
           <SessionList onNewSession={onNewSession} onSwitchSession={onSwitchSession} />
         </div>
       )}
 
-      <div className="flex flex-col flex-1 overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <div className="flex items-center px-2 py-1 border-b border-border-subtle bg-surface-base">
           <button
             onClick={onToggleSessionList}
