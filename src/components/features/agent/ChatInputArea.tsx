@@ -89,7 +89,7 @@ export function ChatInputArea({
     (phase === 'awaiting_approval' && !!pendingPlan) || !!pendingToolPermissionRequest;
 
   return (
-    <div className="border-t border-border-subtle px-3 py-2">
+    <div className="min-w-0 border-t border-border-subtle px-3 py-2">
       <div className="overflow-hidden rounded-lg border border-border-subtle bg-surface-elevated/60">
         <div className="space-y-2 px-3 pt-2">
           {pendingClarificationQuestion && (
@@ -142,7 +142,7 @@ export function ChatInputArea({
         />
 
         <div className="px-3 py-2">
-          <div className="flex items-end gap-2">
+          <div className="flex min-w-0 items-end gap-2">
             <PromptInput
               value={input}
               onChange={onInputChange}

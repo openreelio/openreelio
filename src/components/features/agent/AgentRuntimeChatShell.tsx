@@ -289,7 +289,10 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
     );
 
     return (
-      <div data-testid={chatTestId} className={`flex flex-col h-full bg-surface-base ${className}`}>
+      <div
+        data-testid={chatTestId}
+        className={`flex h-full min-w-0 flex-col bg-surface-base ${className}`}
+      >
         <AgentSessionPersistenceBanner />
         <AgentSessionArtifactSummary
           messages={messages}

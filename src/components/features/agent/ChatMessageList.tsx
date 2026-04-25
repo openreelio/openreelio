@@ -102,7 +102,7 @@ export function ChatMessageList({
     <div
       ref={scrollContainerRef}
       onScroll={handleScroll}
-      className={`flex-1 overflow-y-auto px-3 py-3 space-y-3 ${className}`}
+      className={`min-w-0 flex-1 overflow-y-auto px-3 py-3 space-y-3 ${className}`}
     >
       {messages.map((message) => (
         <div

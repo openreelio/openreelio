@@ -128,7 +128,7 @@ export function PromptInput({
   };
 
   return (
-    <div ref={containerRef} className={`relative ${className}`}>
+    <div ref={containerRef} className={`relative min-w-0 ${className}`}>
       {/* Mention Popover */}
       <MentionPopover
         query={popover.type === 'mention' ? popover.query : ''}
@@ -148,7 +148,7 @@ export function PromptInput({
       />
 
       {/* Textarea */}
-      <div className="flex gap-2 items-end">
+      <div className="flex min-w-0 items-end gap-2">
         <textarea
           ref={textareaRef}
           value={value}
@@ -158,7 +158,7 @@ export function PromptInput({
           disabled={disabled}
           rows={1}
           className={`
-            flex-1 px-3 py-2 rounded-md resize-none
+            min-w-0 flex-1 px-3 py-2 rounded-md resize-none
             bg-surface-base border border-border-subtle
             text-text-primary placeholder-text-tertiary
             focus:outline-none focus:ring-1 focus:ring-primary-500/50 focus:border-primary-500
