@@ -436,7 +436,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       });
       const recoveredExecutableResume = await bootstrapRecoveredContextFromCheckpoint({
         sessionId: storeSessionId,
-        addSystemMessage: convStore.addSystemMessage,
+        addSystemMessageToSession: convStore.addSystemMessageToSession,
         logger,
         loggerLabel: 'agentic',
         lastBootstrappedCheckpointIdRef: bootstrappedCheckpointIdRef,

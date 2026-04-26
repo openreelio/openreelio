@@ -20,6 +20,7 @@ import type {
   CompactionTraceRecord,
 } from '@/agents/engine/core/traceRecorder';
 import type { ConversationStore } from '@/stores/conversationStore';
+import { useConversationStore } from '@/stores/conversationStore';
 import {
   buildAgentSessionRecoveryFingerprint,
   useAgentSessionStore,
@@ -257,7 +258,9 @@ export async function bootstrapPersistedAgentSession(input: {
   }
 
   try {
-    await hydratePersistedPermissionRules(sessionId);
+    await hydratePersistedPermissionRules(sessionId, {
+      shouldApply: () => useConversationStore.getState().activeSessionId === sessionId,
+    });
   } catch (error) {
     logger.warn(`Failed to replay persisted ${loggerLabel} permissions`, {
       sessionId,
@@ -389,7 +392,7 @@ export async function finalizePersistedRun(input: {
 
 export async function bootstrapRecoveredContextFromCheckpoint(input: {
   sessionId: string;
-  addSystemMessage: ConversationStore['addSystemMessage'];
+  addSystemMessageToSession: ConversationStore['addSystemMessageToSession'];
   logger: WarnLogger;
   loggerLabel: string;
   lastBootstrappedCheckpointIdRef: CheckpointIdRef;
@@ -398,7 +401,7 @@ export async function bootstrapRecoveredContextFromCheckpoint(input: {
 }): Promise<RecoveredExecutableResume | null> {
   const {
     sessionId,
-    addSystemMessage,
+    addSystemMessageToSession,
     logger,
     loggerLabel,
     lastBootstrappedCheckpointIdRef,
@@ -446,7 +449,7 @@ export async function bootstrapRecoveredContextFromCheckpoint(input: {
     return recoveredExecutableResume;
   }
 
-  addSystemMessage(bootstrapBoundary.message);
+  addSystemMessageToSession(sessionId, bootstrapBoundary.message);
   if (bootstrapBoundary.kind === 'checkpoint') {
     onCheckpointRecovered?.(bootstrapBoundary.traceRecord);
   } else {
