@@ -31,6 +31,8 @@ import {
 import type { LLMMessage } from '@/agents/engine/ports/ILLMClient';
 import { hydratePersistedPermissionRules } from '@/agents/engine/core/permissionAudit';
 import { createLogger } from '@/services/logger';
+import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
+import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { usePermissionStore } from '@/stores/permissionStore';
 
@@ -98,7 +100,9 @@ export interface ConversationActions {
   /** Archive a session */
   archiveSession: (sessionId: string) => Promise<void>;
   /** Add a user message and return its ID */
-  addUserMessage: (content: string) => string;
+  addUserMessage: (content: string, options?: { persist?: boolean }) => string;
+  /** Persist a queued message once it is actually dequeued for execution */
+  persistQueuedMessage: (messageId: string, sessionId?: string | null) => void;
   /** Start a new assistant message (for streaming) and return its ID */
   startAssistantMessage: (sessionId?: string) => string;
   /** Append a part to an existing message */
@@ -129,16 +133,44 @@ export type ConversationStore = ConversationState & ConversationActions;
 // Debounced Persistence (SQLite via IPC)
 // =============================================================================
 
-const saveTimeoutBySession = new Map<string, ReturnType<typeof setTimeout>>();
+interface PendingMessageSave {
+  timeoutId: ReturnType<typeof setTimeout>;
+  sessionId: string;
+  message: ConversationMessage;
+}
+
+const pendingMessageSaves = new Map<string, PendingMessageSave>();
 const pendingSessionCreationByProject = new Map<string, Promise<string | null>>();
 let latestSwitchSessionRequestToken = 0;
 
-/** Clear all pending debounced saves (e.g., on project switch or conversation clear). */
+function logPendingSaveError(sessionId: string, messageId: string, err: unknown): void {
+  logger.error('Failed to persist pending message to SQLite', {
+    sessionId,
+    messageId,
+    err,
+  });
+}
+
+/** Flush all pending debounced saves before changing the active conversation. */
 function clearAllPendingSaves(): void {
-  for (const timeout of saveTimeoutBySession.values()) {
-    clearTimeout(timeout);
+  for (const [key, pending] of pendingMessageSaves.entries()) {
+    clearTimeout(pending.timeoutId);
+    pendingMessageSaves.delete(key);
+    persistMessage(pending.sessionId, pending.message).catch((err) => {
+      logPendingSaveError(pending.sessionId, pending.message.id, err);
+    });
   }
-  saveTimeoutBySession.clear();
+}
+
+function cancelPendingSavesForSession(sessionId: string): void {
+  for (const [key, pending] of pendingMessageSaves.entries()) {
+    if (pending.sessionId !== sessionId) {
+      continue;
+    }
+
+    clearTimeout(pending.timeoutId);
+    pendingMessageSaves.delete(key);
+  }
 }
 
 /**
@@ -148,11 +180,11 @@ function clearAllPendingSaves(): void {
  */
 function debouncedPersistMessage(sessionId: string, message: ConversationMessage): void {
   const key = `${sessionId}:${message.id}`;
-  const existing = saveTimeoutBySession.get(key);
-  if (existing) clearTimeout(existing);
+  const existing = pendingMessageSaves.get(key);
+  if (existing) clearTimeout(existing.timeoutId);
 
   const timeoutId = setTimeout(() => {
-    saveTimeoutBySession.delete(key);
+    pendingMessageSaves.delete(key);
     persistMessage(sessionId, message).catch((err) => {
       logger.error('Failed to persist message to SQLite', {
         sessionId,
@@ -161,7 +193,7 @@ function debouncedPersistMessage(sessionId: string, message: ConversationMessage
       });
     });
   }, SAVE_DEBOUNCE_MS);
-  saveTimeoutBySession.set(key, timeoutId);
+  pendingMessageSaves.set(key, { timeoutId, sessionId, message });
 }
 
 /** Update the persistenceStatus of a message in the store. */
@@ -277,6 +309,8 @@ export const useConversationStore = create<ConversationStore>()(
     loadForProject: (projectId: string) => {
       clearAllPendingSaves();
       usePermissionStore.getState().resetSessionRules();
+      useAgentArtifactReviewStore.getState().clearSelection();
+      useAgentDelegationStore.getState().clear();
       set((state) => {
         state.activeProjectId = projectId;
         state.activeConversation = createConversation(projectId);
@@ -332,6 +366,7 @@ export const useConversationStore = create<ConversationStore>()(
     createSession: async (agent?: string, options?: { preserveDraftConversation?: boolean }) => {
       const projectId = get().activeProjectId;
       if (!projectId) return null;
+      latestSwitchSessionRequestToken += 1;
 
       try {
         const session = await invoke<SessionSummary>('create_ai_session', {
@@ -467,6 +502,7 @@ export const useConversationStore = create<ConversationStore>()(
     deleteSession: async (sessionId: string) => {
       try {
         await invoke('delete_ai_session', { sessionId });
+        cancelPendingSavesForSession(sessionId);
         const wasActive = get().activeSessionId === sessionId;
         set((state) => {
           state.sessions = state.sessions.filter((s) => s.id !== sessionId);
@@ -474,8 +510,11 @@ export const useConversationStore = create<ConversationStore>()(
             state.activeSessionId = null;
             const pid = state.activeProjectId;
             state.activeConversation = pid ? createConversation(pid) : null;
+            state.isGenerating = false;
+            state.streamingMessageId = null;
           }
         });
+        useAgentDelegationStore.getState().clearForSession(sessionId);
         if (wasActive) {
           usePermissionStore.getState().resetSessionRules();
         }
@@ -488,6 +527,7 @@ export const useConversationStore = create<ConversationStore>()(
     archiveSession: async (sessionId: string) => {
       try {
         await invoke('archive_ai_session', { sessionId });
+        cancelPendingSavesForSession(sessionId);
         const wasActive = get().activeSessionId === sessionId;
         set((state) => {
           state.sessions = state.sessions.filter((s) => s.id !== sessionId);
@@ -495,8 +535,11 @@ export const useConversationStore = create<ConversationStore>()(
             state.activeSessionId = null;
             const pid = state.activeProjectId;
             state.activeConversation = pid ? createConversation(pid) : null;
+            state.isGenerating = false;
+            state.streamingMessageId = null;
           }
         });
+        useAgentDelegationStore.getState().clearForSession(sessionId);
         if (wasActive) {
           usePermissionStore.getState().resetSessionRules();
         }
@@ -506,9 +549,10 @@ export const useConversationStore = create<ConversationStore>()(
       }
     },
 
-    addUserMessage: (content: string) => {
+    addUserMessage: (content: string, options?: { persist?: boolean }) => {
       const msg = createUserMessage(content);
       const sid = get().activeSessionId;
+      const shouldPersist = options?.persist !== false;
       if (sid) {
         msg.sessionId = sid;
       }
@@ -520,6 +564,10 @@ export const useConversationStore = create<ConversationStore>()(
       });
 
       // Persist to SQLite if we have an active session
+      if (!shouldPersist) {
+        return msg.id;
+      }
+
       if (sid) {
         debouncedPersistMessage(sid, msg);
       } else {
@@ -551,6 +599,34 @@ export const useConversationStore = create<ConversationStore>()(
           });
       }
       return msg.id;
+    },
+
+    persistQueuedMessage: (messageId: string, sessionId?: string | null) => {
+      const resolvedSessionId = sessionId ?? get().activeSessionId;
+      if (!resolvedSessionId) return;
+
+      let queuedMessage: ConversationMessage | null = null;
+      set((state) => {
+        const message = state.activeConversation?.messages.find((m) => m.id === messageId);
+        if (!message) return;
+
+        message.sessionId = resolvedSessionId;
+        message.persistenceStatus = 'pending';
+        queuedMessage = {
+          ...message,
+          parts: [...message.parts],
+        };
+      });
+
+      if (!queuedMessage) return;
+
+      persistMessage(resolvedSessionId, queuedMessage).catch((err) => {
+        logger.error('Failed to persist dequeued user message', {
+          sessionId: resolvedSessionId,
+          messageId,
+          err,
+        });
+      });
     },
 
     startAssistantMessage: (sessionId?: string) => {

@@ -120,6 +120,7 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
       (state) => state.activeConversation?.id ?? null,
     );
     const addUserMessage = useConversationStore((state) => state.addUserMessage);
+    const persistQueuedMessage = useConversationStore((state) => state.persistQueuedMessage);
     const addSystemMessage = useConversationStore((state) => state.addSystemMessage);
     const activeProjectId = useConversationStore((state) => state.activeProjectId);
     const loadForProject = useConversationStore((state) => state.loadForProject);
@@ -167,13 +168,21 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
 
       setInput('');
 
-      addUserMessage(userInput);
-      onSubmit?.(userInput);
-
       if (isRunning) {
-        enqueue(userInput);
+        const currentState = useConversationStore.getState();
+        const queuedMessageId = addUserMessage(userInput, { persist: false });
+        enqueue(userInput, {
+          projectId: currentState.activeProjectId,
+          sessionId: currentState.activeSessionId,
+          conversationId: currentState.activeConversation?.id ?? null,
+          messageId: queuedMessageId,
+        });
+        onSubmit?.(userInput);
         return;
       }
+
+      addUserMessage(userInput);
+      onSubmit?.(userInput);
 
       await executeMessage(userInput);
     }, [
@@ -243,13 +252,29 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
         }
 
         setStopState('idle');
-        const next = dequeue();
-        if (next) {
-          void executeMessage(next.content);
+        let next = dequeue();
+        while (next) {
+          const currentState = useConversationStore.getState();
+          const stillMatchesProject =
+            !next.projectId || next.projectId === currentState.activeProjectId;
+          const stillMatchesSession =
+            !next.sessionId || next.sessionId === currentState.activeSessionId;
+          const stillMatchesConversation =
+            !next.conversationId || next.conversationId === currentState.activeConversation?.id;
+
+          if (stillMatchesProject && stillMatchesSession && stillMatchesConversation) {
+            if (next.messageId) {
+              persistQueuedMessage(next.messageId, next.sessionId);
+            }
+            void executeMessage(next.content);
+            break;
+          }
+
+          next = dequeue();
         }
       }
       prevIsRunningRef.current = isRunning;
-    }, [dequeue, executeMessage, isRunning, stopState]);
+    }, [dequeue, executeMessage, isRunning, persistQueuedMessage, stopState]);
 
     useEffect(() => {
       return () => {
@@ -306,6 +331,7 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
 
         <ChatMessageList
           messages={messages}
+          conversationId={activeConversationId}
           error={error}
           onApprove={onApprove}
           onReject={onReject}

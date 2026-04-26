@@ -203,6 +203,80 @@ describe('AgentRuntimeChatShell', () => {
     expect(executeMessage).toHaveBeenCalledWith('queued prompt');
   });
 
+  it('drops queued prompts when the active session changed before completion', () => {
+    const executeMessage = vi.fn();
+
+    act(() => {
+      useMessageQueueStore.getState().enqueue('queued prompt', {
+        projectId: 'project-1',
+        sessionId: 'session-1',
+        conversationId: 'session-1',
+        messageId: 'queued-message-1',
+      });
+    });
+
+    const { rerender } = render(
+      <AgentRuntimeChatShell
+        chatTestId="agent-runtime-shell"
+        executeMessage={executeMessage}
+        abort={vi.fn()}
+        phase="executing"
+        isRunning={true}
+        isEnabled={true}
+        error={null}
+        runtimeSummary={{ startedTools: 1, completedTools: 0, latestIteration: 0 }}
+        plan={null}
+        pendingClarificationQuestion={null}
+        pendingToolPermissionRequest={null}
+        onApprove={() => {}}
+        onReject={() => {}}
+        onRetry={() => {}}
+        onToolAllow={() => {}}
+        onToolAllowAlways={() => {}}
+        onToolDeny={() => {}}
+      />,
+    );
+
+    act(() => {
+      useConversationStore.setState((state) => ({
+        ...state,
+        activeConversation: {
+          id: 'session-2',
+          projectId: 'project-1',
+          messages: [],
+          createdAt: 200,
+          updatedAt: 200,
+        },
+        activeSessionId: 'session-2',
+      }));
+    });
+
+    rerender(
+      <AgentRuntimeChatShell
+        chatTestId="agent-runtime-shell"
+        executeMessage={executeMessage}
+        abort={vi.fn()}
+        phase="completed"
+        isRunning={false}
+        isEnabled={true}
+        error={null}
+        runtimeSummary={{ startedTools: 1, completedTools: 1, latestIteration: 1 }}
+        plan={null}
+        pendingClarificationQuestion={null}
+        pendingToolPermissionRequest={null}
+        onApprove={() => {}}
+        onReject={() => {}}
+        onRetry={() => {}}
+        onToolAllow={() => {}}
+        onToolAllowAlways={() => {}}
+        onToolDeny={() => {}}
+      />,
+    );
+
+    expect(executeMessage).not.toHaveBeenCalled();
+    expect(useMessageQueueStore.getState().queue).toHaveLength(0);
+  });
+
   it('bootstraps the conversation store before submitting a prompt', async () => {
     const user = userEvent.setup();
     const executeMessage = vi.fn().mockResolvedValue(undefined);

@@ -15,14 +15,25 @@ import { create } from 'zustand';
 export interface QueuedMessage {
   id: string;
   content: string;
+  projectId: string | null;
+  sessionId: string | null;
+  conversationId: string | null;
+  messageId: string | null;
   queuedAt: number;
+}
+
+export interface QueueMessageContext {
+  projectId?: string | null;
+  sessionId?: string | null;
+  conversationId?: string | null;
+  messageId?: string | null;
 }
 
 export interface MessageQueueState {
   /** Queued messages awaiting execution */
   queue: QueuedMessage[];
   /** Add a message to the queue */
-  enqueue: (content: string) => string;
+  enqueue: (content: string, context?: QueueMessageContext) => string;
   /** Remove and return the next message */
   dequeue: () => QueuedMessage | null;
   /** Peek at the next message without removing */
@@ -40,11 +51,15 @@ export interface MessageQueueState {
 export const useMessageQueueStore = create<MessageQueueState>()((set, get) => ({
   queue: [],
 
-  enqueue: (content: string) => {
+  enqueue: (content: string, context: QueueMessageContext = {}) => {
     const id = crypto.randomUUID();
     const message: QueuedMessage = {
       id,
       content,
+      projectId: context.projectId ?? null,
+      sessionId: context.sessionId ?? null,
+      conversationId: context.conversationId ?? null,
+      messageId: context.messageId ?? null,
       queuedAt: Date.now(),
     };
     set((state) => ({ queue: [...state.queue, message] }));
