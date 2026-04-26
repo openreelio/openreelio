@@ -44,7 +44,7 @@ export function AgentArtifactDetailPanel({
   const containerClassName =
     variant === 'panel'
       ? `h-full overflow-auto p-4 ${className}`
-      : `border-b border-border-subtle bg-surface-elevated/80 px-4 py-3 ${className}`;
+      : `max-h-72 shrink-0 overflow-y-auto border-b border-border-subtle bg-surface-elevated/80 px-4 py-3 ${className}`;
   const patchStats = detail.kind === 'file' ? countPatchStats(detail.patch.diff) : null;
   const toolStatus = detail.kind === 'tool' ? (detail.toolCall?.status ?? 'completed') : null;
   const toolRisk = detail.kind === 'tool' ? (detail.toolCall?.riskLevel ?? null) : null;

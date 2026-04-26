@@ -102,11 +102,26 @@ export function AgentArtifactReviewPanel({ className = '' }: { className?: strin
   );
   const delegationRecordsBySessionId = useAgentDelegationStore((state) => state.recordsBySessionId);
   const selection = useAgentArtifactReviewStore((state) => state.selection);
-  const reviewSource = useAgentArtifactReviewStore((state) =>
+  const rawReviewSource = useAgentArtifactReviewStore((state) =>
     selection.conversationId
       ? (state.sourcesByConversationId[selection.conversationId] ?? null)
       : null,
   );
+  const reviewSource = useMemo(() => {
+    if (!rawReviewSource) {
+      return null;
+    }
+
+    if (selection.projectId && rawReviewSource.projectId !== selection.projectId) {
+      return null;
+    }
+
+    if (activeProjectId && rawReviewSource.projectId !== activeProjectId) {
+      return null;
+    }
+
+    return rawReviewSource;
+  }, [activeProjectId, rawReviewSource, selection.projectId]);
   const isReviewSourceLoading = useAgentArtifactReviewStore((state) =>
     selection.conversationId
       ? (state.isLoadingByConversationId[selection.conversationId] ?? false)
@@ -124,6 +139,12 @@ export function AgentArtifactReviewPanel({ className = '' }: { className?: strin
   const createDelegatedSession = useAgentDelegationStore((state) => state.createDelegatedSession);
   const loadDelegations = useAgentDelegationStore((state) => state.loadDelegations);
   const updateDelegationRecord = useAgentDelegationStore((state) => state.updateDelegationRecord);
+
+  useEffect(() => {
+    if (selection.projectId && activeProjectId && selection.projectId !== activeProjectId) {
+      clearSelection();
+    }
+  }, [activeProjectId, clearSelection, selection.projectId]);
 
   useEffect(() => {
     if (
@@ -418,7 +439,13 @@ export function AgentArtifactReviewPanel({ className = '' }: { className?: strin
   const handleSelectFocus = useCallback(
     (focus: AgentArtifactFocus) => {
       if (isSameArtifactFocus(activeFocus, focus)) {
-        clearSelection();
+        setSelection({
+          focus: null,
+          projectId: reviewSession?.projectId ?? activeProjectId,
+          conversationId: reviewSession?.conversationId ?? activeConversationId,
+          sourceLabel: reviewSession?.title ?? selection.sourceLabel,
+          sourceAgentProfileId: reviewSession?.agentProfileId ?? selection.sourceAgentProfileId,
+        });
         return;
       }
 
@@ -434,7 +461,6 @@ export function AgentArtifactReviewPanel({ className = '' }: { className?: strin
       activeConversationId,
       activeFocus,
       activeProjectId,
-      clearSelection,
       reviewSession,
       selection.sourceAgentProfileId,
       selection.sourceLabel,
@@ -780,7 +806,7 @@ export function AgentArtifactReviewPanel({ className = '' }: { className?: strin
       className={`flex h-full flex-col bg-editor-bg ${className}`}
       data-testid="agent-artifact-review-panel"
     >
-      <div className="border-b border-editor-border px-4 py-3">
+      <div className="max-h-[42%] shrink-0 overflow-y-auto border-b border-editor-border px-4 py-3">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-editor-text-muted">
             Agent Review
@@ -1066,7 +1092,10 @@ export function AgentArtifactReviewPanel({ className = '' }: { className?: strin
         )}
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)]">
+      <div
+        className="grid min-h-0 flex-1"
+        style={{ gridTemplateColumns: 'minmax(0, min(12rem, 38%)) minmax(0, 1fr)' }}
+      >
         <div className="overflow-auto border-r border-editor-border p-3">
           <div className="space-y-3">
             {relatedSources.length > 0 && (
