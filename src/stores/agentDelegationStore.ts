@@ -162,8 +162,18 @@ export const useAgentDelegationStore = create<AgentDelegationStore>((set) => ({
 
   clearForSession: (sessionId) => {
     set((state) => {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { [sessionId]: _records, ...nextRecords } = state.recordsBySessionId;
+      const nextRecords = Object.fromEntries(
+        Object.entries(state.recordsBySessionId)
+          .filter(([bucketSessionId]) => bucketSessionId !== sessionId)
+          .map(([bucketSessionId, records]) => [
+            bucketSessionId,
+            records.filter(
+              (record) =>
+                record.parentSessionId !== sessionId && record.childSessionId !== sessionId,
+            ),
+          ])
+          .filter(([, records]) => records.length > 0),
+      );
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { [sessionId]: _loading, ...nextLoading } = state.isLoadingBySessionId;
       // eslint-disable-next-line @typescript-eslint/no-unused-vars

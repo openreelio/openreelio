@@ -101,7 +101,12 @@ export function buildDelegatedFromContext({
   handleSessionSwitch,
   openDelegationReview,
 }: BuildDelegatedFromContextArgs): DelegatedParentContext | null {
-  const parentSessionId = activeAgentSnapshot?.session.lineage.parentSessionId;
+  const fallbackParentSessionId =
+    activeDelegationRecord?.childSessionId === activeSessionId
+      ? activeDelegationRecord.parentSessionId
+      : null;
+  const parentSessionId =
+    activeAgentSnapshot?.session.lineage.parentSessionId ?? fallbackParentSessionId;
   if (!parentSessionId) {
     return null;
   }
