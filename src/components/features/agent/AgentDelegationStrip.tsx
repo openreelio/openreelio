@@ -109,7 +109,9 @@ function DelegationResultSummary({
 
   return (
     <div className="mt-2 space-y-2">
-      {preview && <p className="truncate text-xs text-text-secondary">Latest result: {preview}</p>}
+      {preview && (
+        <p className="min-w-0 truncate text-xs text-text-secondary">Latest result: {preview}</p>
+      )}
 
       {result && (
         <>
@@ -144,7 +146,7 @@ function DelegationResultSummary({
                   {result.recentTools.slice(0, 3).map((tool) => (
                     <code
                       key={tool}
-                      className="rounded bg-surface-base px-1.5 py-0.5 text-[10px] text-text-secondary"
+                      className="max-w-full break-all rounded bg-surface-base px-1.5 py-0.5 text-[10px] text-text-secondary"
                     >
                       {tool}
                     </code>
@@ -160,7 +162,7 @@ function DelegationResultSummary({
                   {result.recentFiles.slice(0, 3).map((file) => (
                     <code
                       key={file}
-                      className="rounded bg-surface-base px-1.5 py-0.5 text-[10px] text-text-secondary"
+                      className="max-w-full break-all rounded bg-surface-base px-1.5 py-0.5 text-[10px] text-text-secondary"
                     >
                       {file}
                     </code>
@@ -190,12 +192,14 @@ export function AgentDelegationStrip({
       data-testid="agent-delegation-strip"
     >
       {delegatedFrom && (
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="min-w-0">
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0 flex-1">
             <p className="text-[10px] font-medium uppercase tracking-[0.08em] text-text-tertiary">
               Delegated Session
             </p>
-            <p className="mt-1 text-sm text-text-primary">From {delegatedFrom.parentLabel}</p>
+            <p className="mt-1 truncate text-sm text-text-primary">
+              From {delegatedFrom.parentLabel}
+            </p>
             {delegatedFrom.delegatedGoal && (
               <p className="mt-1 truncate text-xs text-text-secondary">
                 Goal: {delegatedFrom.delegatedGoal}
@@ -209,7 +213,7 @@ export function AgentDelegationStrip({
               errorMessage={delegatedFrom.errorMessage}
             />
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
             {delegatedFrom.statusLabel && (
               <span className="rounded-full border border-border-subtle bg-surface-base px-2 py-0.5 text-[11px] text-text-secondary">
                 {delegatedFrom.statusLabel}
@@ -248,12 +252,14 @@ export function AgentDelegationStrip({
             {delegatedChildren.map((child) => (
               <div
                 key={child.id}
-                className="max-w-full rounded-md border border-border-subtle bg-surface-base px-2.5 py-1.5 text-left transition-colors hover:bg-surface-active"
+                className="min-w-0 max-w-full rounded-md border border-border-subtle bg-surface-base px-2.5 py-1.5 text-left transition-colors hover:bg-surface-active"
                 data-testid={`agent-delegated-child-${child.id}`}
               >
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-medium text-text-primary">{child.label}</span>
-                  <span className="rounded-full border border-border-subtle px-1.5 py-0.5 text-[10px] text-text-tertiary">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 truncate text-xs font-medium text-text-primary">
+                    {child.label}
+                  </span>
+                  <span className="shrink-0 rounded-full border border-border-subtle px-1.5 py-0.5 text-[10px] text-text-tertiary">
                     {child.statusLabel}
                   </span>
                 </div>

@@ -167,81 +167,83 @@ export function AISidebar({
         />
       )}
 
-      {/* Header */}
-      <header className="flex items-center justify-between px-3 py-2.5 border-b border-editor-border bg-editor-sidebar/50">
-        <div className="flex min-w-0 items-center gap-2">
-          <Bot className="w-5 h-5 shrink-0 text-purple-400" />
-          <h2 className="truncate text-sm font-medium text-editor-text">AI Assistant</h2>
-          <span
-            data-testid="agentic-mode-indicator"
-            className="flex shrink-0 items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium bg-purple-500/20 text-purple-300 rounded"
-            title="Agentic Engine Mode (Think-Plan-Act-Observe)"
-          >
-            <Zap className="w-2.5 h-2.5" />
-            Agent
-          </span>
-          <div
-            data-testid="provider-status"
-            className={`h-2 w-2 shrink-0 rounded-full ${getProviderStatusColor()} ring-2 ring-offset-1 ring-offset-editor-sidebar/50 ring-transparent`}
-            title={
-              providerStatus.isConfigured
-                ? providerStatus.isAvailable
-                  ? `Connected: ${providerStatus.currentModel}`
-                  : 'Provider unavailable'
-                : 'Not configured'
-            }
-          />
-        </div>
-
-        {/* Actions */}
-        <div className="flex shrink-0 items-center gap-0.5">
-          <button
-            type="button"
-            data-testid="new-chat-btn"
-            onClick={newChatHandler.handler}
-            disabled={!newChatHandler.canCreate}
-            className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
-            aria-label="New conversation"
-            title="New conversation"
-          >
-            <Plus className="w-4 h-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => openSettings('ai')}
-            className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text"
-            aria-label="AI settings"
-            title="AI Settings"
-          >
-            <Settings className="w-4 h-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={onToggle}
-            className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text"
-            aria-label="Collapse AI sidebar"
-            aria-expanded={!collapsed}
-            title="Collapse (Ctrl+/)"
-          >
-            <ChevronRight className="w-4 h-4" />
-          </button>
-        </div>
-      </header>
-
-      {/* Content - only render when not collapsed */}
       {!collapsed && (
-        <AIErrorBoundary
-          onError={(error) => {
-            logger.error('AI Sidebar error caught by boundary', { error });
-          }}
-        >
-          <AgenticSidebarContent
-            className="flex-1"
-            onRegisterNewChat={onRegisterNewChat}
-          />
-        </AIErrorBoundary>
+        <>
+          {/* Header */}
+          <header className="flex items-center justify-between px-3 py-2.5 border-b border-editor-border bg-editor-sidebar/50">
+            <div className="flex min-w-0 items-center gap-2">
+              <Bot className="w-5 h-5 shrink-0 text-purple-400" />
+              <h2 className="truncate text-sm font-medium text-editor-text">AI Assistant</h2>
+              <span
+                data-testid="agentic-mode-indicator"
+                className="flex shrink-0 items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium bg-purple-500/20 text-purple-300 rounded"
+                title="Agentic Engine Mode (Think-Plan-Act-Observe)"
+              >
+                <Zap className="w-2.5 h-2.5" />
+                Agent
+              </span>
+              <div
+                data-testid="provider-status"
+                className={`h-2 w-2 shrink-0 rounded-full ${getProviderStatusColor()} ring-2 ring-offset-1 ring-offset-editor-sidebar/50 ring-transparent`}
+                title={
+                  providerStatus.isConfigured
+                    ? providerStatus.isAvailable
+                      ? `Connected: ${providerStatus.currentModel}`
+                      : 'Provider unavailable'
+                    : 'Not configured'
+                }
+              />
+            </div>
+
+            {/* Actions */}
+            <div className="flex shrink-0 items-center gap-0.5">
+              <button
+                type="button"
+                data-testid="new-chat-btn"
+                onClick={newChatHandler.handler}
+                disabled={!newChatHandler.canCreate}
+                className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
+                aria-label="New conversation"
+                title="New conversation"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => openSettings('ai')}
+                className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text"
+                aria-label="AI settings"
+                title="AI Settings"
+              >
+                <Settings className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={onToggle}
+                className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text"
+                aria-label="Collapse AI sidebar"
+                aria-expanded={!collapsed}
+                title="Collapse (Ctrl+/)"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          </header>
+
+          {/* Content */}
+          <AIErrorBoundary
+            onError={(error) => {
+              logger.error('AI Sidebar error caught by boundary', { error });
+            }}
+          >
+            <AgenticSidebarContent
+              className="flex-1"
+              onRegisterNewChat={onRegisterNewChat}
+            />
+          </AIErrorBoundary>
+        </>
       )}
 
     </aside>

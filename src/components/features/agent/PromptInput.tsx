@@ -95,9 +95,13 @@ export function PromptInput({
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      const hasVisiblePopover = Boolean(
+        containerRef.current?.querySelector('[data-agent-prompt-popover="true"]'),
+      );
+
       // When a popover is open, intercept keys that the popover should handle
       // and explicitly prevent the textarea from acting on them.
-      if (popover.type) {
+      if (popover.type && hasVisiblePopover) {
         if (['ArrowDown', 'ArrowUp', 'Tab', 'Escape'].includes(e.key)) {
           // The popover's capture-phase listener will handle these.
           // We must NOT call preventDefault here so the popover listener fires.
@@ -123,7 +127,7 @@ export function PromptInput({
 
   // Compute popover position relative to container
   const popoverPosition = {
-    top: -(containerRef.current?.offsetHeight ?? 0) - 8,
+    top: 0,
     left: 0,
   };
 
