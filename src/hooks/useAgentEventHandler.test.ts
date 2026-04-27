@@ -480,6 +480,14 @@ describe('useAgentEventHandler', () => {
       });
     });
 
+    act(() => {
+      result.current.handleEvent({
+        type: 'thinking_complete',
+        thought: createTestThought(),
+        timestamp: Date.now(),
+      });
+    });
+
     const state = useConversationStore.getState();
     expect(state.activeSessionId).toBe('session-2');
     expect(state.activeConversation!.messages).toHaveLength(0);

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useCallback, type ReactNode } from 'react';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { SessionList } from './SessionList';
 import {
@@ -46,19 +46,25 @@ export function AgenticSidebarWorkspace({
   sessionTransitionLabel,
   children,
 }: AgenticSidebarWorkspaceProps): JSX.Element {
-  const handleNewSession = (agentProfileId?: string) => {
-    onNewSession(agentProfileId);
-    if (showSessionList) {
-      onToggleSessionList();
-    }
-  };
+  const handleNewSession = useCallback(
+    (agentProfileId?: string) => {
+      onNewSession(agentProfileId);
+      if (showSessionList) {
+        onToggleSessionList();
+      }
+    },
+    [onNewSession, onToggleSessionList, showSessionList],
+  );
 
-  const handleSwitchSession = (sessionId: string) => {
-    onSwitchSession(sessionId);
-    if (showSessionList) {
-      onToggleSessionList();
-    }
-  };
+  const handleSwitchSession = useCallback(
+    (sessionId: string) => {
+      onSwitchSession(sessionId);
+      if (showSessionList) {
+        onToggleSessionList();
+      }
+    },
+    [onSwitchSession, onToggleSessionList, showSessionList],
+  );
 
   return (
     <div

@@ -25,7 +25,6 @@ export interface MentionItem {
 
 interface MentionPopoverProps {
   query: string;
-  position: { top: number; left: number };
   onSelect: (item: MentionItem) => void;
   onClose: () => void;
   visible: boolean;
@@ -58,7 +57,6 @@ function formatDuration(sec?: number): string {
 
 export function MentionPopover({
   query,
-  position,
   onSelect,
   onClose,
   visible,
@@ -207,8 +205,7 @@ export function MentionPopover({
 
   return (
     <div
-      className="absolute bottom-[calc(100%+0.5rem)] z-50 max-h-48 w-[min(16rem,100%)] overflow-y-auto rounded-lg border border-border-subtle bg-surface-elevated shadow-xl"
-      style={{ left: position.left }}
+      className="absolute bottom-[calc(100%+0.5rem)] left-0 z-50 max-h-48 w-[min(16rem,100%)] overflow-y-auto rounded-lg border border-border-subtle bg-surface-elevated shadow-xl"
       data-agent-prompt-popover="true"
       data-testid="mention-popover"
     >

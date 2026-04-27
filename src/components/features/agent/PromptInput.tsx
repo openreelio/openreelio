@@ -125,18 +125,11 @@ export function PromptInput({
     [onSubmit, popover.type],
   );
 
-  // Compute popover position relative to container
-  const popoverPosition = {
-    top: 0,
-    left: 0,
-  };
-
   return (
     <div ref={containerRef} className={`relative min-w-0 ${className}`}>
       {/* Mention Popover */}
       <MentionPopover
         query={popover.type === 'mention' ? popover.query : ''}
-        position={popoverPosition}
         onSelect={handleMentionSelect}
         onClose={closePopover}
         visible={popover.type === 'mention'}
@@ -145,7 +138,6 @@ export function PromptInput({
       {/* Command Popover */}
       <CommandPopover
         query={popover.type === 'command' ? popover.query : ''}
-        position={popoverPosition}
         onSelect={handleCommandSelect}
         onClose={closePopover}
         visible={popover.type === 'command'}

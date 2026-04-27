@@ -1092,10 +1092,7 @@ export function AgentArtifactReviewPanel({ className = '' }: { className?: strin
         )}
       </div>
 
-      <div
-        className="grid min-h-0 flex-1"
-        style={{ gridTemplateColumns: 'minmax(0, min(12rem, 38%)) minmax(0, 1fr)' }}
-      >
+      <div className="grid min-h-0 flex-1 [grid-template-columns:minmax(0,_min(12rem,_38%))_minmax(0,_1fr)]">
         <div className="overflow-auto border-r border-editor-border p-3">
           <div className="space-y-3">
             {relatedSources.length > 0 && (

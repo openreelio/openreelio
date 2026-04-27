@@ -254,6 +254,7 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
         setStopState('idle');
         let next = dequeue();
         while (next) {
+          const queuedMessageId = next.messageId;
           const currentState = useConversationStore.getState();
           const stillMatchesProject =
             !next.projectId || next.projectId === currentState.activeProjectId;
@@ -261,8 +262,18 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
             !next.sessionId || next.sessionId === currentState.activeSessionId;
           const stillMatchesConversation =
             !next.conversationId || next.conversationId === currentState.activeConversation?.id;
+          const hasVisibleQueuedMessage =
+            !queuedMessageId ||
+            !!currentState.activeConversation?.messages.some(
+              (message) => message.id === queuedMessageId,
+            );
 
-          if (stillMatchesProject && stillMatchesSession && stillMatchesConversation) {
+          if (
+            stillMatchesProject &&
+            stillMatchesSession &&
+            stillMatchesConversation &&
+            hasVisibleQueuedMessage
+          ) {
             if (next.messageId) {
               persistQueuedMessage(next.messageId, next.sessionId);
             }

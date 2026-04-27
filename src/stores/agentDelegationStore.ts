@@ -171,8 +171,7 @@ export const useAgentDelegationStore = create<AgentDelegationStore>((set) => ({
               (record) =>
                 record.parentSessionId !== sessionId && record.childSessionId !== sessionId,
             ),
-          ])
-          .filter(([, records]) => records.length > 0),
+          ]),
       );
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { [sessionId]: _loading, ...nextLoading } = state.isLoadingBySessionId;

@@ -605,19 +605,15 @@ export const useConversationStore = create<ConversationStore>()(
       const resolvedSessionId = sessionId ?? get().activeSessionId;
       if (!resolvedSessionId) return;
 
-      let queuedMessage: ConversationMessage | null = null;
       set((state) => {
         const message = state.activeConversation?.messages.find((m) => m.id === messageId);
         if (!message) return;
 
         message.sessionId = resolvedSessionId;
         message.persistenceStatus = 'pending';
-        queuedMessage = {
-          ...message,
-          parts: [...message.parts],
-        };
       });
 
+      const queuedMessage = get().activeConversation?.messages.find((m) => m.id === messageId);
       if (!queuedMessage) return;
 
       persistMessage(resolvedSessionId, queuedMessage).catch((err) => {
