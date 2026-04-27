@@ -161,22 +161,22 @@ export function AgentComposerTray({
   return (
     <div
       ref={trayRef}
-      className="relative flex min-w-0 items-center justify-between gap-2 border-b border-border-subtle px-3 py-1.5"
+      className="relative flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-border-subtle px-3 py-1.5"
       data-testid="agent-composer-tray"
     >
-      <div className="flex min-w-0 items-center gap-2">
-        <span className="rounded border border-border-subtle bg-surface-base px-2 py-0.5 text-xs font-medium text-text-secondary flex-shrink-0 truncate">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        <span className="min-w-0 max-w-[12rem] truncate rounded border border-border-subtle bg-surface-base px-2 py-0.5 text-xs font-medium text-text-secondary">
           {currentAgentName}
         </span>
         {isExperimentalSession && (
-          <span className="rounded-full border border-yellow-500/20 bg-yellow-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] text-yellow-300">
+          <span className="shrink-0 rounded-full border border-yellow-500/20 bg-yellow-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em] text-yellow-300">
             Experimental
           </span>
         )}
         {currentAgentDescription && <span className="sr-only">{currentAgentDescription}</span>}
       </div>
 
-      <div className="flex min-w-0 flex-shrink-0 items-center justify-end gap-1.5 overflow-hidden">
+      <div className="flex min-w-0 shrink-0 items-center justify-end gap-1.5 overflow-visible">
         {showRuntime && (
           <div
             className={`inline-flex min-w-0 max-w-[10rem] items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] ${runtimeTone}`}
@@ -217,7 +217,7 @@ export function AgentComposerTray({
 
             {menuOpen && (
               <div
-                className="absolute right-0 top-full z-20 mt-2 w-72 overflow-hidden rounded-lg border border-border-subtle bg-surface-elevated shadow-xl"
+                className="absolute right-0 top-full z-20 mt-2 w-64 max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg border border-border-subtle bg-surface-elevated shadow-xl"
                 data-testid="agent-specialists-menu"
               >
                 <div className="border-b border-border-subtle px-3 py-2">
@@ -239,10 +239,10 @@ export function AgentComposerTray({
                       className="flex w-full flex-col rounded-md px-3 py-2 text-left transition-colors hover:bg-surface-active"
                       data-testid={`agent-specialist-option-${definition.id}`}
                     >
-                      <span className="text-sm font-medium text-text-primary">
+                      <span className="max-w-full truncate text-sm font-medium text-text-primary">
                         {definition.name}
                       </span>
-                      <span className="mt-0.5 text-xs text-text-tertiary">
+                      <span className="mt-0.5 break-words text-xs text-text-tertiary">
                         {definition.description}
                       </span>
                     </button>

@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ComponentProps } from 'react';
 import { useProjectStore } from '@/stores';
 import { useConversationStore } from '@/stores/conversationStore';
 import { useMessageQueueStore } from '@/stores/messageQueueStore';
@@ -9,6 +10,44 @@ import { createDefaultLayout, useWorkspaceLayoutStore } from '@/stores/workspace
 import { AgentRuntimeChatShell } from './AgentRuntimeChatShell';
 
 const defaultLoadForProject = useConversationStore.getState().loadForProject;
+
+function renderRuntimeShell({
+  executeMessage = vi.fn(),
+  abort = vi.fn(),
+  phase = 'executing',
+  isRunning = true,
+}: {
+  executeMessage?: ReturnType<typeof vi.fn>;
+  abort?: ReturnType<typeof vi.fn>;
+  phase?: ComponentProps<typeof AgentRuntimeChatShell>['phase'];
+  isRunning?: boolean;
+} = {}) {
+  return render(
+    <AgentRuntimeChatShell
+      chatTestId="agent-runtime-shell"
+      executeMessage={executeMessage}
+      abort={abort}
+      phase={phase}
+      isRunning={isRunning}
+      isEnabled={true}
+      error={null}
+      runtimeSummary={{
+        startedTools: 1,
+        completedTools: isRunning ? 0 : 1,
+        latestIteration: isRunning ? 0 : 1,
+      }}
+      plan={null}
+      pendingClarificationQuestion={null}
+      pendingToolPermissionRequest={null}
+      onApprove={() => {}}
+      onReject={() => {}}
+      onRetry={() => {}}
+      onToolAllow={() => {}}
+      onToolAllowAlways={() => {}}
+      onToolDeny={() => {}}
+    />,
+  );
+}
 
 vi.mock('./ChatMessageList', () => ({
   ChatMessageList: () => <div data-testid="chat-message-list" />,
@@ -201,6 +240,215 @@ describe('AgentRuntimeChatShell', () => {
     );
 
     expect(executeMessage).toHaveBeenCalledWith('queued prompt');
+  });
+
+  it('drops queued prompts when the active session changed before completion', () => {
+    const executeMessage = vi.fn();
+
+    act(() => {
+      useMessageQueueStore.getState().enqueue('queued prompt', {
+        projectId: 'project-1',
+        sessionId: 'session-1',
+        conversationId: 'session-1',
+        messageId: 'queued-message-1',
+      });
+    });
+
+    const { rerender } = render(
+      <AgentRuntimeChatShell
+        chatTestId="agent-runtime-shell"
+        executeMessage={executeMessage}
+        abort={vi.fn()}
+        phase="executing"
+        isRunning={true}
+        isEnabled={true}
+        error={null}
+        runtimeSummary={{ startedTools: 1, completedTools: 0, latestIteration: 0 }}
+        plan={null}
+        pendingClarificationQuestion={null}
+        pendingToolPermissionRequest={null}
+        onApprove={() => {}}
+        onReject={() => {}}
+        onRetry={() => {}}
+        onToolAllow={() => {}}
+        onToolAllowAlways={() => {}}
+        onToolDeny={() => {}}
+      />,
+    );
+
+    act(() => {
+      useConversationStore.setState((state) => ({
+        ...state,
+        activeConversation: {
+          id: 'session-2',
+          projectId: 'project-1',
+          messages: [],
+          createdAt: 200,
+          updatedAt: 200,
+        },
+        activeSessionId: 'session-2',
+      }));
+    });
+
+    act(() => {
+      rerender(
+        <AgentRuntimeChatShell
+          chatTestId="agent-runtime-shell"
+          executeMessage={executeMessage}
+          abort={vi.fn()}
+          phase="completed"
+          isRunning={false}
+          isEnabled={true}
+          error={null}
+          runtimeSummary={{ startedTools: 1, completedTools: 1, latestIteration: 1 }}
+          plan={null}
+          pendingClarificationQuestion={null}
+          pendingToolPermissionRequest={null}
+          onApprove={() => {}}
+          onReject={() => {}}
+          onRetry={() => {}}
+          onToolAllow={() => {}}
+          onToolAllowAlways={() => {}}
+          onToolDeny={() => {}}
+        />,
+      );
+    });
+
+    expect(executeMessage).not.toHaveBeenCalled();
+    expect(useMessageQueueStore.getState().queue).toHaveLength(0);
+  });
+
+  it('skips stale queued prompts and executes the next matching prompt', () => {
+    const executeMessage = vi.fn();
+
+    act(() => {
+      useMessageQueueStore.getState().enqueue('stale prompt', {
+        projectId: 'project-1',
+        sessionId: 'session-2',
+        conversationId: 'session-2',
+        messageId: 'stale-message',
+      });
+      useMessageQueueStore.getState().enqueue('matching prompt', {
+        projectId: 'project-1',
+        sessionId: 'session-1',
+        conversationId: 'session-1',
+      });
+    });
+
+    const { rerender } = renderRuntimeShell({ executeMessage });
+
+    act(() => {
+      rerender(
+        <AgentRuntimeChatShell
+          chatTestId="agent-runtime-shell"
+          executeMessage={executeMessage}
+          abort={vi.fn()}
+          phase="completed"
+          isRunning={false}
+          isEnabled={true}
+          error={null}
+          runtimeSummary={{ startedTools: 1, completedTools: 1, latestIteration: 1 }}
+          plan={null}
+          pendingClarificationQuestion={null}
+          pendingToolPermissionRequest={null}
+          onApprove={() => {}}
+          onReject={() => {}}
+          onRetry={() => {}}
+          onToolAllow={() => {}}
+          onToolAllowAlways={() => {}}
+          onToolDeny={() => {}}
+        />,
+      );
+    });
+
+    expect(executeMessage).toHaveBeenCalledTimes(1);
+    expect(executeMessage).toHaveBeenCalledWith('matching prompt');
+    expect(useMessageQueueStore.getState().queue).toHaveLength(0);
+  });
+
+  it('drops queued prompts when only the active project changed', () => {
+    const executeMessage = vi.fn();
+
+    act(() => {
+      const messageId = useConversationStore
+        .getState()
+        .addUserMessage('project-scoped prompt', { persist: false });
+      useMessageQueueStore.getState().enqueue('project-scoped prompt', {
+        projectId: 'project-2',
+        sessionId: 'session-1',
+        conversationId: 'session-1',
+        messageId,
+      });
+    });
+
+    const { rerender } = renderRuntimeShell({ executeMessage });
+
+    act(() => {
+      rerender(
+        <AgentRuntimeChatShell
+          chatTestId="agent-runtime-shell"
+          executeMessage={executeMessage}
+          abort={vi.fn()}
+          phase="completed"
+          isRunning={false}
+          isEnabled={true}
+          error={null}
+          runtimeSummary={{ startedTools: 1, completedTools: 1, latestIteration: 1 }}
+          plan={null}
+          pendingClarificationQuestion={null}
+          pendingToolPermissionRequest={null}
+          onApprove={() => {}}
+          onReject={() => {}}
+          onRetry={() => {}}
+          onToolAllow={() => {}}
+          onToolAllowAlways={() => {}}
+          onToolDeny={() => {}}
+        />,
+      );
+    });
+
+    expect(executeMessage).not.toHaveBeenCalled();
+    expect(useMessageQueueStore.getState().queue).toHaveLength(0);
+  });
+
+  it('drops matching queued prompts when their user message is no longer visible', () => {
+    const executeMessage = vi.fn();
+
+    act(() => {
+      useMessageQueueStore.getState().enqueue('orphaned prompt', {
+        projectId: 'project-1',
+        sessionId: 'session-1',
+        conversationId: 'session-1',
+        messageId: 'missing-message',
+      });
+    });
+
+    const { rerender } = renderRuntimeShell({ executeMessage });
+
+    rerender(
+      <AgentRuntimeChatShell
+        chatTestId="agent-runtime-shell"
+        executeMessage={executeMessage}
+        abort={vi.fn()}
+        phase="completed"
+        isRunning={false}
+        isEnabled={true}
+        error={null}
+        runtimeSummary={{ startedTools: 1, completedTools: 1, latestIteration: 1 }}
+        plan={null}
+        pendingClarificationQuestion={null}
+        pendingToolPermissionRequest={null}
+        onApprove={() => {}}
+        onReject={() => {}}
+        onRetry={() => {}}
+        onToolAllow={() => {}}
+        onToolAllowAlways={() => {}}
+        onToolDeny={() => {}}
+      />,
+    );
+
+    expect(executeMessage).not.toHaveBeenCalled();
+    expect(useMessageQueueStore.getState().queue).toHaveLength(0);
   });
 
   it('bootstraps the conversation store before submitting a prompt', async () => {

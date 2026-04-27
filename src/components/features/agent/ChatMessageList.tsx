@@ -16,6 +16,7 @@ import { messageMatchesArtifactFocus, type AgentArtifactFocus } from './agentArt
 
 export interface ChatMessageListProps {
   messages: readonly ConversationMessage[];
+  conversationId?: string | null;
   error: Error | null;
   onApprove: () => void;
   onReject: (reason?: string) => void;
@@ -33,6 +34,7 @@ export interface ChatMessageListProps {
 
 export function ChatMessageList({
   messages,
+  conversationId = null,
   error,
   onApprove,
   onReject,
@@ -69,6 +71,14 @@ export function ChatMessageList({
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, []);
+
+  useEffect(() => {
+    isUserScrolledUpRef.current = false;
+    messageItemRefs.current = {};
+    if (messagesEndRef.current && typeof messagesEndRef.current.scrollIntoView === 'function') {
+      messagesEndRef.current.scrollIntoView({ behavior: 'auto' });
+    }
+  }, [conversationId]);
 
   const handleScroll = useCallback(() => {
     const container = scrollContainerRef.current;

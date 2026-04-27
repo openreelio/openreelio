@@ -334,7 +334,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
       });
       await bootstrapRecoveredContextFromCheckpoint({
         sessionId: storeSessionId,
-        addSystemMessage: store.addSystemMessage,
+        addSystemMessageToSession: store.addSystemMessageToSession,
         logger,
         loggerLabel: 'agent loop',
         lastBootstrappedCheckpointIdRef: bootstrappedCheckpointIdRef,

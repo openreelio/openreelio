@@ -191,10 +191,22 @@ function extractErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function applySnapshot(state: AgentSessionStoreState, snapshot: AgentSessionSnapshot): void {
+function applySnapshot(
+  state: AgentSessionStoreState,
+  snapshot: AgentSessionSnapshot,
+  options: { activate?: boolean } = {},
+): void {
   state.snapshotsById[snapshot.session.id] = snapshot;
-  state.activeProjectId = snapshot.session.projectId;
-  state.activeSessionId = snapshot.session.id;
+  if (
+    options.activate !== false ||
+    !state.activeSessionId ||
+    state.activeSessionId === snapshot.session.id
+  ) {
+    state.activeProjectId = snapshot.session.projectId;
+    state.activeSessionId = snapshot.session.id;
+  } else if (!state.activeProjectId) {
+    state.activeProjectId = snapshot.session.projectId;
+  }
   state.sessionOrder = touchSessionOrder(state.sessionOrder, snapshot.session.id);
 }
 
@@ -616,7 +628,7 @@ export function createAgentSessionStore(
           const headerFingerprint = buildAgentSessionRecoveryFingerprint(snapshot.session);
 
           set((state) => {
-            applySnapshot(state, snapshot);
+            applySnapshot(state, snapshot, { activate: false });
           });
 
           get().clearPersistenceIssue(record.sessionId, 'compaction_record');
@@ -641,7 +653,7 @@ export function createAgentSessionStore(
           const headerFingerprint = buildAgentSessionRecoveryFingerprint(snapshot.session);
 
           set((state) => {
-            applySnapshot(state, snapshot);
+            applySnapshot(state, snapshot, { activate: false });
           });
 
           get().clearPersistenceIssue(checkpoint.sessionId, 'resume_checkpoint');
@@ -671,7 +683,7 @@ export function createAgentSessionStore(
           const headerFingerprint = buildAgentSessionRecoveryFingerprint(snapshot.session);
 
           set((state) => {
-            applySnapshot(state, snapshot);
+            applySnapshot(state, snapshot, { activate: false });
           });
 
           get().clearPersistenceIssue(checkpoint.sessionId, 'resume_checkpoint');
@@ -793,7 +805,7 @@ export function createAgentSessionStore(
           const headerFingerprint = buildAgentSessionRecoveryFingerprint(snapshot.session);
 
           set((state) => {
-            applySnapshot(state, snapshot);
+            applySnapshot(state, snapshot, { activate: false });
             state.isMutating = false;
           });
 
@@ -829,7 +841,7 @@ export function createAgentSessionStore(
           const headerFingerprint = buildAgentSessionRecoveryFingerprint(snapshot.session);
 
           set((state) => {
-            applySnapshot(state, snapshot);
+            applySnapshot(state, snapshot, { activate: false });
             state.isMutating = false;
           });
 

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useCallback, type ReactNode } from 'react';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { SessionList } from './SessionList';
 import {
@@ -46,14 +46,50 @@ export function AgenticSidebarWorkspace({
   sessionTransitionLabel,
   children,
 }: AgenticSidebarWorkspaceProps): JSX.Element {
+  const handleNewSession = useCallback(
+    (agentProfileId?: string) => {
+      onNewSession(agentProfileId);
+      if (showSessionList) {
+        onToggleSessionList();
+      }
+    },
+    [onNewSession, onToggleSessionList, showSessionList],
+  );
+
+  const handleSwitchSession = useCallback(
+    (sessionId: string) => {
+      onSwitchSession(sessionId);
+      if (showSessionList) {
+        onToggleSessionList();
+      }
+    },
+    [onSwitchSession, onToggleSessionList, showSessionList],
+  );
+
   return (
     <div
       data-testid="agentic-sidebar-content"
       className={`relative flex min-w-0 flex-1 overflow-hidden ${className}`}
     >
       {showSessionList && (
-        <div className="absolute inset-y-0 left-0 z-20 w-[82%] max-w-[240px] border-r border-border-subtle bg-surface-base shadow-xl">
-          <SessionList onNewSession={onNewSession} onSwitchSession={onSwitchSession} />
+        <div className="absolute inset-y-0 left-0 z-20 flex w-[82%] max-w-[240px] min-w-0 flex-col border-r border-border-subtle bg-surface-base shadow-xl">
+          <div className="flex shrink-0 items-center justify-end border-b border-border-subtle px-2 py-1">
+            <button
+              type="button"
+              onClick={onToggleSessionList}
+              className="p-1 rounded hover:bg-surface-active transition-colors"
+              aria-label="Hide sessions"
+              title="Hide sessions"
+              data-testid="close-sessions-overlay-btn"
+            >
+              <PanelLeftClose className="w-3.5 h-3.5 text-text-tertiary" />
+            </button>
+          </div>
+          <SessionList
+            className="min-h-0 flex-1"
+            onNewSession={handleNewSession}
+            onSwitchSession={handleSwitchSession}
+          />
         </div>
       )}
 

@@ -64,4 +64,12 @@ describe('AISidebar', () => {
     expect(screen.getByTestId('ai-sidebar')).toHaveStyle({ width: '520px' });
     expect(screen.getByTestId('resize-handle')).toBeInTheDocument();
   });
+
+  it('should not render the header or content while collapsed', () => {
+    render(<AISidebar collapsed onToggle={vi.fn()} layoutMode="sidebar" />);
+
+    expect(screen.getByTestId('ai-sidebar')).toHaveStyle({ overflow: 'visible' });
+    expect(screen.queryByText('AI Assistant')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('agentic-sidebar-content')).not.toBeInTheDocument();
+  });
 });

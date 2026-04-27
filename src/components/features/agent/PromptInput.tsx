@@ -95,9 +95,13 @@ export function PromptInput({
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      const hasVisiblePopover = Boolean(
+        containerRef.current?.querySelector('[data-agent-prompt-popover="true"]'),
+      );
+
       // When a popover is open, intercept keys that the popover should handle
       // and explicitly prevent the textarea from acting on them.
-      if (popover.type) {
+      if (popover.type && hasVisiblePopover) {
         if (['ArrowDown', 'ArrowUp', 'Tab', 'Escape'].includes(e.key)) {
           // The popover's capture-phase listener will handle these.
           // We must NOT call preventDefault here so the popover listener fires.
@@ -121,18 +125,11 @@ export function PromptInput({
     [onSubmit, popover.type],
   );
 
-  // Compute popover position relative to container
-  const popoverPosition = {
-    top: -(containerRef.current?.offsetHeight ?? 0) - 8,
-    left: 0,
-  };
-
   return (
     <div ref={containerRef} className={`relative min-w-0 ${className}`}>
       {/* Mention Popover */}
       <MentionPopover
         query={popover.type === 'mention' ? popover.query : ''}
-        position={popoverPosition}
         onSelect={handleMentionSelect}
         onClose={closePopover}
         visible={popover.type === 'mention'}
@@ -141,7 +138,6 @@ export function PromptInput({
       {/* Command Popover */}
       <CommandPopover
         query={popover.type === 'command' ? popover.query : ''}
-        position={popoverPosition}
         onSelect={handleCommandSelect}
         onClose={closePopover}
         visible={popover.type === 'command'}

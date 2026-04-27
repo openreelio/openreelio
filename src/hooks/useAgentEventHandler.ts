@@ -49,11 +49,15 @@ export function useAgentEventHandler() {
 
     switch (event.type) {
       case 'session_start': {
+        if (
+          store.activeSessionId !== event.sessionId ||
+          store.activeConversation?.id !== event.sessionId
+        ) {
+          return;
+        }
+
         // Bind this handler to the engine's session
         boundSessionIdRef.current = event.sessionId;
-        if (store.activeSessionId !== event.sessionId) {
-          useConversationStore.setState({ activeSessionId: event.sessionId });
-        }
         // Start a new assistant message for this session
         const msgId = store.startAssistantMessage(event.sessionId);
         messageIdRef.current = msgId;

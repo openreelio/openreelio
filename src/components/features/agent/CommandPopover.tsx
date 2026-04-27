@@ -21,7 +21,6 @@ export interface CommandItem {
 
 interface CommandPopoverProps {
   query: string;
-  position: { top: number; left: number };
   onSelect: (item: CommandItem) => void;
   onClose: () => void;
   visible: boolean;
@@ -100,7 +99,6 @@ const BUILT_IN_COMMANDS: CommandItem[] = [
 
 export function CommandPopover({
   query,
-  position,
   onSelect,
   onClose,
   visible,
@@ -167,8 +165,8 @@ export function CommandPopover({
 
   return (
     <div
-      className="absolute z-50 w-64 max-h-48 overflow-y-auto rounded-lg border border-border-subtle bg-surface-elevated shadow-xl"
-      style={{ top: position.top, left: position.left }}
+      className="absolute bottom-[calc(100%+0.5rem)] left-0 z-50 max-h-48 w-[min(16rem,100%)] overflow-y-auto rounded-lg border border-border-subtle bg-surface-elevated shadow-xl"
+      data-agent-prompt-popover="true"
       data-testid="command-popover"
     >
       <div className="px-3 py-1.5 border-b border-border-subtle">

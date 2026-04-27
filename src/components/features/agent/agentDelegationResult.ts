@@ -191,17 +191,26 @@ function findBalancedJsonObject(source: string, startIndex: number): string | nu
 }
 
 function extractDelegationHandoffJsonCandidate(content: string): string | null {
-  const markerIndex = content.lastIndexOf('DELEGATION_HANDOFF');
-  if (markerIndex < 0) {
-    return null;
+  let searchFrom = content.length;
+
+  while (searchFrom > 0) {
+    const markerIndex = content.lastIndexOf('DELEGATION_HANDOFF', searchFrom - 1);
+    if (markerIndex < 0) {
+      return null;
+    }
+
+    const firstBraceIndex = content.indexOf('{', markerIndex);
+    if (firstBraceIndex >= 0) {
+      const candidate = findBalancedJsonObject(content, firstBraceIndex);
+      if (candidate) {
+        return candidate;
+      }
+    }
+
+    searchFrom = markerIndex;
   }
 
-  const firstBraceIndex = content.indexOf('{', markerIndex);
-  if (firstBraceIndex < 0) {
-    return null;
-  }
-
-  return findBalancedJsonObject(content, firstBraceIndex);
+  return null;
 }
 
 function hasDelegationHandoffMarker(content: string): boolean {

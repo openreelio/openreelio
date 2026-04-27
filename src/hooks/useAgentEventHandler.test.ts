@@ -59,7 +59,7 @@ function createTestStep(): PlanStep {
 beforeEach(() => {
   useConversationStore.setState({
     activeConversation: {
-      id: 'conv-1',
+      id: 'session-1',
       projectId: 'project-1',
       messages: [],
       createdAt: Date.now(),
@@ -68,6 +68,7 @@ beforeEach(() => {
     isGenerating: false,
     streamingMessageId: null,
     activeProjectId: 'project-1',
+    activeSessionId: 'session-1',
   });
 
   let uuidCounter = 0;
@@ -454,6 +455,42 @@ describe('useAgentEventHandler', () => {
 
     const msg = useConversationStore.getState().activeConversation!.messages[0];
     expect(msg.parts).toHaveLength(0);
+  });
+
+  it('should drop session_start for an inactive session', () => {
+    const { result } = renderHook(() => useAgentEventHandler());
+
+    useConversationStore.setState({
+      activeConversation: {
+        id: 'session-2',
+        projectId: 'project-1',
+        messages: [],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      },
+      activeSessionId: 'session-2',
+    });
+
+    act(() => {
+      result.current.handleEvent({
+        type: 'session_start',
+        sessionId: 'session-1',
+        input: 'late event',
+        timestamp: Date.now(),
+      });
+    });
+
+    act(() => {
+      result.current.handleEvent({
+        type: 'thinking_complete',
+        thought: createTestThought(),
+        timestamp: Date.now(),
+      });
+    });
+
+    const state = useConversationStore.getState();
+    expect(state.activeSessionId).toBe('session-2');
+    expect(state.activeConversation!.messages).toHaveLength(0);
   });
 
   it('should handle full session lifecycle', () => {
