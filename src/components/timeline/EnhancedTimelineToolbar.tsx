@@ -313,12 +313,12 @@ function EnhancedTimelineToolbarComponent({
   return (
     <div
       data-testid="enhanced-timeline-toolbar"
-      className="flex items-center justify-between gap-2 px-2 py-1 bg-editor-sidebar border-b border-editor-border"
+      className="flex min-h-[38px] min-w-0 items-center gap-2 overflow-x-auto overflow-y-hidden border-b border-editor-border bg-editor-sidebar px-2 py-1 lg:justify-between"
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
       {/* Left Section: Tools and Editing Actions */}
-      <div className="flex items-center gap-1">
+      <div className="flex shrink-0 items-center gap-1">
         {/* Tool Selection */}
         <div className="flex items-center gap-0.5 bg-editor-panel/50 rounded p-0.5">
           <ToolButton tool="select" activeTool={activeTool} onClick={handleToolChange} />
@@ -455,7 +455,7 @@ function EnhancedTimelineToolbarComponent({
       </div>
 
       {/* Center Section: Playback Controls and Timecode */}
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         {/* Playback Controls */}
         <div className="flex items-center gap-0.5">
           <button
@@ -517,7 +517,7 @@ function EnhancedTimelineToolbarComponent({
       </div>
 
       {/* Right Section: View Controls */}
-      <div className="flex items-center gap-1">
+      <div className="flex shrink-0 items-center gap-1">
         {/* Mode Toggles */}
         <button
           data-testid="snap-toggle-button"

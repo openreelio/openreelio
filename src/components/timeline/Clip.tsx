@@ -337,7 +337,6 @@ export function Clip({
   const showVideoAudioSourceTag =
     !isText && Boolean(waveformConfig?.isVideoSource) && !thumbnailConfig?.enabled;
   const showAudioLabelBackdrop = !isText && !thumbnailConfig?.enabled;
-  const allowLabelOverflow = showAudioLabelBackdrop;
   const showAudioEditorControls = !isText && trackKind === 'audio';
   const showAudioAutomationEditor = (clip.audio?.volumeKeyframes?.length ?? 0) >= 1;
 
@@ -351,8 +350,7 @@ export function Clip({
     <div
       data-testid={`clip-${clip.id}`}
       className={`
-        absolute h-full rounded-sm cursor-pointer transition-shadow select-none
-        ${allowLabelOverflow ? 'overflow-visible' : 'overflow-hidden'}
+        absolute h-full overflow-hidden rounded-sm cursor-pointer transition-shadow select-none
         ${selected ? 'ring-2 ring-primary-400 z-10' : clip.groupId ? 'ring-1 ring-emerald-400/70' : ''}
         ${disabled ? 'cursor-not-allowed' : 'hover:brightness-110'}
         ${isDragging ? 'z-20' : ''}
@@ -444,12 +442,12 @@ export function Clip({
 
       {/* Clip content */}
       <div
-        className={`h-full p-1 pointer-events-none relative z-10 ${allowLabelOverflow ? 'overflow-visible' : 'overflow-hidden'}`}
+        className="h-full p-1 pointer-events-none relative z-10 overflow-hidden"
       >
         {/* Label */}
         {displayLabel && (
           <span
-            className={`text-xs text-white block max-w-full drop-shadow-sm ${showAudioLabelBackdrop ? 'inline-block rounded bg-black/55 px-1.5 py-0.5 whitespace-nowrap' : 'truncate'}`}
+            className={`text-xs text-white block max-w-full drop-shadow-sm ${showAudioLabelBackdrop ? 'inline-block overflow-hidden text-ellipsis whitespace-nowrap rounded bg-black/55 px-1.5 py-0.5 align-top' : 'truncate'}`}
           >
             {displayLabel}
           </span>

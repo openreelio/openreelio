@@ -225,7 +225,7 @@ describe('Clip', () => {
       expect(screen.queryByTestId('video-audio-source-tag')).not.toBeInTheDocument();
     });
 
-    it('should allow label overflow for audio-style clips', () => {
+    it('should keep audio-style labels contained within the clip bounds', () => {
       render(
         <Clip
           clip={{ ...mockClip, label: undefined }}
@@ -241,7 +241,10 @@ describe('Clip', () => {
         />,
       );
 
-      expect(screen.getByTestId('clip-clip_001')).toHaveClass('overflow-visible');
+      expect(screen.getByTestId('clip-clip_001')).toHaveClass('overflow-hidden');
+      expect(screen.getByText('Very long audio source label that must remain visible')).toHaveClass(
+        'text-ellipsis',
+      );
     });
   });
 
