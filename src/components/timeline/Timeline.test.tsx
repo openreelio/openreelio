@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act, createEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act, createEvent, waitFor } from '@testing-library/react';
 import { Timeline } from './Timeline';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
@@ -173,6 +173,17 @@ describe('Timeline', () => {
     it('should render time ruler', () => {
       render(<Timeline sequence={mockSequence} />);
       expect(screen.getByTestId('time-ruler')).toBeInTheDocument();
+    });
+
+    it('should size the ruler canvas to the measured timeline viewport', async () => {
+      const { container } = render(<Timeline sequence={mockSequence} />);
+
+      await waitFor(() => {
+        const canvas = container.querySelector('[data-testid="time-ruler"] canvas') as
+          | HTMLCanvasElement
+          | null;
+        expect(canvas?.style.width).toBe('808px');
+      });
     });
 
     it('should render all tracks', () => {
@@ -710,6 +721,36 @@ describe('Timeline', () => {
 
       expect(usePlaybackStore.getState().currentTime).toBe(0);
       expect(document.body.style.cursor).toBe('');
+    });
+
+    it('should clamp empty-area pan to the content width without header overscroll', async () => {
+      useTimelineStore.setState({ scrollX: 350, scrollY: 0 });
+      render(<Timeline sequence={mockSequence} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+
+      await act(async () => {
+        fireEvent.pointerDown(tracksArea, { clientX: 400, clientY: 120, button: 0, pointerId: 5 });
+      });
+
+      await act(async () => {
+        fireEvent.pointerMove(tracksArea, { clientX: 100, clientY: 120, pointerId: 5 });
+      });
+
+      expect(useTimelineStore.getState().scrollX).toBe(392);
+
+      await act(async () => {
+        fireEvent.pointerUp(tracksArea, { clientX: 100, clientY: 120, button: 0, pointerId: 5 });
+      });
+    });
+
+    it('should clamp stale horizontal scroll after viewport measurement changes', async () => {
+      useTimelineStore.setState({ scrollX: 999, scrollY: 0 });
+      render(<Timeline sequence={mockSequence} />);
+
+      await waitFor(() => {
+        expect(useTimelineStore.getState().scrollX).toBe(392);
+      });
     });
 
     it('should treat mostly vertical empty-area movement as click seek, not horizontal pan', async () => {
