@@ -516,11 +516,23 @@ export function Timeline({
   // ===========================================================================
   // Timeline Panning (Hand Tool / Middle Mouse)
   // ===========================================================================
-  const maxScrollX = Math.max(0, duration * zoom - viewportWidth + TRACK_HEADER_WIDTH);
+  const maxScrollX = Math.max(0, duration * zoom - viewportWidth);
   const maxScrollY = Math.max(0, (sequence?.tracks.length ?? 0) * TRACK_HEIGHT - viewportHeight);
   const isHandToolActive = activeTool === 'hand';
 
   const { segments: cacheSegments } = useRenderCache();
+
+  useEffect(() => {
+    if (scrollX > maxScrollX) {
+      setScrollX(maxScrollX);
+    }
+  }, [maxScrollX, scrollX, setScrollX]);
+
+  useEffect(() => {
+    if (scrollY > maxScrollY) {
+      setScrollY(maxScrollY);
+    }
+  }, [maxScrollY, scrollY, setScrollY]);
 
   const { isPanning, handleMouseDown: handlePanMouseDown } = useTimelinePan({
     scrollX,
@@ -1966,6 +1978,7 @@ export function Timeline({
             duration={duration}
             zoom={zoom}
             scrollX={scrollX}
+            viewportWidth={viewportWidth}
             onSeek={handleSeek}
             onWheel={handleWheel}
           />

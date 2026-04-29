@@ -161,10 +161,21 @@ describe('TimeRuler', () => {
       const mockCtx = createMockContext();
       HTMLCanvasElement.prototype.getContext = vi.fn().mockReturnValue(mockCtx);
 
-      render(<TimeRuler duration={60} zoom={100} scrollX={0} viewportWidth={800} />);
+      const { container } = render(
+        <TimeRuler duration={60} zoom={100} scrollX={0} viewportWidth={800} />,
+      );
 
       // Canvas should be sized based on viewport + buffer
       expect(mockCtx.scale).toHaveBeenCalled();
+      expect(container.querySelector('canvas')).toHaveStyle({ width: '1000px' });
+    });
+
+    it('should cover wide responsive timeline viewports', () => {
+      const { container } = render(
+        <TimeRuler duration={60} zoom={100} scrollX={0} viewportWidth={1400} />,
+      );
+
+      expect(container.querySelector('canvas')).toHaveStyle({ width: '1600px' });
     });
 
     it('should handle scroll offset', () => {

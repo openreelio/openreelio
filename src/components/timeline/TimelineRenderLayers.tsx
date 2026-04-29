@@ -62,6 +62,7 @@ export interface TimelineHeaderLayerProps {
   duration: number;
   zoom: number;
   scrollX: number;
+  viewportWidth: number;
   onSeek: (time: number) => void;
   onWheel: WheelEventHandler<HTMLDivElement>;
 }
@@ -71,6 +72,7 @@ export function TimelineHeaderLayer({
   duration,
   zoom,
   scrollX,
+  viewportWidth,
   onSeek,
   onWheel,
 }: TimelineHeaderLayerProps): JSX.Element {
@@ -87,7 +89,13 @@ export function TimelineHeaderLayer({
             data-testid="timeline-ruler-scroll-layer"
             style={{ transform: `translateX(-${scrollX}px)` }}
           >
-            <TimeRuler duration={duration} zoom={zoom} scrollX={scrollX} onSeek={onSeek} />
+            <TimeRuler
+              duration={duration}
+              zoom={zoom}
+              scrollX={scrollX}
+              viewportWidth={viewportWidth}
+              onSeek={onSeek}
+            />
           </div>
         </div>
       </div>

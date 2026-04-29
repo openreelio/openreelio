@@ -203,7 +203,7 @@ export function CaptionTrack({
         data-track-row="true"
         data-track-id={track.id}
         data-track-kind="caption"
-        className="flex border-b border-editor-border"
+        className="flex min-w-0 border-b border-editor-border"
       >
         {/* Track Header */}
         <div
@@ -276,7 +276,7 @@ export function CaptionTrack({
         <div
           ref={contentRef}
           data-testid="caption-track-content"
-          className={`flex-1 bg-editor-bg relative overflow-hidden ${
+          className={`min-w-0 flex-1 bg-editor-bg relative overflow-hidden ${
             !track.visible ? 'opacity-50' : ''
           }`}
           style={{ height: TRACK_HEIGHT }}

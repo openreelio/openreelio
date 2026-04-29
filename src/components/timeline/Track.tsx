@@ -702,7 +702,7 @@ export function Track({
         data-track-row="true"
         data-track-id={track.id}
         data-track-kind={track.kind}
-        className="flex border-b border-editor-border"
+        className="flex min-w-0 border-b border-editor-border"
       >
         {/* Track Header */}
         <div
@@ -793,7 +793,7 @@ export function Track({
           data-drop-target={isDropTarget}
           data-drop-valid={dropValidity?.isValid}
           className={`
-            flex-1 bg-editor-bg relative overflow-hidden transition-colors duration-100
+            min-w-0 flex-1 bg-editor-bg relative overflow-hidden transition-colors duration-100
             ${!track.visible ? 'opacity-50' : ''}
             ${isDropTarget && dropValidity?.isValid ? 'bg-blue-500/10 ring-1 ring-blue-500/50 ring-inset' : ''}
             ${isDropTarget && dropValidity && !dropValidity.isValid ? 'bg-red-500/10 ring-1 ring-red-500/50 ring-inset' : ''}
