@@ -2204,6 +2204,213 @@ fn apply_audio_mix_settings(
     current_label
 }
 
+const TIMELINE_EPSILON_SEC: f64 = 0.001;
+
+#[derive(Clone, Debug)]
+struct VideoTimelineSegment {
+    stream_label: String,
+    start_sec: f64,
+    end_sec: f64,
+    transition_filter: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct VideoConcatPart {
+    stream_label: String,
+    transition_filter: Option<String>,
+}
+
+fn output_video_dimensions(sequence: &Sequence, settings: &ExportSettings) -> (u32, u32) {
+    let width = settings
+        .width
+        .unwrap_or(sequence.format.canvas.width)
+        .max(1);
+    let height = settings
+        .height
+        .unwrap_or(sequence.format.canvas.height)
+        .max(1);
+    (width, height)
+}
+
+fn output_video_fps(sequence: &Sequence, settings: &ExportSettings) -> f64 {
+    let fps = settings.fps.unwrap_or_else(|| sequence.format.fps.as_f64());
+
+    if fps.is_finite() && fps > 0.0 {
+        fps
+    } else {
+        30.0
+    }
+}
+
+fn output_video_pixel_format(settings: &ExportSettings) -> &'static str {
+    match settings.video_codec {
+        VideoCodec::ProRes => "yuv422p10le",
+        VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp9 | VideoCodec::Copy => "yuv420p",
+    }
+}
+
+fn append_video_stream_normalization(
+    filter_complex: &mut String,
+    input_label: &str,
+    output_label: &str,
+    width: u32,
+    height: u32,
+    fps: f64,
+    pixel_format: &str,
+) {
+    filter_complex.push_str(&format!(
+        "[{}]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={},format={}[{}];",
+        input_label,
+        width,
+        height,
+        width,
+        height,
+        format_speed_number(fps),
+        pixel_format,
+        output_label
+    ));
+}
+
+fn append_black_video_gap(
+    filter_complex: &mut String,
+    output_label: &str,
+    duration_sec: f64,
+    width: u32,
+    height: u32,
+    fps: f64,
+    pixel_format: &str,
+) {
+    filter_complex.push_str(&format!(
+        "color=c=black:s={}x{}:r={}:d={},format={}[{}];",
+        width,
+        height,
+        format_speed_number(fps),
+        format_speed_number(duration_sec),
+        pixel_format,
+        output_label
+    ));
+}
+
+fn append_timeline_video_output(
+    filter_complex: &mut String,
+    segments: &[VideoTimelineSegment],
+    timeline_end_sec: f64,
+    width: u32,
+    height: u32,
+    fps: f64,
+    pixel_format: &str,
+) -> Result<(), ExportError> {
+    let mut sorted_segments: Vec<&VideoTimelineSegment> = segments
+        .iter()
+        .filter(|segment| segment.end_sec > segment.start_sec + TIMELINE_EPSILON_SEC)
+        .collect();
+
+    if sorted_segments.is_empty() {
+        return Err(ExportError::InvalidSettings(
+            "Sequence has no visual clips to export".to_string(),
+        ));
+    }
+
+    sorted_segments.sort_by(|a, b| {
+        a.start_sec
+            .partial_cmp(&b.start_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut parts: Vec<VideoConcatPart> = Vec::new();
+    let mut cursor = 0.0_f64;
+    let mut gap_index = 0_usize;
+
+    for segment in sorted_segments {
+        let start = segment.start_sec.max(0.0);
+        let end = segment.end_sec.max(start);
+
+        if start > cursor + TIMELINE_EPSILON_SEC {
+            if let Some(previous) = parts.last_mut() {
+                previous.transition_filter = None;
+            }
+
+            let gap_label = format!("vgap{}", gap_index);
+            append_black_video_gap(
+                filter_complex,
+                &gap_label,
+                start - cursor,
+                width,
+                height,
+                fps,
+                pixel_format,
+            );
+            parts.push(VideoConcatPart {
+                stream_label: format!("[{}]", gap_label),
+                transition_filter: None,
+            });
+            gap_index += 1;
+            cursor = start;
+        }
+
+        parts.push(VideoConcatPart {
+            stream_label: segment.stream_label.clone(),
+            transition_filter: segment.transition_filter.clone(),
+        });
+        cursor = cursor.max(end);
+    }
+
+    if timeline_end_sec.is_finite() && timeline_end_sec > cursor + TIMELINE_EPSILON_SEC {
+        if let Some(previous) = parts.last_mut() {
+            previous.transition_filter = None;
+        }
+
+        let gap_label = format!("vgap{}", gap_index);
+        append_black_video_gap(
+            filter_complex,
+            &gap_label,
+            timeline_end_sec - cursor,
+            width,
+            height,
+            fps,
+            pixel_format,
+        );
+        parts.push(VideoConcatPart {
+            stream_label: format!("[{}]", gap_label),
+            transition_filter: None,
+        });
+    }
+
+    if parts.len() == 1 {
+        filter_complex.push_str(&format!("{}null[outv]", parts[0].stream_label));
+        return Ok(());
+    }
+
+    let mut current_stream = parts[0].stream_label.clone();
+    for i in 0..parts.len() - 1 {
+        let next_stream = &parts[i + 1].stream_label;
+        let output_label = if i == parts.len() - 2 {
+            "[outv]".to_string()
+        } else {
+            format!("[vseq{}]", i)
+        };
+
+        if let Some(ref transition_filter) = parts[i].transition_filter {
+            filter_complex.push_str(&format!(
+                "{}{}{}{}",
+                current_stream, next_stream, transition_filter, output_label
+            ));
+        } else {
+            filter_complex.push_str(&format!(
+                "{}{}concat=n=2:v=1:a=0{}",
+                current_stream, next_stream, output_label
+            ));
+        }
+
+        if i < parts.len() - 2 {
+            filter_complex.push(';');
+            current_stream = output_label;
+        }
+    }
+
+    Ok(())
+}
+
 fn append_master_audio_output(
     filter_complex: &mut String,
     audio_streams: &[String],
@@ -2943,9 +3150,9 @@ impl ExportEngine {
         let mut args = Vec::new();
         let mut input_index = 0;
         let mut filter_complex = String::new();
-        let mut video_streams = Vec::new();
+        let mut video_segments = Vec::new();
         let mut audio_streams = Vec::new();
-        let mut video_transitions: Vec<Option<&Effect>> = Vec::new();
+        let mut timeline_end_sec = 0.0_f64;
         let audio_companion_keys = collect_audio_companion_keys(sequence, assets, audio_info);
 
         // Collect enabled clips sorted by timeline position.
@@ -2957,9 +3164,9 @@ impl ExportEngine {
 
         let caption_filters = collect_caption_drawtext_filters(&all_clips);
 
-        // Get output dimensions from settings or use defaults
-        let output_width = settings.width.unwrap_or(1920);
-        let output_height = settings.height.unwrap_or(1080);
+        let (output_width, output_height) = output_video_dimensions(sequence, settings);
+        let output_fps = output_video_fps(sequence, settings);
+        let output_pixel_format = output_video_pixel_format(settings);
 
         // Collect adjustment layer effects for post-processing.
         // These are applied to the composited output after the main concat,
@@ -3004,6 +3211,7 @@ impl ExportEngine {
                     args.extend(input_args);
 
                     let video_out_label = format!("v{}", input_index);
+                    let normalized_video_label = format!("vnorm{}", input_index);
 
                     // Apply drawtext filter directly to color source
                     let text_filter = format!(
@@ -3013,8 +3221,24 @@ impl ExportEngine {
                     filter_complex.push_str(&text_filter);
                     filter_complex.push(';');
 
-                    video_streams.push(format!("[{}]", video_out_label));
-                    video_transitions.push(find_transition_effect(clip, effects));
+                    append_video_stream_normalization(
+                        &mut filter_complex,
+                        &video_out_label,
+                        &normalized_video_label,
+                        output_width,
+                        output_height,
+                        output_fps,
+                        output_pixel_format,
+                    );
+
+                    video_segments.push(VideoTimelineSegment {
+                        stream_label: format!("[{}]", normalized_video_label),
+                        start_sec: clip.place.timeline_in_sec,
+                        end_sec: clip.place.timeline_out_sec(),
+                        transition_filter: find_transition_effect(clip, effects)
+                            .map(|effect| effect.to_filter_body()),
+                    });
+                    timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
 
                     // Text clips have no audio
                     input_index += 1;
@@ -3050,6 +3274,7 @@ impl ExportEngine {
             if !contributes_visual_output && !clip_has_audio {
                 continue;
             }
+            timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
 
             // Add input (using validated path)
             args.push("-i".to_string());
@@ -3074,6 +3299,7 @@ impl ExportEngine {
                         // Video processing: trim → [reverse] → [speed] → effects → [tonemap] → output
                         let trim_label = format!("trim{}", input_index);
                         let video_out_label = format!("v{}", input_index);
+                        let normalized_video_label = format!("vnorm{}", input_index);
 
                         let effects_out_label = if tonemap_filter.is_some() {
                             format!("vfx{}", input_index)
@@ -3108,8 +3334,23 @@ impl ExportEngine {
                             ));
                         }
 
-                        video_streams.push(format!("[{}]", video_out_label));
-                        video_transitions.push(find_transition_effect(clip, effects));
+                        append_video_stream_normalization(
+                            &mut filter_complex,
+                            &video_out_label,
+                            &normalized_video_label,
+                            output_width,
+                            output_height,
+                            output_fps,
+                            output_pixel_format,
+                        );
+
+                        video_segments.push(VideoTimelineSegment {
+                            stream_label: format!("[{}]", normalized_video_label),
+                            start_sec: clip.place.timeline_in_sec,
+                            end_sec: clip.place.timeline_out_sec(),
+                            transition_filter: find_transition_effect(clip, effects)
+                                .map(|effect| effect.to_filter_body()),
+                        });
                     }
 
                     // Audio processing: ONLY if this asset has audio
@@ -3192,7 +3433,7 @@ impl ExportEngine {
             input_index += 1;
         }
 
-        if video_streams.is_empty() {
+        if video_segments.is_empty() {
             return Err(ExportError::InvalidSettings(
                 "Sequence has no visual clips to export".to_string(),
             ));
@@ -3204,46 +3445,15 @@ impl ExportEngine {
         }
         filter_complex.push(';');
 
-        // Concat video streams with optional xfade transitions
-        if video_streams.len() == 1 {
-            // Single clip - just use the processed stream
-            filter_complex.push_str(&format!("{}null[outv]", video_streams[0]));
-        } else {
-            // Multiple clips - check for transitions and apply xfade where needed
-            let mut current_stream = video_streams[0].clone();
-
-            for i in 0..video_streams.len() - 1 {
-                let next_stream = &video_streams[i + 1];
-                let output_label = if i == video_streams.len() - 2 {
-                    "[outv]".to_string()
-                } else {
-                    format!("[xfade{}]", i)
-                };
-
-                // Check if current clip has a transition effect (applies to transition INTO next clip)
-                if let Some(transition_effect) = video_transitions.get(i).and_then(|t| *t) {
-                    // Build xfade filter using the transition effect parameters
-                    let xfade_filter = transition_effect.to_filter_body();
-
-                    // Apply xfade: [current][next]xfade=...[output]
-                    filter_complex.push_str(&format!(
-                        "{}{}{}{}",
-                        current_stream, next_stream, xfade_filter, output_label
-                    ));
-                } else {
-                    // No transition - use concat for these two clips
-                    filter_complex.push_str(&format!(
-                        "{}{}concat=n=2:v=1:a=0{}",
-                        current_stream, next_stream, output_label
-                    ));
-                }
-
-                if i < video_streams.len() - 2 {
-                    filter_complex.push(';');
-                    current_stream = output_label;
-                }
-            }
-        }
+        append_timeline_video_output(
+            &mut filter_complex,
+            &video_segments,
+            timeline_end_sec,
+            output_width,
+            output_height,
+            output_fps,
+            output_pixel_format,
+        )?;
 
         // Apply adjustment layer effects as post-processing on the composited output.
         // Each adjustment layer's effects are time-scoped to the layer's clip range
@@ -4448,15 +4658,6 @@ pub fn validate_export_settings(
         }
     }
 
-    // Check for timeline gaps (warning, not error)
-    let gaps = detect_timeline_gaps(sequence);
-    if !gaps.is_empty() {
-        validation.add_warning(format!(
-            "Timeline has {} gap(s). Final render does not preserve gaps yet; insert filler clips before export.",
-            gaps.len()
-        ));
-    }
-
     if has_layered_visual_overlap(sequence) {
         validation.add_error(
             "Final render export does not support simultaneous layered video clips yet".to_string(),
@@ -4499,8 +4700,9 @@ pub fn build_complex_filter_args_with_audio_info(
     let mut args = Vec::new();
     let mut input_index = 0;
     let mut filter_complex = String::new();
-    let mut video_streams = Vec::new();
+    let mut video_segments = Vec::new();
     let mut audio_streams = Vec::new();
+    let mut timeline_end_sec = 0.0_f64;
     let audio_companion_keys = collect_audio_companion_keys(sequence, assets, audio_info);
 
     // Collect enabled clips sorted by timeline position.
@@ -4551,9 +4753,9 @@ pub fn build_complex_filter_args_with_audio_info(
         graph
     }
 
-    // Get output dimensions from settings or use defaults
-    let output_width = settings.width.unwrap_or(1920);
-    let output_height = settings.height.unwrap_or(1080);
+    let (output_width, output_height) = output_video_dimensions(sequence, settings);
+    let output_fps = output_video_fps(sequence, settings);
+    let output_pixel_format = output_video_pixel_format(settings);
 
     // Collect adjustment layer effects for post-processing, time-scoped to clip range
     let mut adjustment_layer_effects: Vec<(FilterGraph, f64, f64)> = Vec::new();
@@ -4592,6 +4794,7 @@ pub fn build_complex_filter_args_with_audio_info(
                 args.extend(input_args);
 
                 let video_out_label = format!("v{}", input_index);
+                let normalized_video_label = format!("vnorm{}", input_index);
 
                 // Apply drawtext filter directly to color source
                 let text_filter = format!(
@@ -4601,7 +4804,23 @@ pub fn build_complex_filter_args_with_audio_info(
                 filter_complex.push_str(&text_filter);
                 filter_complex.push(';');
 
-                video_streams.push(format!("[{}]", video_out_label));
+                append_video_stream_normalization(
+                    &mut filter_complex,
+                    &video_out_label,
+                    &normalized_video_label,
+                    output_width,
+                    output_height,
+                    output_fps,
+                    output_pixel_format,
+                );
+
+                video_segments.push(VideoTimelineSegment {
+                    stream_label: format!("[{}]", normalized_video_label),
+                    start_sec: clip.place.timeline_in_sec,
+                    end_sec: clip.place.timeline_out_sec(),
+                    transition_filter: None,
+                });
+                timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
 
                 // Text clips have no audio
                 input_index += 1;
@@ -4633,6 +4852,7 @@ pub fn build_complex_filter_args_with_audio_info(
         if !contributes_visual_output && !clip_has_audio {
             continue;
         }
+        timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
 
         // Validate asset URI before passing to FFmpeg
         let validated_path = validate_local_input_path(&asset.uri, "Asset file")
@@ -4654,6 +4874,7 @@ pub fn build_complex_filter_args_with_audio_info(
                 if track.visible {
                     let trim_label = format!("trim{}", input_index);
                     let video_out_label = format!("v{}", input_index);
+                    let normalized_video_label = format!("vnorm{}", input_index);
                     let effects_out_label = if tonemap_filter.is_some() {
                         format!("vfx{}", input_index)
                     } else {
@@ -4679,7 +4900,22 @@ pub fn build_complex_filter_args_with_audio_info(
                         ));
                     }
 
-                    video_streams.push(format!("[{}]", video_out_label));
+                    append_video_stream_normalization(
+                        &mut filter_complex,
+                        &video_out_label,
+                        &normalized_video_label,
+                        output_width,
+                        output_height,
+                        output_fps,
+                        output_pixel_format,
+                    );
+
+                    video_segments.push(VideoTimelineSegment {
+                        stream_label: format!("[{}]", normalized_video_label),
+                        start_sec: clip.place.timeline_in_sec,
+                        end_sec: clip.place.timeline_out_sec(),
+                        transition_filter: None,
+                    });
                 }
 
                 if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
@@ -4757,7 +4993,7 @@ pub fn build_complex_filter_args_with_audio_info(
         input_index += 1;
     }
 
-    if video_streams.is_empty() {
+    if video_segments.is_empty() {
         return Err(ExportError::InvalidSettings(
             "Sequence has no visual clips to export".to_string(),
         ));
@@ -4769,13 +5005,15 @@ pub fn build_complex_filter_args_with_audio_info(
     }
     filter_complex.push(';');
 
-    // Concat video streams
-    if video_streams.len() == 1 {
-        filter_complex.push_str(&format!("{}null[outv]", video_streams[0]));
-    } else {
-        filter_complex.push_str(&video_streams.join(""));
-        filter_complex.push_str(&format!("concat=n={}:v=1:a=0[outv]", video_streams.len()));
-    }
+    append_timeline_video_output(
+        &mut filter_complex,
+        &video_segments,
+        timeline_end_sec,
+        output_width,
+        output_height,
+        output_fps,
+        output_pixel_format,
+    )?;
 
     // Apply adjustment layer effects as post-processing, time-scoped via enable clause
     let mut adj_video_label = "outv".to_string();
@@ -6753,8 +6991,137 @@ mod tests {
             "Expected delayed audio placement for downstream clip. Got: {filter_complex}"
         );
         assert!(
+            filter_complex.contains("color=c=black:s=1920x1080:r=30:d=3"),
+            "Expected black video filler to preserve the timeline gap. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("[vgap0]"),
+            "Expected video gap segment to participate in the video concat chain. Got: {filter_complex}"
+        );
+        assert!(
             filter_complex.contains("amix=inputs=2"),
             "Expected audio timeline mix instead of concat. Got: {filter_complex}"
+        );
+    }
+
+    #[test]
+    fn test_build_filter_extends_video_for_trailing_audio_only_timeline() {
+        use crate::core::assets::{AudioInfo, VideoInfo};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut audio_track = Track::new_audio("Audio 1");
+        audio_track.add_clip(
+            Clip::new("audio_asset")
+                .with_source_range(0.0, 4.0)
+                .place_at(8.0),
+        );
+        sequence.add_track(audio_track);
+
+        let video_path = create_temp_media_file("trailing_audio_video.mp4");
+        let mut video_asset = Asset::new_video(
+            "trailing_audio_video.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_file_size(5_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let audio_path = create_temp_media_file("trailing_audio.wav");
+        let mut audio_asset =
+            Asset::new_audio("trailing_audio.wav", &audio_path, AudioInfo::default())
+                .with_duration(4.0)
+                .with_file_size(1_000_000);
+        audio_asset.id = "audio_asset".to_string();
+
+        let mut assets = HashMap::new();
+        assets.insert(video_asset.id.clone(), video_asset);
+        assets.insert(audio_asset.id.clone(), audio_asset);
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings::default(),
+        )
+        .expect("trailing audio-only timeline should build");
+
+        let filter_complex = args
+            .windows(2)
+            .find_map(|window| (window[0] == "-filter_complex").then_some(window[1].as_str()))
+            .unwrap();
+
+        assert!(
+            filter_complex.contains("adelay=delays=8000:all=1"),
+            "Expected trailing audio clip to keep its timeline position. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("color=c=black:s=1920x1080:r=30:d=7"),
+            "Expected black video extension from the last visual clip to the audio timeline end. Got: {filter_complex}"
+        );
+    }
+
+    #[test]
+    fn test_validation_does_not_warn_for_supported_timeline_gaps() {
+        use crate::core::assets::{AudioInfo, VideoInfo};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(
+            Clip::new("asset1")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        track.add_clip(
+            Clip::new("asset2")
+                .with_source_range(0.0, 5.0)
+                .place_at(8.0),
+        );
+        sequence.add_track(track);
+
+        let path1 = create_temp_media_file("gap_validation_1.mp4");
+        let mut asset1 = Asset::new_video("gap_validation_1.mp4", &path1, VideoInfo::default())
+            .with_duration(5.0)
+            .with_file_size(5_000_000);
+        asset1.id = "asset1".to_string();
+        asset1.audio = Some(AudioInfo::default());
+
+        let path2 = create_temp_media_file("gap_validation_2.mp4");
+        let mut asset2 = Asset::new_video("gap_validation_2.mp4", &path2, VideoInfo::default())
+            .with_duration(5.0)
+            .with_file_size(5_000_000);
+        asset2.id = "asset2".to_string();
+        asset2.audio = Some(AudioInfo::default());
+
+        let mut assets = HashMap::new();
+        assets.insert(asset1.id.clone(), asset1);
+        assets.insert(asset2.id.clone(), asset2);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            !validation
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("does not preserve gaps")),
+            "Timeline gaps are now represented by video filler segments. Got warnings: {:?}",
+            validation.warnings
         );
     }
 
