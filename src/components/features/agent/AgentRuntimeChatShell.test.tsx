@@ -690,7 +690,7 @@ describe('AgentRuntimeChatShell', () => {
     });
   });
 
-  it('opens the external agent review panel when an artifact is selected', async () => {
+  it('keeps artifact review inline when an artifact is selected', async () => {
     const user = userEvent.setup();
 
     act(() => {
@@ -748,9 +748,10 @@ describe('AgentRuntimeChatShell', () => {
     await user.click(screen.getByTestId('artifact-tool-delete_clip'));
 
     const layout = useWorkspaceLayoutStore.getState().layout;
-    expect(layout.zones.bottom.panelIds).toContain('agent-review');
-    expect(layout.zones.bottom.activePanelId).toBe('agent-review');
-    expect(layout.zones.bottom.collapsed).toBe(false);
+    expect(layout.zones.bottom.panelIds).not.toContain('agent-review');
+    expect(layout.zones.bottom.activePanelId).toBe('history');
+    expect(layout.zones.bottom.collapsed).toBe(true);
+    expect(screen.getByTestId('agent-artifact-detail-panel')).toHaveTextContent('delete_clip');
     expect(useAgentArtifactReviewStore.getState().selection.focus).toEqual({
       kind: 'tool',
       value: 'delete_clip',

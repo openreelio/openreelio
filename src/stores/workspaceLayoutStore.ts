@@ -126,6 +126,8 @@ export const MIN_ZONE_SIZES = {
 
 const DEFAULT_BOTTOM_PANEL_IDS: PanelId[] = ['history', 'transcript'];
 const DEFAULT_BOTTOM_ACTIVE_PANEL: PanelId = 'history';
+const NON_PERSISTED_PANEL_IDS = new Set<PanelId>(['terminal', 'agent-review']);
+const INTERNAL_ONLY_PANEL_IDS = new Set<PanelId>(['agent-review']);
 
 /** Maximum zone sizes */
 export const MAX_ZONE_SIZES = {
@@ -417,6 +419,10 @@ export function revealWorkspacePanel(
   defaultZoneId: DockZoneId,
   options: { moveToDefaultZone?: boolean } = {},
 ): DockZoneId | null {
+  if (INTERNAL_ONLY_PANEL_IDS.has(panelId)) {
+    return null;
+  }
+
   let store = useWorkspaceLayoutStore.getState();
   let targetZoneId = findPanelZone(store.layout, panelId);
 
@@ -450,6 +456,9 @@ function normalizeZone(zone: DockZone): void {
       return false;
     }
     if (panelId === 'generation' && !videoGenerationEnabled) {
+      return false;
+    }
+    if (NON_PERSISTED_PANEL_IDS.has(panelId)) {
       return false;
     }
     if (seen.has(panelId)) {
@@ -490,8 +499,7 @@ function normalizeWorkspaceLayout(layout: WorkspaceLayout): WorkspaceLayout {
 
   for (const zone of Object.values(normalized.zones)) {
     normalizeZone(zone);
-    zone.panelIds = zone.panelIds.filter((panelId) => panelId !== 'terminal');
-    if (zone.activePanelId === 'terminal') {
+    if (zone.activePanelId && NON_PERSISTED_PANEL_IDS.has(zone.activePanelId)) {
       zone.activePanelId = zone.panelIds[0] ?? null;
     }
   }
@@ -499,6 +507,13 @@ function normalizeWorkspaceLayout(layout: WorkspaceLayout): WorkspaceLayout {
   ensurePanelInLayout(normalized, 'ai-assistant', 'right');
 
   return normalized;
+}
+
+function normalizeCustomPresets(customPresets: WorkspacePreset[] | undefined): WorkspacePreset[] {
+  return (customPresets ?? []).map((preset) => ({
+    ...preset,
+    layout: normalizeWorkspaceLayout(preset.layout),
+  }));
 }
 
 // =============================================================================
@@ -568,6 +583,10 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
 
       restorePanel: (panelId, targetZoneId = 'right') => {
         set((state) => {
+          if (INTERNAL_ONLY_PANEL_IDS.has(panelId)) {
+            return;
+          }
+
           if (panelId === 'generation' && !isVideoGenerationEnabled()) {
             return;
           }
@@ -749,7 +768,7 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
     })),
     {
       name: 'openreelio-workspace-layout',
-      version: 2,
+      version: 3,
       partialize: (state) => ({
         layout: state.layout,
         activePresetId: state.activePresetId,
@@ -777,7 +796,7 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
             ...state,
             layout: normalizeWorkspaceLayout(state.layout),
             activePresetId: state.activePresetId ?? null,
-            customPresets: state.customPresets ?? [],
+            customPresets: normalizeCustomPresets(state.customPresets),
           };
         }
         return persisted;

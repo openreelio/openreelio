@@ -14,6 +14,8 @@ import {
   WORKSPACE_PRESETS,
   MIN_ZONE_SIZES,
   MAX_ZONE_SIZES,
+  type WorkspaceLayout,
+  type WorkspacePreset,
 } from './workspaceLayoutStore';
 
 describe('WorkspaceLayoutStore', () => {
@@ -135,6 +137,15 @@ describe('WorkspaceLayoutStore', () => {
 
       const { layout } = useWorkspaceLayoutStore.getState();
       expect(layout.zones.bottom.panelIds).toContain('terminal');
+    });
+
+    it('should not restore the internal agent review panel into the dock layout', () => {
+      const store = useWorkspaceLayoutStore.getState();
+      store.restorePanel('agent-review', 'bottom');
+
+      const { layout } = useWorkspaceLayoutStore.getState();
+      expect(layout.zones.bottom.panelIds).not.toContain('agent-review');
+      expect(layout.zones.bottom.activePanelId).toBe('history');
     });
 
     it('should hide a panel and update the active tab when removed', () => {
@@ -295,6 +306,16 @@ describe('WorkspaceLayoutStore', () => {
       expect(layout.zones.bottom.collapsed).toBe(false);
     });
 
+    it('should not reveal the internal agent review panel as a dock tab', () => {
+      const zoneId = revealWorkspacePanel('agent-review', 'bottom');
+
+      const { layout } = useWorkspaceLayoutStore.getState();
+      expect(zoneId).toBeNull();
+      expect(layout.zones.bottom.panelIds).not.toContain('agent-review');
+      expect(layout.zones.bottom.activePanelId).toBe('history');
+      expect(layout.zones.bottom.collapsed).toBe(true);
+    });
+
     it('should move a panel back to its canonical zone when requested', () => {
       const store = useWorkspaceLayoutStore.getState();
       store.movePanel('explorer', 'right');
@@ -347,6 +368,34 @@ describe('WorkspaceLayoutStore', () => {
         expect(layout.zones.left.panelIds).toEqual(['explorer']);
         expect(layout.zones['center-top'].activePanelId).toBe('source-monitor');
         expect(layout.sizes.centerSplitRatio).toBe(0.4);
+      });
+
+      it('should strip internal review panels from custom preset layouts', () => {
+        const staleLayout = createDefaultLayout();
+        staleLayout.zones.bottom = {
+          panelIds: ['history', 'agent-review', 'transcript'],
+          activePanelId: 'agent-review',
+          collapsed: false,
+        };
+        const stalePreset: WorkspacePreset = {
+          id: 'custom-agent-review',
+          name: 'Stale Agent Review',
+          description: '',
+          layout: staleLayout,
+          builtIn: false,
+        };
+
+        useWorkspaceLayoutStore.setState((state) => ({
+          ...state,
+          customPresets: [stalePreset],
+        }));
+
+        const store = useWorkspaceLayoutStore.getState();
+        store.applyPreset('custom-agent-review');
+
+        const { layout } = useWorkspaceLayoutStore.getState();
+        expect(layout.zones.bottom.panelIds).toEqual(['history', 'transcript']);
+        expect(layout.zones.bottom.activePanelId).toBe('history');
       });
 
       it('should apply the Color preset with inspector and comparison in right zone', () => {
@@ -671,6 +720,45 @@ describe('WorkspaceLayoutStore', () => {
         const { activePresetId, customPresets } = useWorkspaceLayoutStore.getState();
         expect(activePresetId).not.toBeNull();
         expect(customPresets).toHaveLength(1);
+      });
+
+      it('should migrate persisted layouts without internal review dock tabs', async () => {
+        const staleLayout = createDefaultLayout();
+        staleLayout.zones.bottom = {
+          panelIds: ['history', 'agent-review', 'transcript'],
+          activePanelId: 'agent-review',
+          collapsed: false,
+        };
+        const stalePreset: WorkspacePreset = {
+          id: 'custom-agent-review',
+          name: 'Stale Agent Review',
+          description: '',
+          layout: staleLayout,
+          builtIn: false,
+        };
+        const migrate = useWorkspaceLayoutStore.persist.getOptions().migrate;
+
+        expect(useWorkspaceLayoutStore.persist.getOptions().version).toBe(3);
+        expect(migrate).toBeDefined();
+
+        const migrated = (await migrate?.(
+          {
+            layout: staleLayout,
+            activePresetId: 'custom-agent-review',
+            customPresets: [stalePreset],
+          },
+          2,
+        )) as {
+          layout: WorkspaceLayout;
+          customPresets: WorkspacePreset[];
+        };
+
+        expect(migrated.layout.zones.bottom.panelIds).toEqual(['history', 'transcript']);
+        expect(migrated.layout.zones.bottom.activePanelId).toBe('history');
+        expect(migrated.customPresets[0].layout.zones.bottom.panelIds).toEqual([
+          'history',
+          'transcript',
+        ]);
       });
     });
   });

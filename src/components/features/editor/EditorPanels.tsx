@@ -279,9 +279,11 @@ export function createEditorPanelContent({
     ),
 
     'agent-review': (
-      <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
-        <AgentArtifactReviewPanelLazy />
-      </Suspense>
+      <AIErrorBoundary onError={(error) => logger.error('Agent review panel error', { error })}>
+        <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+          <AgentArtifactReviewPanelLazy />
+        </Suspense>
+      </AIErrorBoundary>
     ),
 
     history: (

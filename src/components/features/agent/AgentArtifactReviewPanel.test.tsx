@@ -101,6 +101,23 @@ describe('AgentArtifactReviewPanel', () => {
     expect(screen.getByText('Select an artifact to review')).toBeInTheDocument();
   });
 
+  it('renders an empty state without an active conversation', () => {
+    act(() => {
+      useConversationStore.setState((state) => ({
+        ...state,
+        activeProjectId: null,
+        activeConversation: null,
+        activeSessionId: null,
+        sessions: [],
+      }));
+    });
+
+    render(<AgentArtifactReviewPanel />);
+
+    expect(screen.getByTestId('agent-artifact-review-panel-empty')).toBeInTheDocument();
+    expect(screen.getByText('No artifact selected')).toBeInTheDocument();
+  });
+
   it('renders review detail for the selected artifact in the active conversation', () => {
     act(() => {
       useAgentArtifactReviewStore.getState().setSelection({

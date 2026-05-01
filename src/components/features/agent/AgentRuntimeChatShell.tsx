@@ -20,7 +20,6 @@ import { useConversationStore } from '@/stores/conversationStore';
 import { useMessageQueueStore } from '@/stores/messageQueueStore';
 import { useProjectStore } from '@/stores';
 import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
-import { revealWorkspacePanel, type DockZoneId, type PanelId } from '@/stores/workspaceLayoutStore';
 import { ChatMessageList, type ChatMessageListProps } from './ChatMessageList';
 import { ChatInputArea } from './ChatInputArea';
 import { AgentArtifactFocusBanner } from './AgentArtifactFocusBanner';
@@ -31,8 +30,6 @@ import type { AgentRuntimePermissionRequest, AgentRuntimeSummary } from './Agent
 import { isSameArtifactFocus, type AgentArtifactFocus } from './agentArtifactFocus';
 
 const EMPTY_MESSAGES: readonly never[] = [];
-const AGENT_REVIEW_PANEL_ID: PanelId = 'agent-review';
-const DEFAULT_AGENT_REVIEW_ZONE: DockZoneId = 'bottom';
 
 export interface AgentRuntimeChatHandle {
   abort: () => void;
@@ -296,10 +293,6 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
       };
     }, [clearQueue, clearQueueOnUnmount, onUnmount]);
 
-    const openAgentReviewPanel = useCallback(() => {
-      revealWorkspacePanel(AGENT_REVIEW_PANEL_ID, DEFAULT_AGENT_REVIEW_ZONE);
-    }, []);
-
     const handleArtifactFocus = useCallback(
       (focus: AgentArtifactFocus) => {
         if (isSameArtifactFocus(artifactFocus, focus)) {
@@ -312,14 +305,12 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
           projectId: activeProjectId,
           conversationId: activeConversationId,
         });
-        openAgentReviewPanel();
       },
       [
         activeConversationId,
         activeProjectId,
         artifactFocus,
         clearArtifactSelection,
-        openAgentReviewPanel,
         setArtifactSelection,
       ],
     );

@@ -6,7 +6,9 @@
  */
 
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { X } from 'lucide-react';
 import { AgenticChat } from './AgenticChat';
+import { AgentArtifactReviewPanel } from './AgentArtifactReviewPanel';
 import type { AgentRuntimeChatHandle } from './AgentRuntimeChatShell';
 import { AgenticSidebarWorkspace } from './AgenticSidebarWorkspace';
 import { DEFAULT_AGENT_PROFILE_ID, type AgentRunResult } from '@/agents/engine';
@@ -32,7 +34,6 @@ import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
 import { useMessageQueueStore } from '@/stores/messageQueueStore';
-import { revealWorkspacePanel, type DockZoneId, type PanelId } from '@/stores/workspaceLayoutStore';
 import { createLogger } from '@/services/logger';
 import {
   buildCancelledDelegationPayload,
@@ -57,8 +58,6 @@ import { useAgentSessionTransition } from './useAgentSessionTransition';
 const logger = createLogger('AgenticSidebarContent');
 const EMPTY_DELEGATIONS: readonly DelegationRecord[] = [];
 const EMPTY_MESSAGES: readonly ConversationMessage[] = [];
-const AGENT_REVIEW_PANEL_ID: PanelId = 'agent-review';
-const DEFAULT_AGENT_REVIEW_ZONE: DockZoneId = 'bottom';
 
 export interface AgenticSidebarContentProps {
   /** Whether the component is visible */
@@ -82,6 +81,7 @@ export function AgenticSidebarContent({
   className = '',
 }: AgenticSidebarContentProps) {
   const [showSessionList, setShowSessionList] = useState(false);
+  const [showArtifactReviewPanel, setShowArtifactReviewPanel] = useState(false);
   const [projectPromptContext, setProjectPromptContext] = useState<ProjectPromptContext>({
     knowledge: [],
   });
@@ -136,6 +136,7 @@ export function AgenticSidebarContent({
   );
   const getLastUserInput = useConversationStore((state) => state.getLastUserInput);
   const clearQueuedMessages = useMessageQueueStore((state) => state.clear);
+  const artifactReviewSelection = useAgentArtifactReviewStore((state) => state.selection);
   const setArtifactReviewSelection = useAgentArtifactReviewStore((state) => state.setSelection);
   const clearArtifactReviewSelection = useAgentArtifactReviewStore((state) => state.clearSelection);
   const agentSnapshotsById = useAgentSessionStore((state) => state.snapshotsById);
@@ -184,13 +185,10 @@ export function AgenticSidebarContent({
     }
 
     abortCurrentSession();
+    setShowArtifactReviewPanel(false);
     clearArtifactReviewSelection();
     resetSessionTransition({ bumpChatSurfaceKey: true });
   }, [abortCurrentSession, clearArtifactReviewSelection, currentProjectId, resetSessionTransition]);
-
-  const openAgentReviewPanel = useCallback(() => {
-    revealWorkspacePanel(AGENT_REVIEW_PANEL_ID, DEFAULT_AGENT_REVIEW_ZONE);
-  }, []);
 
   const openDelegationReview = useCallback(
     (input: OpenDelegationReviewInput) => {
@@ -207,10 +205,40 @@ export function AgenticSidebarContent({
         sourceLabel: input.title,
         sourceAgentProfileId: input.agentProfileId,
       });
-      openAgentReviewPanel();
+      setShowArtifactReviewPanel(true);
     },
-    [currentProjectId, openAgentReviewPanel, setArtifactReviewSelection],
+    [currentProjectId, setArtifactReviewSelection],
   );
+
+  const closeArtifactReviewPanel = useCallback(() => {
+    setShowArtifactReviewPanel(false);
+    clearArtifactReviewSelection();
+  }, [clearArtifactReviewSelection]);
+
+  const shouldShowArtifactReviewPanel = Boolean(
+    showArtifactReviewPanel &&
+    currentProjectId &&
+    artifactReviewSelection.projectId === currentProjectId &&
+    artifactReviewSelection.conversationId,
+  );
+
+  useEffect(() => {
+    if (!showArtifactReviewPanel) {
+      return;
+    }
+
+    if (
+      !artifactReviewSelection.conversationId ||
+      (currentProjectId && artifactReviewSelection.projectId !== currentProjectId)
+    ) {
+      setShowArtifactReviewPanel(false);
+    }
+  }, [
+    artifactReviewSelection.conversationId,
+    artifactReviewSelection.projectId,
+    currentProjectId,
+    showArtifactReviewPanel,
+  ]);
 
   useEffect(() => {
     if (!activeSessionId) {
@@ -610,25 +638,54 @@ export function AgenticSidebarContent({
       }
       sessionTransitionLabel={sessionTransitionLabel}
     >
-      <AgenticChat
-        key={`agent-workspace-${chatSurfaceKey}`}
-        ref={chatHandleRef}
-        llmClient={llmClient}
-        toolExecutor={toolExecutor}
-        config={chatPromptConfig}
-        onSubmit={handleSubmit}
-        onComplete={handleComplete}
-        onAbort={handleAbort}
-        onError={handleError}
-        placeholder={promptPlaceholder}
-        disabled={isSessionTransitionPending}
-        currentAgentName={activeAgentDefinition?.name ?? 'Editor'}
-        currentAgentDescription={activeAgentDefinition?.description}
-        isExperimentalSession={activeAgentDefinition?.mode === 'subagent'}
-        specialistDefinitions={specialistDefinitions}
-        onStartSession={handleTrayStartSession}
-        className="flex-1"
-      />
+      {shouldShowArtifactReviewPanel ? (
+        <section
+          className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface-base"
+          data-testid="agent-review-inline-panel"
+        >
+          <div className="flex shrink-0 items-center justify-between border-b border-border-subtle px-3 py-2">
+            <div className="min-w-0">
+              <p className="truncate text-xs font-medium text-text-primary">Agent Review</p>
+              {artifactReviewSelection.sourceLabel && (
+                <p className="mt-0.5 truncate text-[11px] text-text-secondary">
+                  {artifactReviewSelection.sourceLabel}
+                </p>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={closeArtifactReviewPanel}
+              className="rounded p-1 text-text-tertiary transition-colors hover:bg-surface-active hover:text-text-primary"
+              aria-label="Close agent review"
+              title="Close agent review"
+              data-testid="agent-review-inline-close-btn"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <AgentArtifactReviewPanel className="min-h-0 flex-1" layout="compact" />
+        </section>
+      ) : (
+        <AgenticChat
+          key={`agent-workspace-${chatSurfaceKey}`}
+          ref={chatHandleRef}
+          llmClient={llmClient}
+          toolExecutor={toolExecutor}
+          config={chatPromptConfig}
+          onSubmit={handleSubmit}
+          onComplete={handleComplete}
+          onAbort={handleAbort}
+          onError={handleError}
+          placeholder={promptPlaceholder}
+          disabled={isSessionTransitionPending}
+          currentAgentName={activeAgentDefinition?.name ?? 'Editor'}
+          currentAgentDescription={activeAgentDefinition?.description}
+          isExperimentalSession={activeAgentDefinition?.mode === 'subagent'}
+          specialistDefinitions={specialistDefinitions}
+          onStartSession={handleTrayStartSession}
+          className="flex-1"
+        />
+      )}
     </AgenticSidebarWorkspace>
   );
 }
