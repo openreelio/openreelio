@@ -770,9 +770,9 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
       name: 'openreelio-workspace-layout',
       version: 3,
       partialize: (state) => ({
-        layout: state.layout,
-        activePresetId: state.activePresetId,
-        customPresets: state.customPresets,
+        layout: normalizeWorkspaceLayout(state.layout),
+        activePresetId: state.activePresetId ?? null,
+        customPresets: normalizeCustomPresets(state.customPresets),
       }),
       migrate: (persisted, version) => {
         if (version === 1) {

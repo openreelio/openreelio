@@ -2243,9 +2243,17 @@ fn output_video_fps(sequence: &Sequence, settings: &ExportSettings) -> f64 {
 }
 
 fn output_video_pixel_format(settings: &ExportSettings) -> &'static str {
+    let use_10_bit = settings.is_hdr() || settings.bit_depth.unwrap_or(8) >= 10;
+
     match settings.video_codec {
         VideoCodec::ProRes => "yuv422p10le",
-        VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp9 | VideoCodec::Copy => "yuv420p",
+        VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp9 | VideoCodec::Copy => {
+            if use_10_bit {
+                "yuv420p10le"
+            } else {
+                "yuv420p"
+            }
+        }
     }
 }
 
@@ -4818,7 +4826,8 @@ pub fn build_complex_filter_args_with_audio_info(
                     stream_label: format!("[{}]", normalized_video_label),
                     start_sec: clip.place.timeline_in_sec,
                     end_sec: clip.place.timeline_out_sec(),
-                    transition_filter: None,
+                    transition_filter: find_transition_effect(clip, effects)
+                        .map(|effect| effect.to_filter_body()),
                 });
                 timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
 
@@ -4914,7 +4923,8 @@ pub fn build_complex_filter_args_with_audio_info(
                         stream_label: format!("[{}]", normalized_video_label),
                         start_sec: clip.place.timeline_in_sec,
                         end_sec: clip.place.timeline_out_sec(),
-                        transition_filter: None,
+                        transition_filter: find_transition_effect(clip, effects)
+                            .map(|effect| effect.to_filter_body()),
                     });
                 }
 
@@ -8119,6 +8129,31 @@ mod tests {
         let settings = ExportSettings::default();
         let args = settings.hdr_args();
         assert!(args.is_empty(), "SDR mode should return empty args");
+    }
+
+    #[test]
+    fn test_output_video_pixel_format_preserves_10_bit_requests() {
+        let sdr = ExportSettings::default();
+        assert_eq!(output_video_pixel_format(&sdr), "yuv420p");
+
+        let hdr_h265 = ExportSettings {
+            hdr_mode: HdrMode::Hdr10,
+            video_codec: VideoCodec::H265,
+            ..Default::default()
+        };
+        assert_eq!(output_video_pixel_format(&hdr_h265), "yuv420p10le");
+
+        let explicit_10_bit = ExportSettings {
+            bit_depth: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(output_video_pixel_format(&explicit_10_bit), "yuv420p10le");
+
+        let prores = ExportSettings {
+            video_codec: VideoCodec::ProRes,
+            ..Default::default()
+        };
+        assert_eq!(output_video_pixel_format(&prores), "yuv422p10le");
     }
 
     #[test]

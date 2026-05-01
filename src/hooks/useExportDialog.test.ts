@@ -227,6 +227,44 @@ describe('useExportDialog', () => {
     expect(invoke).not.toHaveBeenCalledWith('start_render', expect.anything());
   });
 
+  it('should route editable timeline exports to EDL and update the extension', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      format: 'edl',
+      outputPath: '/tmp/sequence.edl',
+      eventCount: 2,
+      trackCount: 1,
+      durationSec: 10,
+    });
+
+    const { result } = renderHook(() =>
+      useExportDialog({
+        isOpen: true,
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+        initialExportKind: 'timeline',
+      }),
+    );
+
+    act(() => {
+      result.current.setOutputPath('/tmp/sequence.fcpxml');
+      result.current.setSelectedTimelineFormat('edl');
+    });
+
+    await waitFor(() => {
+      expect(result.current.outputPath).toBe('/tmp/sequence.edl');
+    });
+
+    await act(async () => {
+      await result.current.handleExport();
+    });
+
+    expect(invoke).toHaveBeenCalledWith('export_edl', {
+      sequenceId: 'sequence-1',
+      outputPath: '/tmp/sequence.edl',
+    });
+    expect(invoke).not.toHaveBeenCalledWith('start_render', expect.anything());
+  });
+
   it('should ignore invalid render ranges when exporting editable timelines', async () => {
     vi.mocked(invoke).mockResolvedValue({
       format: 'fcpxml',

@@ -125,6 +125,32 @@ fn build_export_settings(
     }
 }
 
+fn validate_batch_item_range(
+    index: usize,
+    in_point: Option<f64>,
+    out_point: Option<f64>,
+) -> Result<(), String> {
+    if let Some(in_pt) = in_point {
+        if in_pt < 0.0 {
+            return Err(format!(
+                "Batch item {}: In point must be non-negative",
+                index
+            ));
+        }
+    }
+
+    if let (Some(in_pt), Some(out_pt)) = (in_point, out_point) {
+        if in_pt >= out_pt {
+            return Err(format!(
+                "Batch item {}: In point must be before Out point",
+                index
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Cached FFmpeg hardware probe results (decoders + encoders).
 ///
 /// FFmpeg encoder/decoder availability does not change within a session,
@@ -644,6 +670,8 @@ pub async fn batch_render(
             &root_refs,
         )?;
 
+        validate_batch_item_range(i, item.in_point, item.out_point)?;
+
         let settings = build_export_settings(
             validated_path,
             &item.preset,
@@ -651,16 +679,6 @@ pub async fn batch_render(
             item.in_point,
             item.out_point,
         )?;
-
-        // Validate range if provided
-        if let (Some(in_pt), Some(out_pt)) = (item.in_point, item.out_point) {
-            if in_pt >= out_pt {
-                return Err(format!(
-                    "Batch item {}: In point must be before Out point",
-                    i
-                ));
-            }
-        }
 
         let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
         if !validation.is_valid {
@@ -2569,4 +2587,36 @@ pub async fn track_point(
         points_count,
         average_confidence,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_batch_item_range;
+
+    #[test]
+    fn validate_batch_item_range_rejects_negative_in_point() {
+        assert_eq!(
+            validate_batch_item_range(2, Some(-0.1), Some(1.0)).unwrap_err(),
+            "Batch item 2: In point must be non-negative"
+        );
+    }
+
+    #[test]
+    fn validate_batch_item_range_rejects_in_point_at_or_after_out_point() {
+        assert_eq!(
+            validate_batch_item_range(1, Some(5.0), Some(5.0)).unwrap_err(),
+            "Batch item 1: In point must be before Out point"
+        );
+        assert_eq!(
+            validate_batch_item_range(1, Some(6.0), Some(5.0)).unwrap_err(),
+            "Batch item 1: In point must be before Out point"
+        );
+    }
+
+    #[test]
+    fn validate_batch_item_range_accepts_open_or_forward_ranges() {
+        assert!(validate_batch_item_range(0, None, None).is_ok());
+        assert!(validate_batch_item_range(0, Some(0.0), None).is_ok());
+        assert!(validate_batch_item_range(0, Some(0.0), Some(1.0)).is_ok());
+    }
 }

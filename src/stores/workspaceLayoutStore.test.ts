@@ -722,6 +722,45 @@ describe('WorkspaceLayoutStore', () => {
         expect(customPresets).toHaveLength(1);
       });
 
+      it('should strip non-persisted panels before saving state', () => {
+        const staleLayout = createDefaultLayout();
+        staleLayout.zones.bottom = {
+          panelIds: ['history', 'terminal', 'agent-review', 'transcript'],
+          activePanelId: 'terminal',
+          collapsed: false,
+        };
+        const stalePreset: WorkspacePreset = {
+          id: 'custom-transient-panels',
+          name: 'Transient Panels',
+          description: '',
+          layout: staleLayout,
+          builtIn: false,
+        };
+        const partialize = useWorkspaceLayoutStore.persist.getOptions().partialize as (state: {
+          layout: WorkspaceLayout;
+          activePresetId?: string | null;
+          customPresets?: WorkspacePreset[];
+        }) => {
+          layout: WorkspaceLayout;
+          activePresetId: string | null;
+          customPresets: WorkspacePreset[];
+        };
+
+        const persisted = partialize({
+          layout: staleLayout,
+          activePresetId: undefined,
+          customPresets: [stalePreset],
+        });
+
+        expect(persisted.activePresetId).toBeNull();
+        expect(persisted.layout.zones.bottom.panelIds).toEqual(['history', 'transcript']);
+        expect(persisted.layout.zones.bottom.activePanelId).toBe('history');
+        expect(persisted.customPresets[0].layout.zones.bottom.panelIds).toEqual([
+          'history',
+          'transcript',
+        ]);
+      });
+
       it('should migrate persisted layouts without internal review dock tabs', async () => {
         const staleLayout = createDefaultLayout();
         staleLayout.zones.bottom = {

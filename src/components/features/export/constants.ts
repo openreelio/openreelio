@@ -242,23 +242,6 @@ export const TIMELINE_EXPORT_FORMATS: TimelineFormatOption[] = [
   },
 ];
 
-// =============================================================================
-// Preset ID to File Extension Mapping
-// =============================================================================
-
-/** Map of preset IDs to file extensions */
-export const PRESET_EXTENSIONS: Record<string, string> = {
-  mp4_draft: 'mp4',
-  youtube_1080p: 'mp4',
-  mp4_high: 'mp4',
-  youtube_4k: 'mp4',
-  youtube_shorts: 'mp4',
-  twitter: 'mp4',
-  instagram: 'mp4',
-  webm_vp9: 'webm',
-  prores: 'mov',
-};
-
 /** Map of audio formats to file extensions */
 export const AUDIO_FORMAT_EXTENSIONS: Record<AudioExportFormat, string> = {
   wav: 'wav',
@@ -277,10 +260,11 @@ export const TIMELINE_FORMAT_EXTENSIONS: Record<TimelineExportFormat, string> = 
 /**
  * Get file extension for a preset ID.
  * @param presetId - The preset ID
- * @returns The file extension (default: 'mp4')
+ * @returns The file extension for the preset container
+ * @throws Error when the preset ID is unknown
  */
 export function getPresetExtension(presetId: string): string {
-  return PRESET_EXTENSIONS[presetId] || 'mp4';
+  return getExportPreset(presetId).settings.container;
 }
 
 /** Get file extension for an audio export format. */
@@ -300,7 +284,11 @@ export function getAudioFormatOption(format: AudioExportFormat): AudioFormatOpti
 
 /** Look up the metadata for a video export preset. */
 export function getExportPreset(presetId: string): ExportPreset {
-  return EXPORT_PRESETS.find((option) => option.id === presetId) ?? EXPORT_PRESETS[0];
+  const preset = EXPORT_PRESETS.find((option) => option.id === presetId);
+  if (!preset) {
+    throw new Error(`Unknown export preset: ${presetId}`);
+  }
+  return preset;
 }
 
 /** Return a fresh request object for the selected video export preset. */
