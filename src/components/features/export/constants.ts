@@ -4,7 +4,14 @@
  * Centralized constants for export dialog component.
  */
 
-import type { AudioExportFormat, AudioFormatOption, ExportPreset } from './types';
+import type {
+  AudioExportFormat,
+  AudioFormatOption,
+  ExportPreset,
+  TimelineExportFormat,
+  TimelineFormatOption,
+} from './types';
+import type { VideoExportRequest } from '@/bindings';
 
 // =============================================================================
 // Export Presets
@@ -14,45 +21,174 @@ import type { AudioExportFormat, AudioFormatOption, ExportPreset } from './types
 export const EXPORT_PRESETS: ExportPreset[] = [
   {
     id: 'youtube_1080p',
-    name: 'YouTube 1080p',
-    description: 'H.264, 1920x1080, 8Mbps',
+    name: 'MP4 Standard',
+    description: 'H.264, 1080p, balanced delivery',
     icon: 'monitor',
+    settings: {
+      container: 'mp4',
+      videoCodec: 'h264',
+      audioCodec: 'aac',
+      qualityTier: 'standard',
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      videoBitrate: '8M',
+      audioBitrate: '192k',
+      crf: 23,
+      twoPass: false,
+    },
+  },
+  {
+    id: 'mp4_draft',
+    name: 'MP4 Draft',
+    description: 'H.264, 720p, small review file',
+    icon: 'monitor',
+    settings: {
+      container: 'mp4',
+      videoCodec: 'h264',
+      audioCodec: 'aac',
+      qualityTier: 'draft',
+      width: 1280,
+      height: 720,
+      fps: 30,
+      videoBitrate: '3M',
+      audioBitrate: '128k',
+      crf: 28,
+      twoPass: false,
+    },
+  },
+  {
+    id: 'mp4_high',
+    name: 'MP4 High',
+    description: 'H.264, 1080p, higher quality',
+    icon: 'monitor',
+    settings: {
+      container: 'mp4',
+      videoCodec: 'h264',
+      audioCodec: 'aac',
+      qualityTier: 'high',
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      videoBitrate: '15M',
+      audioBitrate: '320k',
+      crf: 18,
+      twoPass: false,
+    },
   },
   {
     id: 'youtube_4k',
-    name: 'YouTube 4K',
-    description: 'H.264, 3840x2160, 35Mbps',
+    name: 'MP4 4K High',
+    description: 'H.264, 2160p, high bitrate',
     icon: 'monitor',
+    settings: {
+      container: 'mp4',
+      videoCodec: 'h264',
+      audioCodec: 'aac',
+      qualityTier: 'high',
+      width: 3840,
+      height: 2160,
+      fps: 30,
+      videoBitrate: '35M',
+      audioBitrate: '320k',
+      crf: 18,
+      twoPass: false,
+    },
   },
   {
     id: 'youtube_shorts',
     name: 'Shorts/Reels',
-    description: 'Vertical 1080x1920',
+    description: 'H.264, vertical 1080x1920',
     icon: 'smartphone',
+    settings: {
+      container: 'mp4',
+      videoCodec: 'h264',
+      audioCodec: 'aac',
+      qualityTier: 'standard',
+      width: 1080,
+      height: 1920,
+      fps: 30,
+      videoBitrate: '8M',
+      audioBitrate: '192k',
+      crf: 23,
+      twoPass: false,
+    },
   },
   {
     id: 'twitter',
     name: 'Twitter/X',
     description: 'H.264, 1280x720, 5Mbps',
     icon: 'globe',
+    settings: {
+      container: 'mp4',
+      videoCodec: 'h264',
+      audioCodec: 'aac',
+      qualityTier: 'draft',
+      width: 1280,
+      height: 720,
+      fps: 30,
+      videoBitrate: '5M',
+      audioBitrate: '128k',
+      crf: 24,
+      twoPass: false,
+    },
   },
   {
     id: 'instagram',
     name: 'Instagram',
-    description: 'Square 1080x1080',
+    description: 'H.264, square 1080x1080',
     icon: 'smartphone',
+    settings: {
+      container: 'mp4',
+      videoCodec: 'h264',
+      audioCodec: 'aac',
+      qualityTier: 'standard',
+      width: 1080,
+      height: 1080,
+      fps: 30,
+      videoBitrate: '6M',
+      audioBitrate: '128k',
+      crf: 23,
+      twoPass: false,
+    },
   },
   {
     id: 'webm_vp9',
     name: 'WebM VP9',
     description: 'VP9/Opus, High quality',
     icon: 'globe',
+    settings: {
+      container: 'webm',
+      videoCodec: 'vp9',
+      audioCodec: 'opus',
+      qualityTier: 'high',
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      videoBitrate: '6M',
+      audioBitrate: '128k',
+      crf: 31,
+      twoPass: false,
+    },
   },
   {
     id: 'prores',
-    name: 'ProRes',
-    description: 'Apple ProRes 422',
+    name: 'MOV Master',
+    description: 'ProRes 422, PCM audio',
     icon: 'film',
+    settings: {
+      container: 'mov',
+      videoCodec: 'prores',
+      audioCodec: 'pcm',
+      qualityTier: 'master',
+      width: null,
+      height: null,
+      fps: null,
+      videoBitrate: null,
+      audioBitrate: null,
+      crf: null,
+      twoPass: false,
+    },
   },
 ];
 
@@ -90,13 +226,31 @@ export const AUDIO_EXPORT_FORMATS: AudioFormatOption[] = [
   },
 ];
 
+/** Editable timeline export formats */
+export const TIMELINE_EXPORT_FORMATS: TimelineFormatOption[] = [
+  {
+    id: 'fcpxml',
+    name: 'FCPXML',
+    description: 'Editable timeline for FCP/Resolve',
+    icon: 'film',
+  },
+  {
+    id: 'edl',
+    name: 'EDL',
+    description: 'CMX 3600 edit decision list',
+    icon: 'film',
+  },
+];
+
 // =============================================================================
 // Preset ID to File Extension Mapping
 // =============================================================================
 
 /** Map of preset IDs to file extensions */
 export const PRESET_EXTENSIONS: Record<string, string> = {
+  mp4_draft: 'mp4',
   youtube_1080p: 'mp4',
+  mp4_high: 'mp4',
   youtube_4k: 'mp4',
   youtube_shorts: 'mp4',
   twitter: 'mp4',
@@ -114,6 +268,12 @@ export const AUDIO_FORMAT_EXTENSIONS: Record<AudioExportFormat, string> = {
   ogg: 'ogg',
 };
 
+/** Map of editable timeline formats to file extensions */
+export const TIMELINE_FORMAT_EXTENSIONS: Record<TimelineExportFormat, string> = {
+  edl: 'edl',
+  fcpxml: 'fcpxml',
+};
+
 /**
  * Get file extension for a preset ID.
  * @param presetId - The preset ID
@@ -128,7 +288,30 @@ export function getAudioFormatExtension(format: AudioExportFormat): string {
   return AUDIO_FORMAT_EXTENSIONS[format] || 'wav';
 }
 
+/** Get file extension for an editable timeline format. */
+export function getTimelineFormatExtension(format: TimelineExportFormat): string {
+  return TIMELINE_FORMAT_EXTENSIONS[format] || 'fcpxml';
+}
+
 /** Look up the metadata for an audio export format. */
 export function getAudioFormatOption(format: AudioExportFormat): AudioFormatOption {
   return AUDIO_EXPORT_FORMATS.find((option) => option.id === format) ?? AUDIO_EXPORT_FORMATS[0];
+}
+
+/** Look up the metadata for a video export preset. */
+export function getExportPreset(presetId: string): ExportPreset {
+  return EXPORT_PRESETS.find((option) => option.id === presetId) ?? EXPORT_PRESETS[0];
+}
+
+/** Return a fresh request object for the selected video export preset. */
+export function getVideoExportRequest(presetId: string): VideoExportRequest {
+  const preset = getExportPreset(presetId);
+  return { ...preset.settings };
+}
+
+/** Look up the metadata for an editable timeline export format. */
+export function getTimelineFormatOption(format: TimelineExportFormat): TimelineFormatOption {
+  return (
+    TIMELINE_EXPORT_FORMATS.find((option) => option.id === format) ?? TIMELINE_EXPORT_FORMATS[0]
+  );
 }

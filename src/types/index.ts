@@ -1195,6 +1195,8 @@ export interface AudioStreamInfo {
 /** Export preset options */
 export type ExportPreset =
   | 'youtube_1080p'
+  | 'mp4_draft'
+  | 'mp4_high'
   | 'youtube_4k'
   | 'youtube_shorts'
   | 'twitter'

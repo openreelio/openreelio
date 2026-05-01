@@ -101,6 +101,17 @@ where
     }
 }
 
+fn parse_optional_video_export_request(
+    payload: &serde_json::Value,
+) -> Result<Option<crate::core::render::VideoExportRequest>, String> {
+    match payload.get("settings") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|e| format!("Invalid export settings payload: {e}")),
+    }
+}
+
 // =============================================================================
 // Job Handle
 // =============================================================================
@@ -1436,6 +1447,7 @@ impl JobProcessor {
     /// * `sequenceId` (required) - ID of the sequence to render
     /// * `outputPath` (required) - Destination path
     /// * `preset` (optional) - Export preset name (default: "youtube_1080p")
+    /// * `settings` (optional) - Structured video export settings
     ///
     /// # Events
     ///
@@ -1514,20 +1526,23 @@ impl JobProcessor {
             let validated_output_path =
                 validate_scoped_output_path(output_path_str, "outputPath", &root_refs)?;
 
-            // 3. Configure Export Settings
-            let export_preset = match preset_name.to_lowercase().as_str() {
-                "youtube_1080p" | "youtube1080p" => ExportPreset::Youtube1080p,
-                "youtube_4k" | "youtube4k" => ExportPreset::Youtube4k,
-                "youtube_shorts" | "youtubeshorts" => ExportPreset::YoutubeShorts,
-                "twitter" => ExportPreset::Twitter,
-                "instagram" => ExportPreset::Instagram,
-                "webm" | "webm_vp9" => ExportPreset::WebmVp9,
-                "prores" => ExportPreset::ProRes,
-                _ => ExportPreset::Youtube1080p,
-            };
+            // 3. Configure export settings.
+            let structured_settings = parse_optional_video_export_request(&job.payload)?;
 
-            let settings =
-                ExportSettings::from_preset(export_preset, validated_output_path.clone());
+            let settings = match structured_settings.as_ref() {
+                Some(request) => ExportSettings::from_video_request(
+                    request,
+                    validated_output_path.clone(),
+                    None,
+                    None,
+                )
+                .map_err(|e| e.to_string())?,
+                None => {
+                    let export_preset =
+                        ExportPreset::from_legacy_id(preset_name).map_err(|e| e.to_string())?;
+                    ExportSettings::from_preset(export_preset, validated_output_path.clone())
+                }
+            };
 
             // 4. Validate export feasibility
             let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
@@ -2240,6 +2255,43 @@ mod tests {
         assert_eq!(sequence_id, Some("seq_002"));
         assert_eq!(start_time, None); // Optional, not provided
         assert_eq!(end_time, None); // Optional, not provided
+    }
+
+    #[test]
+    fn parses_optional_video_export_request_null_as_absent() {
+        let payload = serde_json::json!({
+            "settings": null
+        });
+
+        let parsed = parse_optional_video_export_request(&payload).unwrap();
+
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parses_optional_video_export_request_object() {
+        let payload = serde_json::json!({
+            "settings": {
+                "container": "mp4",
+                "videoCodec": "h264",
+                "audioCodec": "aac",
+                "qualityTier": "high",
+                "width": 1920,
+                "height": 1080,
+                "fps": 30.0,
+                "videoBitrate": "15M",
+                "audioBitrate": "320k",
+                "crf": 18,
+                "twoPass": false
+            }
+        });
+
+        let parsed = parse_optional_video_export_request(&payload)
+            .unwrap()
+            .expect("settings should parse");
+
+        assert_eq!(parsed.video_codec, crate::core::render::VideoCodec::H264);
+        assert_eq!(parsed.width, Some(1920));
     }
 
     #[test]

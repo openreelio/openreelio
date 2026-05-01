@@ -11,7 +11,11 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { commands } from '@/bindings';
 import type { BatchRenderItemDto } from '@/bindings';
 import { save } from '@tauri-apps/plugin-dialog';
-import { EXPORT_PRESETS, getPresetExtension } from '@/components/features/export/constants';
+import {
+  EXPORT_PRESETS,
+  getPresetExtension,
+  getVideoExportRequest,
+} from '@/components/features/export/constants';
 import type {
   RenderQueueItem,
   RenderQueueItemStatus,
@@ -223,6 +227,7 @@ export function useRenderQueue({
         jobId: `queue_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         presetId,
         presetName: preset.name,
+        settings: getVideoExportRequest(presetId),
         outputPath: selected,
         status: 'pending',
         progress: 0,
@@ -288,6 +293,7 @@ export function useRenderQueue({
       outputPath: item.outputPath,
       inPoint: item.inPoint ?? null,
       outPoint: item.outPoint ?? null,
+      settings: item.settings,
     }));
 
     try {

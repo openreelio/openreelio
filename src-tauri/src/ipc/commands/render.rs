@@ -10,7 +10,7 @@ use crate::core::{
     fs::{default_export_allowed_roots, validate_local_input_path, validate_scoped_output_path},
     render::{
         cancel_render_job, register_render_job, unregister_render_job, AudioExportFormat,
-        ExportError, ExportPreset, ImageFormat,
+        ExportError, ExportPreset, ImageFormat, VideoExportRequest,
     },
     CoreError,
 };
@@ -44,6 +44,10 @@ pub struct BatchRenderItemDto {
     pub in_point: Option<f64>,
     /// Optional Out point in seconds for range export
     pub out_point: Option<f64>,
+    /// Optional structured export settings. If omitted, `preset` is used for
+    /// legacy compatibility.
+    #[serde(default)]
+    pub settings: Option<VideoExportRequest>,
 }
 
 /// Result returned when a batch render is started.
@@ -91,21 +95,32 @@ pub struct FrameExportResultDto {
 // =============================================================================
 
 /// Parse a preset string into an ExportPreset enum.
-fn parse_export_preset(preset: &str) -> ExportPreset {
-    match preset.to_lowercase().as_str() {
-        "youtube_1080p" | "youtube1080p" => ExportPreset::Youtube1080p,
-        "youtube_4k" | "youtube4k" => ExportPreset::Youtube4k,
-        "youtube_shorts" | "youtubeshorts" => ExportPreset::YoutubeShorts,
-        "twitter" => ExportPreset::Twitter,
-        "instagram" => ExportPreset::Instagram,
-        "webm" | "webm_vp9" => ExportPreset::WebmVp9,
-        "prores" => ExportPreset::ProRes,
-        other => {
-            tracing::warn!(
-                "Unknown export preset '{}', defaulting to youtube_1080p",
-                other
-            );
-            ExportPreset::Youtube1080p
+fn parse_export_preset(preset: &str) -> Result<ExportPreset, String> {
+    ExportPreset::from_legacy_id(preset).map_err(|e| e.to_string())
+}
+
+fn build_export_settings(
+    output_path: std::path::PathBuf,
+    preset: &str,
+    request: Option<&VideoExportRequest>,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
+) -> Result<crate::core::render::ExportSettings, String> {
+    match request {
+        Some(request) => crate::core::render::ExportSettings::from_video_request(
+            request,
+            output_path,
+            start_time,
+            end_time,
+        )
+        .map_err(|e| e.to_string()),
+        None => {
+            let export_preset = parse_export_preset(preset)?;
+            let mut settings =
+                crate::core::render::ExportSettings::from_preset(export_preset, output_path);
+            settings.start_time = start_time;
+            settings.end_time = end_time;
+            Ok(settings)
         }
     }
 }
@@ -201,13 +216,12 @@ pub async fn start_render(
     sequence_id: String,
     output_path: String,
     preset: String,
+    settings: Option<VideoExportRequest>,
     state: State<'_, AppState>,
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
     app_handle: tauri::AppHandle,
 ) -> Result<RenderStartResult, String> {
-    use crate::core::render::{
-        validate_export_settings, ExportEngine, ExportProgress, ExportSettings,
-    };
+    use crate::core::render::{validate_export_settings, ExportEngine, ExportProgress};
     use tauri::Emitter;
 
     // Get sequence/assets/effects + project path from project state
@@ -263,11 +277,14 @@ pub async fn start_render(
         "FFmpeg not initialized. Please install FFmpeg and restart the application.".to_string()
     })?;
 
-    // Parse preset
-    let export_preset = parse_export_preset(&preset);
-
     // Create export settings using validated path
-    let mut settings = ExportSettings::from_preset(export_preset, validated_output_path.clone());
+    let mut settings = build_export_settings(
+        validated_output_path.clone(),
+        &preset,
+        settings.as_ref(),
+        None,
+        None,
+    )?;
 
     resolve_export_hardware_preferences(&app_handle, &ffmpeg.info().ffmpeg_path, &mut settings)
         .await?;
@@ -394,15 +411,14 @@ pub async fn render_range(
     sequence_id: String,
     output_path: String,
     preset: String,
+    settings: Option<VideoExportRequest>,
     in_point: f64,
     out_point: f64,
     state: State<'_, AppState>,
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
     app_handle: tauri::AppHandle,
 ) -> Result<RenderStartResult, String> {
-    use crate::core::render::{
-        validate_export_settings, ExportEngine, ExportProgress, ExportSettings,
-    };
+    use crate::core::render::{validate_export_settings, ExportEngine, ExportProgress};
     use tauri::Emitter;
 
     // Validate range
@@ -456,10 +472,13 @@ pub async fn render_range(
     })?;
 
     // Build settings with range
-    let export_preset = parse_export_preset(&preset);
-    let mut settings = ExportSettings::from_preset(export_preset, validated_output_path);
-    settings.start_time = Some(in_point);
-    settings.end_time = Some(out_point);
+    let mut settings = build_export_settings(
+        validated_output_path,
+        &preset,
+        settings.as_ref(),
+        Some(in_point),
+        Some(out_point),
+    )?;
 
     resolve_export_hardware_preferences(&app_handle, &ffmpeg.info().ffmpeg_path, &mut settings)
         .await?;
@@ -625,10 +644,13 @@ pub async fn batch_render(
             &root_refs,
         )?;
 
-        let export_preset = parse_export_preset(&item.preset);
-        let mut settings = ExportSettings::from_preset(export_preset, validated_path);
-        settings.start_time = item.in_point;
-        settings.end_time = item.out_point;
+        let settings = build_export_settings(
+            validated_path,
+            &item.preset,
+            item.settings.as_ref(),
+            item.in_point,
+            item.out_point,
+        )?;
 
         // Validate range if provided
         if let (Some(in_pt), Some(out_pt)) = (item.in_point, item.out_point) {

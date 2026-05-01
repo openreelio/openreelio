@@ -8,7 +8,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::{fs::validate_path_id_component, AssetId, ClipId, SequenceId, TimeSec, TrackId};
+use crate::core::{
+    fs::validate_path_id_component, render::VideoExportRequest, AssetId, ClipId, SequenceId,
+    TimeSec, TrackId,
+};
 
 const MAX_JOB_PAYLOAD_BYTES: usize = 256 * 1024; // 256KiB
 
@@ -280,6 +283,7 @@ pub struct FinalRenderJobPayload {
     pub sequence_id: SequenceId,
     pub output_path: String,
     pub preset: Option<String>,
+    pub settings: Option<VideoExportRequest>,
 }
 
 impl FinalRenderJobPayload {
@@ -496,6 +500,42 @@ mod tests {
             ValidatedJobPayload::Transcription(p) => {
                 assert_eq!(p.model, "tiny");
                 assert!(p.translate);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn accepts_structured_final_render_settings() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "outputPath": "/tmp/out.mp4",
+            "preset": "mp4-high",
+            "settings": {
+                "container": "mp4",
+                "videoCodec": "h264",
+                "audioCodec": "aac",
+                "qualityTier": "high",
+                "width": 1920,
+                "height": 1080,
+                "fps": 30.0,
+                "videoBitrate": "15M",
+                "audioBitrate": "320k",
+                "crf": 18,
+                "twoPass": false
+            }
+        });
+
+        let parsed = ValidatedJobPayload::parse(&JobType::FinalRender, payload).unwrap();
+
+        match parsed {
+            ValidatedJobPayload::FinalRender(p) => {
+                let settings = p.settings.expect("structured settings should parse");
+                assert_eq!(
+                    settings.quality_tier,
+                    crate::core::render::ExportQualityTier::High
+                );
+                assert_eq!(settings.width, Some(1920));
             }
             _ => panic!("wrong variant"),
         }

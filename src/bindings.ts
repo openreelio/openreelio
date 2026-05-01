@@ -457,9 +457,9 @@ async getJobStats() : Promise<Result<JsonValue, string>> {
  * This command validates the export settings before starting the render,
  * and reports real-time progress via Tauri events.
  */
-async startRender(sequenceId: string, outputPath: string, preset: string) : Promise<Result<RenderStartResult, string>> {
+async startRender(sequenceId: string, outputPath: string, preset: string, settings: VideoExportRequest | null) : Promise<Result<RenderStartResult, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_render", { sequenceId, outputPath, preset }) };
+    return { status: "ok", data: await TAURI_INVOKE("start_render", { sequenceId, outputPath, preset, settings }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -470,9 +470,9 @@ async startRender(sequenceId: string, outputPath: string, preset: string) : Prom
  * Uses `in_point` and `out_point` (in seconds) to restrict the export
  * to a portion of the timeline. Reports progress via Tauri events.
  */
-async renderRange(sequenceId: string, outputPath: string, preset: string, inPoint: number, outPoint: number) : Promise<Result<RenderStartResult, string>> {
+async renderRange(sequenceId: string, outputPath: string, preset: string, settings: VideoExportRequest | null, inPoint: number, outPoint: number) : Promise<Result<RenderStartResult, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("render_range", { sequenceId, outputPath, preset, inPoint, outPoint }) };
+    return { status: "ok", data: await TAURI_INVOKE("render_range", { sequenceId, outputPath, preset, settings, inPoint, outPoint }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -2982,6 +2982,10 @@ duration: number | null;
  */
 tags: string[] }
 /**
+ * Audio codec selection
+ */
+export type AudioCodec = "aac" | "mp3" | "opus" | "pcm" | "copy"
+/**
  * Parameters for audio ducking.
  */
 export type AudioDuckingParams = { 
@@ -3189,7 +3193,12 @@ inPoint: number | null;
 /**
  * Optional Out point in seconds for range export
  */
-outPoint: number | null }
+outPoint: number | null;
+/**
+ * Optional structured export settings. If omitted, `preset` is used for
+ * legacy compatibility.
+ */
+settings?: VideoExportRequest | null }
 /**
  * Result returned when a batch render is started.
  */
@@ -3669,6 +3678,22 @@ columns: number;
  */
 rows: number }
 /**
+ * Output media container.
+ */
+export type ContainerFormat =
+/**
+ * MPEG-4 container, typically H.264/H.265 + AAC.
+ */
+"mp4" |
+/**
+ * QuickTime container for ProRes/H.264/H.265 delivery and masters.
+ */
+"mov" |
+/**
+ * WebM container for VP9/Opus delivery.
+ */
+"webm"
+/**
  * A classified time segment of video content
  */
 export type ContentSegment = { 
@@ -4019,6 +4044,30 @@ tempoClassification: TempoClassification }
  * Response for estimate_generation_cost
  */
 export type EstimateGenerationCostResponse = { estimatedCents: number; quality: string; durationSec: number }
+/**
+ * User-facing quality tier that maps to concrete encoder settings.
+ */
+export type ExportQualityTier =
+/**
+ * Fast, lower-bitrate review export.
+ */
+"draft" |
+/**
+ * Balanced default delivery.
+ */
+"standard" |
+/**
+ * Higher-quality web delivery.
+ */
+"high" |
+/**
+ * Editing/mastering-oriented output.
+ */
+"master" |
+/**
+ * Caller supplied explicit bitrate/CRF settings.
+ */
+"custom"
 export type ExportSettingsDto = { defaultFormat: string; defaultVideoCodec: string; defaultAudioCodec: string; defaultExportLocation: string | null; openFolderAfterExport: boolean }
 export type ExternalDiarizationRunSummary = { assetId: string; inputAudioPath: string; outputJsonPath: string; transcriptSegmentCount: number; speakerCount: number; speakerTurnCount: number }
 /**
@@ -6956,6 +7005,14 @@ issues: string[];
  * Non-critical warnings
  */
 warnings: string[] }
+/**
+ * Video codec selection
+ */
+export type VideoCodec = "h264" | "h265" | "vp9" | "prores" | "copy"
+/**
+ * Structured video export request used by UI and agent-driven export paths.
+ */
+export type VideoExportRequest = { container: ContainerFormat; videoCodec: VideoCodec; audioCodec: AudioCodec; qualityTier: ExportQualityTier; width: number | null; height: number | null; fps: number | null; videoBitrate: string | null; audioBitrate: string | null; crf: number | null; twoPass?: boolean }
 /**
  * Video-specific metadata
  */
