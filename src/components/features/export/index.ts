@@ -10,4 +10,4 @@ export { PresetOption, ProgressDisplay } from './ExportHelpers';
 export type { PresetOptionProps, ProgressDisplayProps } from './ExportHelpers';
 
 // Constants
-export { EXPORT_PRESETS, PRESET_EXTENSIONS, getPresetExtension } from './constants';
+export { EXPORT_PRESETS, getPresetExtension } from './constants';

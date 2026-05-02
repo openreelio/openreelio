@@ -9,6 +9,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use specta::Type;
 use tokio::sync::mpsc::Sender;
 
 use crate::core::{
@@ -238,6 +239,10 @@ fn sequence_has_exportable_audio(
 pub enum ExportPreset {
     /// YouTube 1080p (H.264, AAC)
     Youtube1080p,
+    /// Draft MP4 (H.264, AAC, 720p)
+    Mp4Draft,
+    /// High quality MP4 (H.264, AAC, 1080p)
+    Mp4High,
     /// YouTube 4K (H.264, AAC)
     Youtube4k,
     /// YouTube Shorts (Vertical 1080x1920)
@@ -254,22 +259,51 @@ pub enum ExportPreset {
     Custom,
 }
 
+impl ExportPreset {
+    /// Parse a legacy preset identifier.
+    pub fn from_legacy_id(preset: &str) -> Result<Self, ExportError> {
+        let normalized = preset.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+
+        match normalized.as_str() {
+            "youtube_1080p" | "youtube1080p" | "youtube_1080" | "mp4_h264_1080p" => {
+                Ok(Self::Youtube1080p)
+            }
+            "mp4_draft" | "mp4_h264_720p" | "mp4_h264_draft" => Ok(Self::Mp4Draft),
+            "mp4_high" | "mp4_h264_high" | "mp4_h264_1080p_high" => Ok(Self::Mp4High),
+            "youtube_4k" | "youtube4k" | "youtube_2160p" | "mp4_h264_4k" | "mp4_h264_2160p" => {
+                Ok(Self::Youtube4k)
+            }
+            "youtube_shorts" | "youtubeshorts" | "shorts_reels" => Ok(Self::YoutubeShorts),
+            "twitter" => Ok(Self::Twitter),
+            "instagram" => Ok(Self::Instagram),
+            "webm" | "webm_vp9" | "webm_vp9_1080p" | "webm_vp9_720p" => Ok(Self::WebmVp9),
+            "prores" | "prores_422" => Ok(Self::ProRes),
+            other => Err(ExportError::InvalidSettings(format!(
+                "Unknown export preset: {other}"
+            ))),
+        }
+    }
+}
+
 /// Video codec selection
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoCodec {
     H264,
     H265,
+    #[serde(rename = "vp9")]
     Vp9,
+    #[serde(rename = "prores")]
     ProRes,
     Copy,
 }
 
 /// Audio codec selection
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioCodec {
     Aac,
+    #[serde(rename = "mp3")]
     Mp3,
     Opus,
     Pcm,
@@ -277,7 +311,7 @@ pub enum AudioCodec {
 }
 
 /// HDR (High Dynamic Range) mode for export
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum HdrMode {
     /// SDR (Standard Dynamic Range) - default
@@ -289,6 +323,65 @@ pub enum HdrMode {
     /// HLG (Hybrid Log-Gamma) HDR format
     /// Compatible with both HDR and SDR displays
     Hlg,
+}
+
+/// Output media container.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerFormat {
+    /// MPEG-4 container, typically H.264/H.265 + AAC.
+    #[default]
+    #[serde(rename = "mp4")]
+    Mp4,
+    /// QuickTime container for ProRes/H.264/H.265 delivery and masters.
+    Mov,
+    /// WebM container for VP9/Opus delivery.
+    Webm,
+}
+
+impl ContainerFormat {
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Mov => "mov",
+            Self::Webm => "webm",
+        }
+    }
+}
+
+/// User-facing quality tier that maps to concrete encoder settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportQualityTier {
+    /// Fast, lower-bitrate review export.
+    Draft,
+    /// Balanced default delivery.
+    #[default]
+    Standard,
+    /// Higher-quality web delivery.
+    High,
+    /// Editing/mastering-oriented output.
+    Master,
+    /// Caller supplied explicit bitrate/CRF settings.
+    Custom,
+}
+
+/// Structured video export request used by UI and agent-driven export paths.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoExportRequest {
+    pub container: ContainerFormat,
+    pub video_codec: VideoCodec,
+    pub audio_codec: AudioCodec,
+    pub quality_tier: ExportQualityTier,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub fps: Option<f64>,
+    pub video_bitrate: Option<String>,
+    pub audio_bitrate: Option<String>,
+    pub crf: Option<u8>,
+    #[serde(default)]
+    pub two_pass: bool,
 }
 
 /// Export settings
@@ -419,6 +512,50 @@ impl ExportSettings {
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
             },
+            ExportPreset::Mp4Draft => Self {
+                preset: ExportPreset::Mp4Draft,
+                output_path,
+                video_codec: VideoCodec::H264,
+                audio_codec: AudioCodec::Aac,
+                width: Some(1280),
+                height: Some(720),
+                video_bitrate: Some("3M".to_string()),
+                audio_bitrate: Some("128k".to_string()),
+                fps: Some(30.0),
+                crf: Some(28),
+                two_pass: false,
+                start_time: None,
+                end_time: None,
+                hdr_mode: HdrMode::Sdr,
+                max_cll: None,
+                max_fall: None,
+                bit_depth: None,
+                tonemap_mode: None,
+                hardware_accel: super::hardware::HardwareAccelMode::default(),
+                resolved_encoder_name: None,
+            },
+            ExportPreset::Mp4High => Self {
+                preset: ExportPreset::Mp4High,
+                output_path,
+                video_codec: VideoCodec::H264,
+                audio_codec: AudioCodec::Aac,
+                width: Some(1920),
+                height: Some(1080),
+                video_bitrate: Some("15M".to_string()),
+                audio_bitrate: Some("320k".to_string()),
+                fps: Some(30.0),
+                crf: Some(18),
+                two_pass: false,
+                start_time: None,
+                end_time: None,
+                hdr_mode: HdrMode::Sdr,
+                max_cll: None,
+                max_fall: None,
+                bit_depth: None,
+                tonemap_mode: None,
+                hardware_accel: super::hardware::HardwareAccelMode::default(),
+                resolved_encoder_name: None,
+            },
             ExportPreset::Youtube4k => Self {
                 preset: ExportPreset::Youtube4k,
                 output_path,
@@ -430,7 +567,7 @@ impl ExportSettings {
                 audio_bitrate: Some("320k".to_string()),
                 fps: Some(30.0),
                 crf: Some(18),
-                two_pass: true,
+                two_pass: false,
                 start_time: None,
                 end_time: None,
                 hdr_mode: HdrMode::Sdr,
@@ -534,11 +671,11 @@ impl ExportSettings {
                 output_path,
                 video_codec: VideoCodec::ProRes,
                 audio_codec: AudioCodec::Pcm,
-                width: Some(1920),
-                height: Some(1080),
+                width: None,
+                height: None,
                 video_bitrate: None,
                 audio_bitrate: None,
-                fps: Some(30.0),
+                fps: None,
                 crf: None,
                 two_pass: false,
                 start_time: None,
@@ -556,6 +693,64 @@ impl ExportSettings {
                 output_path,
                 ..Default::default()
             },
+        }
+    }
+
+    /// Create settings from a structured video export request.
+    pub fn from_video_request(
+        request: &VideoExportRequest,
+        output_path: PathBuf,
+        start_time: Option<f64>,
+        end_time: Option<f64>,
+    ) -> Result<Self, ExportError> {
+        validate_video_export_request(request, &output_path)?;
+
+        Ok(Self {
+            preset: ExportPreset::Custom,
+            output_path,
+            video_codec: request.video_codec.clone(),
+            audio_codec: request.audio_codec.clone(),
+            width: request.width,
+            height: request.height,
+            video_bitrate: request.video_bitrate.clone(),
+            audio_bitrate: request.audio_bitrate.clone(),
+            fps: request.fps,
+            crf: request.crf,
+            two_pass: request.two_pass,
+            start_time,
+            end_time,
+            hdr_mode: HdrMode::Sdr,
+            max_cll: None,
+            max_fall: None,
+            bit_depth: None,
+            tonemap_mode: None,
+            hardware_accel: super::hardware::HardwareAccelMode::default(),
+            resolved_encoder_name: None,
+        })
+    }
+
+    /// Create a structured request from a legacy preset.
+    pub fn request_from_preset(preset: ExportPreset) -> VideoExportRequest {
+        let settings = Self::from_preset(
+            preset.clone(),
+            PathBuf::from(format!(
+                "output.{}",
+                preset_default_container(&preset).extension()
+            )),
+        );
+
+        VideoExportRequest {
+            container: preset_default_container(&preset),
+            video_codec: settings.video_codec,
+            audio_codec: settings.audio_codec,
+            quality_tier: preset_default_quality_tier(&preset),
+            width: settings.width,
+            height: settings.height,
+            fps: settings.fps,
+            video_bitrate: settings.video_bitrate,
+            audio_bitrate: settings.audio_bitrate,
+            crf: settings.crf,
+            two_pass: settings.two_pass,
         }
     }
 
@@ -768,6 +963,247 @@ impl ExportSettings {
     }
 }
 
+fn preset_default_container(preset: &ExportPreset) -> ContainerFormat {
+    match preset {
+        ExportPreset::WebmVp9 => ContainerFormat::Webm,
+        ExportPreset::ProRes => ContainerFormat::Mov,
+        ExportPreset::Youtube1080p
+        | ExportPreset::Mp4Draft
+        | ExportPreset::Mp4High
+        | ExportPreset::Youtube4k
+        | ExportPreset::YoutubeShorts
+        | ExportPreset::Twitter
+        | ExportPreset::Instagram
+        | ExportPreset::Custom => ContainerFormat::Mp4,
+    }
+}
+
+fn preset_default_quality_tier(preset: &ExportPreset) -> ExportQualityTier {
+    match preset {
+        ExportPreset::Mp4Draft | ExportPreset::Twitter => ExportQualityTier::Draft,
+        ExportPreset::Mp4High | ExportPreset::Youtube4k | ExportPreset::WebmVp9 => {
+            ExportQualityTier::High
+        }
+        ExportPreset::ProRes => ExportQualityTier::Master,
+        ExportPreset::Youtube1080p | ExportPreset::YoutubeShorts | ExportPreset::Instagram => {
+            ExportQualityTier::Standard
+        }
+        ExportPreset::Custom => ExportQualityTier::Custom,
+    }
+}
+
+fn output_extension(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.trim_start_matches('.').to_ascii_lowercase())
+}
+
+fn bitrate_is_valid(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+
+    let split_at = value
+        .find(|ch: char| !ch.is_ascii_digit() && ch != '.')
+        .unwrap_or(value.len());
+    let (number, suffix) = value.split_at(split_at);
+
+    if number.is_empty() || number == "." {
+        return false;
+    }
+
+    let Ok(parsed) = number.parse::<f64>() else {
+        return false;
+    };
+
+    parsed.is_finite()
+        && parsed > 0.0
+        && matches!(
+            suffix.to_ascii_lowercase().as_str(),
+            "" | "k" | "m" | "g" | "kbps" | "mbps"
+        )
+}
+
+fn crf_range_for_codec(codec: &VideoCodec) -> Option<std::ops::RangeInclusive<u8>> {
+    match codec {
+        VideoCodec::H264 | VideoCodec::H265 => Some(0..=51),
+        VideoCodec::Vp9 => Some(0..=63),
+        VideoCodec::ProRes | VideoCodec::Copy => None,
+    }
+}
+
+fn container_supports_video_codec(container: &ContainerFormat, codec: &VideoCodec) -> bool {
+    matches!(
+        (container, codec),
+        (ContainerFormat::Mp4, VideoCodec::H264 | VideoCodec::H265)
+            | (
+                ContainerFormat::Mov,
+                VideoCodec::H264 | VideoCodec::H265 | VideoCodec::ProRes
+            )
+            | (ContainerFormat::Webm, VideoCodec::Vp9)
+    )
+}
+
+fn container_supports_audio_codec(container: &ContainerFormat, codec: &AudioCodec) -> bool {
+    matches!(
+        (container, codec),
+        (ContainerFormat::Mp4, AudioCodec::Aac | AudioCodec::Mp3)
+            | (
+                ContainerFormat::Mov,
+                AudioCodec::Aac | AudioCodec::Mp3 | AudioCodec::Pcm
+            )
+            | (ContainerFormat::Webm, AudioCodec::Opus)
+    )
+}
+
+fn container_supports_extension(container: &ContainerFormat, extension: &str) -> bool {
+    matches!(
+        (container, extension),
+        (ContainerFormat::Mp4, "mp4" | "m4v")
+            | (ContainerFormat::Mov, "mov")
+            | (ContainerFormat::Webm, "webm")
+    )
+}
+
+/// Validate a structured video export request before render setup.
+pub fn validate_video_export_request(
+    request: &VideoExportRequest,
+    output_path: &Path,
+) -> Result<(), ExportError> {
+    let expected_ext = request.container.extension();
+    let actual_ext = output_extension(output_path).ok_or_else(|| {
+        ExportError::InvalidSettings("Output path must include a file extension".to_string())
+    })?;
+    if !container_supports_extension(&request.container, &actual_ext) {
+        return Err(ExportError::InvalidSettings(format!(
+            "Output extension '.{}' does not match selected container '{}'",
+            actual_ext, expected_ext
+        )));
+    }
+
+    if !container_supports_video_codec(&request.container, &request.video_codec) {
+        return Err(ExportError::InvalidSettings(format!(
+            "Container {:?} does not support video codec {:?}",
+            request.container, request.video_codec
+        )));
+    }
+
+    if !container_supports_audio_codec(&request.container, &request.audio_codec) {
+        return Err(ExportError::InvalidSettings(format!(
+            "Container {:?} does not support audio codec {:?}",
+            request.container, request.audio_codec
+        )));
+    }
+
+    match (request.width, request.height) {
+        (Some(width), Some(height)) if width > 0 && height > 0 => {}
+        (None, None) => {}
+        _ => {
+            return Err(ExportError::InvalidSettings(
+                "Export resolution must provide both width and height, or neither".to_string(),
+            ));
+        }
+    }
+
+    if let Some(fps) = request.fps {
+        if !fps.is_finite() || fps <= 0.0 || fps > 240.0 {
+            return Err(ExportError::InvalidSettings(
+                "Frame rate must be greater than 0 and no more than 240 fps".to_string(),
+            ));
+        }
+    }
+
+    if let Some(ref bitrate) = request.video_bitrate {
+        if !bitrate_is_valid(bitrate) {
+            return Err(ExportError::InvalidSettings(format!(
+                "Invalid video bitrate: {bitrate}"
+            )));
+        }
+    }
+
+    if let Some(ref bitrate) = request.audio_bitrate {
+        if !bitrate_is_valid(bitrate) {
+            return Err(ExportError::InvalidSettings(format!(
+                "Invalid audio bitrate: {bitrate}"
+            )));
+        }
+    }
+
+    if let Some(crf) = request.crf {
+        let Some(range) = crf_range_for_codec(&request.video_codec) else {
+            return Err(ExportError::InvalidSettings(format!(
+                "Codec {:?} does not support CRF/CQ quality control",
+                request.video_codec
+            )));
+        };
+        if !range.contains(&crf) {
+            return Err(ExportError::InvalidSettings(format!(
+                "CRF/CQ value {} is outside the supported range for {:?}",
+                crf, request.video_codec
+            )));
+        }
+    }
+
+    if request.two_pass {
+        return Err(ExportError::InvalidSettings(
+            "Two-pass export is not exposed until pass-one/pass-two execution is implemented"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn container_from_output_path(path: &Path) -> Result<ContainerFormat, ExportError> {
+    match output_extension(path).as_deref() {
+        Some("mp4") | Some("m4v") => Ok(ContainerFormat::Mp4),
+        Some("mov") => Ok(ContainerFormat::Mov),
+        Some("webm") => Ok(ContainerFormat::Webm),
+        Some(ext) => Err(ExportError::InvalidSettings(format!(
+            "Unsupported video output extension: .{ext}"
+        ))),
+        None => Err(ExportError::InvalidSettings(
+            "Output path must include a file extension".to_string(),
+        )),
+    }
+}
+
+fn validate_export_settings_options(settings: &ExportSettings) -> Vec<String> {
+    let mut errors = Vec::new();
+    let container = match container_from_output_path(&settings.output_path) {
+        Ok(container) => container,
+        Err(error) => {
+            errors.push(error.to_string());
+            return errors;
+        }
+    };
+
+    let request = VideoExportRequest {
+        container,
+        video_codec: settings.video_codec.clone(),
+        audio_codec: settings.audio_codec.clone(),
+        quality_tier: ExportQualityTier::Custom,
+        width: settings.width,
+        height: settings.height,
+        fps: settings.fps,
+        video_bitrate: settings.video_bitrate.clone(),
+        audio_bitrate: settings.audio_bitrate.clone(),
+        crf: settings.crf,
+        two_pass: settings.two_pass,
+    };
+
+    if let Err(error) = validate_video_export_request(&request, &settings.output_path) {
+        errors.push(error.to_string());
+    }
+
+    if let Some(error) = settings.validate_hdr_settings() {
+        errors.push(error);
+    }
+
+    errors
+}
+
 /// Export progress update
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -819,6 +1255,9 @@ pub struct BatchRenderItem {
     pub in_point: Option<f64>,
     /// Optional Out point in seconds for range export
     pub out_point: Option<f64>,
+    /// Optional structured export settings. When omitted, `preset` is used.
+    #[serde(default)]
+    pub settings: Option<VideoExportRequest>,
 }
 
 /// Status of an individual render job within a batch
@@ -1765,6 +2204,221 @@ fn apply_audio_mix_settings(
     current_label
 }
 
+const TIMELINE_EPSILON_SEC: f64 = 0.001;
+
+#[derive(Clone, Debug)]
+struct VideoTimelineSegment {
+    stream_label: String,
+    start_sec: f64,
+    end_sec: f64,
+    transition_filter: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct VideoConcatPart {
+    stream_label: String,
+    transition_filter: Option<String>,
+}
+
+fn output_video_dimensions(sequence: &Sequence, settings: &ExportSettings) -> (u32, u32) {
+    let width = settings
+        .width
+        .unwrap_or(sequence.format.canvas.width)
+        .max(1);
+    let height = settings
+        .height
+        .unwrap_or(sequence.format.canvas.height)
+        .max(1);
+    (width, height)
+}
+
+fn output_video_fps(sequence: &Sequence, settings: &ExportSettings) -> f64 {
+    let fps = settings.fps.unwrap_or_else(|| sequence.format.fps.as_f64());
+
+    if fps.is_finite() && fps > 0.0 {
+        fps
+    } else {
+        30.0
+    }
+}
+
+fn output_video_pixel_format(settings: &ExportSettings) -> &'static str {
+    let use_10_bit = settings.is_hdr() || settings.bit_depth.unwrap_or(8) >= 10;
+
+    match settings.video_codec {
+        VideoCodec::ProRes => "yuv422p10le",
+        VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp9 | VideoCodec::Copy => {
+            if use_10_bit {
+                "yuv420p10le"
+            } else {
+                "yuv420p"
+            }
+        }
+    }
+}
+
+fn append_video_stream_normalization(
+    filter_complex: &mut String,
+    input_label: &str,
+    output_label: &str,
+    width: u32,
+    height: u32,
+    fps: f64,
+    pixel_format: &str,
+) {
+    filter_complex.push_str(&format!(
+        "[{}]scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={},format={}[{}];",
+        input_label,
+        width,
+        height,
+        width,
+        height,
+        format_speed_number(fps),
+        pixel_format,
+        output_label
+    ));
+}
+
+fn append_black_video_gap(
+    filter_complex: &mut String,
+    output_label: &str,
+    duration_sec: f64,
+    width: u32,
+    height: u32,
+    fps: f64,
+    pixel_format: &str,
+) {
+    filter_complex.push_str(&format!(
+        "color=c=black:s={}x{}:r={}:d={},format={}[{}];",
+        width,
+        height,
+        format_speed_number(fps),
+        format_speed_number(duration_sec),
+        pixel_format,
+        output_label
+    ));
+}
+
+fn append_timeline_video_output(
+    filter_complex: &mut String,
+    segments: &[VideoTimelineSegment],
+    timeline_end_sec: f64,
+    width: u32,
+    height: u32,
+    fps: f64,
+    pixel_format: &str,
+) -> Result<(), ExportError> {
+    let mut sorted_segments: Vec<&VideoTimelineSegment> = segments
+        .iter()
+        .filter(|segment| segment.end_sec > segment.start_sec + TIMELINE_EPSILON_SEC)
+        .collect();
+
+    if sorted_segments.is_empty() {
+        return Err(ExportError::InvalidSettings(
+            "Sequence has no visual clips to export".to_string(),
+        ));
+    }
+
+    sorted_segments.sort_by(|a, b| {
+        a.start_sec
+            .partial_cmp(&b.start_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut parts: Vec<VideoConcatPart> = Vec::new();
+    let mut cursor = 0.0_f64;
+    let mut gap_index = 0_usize;
+
+    for segment in sorted_segments {
+        let start = segment.start_sec.max(0.0);
+        let end = segment.end_sec.max(start);
+
+        if start > cursor + TIMELINE_EPSILON_SEC {
+            if let Some(previous) = parts.last_mut() {
+                previous.transition_filter = None;
+            }
+
+            let gap_label = format!("vgap{}", gap_index);
+            append_black_video_gap(
+                filter_complex,
+                &gap_label,
+                start - cursor,
+                width,
+                height,
+                fps,
+                pixel_format,
+            );
+            parts.push(VideoConcatPart {
+                stream_label: format!("[{}]", gap_label),
+                transition_filter: None,
+            });
+            gap_index += 1;
+            cursor = start;
+        }
+
+        parts.push(VideoConcatPart {
+            stream_label: segment.stream_label.clone(),
+            transition_filter: segment.transition_filter.clone(),
+        });
+        cursor = cursor.max(end);
+    }
+
+    if timeline_end_sec.is_finite() && timeline_end_sec > cursor + TIMELINE_EPSILON_SEC {
+        if let Some(previous) = parts.last_mut() {
+            previous.transition_filter = None;
+        }
+
+        let gap_label = format!("vgap{}", gap_index);
+        append_black_video_gap(
+            filter_complex,
+            &gap_label,
+            timeline_end_sec - cursor,
+            width,
+            height,
+            fps,
+            pixel_format,
+        );
+        parts.push(VideoConcatPart {
+            stream_label: format!("[{}]", gap_label),
+            transition_filter: None,
+        });
+    }
+
+    if parts.len() == 1 {
+        filter_complex.push_str(&format!("{}null[outv]", parts[0].stream_label));
+        return Ok(());
+    }
+
+    let mut current_stream = parts[0].stream_label.clone();
+    for i in 0..parts.len() - 1 {
+        let next_stream = &parts[i + 1].stream_label;
+        let output_label = if i == parts.len() - 2 {
+            "[outv]".to_string()
+        } else {
+            format!("[vseq{}]", i)
+        };
+
+        if let Some(ref transition_filter) = parts[i].transition_filter {
+            filter_complex.push_str(&format!(
+                "{}{}{}{}",
+                current_stream, next_stream, transition_filter, output_label
+            ));
+        } else {
+            filter_complex.push_str(&format!(
+                "{}{}concat=n=2:v=1:a=0{}",
+                current_stream, next_stream, output_label
+            ));
+        }
+
+        if i < parts.len() - 2 {
+            filter_complex.push(';');
+            current_stream = output_label;
+        }
+    }
+
+    Ok(())
+}
+
 fn append_master_audio_output(
     filter_complex: &mut String,
     audio_streams: &[String],
@@ -2399,7 +3053,10 @@ impl ExportEngine {
 
         // Quality settings (CRF for software, CQ/QP for hardware encoders)
         if let Some(crf) = settings.crf {
-            if matches!(settings.video_codec, VideoCodec::H264 | VideoCodec::H265) {
+            if matches!(
+                settings.video_codec,
+                VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp9
+            ) {
                 args.extend(super::hardware::resolve_quality_args(&video_codec, crf));
             }
         }
@@ -2501,9 +3158,9 @@ impl ExportEngine {
         let mut args = Vec::new();
         let mut input_index = 0;
         let mut filter_complex = String::new();
-        let mut video_streams = Vec::new();
+        let mut video_segments = Vec::new();
         let mut audio_streams = Vec::new();
-        let mut video_transitions: Vec<Option<&Effect>> = Vec::new();
+        let mut timeline_end_sec = 0.0_f64;
         let audio_companion_keys = collect_audio_companion_keys(sequence, assets, audio_info);
 
         // Collect enabled clips sorted by timeline position.
@@ -2515,9 +3172,9 @@ impl ExportEngine {
 
         let caption_filters = collect_caption_drawtext_filters(&all_clips);
 
-        // Get output dimensions from settings or use defaults
-        let output_width = settings.width.unwrap_or(1920);
-        let output_height = settings.height.unwrap_or(1080);
+        let (output_width, output_height) = output_video_dimensions(sequence, settings);
+        let output_fps = output_video_fps(sequence, settings);
+        let output_pixel_format = output_video_pixel_format(settings);
 
         // Collect adjustment layer effects for post-processing.
         // These are applied to the composited output after the main concat,
@@ -2562,6 +3219,7 @@ impl ExportEngine {
                     args.extend(input_args);
 
                     let video_out_label = format!("v{}", input_index);
+                    let normalized_video_label = format!("vnorm{}", input_index);
 
                     // Apply drawtext filter directly to color source
                     let text_filter = format!(
@@ -2571,8 +3229,24 @@ impl ExportEngine {
                     filter_complex.push_str(&text_filter);
                     filter_complex.push(';');
 
-                    video_streams.push(format!("[{}]", video_out_label));
-                    video_transitions.push(find_transition_effect(clip, effects));
+                    append_video_stream_normalization(
+                        &mut filter_complex,
+                        &video_out_label,
+                        &normalized_video_label,
+                        output_width,
+                        output_height,
+                        output_fps,
+                        output_pixel_format,
+                    );
+
+                    video_segments.push(VideoTimelineSegment {
+                        stream_label: format!("[{}]", normalized_video_label),
+                        start_sec: clip.place.timeline_in_sec,
+                        end_sec: clip.place.timeline_out_sec(),
+                        transition_filter: find_transition_effect(clip, effects)
+                            .map(|effect| effect.to_filter_body()),
+                    });
+                    timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
 
                     // Text clips have no audio
                     input_index += 1;
@@ -2608,6 +3282,7 @@ impl ExportEngine {
             if !contributes_visual_output && !clip_has_audio {
                 continue;
             }
+            timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
 
             // Add input (using validated path)
             args.push("-i".to_string());
@@ -2632,6 +3307,7 @@ impl ExportEngine {
                         // Video processing: trim → [reverse] → [speed] → effects → [tonemap] → output
                         let trim_label = format!("trim{}", input_index);
                         let video_out_label = format!("v{}", input_index);
+                        let normalized_video_label = format!("vnorm{}", input_index);
 
                         let effects_out_label = if tonemap_filter.is_some() {
                             format!("vfx{}", input_index)
@@ -2666,8 +3342,23 @@ impl ExportEngine {
                             ));
                         }
 
-                        video_streams.push(format!("[{}]", video_out_label));
-                        video_transitions.push(find_transition_effect(clip, effects));
+                        append_video_stream_normalization(
+                            &mut filter_complex,
+                            &video_out_label,
+                            &normalized_video_label,
+                            output_width,
+                            output_height,
+                            output_fps,
+                            output_pixel_format,
+                        );
+
+                        video_segments.push(VideoTimelineSegment {
+                            stream_label: format!("[{}]", normalized_video_label),
+                            start_sec: clip.place.timeline_in_sec,
+                            end_sec: clip.place.timeline_out_sec(),
+                            transition_filter: find_transition_effect(clip, effects)
+                                .map(|effect| effect.to_filter_body()),
+                        });
                     }
 
                     // Audio processing: ONLY if this asset has audio
@@ -2750,7 +3441,7 @@ impl ExportEngine {
             input_index += 1;
         }
 
-        if video_streams.is_empty() {
+        if video_segments.is_empty() {
             return Err(ExportError::InvalidSettings(
                 "Sequence has no visual clips to export".to_string(),
             ));
@@ -2762,46 +3453,15 @@ impl ExportEngine {
         }
         filter_complex.push(';');
 
-        // Concat video streams with optional xfade transitions
-        if video_streams.len() == 1 {
-            // Single clip - just use the processed stream
-            filter_complex.push_str(&format!("{}null[outv]", video_streams[0]));
-        } else {
-            // Multiple clips - check for transitions and apply xfade where needed
-            let mut current_stream = video_streams[0].clone();
-
-            for i in 0..video_streams.len() - 1 {
-                let next_stream = &video_streams[i + 1];
-                let output_label = if i == video_streams.len() - 2 {
-                    "[outv]".to_string()
-                } else {
-                    format!("[xfade{}]", i)
-                };
-
-                // Check if current clip has a transition effect (applies to transition INTO next clip)
-                if let Some(transition_effect) = video_transitions.get(i).and_then(|t| *t) {
-                    // Build xfade filter using the transition effect parameters
-                    let xfade_filter = transition_effect.to_filter_body();
-
-                    // Apply xfade: [current][next]xfade=...[output]
-                    filter_complex.push_str(&format!(
-                        "{}{}{}{}",
-                        current_stream, next_stream, xfade_filter, output_label
-                    ));
-                } else {
-                    // No transition - use concat for these two clips
-                    filter_complex.push_str(&format!(
-                        "{}{}concat=n=2:v=1:a=0{}",
-                        current_stream, next_stream, output_label
-                    ));
-                }
-
-                if i < video_streams.len() - 2 {
-                    filter_complex.push(';');
-                    current_stream = output_label;
-                }
-            }
-        }
+        append_timeline_video_output(
+            &mut filter_complex,
+            &video_segments,
+            timeline_end_sec,
+            output_width,
+            output_height,
+            output_fps,
+            output_pixel_format,
+        )?;
 
         // Apply adjustment layer effects as post-processing on the composited output.
         // Each adjustment layer's effects are time-scoped to the layer's clip range
@@ -2872,7 +3532,10 @@ impl ExportEngine {
 
         // Quality args (CRF for software, CQ/QP for hardware encoders)
         if let Some(crf) = settings.crf {
-            if matches!(settings.video_codec, VideoCodec::H264 | VideoCodec::H265) {
+            if matches!(
+                settings.video_codec,
+                VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp9
+            ) {
                 args.extend(super::hardware::resolve_quality_args(&video_encoder, crf));
             }
         }
@@ -3884,9 +4547,13 @@ pub fn validate_export_settings(
     sequence: &Sequence,
     assets: &std::collections::HashMap<String, Asset>,
     effects: &std::collections::HashMap<String, Effect>,
-    _settings: &ExportSettings,
+    settings: &ExportSettings,
 ) -> ExportValidation {
     let mut validation = ExportValidation::valid();
+
+    for error in validate_export_settings_options(settings) {
+        validation.add_error(error);
+    }
 
     // Check for empty sequence after applying clip-enabled state.
     let total_clips: usize = sequence
@@ -3999,15 +4666,6 @@ pub fn validate_export_settings(
         }
     }
 
-    // Check for timeline gaps (warning, not error)
-    let gaps = detect_timeline_gaps(sequence);
-    if !gaps.is_empty() {
-        validation.add_warning(format!(
-            "Timeline has {} gap(s). Final render does not preserve gaps yet; insert filler clips before export.",
-            gaps.len()
-        ));
-    }
-
     if has_layered_visual_overlap(sequence) {
         validation.add_error(
             "Final render export does not support simultaneous layered video clips yet".to_string(),
@@ -4050,8 +4708,9 @@ pub fn build_complex_filter_args_with_audio_info(
     let mut args = Vec::new();
     let mut input_index = 0;
     let mut filter_complex = String::new();
-    let mut video_streams = Vec::new();
+    let mut video_segments = Vec::new();
     let mut audio_streams = Vec::new();
+    let mut timeline_end_sec = 0.0_f64;
     let audio_companion_keys = collect_audio_companion_keys(sequence, assets, audio_info);
 
     // Collect enabled clips sorted by timeline position.
@@ -4102,9 +4761,9 @@ pub fn build_complex_filter_args_with_audio_info(
         graph
     }
 
-    // Get output dimensions from settings or use defaults
-    let output_width = settings.width.unwrap_or(1920);
-    let output_height = settings.height.unwrap_or(1080);
+    let (output_width, output_height) = output_video_dimensions(sequence, settings);
+    let output_fps = output_video_fps(sequence, settings);
+    let output_pixel_format = output_video_pixel_format(settings);
 
     // Collect adjustment layer effects for post-processing, time-scoped to clip range
     let mut adjustment_layer_effects: Vec<(FilterGraph, f64, f64)> = Vec::new();
@@ -4143,6 +4802,7 @@ pub fn build_complex_filter_args_with_audio_info(
                 args.extend(input_args);
 
                 let video_out_label = format!("v{}", input_index);
+                let normalized_video_label = format!("vnorm{}", input_index);
 
                 // Apply drawtext filter directly to color source
                 let text_filter = format!(
@@ -4152,7 +4812,24 @@ pub fn build_complex_filter_args_with_audio_info(
                 filter_complex.push_str(&text_filter);
                 filter_complex.push(';');
 
-                video_streams.push(format!("[{}]", video_out_label));
+                append_video_stream_normalization(
+                    &mut filter_complex,
+                    &video_out_label,
+                    &normalized_video_label,
+                    output_width,
+                    output_height,
+                    output_fps,
+                    output_pixel_format,
+                );
+
+                video_segments.push(VideoTimelineSegment {
+                    stream_label: format!("[{}]", normalized_video_label),
+                    start_sec: clip.place.timeline_in_sec,
+                    end_sec: clip.place.timeline_out_sec(),
+                    transition_filter: find_transition_effect(clip, effects)
+                        .map(|effect| effect.to_filter_body()),
+                });
+                timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
 
                 // Text clips have no audio
                 input_index += 1;
@@ -4184,6 +4861,7 @@ pub fn build_complex_filter_args_with_audio_info(
         if !contributes_visual_output && !clip_has_audio {
             continue;
         }
+        timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
 
         // Validate asset URI before passing to FFmpeg
         let validated_path = validate_local_input_path(&asset.uri, "Asset file")
@@ -4205,6 +4883,7 @@ pub fn build_complex_filter_args_with_audio_info(
                 if track.visible {
                     let trim_label = format!("trim{}", input_index);
                     let video_out_label = format!("v{}", input_index);
+                    let normalized_video_label = format!("vnorm{}", input_index);
                     let effects_out_label = if tonemap_filter.is_some() {
                         format!("vfx{}", input_index)
                     } else {
@@ -4230,7 +4909,23 @@ pub fn build_complex_filter_args_with_audio_info(
                         ));
                     }
 
-                    video_streams.push(format!("[{}]", video_out_label));
+                    append_video_stream_normalization(
+                        &mut filter_complex,
+                        &video_out_label,
+                        &normalized_video_label,
+                        output_width,
+                        output_height,
+                        output_fps,
+                        output_pixel_format,
+                    );
+
+                    video_segments.push(VideoTimelineSegment {
+                        stream_label: format!("[{}]", normalized_video_label),
+                        start_sec: clip.place.timeline_in_sec,
+                        end_sec: clip.place.timeline_out_sec(),
+                        transition_filter: find_transition_effect(clip, effects)
+                            .map(|effect| effect.to_filter_body()),
+                    });
                 }
 
                 if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
@@ -4308,7 +5003,7 @@ pub fn build_complex_filter_args_with_audio_info(
         input_index += 1;
     }
 
-    if video_streams.is_empty() {
+    if video_segments.is_empty() {
         return Err(ExportError::InvalidSettings(
             "Sequence has no visual clips to export".to_string(),
         ));
@@ -4320,13 +5015,15 @@ pub fn build_complex_filter_args_with_audio_info(
     }
     filter_complex.push(';');
 
-    // Concat video streams
-    if video_streams.len() == 1 {
-        filter_complex.push_str(&format!("{}null[outv]", video_streams[0]));
-    } else {
-        filter_complex.push_str(&video_streams.join(""));
-        filter_complex.push_str(&format!("concat=n={}:v=1:a=0[outv]", video_streams.len()));
-    }
+    append_timeline_video_output(
+        &mut filter_complex,
+        &video_segments,
+        timeline_end_sec,
+        output_width,
+        output_height,
+        output_fps,
+        output_pixel_format,
+    )?;
 
     // Apply adjustment layer effects as post-processing, time-scoped via enable clause
     let mut adj_video_label = "outv".to_string();
@@ -4388,7 +5085,10 @@ pub fn build_complex_filter_args_with_audio_info(
 
     // Quality args (CRF for software, CQ/QP for hardware encoders)
     if let Some(crf) = settings.crf {
-        if matches!(settings.video_codec, VideoCodec::H264 | VideoCodec::H265) {
+        if matches!(
+            settings.video_codec,
+            VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp9
+        ) {
             args.extend(super::hardware::resolve_quality_args(&video_encoder, crf));
         }
     }
@@ -5184,6 +5884,28 @@ mod tests {
     }
 
     #[test]
+    fn test_export_preset_mp4_draft() {
+        let settings =
+            ExportSettings::from_preset(ExportPreset::Mp4Draft, PathBuf::from("draft.mp4"));
+
+        assert_eq!(settings.width, Some(1280));
+        assert_eq!(settings.height, Some(720));
+        assert_eq!(settings.video_bitrate, Some("3M".to_string()));
+        assert_eq!(settings.crf, Some(28));
+    }
+
+    #[test]
+    fn test_export_preset_mp4_high() {
+        let settings =
+            ExportSettings::from_preset(ExportPreset::Mp4High, PathBuf::from("high.mp4"));
+
+        assert_eq!(settings.width, Some(1920));
+        assert_eq!(settings.height, Some(1080));
+        assert_eq!(settings.video_bitrate, Some("15M".to_string()));
+        assert_eq!(settings.crf, Some(18));
+    }
+
+    #[test]
     fn test_export_preset_youtube_shorts() {
         let settings =
             ExportSettings::from_preset(ExportPreset::YoutubeShorts, PathBuf::from("shorts.mp4"));
@@ -5200,6 +5922,141 @@ mod tests {
 
         assert_eq!(settings.video_codec, VideoCodec::Vp9);
         assert_eq!(settings.audio_codec, AudioCodec::Opus);
+    }
+
+    #[test]
+    fn test_export_preset_prores_master_preserves_sequence_format() {
+        let settings =
+            ExportSettings::from_preset(ExportPreset::ProRes, PathBuf::from("master.mov"));
+
+        assert_eq!(settings.video_codec, VideoCodec::ProRes);
+        assert_eq!(settings.audio_codec, AudioCodec::Pcm);
+        assert_eq!(settings.width, None);
+        assert_eq!(settings.height, None);
+        assert_eq!(settings.fps, None);
+    }
+
+    /// Feature: Structured video export requests
+    /// Scenario: should convert legacy YouTube preset to an explicit request
+    #[test]
+    fn video_export_request_should_convert_legacy_youtube_preset() {
+        let preset = ExportPreset::from_legacy_id("youtube_1080p").unwrap();
+        let request = ExportSettings::request_from_preset(preset);
+
+        assert_eq!(request.container, ContainerFormat::Mp4);
+        assert_eq!(request.video_codec, VideoCodec::H264);
+        assert_eq!(request.audio_codec, AudioCodec::Aac);
+        assert_eq!(request.quality_tier, ExportQualityTier::Standard);
+        assert_eq!(request.width, Some(1920));
+        assert_eq!(request.height, Some(1080));
+    }
+
+    /// Feature: Structured video export requests
+    /// Scenario: should accept project-wide hyphenated preset aliases
+    #[test]
+    fn video_export_request_should_accept_project_preset_aliases() {
+        let aliases = [
+            ("youtube-1080p", ExportPreset::Youtube1080p),
+            ("mp4-h264-1080p", ExportPreset::Youtube1080p),
+            ("mp4-draft", ExportPreset::Mp4Draft),
+            ("mp4-high", ExportPreset::Mp4High),
+            ("webm-vp9-720p", ExportPreset::WebmVp9),
+        ];
+
+        for (alias, expected) in aliases {
+            let actual = ExportPreset::from_legacy_id(alias).unwrap();
+            assert_eq!(actual, expected, "alias {alias} should map correctly");
+        }
+    }
+
+    /// Feature: Structured video export requests
+    /// Scenario: should reject unknown legacy presets instead of silently defaulting
+    #[test]
+    fn video_export_request_should_reject_unknown_legacy_preset() {
+        let error = ExportPreset::from_legacy_id("unknown_delivery").unwrap_err();
+
+        assert!(
+            error.to_string().contains("Unknown export preset"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Feature: Structured video export validation
+    /// Scenario: should reject incompatible container and codec combinations
+    #[test]
+    fn video_export_request_should_reject_container_codec_mismatch() {
+        let request = VideoExportRequest {
+            container: ContainerFormat::Webm,
+            video_codec: VideoCodec::ProRes,
+            audio_codec: AudioCodec::Opus,
+            quality_tier: ExportQualityTier::Master,
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(30.0),
+            video_bitrate: None,
+            audio_bitrate: None,
+            crf: None,
+            two_pass: false,
+        };
+
+        let error =
+            validate_video_export_request(&request, Path::new("/tmp/master.webm")).unwrap_err();
+
+        assert!(
+            error.to_string().contains("does not support video codec"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Feature: Structured video export validation
+    /// Scenario: should reject output extension mismatches before rendering
+    #[test]
+    fn video_export_request_should_reject_extension_mismatch() {
+        let request = ExportSettings::request_from_preset(ExportPreset::ProRes);
+
+        let error =
+            validate_video_export_request(&request, Path::new("/tmp/master.mp4")).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not match selected container"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Feature: Structured video export validation
+    /// Scenario: should accept alternate file extensions for the same container
+    #[test]
+    fn video_export_request_should_accept_mp4_container_m4v_extension() {
+        let request = ExportSettings::request_from_preset(ExportPreset::Youtube1080p);
+
+        validate_video_export_request(&request, Path::new("/tmp/delivery.m4v"))
+            .expect("m4v is an MPEG-4 container extension");
+    }
+
+    /// Feature: WebM VP9 quality export
+    /// Scenario: should include VP9 CRF quality args in generated FFmpeg args
+    #[test]
+    fn webm_vp9_export_should_include_crf_quality_args() {
+        use crate::core::ffmpeg::{FFmpegInfo, FFmpegRunner};
+
+        let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
+            ffmpeg_path: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
+            version: "test".to_string(),
+            is_bundled: false,
+        }));
+        let settings =
+            ExportSettings::from_preset(ExportPreset::WebmVp9, PathBuf::from("output.webm"));
+
+        let args = engine.build_simple_export_args(Path::new("/tmp/input.webm"), &settings);
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-crf" && pair[1] == "31"),
+            "expected VP9 CRF args, got: {args:?}"
+        );
     }
 
     #[test]
@@ -6144,8 +7001,137 @@ mod tests {
             "Expected delayed audio placement for downstream clip. Got: {filter_complex}"
         );
         assert!(
+            filter_complex.contains("color=c=black:s=1920x1080:r=30:d=3"),
+            "Expected black video filler to preserve the timeline gap. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("[vgap0]"),
+            "Expected video gap segment to participate in the video concat chain. Got: {filter_complex}"
+        );
+        assert!(
             filter_complex.contains("amix=inputs=2"),
             "Expected audio timeline mix instead of concat. Got: {filter_complex}"
+        );
+    }
+
+    #[test]
+    fn test_build_filter_extends_video_for_trailing_audio_only_timeline() {
+        use crate::core::assets::{AudioInfo, VideoInfo};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut audio_track = Track::new_audio("Audio 1");
+        audio_track.add_clip(
+            Clip::new("audio_asset")
+                .with_source_range(0.0, 4.0)
+                .place_at(8.0),
+        );
+        sequence.add_track(audio_track);
+
+        let video_path = create_temp_media_file("trailing_audio_video.mp4");
+        let mut video_asset = Asset::new_video(
+            "trailing_audio_video.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_file_size(5_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let audio_path = create_temp_media_file("trailing_audio.wav");
+        let mut audio_asset =
+            Asset::new_audio("trailing_audio.wav", &audio_path, AudioInfo::default())
+                .with_duration(4.0)
+                .with_file_size(1_000_000);
+        audio_asset.id = "audio_asset".to_string();
+
+        let mut assets = HashMap::new();
+        assets.insert(video_asset.id.clone(), video_asset);
+        assets.insert(audio_asset.id.clone(), audio_asset);
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings::default(),
+        )
+        .expect("trailing audio-only timeline should build");
+
+        let filter_complex = args
+            .windows(2)
+            .find_map(|window| (window[0] == "-filter_complex").then_some(window[1].as_str()))
+            .unwrap();
+
+        assert!(
+            filter_complex.contains("adelay=delays=8000:all=1"),
+            "Expected trailing audio clip to keep its timeline position. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("color=c=black:s=1920x1080:r=30:d=7"),
+            "Expected black video extension from the last visual clip to the audio timeline end. Got: {filter_complex}"
+        );
+    }
+
+    #[test]
+    fn test_validation_does_not_warn_for_supported_timeline_gaps() {
+        use crate::core::assets::{AudioInfo, VideoInfo};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(
+            Clip::new("asset1")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        track.add_clip(
+            Clip::new("asset2")
+                .with_source_range(0.0, 5.0)
+                .place_at(8.0),
+        );
+        sequence.add_track(track);
+
+        let path1 = create_temp_media_file("gap_validation_1.mp4");
+        let mut asset1 = Asset::new_video("gap_validation_1.mp4", &path1, VideoInfo::default())
+            .with_duration(5.0)
+            .with_file_size(5_000_000);
+        asset1.id = "asset1".to_string();
+        asset1.audio = Some(AudioInfo::default());
+
+        let path2 = create_temp_media_file("gap_validation_2.mp4");
+        let mut asset2 = Asset::new_video("gap_validation_2.mp4", &path2, VideoInfo::default())
+            .with_duration(5.0)
+            .with_file_size(5_000_000);
+        asset2.id = "asset2".to_string();
+        asset2.audio = Some(AudioInfo::default());
+
+        let mut assets = HashMap::new();
+        assets.insert(asset1.id.clone(), asset1);
+        assets.insert(asset2.id.clone(), asset2);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            !validation
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("does not preserve gaps")),
+            "Timeline gaps are now represented by video filler segments. Got warnings: {:?}",
+            validation.warnings
         );
     }
 
@@ -7146,6 +8132,31 @@ mod tests {
     }
 
     #[test]
+    fn test_output_video_pixel_format_preserves_10_bit_requests() {
+        let sdr = ExportSettings::default();
+        assert_eq!(output_video_pixel_format(&sdr), "yuv420p");
+
+        let hdr_h265 = ExportSettings {
+            hdr_mode: HdrMode::Hdr10,
+            video_codec: VideoCodec::H265,
+            ..Default::default()
+        };
+        assert_eq!(output_video_pixel_format(&hdr_h265), "yuv420p10le");
+
+        let explicit_10_bit = ExportSettings {
+            bit_depth: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(output_video_pixel_format(&explicit_10_bit), "yuv420p10le");
+
+        let prores = ExportSettings {
+            video_codec: VideoCodec::ProRes,
+            ..Default::default()
+        };
+        assert_eq!(output_video_pixel_format(&prores), "yuv422p10le");
+    }
+
+    #[test]
     fn test_hdr10_mode_args() {
         let settings = ExportSettings {
             hdr_mode: HdrMode::Hdr10,
@@ -7340,6 +8351,8 @@ mod tests {
 
         let presets = vec![
             ExportPreset::Youtube1080p,
+            ExportPreset::Mp4Draft,
+            ExportPreset::Mp4High,
             ExportPreset::Youtube4k,
             ExportPreset::YoutubeShorts,
             ExportPreset::Twitter,
@@ -7986,6 +8999,7 @@ mod tests {
             output_path: "/tmp/output.mp4".to_string(),
             in_point: Some(1.5),
             out_point: Some(10.0),
+            settings: None,
         };
 
         let json = serde_json::to_string(&item).unwrap();
@@ -8009,6 +9023,7 @@ mod tests {
             output_path: "/export/final.mov".to_string(),
             in_point: None,
             out_point: None,
+            settings: None,
         };
 
         let json = serde_json::to_string(&item).unwrap();

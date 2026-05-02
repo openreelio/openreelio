@@ -16,12 +16,17 @@ import type {
   RenderProgressEvent,
   RenderCompleteEvent,
   RenderErrorEvent,
+  TimelineExportFormat,
 } from '@/components/features/export/types';
 import {
   AUDIO_EXPORT_FORMATS,
   EXPORT_PRESETS,
+  TIMELINE_EXPORT_FORMATS,
   getAudioFormatExtension,
   getAudioFormatOption,
+  getTimelineFormatExtension,
+  getTimelineFormatOption,
+  getVideoExportRequest,
   getPresetExtension,
 } from '@/components/features/export/constants';
 
@@ -75,6 +80,10 @@ export interface UseExportDialogResult {
   selectedAudioFormat: AudioExportFormat;
   /** Set the selected audio format */
   setSelectedAudioFormat: (format: AudioExportFormat) => void;
+  /** Currently selected editable timeline format */
+  selectedTimelineFormat: TimelineExportFormat;
+  /** Set the selected editable timeline format */
+  setSelectedTimelineFormat: (format: TimelineExportFormat) => void;
   /** Output file path */
   outputPath: string;
   /** Set the output path */
@@ -116,6 +125,9 @@ export function useExportDialog({
   const [selectedAudioFormat, setSelectedAudioFormat] = useState<AudioExportFormat>(
     AUDIO_EXPORT_FORMATS[0].id,
   );
+  const [selectedTimelineFormat, setSelectedTimelineFormat] = useState<TimelineExportFormat>(
+    TIMELINE_EXPORT_FORMATS[0].id,
+  );
   const [outputPath, setOutputPath] = useState('');
   const [status, setStatus] = useState<ExportStatus>({ type: 'idle' });
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
@@ -134,6 +146,7 @@ export function useExportDialog({
       setExportKind(initialExportKind);
       setSelectedPreset(EXPORT_PRESETS[0].id);
       setSelectedAudioFormat(AUDIO_EXPORT_FORMATS[0].id);
+      setSelectedTimelineFormat(TIMELINE_EXPORT_FORMATS[0].id);
       setOutputPath('');
       setStatus({ type: 'idle' });
       setCurrentJobId(null);
@@ -154,13 +167,15 @@ export function useExportDialog({
     const nextExtension =
       exportKind === 'audio'
         ? getAudioFormatExtension(selectedAudioFormat)
-        : getPresetExtension(selectedPreset);
+        : exportKind === 'timeline'
+          ? getTimelineFormatExtension(selectedTimelineFormat)
+          : getPresetExtension(selectedPreset);
     const nextOutputPath = replaceOutputPathExtension(outputPath, nextExtension);
 
     if (nextOutputPath !== outputPath) {
       setOutputPath(nextOutputPath);
     }
-  }, [exportKind, outputPath, selectedAudioFormat, selectedPreset]);
+  }, [exportKind, outputPath, selectedAudioFormat, selectedPreset, selectedTimelineFormat]);
 
   // ===========================================================================
   // Tauri Event Listeners
@@ -264,6 +279,23 @@ export function useExportDialog({
       return;
     }
 
+    if (exportKind === 'timeline') {
+      const option = getTimelineFormatOption(selectedTimelineFormat);
+      const extension = getTimelineFormatExtension(selectedTimelineFormat);
+
+      const selected = await save({
+        defaultPath: `${sequenceName}.${extension}`,
+        filters: [{ name: option.name, extensions: [extension] }],
+        title: 'Export Editable Timeline',
+      });
+
+      if (selected) {
+        setOutputPath(selected);
+      }
+
+      return;
+    }
+
     const extension = getPresetExtension(selectedPreset);
 
     const selected = await save({
@@ -275,14 +307,14 @@ export function useExportDialog({
     if (selected) {
       setOutputPath(selected);
     }
-  }, [exportKind, selectedAudioFormat, selectedPreset, sequenceName]);
+  }, [exportKind, selectedAudioFormat, selectedPreset, selectedTimelineFormat, sequenceName]);
 
   /**
    * Start the export process.
    */
   const handleExport = useCallback(async () => {
     if (!sequenceId || !outputPath) return;
-    if (useRange && (inPoint < 0 || inPoint >= outPoint)) {
+    if (exportKind !== 'timeline' && useRange && (inPoint < 0 || inPoint >= outPoint)) {
       setStatus({ type: 'failed', error: 'In point must be before Out point.' });
       return;
     }
@@ -290,10 +322,38 @@ export function useExportDialog({
     setStatus({
       type: 'exporting',
       progress: 0,
-      message: exportKind === 'audio' ? 'Starting audio export...' : 'Starting export...',
+      message:
+        exportKind === 'audio'
+          ? 'Starting audio export...'
+          : exportKind === 'timeline'
+            ? 'Exporting editable timeline...'
+            : 'Starting export...',
     });
 
     try {
+      if (exportKind === 'timeline') {
+        const res =
+          selectedTimelineFormat === 'edl'
+            ? await commands.exportEdl(sequenceId, outputPath)
+            : await commands.exportFcpxml(sequenceId, outputPath);
+
+        if (res.status === 'error') {
+          setStatus({ type: 'failed', error: String(res.error) });
+          currentJobIdRef.current = null;
+          setCurrentJobId(null);
+          return;
+        }
+
+        setStatus({
+          type: 'completed',
+          outputPath: res.data.outputPath,
+          duration: 0,
+        });
+        currentJobIdRef.current = null;
+        setCurrentJobId(null);
+        return;
+      }
+
       const res =
         exportKind === 'audio'
           ? await commands.exportAudioOnly(
@@ -306,8 +366,20 @@ export function useExportDialog({
               useRange ? outPoint : null,
             )
           : useRange
-            ? await commands.renderRange(sequenceId, outputPath, selectedPreset, inPoint, outPoint)
-            : await commands.startRender(sequenceId, outputPath, selectedPreset);
+            ? await commands.renderRange(
+                sequenceId,
+                outputPath,
+                selectedPreset,
+                getVideoExportRequest(selectedPreset),
+                inPoint,
+                outPoint,
+              )
+            : await commands.startRender(
+                sequenceId,
+                outputPath,
+                selectedPreset,
+                getVideoExportRequest(selectedPreset),
+              );
 
       if (res.status === 'error') {
         setStatus({ type: 'failed', error: String(res.error) });
@@ -342,6 +414,7 @@ export function useExportDialog({
     outputPath,
     selectedAudioFormat,
     selectedPreset,
+    selectedTimelineFormat,
     sequenceId,
     useRange,
   ]);
@@ -375,6 +448,8 @@ export function useExportDialog({
     setSelectedPreset,
     selectedAudioFormat,
     setSelectedAudioFormat,
+    selectedTimelineFormat,
+    setSelectedTimelineFormat,
     outputPath,
     setOutputPath,
     status,

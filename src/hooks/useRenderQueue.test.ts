@@ -177,8 +177,42 @@ describe('useRenderQueue', () => {
           outputPath: '/tmp/out.mp4',
           inPoint: 1,
           outPoint: 5,
+          settings: expect.objectContaining({
+            container: 'mp4',
+            videoCodec: 'h264',
+            qualityTier: 'standard',
+          }),
         },
       ],
     });
+  });
+
+  it('should preserve the full structured request when adding high quality exports to the queue', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      batchId: 'batch-1',
+      jobIds: ['job-1'],
+      totalItems: 1,
+      status: 'started',
+    });
+
+    const { result } = renderHook(() =>
+      useRenderQueue({
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+      }),
+    );
+
+    await act(async () => {
+      await result.current.addToQueue('mp4_high');
+    });
+
+    expect(result.current.queue[0]?.settings).toEqual(
+      expect.objectContaining({
+        container: 'mp4',
+        videoCodec: 'h264',
+        qualityTier: 'high',
+        crf: 18,
+      }),
+    );
   });
 });

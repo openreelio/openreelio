@@ -28,6 +28,7 @@ describe('ExportDialog', () => {
   const setExportKind = vi.fn();
   const setSelectedPreset = vi.fn();
   const setSelectedAudioFormat = vi.fn();
+  const setSelectedTimelineFormat = vi.fn();
   const handleBrowse = vi.fn();
   const handleExport = vi.fn();
   const handleRetry = vi.fn();
@@ -58,6 +59,8 @@ describe('ExportDialog', () => {
       setSelectedPreset,
       selectedAudioFormat: 'wav',
       setSelectedAudioFormat,
+      selectedTimelineFormat: 'fcpxml',
+      setSelectedTimelineFormat,
       outputPath: 'D:/exports/out.mp4',
       status: { type: 'idle' },
       isExporting: false,
@@ -164,5 +167,25 @@ describe('ExportDialog', () => {
     await waitFor(() => {
       expect(resetQueue).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('does not block timeline export when a stale video range is invalid', () => {
+    exportDialogState = {
+      ...exportDialogState,
+      exportKind: 'timeline',
+      outputPath: 'D:/exports/timeline.fcpxml',
+    };
+    renderQueueState = {
+      ...renderQueueState,
+      useRange: true,
+      inPoint: 8,
+      outPoint: 4,
+    };
+
+    render(
+      <ExportDialog isOpen onClose={vi.fn()} sequenceId="sequence-1" sequenceName="Sequence" />,
+    );
+
+    expect(screen.getByRole('button', { name: /export timeline/i })).not.toBeDisabled();
   });
 });

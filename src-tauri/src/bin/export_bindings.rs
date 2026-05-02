@@ -28,10 +28,54 @@ fn normalize_bindings(path: &std::path::Path) {
             "if(e instanceof Error) throw e;\n    else return { status: \"error\", error: e  as any };\n",
             "return { status: \"error\", error: e  as any };\n",
         );
+    let normalized = normalize_unstable_type_line_spacing(&normalized);
 
     if normalized != contents {
         let _ = fs::write(path, normalized);
     }
+}
+
+fn normalize_unstable_type_line_spacing(input: &str) -> String {
+    let mut in_batch_render_item = false;
+    let mut normalized = input
+        .lines()
+        .map(|line| {
+            // Keep the generated output stable for newly documented union and DTO lines without
+            // rewriting the legacy trailing-space style across the entire bindings file.
+            if line.starts_with("export type BatchRenderItemDto =") {
+                in_batch_render_item = true;
+            }
+
+            let normalized_line = if in_batch_render_item && line == "outPoint: number | null; " {
+                "outPoint: number | null;"
+            } else {
+                line
+            };
+
+            if in_batch_render_item && line.starts_with("settings?: VideoExportRequest") {
+                in_batch_render_item = false;
+            }
+
+            match line {
+                "export type ContainerFormat = " => "export type ContainerFormat =",
+                "\"mp4\" | " => "\"mp4\" |",
+                "\"mov\" | " => "\"mov\" |",
+                "export type ExportQualityTier = " => "export type ExportQualityTier =",
+                "\"draft\" | " => "\"draft\" |",
+                "\"standard\" | " => "\"standard\" |",
+                "\"high\" | " => "\"high\" |",
+                "\"master\" | " => "\"master\" |",
+                _ => normalized_line,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if input.ends_with('\n') {
+        normalized.push('\n');
+    }
+
+    normalized
 }
 
 fn main() {

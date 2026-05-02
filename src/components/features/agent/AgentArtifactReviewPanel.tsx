@@ -4,6 +4,7 @@ import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
 import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { getAgentDisplayName } from '@/agents/engine/core/agentCatalog';
+import type { ConversationMessage } from '@/agents/engine/core/conversation';
 import { writeWorkspaceDocumentToBackend } from '@/services/workspaceGateway';
 import {
   buildAgentArtifactSessionSummary,
@@ -36,6 +37,13 @@ interface ReviewSourceNavItem {
   statusLabel?: string | null;
   defaultFocus: AgentArtifactFocus | null;
 }
+
+interface AgentArtifactReviewPanelProps {
+  className?: string;
+  layout?: 'default' | 'compact';
+}
+
+const EMPTY_MESSAGES: readonly ConversationMessage[] = [];
 
 function formatDelegationMergeStatus(status: string): string {
   switch (status) {
@@ -85,7 +93,10 @@ function formatDelegationRecommendation(recommendation: DelegationRecommendation
   }
 }
 
-export function AgentArtifactReviewPanel({ className = '' }: { className?: string }) {
+export function AgentArtifactReviewPanel({
+  className = '',
+  layout = 'default',
+}: AgentArtifactReviewPanelProps) {
   const [isApplyingReviewDecision, setIsApplyingReviewDecision] = useState(false);
   const [isLaunchingVerifier, setIsLaunchingVerifier] = useState(false);
   const [verifierLaunchError, setVerifierLaunchError] = useState<string | null>(null);
@@ -94,7 +105,9 @@ export function AgentArtifactReviewPanel({ className = '' }: { className?: strin
   );
   const activeProjectId = useConversationStore((state) => state.activeProjectId);
   const activeSessions = useConversationStore((state) => state.sessions);
-  const messages = useConversationStore((state) => state.activeConversation?.messages ?? []);
+  const messages = useConversationStore(
+    (state) => state.activeConversation?.messages ?? EMPTY_MESSAGES,
+  );
   const loadSessions = useConversationStore((state) => state.loadSessions);
   const switchSession = useConversationStore((state) => state.switchSession);
   const addSystemMessageToSession = useConversationStore(
@@ -189,7 +202,7 @@ export function AgentArtifactReviewPanel({ className = '' }: { className?: strin
     selection.sourceLabel,
   ]);
 
-  const reviewMessages = reviewSession?.messages ?? [];
+  const reviewMessages = reviewSession?.messages ?? EMPTY_MESSAGES;
   const sessionSummary = useMemo(
     () => buildAgentArtifactSessionSummary(reviewMessages),
     [reviewMessages],
@@ -801,12 +814,25 @@ export function AgentArtifactReviewPanel({ className = '' }: { className?: strin
     );
   }
 
+  const headerClassName =
+    layout === 'compact'
+      ? 'max-h-[38%] shrink-0 overflow-y-auto border-b border-editor-border px-3 py-2.5'
+      : 'max-h-[42%] shrink-0 overflow-y-auto border-b border-editor-border px-4 py-3';
+  const contentClassName =
+    layout === 'compact'
+      ? 'flex min-h-0 flex-1 flex-col'
+      : 'grid min-h-0 flex-1 [grid-template-columns:minmax(0,_min(12rem,_38%))_minmax(0,_1fr)]';
+  const sourceListClassName =
+    layout === 'compact'
+      ? 'max-h-44 shrink-0 overflow-auto border-b border-editor-border p-3'
+      : 'overflow-auto border-r border-editor-border p-3';
+
   return (
     <div
       className={`flex h-full flex-col bg-editor-bg ${className}`}
       data-testid="agent-artifact-review-panel"
     >
-      <div className="max-h-[42%] shrink-0 overflow-y-auto border-b border-editor-border px-4 py-3">
+      <div className={headerClassName}>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-editor-text-muted">
             Agent Review
@@ -1092,8 +1118,8 @@ export function AgentArtifactReviewPanel({ className = '' }: { className?: strin
         )}
       </div>
 
-      <div className="grid min-h-0 flex-1 [grid-template-columns:minmax(0,_min(12rem,_38%))_minmax(0,_1fr)]">
-        <div className="overflow-auto border-r border-editor-border p-3">
+      <div className={contentClassName}>
+        <div className={sourceListClassName}>
           <div className="space-y-3">
             {relatedSources.length > 0 && (
               <section>

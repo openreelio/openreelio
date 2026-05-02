@@ -871,11 +871,17 @@ describe('AgenticSidebarContent', () => {
         focus: { kind: 'file', value: 'src/foo.ts' },
       }),
     );
-    expect(useWorkspaceLayoutStore.getState().layout.zones.bottom.panelIds).toContain(
+    expect(screen.getByTestId('agent-review-inline-panel')).toBeInTheDocument();
+    expect(screen.queryByTestId('agentic-chat')).not.toBeInTheDocument();
+    expect(useWorkspaceLayoutStore.getState().layout.zones.bottom.panelIds).not.toContain(
       'agent-review',
     );
-    expect(useWorkspaceLayoutStore.getState().layout.zones.bottom.activePanelId).toBe(
-      'agent-review',
-    );
+    expect(useWorkspaceLayoutStore.getState().layout.zones.bottom.activePanelId).toBe('history');
+
+    await user.click(screen.getByTestId('agent-review-inline-close-btn'));
+
+    expect(screen.queryByTestId('agent-review-inline-panel')).not.toBeInTheDocument();
+    expect(screen.getByTestId('agentic-chat')).toBeInTheDocument();
+    expect(useAgentArtifactReviewStore.getState().selection.conversationId).toBeNull();
   });
 });

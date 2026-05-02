@@ -4,12 +4,14 @@
  * Type definitions for the ExportDialog component and related sub-components.
  */
 
+import type { VideoExportRequest } from '@/bindings';
+
 // =============================================================================
 // Export Preset Types
 // =============================================================================
 
 /** Export workflow kind */
-export type ExportKind = 'video' | 'audio';
+export type ExportKind = 'video' | 'audio' | 'timeline';
 
 /** Export option icon options */
 export type ExportOptionIcon = 'monitor' | 'smartphone' | 'film' | 'globe' | 'audio';
@@ -27,15 +29,27 @@ export interface SelectableExportOption {
 }
 
 /** Export preset configuration */
-export type ExportPreset = SelectableExportOption;
+export interface ExportPreset extends SelectableExportOption {
+  /** Explicit video export request sent to the backend */
+  settings: VideoExportRequest;
+}
 
 /** Audio export format IDs */
 export type AudioExportFormat = 'wav' | 'mp3' | 'm4a' | 'flac' | 'ogg';
+
+/** Editable timeline export format IDs */
+export type TimelineExportFormat = 'edl' | 'fcpxml';
 
 /** Audio export option configuration */
 export interface AudioFormatOption extends SelectableExportOption {
   /** Audio format identifier */
   id: AudioExportFormat;
+}
+
+/** Editable timeline export option configuration */
+export interface TimelineFormatOption extends SelectableExportOption {
+  /** Timeline interchange format identifier */
+  id: TimelineExportFormat;
 }
 
 // =============================================================================
@@ -154,6 +168,8 @@ export interface RenderQueueItem {
   jobId: string;
   /** Export preset ID */
   presetId: string;
+  /** Explicit video export request for this queue item */
+  settings: VideoExportRequest;
   /** Display name of the preset */
   presetName: string;
   /** Output file path */

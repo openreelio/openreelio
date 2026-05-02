@@ -37,6 +37,18 @@ describe('useExportDialog', () => {
     });
   });
 
+  it('should default video export to the standard MP4 preset', () => {
+    const { result } = renderHook(() =>
+      useExportDialog({
+        isOpen: true,
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+      }),
+    );
+
+    expect(result.current.selectedPreset).toBe('youtube_1080p');
+  });
+
   it('should call render_range when range export is enabled', async () => {
     vi.mocked(invoke).mockResolvedValue({
       jobId: 'job-1',
@@ -68,6 +80,11 @@ describe('useExportDialog', () => {
       sequenceId: 'sequence-1',
       outputPath: '/tmp/out.mp4',
       preset: 'youtube_1080p',
+      settings: expect.objectContaining({
+        container: 'mp4',
+        videoCodec: 'h264',
+        qualityTier: 'standard',
+      }),
       inPoint: 3,
       outPoint: 7.5,
     });
@@ -139,6 +156,155 @@ describe('useExportDialog', () => {
     });
   });
 
+  it('should call start_render with structured video settings for video export', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      jobId: 'job-1',
+      outputPath: '/tmp/out.mp4',
+      status: 'started',
+    });
+
+    const { result } = renderHook(() =>
+      useExportDialog({
+        isOpen: true,
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+      }),
+    );
+
+    act(() => {
+      result.current.setOutputPath('/tmp/out.mp4');
+      result.current.setSelectedPreset('mp4_high');
+    });
+
+    await act(async () => {
+      await result.current.handleExport();
+    });
+
+    expect(invoke).toHaveBeenCalledWith('start_render', {
+      sequenceId: 'sequence-1',
+      outputPath: '/tmp/out.mp4',
+      preset: 'mp4_high',
+      settings: expect.objectContaining({
+        container: 'mp4',
+        videoCodec: 'h264',
+        qualityTier: 'high',
+        crf: 18,
+      }),
+    });
+  });
+
+  it('should route editable timeline exports to FCPXML without starting a render job', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      format: 'fcpxml',
+      outputPath: '/tmp/sequence.fcpxml',
+      eventCount: 2,
+      trackCount: 1,
+      durationSec: 10,
+    });
+
+    const { result } = renderHook(() =>
+      useExportDialog({
+        isOpen: true,
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+        initialExportKind: 'timeline',
+      }),
+    );
+
+    act(() => {
+      result.current.setOutputPath('/tmp/sequence.fcpxml');
+      result.current.setSelectedTimelineFormat('fcpxml');
+    });
+
+    await act(async () => {
+      await result.current.handleExport();
+    });
+
+    expect(invoke).toHaveBeenCalledWith('export_fcpxml', {
+      sequenceId: 'sequence-1',
+      outputPath: '/tmp/sequence.fcpxml',
+    });
+    expect(invoke).not.toHaveBeenCalledWith('start_render', expect.anything());
+  });
+
+  it('should route editable timeline exports to EDL and update the extension', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      format: 'edl',
+      outputPath: '/tmp/sequence.edl',
+      eventCount: 2,
+      trackCount: 1,
+      durationSec: 10,
+    });
+
+    const { result } = renderHook(() =>
+      useExportDialog({
+        isOpen: true,
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+        initialExportKind: 'timeline',
+      }),
+    );
+
+    act(() => {
+      result.current.setOutputPath('/tmp/sequence.fcpxml');
+      result.current.setSelectedTimelineFormat('edl');
+    });
+
+    await waitFor(() => {
+      expect(result.current.outputPath).toBe('/tmp/sequence.edl');
+    });
+
+    await act(async () => {
+      await result.current.handleExport();
+    });
+
+    expect(invoke).toHaveBeenCalledWith('export_edl', {
+      sequenceId: 'sequence-1',
+      outputPath: '/tmp/sequence.edl',
+    });
+    expect(invoke).not.toHaveBeenCalledWith('start_render', expect.anything());
+  });
+
+  it('should ignore invalid render ranges when exporting editable timelines', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      format: 'fcpxml',
+      outputPath: '/tmp/sequence.fcpxml',
+      eventCount: 2,
+      trackCount: 1,
+      durationSec: 10,
+    });
+
+    const { result } = renderHook(() =>
+      useExportDialog({
+        isOpen: true,
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+        initialExportKind: 'timeline',
+        useRange: true,
+        inPoint: 8,
+        outPoint: 4,
+      }),
+    );
+
+    act(() => {
+      result.current.setOutputPath('/tmp/sequence.fcpxml');
+    });
+
+    await act(async () => {
+      await result.current.handleExport();
+    });
+
+    expect(invoke).toHaveBeenCalledWith('export_fcpxml', {
+      sequenceId: 'sequence-1',
+      outputPath: '/tmp/sequence.fcpxml',
+    });
+    expect(result.current.status).toEqual({
+      type: 'completed',
+      outputPath: '/tmp/sequence.fcpxml',
+      duration: 0,
+    });
+  });
+
   it('should browse with audio-specific filters when audio export is selected', async () => {
     vi.mocked(save).mockResolvedValue('/tmp/out.ogg');
 
@@ -185,6 +351,25 @@ describe('useExportDialog', () => {
 
     await waitFor(() => {
       expect(result.current.outputPath).toBe('/tmp/final.wav');
+    });
+  });
+
+  it('should update the output extension when switching to editable timeline export', async () => {
+    const { result } = renderHook(() =>
+      useExportDialog({
+        isOpen: true,
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+      }),
+    );
+
+    act(() => {
+      result.current.setOutputPath('/tmp/final.mp4');
+      result.current.setExportKind('timeline');
+    });
+
+    await waitFor(() => {
+      expect(result.current.outputPath).toBe('/tmp/final.fcpxml');
     });
   });
 

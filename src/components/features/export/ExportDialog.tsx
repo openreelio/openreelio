@@ -3,7 +3,7 @@
  */
 
 import { useRef, useCallback, useState, useEffect } from 'react';
-import { X, Download, ListPlus, Cpu, Zap, Music } from 'lucide-react';
+import { X, Download, ListPlus, Cpu, Zap, Music, FileCode } from 'lucide-react';
 import { useExportDialog } from '@/hooks/useExportDialog';
 import { useRenderQueue } from '@/hooks/useRenderQueue';
 import {
@@ -13,7 +13,7 @@ import {
   RangeControls,
   RenderQueuePanel,
 } from './ExportHelpers';
-import { AUDIO_EXPORT_FORMATS, EXPORT_PRESETS } from './constants';
+import { AUDIO_EXPORT_FORMATS, EXPORT_PRESETS, TIMELINE_EXPORT_FORMATS } from './constants';
 import type { ExportDialogProps } from './types';
 import { commands } from '@/bindings';
 
@@ -41,6 +41,8 @@ export function ExportDialog({
     setSelectedPreset,
     selectedAudioFormat,
     setSelectedAudioFormat,
+    selectedTimelineFormat,
+    setSelectedTimelineFormat,
     outputPath,
     status,
     isExporting,
@@ -115,10 +117,17 @@ export function ExportDialog({
   const isBusy = isExporting || renderQueue.isBatchRendering;
   const hasPendingItems = renderQueue.queue.some((item) => item.status === 'pending');
   const isRangeValid =
+    exportKind === 'timeline' ||
     !renderQueue.useRange ||
     (renderQueue.inPoint >= 0 && renderQueue.inPoint < renderQueue.outPoint);
-  const exportTitle = exportKind === 'audio' ? 'Export Audio' : 'Export Video';
-  const ExportTitleIcon = exportKind === 'audio' ? Music : Download;
+  const exportTitle =
+    exportKind === 'audio'
+      ? 'Export Audio'
+      : exportKind === 'timeline'
+        ? 'Export Editable Timeline'
+        : 'Export Video';
+  const ExportTitleIcon =
+    exportKind === 'audio' ? Music : exportKind === 'timeline' ? FileCode : Download;
 
   return (
     <div
@@ -154,7 +163,7 @@ export function ExportDialog({
         <div className="space-y-4 px-6 py-4">
           {showSettings && !renderQueue.isBatchRendering ? (
             <>
-              <div className="grid grid-cols-2 gap-2 rounded-lg bg-editor-bg p-1">
+              <div className="grid grid-cols-3 gap-2 rounded-lg bg-editor-bg p-1">
                 <button
                   type="button"
                   onClick={() => setExportKind('video')}
@@ -179,6 +188,18 @@ export function ExportDialog({
                 >
                   Audio
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setExportKind('timeline')}
+                  disabled={isBusy}
+                  className={`rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                    exportKind === 'timeline'
+                      ? 'bg-primary-600 text-white'
+                      : 'text-editor-text-muted hover:bg-editor-panel'
+                  }`}
+                >
+                  Timeline
+                </button>
               </div>
 
               <div className="flex items-center justify-between gap-3 rounded-lg bg-editor-bg p-3">
@@ -188,6 +209,11 @@ export function ExportDialog({
                   {exportKind === 'audio' && (
                     <p className="mt-1 text-xs text-editor-text-muted">
                       Mix down enabled audio tracks to a single master file.
+                    </p>
+                  )}
+                  {exportKind === 'timeline' && (
+                    <p className="mt-1 text-xs text-editor-text-muted">
+                      Export an editable timeline interchange file.
                     </p>
                   )}
                 </div>
@@ -202,8 +228,17 @@ export function ExportDialog({
                   </div>
                 ) : (
                   <div className="flex items-center gap-1.5 text-xs text-editor-text-muted">
-                    <Music className="h-3.5 w-3.5" />
-                    <span>Audio-only mixdown</span>
+                    {exportKind === 'audio' ? (
+                      <>
+                        <Music className="h-3.5 w-3.5" />
+                        <span>Audio-only mixdown</span>
+                      </>
+                    ) : (
+                      <>
+                        <FileCode className="h-3.5 w-3.5" />
+                        <span>Editable export</span>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -225,7 +260,7 @@ export function ExportDialog({
                     ))}
                   </div>
                 </div>
-              ) : (
+              ) : exportKind === 'audio' ? (
                 <div>
                   <label className="mb-2 block text-sm font-medium text-editor-text">
                     Audio Format
@@ -242,17 +277,36 @@ export function ExportDialog({
                     ))}
                   </div>
                 </div>
+              ) : (
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-editor-text">
+                    Timeline Format
+                  </label>
+                  <div className="grid max-h-48 grid-cols-2 gap-2 overflow-y-auto">
+                    {TIMELINE_EXPORT_FORMATS.map((format) => (
+                      <PresetOption
+                        key={format.id}
+                        preset={format}
+                        isSelected={selectedTimelineFormat === format.id}
+                        onSelect={() => setSelectedTimelineFormat(format.id)}
+                        disabled={isBusy}
+                      />
+                    ))}
+                  </div>
+                </div>
               )}
 
-              <RangeControls
-                useRange={renderQueue.useRange}
-                onUseRangeChange={renderQueue.setUseRange}
-                inPoint={renderQueue.inPoint}
-                onInPointChange={renderQueue.setInPoint}
-                outPoint={renderQueue.outPoint}
-                onOutPointChange={renderQueue.setOutPoint}
-                disabled={isBusy}
-              />
+              {exportKind !== 'timeline' && (
+                <RangeControls
+                  useRange={renderQueue.useRange}
+                  onUseRangeChange={renderQueue.setUseRange}
+                  inPoint={renderQueue.inPoint}
+                  onInPointChange={renderQueue.setInPoint}
+                  outPoint={renderQueue.outPoint}
+                  onOutPointChange={renderQueue.setOutPoint}
+                  disabled={isBusy}
+                />
+              )}
 
               <OutputLocationField
                 outputPath={outputPath}
@@ -328,7 +382,11 @@ export function ExportDialog({
                 className="flex items-center gap-2 rounded-lg bg-primary-600 px-4 py-2 text-sm text-white transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Download className="h-4 w-4" />
-                {exportKind === 'audio' ? 'Export Audio' : 'Export'}
+                {exportKind === 'audio'
+                  ? 'Export Audio'
+                  : exportKind === 'timeline'
+                    ? 'Export Timeline'
+                    : 'Export'}
               </button>
             </div>
           </div>

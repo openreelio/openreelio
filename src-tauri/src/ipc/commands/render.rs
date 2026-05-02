@@ -10,7 +10,7 @@ use crate::core::{
     fs::{default_export_allowed_roots, validate_local_input_path, validate_scoped_output_path},
     render::{
         cancel_render_job, register_render_job, unregister_render_job, AudioExportFormat,
-        ExportError, ExportPreset, ImageFormat,
+        ExportError, ExportPreset, ImageFormat, VideoExportRequest,
     },
     CoreError,
 };
@@ -44,6 +44,10 @@ pub struct BatchRenderItemDto {
     pub in_point: Option<f64>,
     /// Optional Out point in seconds for range export
     pub out_point: Option<f64>,
+    /// Optional structured export settings. If omitted, `preset` is used for
+    /// legacy compatibility.
+    #[serde(default)]
+    pub settings: Option<VideoExportRequest>,
 }
 
 /// Result returned when a batch render is started.
@@ -91,23 +95,60 @@ pub struct FrameExportResultDto {
 // =============================================================================
 
 /// Parse a preset string into an ExportPreset enum.
-fn parse_export_preset(preset: &str) -> ExportPreset {
-    match preset.to_lowercase().as_str() {
-        "youtube_1080p" | "youtube1080p" => ExportPreset::Youtube1080p,
-        "youtube_4k" | "youtube4k" => ExportPreset::Youtube4k,
-        "youtube_shorts" | "youtubeshorts" => ExportPreset::YoutubeShorts,
-        "twitter" => ExportPreset::Twitter,
-        "instagram" => ExportPreset::Instagram,
-        "webm" | "webm_vp9" => ExportPreset::WebmVp9,
-        "prores" => ExportPreset::ProRes,
-        other => {
-            tracing::warn!(
-                "Unknown export preset '{}', defaulting to youtube_1080p",
-                other
-            );
-            ExportPreset::Youtube1080p
+fn parse_export_preset(preset: &str) -> Result<ExportPreset, String> {
+    ExportPreset::from_legacy_id(preset).map_err(|e| e.to_string())
+}
+
+fn build_export_settings(
+    output_path: std::path::PathBuf,
+    preset: &str,
+    request: Option<&VideoExportRequest>,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
+) -> Result<crate::core::render::ExportSettings, String> {
+    match request {
+        Some(request) => crate::core::render::ExportSettings::from_video_request(
+            request,
+            output_path,
+            start_time,
+            end_time,
+        )
+        .map_err(|e| e.to_string()),
+        None => {
+            let export_preset = parse_export_preset(preset)?;
+            let mut settings =
+                crate::core::render::ExportSettings::from_preset(export_preset, output_path);
+            settings.start_time = start_time;
+            settings.end_time = end_time;
+            Ok(settings)
         }
     }
+}
+
+fn validate_batch_item_range(
+    index: usize,
+    in_point: Option<f64>,
+    out_point: Option<f64>,
+) -> Result<(), String> {
+    if let Some(in_pt) = in_point {
+        if in_pt < 0.0 {
+            return Err(format!(
+                "Batch item {}: In point must be non-negative",
+                index
+            ));
+        }
+    }
+
+    if let (Some(in_pt), Some(out_pt)) = (in_point, out_point) {
+        if in_pt >= out_pt {
+            return Err(format!(
+                "Batch item {}: In point must be before Out point",
+                index
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Cached FFmpeg hardware probe results (decoders + encoders).
@@ -201,13 +242,12 @@ pub async fn start_render(
     sequence_id: String,
     output_path: String,
     preset: String,
+    settings: Option<VideoExportRequest>,
     state: State<'_, AppState>,
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
     app_handle: tauri::AppHandle,
 ) -> Result<RenderStartResult, String> {
-    use crate::core::render::{
-        validate_export_settings, ExportEngine, ExportProgress, ExportSettings,
-    };
+    use crate::core::render::{validate_export_settings, ExportEngine, ExportProgress};
     use tauri::Emitter;
 
     // Get sequence/assets/effects + project path from project state
@@ -263,11 +303,14 @@ pub async fn start_render(
         "FFmpeg not initialized. Please install FFmpeg and restart the application.".to_string()
     })?;
 
-    // Parse preset
-    let export_preset = parse_export_preset(&preset);
-
     // Create export settings using validated path
-    let mut settings = ExportSettings::from_preset(export_preset, validated_output_path.clone());
+    let mut settings = build_export_settings(
+        validated_output_path.clone(),
+        &preset,
+        settings.as_ref(),
+        None,
+        None,
+    )?;
 
     resolve_export_hardware_preferences(&app_handle, &ffmpeg.info().ffmpeg_path, &mut settings)
         .await?;
@@ -394,15 +437,14 @@ pub async fn render_range(
     sequence_id: String,
     output_path: String,
     preset: String,
+    settings: Option<VideoExportRequest>,
     in_point: f64,
     out_point: f64,
     state: State<'_, AppState>,
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
     app_handle: tauri::AppHandle,
 ) -> Result<RenderStartResult, String> {
-    use crate::core::render::{
-        validate_export_settings, ExportEngine, ExportProgress, ExportSettings,
-    };
+    use crate::core::render::{validate_export_settings, ExportEngine, ExportProgress};
     use tauri::Emitter;
 
     // Validate range
@@ -456,10 +498,13 @@ pub async fn render_range(
     })?;
 
     // Build settings with range
-    let export_preset = parse_export_preset(&preset);
-    let mut settings = ExportSettings::from_preset(export_preset, validated_output_path);
-    settings.start_time = Some(in_point);
-    settings.end_time = Some(out_point);
+    let mut settings = build_export_settings(
+        validated_output_path,
+        &preset,
+        settings.as_ref(),
+        Some(in_point),
+        Some(out_point),
+    )?;
 
     resolve_export_hardware_preferences(&app_handle, &ffmpeg.info().ffmpeg_path, &mut settings)
         .await?;
@@ -625,20 +670,15 @@ pub async fn batch_render(
             &root_refs,
         )?;
 
-        let export_preset = parse_export_preset(&item.preset);
-        let mut settings = ExportSettings::from_preset(export_preset, validated_path);
-        settings.start_time = item.in_point;
-        settings.end_time = item.out_point;
+        validate_batch_item_range(i, item.in_point, item.out_point)?;
 
-        // Validate range if provided
-        if let (Some(in_pt), Some(out_pt)) = (item.in_point, item.out_point) {
-            if in_pt >= out_pt {
-                return Err(format!(
-                    "Batch item {}: In point must be before Out point",
-                    i
-                ));
-            }
-        }
+        let settings = build_export_settings(
+            validated_path,
+            &item.preset,
+            item.settings.as_ref(),
+            item.in_point,
+            item.out_point,
+        )?;
 
         let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
         if !validation.is_valid {
@@ -2547,4 +2587,36 @@ pub async fn track_point(
         points_count,
         average_confidence,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_batch_item_range;
+
+    #[test]
+    fn validate_batch_item_range_rejects_negative_in_point() {
+        assert_eq!(
+            validate_batch_item_range(2, Some(-0.1), Some(1.0)).unwrap_err(),
+            "Batch item 2: In point must be non-negative"
+        );
+    }
+
+    #[test]
+    fn validate_batch_item_range_rejects_in_point_at_or_after_out_point() {
+        assert_eq!(
+            validate_batch_item_range(1, Some(5.0), Some(5.0)).unwrap_err(),
+            "Batch item 1: In point must be before Out point"
+        );
+        assert_eq!(
+            validate_batch_item_range(1, Some(6.0), Some(5.0)).unwrap_err(),
+            "Batch item 1: In point must be before Out point"
+        );
+    }
+
+    #[test]
+    fn validate_batch_item_range_accepts_open_or_forward_ranges() {
+        assert!(validate_batch_item_range(0, None, None).is_ok());
+        assert!(validate_batch_item_range(0, Some(0.0), None).is_ok());
+        assert!(validate_batch_item_range(0, Some(0.0), Some(1.0)).is_ok());
+    }
 }
