@@ -129,7 +129,7 @@ const PERMISSIVE_RULES: Omit<PermissionRule, 'id'>[] = [
 const BUILTIN_RULES: readonly MatchablePermissionRule[] = [
   {
     id: null,
-    pattern: 'workspace.**',
+    pattern: 'workspace.document.read',
     permission: 'allow',
     scope: 'builtin',
   },
@@ -230,15 +230,10 @@ function resolveMatchingRule(
   let bestMatch: MatchedPermissionRule | null = null;
 
   const ruleLayers: Array<{ rules: readonly MatchablePermissionRule[]; scopeRank: number }> = [
+    { rules: BUILTIN_RULES, scopeRank: 0 },
     { rules: globalRules, scopeRank: 1 },
-    // Workspace tools are project-root scoped by construction:
-    // frontend path validation rejects absolute/traversal paths and the Rust
-    // backend re-validates the resolved target before mutating the filesystem.
-    //
-    // Keep builtin workspace rules at the same precedence tier as global rules
-    // so explicit user rules can still override them, while the more specific
-    // workspace pattern beats the default global "*" ask rule.
-    { rules: BUILTIN_RULES, scopeRank: 1 },
+    // Workspace reads are safe to allow by default. Mutating workspace actions
+    // must pass through the normal ask/deny flow.
     { rules: sessionRules, scopeRank: 2 },
   ];
 
