@@ -101,6 +101,13 @@ impl PluginContext {
         permission_manager: Arc<PermissionManager>,
         base_data_dir: &Path,
     ) -> CoreResult<Self> {
+        if !is_safe_plugin_id(&plugin_id) {
+            return Err(CoreError::PluginError(format!(
+                "Invalid plugin ID for filesystem context: {}",
+                plugin_id
+            )));
+        }
+
         let data_dir = base_data_dir.join("plugins").join(&plugin_id);
         let temp_dir = base_data_dir.join("temp").join(&plugin_id);
 
@@ -397,6 +404,20 @@ impl PluginContext {
 
         Ok(())
     }
+}
+
+fn is_safe_plugin_id(id: &str) -> bool {
+    let trimmed = id.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 128
+        && !trimmed.starts_with('.')
+        && !trimmed.ends_with('.')
+        && trimmed.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        })
 }
 
 // ============================================================================

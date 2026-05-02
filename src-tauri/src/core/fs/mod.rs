@@ -330,6 +330,12 @@ pub fn validate_output_path(path: &str, label: &str) -> Result<PathBuf, String> 
         return Err(format!("{label} points to a directory: {}", pb.display()));
     }
 
+    if let Ok(metadata) = std::fs::symlink_metadata(&pb) {
+        if metadata.file_type().is_symlink() {
+            return Err(format!("{label} must not be a symlink: {}", pb.display()));
+        }
+    }
+
     Ok(pb)
 }
 
@@ -361,6 +367,12 @@ fn validate_output_path_no_create(path: &str, label: &str) -> Result<PathBuf, St
     // Don't allow overwriting a directory
     if pb.exists() && pb.is_dir() {
         return Err(format!("{label} points to a directory: {}", pb.display()));
+    }
+
+    if let Ok(metadata) = std::fs::symlink_metadata(&pb) {
+        if metadata.file_type().is_symlink() {
+            return Err(format!("{label} must not be a symlink: {}", pb.display()));
+        }
     }
 
     Ok(pb)
@@ -931,6 +943,26 @@ mod tests {
             result.is_err(),
             "expected output in prefix-sibling dir to be rejected"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_scoped_output_path_rejects_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("target.mp4");
+        std::fs::write(&outside_file, "external").unwrap();
+
+        let output = root.path().join("out.mp4");
+        symlink(&outside_file, &output).unwrap();
+
+        let output_str = output.to_string_lossy().to_string();
+        let result = validate_scoped_output_path(&output_str, "outputPath", &[root.path()]);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must not be a symlink"));
     }
 
     #[tokio::test]

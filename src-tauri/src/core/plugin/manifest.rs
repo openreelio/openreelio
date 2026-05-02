@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use crate::core::{CoreError, CoreResult};
 
@@ -116,6 +116,12 @@ impl PluginManifest {
                 "Plugin ID cannot be empty".to_string(),
             ));
         }
+        if !Self::is_safe_plugin_id(&self.id) {
+            return Err(CoreError::PluginError(format!(
+                "Invalid plugin ID '{}': use reverse-DNS/path-safe ASCII segments",
+                self.id
+            )));
+        }
 
         // Name must not be empty
         if self.name.trim().is_empty() {
@@ -137,6 +143,12 @@ impl PluginManifest {
             return Err(CoreError::PluginError(
                 "Plugin entry point cannot be empty".to_string(),
             ));
+        }
+        if !Self::is_safe_relative_entry(&self.entry) {
+            return Err(CoreError::PluginError(format!(
+                "Invalid plugin entry '{}': entry must be a relative path inside the plugin bundle",
+                self.entry
+            )));
         }
 
         // Must have at least one capability
@@ -177,6 +189,29 @@ impl PluginManifest {
         }
 
         parts.iter().all(|part| part.parse::<u32>().is_ok())
+    }
+
+    fn is_safe_plugin_id(id: &str) -> bool {
+        let trimmed = id.trim();
+        !trimmed.is_empty()
+            && trimmed.len() <= 128
+            && !trimmed.starts_with('.')
+            && !trimmed.ends_with('.')
+            && trimmed.split('.').all(|segment| {
+                !segment.is_empty()
+                    && segment
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+            })
+    }
+
+    fn is_safe_relative_entry(entry: &str) -> bool {
+        let path = Path::new(entry);
+        !path.is_absolute()
+            && path.components().all(|component| {
+                matches!(component, Component::Normal(_)) || matches!(component, Component::CurDir)
+            })
+            && !entry.chars().any(|ch| ch.is_control())
     }
 
     /// Validates filesystem permission pattern
@@ -327,6 +362,44 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("ID cannot be empty"));
+    }
+
+    #[test]
+    fn test_parse_unsafe_id_fails() {
+        let json = r#"{
+            "id": "../escape",
+            "name": "Test",
+            "version": "1.0.0",
+            "entry": "plugin.wasm",
+            "permissions": {},
+            "capabilities": ["AssetProvider"]
+        }"#;
+
+        let result = PluginManifest::parse(json);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid plugin ID"));
+    }
+
+    #[test]
+    fn test_parse_unsafe_entry_fails() {
+        let json = r#"{
+            "id": "com.example.safe",
+            "name": "Test",
+            "version": "1.0.0",
+            "entry": "../plugin.wasm",
+            "permissions": {},
+            "capabilities": ["AssetProvider"]
+        }"#;
+
+        let result = PluginManifest::parse(json);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid plugin entry"));
     }
 
     #[test]

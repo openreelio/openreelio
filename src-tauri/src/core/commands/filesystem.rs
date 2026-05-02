@@ -45,24 +45,48 @@ fn validate_inside_project(project_root: &Path, target: &Path) -> CoreResult<()>
         )));
     }
 
-    // Second check: if paths exist on disk, use canonicalize for symlink resolution
-    if let (Ok(canonical_root), Ok(canonical_target)) =
-        (project_root.canonicalize(), target.canonicalize())
-    {
+    let canonical_root = project_root.canonicalize().map_err(|e| {
+        CoreError::ValidationError(format!(
+            "Cannot resolve project root '{}': {}",
+            project_root.display(),
+            e
+        ))
+    })?;
+
+    let mut nearest_existing = target;
+    while !nearest_existing.exists() {
+        nearest_existing = nearest_existing.parent().ok_or_else(|| {
+            CoreError::ValidationError(format!("Cannot resolve path: {}", target.display()))
+        })?;
+    }
+
+    let canonical_existing = nearest_existing.canonicalize().map_err(|e| {
+        CoreError::ValidationError(format!(
+            "Cannot resolve path '{}': {}",
+            nearest_existing.display(),
+            e
+        ))
+    })?;
+
+    if !canonical_existing.starts_with(&canonical_root) {
+        return Err(CoreError::ValidationError(format!(
+            "Path escapes project root (via symlink): {}",
+            target.display()
+        )));
+    }
+
+    // Final check: if the target exists on disk, resolve the full path too.
+    if target.exists() {
+        let canonical_target = target.canonicalize().map_err(|e| {
+            CoreError::ValidationError(format!("Cannot resolve path '{}': {}", target.display(), e))
+        })?;
         if !canonical_target.starts_with(&canonical_root) {
             return Err(CoreError::ValidationError(format!(
                 "Path escapes project root (via symlink): {}",
                 target.display()
             )));
         }
-    } else if target.exists() {
-        // Target exists but canonicalize failed — suspicious
-        return Err(CoreError::ValidationError(format!(
-            "Cannot resolve path: {}",
-            target.display()
-        )));
     }
-    // If target doesn't exist (new file/folder), the normalized check above is sufficient
 
     Ok(())
 }
@@ -722,5 +746,21 @@ mod tests {
 
         // Valid path
         assert!(validate_inside_project(dir.path(), &dir.path().join("sub/file.mp4")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_inside_project_rejects_symlink_parent_escape_for_new_path() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link_path = project.path().join("linked");
+        symlink(outside.path(), &link_path).unwrap();
+
+        let target = link_path.join("new-dir");
+        let result = validate_inside_project(project.path(), &target);
+
+        assert!(result.is_err());
     }
 }
