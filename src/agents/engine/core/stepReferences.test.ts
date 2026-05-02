@@ -64,6 +64,43 @@ describe('stepReferences', () => {
     expect(normalized.shouldMute).toBe(false);
   });
 
+  it('skips unsafe object keys while normalizing references', () => {
+    const normalized = normalizeReferencesForValidation(
+      {
+        safe: 'value',
+        ['__proto__']: { polluted: true },
+        constructor: { prototype: { polluted: true } },
+      },
+      { type: 'object' },
+    ) as Record<string, unknown>;
+
+    expect(normalized.safe).toBe('value');
+    expect(Object.prototype).not.toHaveProperty('polluted');
+    expect(Object.prototype.hasOwnProperty.call(normalized, '__proto__')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(normalized, 'constructor')).toBe(false);
+  });
+
+  it('reports unsafe object keys while resolving references', () => {
+    const result = resolveStepValueReferences(
+      {
+        safe: { $fromStep: 'step-1', $path: 'data.value' },
+        prototype: { polluted: true },
+      },
+      () => ({ ok: true as const, value: 'resolved' }),
+    );
+
+    expect((result.value as Record<string, unknown>).safe).toBe('resolved');
+    expect(Object.prototype.hasOwnProperty.call(result.value as object, 'prototype')).toBe(false);
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourcePath: '$.prototype',
+          reason: "Forbidden object key 'prototype'",
+        }),
+      ]),
+    );
+  });
+
   it('reads values from dot and bracket paths', () => {
     const source = {
       data: {
