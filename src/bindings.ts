@@ -5938,7 +5938,7 @@ transformsPath: string }
  * Input payload for starting a new agent run.
  */
 export type StartAgentRunInput = { sessionId: string; runtimeKind: string | null; trigger: string | null; maxIterations: number | null; maxToolCalls: number | null; plannedStepCount: number | null; inputMessageId: string | null; traceId: string | null; id: string | null }
-export type StartTerminalSessionInput = { sessionId: string; cwd: string | null; cols: number | null; rows: number | null; shell: string | null; shellArgs?: string[] | null }
+export type StartTerminalSessionInput = { sessionId: string; cwd: string | null; cols: number | null; rows: number | null; profileId?: string | null; shell?: string | null; shellArgs?: string[] | null }
 /**
  * State change types for event broadcasting.
  */

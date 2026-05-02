@@ -46,6 +46,7 @@ function profileSourceLabel(source: string): string {
   if (source === 'windows-terminal') return 'Windows Terminal';
   if (source === 'wsl') return 'WSL';
   if (source === 'default') return 'Default';
+  if (source === 'settings') return 'Custom';
   return 'Detected';
 }
 
@@ -112,6 +113,9 @@ export function TerminalSettings({
             }
 
             if (value === CUSTOM_PROFILE_ID) {
+              if (!settings.defaultShellCommand) {
+                onUpdate({ defaultShellCommand: '' });
+              }
               return;
             }
 
@@ -158,8 +162,8 @@ export function TerminalSettings({
           className="w-full rounded-lg border border-editor-border bg-editor-bg px-3 py-2 text-editor-text focus:outline-none focus:ring-2 focus:ring-primary-500/50 disabled:opacity-50"
         />
         <p className="mt-2 text-xs text-editor-text-muted">
-          Enter an executable path directly or a full command line. Quote paths that contain spaces.
-          {` ${examples}`}
+          Saved custom commands are resolved by the backend before launch. Quote paths that contain
+          spaces. {examples}
         </p>
       </div>
 

@@ -60,7 +60,7 @@ describe('terminalStore', () => {
     globalThis[DESKTOP_RUNTIME_TEST_FLAG] = undefined;
   });
 
-  it('should open the terminal in the bottom panel using the configured command line', async () => {
+  it('should open the terminal in the bottom panel using a configured detected profile', async () => {
     useSettingsStore.setState((state) => ({
       ...state,
       settings: {
@@ -70,17 +70,28 @@ describe('terminalStore', () => {
     }));
 
     vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'list_terminal_profiles') {
+        return [
+          {
+            id: 'wsl-ubuntu',
+            label: 'Ubuntu (WSL)',
+            commandLine: 'wsl.exe -d Ubuntu',
+            source: 'wsl',
+            isDefault: false,
+          },
+        ];
+      }
+
       if (command === 'start_terminal_session') {
         const payload = args as {
-          input: { sessionId: string; shell: string; shellArgs: string[] };
+          input: { sessionId: string; profileId: string | null };
         };
         expect(handlers.has(`terminal:session:${payload.input.sessionId}`)).toBe(true);
-        expect(payload.input.shell).toBe('wsl.exe');
-        expect(payload.input.shellArgs).toEqual(['-d', 'Ubuntu']);
+        expect(payload.input.profileId).toBe('wsl-ubuntu');
         return {
           sessionId: payload.input.sessionId,
           cwd: '/workspace',
-          shell: 'wsl.exe',
+          shell: 'wsl.exe -d Ubuntu',
         };
       }
 
@@ -99,10 +110,10 @@ describe('terminalStore', () => {
     expect(layout.zones.bottom.collapsed).toBe(false);
     expect(session?.status).toBe('running');
     expect(session?.cwd).toBe('/workspace');
-    expect(session?.shell).toBe('wsl.exe');
+    expect(session?.shell).toBe('wsl.exe -d Ubuntu');
   });
 
-  it('should launch Git Bash with parsed args from terminal settings', async () => {
+  it('should open a saved custom terminal command through the backend settings profile', async () => {
     useSettingsStore.setState((state) => ({
       ...state,
       settings: {
@@ -114,16 +125,27 @@ describe('terminalStore', () => {
     }));
 
     vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'list_terminal_profiles') {
+        return [
+          {
+            id: 'settings-custom-command-line-c-program-files-git-bin-bash-exe-login-i',
+            label: 'Custom command line',
+            commandLine: '"C:\\Program Files\\Git\\bin\\bash.exe" --login -i',
+            source: 'settings',
+            isDefault: false,
+          },
+        ];
+      }
+
       if (command === 'start_terminal_session') {
-        const payload = args as {
-          input: { sessionId: string; shell: string; shellArgs: string[] };
-        };
-        expect(payload.input.shell).toBe('C:\\Program Files\\Git\\bin\\bash.exe');
-        expect(payload.input.shellArgs).toEqual(['--login', '-i']);
+        const payload = args as { input: { sessionId: string; profileId: string | null } };
+        expect(payload.input.profileId).toBe(
+          'settings-custom-command-line-c-program-files-git-bin-bash-exe-login-i',
+        );
         return {
           sessionId: payload.input.sessionId,
           cwd: '/workspace',
-          shell: 'C:\\Program Files\\Git\\bin\\bash.exe',
+          shell: '"C:\\Program Files\\Git\\bin\\bash.exe" --login -i',
         };
       }
 
@@ -132,6 +154,7 @@ describe('terminalStore', () => {
 
     const opened = await useTerminalStore.getState().openTerminal();
     expect(opened).toBe(true);
+    expect(useTerminalStore.getState().lastError).toBeNull();
   });
 
   it('should add a second terminal tab when requested', async () => {

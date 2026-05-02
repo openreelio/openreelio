@@ -4,7 +4,6 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { createLogger } from '@/services/logger';
 import { isDesktopRuntimeAvailable } from '@/services/runtimeEnvironment';
 import { useSettingsStore } from '@/stores/settingsStore';
-import { parseTerminalCommandLine } from '@/utils/terminalCommandLine';
 import {
   findPanelZone,
   useWorkspaceLayoutStore,
@@ -28,6 +27,7 @@ interface StartTerminalSessionInput {
   cwd?: string | null;
   cols?: number | null;
   rows?: number | null;
+  profileId?: string | null;
   shell?: string | null;
   shellArgs?: string[] | null;
 }
@@ -36,6 +36,14 @@ interface TerminalSessionStartResult {
   sessionId: string;
   cwd: string;
   shell: string;
+}
+
+interface DetectedTerminalProfile {
+  id: string;
+  label: string;
+  commandLine: string;
+  source: string;
+  isDefault: boolean;
 }
 
 type TerminalStreamEvent =
@@ -264,14 +272,35 @@ function isTerminalVisible(): boolean {
   );
 }
 
-function resolveConfiguredCommand(): {
-  executable: string | null;
-  args: string[];
+async function resolveConfiguredProfileId(): Promise<{
+  profileId: string | null;
   error: string | null;
-} {
-  return parseTerminalCommandLine(
-    useSettingsStore.getState().settings.terminal.defaultShellCommand,
-  );
+}> {
+  const configuredCommand =
+    useSettingsStore.getState().settings.terminal.defaultShellCommand?.trim() ?? '';
+
+  if (!configuredCommand) {
+    return { profileId: null, error: null };
+  }
+
+  try {
+    const profiles = await invoke<DetectedTerminalProfile[]>('list_terminal_profiles');
+    const profile = profiles.find((candidate) => candidate.commandLine === configuredCommand);
+    if (profile) {
+      return { profileId: profile.id, error: null };
+    }
+  } catch (error) {
+    return {
+      profileId: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  return {
+    profileId: null,
+    error:
+      'Custom terminal command lines are disabled. Select a detected terminal profile in Settings.',
+  };
 }
 
 function findGroupIdBySessionId(
@@ -420,9 +449,9 @@ async function startSession(
   sessionId: string,
   mode: { type: 'new-group'; groupId: string } | { type: 'split-group'; groupId: string },
 ): Promise<string | null> {
-  const parsedCommand = resolveConfiguredCommand();
-  if (parsedCommand.error) {
-    useTerminalStore.setState({ lastError: parsedCommand.error });
+  const resolvedProfile = await resolveConfiguredProfileId();
+  if (resolvedProfile.error) {
+    useTerminalStore.setState({ lastError: resolvedProfile.error });
     return null;
   }
 
@@ -483,8 +512,7 @@ async function startSession(
         sessionId,
         cols: DEFAULT_TERMINAL_COLS,
         rows: DEFAULT_TERMINAL_ROWS,
-        shell: parsedCommand.executable,
-        shellArgs: parsedCommand.args,
+        profileId: resolvedProfile.profileId,
       } satisfies StartTerminalSessionInput,
     });
 
