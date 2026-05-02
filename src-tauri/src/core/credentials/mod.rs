@@ -1,13 +1,11 @@
 //! Secure Credential Management System
 //!
-//! Provides secure storage for API keys and other sensitive credentials using
-//! Tauri Stronghold - an encrypted vault with memory protection.
+//! Provides encrypted storage for API keys and other sensitive credentials.
 //!
 //! # Security Architecture
 //!
 //! - **Encryption at Rest**: All credentials are encrypted using XChaCha20-Poly1305
-//! - **Memory Protection**: Stronghold uses secure memory allocation to prevent leaks
-//! - **Key Derivation**: Master password is derived using Argon2id (memory-hard KDF)
+//! - **Key Derivation**: Vault key material is derived using Argon2id (memory-hard KDF)
 //! - **No Plaintext Storage**: API keys never touch disk in plaintext form
 //! - **Audit Logging**: All credential access is logged (without exposing values)
 //!
@@ -15,7 +13,6 @@
 //!
 //! This implementation protects against:
 //! - File system access by malicious software
-//! - Memory dumps (via secure allocation)
 //! - Credential extraction from config files
 //! - Replay attacks (via nonce management)
 //!
@@ -24,6 +21,7 @@
 //! - Hardware-level attacks
 //! - Social engineering
 //! - Active compromise of the running application
+//! - Attackers who can read local machine identifiers and the vault file
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},

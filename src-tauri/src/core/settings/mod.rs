@@ -646,16 +646,16 @@ pub struct AISettings {
     #[serde(default)]
     pub vision_model: Option<String>,
 
-    // === API Keys (stored in settings, consider keychain in future) ===
-    /// OpenAI API key
+    // === Legacy API Key Fields ===
+    /// Legacy OpenAI API key field. Migrated to credential vault and scrubbed on save.
     #[serde(default)]
     pub openai_api_key: Option<String>,
 
-    /// Anthropic API key
+    /// Legacy Anthropic API key field. Migrated to credential vault and scrubbed on save.
     #[serde(default)]
     pub anthropic_api_key: Option<String>,
 
-    /// Google AI API key
+    /// Legacy Google AI API key field. Migrated to credential vault and scrubbed on save.
     #[serde(default)]
     pub google_api_key: Option<String>,
 
@@ -913,7 +913,8 @@ impl AISettings {
             default_video_gen_default_quality(),
         );
 
-        // Trim legacy API key field if present.
+        // Trim legacy API key field if present so migration can safely move it
+        // into the credential vault before settings are saved.
         self.seedance_api_key = self
             .seedance_api_key
             .as_deref()
@@ -924,12 +925,8 @@ impl AISettings {
 
     /// Get the API key for the specified provider
     pub fn get_api_key(&self, provider: ProviderType) -> Option<&str> {
-        match provider {
-            ProviderType::OpenAI => self.openai_api_key.as_deref(),
-            ProviderType::Anthropic => self.anthropic_api_key.as_deref(),
-            ProviderType::Gemini => self.google_api_key.as_deref(),
-            ProviderType::Local => None, // Local doesn't use API key
-        }
+        let _ = provider;
+        None
     }
 
     /// Check if the provider is configured with necessary credentials
@@ -1065,6 +1062,10 @@ impl SettingsManager {
             // Normalize before persisting.
             let mut normalized = settings.clone();
             normalized.normalize();
+            normalized.ai.openai_api_key = None;
+            normalized.ai.anthropic_api_key = None;
+            normalized.ai.google_api_key = None;
+            normalized.ai.seedance_api_key = None;
 
             // Serialize settings
             let content = serde_json::to_string_pretty(&normalized)
@@ -1353,7 +1354,7 @@ mod tests {
         manager.save(&settings).unwrap();
         let loaded = manager.load();
 
-        assert_eq!(loaded.ai.openai_api_key, Some("sk-test-key".to_string()));
+        assert_eq!(loaded.ai.openai_api_key, None);
         assert_eq!(loaded.ai.primary_provider, ProviderType::OpenAI);
         assert_eq!(loaded.ai.primary_model, "gpt-4o");
         assert_eq!(loaded.ai.monthly_budget_cents, Some(1000));

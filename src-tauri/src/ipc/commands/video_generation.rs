@@ -67,21 +67,7 @@ async fn get_seedance_api_key(app: &tauri::AppHandle) -> Result<Option<String>, 
         }
     }
 
-    // Legacy fallback: read from settings if vault key is not configured.
-    // Vault remains the preferred secure storage location.
-    let settings = SettingsManager::new(app_data_dir).load();
-    let fallback = settings
-        .ai
-        .seedance_api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned);
-    if fallback.is_some() {
-        tracing::warn!("Using legacy settings-based Seedance API key fallback");
-    }
-
-    Ok(fallback)
+    Ok(None)
 }
 
 /// Enforces server-side video generation cost limits from settings.

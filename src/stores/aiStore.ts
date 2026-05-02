@@ -303,21 +303,6 @@ export const useAIStore = create<AIState>()(
                 primaryModel: config.model ?? status.currentModel,
               };
 
-              // Update the appropriate API key field
-              if (config.apiKey) {
-                switch (config.providerType) {
-                  case 'openai':
-                    settingsUpdate.openaiApiKey = config.apiKey;
-                    break;
-                  case 'anthropic':
-                    settingsUpdate.anthropicApiKey = config.apiKey;
-                    break;
-                  case 'gemini':
-                    settingsUpdate.googleApiKey = config.apiKey;
-                    break;
-                }
-              }
-
               if (config.providerType === 'local' && config.baseUrl) {
                 settingsUpdate.ollamaUrl = config.baseUrl;
               }

@@ -346,6 +346,15 @@ function coerceAppSettings(value: unknown): AppSettings {
   // Always merge with defaults to tolerate backend/frontend schema drift.
   // The backend currently does not persist `workspace`, so this prevents
   // workspace-dependent features from crashing when settings are loaded.
+  const aiSettings = {
+    ...DEFAULT_SETTINGS.ai,
+    ...(isRecord(value.ai) ? value.ai : {}),
+    openaiApiKey: null,
+    anthropicApiKey: null,
+    googleApiKey: null,
+    seedanceApiKey: null,
+  };
+
   return {
     ...DEFAULT_SETTINGS,
     ...(value as Partial<AppSettings>),
@@ -369,7 +378,7 @@ function coerceAppSettings(value: unknown): AppSettings {
       ...DEFAULT_SETTINGS.performance,
       ...(isRecord(value.performance) ? value.performance : {}),
     },
-    ai: { ...DEFAULT_SETTINGS.ai, ...(isRecord(value.ai) ? value.ai : {}) },
+    ai: aiSettings,
     workspace: {
       ...DEFAULT_SETTINGS.workspace,
       ...(isRecord(value.workspace) ? value.workspace : {}),
@@ -379,6 +388,15 @@ function coerceAppSettings(value: unknown): AppSettings {
       ...(isRecord(value.terminal) ? value.terminal : {}),
     },
   } as AppSettings;
+}
+
+function stripSecretSettingsValues(values: Record<string, unknown>): Record<string, unknown> {
+  const stripped = { ...values };
+  delete stripped.openaiApiKey;
+  delete stripped.anthropicApiKey;
+  delete stripped.googleApiKey;
+  delete stripped.seedanceApiKey;
+  return stripped;
 }
 
 // =============================================================================
@@ -644,7 +662,11 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           }
 
           // Accumulate partial updates for debounced batch save
-          const strippedValues = stripUndefined(values as Record<string, unknown>);
+          const strippedValues = stripUndefined(
+            section === 'ai'
+              ? stripSecretSettingsValues(values as Record<string, unknown>)
+              : (values as Record<string, unknown>),
+          );
 
           // Check for pending sections limit to prevent memory issues
           if (

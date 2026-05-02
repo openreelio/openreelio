@@ -2024,6 +2024,7 @@ pub async fn validate_edit_script(
 #[tauri::command]
 #[specta::specta]
 pub async fn configure_ai_provider(
+    app: tauri::AppHandle,
     config: ProviderConfigDto,
     state: State<'_, AppState>,
 ) -> Result<ProviderStatusDto, String> {
@@ -2121,6 +2122,40 @@ pub async fn configure_ai_provider(
         Ok(()) => (true, None),
         Err(e) => (false, Some(e.to_string())),
     };
+
+    if let Some(api_key) = requested_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let credential_type = match provider_type {
+            ProviderType::OpenAI => Some(crate::core::credentials::CredentialType::OpenaiApiKey),
+            ProviderType::Anthropic => {
+                Some(crate::core::credentials::CredentialType::AnthropicApiKey)
+            }
+            ProviderType::Gemini => Some(crate::core::credentials::CredentialType::GoogleApiKey),
+            ProviderType::Local => None,
+        };
+
+        if let Some(credential_type) = credential_type {
+            let app_data_dir = super::system::get_app_data_dir(&app)?;
+            let vault_path = app_data_dir.join("credentials.vault");
+            let mut guard = state.credential_vault.lock().await;
+            if guard.is_none() {
+                *guard = Some(
+                    crate::core::credentials::CredentialVault::new(vault_path)
+                        .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
+                );
+            }
+            let vault = guard
+                .as_ref()
+                .ok_or_else(|| "Credential vault unavailable".to_string())?;
+            vault
+                .store(credential_type, api_key)
+                .await
+                .map_err(|e| format!("Failed to store AI provider credential: {}", e))?;
+        }
+    }
 
     // Get available models based on provider type
     let available_models = match provider_type {
