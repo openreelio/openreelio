@@ -48,8 +48,7 @@ fn main() {
                 }
             }
             Err(e) => {
-                println!("cargo:warning=FFmpeg download failed: {}", e);
-                println!("cargo:warning=The app will fall back to system FFmpeg at runtime");
+                panic!("FFmpeg download failed: {e}");
             }
         }
     }
@@ -99,7 +98,7 @@ fn emit_windows_test_manifest_if_requested() {
 /// Determine if FFmpeg should be downloaded during build
 fn should_download_ffmpeg() -> bool {
     // Require explicit opt-in to avoid non-reproducible builds and supply-chain surprises.
-    // Enable by setting `OPENREELIO_DOWNLOAD_FFMPEG=1` (recommended for CI release builds),
+    // Enable by setting `OPENREELIO_DOWNLOAD_FFMPEG=1` after pinned checksums are configured,
     // or by building with the `bundled-ffmpeg` feature.
     let opted_in = env::var("OPENREELIO_DOWNLOAD_FFMPEG").ok().as_deref() == Some("1")
         || env::var("CARGO_FEATURE_BUNDLED_FFMPEG").is_ok();
@@ -136,8 +135,8 @@ fn download_ffmpeg_for_build() -> Result<FFmpegPaths, String> {
     let output_dir = PathBuf::from(out_dir);
 
     let config = BundlerConfig {
-        verify_checksums: false, // Skip checksum verification for faster builds
-        timeout_seconds: 600,    // 10 minutes timeout for CI
+        verify_checksums: true,
+        timeout_seconds: 600, // 10 minutes timeout for CI
         cache_dir: None,
     };
 
@@ -177,8 +176,8 @@ fn copy_binaries_for_bundle(paths: &FFmpegPaths) -> Result<(), String> {
 // ============================================================================
 
 use std::fs::File;
-use std::io::Write;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Component, Path};
 
 #[derive(Debug)]
 pub struct FFmpegPaths {
@@ -269,6 +268,7 @@ pub fn get_binary_names(platform: Platform) -> (&'static str, &'static str) {
 struct DownloadSource {
     url: String,
     filename: String,
+    sha256: Option<String>,
 }
 
 fn get_ffmpeg_download_url(platform: Platform, arch: Arch) -> BundlerResult<DownloadSource> {
@@ -276,15 +276,18 @@ fn get_ffmpeg_download_url(platform: Platform, arch: Arch) -> BundlerResult<Down
         (Platform::Windows, Arch::X64) => Ok(DownloadSource {
             url: "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip".to_string(),
             filename: "ffmpeg-release-essentials.zip".to_string(),
+            sha256: None,
         }),
         (Platform::MacOS, Arch::X64) | (Platform::MacOS, Arch::Arm64) => Ok(DownloadSource {
             url: "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip".to_string(),
             filename: "ffmpeg.zip".to_string(),
+            sha256: None,
         }),
         (Platform::Linux, Arch::X64) => Ok(DownloadSource {
             url: "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
                 .to_string(),
             filename: "ffmpeg-release-amd64-static.tar.xz".to_string(),
+            sha256: None,
         }),
         _ => Err(BundlerError::UnsupportedPlatform(format!(
             "{:?} {:?}",
@@ -301,6 +304,7 @@ fn get_ffprobe_download_url(
         (Platform::MacOS, Arch::X64) | (Platform::MacOS, Arch::Arm64) => Ok(Some(DownloadSource {
             url: "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip".to_string(),
             filename: "ffprobe.zip".to_string(),
+            sha256: None,
         })),
         _ => Ok(None),
     }
@@ -345,6 +349,42 @@ fn download_file_blocking(url: &str, output: &Path, timeout_secs: u64) -> Bundle
     Ok(())
 }
 
+fn verify_archive_checksum(path: &Path, expected_sha256: Option<&str>) -> BundlerResult<()> {
+    use sha2::{Digest, Sha256};
+
+    let Some(expected_sha256) = expected_sha256 else {
+        if std::env::var("OPENREELIO_ALLOW_UNVERIFIED_FFMPEG")
+            .ok()
+            .as_deref()
+            == Some("1")
+        {
+            println!(
+                "cargo:warning=OPENREELIO_ALLOW_UNVERIFIED_FFMPEG=1 set; skipping checksum for {}",
+                path.display()
+            );
+            return Ok(());
+        }
+
+        return Err(BundlerError::VerificationFailed(format!(
+            "Missing pinned SHA-256 for downloaded FFmpeg archive: {}",
+            path.display()
+        )));
+    };
+
+    let bytes = std::fs::read(path)?;
+    let actual = format!("{:x}", Sha256::digest(&bytes));
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
+        return Err(BundlerError::VerificationFailed(format!(
+            "Checksum mismatch for {}: expected {}, got {}",
+            path.display(),
+            expected_sha256,
+            actual
+        )));
+    }
+
+    Ok(())
+}
+
 fn extract_archive(archive_path: &Path, output_dir: &Path) -> BundlerResult<()> {
     std::fs::create_dir_all(output_dir)?;
 
@@ -367,34 +407,159 @@ fn extract_archive(archive_path: &Path, output_dir: &Path) -> BundlerResult<()> 
     }
 }
 
+fn archive_entry_destination(output_root: &Path, entry_name: &Path) -> BundlerResult<PathBuf> {
+    let mut destination = output_root.to_path_buf();
+    let mut saw_component = false;
+
+    for component in entry_name.components() {
+        match component {
+            Component::Normal(segment) => {
+                saw_component = true;
+                destination.push(segment);
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(BundlerError::ExtractionFailed(format!(
+                    "Archive entry escapes extraction directory: {}",
+                    entry_name.display()
+                )));
+            }
+        }
+    }
+
+    if !saw_component {
+        return Err(BundlerError::ExtractionFailed(
+            "Archive entry has an empty path".to_string(),
+        ));
+    }
+
+    Ok(destination)
+}
+
 fn extract_zip(archive: &Path, output: &Path) -> BundlerResult<()> {
     let file = File::open(archive)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to open zip: {}", e)))?;
 
-    archive
-        .extract(output)
-        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to extract zip: {}", e)))
+    let output_root = output.canonicalize()?;
+
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).map_err(|e| {
+            BundlerError::ExtractionFailed(format!("Failed to read zip entry: {}", e))
+        })?;
+
+        if file.is_symlink() {
+            return Err(BundlerError::ExtractionFailed(format!(
+                "Archive symlink entries are not allowed: {}",
+                file.name()
+            )));
+        }
+
+        let entry_name = file.enclosed_name().ok_or_else(|| {
+            BundlerError::ExtractionFailed(format!(
+                "Archive entry escapes extraction directory: {}",
+                file.name()
+            ))
+        })?;
+        let destination = archive_entry_destination(&output_root, &entry_name)?;
+
+        if file.is_dir() {
+            std::fs::create_dir_all(&destination)?;
+            continue;
+        }
+
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut output_file = File::create(&destination)?;
+        std::io::copy(&mut file, &mut output_file).map_err(|e| {
+            BundlerError::ExtractionFailed(format!("Failed to extract zip entry: {}", e))
+        })?;
+
+        #[cfg(unix)]
+        if let Some(mode) = file.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(mode))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_tar_entries<R: Read>(
+    mut archive: tar::Archive<R>,
+    output: &Path,
+    format: &str,
+) -> BundlerResult<()> {
+    let output_root = output.canonicalize()?;
+
+    for entry in archive
+        .entries()
+        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to read {}: {}", format, e)))?
+    {
+        let mut entry = entry.map_err(|e| {
+            BundlerError::ExtractionFailed(format!("Failed to read {} entry: {}", format, e))
+        })?;
+        let entry_type = entry.header().entry_type();
+
+        if entry_type.is_gnu_longname()
+            || entry_type.is_gnu_longlink()
+            || entry_type.is_pax_global_extensions()
+            || entry_type.is_pax_local_extensions()
+        {
+            continue;
+        }
+
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            return Err(BundlerError::ExtractionFailed(format!(
+                "Archive link entries are not allowed: {}",
+                entry
+                    .path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            )));
+        }
+
+        if !entry_type.is_file() && !entry_type.is_dir() && !entry_type.is_contiguous() {
+            return Err(BundlerError::ExtractionFailed(format!(
+                "Unsupported archive entry type in {}: {:?}",
+                format, entry_type
+            )));
+        }
+
+        let entry_path = entry.path().map_err(|e| {
+            BundlerError::ExtractionFailed(format!("Failed to read {} entry path: {}", format, e))
+        })?;
+        let destination = archive_entry_destination(&output_root, entry_path.as_ref())?;
+
+        if entry_type.is_dir() {
+            std::fs::create_dir_all(&destination)?;
+            continue;
+        }
+
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        entry.unpack(&destination).map_err(|e| {
+            BundlerError::ExtractionFailed(format!("Failed to extract {} entry: {}", format, e))
+        })?;
+    }
+
+    Ok(())
 }
 
 fn extract_tar_xz(archive: &Path, output: &Path) -> BundlerResult<()> {
     let file = File::open(archive)?;
     let decompressor = xz2::read::XzDecoder::new(file);
-    let mut archive = tar::Archive::new(decompressor);
-
-    archive
-        .unpack(output)
-        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to extract tar.xz: {}", e)))
+    extract_tar_entries(tar::Archive::new(decompressor), output, "tar.xz")
 }
 
 fn extract_tar_gz(archive: &Path, output: &Path) -> BundlerResult<()> {
     let file = File::open(archive)?;
     let decompressor = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decompressor);
-
-    archive
-        .unpack(output)
-        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to extract tar.gz: {}", e)))
+    extract_tar_entries(tar::Archive::new(decompressor), output, "tar.gz")
 }
 
 fn find_binary_in_dir(dir: &Path, binary_name: &str) -> BundlerResult<PathBuf> {
@@ -456,6 +621,9 @@ pub fn download_ffmpeg(output_dir: &Path, config: &BundlerConfig) -> BundlerResu
     // Download main FFmpeg archive
     let archive_path = temp_dir.join(&source.filename);
     download_file_blocking(&source.url, &archive_path, config.timeout_seconds)?;
+    if config.verify_checksums {
+        verify_archive_checksum(&archive_path, source.sha256.as_deref())?;
+    }
 
     // Extract main archive
     println!("cargo:warning=Extracting FFmpeg archive...");
@@ -473,6 +641,9 @@ pub fn download_ffmpeg(output_dir: &Path, config: &BundlerConfig) -> BundlerResu
         // macOS: Download separate ffprobe
         let ffprobe_archive = temp_dir.join(&ffprobe_src.filename);
         download_file_blocking(&ffprobe_src.url, &ffprobe_archive, config.timeout_seconds)?;
+        if config.verify_checksums {
+            verify_archive_checksum(&ffprobe_archive, ffprobe_src.sha256.as_deref())?;
+        }
 
         let ffprobe_extract_dir = extract_dir.join("ffprobe_extracted");
         std::fs::create_dir_all(&ffprobe_extract_dir)?;
