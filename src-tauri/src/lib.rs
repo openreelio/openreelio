@@ -659,43 +659,60 @@ impl ActiveProject {
         history.sanitize(operations);
     }
 
-    fn rebuild_state_from_history(&mut self) -> crate::core::CoreResult<()> {
+    fn build_state_from_history(
+        &self,
+        history: &mut ProjectHistory,
+    ) -> crate::core::CoreResult<ProjectState> {
         let read_result = self.ops_log.read_all_with_archive()?;
-        self.history.sanitize(&read_result.operations);
+        history.sanitize(&read_result.operations);
 
         let by_id: std::collections::HashMap<&str, crate::core::project::Operation> = read_result
             .operations
             .iter()
             .map(|op| (op.id.as_str(), op.clone()))
             .collect();
-        let active_ops = self
-            .history
+        let active_ops = history
             .applied_op_ids
             .iter()
             .filter_map(|op_id| by_id.get(op_id.as_str()).cloned())
             .collect::<Vec<_>>();
 
-        let meta = self
-            .history
+        let meta = history
             .base_meta
             .clone()
             .unwrap_or_else(|| self.state.meta.clone());
-        self.state = ProjectState::from_operations(active_ops, meta)?;
-        self.state.last_op_id = self.history.current_head().map(str::to_string);
-        self.state.op_count = self.history.applied_op_ids.len();
-        self.state.is_dirty = true;
+        let mut state = ProjectState::from_operations(active_ops, meta)?;
+        state.last_op_id = history.current_head().map(str::to_string);
+        state.op_count = history.applied_op_ids.len();
+        state.is_dirty = true;
+
+        Ok(state)
+    }
+
+    fn apply_history_candidate(
+        &mut self,
+        mut candidate_history: ProjectHistory,
+    ) -> crate::core::CoreResult<()> {
+        let candidate_state = self.build_state_from_history(&mut candidate_history)?;
+        candidate_history.save(&self.history_path)?;
+
+        self.history = candidate_history;
+        self.state = candidate_state;
         self.executor.clear_history();
 
         Ok(())
     }
 
-    fn visible_history_current_index(&self) -> i32 {
-        (self
-            .history
+    fn visible_history_current_index_for(history: &ProjectHistory) -> i32 {
+        (history
             .applied_op_ids
             .len()
-            .saturating_sub(self.history.protected_prefix_len) as i32)
+            .saturating_sub(history.protected_prefix_len) as i32)
             - 1
+    }
+
+    fn visible_history_current_index(&self) -> i32 {
+        Self::visible_history_current_index_for(&self.history)
     }
 
     pub fn can_undo_persisted(&mut self) -> crate::core::CoreResult<bool> {
@@ -788,19 +805,19 @@ impl ActiveProject {
             )));
         }
 
-        let mut current_index = self.visible_history_current_index();
+        let mut candidate_history = self.history.clone();
+        let mut current_index = Self::visible_history_current_index_for(&candidate_history);
         while current_index > target_index {
-            self.history.undo()?;
+            candidate_history.undo()?;
             current_index -= 1;
         }
 
         while current_index < target_index {
-            self.history.redo()?;
+            candidate_history.redo()?;
             current_index += 1;
         }
 
-        self.rebuild_state_from_history()?;
-        self.history.save(&self.history_path)?;
+        self.apply_history_candidate(candidate_history)?;
 
         Ok(self.visible_history_current_index())
     }
@@ -808,18 +825,18 @@ impl ActiveProject {
     /// Performs a persisted undo that survives process restarts.
     pub fn undo_persisted(&mut self) -> crate::core::CoreResult<OpId> {
         self.sync_history_with_ops_log()?;
-        let op_id = self.history.undo()?;
-        self.rebuild_state_from_history()?;
-        self.history.save(&self.history_path)?;
+        let mut candidate_history = self.history.clone();
+        let op_id = candidate_history.undo()?;
+        self.apply_history_candidate(candidate_history)?;
         Ok(op_id)
     }
 
     /// Performs a persisted redo that survives process restarts.
     pub fn redo_persisted(&mut self) -> crate::core::CoreResult<OpId> {
         self.sync_history_with_ops_log()?;
-        let op_id = self.history.redo()?;
-        self.rebuild_state_from_history()?;
-        self.history.save(&self.history_path)?;
+        let mut candidate_history = self.history.clone();
+        let op_id = candidate_history.redo()?;
+        self.apply_history_candidate(candidate_history)?;
         Ok(op_id)
     }
 }
@@ -2023,6 +2040,45 @@ mod tests {
 
         let reopened_after_redo = ActiveProject::open(project_path).unwrap();
         assert_eq!(reopened_after_redo.state.meta.name, "Updated Name");
+    }
+
+    #[test]
+    fn test_active_project_persisted_undo_keeps_history_when_replay_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("history_atomic_project");
+
+        let mut project = ActiveProject::create("History Atomic", project_path.clone()).unwrap();
+        project
+            .ops_log
+            .append(&crate::core::project::Operation::with_id(
+                "corrupt-replay-op",
+                crate::core::project::OpKind::AssetImport,
+                serde_json::json!({}),
+            ))
+            .unwrap();
+        project
+            .executor
+            .execute(
+                Box::new(
+                    crate::core::commands::UpdateProjectSettingsCommand::new()
+                        .with_name("Still Current"),
+                ),
+                &mut project.state,
+            )
+            .unwrap();
+        project.save().unwrap();
+
+        let history_before = project.history.clone();
+        let state_name_before = project.state.meta.name.clone();
+        let result = project.undo_persisted();
+
+        assert!(result.is_err());
+        assert_eq!(project.state.meta.name, state_name_before);
+        assert_eq!(
+            project.history.applied_op_ids,
+            history_before.applied_op_ids
+        );
+        assert_eq!(project.history.redo_op_ids, history_before.redo_op_ids);
     }
 
     #[test]
