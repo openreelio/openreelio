@@ -98,7 +98,11 @@ impl Permission {
 
         // Handle wildcard patterns
         if let Some(prefix) = pattern.strip_suffix("/*") {
-            return resource.starts_with(prefix);
+            return resource == prefix
+                || resource
+                    .strip_prefix(prefix)
+                    .map(|suffix| suffix.starts_with('/'))
+                    .unwrap_or(false);
         }
 
         if let Some(prefix) = pattern.strip_suffix('*') {
@@ -357,6 +361,8 @@ mod tests {
 
         assert!(perm.matches(&PermissionScope::FileRead, "assets/image.png"));
         assert!(perm.matches(&PermissionScope::FileRead, "assets/sub/file.txt"));
+        assert!(perm.matches(&PermissionScope::FileRead, "assets"));
+        assert!(!perm.matches(&PermissionScope::FileRead, "assets-archive/file.txt"));
         assert!(!perm.matches(&PermissionScope::FileRead, "other/file.txt"));
     }
 

@@ -101,6 +101,13 @@ impl PluginContext {
         permission_manager: Arc<PermissionManager>,
         base_data_dir: &Path,
     ) -> CoreResult<Self> {
+        if !is_safe_plugin_id(&plugin_id) {
+            return Err(CoreError::PluginError(format!(
+                "Invalid plugin ID for filesystem context: {}",
+                plugin_id
+            )));
+        }
+
         let data_dir = base_data_dir.join("plugins").join(&plugin_id);
         let temp_dir = base_data_dir.join("temp").join(&plugin_id);
 
@@ -399,6 +406,20 @@ impl PluginContext {
     }
 }
 
+fn is_safe_plugin_id(id: &str) -> bool {
+    !id.is_empty()
+        && id == id.trim()
+        && id.len() <= 128
+        && !id.starts_with('.')
+        && !id.ends_with('.')
+        && id.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        })
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -450,6 +471,20 @@ mod tests {
         assert!(context.data_dir().exists());
         assert!(context.temp_dir().exists());
         assert!(context.data_dir().ends_with("new-plugin"));
+    }
+
+    #[tokio::test]
+    async fn test_create_context_rejects_padded_plugin_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let permission_manager = Arc::new(PermissionManager::new());
+
+        let result = PluginContext::new(
+            " test-plugin ".to_string(),
+            permission_manager,
+            temp_dir.path(),
+        );
+
+        assert!(result.is_err());
     }
 
     // ========================================================================

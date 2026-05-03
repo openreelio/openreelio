@@ -21,7 +21,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "title": "OpenReelio",
@@ -36,10 +36,10 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' data: blob:; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline';",
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self';",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPCACHE/**", "$APPLOCALDATA/**"]
+        "scope": ["$APPCACHE/**"]
       }
     }
   },

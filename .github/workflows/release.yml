@@ -8,7 +8,10 @@ on:
 env:
   NODE_VERSION: '20'
   # Keep this in sync with `src-tauri/Cargo.toml` (`rust-version`).
-  RUST_VERSION: '1.85.0'
+  RUST_VERSION: '1.88.0'
+
+permissions:
+  contents: write
 
 # Code Signing Environment Variables (set via GitHub Secrets):
 # Windows Authenticode:
@@ -38,15 +41,10 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: actions/create-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
-          draft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          body: |
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > release-notes.md <<'EOF'
             ## What's Changed
 
             <!-- Release notes will be added here -->
@@ -59,6 +57,26 @@ jobs:
             | macOS (Intel) | [OpenReelio-${{ github.ref_name }}-macos-x64.dmg](#) |
             | macOS (Apple Silicon) | [OpenReelio-${{ github.ref_name }}-macos-arm64.dmg](#) |
             | Linux | [OpenReelio-${{ github.ref_name }}-linux-x64.AppImage](#) |
+          EOF
+
+          PRERELEASE_FLAG=""
+          if [[ "${{ contains(github.ref_name, '-') }}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          if gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" > release.json 2>/dev/null; then
+            echo "Release ${{ github.ref_name }} already exists; reusing it."
+          else
+            gh release create "${{ github.ref_name }}" \
+              --draft \
+              $PRERELEASE_FLAG \
+              --title "Release ${{ github.ref_name }}" \
+              --notes-file release-notes.md
+            gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" > release.json
+          fi
+
+          echo "id=$(jq -r '.id' release.json)" >> "$GITHUB_OUTPUT"
+          echo "upload_url=$(jq -r '.upload_url' release.json)" >> "$GITHUB_OUTPUT"
 
   build-tauri:
     name: Build (${{ matrix.platform }})
@@ -176,10 +194,12 @@ jobs:
           echo "macOS code signing certificate imported successfully"
         shell: bash
 
-      - name: Download FFmpeg binaries
+      - name: Download pinned FFmpeg binaries
+        if: ${{ vars.OPENREELIO_DOWNLOAD_FFMPEG == '1' }}
         working-directory: src-tauri
         env:
           OPENREELIO_DOWNLOAD_FFMPEG: "1"
+          OPENREELIO_ALLOW_UNVERIFIED_FFMPEG: ${{ vars.OPENREELIO_ALLOW_UNVERIFIED_FFMPEG }}
         run: cargo build --release
         timeout-minutes: 15
 
@@ -316,85 +336,82 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Download release artifacts info
-        uses: actions/github-script@v7
         id: get-release
-        with:
-          script: |
-            const release = await github.rest.repos.getRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: ${{ needs.create-release.outputs.release_id }}
-            });
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          MANIFEST="$(node <<'NODE'
+          const [owner, repo] = process.env.REPOSITORY.split('/');
+          const headers = {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+            'X-GitHub-Api-Version': '2022-11-28',
+          };
 
-            const assets = release.data.assets;
-            const version = release.data.tag_name.replace(/^v/, '');
-            const notes = release.data.body || '';
-            const pub_date = release.data.published_at || new Date().toISOString();
-
-            // Helper function to fetch signature with proper error handling
-            async function fetchSignature(sigAsset, assetName) {
-              if (!sigAsset) {
-                console.log(`No signature file found for ${assetName}`);
-                return '';
-              }
-              try {
-                const response = await fetch(sigAsset.browser_download_url);
-                if (!response.ok) {
-                  console.warn(`Warning: Failed to download signature for ${assetName}: ${response.statusText}`);
-                  return '';
-                }
-                return await response.text();
-              } catch (error) {
-                console.warn(`Warning: Error fetching signature for ${assetName}: ${error.message}`);
-                return '';
-              }
+          async function githubJson(path) {
+            const response = await fetch(`https://api.github.com${path}`, { headers });
+            if (!response.ok) {
+              throw new Error(`${path} failed: ${response.status} ${response.statusText}`);
             }
+            return response.json();
+          }
 
-            // Find platform-specific assets
-            const platforms = {};
+          const release = await githubJson(`/repos/${owner}/${repo}/releases/${process.env.RELEASE_ID}`);
+          const assets = release.assets;
+          const version = release.tag_name.replace(/^v/, '');
+          const notes = release.body || '';
+          const pub_date = release.published_at || new Date().toISOString();
 
-            for (const asset of assets) {
-              const name = asset.name.toLowerCase();
-              const url = asset.browser_download_url;
-
-              // Windows NSIS installer
-              if (name.endsWith('.nsis.zip')) {
-                const sigAsset = assets.find(a => a.name === asset.name + '.sig');
-                const signature = await fetchSignature(sigAsset, asset.name);
-                platforms['windows-x86_64'] = { signature, url };
-                if (!signature) console.warn(`Warning: windows-x86_64 will not support auto-update (missing signature)`);
-              }
-              // macOS Intel
-              else if (name.includes('x64') && name.endsWith('.app.tar.gz')) {
-                const sigAsset = assets.find(a => a.name === asset.name + '.sig');
-                const signature = await fetchSignature(sigAsset, asset.name);
-                platforms['darwin-x86_64'] = { signature, url };
-                if (!signature) console.warn(`Warning: darwin-x86_64 will not support auto-update (missing signature)`);
-              }
-              // macOS ARM
-              else if (name.includes('aarch64') && name.endsWith('.app.tar.gz')) {
-                const sigAsset = assets.find(a => a.name === asset.name + '.sig');
-                const signature = await fetchSignature(sigAsset, asset.name);
-                platforms['darwin-aarch64'] = { signature, url };
-                if (!signature) console.warn(`Warning: darwin-aarch64 will not support auto-update (missing signature)`);
-              }
-              // Linux AppImage
-              else if (name.endsWith('.appimage.tar.gz')) {
-                const sigAsset = assets.find(a => a.name === asset.name + '.sig');
-                const signature = await fetchSignature(sigAsset, asset.name);
-                platforms['linux-x86_64'] = { signature, url };
-                if (!signature) console.warn(`Warning: linux-x86_64 will not support auto-update (missing signature)`);
-              }
+          async function fetchSignature(sigAsset, assetName) {
+            if (!sigAsset) {
+              throw new Error(`No signature file found for ${assetName}`);
             }
+            const response = await fetch(sigAsset.browser_download_url, { headers });
+            if (!response.ok) {
+              throw new Error(`Failed to download signature for ${assetName}: ${response.statusText}`);
+            }
+            const signature = (await response.text()).trim();
+            if (!signature) {
+              throw new Error(`Signature file is empty for ${assetName}`);
+            }
+            return signature;
+          }
 
-            const manifest = {
-              version,
-              notes,
-              pub_date,
-              platforms
-            };
+          const platforms = {};
+          for (const asset of assets) {
+            const name = asset.name.toLowerCase();
+            const url = asset.browser_download_url;
+            if (name.endsWith('.nsis.zip')) {
+              const sigAsset = assets.find((a) => a.name === asset.name + '.sig');
+              platforms['windows-x86_64'] = { signature: await fetchSignature(sigAsset, asset.name), url };
+            } else if (name.includes('x64') && name.endsWith('.app.tar.gz')) {
+              const sigAsset = assets.find((a) => a.name === asset.name + '.sig');
+              platforms['darwin-x86_64'] = { signature: await fetchSignature(sigAsset, asset.name), url };
+            } else if (name.includes('aarch64') && name.endsWith('.app.tar.gz')) {
+              const sigAsset = assets.find((a) => a.name === asset.name + '.sig');
+              platforms['darwin-aarch64'] = { signature: await fetchSignature(sigAsset, asset.name), url };
+            } else if (name.endsWith('.appimage.tar.gz')) {
+              const sigAsset = assets.find((a) => a.name === asset.name + '.sig');
+              platforms['linux-x86_64'] = { signature: await fetchSignature(sigAsset, asset.name), url };
+            }
+          }
 
-            return JSON.stringify(manifest, null, 2);
+          const requiredPlatforms = ['windows-x86_64', 'darwin-x86_64', 'darwin-aarch64', 'linux-x86_64'];
+          const missingPlatforms = requiredPlatforms.filter((platform) => !platforms[platform]?.signature);
+          if (missingPlatforms.length > 0) {
+            throw new Error(`Missing signed updater artifacts for: ${missingPlatforms.join(', ')}`);
+          }
+
+          process.stdout.write(JSON.stringify({ version, notes, pub_date, platforms }, null, 2));
+          NODE
+          )"
+          {
+            echo 'result<<EOF'
+            echo "$MANIFEST"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create latest.json
         run: |
@@ -402,14 +419,9 @@ jobs:
           cat latest.json
 
       - name: Upload latest.json to release
-        uses: actions/upload-release-asset@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./latest.json
-          asset_name: latest.json
-          asset_content_type: application/json
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" latest.json --clobber
 
   publish-release:
     name: Publish Release
@@ -418,12 +430,6 @@ jobs:
 
     steps:
       - name: Publish Release
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.repos.updateRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: ${{ needs.create-release.outputs.release_id }},
-              draft: false
-            });
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ github.ref_name }}" --draft=false

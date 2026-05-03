@@ -47,6 +47,12 @@ interface JsonSchemaLike {
   items?: JsonSchemaLike;
 }
 
+const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const FORBIDDEN_OBJECT_KEY_REFERENCE: StepValueReference = Object.freeze({
+  $fromStep: '<forbidden-object-key>',
+  $path: '<forbidden-object-key>',
+});
+
 export function isStepValueReference(value: unknown): value is StepValueReference {
   if (!isRecord(value)) {
     return false;
@@ -126,8 +132,16 @@ export function resolveStepValueReferences<T>(
       return currentValue;
     }
 
-    const next: Record<string, unknown> = {};
+    const next: Record<string, unknown> = Object.create(null);
     for (const [key, nested] of Object.entries(currentValue)) {
+      if (FORBIDDEN_OBJECT_KEYS.has(key)) {
+        errors.push({
+          sourcePath: `${currentPath}.${key}`,
+          reference: FORBIDDEN_OBJECT_KEY_REFERENCE,
+          reason: `Forbidden object key '${key}'`,
+        });
+        continue;
+      }
       next[key] = resolveValue(nested, `${currentPath}.${key}`);
     }
 
@@ -191,8 +205,11 @@ function normalizeValue(value: unknown, schema?: JsonSchemaLike): unknown {
     return value;
   }
 
-  const normalized: Record<string, unknown> = {};
+  const normalized: Record<string, unknown> = Object.create(null);
   for (const [key, nested] of Object.entries(value)) {
+    if (FORBIDDEN_OBJECT_KEYS.has(key)) {
+      continue;
+    }
     normalized[key] = normalizeValue(nested, schema?.properties?.[key]);
   }
 

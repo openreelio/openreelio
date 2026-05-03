@@ -3,12 +3,13 @@
 //! Tauri IPC commands for app lifecycle, playhead synchronization,
 //! application settings, credential management, and auto-updates.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{Manager, State};
 
+use crate::core::credentials::{CredentialType, CredentialVault};
 use crate::core::settings::{AppSettings, SettingsManager};
 use crate::AppState;
 
@@ -326,9 +327,9 @@ impl From<AppSettings> for AppSettingsDto {
                     crate::core::settings::ProviderType::Local => ProviderTypeDto::Local,
                 }),
                 vision_model: s.ai.vision_model,
-                openai_api_key: s.ai.openai_api_key,
-                anthropic_api_key: s.ai.anthropic_api_key,
-                google_api_key: s.ai.google_api_key,
+                openai_api_key: None,
+                anthropic_api_key: None,
+                google_api_key: None,
                 ollama_url: s.ai.ollama_url,
                 temperature: s.ai.temperature,
                 max_tokens: s.ai.max_tokens,
@@ -352,7 +353,7 @@ impl From<AppSettings> for AppSettingsDto {
                 },
                 cache_duration_hours: s.ai.cache_duration_hours,
                 local_only_mode: s.ai.local_only_mode,
-                seedance_api_key: s.ai.seedance_api_key,
+                seedance_api_key: None,
                 video_gen_provider: s.ai.video_gen_provider,
                 video_gen_default_quality: s.ai.video_gen_default_quality,
                 video_gen_budget_cents: s.ai.video_gen_budget_cents,
@@ -439,9 +440,9 @@ impl From<AppSettingsDto> for AppSettings {
                     ProviderTypeDto::Local => ProviderType::Local,
                 }),
                 vision_model: dto.ai.vision_model,
-                openai_api_key: dto.ai.openai_api_key,
-                anthropic_api_key: dto.ai.anthropic_api_key,
-                google_api_key: dto.ai.google_api_key,
+                openai_api_key: None,
+                anthropic_api_key: None,
+                google_api_key: None,
                 ollama_url: dto.ai.ollama_url,
                 temperature: dto.ai.temperature,
                 max_tokens: dto.ai.max_tokens,
@@ -459,7 +460,7 @@ impl From<AppSettingsDto> for AppSettings {
                 },
                 cache_duration_hours: dto.ai.cache_duration_hours,
                 local_only_mode: dto.ai.local_only_mode,
-                seedance_api_key: dto.ai.seedance_api_key,
+                seedance_api_key: None,
                 video_gen_provider: dto.ai.video_gen_provider,
                 video_gen_default_quality: dto.ai.video_gen_default_quality,
                 video_gen_budget_cents: dto.ai.video_gen_budget_cents,
@@ -635,6 +636,120 @@ fn merge_json(base: &mut serde_json::Value, patch: serde_json::Value) {
     }
 }
 
+fn has_plaintext_secret_value(value: &serde_json::Value) -> bool {
+    const SECRET_KEYS: &[&str] = &[
+        "openaiApiKey",
+        "anthropicApiKey",
+        "googleApiKey",
+        "seedanceApiKey",
+        "openai_api_key",
+        "anthropic_api_key",
+        "google_api_key",
+        "seedance_api_key",
+    ];
+
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(key, nested)| {
+            let is_secret_key = SECRET_KEYS.contains(&key.as_str());
+            if is_secret_key {
+                return nested
+                    .as_str()
+                    .map(|secret| !secret.trim().is_empty())
+                    .unwrap_or(!nested.is_null());
+            }
+            has_plaintext_secret_value(nested)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(has_plaintext_secret_value),
+        _ => false,
+    }
+}
+
+fn dto_contains_plaintext_secrets(settings: &AppSettingsDto) -> bool {
+    settings
+        .ai
+        .openai_api_key
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+        || settings
+            .ai
+            .anthropic_api_key
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        || settings
+            .ai
+            .google_api_key
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        || settings
+            .ai
+            .seedance_api_key
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+}
+
+fn take_legacy_credentials(settings: &mut AppSettings) -> Vec<(CredentialType, String)> {
+    let mut credentials = Vec::new();
+
+    if let Some(value) = settings.ai.openai_api_key.take() {
+        if !value.trim().is_empty() {
+            credentials.push((CredentialType::OpenaiApiKey, value));
+        }
+    }
+    if let Some(value) = settings.ai.anthropic_api_key.take() {
+        if !value.trim().is_empty() {
+            credentials.push((CredentialType::AnthropicApiKey, value));
+        }
+    }
+    if let Some(value) = settings.ai.google_api_key.take() {
+        if !value.trim().is_empty() {
+            credentials.push((CredentialType::GoogleApiKey, value));
+        }
+    }
+    if let Some(value) = settings.ai.seedance_api_key.take() {
+        if !value.trim().is_empty() {
+            credentials.push((CredentialType::SeedanceApiKey, value));
+        }
+    }
+
+    credentials
+}
+
+async fn migrate_legacy_credentials_from_settings(
+    app_data_dir: &Path,
+    state: &AppState,
+    settings: &mut AppSettings,
+) -> Result<bool, String> {
+    let credentials = take_legacy_credentials(settings);
+    if credentials.is_empty() {
+        return Ok(false);
+    }
+
+    let vault_path = app_data_dir.join("credentials.vault");
+    let mut guard = state.credential_vault.lock().await;
+    if guard.is_none() {
+        *guard = Some(
+            CredentialVault::new(vault_path)
+                .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
+        );
+    }
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| "Credential vault unavailable".to_string())?;
+
+    for (credential_type, value) in credentials {
+        vault
+            .store(credential_type, value.trim())
+            .await
+            .map_err(|e| format!("Failed to migrate legacy credential: {}", e))?;
+    }
+
+    Ok(true)
+}
+
 // =============================================================================
 // App Lifecycle Commands
 // =============================================================================
@@ -722,19 +837,35 @@ pub async fn get_playhead_position(
 /// Gets application settings
 #[tauri::command]
 #[specta::specta]
-pub async fn get_settings(app: tauri::AppHandle) -> Result<AppSettingsDto, String> {
+pub async fn get_settings(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppSettingsDto, String> {
     let app_data_dir = get_app_data_dir(&app)?;
-    let manager = SettingsManager::new(app_data_dir);
-    let settings = manager.load();
+    let manager = SettingsManager::new(app_data_dir.clone());
+    let mut settings = manager.load();
+    if migrate_legacy_credentials_from_settings(&app_data_dir, &state, &mut settings).await? {
+        manager.save(&settings)?;
+    }
     Ok(settings.into())
 }
 
 /// Saves application settings
 #[tauri::command]
 #[specta::specta]
-pub async fn set_settings(app: tauri::AppHandle, settings: AppSettingsDto) -> Result<(), String> {
+pub async fn set_settings(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    settings: AppSettingsDto,
+) -> Result<(), String> {
+    if dto_contains_plaintext_secrets(&settings) {
+        return Err("API keys must be stored with store_credential, not settings".to_string());
+    }
+
     let app_data_dir = get_app_data_dir(&app)?;
-    let manager = SettingsManager::new(app_data_dir);
+    let manager = SettingsManager::new(app_data_dir.clone());
+    let mut existing_settings = manager.load();
+    migrate_legacy_credentials_from_settings(&app_data_dir, &state, &mut existing_settings).await?;
     let app_settings: AppSettings = settings.into();
     manager.save(&app_settings).map(|_| ())
 }
@@ -745,9 +876,14 @@ pub async fn set_settings(app: tauri::AppHandle, settings: AppSettingsDto) -> Re
 pub async fn update_settings(
     app: tauri::AppHandle,
     partial: serde_json::Value,
+    state: State<'_, AppState>,
 ) -> Result<AppSettingsDto, String> {
+    if has_plaintext_secret_value(&partial) {
+        return Err("API keys must be stored with store_credential, not settings".to_string());
+    }
+
     let app_data_dir = get_app_data_dir(&app)?;
-    let manager = SettingsManager::new(app_data_dir);
+    let manager = SettingsManager::new(app_data_dir.clone());
 
     // Load current settings
     let current = manager.load();
@@ -758,8 +894,9 @@ pub async fn update_settings(
     merge_json(&mut current_json, partial);
 
     // Deserialize back to AppSettings
-    let updated: AppSettings = serde_json::from_value(current_json)
+    let mut updated: AppSettings = serde_json::from_value(current_json)
         .map_err(|e| format!("Failed to apply settings update: {}", e))?;
+    migrate_legacy_credentials_from_settings(&app_data_dir, &state, &mut updated).await?;
 
     // Save and return
     let saved = manager.save(&updated)?;
@@ -779,8 +916,6 @@ pub async fn reset_settings(app: tauri::AppHandle) -> Result<AppSettingsDto, Str
 // =============================================================================
 // Credential Commands (Secure API Key Storage)
 // =============================================================================
-
-use crate::core::credentials::{CredentialType, CredentialVault};
 
 /// Stores an API key securely in the encrypted vault
 ///

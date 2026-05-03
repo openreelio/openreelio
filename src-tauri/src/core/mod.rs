@@ -29,6 +29,7 @@ pub mod search;
 pub mod settings;
 pub mod shapes;
 pub mod template;
+pub mod terminal_command_line;
 pub mod text;
 pub mod timeline;
 pub mod tracking;

@@ -35,7 +35,6 @@ fn get_app_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
 }
 
 /// Retrieves the Google API key from the credential vault.
-/// Falls back to settings for backwards compatibility.
 async fn get_google_api_key(app: &tauri::AppHandle) -> Result<Option<String>, String> {
     let app_data_dir = get_app_data_dir(app)?;
     let vault_path = app_data_dir.join("credentials.vault");
@@ -54,16 +53,6 @@ async fn get_google_api_key(app: &tauri::AppHandle) -> Result<Option<String>, St
             Err(e) => {
                 tracing::warn!("Failed to open credential vault: {}", e);
             }
-        }
-    }
-
-    // Fall back to settings for backwards compatibility
-    let settings_manager = SettingsManager::new(app_data_dir);
-    let settings = settings_manager.load();
-
-    if let Some(ref api_key) = settings.ai.google_api_key {
-        if !api_key.is_empty() {
-            return Ok(Some(api_key.clone()));
         }
     }
 
@@ -395,15 +384,6 @@ pub async fn configure_cloud_provider(
         .store(CredentialType::GoogleApiKey, trimmed)
         .await
         .map_err(|e| format!("Failed to store API key securely: {}", e))?;
-
-    // Also save to settings for backwards compatibility
-    let settings_manager = SettingsManager::new(app_data_dir);
-    let mut settings = settings_manager.load();
-    settings.ai.google_api_key = Some(trimmed.to_string());
-
-    settings_manager
-        .save(&settings)
-        .map_err(|e| format!("Failed to save settings: {}", e))?;
 
     // Verify the key works (optional health check)
     let guard = state.project.lock().await;

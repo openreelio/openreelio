@@ -49,7 +49,7 @@ describe('permissionStore', () => {
     expect(store.resolvePermission('custom_tool')).toBe('ask');
   });
 
-  it('should allow project-scoped workspace tools by builtin policy', () => {
+  it('should allow workspace reads but require approval for workspace mutations by default', () => {
     const store = usePermissionStore.getState();
 
     expect(store.resolvePermission('read_workspace_document')).toBe('allow');
@@ -57,12 +57,12 @@ describe('permissionStore', () => {
       store.resolvePermission('write_workspace_document', {
         relativePath: 'docs/ROADMAP.md',
       }),
-    ).toBe('allow');
+    ).toBe('ask');
     expect(
       store.resolvePermission('delete_workspace_entry', {
         relativePath: 'docs/ROADMAP.md',
       }),
-    ).toBe('allow');
+    ).toBe('ask');
   });
 
   it('should add global rules', () => {
@@ -108,19 +108,19 @@ describe('permissionStore', () => {
     expect(usePermissionStore.getState().resolvePermission('read_workspace_document')).toBe('deny');
   });
 
-  it('should expose builtin workspace policy details when no user rule overrides it', () => {
+  it('should expose workspace read policy details when no user rule overrides it', () => {
     const store = usePermissionStore.getState();
+    usePermissionStore.setState({ globalRules: [] });
 
-    const resolution = store.resolvePermissionDetails('write_workspace_document', {
+    const resolution = store.resolvePermissionDetails('read_workspace_document', {
       relativePath: 'docs/ROADMAP.md',
     });
 
     expect(resolution).toMatchObject({
       subjectType: 'resource',
-      subject: 'workspace.document.write#path:docs/ROADMAP.md',
+      subject: 'workspace.document.read#path:docs/ROADMAP.md',
       permission: 'allow',
-      matchedRuleId: null,
-      matchedPattern: 'workspace.**',
+      matchedPattern: 'workspace.document.read',
       matchedScope: null,
       source: 'builtin',
     });

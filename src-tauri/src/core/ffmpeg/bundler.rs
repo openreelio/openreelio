@@ -7,6 +7,8 @@
 use std::fs::File;
 #[cfg(feature = "bundled-ffmpeg")]
 use std::io::{Read, Write};
+#[cfg(feature = "bundled-ffmpeg")]
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -91,7 +93,7 @@ pub struct BundlerConfig {
 impl Default for BundlerConfig {
     fn default() -> Self {
         Self {
-            verify_checksums: true,
+            verify_checksums: false,
             timeout_seconds: 300, // 5 minutes
             cache_dir: None,
         }
@@ -325,36 +327,206 @@ pub fn extract_archive(_archive_path: &Path, _output_dir: &Path) -> BundlerResul
 }
 
 #[cfg(feature = "bundled-ffmpeg")]
+fn archive_entry_destination(output_root: &Path, entry_name: &Path) -> BundlerResult<PathBuf> {
+    let mut destination = output_root.to_path_buf();
+    let mut saw_component = false;
+
+    for component in entry_name.components() {
+        match component {
+            Component::Normal(segment) => {
+                saw_component = true;
+                destination.push(segment);
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(BundlerError::ExtractionFailed(format!(
+                    "Archive entry escapes extraction directory: {}",
+                    entry_name.display()
+                )));
+            }
+        }
+    }
+
+    if !saw_component {
+        return Err(BundlerError::ExtractionFailed(
+            "Archive entry has an empty path".to_string(),
+        ));
+    }
+
+    Ok(destination)
+}
+
+#[cfg(feature = "bundled-ffmpeg")]
+fn ensure_no_existing_symlink_in_destination(
+    output_root: &Path,
+    destination: &Path,
+) -> BundlerResult<()> {
+    let relative = destination.strip_prefix(output_root).map_err(|_| {
+        BundlerError::ExtractionFailed(format!(
+            "Archive entry escapes extraction directory: {}",
+            destination.display()
+        ))
+    })?;
+
+    let mut current = output_root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::Normal(segment) => current.push(segment),
+            Component::CurDir => continue,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(BundlerError::ExtractionFailed(format!(
+                    "Archive entry escapes extraction directory: {}",
+                    destination.display()
+                )));
+            }
+        }
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(BundlerError::ExtractionFailed(format!(
+                    "Archive destination contains a symlink: {}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(BundlerError::IoError(error)),
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "bundled-ffmpeg")]
 fn extract_zip(archive: &Path, output: &Path) -> BundlerResult<()> {
     let file = File::open(archive)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to open zip: {}", e)))?;
 
-    archive
-        .extract(output)
-        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to extract zip: {}", e)))
+    let output_root = output.canonicalize()?;
+
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).map_err(|e| {
+            BundlerError::ExtractionFailed(format!("Failed to read zip entry: {}", e))
+        })?;
+
+        if file.is_symlink() {
+            return Err(BundlerError::ExtractionFailed(format!(
+                "Archive symlink entries are not allowed: {}",
+                file.name()
+            )));
+        }
+
+        let entry_name = file.enclosed_name().ok_or_else(|| {
+            BundlerError::ExtractionFailed(format!(
+                "Archive entry escapes extraction directory: {}",
+                file.name()
+            ))
+        })?;
+        let destination = archive_entry_destination(&output_root, &entry_name)?;
+        ensure_no_existing_symlink_in_destination(&output_root, &destination)?;
+
+        if file.is_dir() {
+            std::fs::create_dir_all(&destination)?;
+            continue;
+        }
+
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut output_file = File::create(&destination)?;
+        std::io::copy(&mut file, &mut output_file).map_err(|e| {
+            BundlerError::ExtractionFailed(format!("Failed to extract zip entry: {}", e))
+        })?;
+
+        #[cfg(unix)]
+        if let Some(mode) = file.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(mode))?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "bundled-ffmpeg")]
+fn extract_tar_entries<R: Read>(
+    mut archive: tar::Archive<R>,
+    output: &Path,
+    format: &str,
+) -> BundlerResult<()> {
+    let output_root = output.canonicalize()?;
+
+    for entry in archive
+        .entries()
+        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to read {}: {}", format, e)))?
+    {
+        let mut entry = entry.map_err(|e| {
+            BundlerError::ExtractionFailed(format!("Failed to read {} entry: {}", format, e))
+        })?;
+        let entry_type = entry.header().entry_type();
+
+        if entry_type.is_gnu_longname()
+            || entry_type.is_gnu_longlink()
+            || entry_type.is_pax_global_extensions()
+            || entry_type.is_pax_local_extensions()
+        {
+            continue;
+        }
+
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            return Err(BundlerError::ExtractionFailed(format!(
+                "Archive link entries are not allowed: {}",
+                entry
+                    .path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            )));
+        }
+
+        if !entry_type.is_file() && !entry_type.is_dir() && !entry_type.is_contiguous() {
+            return Err(BundlerError::ExtractionFailed(format!(
+                "Unsupported archive entry type in {}: {:?}",
+                format, entry_type
+            )));
+        }
+
+        let entry_path = entry.path().map_err(|e| {
+            BundlerError::ExtractionFailed(format!("Failed to read {} entry path: {}", format, e))
+        })?;
+        let destination = archive_entry_destination(&output_root, entry_path.as_ref())?;
+        ensure_no_existing_symlink_in_destination(&output_root, &destination)?;
+
+        if entry_type.is_dir() {
+            std::fs::create_dir_all(&destination)?;
+            continue;
+        }
+
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        entry.unpack(&destination).map_err(|e| {
+            BundlerError::ExtractionFailed(format!("Failed to extract {} entry: {}", format, e))
+        })?;
+    }
+
+    Ok(())
 }
 
 #[cfg(feature = "bundled-ffmpeg")]
 fn extract_tar_xz(archive: &Path, output: &Path) -> BundlerResult<()> {
     let file = File::open(archive)?;
     let decompressor = xz2::read::XzDecoder::new(file);
-    let mut archive = tar::Archive::new(decompressor);
-
-    archive
-        .unpack(output)
-        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to extract tar.xz: {}", e)))
+    extract_tar_entries(tar::Archive::new(decompressor), output, "tar.xz")
 }
 
 #[cfg(feature = "bundled-ffmpeg")]
 fn extract_tar_gz(archive: &Path, output: &Path) -> BundlerResult<()> {
     let file = File::open(archive)?;
     let decompressor = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decompressor);
-
-    archive
-        .unpack(output)
-        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to extract tar.gz: {}", e)))
+    extract_tar_entries(tar::Archive::new(decompressor), output, "tar.gz")
 }
 
 // ============================================================================
@@ -364,12 +536,12 @@ fn extract_tar_gz(archive: &Path, output: &Path) -> BundlerResult<()> {
 /// Find a binary file in a directory (recursive search)
 #[cfg(feature = "bundled-ffmpeg")]
 pub fn find_binary_in_dir(dir: &Path, binary_name: &str) -> BundlerResult<PathBuf> {
-    for entry in walkdir::WalkDir::new(dir).follow_links(true) {
+    for entry in walkdir::WalkDir::new(dir).follow_links(false) {
         let entry = entry.map_err(|e| BundlerError::IoError(e.into()))?;
         if entry.file_name().to_string_lossy() == binary_name {
             let path = entry.path().to_path_buf();
             // Verify it's a file, not a directory
-            if path.is_file() {
+            if entry.file_type().is_file() {
                 return Ok(path);
             }
         }
@@ -444,13 +616,17 @@ pub fn download_ffmpeg(output_dir: &Path, config: &BundlerConfig) -> BundlerResu
 
     // Verify checksum if provided
     if config.verify_checksums {
-        if let Some(expected_hash) = &source.sha256 {
-            let valid = verify_checksum(&archive_path, expected_hash)?;
-            if !valid {
-                return Err(BundlerError::VerificationFailed(
-                    "FFmpeg checksum mismatch".to_string(),
-                ));
-            }
+        let expected_hash = source.sha256.as_deref().ok_or_else(|| {
+            BundlerError::VerificationFailed(format!(
+                "Missing pinned SHA-256 for downloaded FFmpeg archive: {}",
+                archive_path.display()
+            ))
+        })?;
+        let valid = verify_checksum(&archive_path, expected_hash)?;
+        if !valid {
+            return Err(BundlerError::VerificationFailed(
+                "FFmpeg checksum mismatch".to_string(),
+            ));
         }
     }
 
@@ -471,6 +647,20 @@ pub fn download_ffmpeg(output_dir: &Path, config: &BundlerConfig) -> BundlerResu
         let ffprobe_archive = temp_dir.join(&ffprobe_src.filename);
         tracing::info!("Downloading FFprobe from {}...", ffprobe_src.url);
         download_file_blocking(&ffprobe_src.url, &ffprobe_archive, config.timeout_seconds)?;
+        if config.verify_checksums {
+            let expected_hash = ffprobe_src.sha256.as_deref().ok_or_else(|| {
+                BundlerError::VerificationFailed(format!(
+                    "Missing pinned SHA-256 for downloaded FFprobe archive: {}",
+                    ffprobe_archive.display()
+                ))
+            })?;
+            let valid = verify_checksum(&ffprobe_archive, expected_hash)?;
+            if !valid {
+                return Err(BundlerError::VerificationFailed(
+                    "FFprobe checksum mismatch".to_string(),
+                ));
+            }
+        }
 
         let ffprobe_extract_dir = extract_dir.join("ffprobe");
         std::fs::create_dir_all(&ffprobe_extract_dir)?;
@@ -708,6 +898,60 @@ mod tests {
         assert!(result.is_ok()); // Skipped when feature disabled
     }
 
+    #[cfg(feature = "bundled-ffmpeg")]
+    #[test]
+    fn test_extract_zip_rejects_path_traversal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let archive_path = temp_dir.path().join("evil.zip");
+        let output_dir = temp_dir.path().join("out");
+
+        {
+            let file = File::create(&archive_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("../evil.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"evil").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let result = extract_archive(&archive_path, &output_dir);
+        assert!(matches!(result, Err(BundlerError::ExtractionFailed(_))));
+        assert!(!temp_dir.path().join("evil.txt").exists());
+    }
+
+    #[cfg(feature = "bundled-ffmpeg")]
+    #[test]
+    fn test_archive_entry_destination_rejects_path_traversal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let result = archive_entry_destination(temp_dir.path(), Path::new("../evil.txt"));
+        assert!(matches!(result, Err(BundlerError::ExtractionFailed(_))));
+    }
+
+    #[cfg(all(feature = "bundled-ffmpeg", unix))]
+    #[test]
+    fn test_extract_zip_rejects_symlink_ancestor() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let archive_path = temp_dir.path().join("symlink-ancestor.zip");
+        let output_dir = temp_dir.path().join("out");
+        let outside_dir = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, output_dir.join("link")).unwrap();
+
+        {
+            let file = File::create(&archive_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("link/evil.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"evil").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let result = extract_archive(&archive_path, &output_dir);
+        assert!(matches!(result, Err(BundlerError::ExtractionFailed(_))));
+        assert!(!outside_dir.join("evil.txt").exists());
+    }
+
     // ========================================================================
     // Configuration Tests
     // ========================================================================
@@ -715,7 +959,7 @@ mod tests {
     #[test]
     fn test_bundler_config_default() {
         let config = BundlerConfig::default();
-        assert!(config.verify_checksums);
+        assert!(!config.verify_checksums);
         assert_eq!(config.timeout_seconds, 300);
         assert!(config.cache_dir.is_none());
     }

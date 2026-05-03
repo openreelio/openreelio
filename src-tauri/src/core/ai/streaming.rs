@@ -143,7 +143,7 @@ pub struct StreamToolDefinition {
 /// This is stored separately from the `Box<dyn AIProvider>` in the gateway
 /// because the trait does not expose streaming capabilities. The streaming
 /// command needs raw HTTP access (API key, base URL, provider type).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StreamingProviderConfig {
     /// Provider type identifier.
     pub provider_type: ProviderType,
@@ -153,6 +153,17 @@ pub struct StreamingProviderConfig {
     pub base_url: String,
     /// Default model to use.
     pub model: String,
+}
+
+impl std::fmt::Debug for StreamingProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamingProviderConfig")
+            .field("provider_type", &self.provider_type)
+            .field("api_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .finish()
+    }
 }
 
 /// Module-level storage for the active streaming provider configuration.
