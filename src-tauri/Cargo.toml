@@ -6,9 +6,14 @@ authors = ["OpenReelio Team"]
 license = "MIT"
 repository = "https://github.com/openreelio/openreelio"
 edition = "2021"
-# Note: transitive dependencies require Rust >= 1.85 (e.g. crates using Edition 2024).
-rust-version = "1.85"
+# Note: transitive dependencies require Rust >= 1.88 (e.g. `time` 0.3.47).
+rust-version = "1.88"
 default-run = "openreelio"
+
+[lints.clippy]
+# Rust 1.88 promotes this style lint under `-D warnings`; keep the MSRV/security
+# upgrade scoped instead of rewriting unrelated formatting across the codebase.
+uninlined_format_args = "allow"
 
 [lib]
 name = "openreelio_lib"
@@ -111,8 +116,8 @@ meilisearch-sdk = { version = "0.27", optional = true }
 futures = { version = "0.3", optional = true }
 
 # WASM Plugin System
-wasmtime = "27"
-wasmtime-wasi = "27"
+wasmtime = "36.0.7"
+wasmtime-wasi = "36.0.7"
 
 # Workspace filesystem scanning and watching
 notify = { version = "7", features = ["macos_fsevent"] }

@@ -44,7 +44,7 @@ fn main() {
 
                 // Copy binaries to src-tauri/binaries for bundling
                 if let Err(e) = copy_binaries_for_bundle(&paths) {
-                    println!("cargo:warning=Failed to copy binaries for bundling: {}", e);
+                    println!("cargo:warning=Failed to copy binaries for bundling: {e}");
                 }
             }
             Err(e) => {
@@ -131,7 +131,7 @@ fn should_download_ffmpeg() -> bool {
 
 /// Download FFmpeg binaries to OUT_DIR
 fn download_ffmpeg_for_build() -> Result<FFmpegPaths, String> {
-    let out_dir = env::var("OUT_DIR").map_err(|e| format!("OUT_DIR not set: {}", e))?;
+    let out_dir = env::var("OUT_DIR").map_err(|e| format!("OUT_DIR not set: {e}"))?;
     let output_dir = PathBuf::from(out_dir);
 
     let config = BundlerConfig {
@@ -149,11 +149,11 @@ fn download_ffmpeg_for_build() -> Result<FFmpegPaths, String> {
 /// Copy downloaded binaries to src-tauri/binaries for Tauri bundling
 fn copy_binaries_for_bundle(paths: &FFmpegPaths) -> Result<(), String> {
     let manifest_dir =
-        env::var("CARGO_MANIFEST_DIR").map_err(|e| format!("CARGO_MANIFEST_DIR not set: {}", e))?;
+        env::var("CARGO_MANIFEST_DIR").map_err(|e| format!("CARGO_MANIFEST_DIR not set: {e}"))?;
     let binaries_dir = PathBuf::from(&manifest_dir).join("binaries");
 
     std::fs::create_dir_all(&binaries_dir)
-        .map_err(|e| format!("Failed to create binaries dir: {}", e))?;
+        .map_err(|e| format!("Failed to create binaries dir: {e}"))?;
 
     // Get binary names for current platform
     let (ffmpeg_name, ffprobe_name) = get_binary_names(detect_platform());
@@ -162,9 +162,9 @@ fn copy_binaries_for_bundle(paths: &FFmpegPaths) -> Result<(), String> {
     let dest_ffprobe = binaries_dir.join(ffprobe_name);
 
     std::fs::copy(&paths.ffmpeg, &dest_ffmpeg)
-        .map_err(|e| format!("Failed to copy ffmpeg: {}", e))?;
+        .map_err(|e| format!("Failed to copy ffmpeg: {e}"))?;
     std::fs::copy(&paths.ffprobe, &dest_ffprobe)
-        .map_err(|e| format!("Failed to copy ffprobe: {}", e))?;
+        .map_err(|e| format!("Failed to copy ffprobe: {e}"))?;
 
     println!(
         "cargo:warning=Binaries copied to {}",
@@ -221,12 +221,12 @@ pub enum BundlerError {
 impl std::fmt::Display for BundlerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BundlerError::DownloadFailed(msg) => write!(f, "Download failed: {}", msg),
-            BundlerError::ExtractionFailed(msg) => write!(f, "Extraction failed: {}", msg),
-            BundlerError::VerificationFailed(msg) => write!(f, "Verification failed: {}", msg),
-            BundlerError::UnsupportedPlatform(msg) => write!(f, "Unsupported platform: {}", msg),
-            BundlerError::IoError(e) => write!(f, "IO error: {}", e),
-            BundlerError::BinaryNotFound(msg) => write!(f, "Binary not found: {}", msg),
+            BundlerError::DownloadFailed(msg) => write!(f, "Download failed: {msg}"),
+            BundlerError::ExtractionFailed(msg) => write!(f, "Extraction failed: {msg}"),
+            BundlerError::VerificationFailed(msg) => write!(f, "Verification failed: {msg}"),
+            BundlerError::UnsupportedPlatform(msg) => write!(f, "Unsupported platform: {msg}"),
+            BundlerError::IoError(e) => write!(f, "IO error: {e}"),
+            BundlerError::BinaryNotFound(msg) => write!(f, "Binary not found: {msg}"),
         }
     }
 }
@@ -293,8 +293,7 @@ fn get_ffmpeg_download_url(platform: Platform, arch: Arch) -> BundlerResult<Down
             sha256: None,
         }),
         _ => Err(BundlerError::UnsupportedPlatform(format!(
-            "{:?} {:?}",
-            platform, arch
+            "{platform:?} {arch:?}"
         ))),
     }
 }
@@ -321,12 +320,12 @@ fn download_file_blocking(url: &str, output: &Path, timeout_secs: u64) -> Bundle
         .build()
         .map_err(|e| BundlerError::DownloadFailed(e.to_string()))?;
 
-    println!("cargo:warning=Downloading from {}...", url);
+    println!("cargo:warning=Downloading from {url}...");
 
     let response = client
         .get(url)
         .send()
-        .map_err(|e| BundlerError::DownloadFailed(format!("Request failed: {}", e)))?;
+        .map_err(|e| BundlerError::DownloadFailed(format!("Request failed: {e}")))?;
 
     if !response.status().is_success() {
         return Err(BundlerError::DownloadFailed(format!(
@@ -338,7 +337,7 @@ fn download_file_blocking(url: &str, output: &Path, timeout_secs: u64) -> Bundle
 
     let bytes = response
         .bytes()
-        .map_err(|e| BundlerError::DownloadFailed(format!("Failed to read response: {}", e)))?;
+        .map_err(|e| BundlerError::DownloadFailed(format!("Failed to read response: {e}")))?;
 
     let mut file = File::create(output)?;
     file.write_all(&bytes)?;
@@ -404,8 +403,7 @@ fn extract_archive(archive_path: &Path, output_dir: &Path) -> BundlerResult<()> 
         extract_tar_gz(archive_path, output_dir)
     } else {
         Err(BundlerError::ExtractionFailed(format!(
-            "Unsupported archive format: {}",
-            filename
+            "Unsupported archive format: {filename}"
         )))
     }
 }
@@ -482,13 +480,13 @@ fn ensure_no_existing_symlink_in_destination(
 fn extract_zip(archive: &Path, output: &Path) -> BundlerResult<()> {
     let file = File::open(archive)?;
     let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to open zip: {}", e)))?;
+        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to open zip: {e}")))?;
 
     let output_root = output.canonicalize()?;
 
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).map_err(|e| {
-            BundlerError::ExtractionFailed(format!("Failed to read zip entry: {}", e))
+            BundlerError::ExtractionFailed(format!("Failed to read zip entry: {e}"))
         })?;
 
         if file.is_symlink() {
@@ -518,7 +516,7 @@ fn extract_zip(archive: &Path, output: &Path) -> BundlerResult<()> {
 
         let mut output_file = File::create(&destination)?;
         std::io::copy(&mut file, &mut output_file).map_err(|e| {
-            BundlerError::ExtractionFailed(format!("Failed to extract zip entry: {}", e))
+            BundlerError::ExtractionFailed(format!("Failed to extract zip entry: {e}"))
         })?;
 
         #[cfg(unix)]
@@ -540,10 +538,10 @@ fn extract_tar_entries<R: Read>(
 
     for entry in archive
         .entries()
-        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to read {}: {}", format, e)))?
+        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to read {format}: {e}")))?
     {
         let mut entry = entry.map_err(|e| {
-            BundlerError::ExtractionFailed(format!("Failed to read {} entry: {}", format, e))
+            BundlerError::ExtractionFailed(format!("Failed to read {format} entry: {e}"))
         })?;
         let entry_type = entry.header().entry_type();
 
@@ -567,13 +565,12 @@ fn extract_tar_entries<R: Read>(
 
         if !entry_type.is_file() && !entry_type.is_dir() && !entry_type.is_contiguous() {
             return Err(BundlerError::ExtractionFailed(format!(
-                "Unsupported archive entry type in {}: {:?}",
-                format, entry_type
+                "Unsupported archive entry type in {format}: {entry_type:?}"
             )));
         }
 
         let entry_path = entry.path().map_err(|e| {
-            BundlerError::ExtractionFailed(format!("Failed to read {} entry path: {}", format, e))
+            BundlerError::ExtractionFailed(format!("Failed to read {format} entry path: {e}"))
         })?;
         let destination = archive_entry_destination(&output_root, entry_path.as_ref())?;
         ensure_no_existing_symlink_in_destination(&output_root, &destination)?;
@@ -588,7 +585,7 @@ fn extract_tar_entries<R: Read>(
         }
 
         entry.unpack(&destination).map_err(|e| {
-            BundlerError::ExtractionFailed(format!("Failed to extract {} entry: {}", format, e))
+            BundlerError::ExtractionFailed(format!("Failed to extract {format} entry: {e}"))
         })?;
     }
 
@@ -633,9 +630,7 @@ fn verify_binary(path: &Path) -> BundlerResult<()> {
     let output = std::process::Command::new(path)
         .arg("-version")
         .output()
-        .map_err(|e| {
-            BundlerError::VerificationFailed(format!("Failed to execute binary: {}", e))
-        })?;
+        .map_err(|e| BundlerError::VerificationFailed(format!("Failed to execute binary: {e}")))?;
 
     if output.status.success() {
         Ok(())
