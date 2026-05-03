@@ -192,12 +192,12 @@ impl PluginManifest {
     }
 
     fn is_safe_plugin_id(id: &str) -> bool {
-        let trimmed = id.trim();
-        !trimmed.is_empty()
-            && trimmed.len() <= 128
-            && !trimmed.starts_with('.')
-            && !trimmed.ends_with('.')
-            && trimmed.split('.').all(|segment| {
+        !id.is_empty()
+            && id == id.trim()
+            && id.len() <= 128
+            && !id.starts_with('.')
+            && !id.ends_with('.')
+            && id.split('.').all(|segment| {
                 !segment.is_empty()
                     && segment
                         .chars()
@@ -368,6 +368,25 @@ mod tests {
     fn test_parse_unsafe_id_fails() {
         let json = r#"{
             "id": "../escape",
+            "name": "Test",
+            "version": "1.0.0",
+            "entry": "plugin.wasm",
+            "permissions": {},
+            "capabilities": ["AssetProvider"]
+        }"#;
+
+        let result = PluginManifest::parse(json);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid plugin ID"));
+    }
+
+    #[test]
+    fn test_parse_padded_id_fails() {
+        let json = r#"{
+            "id": " com.example.safe ",
             "name": "Test",
             "version": "1.0.0",
             "entry": "plugin.wasm",

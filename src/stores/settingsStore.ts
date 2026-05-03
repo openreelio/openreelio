@@ -648,11 +648,17 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
             return;
           }
 
+          const strippedValues = stripUndefined(
+            section === 'ai'
+              ? stripSecretSettingsValues(values as Record<string, unknown>)
+              : (values as Record<string, unknown>),
+          );
+
           // Update local state immediately for responsive UI (optimistic update)
           set((state) => {
             state.settings[section] = {
               ...state.settings[section],
-              ...values,
+              ...strippedValues,
             } as AppSettings[typeof section];
           });
 
@@ -660,13 +666,6 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
             // Web build: keep the optimistic update only.
             return;
           }
-
-          // Accumulate partial updates for debounced batch save
-          const strippedValues = stripUndefined(
-            section === 'ai'
-              ? stripSecretSettingsValues(values as Record<string, unknown>)
-              : (values as Record<string, unknown>),
-          );
 
           // Check for pending sections limit to prevent memory issues
           if (

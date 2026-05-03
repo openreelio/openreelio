@@ -60,7 +60,7 @@ export function TerminalSettings({
   const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
   const selectedProfileId = useMemo(() => {
-    if (!settings.defaultShellCommand) {
+    if (settings.defaultShellCommand == null) {
       return SYSTEM_DEFAULT_ID;
     }
 

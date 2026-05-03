@@ -659,15 +659,14 @@ impl ActiveProject {
         history.sanitize(operations);
     }
 
-    fn build_state_from_history(
+    fn build_state_from_operations(
         &self,
         history: &mut ProjectHistory,
+        operations: &[crate::core::project::Operation],
     ) -> crate::core::CoreResult<ProjectState> {
-        let read_result = self.ops_log.read_all_with_archive()?;
-        history.sanitize(&read_result.operations);
+        history.sanitize(operations);
 
-        let by_id: std::collections::HashMap<&str, crate::core::project::Operation> = read_result
-            .operations
+        let by_id: std::collections::HashMap<&str, crate::core::project::Operation> = operations
             .iter()
             .map(|op| (op.id.as_str(), op.clone()))
             .collect();
@@ -693,7 +692,10 @@ impl ActiveProject {
         &mut self,
         mut candidate_history: ProjectHistory,
     ) -> crate::core::CoreResult<()> {
-        let candidate_state = self.build_state_from_history(&mut candidate_history)?;
+        let read_result = self.ops_log.read_all_with_archive()?;
+        Self::sync_history_with_operations(&mut candidate_history, &read_result.operations);
+        let candidate_state =
+            self.build_state_from_operations(&mut candidate_history, &read_result.operations)?;
         candidate_history.save(&self.history_path)?;
 
         self.history = candidate_history;
@@ -2069,16 +2071,71 @@ mod tests {
         project.save().unwrap();
 
         let history_before = project.history.clone();
+        let history_file_before = std::fs::read(&project.history_path).unwrap();
         let state_name_before = project.state.meta.name.clone();
+        let last_op_id_before = project.state.last_op_id.clone();
+        let op_count_before = project.state.op_count;
+        let is_dirty_before = project.state.is_dirty;
         let result = project.undo_persisted();
 
         assert!(result.is_err());
         assert_eq!(project.state.meta.name, state_name_before);
+        assert_eq!(project.state.last_op_id, last_op_id_before);
+        assert_eq!(project.state.op_count, op_count_before);
+        assert_eq!(project.state.is_dirty, is_dirty_before);
+        assert_eq!(
+            std::fs::read(&project.history_path).unwrap(),
+            history_file_before
+        );
         assert_eq!(
             project.history.applied_op_ids,
             history_before.applied_op_ids
         );
         assert_eq!(project.history.redo_op_ids, history_before.redo_op_ids);
+    }
+
+    #[test]
+    fn test_active_project_apply_history_candidate_keeps_concurrent_ops() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("history_concurrent_project");
+
+        let mut project = ActiveProject::create("History Concurrent", project_path).unwrap();
+        project
+            .executor
+            .execute(
+                Box::new(
+                    crate::core::commands::UpdateProjectSettingsCommand::new()
+                        .with_name("Undo Candidate"),
+                ),
+                &mut project.state,
+            )
+            .unwrap();
+        project.save().unwrap();
+
+        project.sync_history_with_ops_log().unwrap();
+        let mut candidate_history = project.history.clone();
+        candidate_history.undo().unwrap();
+
+        project
+            .executor
+            .execute(
+                Box::new(
+                    crate::core::commands::UpdateProjectSettingsCommand::new()
+                        .with_name("Concurrent Update"),
+                ),
+                &mut project.state,
+            )
+            .unwrap();
+        let concurrent_op_id = project.state.last_op_id.clone().unwrap();
+
+        project.apply_history_candidate(candidate_history).unwrap();
+
+        assert_eq!(project.state.meta.name, "Concurrent Update");
+        assert_eq!(
+            project.history.current_head(),
+            Some(concurrent_op_id.as_str())
+        );
+        assert!(project.history.redo_op_ids.is_empty());
     }
 
     #[test]

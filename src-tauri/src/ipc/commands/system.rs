@@ -853,13 +853,19 @@ pub async fn get_settings(
 /// Saves application settings
 #[tauri::command]
 #[specta::specta]
-pub async fn set_settings(app: tauri::AppHandle, settings: AppSettingsDto) -> Result<(), String> {
+pub async fn set_settings(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    settings: AppSettingsDto,
+) -> Result<(), String> {
     if dto_contains_plaintext_secrets(&settings) {
         return Err("API keys must be stored with store_credential, not settings".to_string());
     }
 
     let app_data_dir = get_app_data_dir(&app)?;
     let manager = SettingsManager::new(app_data_dir.clone());
+    let mut existing_settings = manager.load();
+    migrate_legacy_credentials_from_settings(&app_data_dir, &state, &mut existing_settings).await?;
     let app_settings: AppSettings = settings.into();
     manager.save(&app_settings).map(|_| ())
 }

@@ -70,6 +70,9 @@ describe('stepReferences', () => {
         safe: 'value',
         ['__proto__']: { polluted: true },
         constructor: { prototype: { polluted: true } },
+        nested: {
+          constructor: { prototype: { polluted: true } },
+        },
       },
       { type: 'object' },
     ) as Record<string, unknown>;
@@ -78,6 +81,9 @@ describe('stepReferences', () => {
     expect(Object.prototype).not.toHaveProperty('polluted');
     expect(Object.prototype.hasOwnProperty.call(normalized, '__proto__')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(normalized, 'constructor')).toBe(false);
+    expect(
+      Object.prototype.hasOwnProperty.call(normalized.nested as object, 'constructor'),
+    ).toBe(false);
   });
 
   it('reports unsafe object keys while resolving references', () => {
@@ -85,17 +91,27 @@ describe('stepReferences', () => {
       {
         safe: { $fromStep: 'step-1', $path: 'data.value' },
         prototype: { polluted: true },
+        nested: {
+          constructor: { polluted: true },
+        },
       },
       () => ({ ok: true as const, value: 'resolved' }),
     );
 
     expect((result.value as Record<string, unknown>).safe).toBe('resolved');
     expect(Object.prototype.hasOwnProperty.call(result.value as object, 'prototype')).toBe(false);
+    expect(
+      Object.prototype.hasOwnProperty.call((result.value as Record<string, unknown>).nested!, 'constructor'),
+    ).toBe(false);
     expect(result.errors).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           sourcePath: '$.prototype',
           reason: "Forbidden object key 'prototype'",
+        }),
+        expect.objectContaining({
+          sourcePath: '$.nested.constructor',
+          reason: "Forbidden object key 'constructor'",
         }),
       ]),
     );

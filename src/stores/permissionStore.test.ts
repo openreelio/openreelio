@@ -110,6 +110,7 @@ describe('permissionStore', () => {
 
   it('should expose workspace read policy details when no user rule overrides it', () => {
     const store = usePermissionStore.getState();
+    usePermissionStore.setState({ globalRules: [] });
 
     const resolution = store.resolvePermissionDetails('read_workspace_document', {
       relativePath: 'docs/ROADMAP.md',
@@ -119,9 +120,9 @@ describe('permissionStore', () => {
       subjectType: 'resource',
       subject: 'workspace.document.read#path:docs/ROADMAP.md',
       permission: 'allow',
-      matchedPattern: 'read_*',
-      matchedScope: 'global',
-      source: 'global_policy',
+      matchedPattern: 'workspace.document.read',
+      matchedScope: null,
+      source: 'builtin',
     });
   });
 

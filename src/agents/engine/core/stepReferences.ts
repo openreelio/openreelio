@@ -48,6 +48,10 @@ interface JsonSchemaLike {
 }
 
 const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const FORBIDDEN_OBJECT_KEY_REFERENCE: StepValueReference = Object.freeze({
+  $fromStep: '<forbidden-object-key>',
+  $path: '<forbidden-object-key>',
+});
 
 export function isStepValueReference(value: unknown): value is StepValueReference {
   if (!isRecord(value)) {
@@ -133,7 +137,7 @@ export function resolveStepValueReferences<T>(
       if (FORBIDDEN_OBJECT_KEYS.has(key)) {
         errors.push({
           sourcePath: `${currentPath}.${key}`,
-          reference: { $fromStep: '', $path: '' },
+          reference: FORBIDDEN_OBJECT_KEY_REFERENCE,
           reason: `Forbidden object key '${key}'`,
         });
         continue;

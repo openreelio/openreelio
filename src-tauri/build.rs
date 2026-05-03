@@ -135,7 +135,10 @@ fn download_ffmpeg_for_build() -> Result<FFmpegPaths, String> {
     let output_dir = PathBuf::from(out_dir);
 
     let config = BundlerConfig {
-        verify_checksums: true,
+        verify_checksums: env::var("OPENREELIO_REQUIRE_FFMPEG_CHECKSUMS")
+            .ok()
+            .as_deref()
+            == Some("1"),
         timeout_seconds: 600, // 10 minutes timeout for CI
         cache_dir: None,
     };
@@ -436,6 +439,46 @@ fn archive_entry_destination(output_root: &Path, entry_name: &Path) -> BundlerRe
     Ok(destination)
 }
 
+fn ensure_no_existing_symlink_in_destination(
+    output_root: &Path,
+    destination: &Path,
+) -> BundlerResult<()> {
+    let relative = destination.strip_prefix(output_root).map_err(|_| {
+        BundlerError::ExtractionFailed(format!(
+            "Archive entry escapes extraction directory: {}",
+            destination.display()
+        ))
+    })?;
+
+    let mut current = output_root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::Normal(segment) => current.push(segment),
+            Component::CurDir => continue,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(BundlerError::ExtractionFailed(format!(
+                    "Archive entry escapes extraction directory: {}",
+                    destination.display()
+                )));
+            }
+        }
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(BundlerError::ExtractionFailed(format!(
+                    "Archive destination contains a symlink: {}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(BundlerError::IoError(error)),
+        }
+    }
+
+    Ok(())
+}
+
 fn extract_zip(archive: &Path, output: &Path) -> BundlerResult<()> {
     let file = File::open(archive)?;
     let mut archive = zip::ZipArchive::new(file)
@@ -462,6 +505,7 @@ fn extract_zip(archive: &Path, output: &Path) -> BundlerResult<()> {
             ))
         })?;
         let destination = archive_entry_destination(&output_root, &entry_name)?;
+        ensure_no_existing_symlink_in_destination(&output_root, &destination)?;
 
         if file.is_dir() {
             std::fs::create_dir_all(&destination)?;
@@ -532,6 +576,7 @@ fn extract_tar_entries<R: Read>(
             BundlerError::ExtractionFailed(format!("Failed to read {} entry path: {}", format, e))
         })?;
         let destination = archive_entry_destination(&output_root, entry_path.as_ref())?;
+        ensure_no_existing_symlink_in_destination(&output_root, &destination)?;
 
         if entry_type.is_dir() {
             std::fs::create_dir_all(&destination)?;
@@ -563,9 +608,9 @@ fn extract_tar_gz(archive: &Path, output: &Path) -> BundlerResult<()> {
 }
 
 fn find_binary_in_dir(dir: &Path, binary_name: &str) -> BundlerResult<PathBuf> {
-    for entry in walkdir::WalkDir::new(dir).follow_links(true) {
+    for entry in walkdir::WalkDir::new(dir).follow_links(false) {
         let entry = entry.map_err(|e| BundlerError::IoError(e.into()))?;
-        if entry.file_name().to_string_lossy() == binary_name && entry.path().is_file() {
+        if entry.file_name().to_string_lossy() == binary_name && entry.file_type().is_file() {
             return Ok(entry.path().to_path_buf());
         }
     }

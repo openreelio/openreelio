@@ -154,9 +154,6 @@ impl PluginHost {
             }
         }
 
-        // Register permissions
-        self.permission_manager.register_plugin(&manifest).await?;
-
         // Load WASM module
         let plugin_dir_canon = plugin_dir.canonicalize().map_err(|e| {
             CoreError::PluginError(format!("Failed to resolve plugin directory: {}", e))
@@ -176,6 +173,9 @@ impl PluginHost {
 
         let module = Module::new(&self.engine, &wasm_bytes)
             .map_err(|e| CoreError::PluginError(format!("Failed to compile WASM module: {}", e)))?;
+
+        // Register permissions only after all fallible load steps have succeeded.
+        self.permission_manager.register_plugin(&manifest).await?;
 
         // Create plugin context
         let context = Arc::new(PluginContext::new(
@@ -532,6 +532,25 @@ mod tests {
 
         let result = host.load_plugin(&empty_dir).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_plugin_missing_wasm_does_not_register_permissions() {
+        let temp_dir = TempDir::new().unwrap();
+        let host =
+            PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
+
+        let plugin_dir = create_test_plugin_dir(&temp_dir);
+        std::fs::remove_file(plugin_dir.join("plugin.wasm")).unwrap();
+
+        let result = host.load_plugin(&plugin_dir).await;
+
+        assert!(result.is_err());
+        assert!(host
+            .permission_manager()
+            .get_permissions("test.plugin")
+            .await
+            .is_empty());
     }
 
     #[tokio::test]

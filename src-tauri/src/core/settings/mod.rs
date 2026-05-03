@@ -923,16 +923,32 @@ impl AISettings {
             .map(ToOwned::to_owned);
     }
 
-    /// Get the API key for the specified provider
+    /// Get a legacy API key for the specified provider.
+    ///
+    /// New credential checks should use the credential vault; this only reports
+    /// values that still exist in pre-migration settings.
     pub fn get_api_key(&self, provider: ProviderType) -> Option<&str> {
-        let _ = provider;
-        None
+        match provider {
+            ProviderType::OpenAI => self.openai_api_key.as_deref(),
+            ProviderType::Anthropic => self.anthropic_api_key.as_deref(),
+            ProviderType::Gemini => self.google_api_key.as_deref(),
+            ProviderType::Local => None,
+        }
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     }
 
-    /// Check if the provider is configured with necessary credentials
+    /// Check if the provider is configured in legacy settings.
+    ///
+    /// Vault-backed cloud credential status is exposed by credential IPC
+    /// commands because `AISettings` intentionally does not own the vault.
     pub fn is_provider_configured(&self, provider: ProviderType) -> bool {
         match provider {
-            ProviderType::Local => self.ollama_url.is_some(),
+            ProviderType::Local => self
+                .ollama_url
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|url| !url.is_empty()),
             _ => self.get_api_key(provider).is_some(),
         }
     }

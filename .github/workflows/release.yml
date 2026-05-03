@@ -64,15 +64,19 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          gh release create "${{ github.ref_name }}" \
-            --draft \
-            $PRERELEASE_FLAG \
-            --title "Release ${{ github.ref_name }}" \
-            --notes-file release-notes.md
+          if gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" > release.json 2>/dev/null; then
+            echo "Release ${{ github.ref_name }} already exists; reusing it."
+          else
+            gh release create "${{ github.ref_name }}" \
+              --draft \
+              $PRERELEASE_FLAG \
+              --title "Release ${{ github.ref_name }}" \
+              --notes-file release-notes.md
+            gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" > release.json
+          fi
 
-          RELEASE_JSON="$(gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}")"
-          echo "id=$(jq -r '.id' <<< "$RELEASE_JSON")" >> "$GITHUB_OUTPUT"
-          echo "upload_url=$(jq -r '.upload_url' <<< "$RELEASE_JSON")" >> "$GITHUB_OUTPUT"
+          echo "id=$(jq -r '.id' release.json)" >> "$GITHUB_OUTPUT"
+          echo "upload_url=$(jq -r '.upload_url' release.json)" >> "$GITHUB_OUTPUT"
 
   build-tauri:
     name: Build (${{ matrix.platform }})
