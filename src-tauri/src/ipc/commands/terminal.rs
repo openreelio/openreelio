@@ -16,10 +16,7 @@ use serde_json::Value;
 use specta::Type;
 use tauri::{Emitter, Manager, State};
 
-use crate::{
-    core::{settings::SettingsManager, terminal_command_line::parse_terminal_command_line},
-    AppState,
-};
+use crate::{core::terminal_command_line::parse_terminal_command_line, AppState};
 
 const DEFAULT_TERMINAL_COLS: u16 = 120;
 const DEFAULT_TERMINAL_ROWS: u16 = 32;
@@ -28,7 +25,6 @@ const MAX_TERMINAL_COLS: u16 = 400;
 const MIN_TERMINAL_ROWS: u16 = 5;
 const MAX_TERMINAL_ROWS: u16 = 200;
 const TERMINAL_READ_BUFFER_BYTES: usize = 8192;
-const CUSTOM_TERMINAL_PROFILE_SOURCE: &str = "settings";
 
 type TerminalWriter = Box<dyn Write + Send>;
 type TerminalChild = Box<dyn portable_pty::Child + Send + Sync>;
@@ -595,32 +591,7 @@ fn detect_unix_profiles(
 ) {
 }
 
-fn push_custom_terminal_profile(
-    profiles: &mut Vec<DetectedTerminalProfile>,
-    seen: &mut HashSet<String>,
-    command_line: Option<&str>,
-    default_command_line: &str,
-) {
-    let Some(command_line) = command_line
-        .map(str::trim)
-        .filter(|command| !command.is_empty())
-    else {
-        return;
-    };
-
-    push_profile(
-        profiles,
-        seen,
-        "Custom command line".to_string(),
-        command_line.to_string(),
-        CUSTOM_TERMINAL_PROFILE_SOURCE,
-        default_command_line,
-    );
-}
-
-fn list_available_terminal_profiles(
-    custom_command_line: Option<&str>,
-) -> Vec<DetectedTerminalProfile> {
+fn list_available_terminal_profiles() -> Vec<DetectedTerminalProfile> {
     let default_command_line = resolve_shell(None);
     let mut profiles = Vec::new();
     let mut seen = HashSet::new();
@@ -640,12 +611,6 @@ fn list_available_terminal_profiles(
 
     detect_windows_profiles(&mut profiles, &mut seen, &default_command_line);
     detect_unix_profiles(&mut profiles, &mut seen, &default_command_line);
-    push_custom_terminal_profile(
-        &mut profiles,
-        &mut seen,
-        custom_command_line,
-        &default_command_line,
-    );
 
     profiles.sort_by(|left, right| {
         right.is_default.cmp(&left.is_default).then_with(|| {
@@ -662,7 +627,6 @@ fn resolve_terminal_profile(
     profile_id: Option<String>,
     legacy_shell: Option<String>,
     legacy_shell_args: Option<Vec<String>>,
-    custom_command_line: Option<&str>,
 ) -> Result<ResolvedTerminalProfile, String> {
     if legacy_shell
         .as_deref()
@@ -679,7 +643,7 @@ fn resolve_terminal_profile(
         );
     }
 
-    let profiles = list_available_terminal_profiles(custom_command_line);
+    let profiles = list_available_terminal_profiles();
     let selected = if let Some(profile_id) = profile_id
         .map(|id| id.trim().to_string())
         .filter(|id| !id.is_empty())
@@ -704,22 +668,6 @@ fn resolve_terminal_profile(
         args,
         command_line: selected.command_line.clone(),
     })
-}
-
-fn configured_terminal_command(app: &tauri::AppHandle) -> Result<Option<String>, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("Failed to resolve app data directory: {error}"))?;
-    let settings = SettingsManager::new(app_data_dir).load();
-
-    Ok(settings
-        .terminal
-        .default_shell_command
-        .as_deref()
-        .map(str::trim)
-        .filter(|command| !command.is_empty())
-        .map(ToOwned::to_owned))
 }
 
 async fn get_terminal_session(
@@ -831,15 +779,10 @@ pub async fn shutdown_all_terminal_sessions(state: &AppState) {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn list_terminal_profiles(
-    app: tauri::AppHandle,
-) -> Result<Vec<DetectedTerminalProfile>, String> {
-    let custom_command_line = configured_terminal_command(&app)?;
-    tokio::task::spawn_blocking(move || {
-        list_available_terminal_profiles(custom_command_line.as_deref())
-    })
-    .await
-    .map_err(|error| format!("Terminal profile enumeration failed: {error}"))
+pub async fn list_terminal_profiles() -> Result<Vec<DetectedTerminalProfile>, String> {
+    tokio::task::spawn_blocking(list_available_terminal_profiles)
+        .await
+        .map_err(|error| format!("Terminal profile enumeration failed: {error}"))
 }
 
 #[tauri::command]
@@ -864,13 +807,7 @@ pub async fn start_terminal_session(
         MAX_TERMINAL_ROWS,
     );
     let cwd = resolve_terminal_cwd(input.cwd, &state).await?;
-    let custom_command_line = configured_terminal_command(&app)?;
-    let profile = resolve_terminal_profile(
-        input.profile_id,
-        input.shell,
-        input.shell_args,
-        custom_command_line.as_deref(),
-    )?;
+    let profile = resolve_terminal_profile(input.profile_id, input.shell, input.shell_args)?;
 
     {
         let sessions = state.terminal_sessions.lock().await;
