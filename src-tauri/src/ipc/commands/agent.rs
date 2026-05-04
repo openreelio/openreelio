@@ -3,7 +3,8 @@
 //! Tauri commands for agent-related operations:
 //! trace file writing, plan execution, and memory persistence.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use tauri::State;
@@ -30,6 +31,117 @@ use crate::AppState;
 // Trace Writing
 // =============================================================================
 
+fn validate_trace_id(trace_id: &str) -> Result<(), String> {
+    if trace_id.is_empty() {
+        return Err("Invalid trace_id: empty".to_string());
+    }
+    if trace_id.len() > 128 {
+        return Err("Invalid trace_id: must be 128 characters or fewer".to_string());
+    }
+    if !trace_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(
+            "Invalid trace_id: only ASCII letters, digits, '-' and '_' are allowed".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn ensure_plain_directory(path: &Path, label: &str) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(format!("{label} must not be a symlink: {}", path.display()));
+            }
+            if !metadata.is_dir() {
+                return Err(format!("{label} is not a directory: {}", path.display()));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path)
+                .map_err(|e| format!("Failed to create {label} {}: {}", path.display(), e))?;
+            let metadata = std::fs::symlink_metadata(path)
+                .map_err(|e| format!("Failed to inspect {label} {}: {}", path.display(), e))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(format!(
+                    "{label} is not a plain directory: {}",
+                    path.display()
+                ));
+            }
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect {label} {}: {}",
+                path.display(),
+                error
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_traces_dir(project_path: &Path) -> Result<PathBuf, String> {
+    let openreelio_dir = project_path.join(".openreelio");
+    ensure_plain_directory(&openreelio_dir, ".openreelio directory")?;
+
+    let traces_dir = openreelio_dir.join("traces");
+    ensure_plain_directory(&traces_dir, "traces directory")?;
+    Ok(traces_dir)
+}
+
+fn write_trace_file_no_symlink(file_path: &Path, trace_json: &str) -> Result<(), String> {
+    if let Ok(metadata) = std::fs::symlink_metadata(file_path) {
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Trace file destination must not be a symlink: {}",
+                file_path.display()
+            ));
+        }
+        if !metadata.is_file() {
+            return Err(format!(
+                "Trace file destination is not a file: {}",
+                file_path.display()
+            ));
+        }
+    }
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let tmp_path = file_path.with_extension(format!("json.tmp.{}.{}", std::process::id(), nonce));
+
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("Failed to create temporary trace file: {}", e))?;
+        file.write_all(trace_json.as_bytes())
+            .map_err(|e| format!("Failed to write temporary trace file: {}", e))?;
+        file.sync_all()
+            .map_err(|e| format!("Failed to sync temporary trace file: {}", e))?;
+    }
+
+    if let Ok(metadata) = std::fs::symlink_metadata(file_path) {
+        if metadata.file_type().is_symlink() {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!(
+                "Trace file destination must not be a symlink: {}",
+                file_path.display()
+            ));
+        }
+        std::fs::remove_file(file_path)
+            .map_err(|e| format!("Failed to replace existing trace file: {}", e))?;
+    }
+
+    std::fs::rename(&tmp_path, file_path)
+        .map_err(|e| format!("Failed to finalize trace file: {}", e))?;
+    Ok(())
+}
+
 /// Write an agent trace JSON file to the project's trace directory.
 ///
 /// Traces are stored at `{project_path}/.openreelio/traces/{trace_id}.json`.
@@ -51,26 +163,19 @@ pub async fn write_agent_trace(
         project.path.clone()
     };
 
-    let traces_dir = project_path.join(".openreelio").join("traces");
-
-    // Ensure traces directory exists
-    tokio::fs::create_dir_all(&traces_dir)
-        .await
-        .map_err(|e| format!("Failed to create traces directory: {}", e))?;
+    validate_trace_id(&trace_id)?;
+    let traces_dir = ensure_traces_dir(&project_path)?;
 
     // Rotate old traces if needed
     rotate_traces(&traces_dir, max_files).await;
-
-    // Sanitize trace_id to prevent path traversal
-    if trace_id.contains('/') || trace_id.contains('\\') || trace_id.contains("..") {
-        return Err("Invalid trace_id: contains path separators or '..'".to_string());
-    }
-
-    // Write the trace file
     let file_path = traces_dir.join(format!("{}.json", trace_id));
-    tokio::fs::write(&file_path, trace_json.as_bytes())
-        .await
-        .map_err(|e| format!("Failed to write trace file: {}", e))?;
+
+    let file_path_for_write = file_path.clone();
+    tokio::task::spawn_blocking(move || {
+        write_trace_file_no_symlink(&file_path_for_write, &trace_json)
+    })
+    .await
+    .map_err(|e| format!("Trace write task failed: {}", e))??;
 
     tracing::debug!("Agent trace written: {}", file_path.display());
     Ok(())
