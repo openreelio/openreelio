@@ -19,7 +19,7 @@ const mockResults: AssetSearchResultItem[] = [
     endSec: 15.0,
     score: 0.95,
     reasons: ['Transcript match: "hello world"'],
-    thumbnailUri: '/path/to/thumb1.jpg',
+    thumbnailUri: 'asset://localhost/path/to/thumb1.jpg',
     source: 'transcript',
   },
   {
@@ -134,7 +134,7 @@ describe('SearchResults', () => {
       render(<SearchResults results={mockResults} showThumbnails />);
 
       const thumbnail = screen.getByAltText('Interview.mp4');
-      expect(thumbnail).toHaveAttribute('src', '/path/to/thumb1.jpg');
+      expect(thumbnail).toHaveAttribute('src', 'asset://localhost/path/to/thumb1.jpg');
     });
 
     it('should render placeholder when thumbnail is not available', () => {
