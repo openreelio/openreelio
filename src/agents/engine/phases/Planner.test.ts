@@ -1269,7 +1269,8 @@ describe('Planner', () => {
 
     it('should append project prompt addendum when provided', async () => {
       const customPlanner = createPlanner(mockLLM, mockToolExecutor, {
-        projectPromptAddendum: '<custom_instructions>\nPrefer hard cuts\n</custom_instructions>',
+        projectPromptAddendum:
+          '<project_instructions trust="untrusted">\nPrefer hard cuts\n</project_instructions>',
       });
 
       mockLLM.setStructuredResponse({
@@ -1286,7 +1287,7 @@ describe('Planner', () => {
 
       const request = mockLLM.getLastRequest();
       const systemMessage = request?.messages.find((message) => message.role === 'system');
-      expect(systemMessage?.content).toContain('<custom_instructions>');
+      expect(systemMessage?.content).toContain('<project_instructions trust="untrusted">');
       expect(systemMessage?.content).toContain('Prefer hard cuts');
     });
   });

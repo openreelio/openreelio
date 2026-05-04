@@ -953,7 +953,7 @@ describe('AgentLoop', () => {
       expect(systemMsg).toContain('Preference captionStyle: clean lower thirds');
       expect(systemMsg).toContain('Recent operations: split_clip');
       expect(systemMsg).toContain('Correction: when the user says "cut at five seconds"');
-      expect(systemMsg).toContain('<custom_instructions>');
+      expect(systemMsg).toContain('<project_instructions trust="untrusted">');
     });
 
     it('should sanitize learned context and custom instructions in the system message', async () => {
