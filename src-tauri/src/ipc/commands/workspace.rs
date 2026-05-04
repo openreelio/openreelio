@@ -10,12 +10,15 @@
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tauri::State;
 use walkdir::{DirEntry, WalkDir};
 
 use crate::core::assets::{media_kind_from_extension, AssetKind};
+use crate::core::fs::{
+    validate_scoped_output_path, validate_workspace_relative_path, write_bytes_atomic_no_symlink,
+};
 use crate::core::project::{OpKind, Operation};
 use crate::core::workspace::{
     ignore::IgnoreRules,
@@ -721,7 +724,7 @@ pub async fn write_workspace_document(
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
     let allow_create = create_if_missing.unwrap_or(true);
-    let absolute_path = resolve_workspace_path(&project.path, &relative_path, true)?;
+    let absolute_path = resolve_workspace_output_path(&project.path, &relative_path)?;
 
     if !is_text_document_path(&absolute_path) {
         return Err("File type is not supported for text editing".to_string());
@@ -744,16 +747,7 @@ pub async fn write_workspace_document(
         return Err(format!("File not found: {}", relative_path));
     }
 
-    if let Some(parent) = absolute_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "Failed to create parent directories for '{}': {}",
-                relative_path, e
-            )
-        })?;
-    }
-
-    std::fs::write(&absolute_path, content_bytes)
+    write_bytes_atomic_no_symlink(&absolute_path, content_bytes, "workspace document")
         .map_err(|e| format!("Failed to write file '{}': {}", relative_path, e))?;
 
     let normalized_relative = absolute_path
@@ -856,37 +850,12 @@ fn is_text_document_path(path: &Path) -> bool {
     )
 }
 
-fn validate_relative_path(relative_path: &str) -> Result<PathBuf, String> {
-    let trimmed = relative_path.trim();
-    if trimmed.is_empty() {
-        return Err("relativePath is required".to_string());
-    }
-
-    if trimmed.chars().any(|c| c.is_control()) {
-        return Err("relativePath contains control characters".to_string());
-    }
-
-    let candidate = PathBuf::from(trimmed);
-    if candidate.is_absolute() {
-        return Err("Path must be relative to project root".to_string());
-    }
-
-    if candidate
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
-    {
-        return Err("Path cannot contain parent directory traversal".to_string());
-    }
-
-    Ok(candidate)
-}
-
 fn resolve_workspace_path(
     project_root: &Path,
     relative_path: &str,
     allow_missing: bool,
 ) -> Result<PathBuf, String> {
-    let relative = validate_relative_path(relative_path)?;
+    let relative = validate_workspace_relative_path(relative_path)?;
     let absolute = project_root.join(relative);
 
     let canonical_root = project_root
@@ -929,6 +898,16 @@ fn resolve_workspace_path(
     }
 
     Ok(absolute)
+}
+
+fn resolve_workspace_output_path(
+    project_root: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let relative = validate_workspace_relative_path(relative_path)?;
+    let absolute = project_root.join(relative);
+    let absolute_str = absolute.to_string_lossy().to_string();
+    validate_scoped_output_path(&absolute_str, "workspace document path", &[project_root])
 }
 
 /// Convert internal FileTreeEntry to DTO, populating asset_id and missing flag
@@ -1101,15 +1080,24 @@ mod tests {
 
     #[test]
     fn validate_relative_path_rejects_traversal_and_absolute_paths() {
-        assert!(validate_relative_path("docs/readme.md").is_ok());
-        assert!(validate_relative_path("../secrets.txt").is_err());
+        assert!(validate_workspace_relative_path("docs/readme.md").is_ok());
+        assert!(validate_workspace_relative_path("../secrets.txt").is_err());
 
         let absolute_candidate = if cfg!(windows) {
             "C:/temp/file.txt"
         } else {
             "/tmp/file.txt"
         };
-        assert!(validate_relative_path(absolute_candidate).is_err());
+        assert!(validate_workspace_relative_path(absolute_candidate).is_err());
+    }
+
+    #[test]
+    fn validate_relative_path_rejects_reserved_workspace_directories() {
+        assert!(validate_workspace_relative_path(".openreelio/state/snapshot.json").is_err());
+        assert!(validate_workspace_relative_path(".git/hooks/pre-commit").is_err());
+        assert!(validate_workspace_relative_path("node_modules/pkg/index.js").is_err());
+        assert!(validate_workspace_relative_path("dist/assets/index.js").is_err());
+        assert!(validate_workspace_relative_path("target/debug/app.log").is_err());
     }
 
     #[test]
@@ -1154,5 +1142,15 @@ mod tests {
         let result = resolve_workspace_path(root, "docs/missing.md", false);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("File not found"));
+    }
+
+    #[test]
+    fn resolve_workspace_output_path_creates_safe_parent_inside_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        let output = resolve_workspace_output_path(root, "docs/new.md").unwrap();
+        assert!(output.ends_with(Path::new("docs/new.md")));
+        assert!(root.join("docs").is_dir());
     }
 }
