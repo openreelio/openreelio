@@ -66,8 +66,16 @@ pub(crate) fn allow_project_asset_protocol(
     // Allow the project-managed runtime directory used by previews, thumbnails, waveforms, etc.
     state.allow_asset_protocol_directory(&project_path.join(".openreelio"), true);
 
-    // Allow imported asset source files (read-only via the asset protocol).
-    // This is intentionally scoped to the files referenced by the project state, not arbitrary paths.
+    let canonical_project = std::fs::canonicalize(project_path).unwrap_or_else(|_| {
+        tracing::warn!(
+            "Failed to canonicalize project path for asset protocol scope: {}",
+            project_path.display()
+        );
+        project_path.to_path_buf()
+    });
+
+    // Project files are untrusted input. Only auto-allow asset source files that canonicalize
+    // inside the project; external files must be granted by an explicit import/relink action.
     for asset in assets {
         let uri = asset.uri.trim();
         if uri.is_empty() {
@@ -84,10 +92,27 @@ pub(crate) fn allow_project_asset_protocol(
             continue;
         }
 
-        // Only allow existing files to avoid pre-authorizing future paths.
-        if let Ok(meta) = std::fs::metadata(&path) {
+        let Ok(canonical_path) = std::fs::canonicalize(&path) else {
+            tracing::warn!(
+                "Skipping unresolved asset uri for asset protocol scope: assetId={}, uri={}",
+                asset.id,
+                uri
+            );
+            continue;
+        };
+
+        if !canonical_path.starts_with(&canonical_project) {
+            tracing::warn!(
+                "Skipping external asset uri from project file for asset protocol scope: assetId={}, uri={}",
+                asset.id,
+                uri
+            );
+            continue;
+        }
+
+        if let Ok(meta) = std::fs::metadata(&canonical_path) {
             if meta.is_file() {
-                state.allow_asset_protocol_file(&path);
+                state.allow_asset_protocol_file(&canonical_path);
             }
         }
     }
