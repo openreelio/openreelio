@@ -26,11 +26,9 @@ use crate::core::analysis::color_match::{
 use crate::core::analysis::diarization_import::{
     apply_imported_diarization, parse_imported_diarization_json,
 };
-use crate::core::analysis::diarization_runner::run_external_diarization_runner;
 use crate::core::analysis::esd::{self, EditingStyleDocument, EsdGenerator, EsdSummary};
 use crate::core::analysis::style_planner::{StylePlanResult, StylePlanner, StylePlanningContext};
 use crate::core::analysis::{AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata};
-use crate::core::captions::audio::extract_audio_for_transcription_async;
 use crate::core::commands::AddEffectCommand;
 use crate::core::effects::{curve_points_to_json, CurvePoint, EffectType, ParamValue};
 use crate::core::ffmpeg::{MediaInfo, SharedFFmpegState};
@@ -365,62 +363,18 @@ pub async fn run_external_diarization(
     state: State<'_, AppState>,
     ffmpeg_state: State<'_, SharedFFmpegState>,
 ) -> Result<ExternalDiarizationRunSummary, String> {
-    let asset_context = resolve_asset_context(&asset_id, &state, &ffmpeg_state).await?;
-    let runner = AnalysisJobRunner::new(&asset_context.project_path);
-    let bundle = runner
-        .load_bundle_optional(&asset_id)
-        .map_err(|e| format!("Failed to load analysis bundle: {}", e))?
-        .ok_or_else(|| "No cached analysis bundle exists for this asset".to_string())?;
-    if bundle
-        .transcript
-        .as_ref()
-        .map(|segments| segments.is_empty())
-        .unwrap_or(true)
-    {
-        return Err("The cached analysis bundle does not contain a transcript".to_string());
-    }
+    let _ = (&state, &ffmpeg_state);
+    tracing::warn!(
+        asset_id = %asset_id,
+        requested_executable = %executable,
+        requested_arg_count = args.len(),
+        "Blocked external diarization runner launch from IPC"
+    );
 
-    let analysis_dir = runner
-        .asset_analysis_dir(&asset_id)
-        .map_err(|e| format!("Failed to resolve analysis directory: {}", e))?;
-    tokio::fs::create_dir_all(&analysis_dir)
-        .await
-        .map_err(|e| format!("Failed to create analysis directory: {}", e))?;
-
-    let audio_path = analysis_dir.join("external-diarization-input.wav");
-    let output_path = analysis_dir.join("external-diarization.json");
-    let resolved_asset_path = {
-        let path = PathBuf::from(&asset_context.asset_path);
-        if path.is_absolute() {
-            path
-        } else {
-            asset_context.project_path.join(path)
-        }
-    };
-
-    extract_audio_for_transcription_async(resolved_asset_path.as_path(), &audio_path, None)
-        .await
-        .map_err(|e| format!("Failed to extract diarization input audio: {}", e))?;
-
-    run_external_diarization_runner(&executable, &args, &audio_path, &output_path, None)
-        .await
-        .map_err(|e| e.to_ipc_error())?;
-
-    let imported = import_diarization_json(
-        asset_id.clone(),
-        output_path.to_string_lossy().to_string(),
-        state,
+    Err(
+        "External diarization runners are disabled until a trusted runner registration and approval flow is available."
+            .to_string(),
     )
-    .await?;
-
-    Ok(ExternalDiarizationRunSummary {
-        asset_id,
-        input_audio_path: audio_path.to_string_lossy().to_string(),
-        output_json_path: output_path.to_string_lossy().to_string(),
-        transcript_segment_count: imported.transcript_segment_count,
-        speaker_count: imported.speaker_count,
-        speaker_turn_count: imported.speaker_turn_count,
-    })
 }
 
 // =============================================================================

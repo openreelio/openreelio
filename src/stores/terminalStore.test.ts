@@ -113,7 +113,7 @@ describe('terminalStore', () => {
     expect(session?.shell).toBe('wsl.exe -d Ubuntu');
   });
 
-  it('should open a saved custom terminal command through the backend settings profile', async () => {
+  it('should reject a saved custom terminal command that is not a detected profile', async () => {
     useSettingsStore.setState((state) => ({
       ...state,
       settings: {
@@ -124,37 +124,23 @@ describe('terminalStore', () => {
       },
     }));
 
-    vi.mocked(invoke).mockImplementation(async (command, args) => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === 'list_terminal_profiles') {
-        return [
-          {
-            id: 'settings-custom-command-line-c-program-files-git-bin-bash-exe-login-i',
-            label: 'Custom command line',
-            commandLine: '"C:\\Program Files\\Git\\bin\\bash.exe" --login -i',
-            source: 'settings',
-            isDefault: false,
-          },
-        ];
+        return [];
       }
 
       if (command === 'start_terminal_session') {
-        const payload = args as { input: { sessionId: string; profileId: string | null } };
-        expect(payload.input.profileId).toBe(
-          'settings-custom-command-line-c-program-files-git-bin-bash-exe-login-i',
-        );
-        return {
-          sessionId: payload.input.sessionId,
-          cwd: '/workspace',
-          shell: '"C:\\Program Files\\Git\\bin\\bash.exe" --login -i',
-        };
+        throw new Error('start_terminal_session should not be called for custom commands');
       }
 
       return null;
     });
 
     const opened = await useTerminalStore.getState().openTerminal();
-    expect(opened).toBe(true);
-    expect(useTerminalStore.getState().lastError).toBeNull();
+    expect(opened).toBe(false);
+    expect(useTerminalStore.getState().lastError).toBe(
+      'Custom terminal command lines are disabled. Select a detected terminal profile in Settings.',
+    );
   });
 
   it('should add a second terminal tab when requested', async () => {

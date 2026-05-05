@@ -7,6 +7,7 @@
 
 import { useCallback, useMemo, type KeyboardEvent } from 'react';
 import type { AssetSearchResultItem } from '@/hooks/useSearch';
+import { sanitizeRendererImageUrl } from '@/utils/safeMediaUrl';
 
 // =============================================================================
 // Types
@@ -154,19 +155,7 @@ function ResultItem({
         .map((r) => truncateText(r, 50))
     : [];
 
-  // Defensive: Validate thumbnail URL - allow safe protocols and relative paths
-  const thumbnailUri = result.thumbnailUri &&
-    typeof result.thumbnailUri === 'string' &&
-    (result.thumbnailUri.startsWith('asset://') ||
-      result.thumbnailUri.startsWith('file://') ||
-      result.thumbnailUri.startsWith('http://') ||
-      result.thumbnailUri.startsWith('https://') ||
-      result.thumbnailUri.startsWith('data:image/') ||
-      result.thumbnailUri.startsWith('/') || // Absolute path
-      result.thumbnailUri.startsWith('./') || // Relative path
-      result.thumbnailUri.startsWith('../')) // Parent relative path
-    ? result.thumbnailUri
-    : null;
+  const thumbnailUri = sanitizeRendererImageUrl(result.thumbnailUri);
 
   return (
     <div
@@ -204,12 +193,7 @@ function ResultItem({
               className="w-full h-full flex items-center justify-center text-text-muted"
               aria-hidden="true"
             >
-              <svg
-                className="w-6 h-6"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path
                   strokeLinecap="round"
                   strokeLinejoin="round"
@@ -235,7 +219,10 @@ function ResultItem({
             </span>
           )}
           {showScore && (
-            <span className="text-xs text-text-secondary" aria-label={`Relevance: ${scorePercent}%`}>
+            <span
+              className="text-xs text-text-secondary"
+              aria-label={`Relevance: ${scorePercent}%`}
+            >
               {scorePercent}%
             </span>
           )}
@@ -302,11 +289,9 @@ export function SearchResults({
   const results = useMemo(
     () =>
       Array.isArray(rawResults)
-        ? rawResults
-            .filter(isValidResult)
-            .slice(0, MAX_DISPLAY_RESULTS) // Limit display count for performance
+        ? rawResults.filter(isValidResult).slice(0, MAX_DISPLAY_RESULTS) // Limit display count for performance
         : [],
-    [rawResults]
+    [rawResults],
   );
 
   // ===========================================================================
@@ -348,7 +333,7 @@ export function SearchResults({
         }
       }
     },
-    [results, selectedId, onSelectionChange, onResultClick]
+    [results, selectedId, onSelectionChange, onResultClick],
   );
 
   // ===========================================================================
@@ -374,9 +359,8 @@ export function SearchResults({
 
   if (error) {
     // Defensive: Sanitize and truncate error message
-    const safeError = typeof error === 'string'
-      ? truncateText(error, MAX_TEXT_LENGTH)
-      : 'An error occurred';
+    const safeError =
+      typeof error === 'string' ? truncateText(error, MAX_TEXT_LENGTH) : 'An error occurred';
 
     return (
       <div
@@ -413,14 +397,8 @@ export function SearchResults({
 
   if (results.length === 0) {
     return (
-      <div
-        data-testid="search-results"
-        className={`bg-surface-panel rounded-lg ${className}`}
-      >
-        <div
-          data-testid="search-results-empty"
-          className="p-8 text-center text-text-muted"
-        >
+      <div data-testid="search-results" className={`bg-surface-panel rounded-lg ${className}`}>
+        <div data-testid="search-results-empty" className="p-8 text-center text-text-muted">
           <svg
             className="w-12 h-12 mx-auto mb-3"
             fill="none"
@@ -460,9 +438,7 @@ export function SearchResults({
           <span>
             {displayTotal} {displayTotal === 1 ? 'result' : 'results'}
           </span>
-          {processingTimeMs !== undefined && (
-            <span>{processingTimeMs}ms</span>
-          )}
+          {processingTimeMs !== undefined && <span>{processingTimeMs}ms</span>}
         </div>
       )}
 

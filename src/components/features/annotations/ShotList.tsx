@@ -8,6 +8,7 @@
 import { memo, useCallback } from 'react';
 
 import type { ShotResult } from '@/bindings';
+import { buildSafeAssetImageUrl } from '@/utils/safeMediaUrl';
 
 // =============================================================================
 // Types
@@ -38,7 +39,7 @@ export const ShotList = memo(function ShotList({
     (timeSec: number) => {
       onShotClick?.(timeSec);
     },
-    [onShotClick]
+    [onShotClick],
   );
 
   if (shots.length === 0) {
@@ -109,6 +110,7 @@ const ShotItem = memo(function ShotItem({
 }: ShotItemProps): JSX.Element {
   const handleClick = () => onClick(shot.startSec);
   const duration = shot.endSec - shot.startSec;
+  const keyframeUrl = buildSafeAssetImageUrl(shot.keyframePath);
 
   return (
     <button
@@ -124,9 +126,9 @@ const ShotItem = memo(function ShotItem({
       {/* Thumbnail placeholder */}
       {showThumbnail && (
         <div className="relative h-12 w-20 flex-shrink-0 overflow-hidden rounded bg-editor-bg">
-          {shot.keyframePath ? (
+          {keyframeUrl ? (
             <img
-              src={`asset://localhost/${shot.keyframePath}`}
+              src={keyframeUrl}
               alt={`Shot ${index + 1}`}
               className="h-full w-full object-cover"
             />

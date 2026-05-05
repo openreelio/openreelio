@@ -7,9 +7,9 @@
 //! - A partial write (power loss, crash) must not leave the project unrecoverable.
 //! - Windows semantics differ from Unix for rename-over-existing; we handle both.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::core::{CoreError, CoreResult};
 
@@ -56,6 +56,69 @@ pub fn validate_path_id_component(id: &str, label: &str) -> Result<(), String> {
         return Err(format!("Invalid {label}: contains control characters"));
     }
     Ok(())
+}
+
+/// Validates a project-relative workspace document path.
+///
+/// Agent-facing workspace document tools must not reach internal project state,
+/// dependency caches, build outputs, or VCS metadata. The returned path remains
+/// relative and is safe to join under a separately validated project root.
+pub fn validate_workspace_relative_path(relative_path: &str) -> Result<PathBuf, String> {
+    let trimmed = relative_path.trim();
+    if trimmed.is_empty() {
+        return Err("relativePath is required".to_string());
+    }
+
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err("relativePath contains control characters".to_string());
+    }
+
+    let candidate = PathBuf::from(trimmed);
+    if candidate.is_absolute() {
+        return Err("Path must be relative to project root".to_string());
+    }
+
+    if trimmed
+        .replace('\\', "/")
+        .split('/')
+        .any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err("Path cannot contain current or parent directory traversal".to_string());
+    }
+
+    if candidate.components().any(|component| {
+        matches!(
+            component,
+            Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err("Path cannot contain current or parent directory traversal".to_string());
+    }
+
+    if candidate
+        .components()
+        .enumerate()
+        .any(|(index, component)| {
+            let Component::Normal(name) = component else {
+                return false;
+            };
+            let name = name.to_string_lossy().to_ascii_lowercase();
+            if matches!(
+                name.as_str(),
+                ".openreelio" | ".git" | "node_modules" | "target"
+            ) {
+                return true;
+            }
+            if index == 0 && matches!(name.as_str(), "dist" | "build") {
+                return true;
+            }
+            false
+        })
+    {
+        return Err("Path targets a reserved workspace directory".to_string());
+    }
+
+    Ok(candidate)
 }
 
 /// Validates and resolves a local file path for input operations.
@@ -378,6 +441,174 @@ fn validate_output_path_no_create(path: &str, label: &str) -> Result<PathBuf, St
     Ok(pb)
 }
 
+#[cfg(windows)]
+fn path_starts_with_scope(path: &Path, base: &Path) -> bool {
+    use std::path::Component;
+
+    let mut path_components = path.components();
+    for base_component in base.components() {
+        let Some(path_component) = path_components.next() else {
+            return false;
+        };
+
+        let base_str = base_component.as_os_str().to_string_lossy();
+        let path_str = path_component.as_os_str().to_string_lossy();
+
+        if base_str.to_ascii_lowercase() != path_str.to_ascii_lowercase() {
+            return false;
+        }
+
+        if matches!(base_component, Component::CurDir | Component::ParentDir) {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(not(windows))]
+fn path_starts_with_scope(path: &Path, base: &Path) -> bool {
+    path.starts_with(base)
+}
+
+fn ensure_no_existing_symlink_components(path: &Path, label: &str) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "{label} must not contain symlink components: {}",
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect {label} component {}: {}",
+                    current.display(),
+                    error
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn canonical_allowed_roots(allowed_roots: &[&Path], label: &str) -> Result<Vec<PathBuf>, String> {
+    let canonicalized: Vec<PathBuf> = allowed_roots
+        .iter()
+        .filter_map(|root| match std::fs::canonicalize(root) {
+            Ok(canonical_root) => Some(canonical_root),
+            Err(error) => {
+                tracing::warn!(
+                    label,
+                    root = %root.display(),
+                    %error,
+                    "Skipping unresolvable allowed root"
+                );
+                None
+            }
+        })
+        .collect();
+
+    if canonicalized.is_empty() {
+        return Err(format!("No allowed roots could be resolved for {label}"));
+    }
+
+    Ok(canonicalized)
+}
+
+fn is_within_any_scope(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path_starts_with_scope(path, root))
+}
+
+fn create_scoped_parent_dir_no_symlinks(
+    parent: &Path,
+    label: &str,
+    allowed_root_canon: &[PathBuf],
+) -> Result<(), String> {
+    ensure_no_existing_symlink_components(parent, label)?;
+
+    let mut nearest_existing = parent;
+    while !nearest_existing.exists() {
+        nearest_existing = nearest_existing
+            .parent()
+            .ok_or_else(|| format!("Cannot resolve {label} parent: {}", parent.display()))?;
+    }
+
+    let nearest_canon = std::fs::canonicalize(nearest_existing)
+        .map_err(|e| format!("Failed to resolve {label} ancestor: {e}"))?;
+    if !is_within_any_scope(&nearest_canon, allowed_root_canon) {
+        return Err(format!(
+            "{label} parent escapes allowed roots through an existing path component: {}",
+            nearest_existing.display()
+        ));
+    }
+
+    let relative_missing = parent.strip_prefix(nearest_existing).map_err(|_| {
+        format!(
+            "Failed to resolve missing {label} path under {}",
+            nearest_existing.display()
+        )
+    })?;
+
+    let mut current = nearest_existing.to_path_buf();
+    for component in relative_missing.components() {
+        match component {
+            std::path::Component::Normal(segment) => current.push(segment),
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => {
+                return Err(format!(
+                    "{label} parent contains invalid path component: {}",
+                    parent.display()
+                ));
+            }
+        }
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "{label} parent must not contain symlinks: {}",
+                    current.display()
+                ));
+            }
+            Ok(metadata) => {
+                if !metadata.is_dir() {
+                    return Err(format!(
+                        "{label} parent component is not a directory: {}",
+                        current.display()
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current)
+                    .map_err(|e| format!("Failed to create output directory: {e}"))?;
+                let metadata = std::fs::symlink_metadata(&current)
+                    .map_err(|e| format!("Failed to inspect output directory: {e}"))?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(format!(
+                        "{label} parent component is not a plain directory: {}",
+                        current.display()
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect {label} parent component {}: {}",
+                    current.display(),
+                    error
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Validates an output path and enforces that it is within one of the allowed root directories.
 ///
 /// This is a defense-in-depth control for IPC commands that accept an output path from the
@@ -393,50 +624,10 @@ pub fn validate_scoped_output_path(
         .parent()
         .ok_or_else(|| format!("{label} has no parent directory: {}", pb.display()))?;
 
-    #[cfg(windows)]
-    fn starts_with_path_case_insensitive(path: &Path, base: &Path) -> bool {
-        use std::path::Component;
-
-        let mut path_components = path.components();
-        for base_component in base.components() {
-            let Some(path_component) = path_components.next() else {
-                return false;
-            };
-
-            let base_str = base_component.as_os_str().to_string_lossy();
-            let path_str = path_component.as_os_str().to_string_lossy();
-
-            // Compare case-insensitively for Windows. Use a component-wise comparison to avoid
-            // prefix bugs like allowing `C:\root_evil` when `C:\root` is the allowed root.
-            //
-            // NOTE: `Component` does not expose a stable structural equality that is
-            // case-insensitive, so we normalize to lowercase strings for safety.
-            if base_str.to_ascii_lowercase() != path_str.to_ascii_lowercase() {
-                return false;
-            }
-
-            // If the base is `RootDir` but the path isn't, we'll have returned false above.
-            // For prefix components (drive letters), the string normalization above suffices.
-            if matches!(base_component, Component::CurDir | Component::ParentDir) {
-                // Canonical paths should not contain these, but treat them defensively.
-                return false;
-            }
-        }
-        true
-    }
-
     // Avoid side-effects outside allowed roots: verify scope *before* creating parent directories.
-    let is_allowed_lexical = allowed_roots.iter().any(|root| {
-        #[cfg(windows)]
-        {
-            starts_with_path_case_insensitive(parent, root)
-        }
-
-        #[cfg(not(windows))]
-        {
-            parent.starts_with(root)
-        }
-    });
+    let is_allowed_lexical = allowed_roots
+        .iter()
+        .any(|root| path_starts_with_scope(parent, root));
 
     if !is_allowed_lexical {
         let roots = allowed_roots
@@ -450,27 +641,14 @@ pub fn validate_scoped_output_path(
         ));
     }
 
-    // At this point, `parent` is lexically under an allowed root, so creating it is safe.
-    std::fs::create_dir_all(parent)
-        .map_err(|e| format!("Failed to create output directory: {e}"))?;
+    let allowed_root_canon = canonical_allowed_roots(allowed_roots, label)?;
+    create_scoped_parent_dir_no_symlinks(parent, label, &allowed_root_canon)?;
 
     let parent_canon = std::fs::canonicalize(parent)
         .map_err(|e| format!("Failed to resolve {label} parent directory: {e}"))?;
 
     // Post-creation canonical check to defend against symlink and case/normalization surprises.
-    let is_allowed_canon = allowed_roots.iter().any(|root| {
-        let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| (*root).to_path_buf());
-
-        #[cfg(windows)]
-        {
-            starts_with_path_case_insensitive(&parent_canon, &root_canon)
-        }
-
-        #[cfg(not(windows))]
-        {
-            parent_canon.starts_with(&root_canon)
-        }
-    });
+    let is_allowed_canon = is_within_any_scope(&parent_canon, &allowed_root_canon);
 
     if !is_allowed_canon {
         let roots = allowed_roots
@@ -484,7 +662,103 @@ pub fn validate_scoped_output_path(
         ));
     }
 
+    if let Ok(metadata) = std::fs::symlink_metadata(&pb) {
+        if metadata.file_type().is_symlink() {
+            return Err(format!("{label} must not be a symlink: {}", pb.display()));
+        }
+    }
+
     Ok(pb)
+}
+
+/// Atomically writes bytes without following a symlink at the final destination.
+///
+/// The caller is still responsible for validating scope before calling this
+/// helper. This function is the last-mile write guard for renderer-controlled
+/// output paths: it rejects symlink destinations, writes to a unique sibling temp
+/// file, then renames that temp file into place.
+pub fn write_bytes_atomic_no_symlink(path: &Path, bytes: &[u8], label: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{label} has no parent directory: {}", path.display()))?;
+    if !parent.exists() {
+        return Err(format!(
+            "{label} parent directory does not exist: {}",
+            parent.display()
+        ));
+    }
+    ensure_no_existing_symlink_components(parent, label)?;
+
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            return Err(format!("{label} must not be a symlink: {}", path.display()));
+        }
+        if !metadata.is_file() {
+            return Err(format!("{label} is not a file: {}", path.display()));
+        }
+    }
+
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "output".to_string());
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let tmp_path = parent.join(format!(".{file_name}.tmp.{}.{}", std::process::id(), nonce));
+
+    {
+        let mut tmp_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("Failed to create temporary {label}: {e}"))?;
+        tmp_file
+            .write_all(bytes)
+            .map_err(|e| format!("Failed to write temporary {label}: {e}"))?;
+        tmp_file
+            .sync_all()
+            .map_err(|e| format!("Failed to sync temporary {label}: {e}"))?;
+    }
+
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("{label} must not be a symlink: {}", path.display()));
+        }
+        if !metadata.is_file() {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("{label} is not a file: {}", path.display()));
+        }
+    }
+
+    match std::fs::rename(&tmp_path, path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let backup_path =
+                parent.join(format!(".{file_name}.bak.{}.{}", std::process::id(), nonce));
+
+            std::fs::rename(path, &backup_path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                format!("Failed to move existing {label} aside: {e}")
+            })?;
+
+            if let Err(e) = std::fs::rename(&tmp_path, path) {
+                let _ = std::fs::rename(&backup_path, path);
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(format!("Failed to finalize {label}: {e}"));
+            }
+
+            let _ = std::fs::remove_file(&backup_path);
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("Failed to finalize {label}: {error}"));
+        }
+    }
+
+    Ok(())
 }
 
 /// Write bytes to `path` using an atomic replace pattern.
@@ -586,6 +860,36 @@ mod tests {
         atomic_write_bytes(&path, b"two").unwrap();
         let second = std::fs::read_to_string(&path).unwrap();
         assert_eq!(second, "two");
+    }
+
+    #[test]
+    fn write_bytes_atomic_no_symlink_creates_and_replaces_plain_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("out.txt");
+
+        write_bytes_atomic_no_symlink(&path, b"one", "outputPath").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one");
+
+        write_bytes_atomic_no_symlink(&path, b"two", "outputPath").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bytes_atomic_no_symlink_rejects_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("target.txt");
+        std::fs::write(&outside_file, "external").unwrap();
+
+        let output = root.path().join("out.txt");
+        symlink(&outside_file, &output).unwrap();
+
+        let result = write_bytes_atomic_no_symlink(&output, b"updated", "outputPath");
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "external");
     }
 
     #[test]
@@ -704,6 +1008,28 @@ mod tests {
         // Newline
         let result = validate_path_id_component("foo\nbar", "assetId");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_workspace_relative_path_allows_safe_documents() {
+        assert!(validate_workspace_relative_path("docs/readme.md").is_ok());
+        assert!(validate_workspace_relative_path("docs/build/notes.md").is_ok());
+        assert!(validate_workspace_relative_path("captions/subtitles.srt").is_ok());
+        assert!(validate_workspace_relative_path("src/main.ts").is_ok());
+    }
+
+    #[test]
+    fn test_validate_workspace_relative_path_rejects_escape_and_reserved_dirs() {
+        assert!(validate_workspace_relative_path("../secrets.txt").is_err());
+        assert!(validate_workspace_relative_path("docs/../../secrets.txt").is_err());
+        assert!(validate_workspace_relative_path("./dist/assets/index.js").is_err());
+        assert!(validate_workspace_relative_path("docs/./readme.md").is_err());
+        assert!(validate_workspace_relative_path(".openreelio/state/snapshot.json").is_err());
+        assert!(validate_workspace_relative_path(".git/hooks/pre-commit").is_err());
+        assert!(validate_workspace_relative_path("node_modules/pkg/index.js").is_err());
+        assert!(validate_workspace_relative_path("dist/assets/index.js").is_err());
+        assert!(validate_workspace_relative_path("build/output.log").is_err());
+        assert!(validate_workspace_relative_path("target/debug/app.log").is_err());
     }
 
     #[test]
@@ -904,6 +1230,19 @@ mod tests {
         let result =
             validate_scoped_output_path(&out_str, "outputPath", &[root_a.path(), root_b.path()]);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_scoped_output_path_skips_missing_allowed_roots() {
+        let root = TempDir::new().unwrap();
+        let missing_root = root.path().join("missing-root");
+        let out = root.path().join("exports").join("out.png");
+        let out_str = out.to_string_lossy().to_string();
+
+        let result =
+            validate_scoped_output_path(&out_str, "outputPath", &[&missing_root, root.path()]);
+        assert!(result.is_ok());
+        assert!(out.parent().unwrap().exists());
     }
 
     #[test]

@@ -5,7 +5,9 @@
 use tauri::State;
 
 use crate::core::{
-    fs::{default_export_allowed_roots, validate_scoped_output_path},
+    fs::{
+        default_export_allowed_roots, validate_scoped_output_path, write_bytes_atomic_no_symlink,
+    },
     interchange::{edl, models::InterchangeExportResult, xml},
     CoreError,
 };
@@ -62,17 +64,13 @@ pub async fn export_edl(
     let duration_sec = sequence.duration();
     let (edl_content, event_count, track_count) = edl::export_edl(&sequence, &assets)?;
 
-    // Ensure parent directory exists
-    if let Some(parent) = validated_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("Failed to create output directory: {}", e))?;
-    }
-
-    // Write file
-    tokio::fs::write(&validated_path, edl_content)
-        .await
-        .map_err(|e| format!("Failed to write EDL file: {}", e))?;
+    let write_path = validated_path.clone();
+    tokio::task::spawn_blocking(move || {
+        write_bytes_atomic_no_symlink(&write_path, edl_content.as_bytes(), "EDL output path")
+    })
+    .await
+    .map_err(|e| format!("EDL write task failed: {e}"))?
+    .map_err(|e| format!("Failed to write EDL file: {e}"))?;
 
     let result = edl::build_export_result(
         &validated_path.to_string_lossy(),
@@ -139,17 +137,13 @@ pub async fn export_fcpxml(
     let duration_sec = sequence.duration();
     let (fcpxml_content, event_count, track_count) = xml::export_fcpxml(&sequence, &assets)?;
 
-    // Ensure parent directory exists
-    if let Some(parent) = validated_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("Failed to create output directory: {}", e))?;
-    }
-
-    // Write file
-    tokio::fs::write(&validated_path, fcpxml_content)
-        .await
-        .map_err(|e| format!("Failed to write FCPXML file: {}", e))?;
+    let write_path = validated_path.clone();
+    tokio::task::spawn_blocking(move || {
+        write_bytes_atomic_no_symlink(&write_path, fcpxml_content.as_bytes(), "FCPXML output path")
+    })
+    .await
+    .map_err(|e| format!("FCPXML write task failed: {e}"))?
+    .map_err(|e| format!("Failed to write FCPXML file: {e}"))?;
 
     let result = xml::build_export_result(
         &validated_path.to_string_lossy(),

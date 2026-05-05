@@ -6,7 +6,10 @@ use specta::Type;
 use tauri::State;
 
 use crate::core::{
-    fs::{default_export_allowed_roots, validate_path_id_component, validate_scoped_output_path},
+    fs::{
+        default_export_allowed_roots, validate_path_id_component, validate_scoped_output_path,
+        write_bytes_atomic_no_symlink,
+    },
     jobs::{Job, JobType, Priority},
     CoreError,
 };
@@ -375,7 +378,6 @@ pub async fn export_captions(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     use crate::core::captions::{export_srt, export_vtt, Caption};
-    use std::path::Path;
 
     // Convert to internal Caption type
     let internal_captions: Vec<Caption> = captions
@@ -422,19 +424,13 @@ pub async fn export_captions(
     let validated_output_path =
         validate_scoped_output_path(output_path_trimmed, "outputPath", &root_refs)?;
 
-    // Write to file (async to avoid blocking the runtime).
-    let output = Path::new(&validated_output_path);
-    if let Some(parent) = output.parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("Failed to create output directory: {e}"))?;
-        }
-    }
-
-    tokio::fs::write(output, content)
-        .await
-        .map_err(|e| format!("Failed to write caption file: {e}"))?;
+    let write_path = validated_output_path.clone();
+    tokio::task::spawn_blocking(move || {
+        write_bytes_atomic_no_symlink(&write_path, content.as_bytes(), "outputPath")
+    })
+    .await
+    .map_err(|e| format!("Caption write task failed: {e}"))?
+    .map_err(|e| format!("Failed to write caption file: {e}"))?;
 
     tracing::info!(
         "Exported {} captions to {} as {:?}",

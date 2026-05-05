@@ -8,6 +8,7 @@
 import React, { useState, useCallback, useMemo } from 'react';
 import { ChevronDown, ChevronRight, Film, Music, FileText } from 'lucide-react';
 import type { AssetSearchResultItem } from '@/hooks/useSearch';
+import { sanitizeRendererImageUrl } from '@/utils/safeMediaUrl';
 
 // =============================================================================
 // Types
@@ -69,10 +70,7 @@ function getSourceIcon(source: string) {
   }
 }
 
-function groupResults(
-  results: AssetSearchResultItem[],
-  groupBy: GroupByOption
-): ResultGroup[] {
+function groupResults(results: AssetSearchResultItem[], groupBy: GroupByOption): ResultGroup[] {
   if (groupBy === 'none') {
     return [];
   }
@@ -134,12 +132,7 @@ interface GroupHeaderProps {
   onToggle: () => void;
 }
 
-const GroupHeader: React.FC<GroupHeaderProps> = ({
-  group,
-  isExpanded,
-  showCount,
-  onToggle,
-}) => {
+const GroupHeader: React.FC<GroupHeaderProps> = ({ group, isExpanded, showCount, onToggle }) => {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
@@ -184,6 +177,8 @@ const ResultItem: React.FC<ResultItemProps> = ({
   onClick,
   onDoubleClick,
 }) => {
+  const thumbnailUri = sanitizeRendererImageUrl(result.thumbnailUri);
+
   return (
     <div
       data-testid="search-result-item"
@@ -194,12 +189,8 @@ const ResultItem: React.FC<ResultItemProps> = ({
       {/* Thumbnail */}
       {showThumbnails && (
         <div className="flex-shrink-0 w-12 h-8 bg-gray-700 rounded overflow-hidden">
-          {result.thumbnailUri ? (
-            <img
-              src={result.thumbnailUri}
-              alt=""
-              className="w-full h-full object-cover"
-            />
+          {thumbnailUri ? (
+            <img src={thumbnailUri} alt="" className="w-full h-full object-cover" />
           ) : (
             <div className="w-full h-full flex items-center justify-center text-gray-500">
               {getSourceIcon(result.source)}
@@ -214,14 +205,10 @@ const ResultItem: React.FC<ResultItemProps> = ({
           <span className="text-sm text-gray-300">
             {formatTime(result.startSec)} - {formatTime(result.endSec)}
           </span>
-          <span className="text-xs text-gray-500">
-            {Math.round(result.score * 100)}%
-          </span>
+          <span className="text-xs text-gray-500">{Math.round(result.score * 100)}%</span>
         </div>
         {result.reasons.length > 0 && (
-          <div className="text-xs text-gray-500 truncate mt-0.5">
-            {result.reasons.join(', ')}
-          </div>
+          <div className="text-xs text-gray-500 truncate mt-0.5">{result.reasons.join(', ')}</div>
         )}
       </div>
     </div>
@@ -246,9 +233,7 @@ export const GroupedSearchResults: React.FC<GroupedSearchResultsProps> = ({
   className = '',
 }) => {
   // Track collapsed groups
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
-    new Set(defaultCollapsed)
-  );
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set(defaultCollapsed));
 
   // Group and sort results
   const groups = useMemo(() => {
@@ -273,7 +258,7 @@ export const GroupedSearchResults: React.FC<GroupedSearchResultsProps> = ({
         return next;
       });
     },
-    [onGroupToggle]
+    [onGroupToggle],
   );
 
   // Empty state
@@ -291,10 +276,7 @@ export const GroupedSearchResults: React.FC<GroupedSearchResultsProps> = ({
   // Flat (ungrouped) mode
   if (groupBy === 'none') {
     return (
-      <div
-        data-testid="grouped-search-results"
-        className={`divide-y divide-gray-700 ${className}`}
-      >
+      <div data-testid="grouped-search-results" className={`divide-y divide-gray-700 ${className}`}>
         {results.map((result, index) => (
           <ResultItem
             key={`${result.assetId}-${result.startSec}-${index}`}
@@ -310,15 +292,16 @@ export const GroupedSearchResults: React.FC<GroupedSearchResultsProps> = ({
 
   // Grouped mode
   return (
-    <div
-      data-testid="grouped-search-results"
-      className={className}
-    >
+    <div data-testid="grouped-search-results" className={className}>
       {groups.map((group) => {
         const isExpanded = !collapsedGroups.has(group.id);
 
         return (
-          <div key={group.id} data-testid="result-group" className="border-b border-gray-700 last:border-b-0">
+          <div
+            key={group.id}
+            data-testid="result-group"
+            className="border-b border-gray-700 last:border-b-0"
+          >
             <GroupHeader
               group={group}
               isExpanded={isExpanded}

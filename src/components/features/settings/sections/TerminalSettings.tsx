@@ -17,36 +17,30 @@ interface DetectedTerminalProfile {
   isDefault: boolean;
 }
 
-const CUSTOM_PROFILE_ID = '__custom__';
 const SYSTEM_DEFAULT_ID = '__system__';
 
 function getTerminalExamples(): { defaultLabel: string; examples: string } {
   if (typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('win')) {
     return {
       defaultLabel: 'Windows default shell',
-      examples:
-        'Examples: powershell.exe, pwsh.exe, wsl.exe -d Ubuntu, "C:\\Program Files\\Git\\bin\\bash.exe" --login -i',
+      examples: 'Examples: PowerShell, PowerShell 7, WSL, Git Bash',
     };
   }
 
   if (typeof navigator !== 'undefined' && /(mac|iphone|ipad|ipod)/i.test(navigator.platform)) {
     return {
       defaultLabel: 'your login shell',
-      examples: 'Examples: /bin/zsh, /bin/bash -l, /opt/homebrew/bin/fish',
+      examples: 'Examples: /bin/zsh, /bin/bash, /opt/homebrew/bin/fish',
     };
   }
 
-  return {
-    defaultLabel: 'your login shell',
-    examples: 'Examples: /bin/bash, /bin/zsh, /usr/bin/fish, /usr/bin/nu',
-  };
+  return { defaultLabel: 'your login shell', examples: 'Examples: /bin/bash, /bin/zsh, fish' };
 }
 
 function profileSourceLabel(source: string): string {
   if (source === 'windows-terminal') return 'Windows Terminal';
   if (source === 'wsl') return 'WSL';
   if (source === 'default') return 'Default';
-  if (source === 'settings') return 'Custom';
   return 'Detected';
 }
 
@@ -64,10 +58,9 @@ export function TerminalSettings({
       return SYSTEM_DEFAULT_ID;
     }
 
-    return (
-      profiles.find((profile) => profile.commandLine === settings.defaultShellCommand)?.id ??
-      CUSTOM_PROFILE_ID
-    );
+    const configuredCommand = settings.defaultShellCommand.trim();
+
+    return profiles.find((profile) => profile.commandLine.trim() === configuredCommand)?.id ?? '';
   }, [profiles, settings.defaultShellCommand]);
 
   useEffect(() => {
@@ -112,13 +105,6 @@ export function TerminalSettings({
               return;
             }
 
-            if (value === CUSTOM_PROFILE_ID) {
-              if (!settings.defaultShellCommand) {
-                onUpdate({ defaultShellCommand: '' });
-              }
-              return;
-            }
-
             const selectedProfile = profiles.find((profile) => profile.id === value);
             if (selectedProfile) {
               onUpdate({ defaultShellCommand: selectedProfile.commandLine });
@@ -132,12 +118,14 @@ export function TerminalSettings({
               {profile.label} · {profileSourceLabel(profile.source)}
             </option>
           ))}
-          <option value={CUSTOM_PROFILE_ID}>Custom command line</option>
+          {settings.defaultShellCommand && selectedProfileId === '' && !isLoadingProfiles && (
+            <option value="">Unavailable saved profile</option>
+          )}
         </select>
         <p className="mt-2 text-xs text-editor-text-muted">
           {isLoadingProfiles
             ? 'Scanning installed terminal profiles...'
-            : 'Pick a detected profile or type a custom command line below.'}
+            : 'Pick a detected profile. Custom command lines are not launched from settings.'}
         </p>
         {profileError && <p className="mt-2 text-xs text-rose-400">{profileError}</p>}
       </div>
@@ -147,23 +135,19 @@ export function TerminalSettings({
           htmlFor="defaultShellCommand"
           className="mb-2 block text-sm font-medium text-editor-text"
         >
-          Default Terminal Command Line
+          Saved Terminal Command Line
         </label>
         <input
           id="defaultShellCommand"
           type="text"
           value={settings.defaultShellCommand ?? ''}
-          onChange={(event) => {
-            const value = event.target.value;
-            onUpdate({ defaultShellCommand: value.trim().length === 0 ? null : value });
-          }}
+          readOnly
           disabled={disabled}
           placeholder={`Leave blank to use ${defaultLabel}`}
-          className="w-full rounded-lg border border-editor-border bg-editor-bg px-3 py-2 text-editor-text focus:outline-none focus:ring-2 focus:ring-primary-500/50 disabled:opacity-50"
+          className="w-full rounded-lg border border-editor-border bg-editor-bg px-3 py-2 text-editor-text opacity-80 focus:outline-none focus:ring-2 focus:ring-primary-500/50 disabled:opacity-50"
         />
         <p className="mt-2 text-xs text-editor-text-muted">
-          Saved custom commands are resolved by the backend before launch. Quote paths that contain
-          spaces. {examples}
+          The backend resolves this value against detected profiles before launch. {examples}
         </p>
       </div>
 
