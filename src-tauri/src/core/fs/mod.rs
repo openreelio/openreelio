@@ -497,18 +497,27 @@ fn ensure_no_existing_symlink_components(path: &Path, label: &str) -> Result<(),
 }
 
 fn canonical_allowed_roots(allowed_roots: &[&Path], label: &str) -> Result<Vec<PathBuf>, String> {
-    allowed_roots
+    let canonicalized: Vec<PathBuf> = allowed_roots
         .iter()
-        .map(|root| {
-            std::fs::canonicalize(root).map_err(|e| {
-                format!(
-                    "Failed to resolve allowed root for {label} '{}': {}",
-                    root.display(),
-                    e
-                )
-            })
+        .filter_map(|root| match std::fs::canonicalize(root) {
+            Ok(canonical_root) => Some(canonical_root),
+            Err(error) => {
+                tracing::warn!(
+                    label,
+                    root = %root.display(),
+                    %error,
+                    "Skipping unresolvable allowed root"
+                );
+                None
+            }
         })
-        .collect()
+        .collect();
+
+    if canonicalized.is_empty() {
+        return Err(format!("No allowed roots could be resolved for {label}"));
+    }
+
+    Ok(canonicalized)
 }
 
 fn is_within_any_scope(path: &Path, roots: &[PathBuf]) -> bool {
@@ -1221,6 +1230,19 @@ mod tests {
         let result =
             validate_scoped_output_path(&out_str, "outputPath", &[root_a.path(), root_b.path()]);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_scoped_output_path_skips_missing_allowed_roots() {
+        let root = TempDir::new().unwrap();
+        let missing_root = root.path().join("missing-root");
+        let out = root.path().join("exports").join("out.png");
+        let out_str = out.to_string_lossy().to_string();
+
+        let result =
+            validate_scoped_output_path(&out_str, "outputPath", &[&missing_root, root.path()]);
+        assert!(result.is_ok());
+        assert!(out.parent().unwrap().exists());
     }
 
     #[test]

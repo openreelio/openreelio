@@ -58,9 +58,9 @@ export function TerminalSettings({
       return SYSTEM_DEFAULT_ID;
     }
 
-    return (
-      profiles.find((profile) => profile.commandLine === settings.defaultShellCommand)?.id ?? ''
-    );
+    const configuredCommand = settings.defaultShellCommand.trim();
+
+    return profiles.find((profile) => profile.commandLine.trim() === configuredCommand)?.id ?? '';
   }, [profiles, settings.defaultShellCommand]);
 
   useEffect(() => {
