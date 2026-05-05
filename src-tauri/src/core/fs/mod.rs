@@ -78,11 +78,21 @@ pub fn validate_workspace_relative_path(relative_path: &str) -> Result<PathBuf, 
         return Err("Path must be relative to project root".to_string());
     }
 
-    if candidate
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    if trimmed
+        .replace('\\', "/")
+        .split('/')
+        .any(|segment| matches!(segment, "." | ".."))
     {
-        return Err("Path cannot contain parent directory traversal".to_string());
+        return Err("Path cannot contain current or parent directory traversal".to_string());
+    }
+
+    if candidate.components().any(|component| {
+        matches!(
+            component,
+            Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err("Path cannot contain current or parent directory traversal".to_string());
     }
 
     if candidate
@@ -102,7 +112,7 @@ pub fn validate_workspace_relative_path(relative_path: &str) -> Result<PathBuf, 
             if index == 0 && matches!(name.as_str(), "dist" | "build") {
                 return true;
             }
-            return false;
+            false
         })
     {
         return Err("Path targets a reserved workspace directory".to_string());
@@ -712,16 +722,32 @@ pub fn write_bytes_atomic_no_symlink(path: &Path, bytes: &[u8], label: &str) -> 
             let _ = std::fs::remove_file(&tmp_path);
             return Err(format!("{label} is not a file: {}", path.display()));
         }
-        std::fs::remove_file(path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
-            format!("Failed to replace existing {label}: {e}")
-        })?;
     }
 
-    std::fs::rename(&tmp_path, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
-        format!("Failed to finalize {label}: {e}")
-    })?;
+    match std::fs::rename(&tmp_path, path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let backup_path =
+                parent.join(format!(".{file_name}.bak.{}.{}", std::process::id(), nonce));
+
+            std::fs::rename(path, &backup_path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                format!("Failed to move existing {label} aside: {e}")
+            })?;
+
+            if let Err(e) = std::fs::rename(&tmp_path, path) {
+                let _ = std::fs::rename(&backup_path, path);
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(format!("Failed to finalize {label}: {e}"));
+            }
+
+            let _ = std::fs::remove_file(&backup_path);
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("Failed to finalize {label}: {error}"));
+        }
+    }
 
     Ok(())
 }
@@ -987,6 +1013,8 @@ mod tests {
     fn test_validate_workspace_relative_path_rejects_escape_and_reserved_dirs() {
         assert!(validate_workspace_relative_path("../secrets.txt").is_err());
         assert!(validate_workspace_relative_path("docs/../../secrets.txt").is_err());
+        assert!(validate_workspace_relative_path("./dist/assets/index.js").is_err());
+        assert!(validate_workspace_relative_path("docs/./readme.md").is_err());
         assert!(validate_workspace_relative_path(".openreelio/state/snapshot.json").is_err());
         assert!(validate_workspace_relative_path(".git/hooks/pre-commit").is_err());
         assert!(validate_workspace_relative_path("node_modules/pkg/index.js").is_err());

@@ -118,7 +118,7 @@ export function TerminalSettings({
               {profile.label} · {profileSourceLabel(profile.source)}
             </option>
           ))}
-          {settings.defaultShellCommand && selectedProfileId === '' && (
+          {settings.defaultShellCommand && selectedProfileId === '' && !isLoadingProfiles && (
             <option value="">Unavailable saved profile</option>
           )}
         </select>

@@ -3,7 +3,6 @@
 //! Tauri commands for agent-related operations:
 //! trace file writing, plan execution, and memory persistence.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -23,7 +22,7 @@ use crate::core::plugin::api::{
 };
 use crate::core::plugin::providers::freesound::{FreesoundConfig, FreesoundProvider};
 use crate::core::plugin::providers::stock::{StockMediaConfig, StockMediaProvider};
-use crate::core::CoreError;
+use crate::core::{fs::write_bytes_atomic_no_symlink, CoreError};
 use crate::ipc::payloads::CommandPayload;
 use crate::AppState;
 
@@ -107,39 +106,7 @@ fn write_trace_file_no_symlink(file_path: &Path, trace_json: &str) -> Result<(),
         }
     }
 
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let tmp_path = file_path.with_extension(format!("json.tmp.{}.{}", std::process::id(), nonce));
-
-    {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .map_err(|e| format!("Failed to create temporary trace file: {}", e))?;
-        file.write_all(trace_json.as_bytes())
-            .map_err(|e| format!("Failed to write temporary trace file: {}", e))?;
-        file.sync_all()
-            .map_err(|e| format!("Failed to sync temporary trace file: {}", e))?;
-    }
-
-    if let Ok(metadata) = std::fs::symlink_metadata(file_path) {
-        if metadata.file_type().is_symlink() {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(format!(
-                "Trace file destination must not be a symlink: {}",
-                file_path.display()
-            ));
-        }
-        std::fs::remove_file(file_path)
-            .map_err(|e| format!("Failed to replace existing trace file: {}", e))?;
-    }
-
-    std::fs::rename(&tmp_path, file_path)
-        .map_err(|e| format!("Failed to finalize trace file: {}", e))?;
-    Ok(())
+    write_bytes_atomic_no_symlink(file_path, trace_json.as_bytes(), "trace file")
 }
 
 /// Write an agent trace JSON file to the project's trace directory.

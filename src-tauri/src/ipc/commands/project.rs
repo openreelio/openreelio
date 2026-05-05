@@ -123,8 +123,16 @@ pub(crate) fn forbid_project_asset_protocol(
     project_path: &std::path::Path,
     assets: &[Asset],
 ) {
+    let canonical_project = std::fs::canonicalize(project_path).unwrap_or_else(|_| {
+        tracing::warn!(
+            "Failed to canonicalize project path for asset protocol scope removal: {}",
+            project_path.display()
+        );
+        project_path.to_path_buf()
+    });
+
     // Forbid the project-managed runtime directory.
-    state.forbid_asset_protocol_directory(&project_path.join(".openreelio"), true);
+    state.forbid_asset_protocol_directory(&canonical_project.join(".openreelio"), true);
 
     // Forbid imported asset source files.
     for asset in assets {
@@ -138,8 +146,23 @@ pub(crate) fn forbid_project_asset_protocol(
             continue;
         }
 
-        // Forbid the path regardless of current existence to avoid stale scope entries.
-        state.forbid_asset_protocol_file(&path);
+        match std::fs::canonicalize(&path) {
+            Ok(canonical_path) if canonical_path.starts_with(&canonical_project) => {
+                state.forbid_asset_protocol_file(&canonical_path);
+            }
+            Ok(canonical_path) => {
+                tracing::debug!(
+                    "Skipping external asset uri during asset protocol scope removal: assetId={}, uri={}, canonical={}",
+                    asset.id,
+                    uri,
+                    canonical_path.display()
+                );
+            }
+            Err(_) => {
+                // If the file was deleted before scope removal, fall back to the stored path.
+                state.forbid_asset_protocol_file(&path);
+            }
+        }
     }
 }
 

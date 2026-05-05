@@ -20,6 +20,7 @@ describe('sanitizeRendererImageUrl', () => {
     expect(sanitizeRendererImageUrl('file:///C:/videos/thumb.jpg')).toBeNull();
     expect(sanitizeRendererImageUrl('https://example.test/thumb.jpg')).toBeNull();
     expect(sanitizeRendererImageUrl('data:image/png;base64,AAAA')).toBeNull();
+    expect(sanitizeRendererImageUrl('asset://evil.host/thumb.jpg')).toBeNull();
     expect(sanitizeRendererImageUrl('asset://localhost/thumb.jpg\nonerror=alert(1)')).toBeNull();
   });
 });
@@ -35,5 +36,10 @@ describe('buildSafeAssetImageUrl', () => {
     expect(buildSafeAssetImageUrl('../secret/thumb.jpg')).toBeNull();
     expect(buildSafeAssetImageUrl('shots/../../secret/thumb.jpg')).toBeNull();
     expect(buildSafeAssetImageUrl('shots/0001.jpg\u0000.png')).toBeNull();
+    expect(buildSafeAssetImageUrl('/etc/passwd')).toBeNull();
+    expect(buildSafeAssetImageUrl('/home/user/secret.jpg')).toBeNull();
+    expect(buildSafeAssetImageUrl('C:/Users/user/secret.jpg')).toBeNull();
+    expect(buildSafeAssetImageUrl('shots/%2E%2E/secret.jpg')).toBeNull();
+    expect(buildSafeAssetImageUrl('shots/%2e%2e/secret.jpg')).toBeNull();
   });
 });

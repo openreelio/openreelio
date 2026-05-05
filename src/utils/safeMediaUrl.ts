@@ -1,4 +1,6 @@
 const ASSET_LOCALHOST_PREFIX = 'http://asset.localhost/';
+const ASSET_PROTOCOL_PREFIX = 'asset://localhost/';
+const WINDOWS_DRIVE_PATH = /^[A-Za-z]:\//;
 
 function hasControlCharacter(value: string): boolean {
   return Array.from(value).some((char) => {
@@ -18,7 +20,7 @@ export function sanitizeRendererImageUrl(value: unknown): string | null {
   }
 
   if (
-    trimmed.startsWith('asset://') ||
+    trimmed.startsWith(ASSET_PROTOCOL_PREFIX) ||
     trimmed.startsWith(ASSET_LOCALHOST_PREFIX) ||
     trimmed.startsWith('blob:')
   ) {
@@ -34,18 +36,31 @@ export function buildSafeAssetImageUrl(path: unknown): string | null {
   }
 
   const trimmed = path.trim();
+  let decodedTrimmed: string;
+  try {
+    decodedTrimmed = decodeURIComponent(trimmed);
+  } catch {
+    return null;
+  }
+
+  const normalized = trimmed.replace(/\\/g, '/');
+  const decodedNormalized = decodedTrimmed.replace(/\\/g, '/');
+  const lowerDecoded = decodedTrimmed.toLowerCase();
+
   if (
     !trimmed ||
     hasControlCharacter(trimmed) ||
+    hasControlCharacter(decodedTrimmed) ||
     trimmed.includes('://') ||
+    decodedTrimmed.includes('://') ||
     trimmed.startsWith('file:') ||
-    trimmed
-      .replace(/\\/g, '/')
-      .split('/')
-      .some((segment) => segment === '..')
+    lowerDecoded.startsWith('file:') ||
+    decodedNormalized.startsWith('/') ||
+    WINDOWS_DRIVE_PATH.test(decodedNormalized) ||
+    decodedNormalized.split('/').some((segment) => segment === '..')
   ) {
     return null;
   }
 
-  return `asset://localhost/${trimmed}`;
+  return `${ASSET_PROTOCOL_PREFIX}${normalized}`;
 }

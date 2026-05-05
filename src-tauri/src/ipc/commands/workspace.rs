@@ -718,19 +718,16 @@ pub async fn write_workspace_document(
     create_if_missing: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceDocumentWriteResultDto, String> {
-    let guard = state.project.lock().await;
-    let project = guard
-        .as_ref()
-        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+    let project_path = {
+        let guard = state.project.lock().await;
+        guard
+            .as_ref()
+            .map(|project| project.path.clone())
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?
+    };
 
     let allow_create = create_if_missing.unwrap_or(true);
-    let absolute_path = resolve_workspace_output_path(&project.path, &relative_path)?;
-
-    if !is_text_document_path(&absolute_path) {
-        return Err("File type is not supported for text editing".to_string());
-    }
-
-    let content_bytes = content.as_bytes();
+    let content_bytes = content.into_bytes();
     if content_bytes.len() > MAX_DOCUMENT_BYTES {
         return Err(format!(
             "Content is too large ({} bytes, max {})",
@@ -739,27 +736,37 @@ pub async fn write_workspace_document(
         ));
     }
 
-    let existed = absolute_path.exists();
-    if existed && !absolute_path.is_file() {
-        return Err(format!("Not a file: {}", absolute_path.display()));
-    }
-    if !existed && !allow_create {
-        return Err(format!("File not found: {}", relative_path));
-    }
+    tokio::task::spawn_blocking(move || {
+        let absolute_path = resolve_workspace_output_path(&project_path, &relative_path)?;
 
-    write_bytes_atomic_no_symlink(&absolute_path, content_bytes, "workspace document")
-        .map_err(|e| format!("Failed to write file '{}': {}", relative_path, e))?;
+        if !is_text_document_path(&absolute_path) {
+            return Err("File type is not supported for text editing".to_string());
+        }
 
-    let normalized_relative = absolute_path
-        .strip_prefix(&project.path)
-        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-        .unwrap_or(relative_path);
+        let existed = absolute_path.exists();
+        if existed && !absolute_path.is_file() {
+            return Err(format!("Not a file: {}", absolute_path.display()));
+        }
+        if !existed && !allow_create {
+            return Err(format!("File not found: {}", relative_path));
+        }
 
-    Ok(WorkspaceDocumentWriteResultDto {
-        relative_path: normalized_relative,
-        bytes_written: content_bytes.len(),
-        created: !existed,
+        write_bytes_atomic_no_symlink(&absolute_path, &content_bytes, "workspace document")
+            .map_err(|e| format!("Failed to write file '{}': {}", relative_path, e))?;
+
+        let normalized_relative = absolute_path
+            .strip_prefix(&project_path)
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+            .unwrap_or(relative_path);
+
+        Ok(WorkspaceDocumentWriteResultDto {
+            relative_path: normalized_relative,
+            bytes_written: content_bytes.len(),
+            created: !existed,
+        })
     })
+    .await
+    .map_err(|e| format!("Workspace document write task failed: {e}"))?
 }
 
 // =============================================================================

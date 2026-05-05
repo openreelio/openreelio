@@ -199,7 +199,6 @@ jobs:
         shell: bash
 
       - name: Download pinned FFmpeg binaries
-        if: ${{ vars.OPENREELIO_DOWNLOAD_FFMPEG == '1' }}
         working-directory: src-tauri
         env:
           OPENREELIO_DOWNLOAD_FFMPEG: "1"

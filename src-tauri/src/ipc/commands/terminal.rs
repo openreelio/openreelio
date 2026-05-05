@@ -807,7 +807,14 @@ pub async fn start_terminal_session(
         MAX_TERMINAL_ROWS,
     );
     let cwd = resolve_terminal_cwd(input.cwd, &state).await?;
-    let profile = resolve_terminal_profile(input.profile_id, input.shell, input.shell_args)?;
+    let profile_id = input.profile_id;
+    let shell = input.shell;
+    let shell_args = input.shell_args;
+    let profile = tokio::task::spawn_blocking(move || {
+        resolve_terminal_profile(profile_id, shell, shell_args)
+    })
+    .await
+    .map_err(|error| format!("Terminal profile resolution failed: {error}"))??;
 
     {
         let sessions = state.terminal_sessions.lock().await;
