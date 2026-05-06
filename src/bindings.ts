@@ -2541,7 +2541,11 @@ export type AgentSessionLineageDto = { parentSessionId: string | null; branchFro
  * This is the primary output artifact of the analysis pipeline.
  * Stored at `{project}/.openreelio/analysis/{asset_id}/bundle.json`.
  */
-export type AnalysisBundle = { 
+export type AnalysisBundle = {
+/**
+ * Analysis schema version. Version 2 adds transcript detail and frame observations.
+ */
+schemaVersion?: number;
 /**
  * Asset ID this bundle belongs to
  */
@@ -2566,6 +2570,14 @@ segments: ContentSegment[] | null;
  * Visual frame analysis results
  */
 frameAnalysis: FrameAnalysis[] | null; 
+/**
+ * Semantic observations produced by a vision-capable provider.
+ */
+frameObservations?: FrameObservation[] | null;
+/**
+ * Full transcript, words, and speaker-aware segments when available.
+ */
+transcriptDetail?: TranscriptDetail | null;
 /**
  * Representative-frame contact sheet artifact
  */
@@ -4228,6 +4240,58 @@ width: number;
  */
 height: number }
 /**
+ * Semantic visual observation for a representative frame/keyframe.
+ */
+export type FrameObservation = {
+/**
+ * Index of the shot this observation describes
+ */
+shotIndex: number;
+/**
+ * Source-relative timestamp represented by the observed image
+ */
+timeSec: number;
+/**
+ * Absolute or workspace-relative path to the analyzed image
+ */
+imagePath: string;
+/**
+ * Natural-language description of what is visible
+ */
+description: string;
+/**
+ * People or subject categories visible in the frame
+ */
+subjects?: string[];
+/**
+ * Observable actions or motion implied by the frame
+ */
+actions?: string[];
+/**
+ * Setting or environment label
+ */
+setting?: string | null;
+/**
+ * OCR text visible in the frame
+ */
+visibleText?: string[];
+/**
+ * Object or prop labels visible in the frame
+ */
+objects?: string[];
+/**
+ * Short note explaining how this shot may be useful in an edit
+ */
+editUsefulness?: string | null;
+/**
+ * Provider confidence (0.0 - 1.0)
+ */
+confidence: number;
+/**
+ * Provider/model that produced this observation
+ */
+provider: PerceptionProviderMetadata }
+/**
  * Describes a gap (empty region) between clips on a track.
  */
 export type GapInfo = { 
@@ -4801,6 +4865,22 @@ normalizedDuration: number }
  * A content part within a message (text, tool call, tool result, etc.).
  */
 export type PartDto = { id: string; messageId: string; sortOrder: number; partType: string; dataJson: string; compactedAt: number | null }
+/**
+ * Metadata describing the model that produced semantic perception signals.
+ */
+export type PerceptionProviderMetadata = {
+/**
+ * Provider identifier, e.g. "openai" or "local"
+ */
+provider: string;
+/**
+ * Model identifier used by the provider
+ */
+model: string;
+/**
+ * ISO 8601 timestamp when this perception result was produced
+ */
+analyzedAt: string }
 export type PerformanceSettingsDto = { hardwareAcceleration: boolean; gpuDeviceId: string | null; proxyGeneration: boolean; proxyResolution: string; maxConcurrentJobs: number; memoryLimitMb: number; cacheSizeMb: number }
 /**
  * Persisted permission decision DTO aligned with the frontend session kernel vocabulary.
@@ -5911,6 +5991,30 @@ playheadSec: number;
  */
 markedDuration: number | null }
 /**
+ * Speaker-aware transcript range used by `TranscriptDetail`.
+ */
+export type SpeakerSegment = {
+/**
+ * Start time in seconds
+ */
+startSec: number;
+/**
+ * End time in seconds
+ */
+endSec: number;
+/**
+ * Speaker identifier
+ */
+speakerId: string;
+/**
+ * Segment text
+ */
+text: string;
+/**
+ * Provider confidence (0.0 - 1.0)
+ */
+confidence?: number | null }
+/**
  * A detected region of speech / non-silence in the audio track.
  */
 export type SpeechRegion = { 
@@ -6714,6 +6818,26 @@ pointsCount: number;
  * Average confidence score across all tracked points.
  */
 averageConfidence: number }
+/**
+ * Full transcript details beyond the legacy segment list.
+ */
+export type TranscriptDetail = {
+/**
+ * Complete transcript text
+ */
+full: string;
+/**
+ * Word-level timings, estimated or provider supplied
+ */
+words?: TranscriptWord[];
+/**
+ * Speaker-aware transcript ranges
+ */
+speakerSegments?: SpeakerSegment[];
+/**
+ * Provider/model that produced this transcript detail
+ */
+provider?: PerceptionProviderMetadata | null }
 /**
  * Search result for a transcript segment.
  */

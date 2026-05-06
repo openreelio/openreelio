@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use crate::core::annotations::models::{ShotResult, TranscriptSegment};
+use crate::core::annotations::models::{ShotResult, TranscriptSegment, TranscriptWord};
 
 /// Finite decibel floor used for silent audio serialization.
 pub const SILENCE_FLOOR_DB: f64 = -90.0;
@@ -274,6 +274,103 @@ impl FrameAnalysis {
 }
 
 // =============================================================================
+// Perception Provider Metadata
+// =============================================================================
+
+/// Metadata describing the model that produced semantic perception signals.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PerceptionProviderMetadata {
+    /// Provider identifier, e.g. "openai" or "local"
+    pub provider: String,
+    /// Model identifier used by the provider
+    pub model: String,
+    /// ISO 8601 timestamp when this perception result was produced
+    pub analyzed_at: String,
+}
+
+impl PerceptionProviderMetadata {
+    /// Creates provider metadata with the current timestamp.
+    pub fn new(provider: &str, model: &str) -> Self {
+        Self {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            analyzed_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+/// Semantic visual observation for a representative frame/keyframe.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameObservation {
+    /// Index of the shot this observation describes
+    pub shot_index: usize,
+    /// Source-relative timestamp represented by the observed image
+    pub time_sec: f64,
+    /// Absolute or workspace-relative path to the analyzed image
+    pub image_path: String,
+    /// Natural-language description of what is visible
+    pub description: String,
+    /// People or subject categories visible in the frame
+    #[serde(default)]
+    pub subjects: Vec<String>,
+    /// Observable actions or motion implied by the frame
+    #[serde(default)]
+    pub actions: Vec<String>,
+    /// Setting or environment label
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setting: Option<String>,
+    /// OCR text visible in the frame
+    #[serde(default)]
+    pub visible_text: Vec<String>,
+    /// Object or prop labels visible in the frame
+    #[serde(default)]
+    pub objects: Vec<String>,
+    /// Short note explaining how this shot may be useful in an edit
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_usefulness: Option<String>,
+    /// Provider confidence (0.0 - 1.0)
+    pub confidence: f64,
+    /// Provider/model that produced this observation
+    pub provider: PerceptionProviderMetadata,
+}
+
+/// Speaker-aware transcript range used by `TranscriptDetail`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerSegment {
+    /// Start time in seconds
+    pub start_sec: f64,
+    /// End time in seconds
+    pub end_sec: f64,
+    /// Speaker identifier
+    pub speaker_id: String,
+    /// Segment text
+    pub text: String,
+    /// Provider confidence (0.0 - 1.0)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+}
+
+/// Full transcript details beyond the legacy segment list.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptDetail {
+    /// Complete transcript text
+    pub full: String,
+    /// Word-level timings, estimated or provider supplied
+    #[serde(default)]
+    pub words: Vec<TranscriptWord>,
+    /// Speaker-aware transcript ranges
+    #[serde(default)]
+    pub speaker_segments: Vec<SpeakerSegment>,
+    /// Provider/model that produced this transcript detail
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<PerceptionProviderMetadata>,
+}
+
+// =============================================================================
 // Video Metadata
 // =============================================================================
 
@@ -419,6 +516,9 @@ pub struct ContactSheetArtifact {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisBundle {
+    /// Analysis schema version. Version 2 adds transcript detail and frame observations.
+    #[serde(default = "default_analysis_schema_version")]
+    pub schema_version: u32,
     /// Asset ID this bundle belongs to
     pub asset_id: String,
     /// Shot detection results
@@ -431,6 +531,12 @@ pub struct AnalysisBundle {
     pub segments: Option<Vec<ContentSegment>>,
     /// Visual frame analysis results
     pub frame_analysis: Option<Vec<FrameAnalysis>>,
+    /// Semantic observations produced by a vision-capable provider.
+    #[serde(default)]
+    pub frame_observations: Option<Vec<FrameObservation>>,
+    /// Full transcript, words, and speaker-aware segments when available.
+    #[serde(default)]
+    pub transcript_detail: Option<TranscriptDetail>,
     /// Representative-frame contact sheet artifact
     #[serde(default)]
     pub contact_sheet: Option<ContactSheetArtifact>,
@@ -447,12 +553,15 @@ impl AnalysisBundle {
     /// Creates a new empty bundle for an asset
     pub fn new(asset_id: &str, metadata: VideoMetadata) -> Self {
         Self {
+            schema_version: default_analysis_schema_version(),
             asset_id: asset_id.to_string(),
             shots: None,
             transcript: None,
             audio_profile: None,
             segments: None,
             frame_analysis: None,
+            frame_observations: None,
+            transcript_detail: None,
             contact_sheet: None,
             metadata,
             errors: HashMap::new(),
@@ -469,9 +578,11 @@ impl AnalysisBundle {
     pub fn has_results(&self) -> bool {
         self.shots.is_some()
             || self.transcript.is_some()
+            || self.transcript_detail.is_some()
             || self.audio_profile.is_some()
             || self.segments.is_some()
             || self.frame_analysis.is_some()
+            || self.frame_observations.is_some()
             || self.contact_sheet.is_some()
     }
 
@@ -479,6 +590,10 @@ impl AnalysisBundle {
     pub fn is_complete(&self) -> bool {
         self.errors.is_empty()
     }
+}
+
+fn default_analysis_schema_version() -> u32 {
+    2
 }
 
 // =============================================================================
@@ -694,11 +809,14 @@ mod tests {
     fn should_create_empty_bundle() {
         let bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
         assert_eq!(bundle.asset_id, "asset_001");
+        assert_eq!(bundle.schema_version, 2);
         assert!(bundle.shots.is_none());
         assert!(bundle.transcript.is_none());
+        assert!(bundle.transcript_detail.is_none());
         assert!(bundle.audio_profile.is_none());
         assert!(bundle.segments.is_none());
         assert!(bundle.frame_analysis.is_none());
+        assert!(bundle.frame_observations.is_none());
         assert!(bundle.errors.is_empty());
         assert!(!bundle.has_results());
         assert!(bundle.is_complete());
@@ -760,15 +878,52 @@ mod tests {
             columns: 2,
             rows: 1,
         });
+        bundle.frame_observations = Some(vec![FrameObservation {
+            shot_index: 0,
+            time_sec: 2.5,
+            image_path: "/tmp/keyframes/0.jpg".to_string(),
+            description: "A host is speaking to camera in a studio.".to_string(),
+            subjects: vec!["host".to_string()],
+            actions: vec!["speaking".to_string()],
+            setting: Some("studio".to_string()),
+            visible_text: vec!["OPENREELIO".to_string()],
+            objects: vec!["microphone".to_string()],
+            edit_usefulness: Some("Strong opener or explanation beat.".to_string()),
+            confidence: 0.86,
+            provider: PerceptionProviderMetadata::new("openai", "gpt-4.1-mini"),
+        }]);
+        bundle.transcript_detail = Some(TranscriptDetail {
+            full: "Hello from the studio".to_string(),
+            words: crate::core::annotations::models::estimate_word_timings(&[
+                TranscriptSegment::new(0.0, 2.0, "Hello from the studio", 0.9),
+            ]),
+            speaker_segments: vec![SpeakerSegment {
+                start_sec: 0.0,
+                end_sec: 2.0,
+                speaker_id: "speaker_1".to_string(),
+                text: "Hello from the studio".to_string(),
+                confidence: Some(0.9),
+            }],
+            provider: Some(PerceptionProviderMetadata::new(
+                "openai",
+                "gpt-4o-transcribe-diarize",
+            )),
+        });
 
         let json = serde_json::to_string_pretty(&bundle).unwrap();
         let parsed: AnalysisBundle = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.asset_id, "asset_001");
+        assert_eq!(parsed.schema_version, 2);
         assert_eq!(parsed.shots.as_ref().unwrap().len(), 2);
         assert_eq!(parsed.audio_profile.as_ref().unwrap().bpm, Some(128.0));
         assert_eq!(parsed.segments.as_ref().unwrap().len(), 2);
         assert_eq!(parsed.frame_analysis.as_ref().unwrap().len(), 2);
+        assert_eq!(parsed.frame_observations.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            parsed.transcript_detail.as_ref().unwrap().speaker_segments[0].speaker_id,
+            "speaker_1"
+        );
         assert_eq!(parsed.contact_sheet.as_ref().unwrap().frame_count, 2);
         assert!(parsed.errors.is_empty());
     }
@@ -783,6 +938,8 @@ mod tests {
         assert!(json.contains("\"audioProfile\":null"));
         assert!(json.contains("\"segments\":null"));
         assert!(json.contains("\"frameAnalysis\":null"));
+        assert!(json.contains("\"frameObservations\":null"));
+        assert!(json.contains("\"transcriptDetail\":null"));
         assert!(json.contains("\"contactSheet\":null"));
         assert!(json.contains("\"errors\":{}"));
 
@@ -793,7 +950,31 @@ mod tests {
         assert!(parsed.audio_profile.is_none());
         assert!(parsed.segments.is_none());
         assert!(parsed.frame_analysis.is_none());
+        assert!(parsed.frame_observations.is_none());
+        assert!(parsed.transcript_detail.is_none());
         assert!(parsed.contact_sheet.is_none());
+    }
+
+    #[test]
+    fn should_read_legacy_bundle_without_v2_fields() {
+        let json = r#"{
+            "assetId": "asset_legacy",
+            "shots": null,
+            "transcript": null,
+            "audioProfile": null,
+            "segments": null,
+            "frameAnalysis": null,
+            "contactSheet": null,
+            "metadata": { "durationSec": 10.0, "hasAudio": true },
+            "errors": {},
+            "analyzedAt": "2026-03-07T00:00:00Z"
+        }"#;
+
+        let parsed: AnalysisBundle = serde_json::from_str(json).unwrap();
+
+        assert_eq!(parsed.schema_version, 2);
+        assert!(parsed.frame_observations.is_none());
+        assert!(parsed.transcript_detail.is_none());
     }
 
     #[test]
