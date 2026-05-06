@@ -403,7 +403,7 @@ fn encode_embedding(vector: &[f32]) -> Vec<u8> {
 }
 
 fn decode_embedding(bytes: &[u8]) -> CoreResult<Vec<f32>> {
-    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+    if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
         return Err(CoreError::Internal(
             "Stored embedding bytes are not aligned to f32 size".to_string(),
         ));

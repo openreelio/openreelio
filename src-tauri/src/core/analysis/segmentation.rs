@@ -375,7 +375,7 @@ impl ContentSegmenter {
         }
 
         finite_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median_db = if finite_values.len() % 2 == 0 {
+        let median_db = if finite_values.len().is_multiple_of(2) {
             let upper = finite_values.len() / 2;
             (finite_values[upper - 1] + finite_values[upper]) / 2.0
         } else {
