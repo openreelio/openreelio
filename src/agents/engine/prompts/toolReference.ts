@@ -56,13 +56,13 @@ const QUERY_ACTIONS = `## Query Actions (meta-tool: query)
 - get_analysis_cost_estimate(assetId) → cost estimate for cloud analysis
 - get_analysis_providers → available analysis backends
 - analyze_reference_video(assetId) → extract edit/style signals from a reference video
-- read_source_analysis_report(assetId|file, outputPath?) → read the canonical Markdown source-analysis report for a source video; the report now leads with semantic scene-by-scene understanding (what is happening, who is present, what is heard, visible text, likely setting, useful moments). It auto-generates/refreshes analysis and saves "<asset-name>.analysis.md" beside the asset by default, or to outputPath when provided. Key outputs: data.content, data.relativePath
-- generate_source_analysis_report(assetId, outputPath?) → build/reuse the structured source-footage report (JSON + Markdown) with semantic overview, scene timeline, useful moments, and supporting signals, then persist the Markdown report beside the asset by default. Key outputs: data.content, data.reportPath
+- read_source_analysis_report(assetId|file, outputPath?) → read the canonical Markdown source-analysis report for a source video; the report leads with quality status plus semantic scene-by-scene understanding, frame observations, timed transcript, visible text, likely setting, and useful moments. It auto-generates/refreshes analysis and saves "<asset-name>.analysis.md" beside the asset by default, or to outputPath when provided. Key outputs: data.content, data.relativePath, data.quality
+- generate_source_analysis_report(assetId, outputPath?) → build/reuse the structured source-footage report (JSON + Markdown) with quality gate, semantic overview, full transcript, frame observations, scene timeline, useful moments, and supporting signals, then persist the Markdown report beside the asset by default. Key outputs: data.content, data.reportPath, data.quality
 - import_external_diarization(assetId, inputPath) → import external diarization JSON and merge true speaker IDs into the cached transcript bundle
-- search_source_analysis_report(assetId, query) → search report moments/chapters/highlights/speaker turns/visual breakdown entries and return ranked source ranges
-- search_source_library(query) → search report moments/chapters/highlights/speaker turns/visual breakdown entries across multiple source assets and return ranked ranges
-- search_indexed_source_library(query) → index report chunks, including visual breakdown entries, and search them through backend lexical or hybrid semantic retrieval across multiple source assets
-- build_source_selects(query) → turn ranked source matches (including speaker turns when relevant) into a timeline-ready selects stringout plan, optionally applying it to a selects track
+- search_source_analysis_report(assetId, query) → search report moments/chapters/highlights/speaker turns/visual breakdown/frame-observation entries and return ranked source ranges
+- search_source_library(query) → search report moments/chapters/highlights/speaker turns/visual breakdown/frame-observation entries across multiple source assets and return ranked ranges
+- search_indexed_source_library(query) → index report chunks, including visual breakdown and frame-observation entries, and search them through backend lexical or hybrid semantic retrieval across multiple source assets
+- build_source_selects(query) → turn ranked source matches (including speaker turns and frame observations when relevant) into a timeline-ready selects stringout plan, automatically analyzing missing/low-quality source reports by default, optionally applying it to a selects track
 - generate_style_document(assetId) → build/reuse an editing style document (ESD)
 - compare_edit_structure(sequenceId?, esdId) → compare current cut structure to a reference style`;
 
@@ -154,7 +154,7 @@ const COMMON_WORKFLOWS = `## Common Workflows
 6. Segment an inserted clip: insert_clip → split_clip using data.clipId for the first cut → later split_clip steps use the previous split's data.newClipId
 7. Track-specific clip lookup: get_track_clips(trackId) → reference clip IDs via data.clips[n].id
 8. Time-based clip lookup across tracks: get_clips_at_time(time) → reference clip IDs via data[n].id (never data[n].clipId)
-9. Deep source inspection: find_workspace_file or get_asset_catalog → read_source_analysis_report (this already writes the default ".analysis.md" report beside the asset) → search_source_analysis_report / search_source_library → build_source_selects or edit actions
+9. Deep source inspection/editing: find_workspace_file or get_asset_catalog → read_source_analysis_report (this already writes the default ".analysis.md" report beside the asset) → check data.quality.status and do not silently edit from an insufficient/partial report; refresh or use build_source_selects with analyzeMissing=true when source selection depends on transcript or frame semantics → search_source_analysis_report / search_source_library → build_source_selects or edit actions
 10. If the user asks to save the analysis as a file but does not specify a location, do not add a separate write step: source-analysis tools already save "<asset-name>.analysis.md" beside the asset by default. Use write_workspace_document only for a custom second copy/path.`;
 
 const CLI_REFERENCE = `## CLI (headless alternative)

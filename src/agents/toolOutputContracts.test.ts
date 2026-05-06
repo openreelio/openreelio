@@ -8,6 +8,7 @@ describe('toolOutputContracts', () => {
 
     expect(contract?.validatePath?.('data.metadata.durationSec')).toBe(true);
     expect(contract?.validatePath?.('data.coverage.annotation')).toBe(true);
+    expect(contract?.validatePath?.('data.quality.status')).toBe(true);
     expect(contract?.validatePath?.('data.sectionCounts.highlights')).toBe(true);
     expect(contract?.validatePath?.('data.requestedFile')).toBe(true);
     expect(contract?.validatePath?.('data.warnings[0]')).toBe(true);
@@ -21,6 +22,8 @@ describe('toolOutputContracts', () => {
     expect(contract?.validatePath?.('data.metadata.codec')).toBe(true);
     expect(contract?.validatePath?.('data.coverage.visual')).toBe(true);
     expect(contract?.validatePath?.('data.errors.visual')).toBe(true);
+    expect(contract?.validatePath?.('data.quality.score')).toBe(true);
+    expect(contract?.validatePath?.('data.transcript.segments[0].text')).toBe(true);
     expect(contract?.validatePath?.('data.visual.items[0].cameraAngle')).toBe(true);
     expect(contract?.validatePath?.('data.visual.items[0].summary')).toBe(true);
     expect(contract?.validatePath?.('data.semantic.sceneTimeline[0].summary')).toBe(true);
@@ -32,6 +35,7 @@ describe('toolOutputContracts', () => {
     const generateContract = getToolOutputContract('generate_source_analysis_report');
 
     expect(readContract?.validatePath?.('data.visual.items[0].cameraAngle')).toBe(false);
+    expect(readContract?.validatePath?.('data.transcript.segments[0].text')).toBe(false);
     expect(readContract?.validatePath?.('data.semantic.sceneTimeline[0].summary')).toBe(false);
     expect(readContract?.validatePath?.('data.markdown')).toBe(false);
     expect(generateContract?.validatePath?.('data.markdown')).toBe(true);

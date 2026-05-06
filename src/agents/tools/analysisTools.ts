@@ -217,6 +217,46 @@ function buildTranscriptExcerpt(segments: Array<{ text: string }>, maxLength = 2
   return `${joined.slice(0, maxLength - 3).trimEnd()}...`;
 }
 
+function buildFullTranscriptText(segments: Array<{ text: string }>): string | null {
+  const joined = segments
+    .map((segment) => normalizeText(segment.text))
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+
+  return joined.length > 0 ? joined : null;
+}
+
+function buildTranscriptLines(
+  segments: Array<
+    TranscriptLikeSegment & {
+      confidence?: number | null;
+      language?: string | null;
+    }
+  >,
+): Array<{
+  index: number;
+  startSec: number;
+  endSec: number;
+  speakerId: string | null;
+  speakerTurnId: string | null;
+  language: string | null;
+  confidence: number | null;
+  text: string;
+}> {
+  return segments.map((segment, index) => ({
+    index,
+    startSec: roundTo(segment.startSec) ?? 0,
+    endSec: roundTo(segment.endSec) ?? 0,
+    speakerId: segment.speakerId ?? null,
+    speakerTurnId: segment.speakerTurnId ?? null,
+    language:
+      typeof segment.language === 'string' && segment.language.length > 0 ? segment.language : null,
+    confidence: roundTo(segment.confidence, 3),
+    text: normalizeText(segment.text),
+  }));
+}
+
 type TimedRange = {
   startSec: number;
   endSec: number;
@@ -231,6 +271,8 @@ type TranscriptLikeSegment = TimedRange & {
   speakerId?: string | null;
   speakerTurnId?: string | null;
 };
+
+type FrameObservationLike = NonNullable<AnalysisBundle['frameObservations']>[number];
 
 type SegmentLike = TimedRange & {
   segmentType: string;
@@ -907,6 +949,38 @@ function buildSourceReportChunks(report: SourceAnalysisReport): SourceReportChun
         subjectPosition: item.subjectPosition,
         motionDirection: item.motionDirection,
         visualComplexity: item.visualComplexity,
+      },
+    })),
+    ...report.visual.observations.map((observation) => ({
+      id: `${report.assetId}:visualObservation:${observation.shotIndex}`,
+      sectionType: 'visual' as const,
+      sectionIndex: observation.shotIndex,
+      startSec: observation.startSec,
+      endSec: observation.endSec,
+      searchText: [
+        observation.description,
+        observation.subjects.join(' '),
+        observation.actions.join(' '),
+        observation.setting,
+        observation.visibleText.join(' '),
+        observation.objects.join(' '),
+        observation.editUsefulness,
+      ]
+        .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        .join(' '),
+      metadata: {
+        preview: observation.description,
+        keyframePath: observation.imagePath,
+        durationSec: observation.endSec - observation.startSec,
+        description: observation.description,
+        subjects: observation.subjects,
+        actions: observation.actions,
+        setting: observation.setting,
+        visibleText: observation.visibleText,
+        objects: observation.objects,
+        editUsefulness: observation.editUsefulness,
+        confidence: observation.confidence,
+        provider: observation.provider,
       },
     })),
   ];
@@ -1773,6 +1847,296 @@ function buildReportVisualItems(
   });
 }
 
+function buildFrameObservationItems(
+  observations: FrameObservationLike[],
+  shots: Array<
+    TimedRange & {
+      keyframePath?: string | null;
+    }
+  >,
+): Array<{
+  shotIndex: number;
+  startSec: number;
+  endSec: number;
+  timeSec: number;
+  imagePath: string | null;
+  description: string;
+  subjects: string[];
+  actions: string[];
+  setting: string | null;
+  visibleText: string[];
+  objects: string[];
+  editUsefulness: string | null;
+  confidence: number | null;
+  provider: {
+    provider: string;
+    model: string;
+    analyzedAt: string;
+  } | null;
+}> {
+  return observations.flatMap((observation, fallbackIndex) => {
+    const resolvedShotIndex = shots[observation.shotIndex] ? observation.shotIndex : fallbackIndex;
+    const shot = shots[resolvedShotIndex] ?? null;
+    const timeSec =
+      roundTo(observation.timeSec) ??
+      (shot ? (roundTo((shot.startSec + shot.endSec) / 2) ?? 0) : 0);
+    const description = normalizeText(observation.description);
+
+    if (!description && !shot) {
+      return [];
+    }
+
+    const provider = observation.provider
+      ? {
+          provider: normalizeText(observation.provider.provider) || 'unknown',
+          model: normalizeText(observation.provider.model) || 'unknown',
+          analyzedAt: normalizeText(observation.provider.analyzedAt) || 'unknown',
+        }
+      : null;
+
+    return [
+      {
+        shotIndex: resolvedShotIndex,
+        startSec: shot ? (roundTo(shot.startSec) ?? timeSec) : timeSec,
+        endSec: shot ? (roundTo(shot.endSec) ?? timeSec) : timeSec,
+        timeSec,
+        imagePath: observation.imagePath || shot?.keyframePath || null,
+        description,
+        subjects: uniqueStrings(observation.subjects ?? [], 8),
+        actions: uniqueStrings(observation.actions ?? [], 8),
+        setting:
+          typeof observation.setting === 'string' && observation.setting.trim().length > 0
+            ? normalizeText(observation.setting)
+            : null,
+        visibleText: uniqueStrings(observation.visibleText ?? [], 8),
+        objects: uniqueStrings(observation.objects ?? [], 10),
+        editUsefulness:
+          typeof observation.editUsefulness === 'string' &&
+          observation.editUsefulness.trim().length > 0
+            ? normalizeText(observation.editUsefulness)
+            : null,
+        confidence: roundTo(observation.confidence, 3),
+        provider,
+      },
+    ];
+  });
+}
+
+function isUnknownVisualValue(value: string | null | undefined): boolean {
+  return !value || value === 'unknown';
+}
+
+function isLocalVisualFallbackOnly(
+  frameAnalysis: Array<{
+    cameraAngle?: string | null;
+    subjectPosition?: string | null;
+    motionDirection?: string | null;
+  }>,
+): boolean {
+  return (
+    frameAnalysis.length > 0 &&
+    frameAnalysis.every(
+      (entry) =>
+        isUnknownVisualValue(entry.cameraAngle) &&
+        isUnknownVisualValue(entry.subjectPosition) &&
+        isUnknownVisualValue(entry.motionDirection),
+    )
+  );
+}
+
+function resolveVisualSemanticCoverage(
+  frameAnalysis: Array<{
+    cameraAngle?: string | null;
+    subjectPosition?: string | null;
+    motionDirection?: string | null;
+  }>,
+  frameObservations: unknown[] = [],
+): 'semantic' | 'local_fallback' | 'missing' {
+  if (frameObservations.length > 0) {
+    return 'semantic';
+  }
+
+  if (frameAnalysis.length === 0) {
+    return 'missing';
+  }
+
+  return isLocalVisualFallbackOnly(frameAnalysis) ? 'local_fallback' : 'semantic';
+}
+
+function buildKeyframeGallery(
+  shots: Array<
+    TimedRange & {
+      keyframePath?: string | null;
+      keyframeSelectionMethod?: string | null;
+    }
+  >,
+): Array<{
+  shotIndex: number;
+  startSec: number;
+  endSec: number;
+  keyframePath: string;
+  keyframeSelectionMethod: string | null;
+  label: string;
+}> {
+  return shots.flatMap((shot, index) => {
+    if (!shot.keyframePath) {
+      return [];
+    }
+
+    return [
+      {
+        shotIndex: index,
+        startSec: roundTo(shot.startSec) ?? 0,
+        endSec: roundTo(shot.endSec) ?? 0,
+        keyframePath: shot.keyframePath,
+        keyframeSelectionMethod: shot.keyframeSelectionMethod ?? null,
+        label: `Shot ${index + 1} keyframe`,
+      },
+    ];
+  });
+}
+
+function buildSourceReportQuality(report: {
+  coverage: {
+    shots: boolean;
+    transcript: boolean;
+    audio: boolean;
+    segments: boolean;
+    visual: boolean;
+    annotation: boolean;
+  };
+  metadata: {
+    hasAudioStream: boolean;
+  };
+  visual: {
+    semanticCoverage: 'semantic' | 'local_fallback' | 'missing';
+    keyframes: unknown[];
+    contactSheet: unknown | null;
+  };
+  transcript: {
+    segmentCount: number;
+  };
+  annotations: {
+    objectDetectionCount: number;
+    faceDetectionCount: number;
+    ocrTextCount: number;
+  };
+  errors: Record<string, string>;
+}): {
+  status: 'ready' | 'partial' | 'insufficient';
+  score: number;
+  criticalSignals: string[];
+  missingSignals: string[];
+  degradedSignals: string[];
+  recommendedActions: string[];
+} {
+  let score = 100;
+  const criticalSignals: string[] = [];
+  const missingSignals: string[] = [];
+  const degradedSignals: string[] = [];
+  const recommendedActions: string[] = [];
+
+  const requireSignal = (
+    available: boolean,
+    signal: string,
+    penalty: number,
+    recommendation: string,
+  ) => {
+    if (available) {
+      criticalSignals.push(signal);
+      return;
+    }
+
+    score -= penalty;
+    missingSignals.push(signal);
+    recommendedActions.push(recommendation);
+  };
+
+  requireSignal(
+    report.coverage.shots,
+    'shot boundaries',
+    20,
+    'Run shot detection so the report can align transcript and visuals to edit-ready ranges.',
+  );
+  if (report.metadata.hasAudioStream) {
+    requireSignal(
+      report.coverage.transcript,
+      'timed transcript',
+      25,
+      'Run transcription so dialogue, searchable quotes, and subtitles are available.',
+    );
+    requireSignal(
+      report.coverage.audio,
+      'audio profile',
+      12,
+      'Run audio profiling so speech, silence, loudness, and pacing cues are available.',
+    );
+  }
+  requireSignal(
+    report.coverage.visual,
+    'visual frame analysis',
+    20,
+    'Run visual analysis so keyframe-level framing and motion cues are available.',
+  );
+
+  if (report.visual.semanticCoverage === 'local_fallback') {
+    score -= 12;
+    degradedSignals.push('semantic visual descriptions');
+    recommendedActions.push(
+      'Run a vision-capable provider over the extracted keyframes/contact sheet for actual scene descriptions.',
+    );
+  } else if (report.visual.semanticCoverage === 'semantic') {
+    criticalSignals.push('semantic visual cues');
+  }
+
+  if (!report.coverage.annotation) {
+    score -= 8;
+    missingSignals.push('object, face, and OCR annotations');
+    recommendedActions.push(
+      'Run object/OCR/face annotation if the edit depends on people, props, screens, or visible text.',
+    );
+  } else if (
+    report.annotations.objectDetectionCount +
+      report.annotations.faceDetectionCount +
+      report.annotations.ocrTextCount >
+    0
+  ) {
+    criticalSignals.push('annotation cues');
+  }
+
+  if (report.visual.keyframes.length === 0) {
+    score -= 8;
+    degradedSignals.push('keyframe gallery');
+    recommendedActions.push(
+      'Regenerate shot keyframes so agents can inspect representative stills.',
+    );
+  }
+
+  if (!report.visual.contactSheet) {
+    score -= 4;
+    degradedSignals.push('contact sheet');
+  }
+
+  const errorCount = Object.keys(report.errors).length;
+  if (errorCount > 0) {
+    score -= Math.min(20, errorCount * 6);
+    degradedSignals.push('failed analysis sub-jobs');
+  }
+
+  const normalizedScore = Math.max(0, Math.min(100, Math.round(score)));
+  const status =
+    normalizedScore >= 80 ? 'ready' : normalizedScore >= 50 ? 'partial' : 'insufficient';
+
+  return {
+    status,
+    score: normalizedScore,
+    criticalSignals: uniqueStrings(criticalSignals),
+    missingSignals: uniqueStrings(missingSignals),
+    degradedSignals: uniqueStrings(degradedSignals),
+    recommendedActions: uniqueStrings(recommendedActions),
+  };
+}
+
 function formatProviderLabel(provider: unknown): string {
   if (typeof provider === 'string') {
     return provider;
@@ -1789,12 +2153,20 @@ function formatProviderLabel(provider: unknown): string {
 }
 
 function bundleSatisfiesOptions(bundle: AnalysisBundle, options: AnalysisOptions): boolean {
+  const frameObservations = bundle.frameObservations ?? [];
+  const hasFrameAnalysis = (bundle.frameAnalysis?.length ?? 0) > 0;
+  const hasVisualSignals = hasFrameAnalysis || frameObservations.length > 0;
+
   return (
     (!options.shots || hasValue(bundle.shots)) &&
     (!options.transcript || hasValue(bundle.transcript)) &&
     (!options.audio || hasValue(bundle.audioProfile)) &&
     (!options.segments || hasValue(bundle.segments)) &&
-    (!options.visual || hasValue(bundle.frameAnalysis))
+    (!options.visual ||
+      (hasVisualSignals &&
+        (options.localOnly ||
+          !isLocalVisualFallbackOnly(bundle.frameAnalysis ?? []) ||
+          frameObservations.length > 0)))
   );
 }
 
@@ -1879,6 +2251,15 @@ type SourceLibraryMatch = {
     subjectPosition?: string | null;
     motionDirection?: string | null;
     visualComplexity?: number;
+    description?: string;
+    subjects?: string[];
+    actions?: string[];
+    setting?: string | null;
+    visibleText?: string[];
+    objects?: string[];
+    editUsefulness?: string | null;
+    confidence?: number | null;
+    provider?: Record<string, unknown> | null;
   };
 };
 
@@ -1909,6 +2290,15 @@ type SemanticReportInput = {
   };
   visual: {
     topCameraAngles: Array<{ label: string; count: number }>;
+    observations: Array<{
+      description: string;
+      subjects: string[];
+      actions: string[];
+      setting: string | null;
+      visibleText: string[];
+      objects: string[];
+      editUsefulness: string | null;
+    }>;
   };
   speakerTurns: {
     items: ReportSpeakerTurn[];
@@ -2107,12 +2497,20 @@ function buildSemanticReportData(report: SemanticReportInput): SemanticReportDat
       };
     });
 
+  const observationDescriptions = report.visual.observations
+    .map((observation) => observation.description)
+    .filter((value) => value.length > 0);
   const whatIsHappening = uniqueStrings(
-    sceneTimeline.map((item) => item.summary),
+    [...observationDescriptions, ...sceneTimeline.map((item) => item.summary)],
     SEMANTIC_OVERVIEW_LIMIT,
   );
   const likelySetting = uniqueStrings(
-    report.moments.items.flatMap((moment) => moment.settingHints),
+    [
+      ...report.visual.observations
+        .map((observation) => observation.setting)
+        .filter((value): value is string => typeof value === 'string' && value.length > 0),
+      ...report.moments.items.flatMap((moment) => moment.settingHints),
+    ],
     SEMANTIC_OVERVIEW_LIMIT,
   );
   const whoIsPresent = uniqueStrings(
@@ -2126,6 +2524,9 @@ function buildSemanticReportData(report: SemanticReportInput): SemanticReportDat
       ...report.moments.items
         .map((moment) => moment.peopleSummary)
         .filter((value): value is string => typeof value === 'string' && value.length > 0),
+      ...report.visual.observations
+        .flatMap((observation) => observation.subjects)
+        .map((subject) => `Visible subject: ${subject}.`),
       report.annotations.topObjectLabels.length > 0
         ? `Recurring visible cues include ${formatNaturalList(
             report.annotations.topObjectLabels.slice(0, 4).map((entry) => entry.label),
@@ -2166,6 +2567,9 @@ function buildSemanticReportData(report: SemanticReportInput): SemanticReportDat
       ...report.moments.items
         .map((moment) => moment.textSummary)
         .filter((value): value is string => typeof value === 'string' && value.length > 0),
+      ...report.visual.observations
+        .flatMap((observation) => observation.visibleText)
+        .map((text) => `Vision-visible text reads ${quoteSnippet(text, 64)}.`),
     ],
     SEMANTIC_OVERVIEW_LIMIT,
   );
@@ -2420,6 +2824,44 @@ function searchSourceAnalysisReport(
           subjectPosition: item.subjectPosition,
           motionDirection: item.motionDirection,
           visualComplexity: item.visualComplexity,
+        },
+      });
+    }
+
+    for (const observation of report.visual.observations) {
+      const match = scoreSearchTextFields(normalizedQuery, queryTokens, [
+        { field: 'description', value: observation.description, weight: 4 },
+        { field: 'subjects', value: observation.subjects, weight: 3 },
+        { field: 'actions', value: observation.actions, weight: 3 },
+        { field: 'setting', value: observation.setting, weight: 2 },
+        { field: 'visibleText', value: observation.visibleText, weight: 3 },
+        { field: 'objects', value: observation.objects, weight: 2 },
+        { field: 'editUsefulness', value: observation.editUsefulness, weight: 2 },
+      ]);
+      if (match.score <= 0) {
+        continue;
+      }
+
+      candidates.push({
+        sectionType: 'visual',
+        index: observation.shotIndex,
+        startSec: observation.startSec,
+        endSec: observation.endSec,
+        score: match.score,
+        whyMatched: match.whyMatched,
+        preview: observation.description,
+        keyframePath: observation.imagePath,
+        metadata: {
+          durationSec: roundTo(observation.endSec - observation.startSec) ?? 0,
+          description: observation.description,
+          subjects: observation.subjects,
+          actions: observation.actions,
+          setting: observation.setting,
+          visibleText: observation.visibleText,
+          objects: observation.objects,
+          editUsefulness: observation.editUsefulness,
+          confidence: observation.confidence,
+          provider: observation.provider,
         },
       });
     }
@@ -3065,8 +3507,23 @@ function buildSourceAnalysisReportPayload({
     : (annotationAnalysis?.transcript?.results ?? []);
   const segments = bundle.segments ?? [];
   const frameAnalysis = bundle.frameAnalysis ?? [];
+  const frameObservationItems = buildFrameObservationItems(bundle.frameObservations ?? [], shots);
   const visualItems = buildReportVisualItems(shots, frameAnalysis);
+  const visualSemanticCoverage = resolveVisualSemanticCoverage(frameAnalysis, frameObservationItems);
+  const keyframes = buildKeyframeGallery(shots);
   const audioProfile = bundle.audioProfile;
+  const transcriptDetail = bundle.transcriptDetail ?? null;
+  const transcriptDetailWords = transcriptDetail?.words ?? [];
+  const transcriptDetailSpeakerSegments = (transcriptDetail?.speakerSegments ?? []).map(
+    (segment, index) => ({
+      index,
+      startSec: roundTo(segment.startSec) ?? 0,
+      endSec: roundTo(segment.endSec) ?? 0,
+      speakerId: normalizeText(segment.speakerId),
+      text: normalizeText(segment.text),
+      confidence: roundTo(segment.confidence, 3),
+    }),
+  );
   const objectDetections = annotationAnalysis?.objects?.results ?? [];
   const faceDetections = annotationAnalysis?.faces?.results ?? [];
   const textDetections = annotationAnalysis?.textOcr?.results ?? [];
@@ -3090,10 +3547,19 @@ function buildSourceAnalysisReportPayload({
     (sum, region) => sum + (region.endSec - region.startSec),
     0,
   );
-  const transcriptWordCount = transcriptSegments.reduce((count, segment) => {
+  const transcriptWordCountFromSegments = transcriptSegments.reduce((count, segment) => {
     const words = segment.text.trim().split(/\s+/).filter(Boolean).length;
     return count + words;
   }, 0);
+  const transcriptFullText =
+    typeof transcriptDetail?.full === 'string' && transcriptDetail.full.trim().length > 0
+      ? normalizeText(transcriptDetail.full)
+      : buildFullTranscriptText(transcriptSegments);
+  const transcriptWordCount =
+    transcriptDetailWords.length > 0
+      ? transcriptDetailWords.length
+      : transcriptWordCountFromSegments ||
+        (transcriptFullText?.split(/\s+/).filter(Boolean).length ?? 0);
   const transcriptLanguages = Array.from(
     new Set(
       transcriptSegments
@@ -3103,9 +3569,12 @@ function buildSourceAnalysisReportPayload({
         ),
     ),
   );
+  const transcriptLines = buildTranscriptLines(transcriptSegments);
   const speakerCount = new Set(
-    transcriptSegments
-      .map((segment) => segment.speakerId)
+    [
+      ...transcriptSegments.map((segment) => segment.speakerId),
+      ...transcriptDetailSpeakerSegments.map((segment) => segment.speakerId),
+    ]
       .filter(
         (speakerId): speakerId is string => typeof speakerId === 'string' && speakerId.length > 0,
       ),
@@ -3195,15 +3664,19 @@ function buildSourceAnalysisReportPayload({
     ([analysisType, message]) => `${analysisType}: ${message}`,
   );
 
-  if (transcriptSegments.length === 0) {
+  if (transcriptSegments.length === 0 && !transcriptFullText) {
     warnings.push(
       'Transcript data is missing. Enable transcript analysis for searchable dialogue.',
     );
   }
 
-  if (frameAnalysis.length === 0) {
+  if (frameAnalysis.length === 0 && frameObservationItems.length === 0) {
     warnings.push(
       'Visual composition analysis is missing. Enable visual analysis for framing and motion cues.',
+    );
+  } else if (visualSemanticCoverage === 'local_fallback') {
+    warnings.push(
+      'Visual semantic analysis is local fallback only. Frame descriptions contain composition metrics, not true scene understanding.',
     );
   }
 
@@ -3213,10 +3686,10 @@ function buildSourceAnalysisReportPayload({
 
   const coverage = {
     shots: shots.length > 0,
-    transcript: transcriptSegments.length > 0,
+    transcript: transcriptSegments.length > 0 || Boolean(transcriptFullText),
     audio: hasValue(audioProfile),
     segments: segments.length > 0,
-    visual: frameAnalysis.length > 0,
+    visual: frameAnalysis.length > 0 || frameObservationItems.length > 0,
     annotation: Boolean(annotation),
   };
   const report = {
@@ -3240,7 +3713,7 @@ function buildSourceAnalysisReportPayload({
       codec,
       hasAudio: bundle.metadata.hasAudio,
       hasVideoStream: asset?.hasVideoStream ?? width !== null,
-      hasAudioStream: asset?.hasAudioStream ?? bundle.metadata.hasAudio,
+      hasAudioStream: bundle.metadata.hasAudio || (asset?.hasAudioStream ?? false),
       onTimeline: asset?.onTimeline ?? false,
       timelineClipCount: asset?.timelineClipCount ?? 0,
     },
@@ -3265,8 +3738,14 @@ function buildSourceAnalysisReportPayload({
       wordCount: transcriptWordCount,
       speakerCount,
       speakerTurnCount: speakerTurns.length,
+      speakerSegmentCount: transcriptDetailSpeakerSegments.length,
+      wordTimingCount: transcriptDetailWords.length,
+      provider: transcriptDetail?.provider ?? null,
       languages: transcriptLanguages,
       excerpt: buildTranscriptExcerpt(transcriptSegments),
+      fullText: transcriptFullText,
+      segments: transcriptLines,
+      speakerSegments: transcriptDetailSpeakerSegments,
       firstSegments: transcriptSegments.slice(0, 8).map((segment, index) => ({
         index,
         startSec: roundTo(segment.startSec),
@@ -3320,6 +3799,7 @@ function buildSourceAnalysisReportPayload({
     },
     visual: {
       sampleCount: frameAnalysis.length,
+      observationCount: frameObservationItems.length,
       averageComplexity:
         frameAnalysis.length > 0
           ? roundTo(
@@ -3330,7 +3810,10 @@ function buildSourceAnalysisReportPayload({
       topCameraAngles,
       topMotionDirections,
       contactSheet: bundle.contactSheet ?? null,
+      semanticCoverage: visualSemanticCoverage,
+      keyframes,
       items: visualItems,
+      observations: frameObservationItems,
     },
     moments: {
       count: moments.length,
@@ -3362,9 +3845,13 @@ function buildSourceAnalysisReportPayload({
     errors: bundle.errors ?? {},
   };
 
+  const reportWithQuality = {
+    ...report,
+    quality: buildSourceReportQuality(report),
+  };
   const semantic = buildSemanticReportData(report);
   return {
-    ...report,
+    ...reportWithQuality,
     summary: semantic.summaryLine,
     semantic,
   };
@@ -3383,6 +3870,31 @@ function buildSourceAnalysisMarkdown(
   ];
 
   const semantic = report.semantic;
+  const quality = report.quality;
+
+  lines.push(
+    '',
+    '## Analysis Quality',
+    '',
+    `- Status: ${quality.status}`,
+    `- Score: ${quality.score}/100`,
+    `- Critical signals: ${
+      quality.criticalSignals.length > 0 ? quality.criticalSignals.join(', ') : 'none'
+    }`,
+    `- Missing signals: ${
+      quality.missingSignals.length > 0 ? quality.missingSignals.join(', ') : 'none'
+    }`,
+    `- Degraded signals: ${
+      quality.degradedSignals.length > 0 ? quality.degradedSignals.join(', ') : 'none'
+    }`,
+  );
+
+  if (quality.recommendedActions.length > 0) {
+    lines.push('', '### Recommended Follow-Up', '');
+    for (const action of quality.recommendedActions) {
+      lines.push(`- ${action}`);
+    }
+  }
 
   if (
     semantic.whatIsHappening.length > 0 ||
@@ -3429,6 +3941,7 @@ function buildSourceAnalysisMarkdown(
       );
       if (scene.keyframePath) {
         lines.push(`- Keyframe: ${scene.keyframePath}`);
+        lines.push(formatMarkdownImage(`${scene.title} keyframe`, scene.keyframePath));
       }
     }
   }
@@ -3441,6 +3954,7 @@ function buildSourceAnalysisMarkdown(
       );
       if (moment.keyframePath) {
         lines.push(`- Keyframe: ${moment.keyframePath}`);
+        lines.push(formatMarkdownImage(`${moment.kind} moment keyframe`, moment.keyframePath));
       }
       lines.push(`- Why it stands out: ${moment.reason}`);
     }
@@ -3507,17 +4021,48 @@ function buildSourceAnalysisMarkdown(
     `- Longest shot: ${report.shots.maxDurationSec ?? 'unknown'}s`,
   );
 
-  if (report.transcript.segmentCount > 0) {
+  if (report.transcript.segmentCount > 0 || report.transcript.fullText) {
     lines.push('', '## Transcript Summary', '');
+    const providerLabel = formatPerceptionProvider(report.transcript.provider);
+    if (providerLabel) {
+      lines.push(`- Provider: ${providerLabel}`);
+    }
     lines.push(`- Segment count: ${report.transcript.segmentCount}`);
     lines.push(`- Estimated word count: ${report.transcript.wordCount}`);
+    lines.push(`- Word timings: ${report.transcript.wordTimingCount}`);
     lines.push(`- Speakers detected: ${report.transcript.speakerCount}`);
     lines.push(`- Speaker turns: ${report.transcript.speakerTurnCount}`);
+    lines.push(`- Speaker segments: ${report.transcript.speakerSegmentCount}`);
     lines.push(
       `- Languages: ${report.transcript.languages.length > 0 ? report.transcript.languages.join(', ') : 'unknown'}`,
     );
     if (report.transcript.excerpt) {
       lines.push(`- Excerpt: ${report.transcript.excerpt}`);
+    }
+  }
+
+  if (report.transcript.segments.length > 0) {
+    lines.push('', '## Full Transcript', '');
+    for (const line of report.transcript.segments) {
+      lines.push(
+        `- ${formatTimecode(line.startSec)}-${formatTimecode(line.endSec)} | ${formatTranscriptSpeaker(line)} | ${line.text}`,
+      );
+    }
+  } else if (report.transcript.fullText) {
+    lines.push('', '## Full Transcript', '', report.transcript.fullText);
+  }
+
+  if (report.transcript.speakerSegments.length > 0) {
+    lines.push('', '## Speaker-Aware Transcript Segments', '');
+    for (const segment of report.transcript.speakerSegments.slice(0, 24)) {
+      lines.push(
+        `- ${formatTimecode(segment.startSec)}-${formatTimecode(segment.endSec)} | ${segment.speakerId || 'unknown speaker'} | ${segment.text}`,
+      );
+    }
+    if (report.transcript.speakerSegments.length > 24) {
+      lines.push(
+        `- ... ${report.transcript.speakerSegments.length - 24} more speaker-aware transcript segments omitted from Markdown preview`,
+      );
     }
   }
 
@@ -3599,6 +4144,7 @@ function buildSourceAnalysisMarkdown(
       );
       if (item.keyframePath) {
         lines.push(`- Keyframe: ${item.keyframePath}`);
+        lines.push(formatMarkdownImage(`Shot ${item.shotIndex + 1} keyframe`, item.keyframePath));
       }
     }
     if (report.visual.items.length > VISUAL_BREAKDOWN_MARKDOWN_LIMIT) {
@@ -3608,12 +4154,72 @@ function buildSourceAnalysisMarkdown(
     }
   }
 
+  if (report.visual.observations.length > 0) {
+    lines.push('', '## Frame Observations', '');
+    for (const observation of report.visual.observations.slice(0, 24)) {
+      lines.push(
+        `- ${formatTimecode(observation.startSec)}-${formatTimecode(observation.endSec)} | Shot ${observation.shotIndex + 1} | ${observation.description || 'No description available'}`,
+      );
+      if (observation.subjects.length > 0) {
+        lines.push(`- Subjects: ${observation.subjects.join(', ')}`);
+      }
+      if (observation.actions.length > 0) {
+        lines.push(`- Actions: ${observation.actions.join(', ')}`);
+      }
+      if (observation.setting) {
+        lines.push(`- Setting: ${observation.setting}`);
+      }
+      if (observation.visibleText.length > 0) {
+        lines.push(`- Visible text: ${observation.visibleText.join(' | ')}`);
+      }
+      if (observation.objects.length > 0) {
+        lines.push(`- Objects: ${observation.objects.join(', ')}`);
+      }
+      if (observation.editUsefulness) {
+        lines.push(`- Edit usefulness: ${observation.editUsefulness}`);
+      }
+      const providerLabel = formatPerceptionProvider(observation.provider);
+      if (providerLabel) {
+        lines.push(
+          `- Provider: ${providerLabel}${observation.confidence !== null ? ` | confidence ${observation.confidence}` : ''}`,
+        );
+      }
+      if (observation.imagePath) {
+        lines.push(`- Image: ${observation.imagePath}`);
+        lines.push(
+          formatMarkdownImage(`Shot ${observation.shotIndex + 1} observation`, observation.imagePath),
+        );
+      }
+    }
+    if (report.visual.observations.length > 24) {
+      lines.push(
+        `- ... ${report.visual.observations.length - 24} more frame observations omitted from Markdown preview`,
+      );
+    }
+  }
+
   if (report.visual.contactSheet) {
     lines.push('', '## Visual Artifacts', '');
     lines.push(`- Contact sheet: ${report.visual.contactSheet.path}`);
+    lines.push(formatMarkdownImage('Contact sheet', report.visual.contactSheet.path));
     lines.push(
       `- Layout: ${report.visual.contactSheet.frameCount} frames in ${report.visual.contactSheet.columns}x${report.visual.contactSheet.rows} grid`,
     );
+  }
+
+  if (report.visual.keyframes.length > 0) {
+    lines.push('', '## Keyframe Gallery', '');
+    for (const keyframe of report.visual.keyframes.slice(0, 24)) {
+      lines.push(
+        `- ${formatTimecode(keyframe.startSec)}-${formatTimecode(keyframe.endSec)} | ${keyframe.label}${keyframe.keyframeSelectionMethod ? ` | ${keyframe.keyframeSelectionMethod}` : ''}`,
+      );
+      lines.push(formatMarkdownImage(keyframe.label, keyframe.keyframePath));
+    }
+    if (report.visual.keyframes.length > 24) {
+      lines.push(
+        `- ... ${report.visual.keyframes.length - 24} more keyframes omitted from Markdown preview`,
+      );
+    }
   }
 
   if (report.chapters.count > 0) {
@@ -3702,6 +4308,64 @@ function buildDefaultSourceAnalysisReportRelativePath(report: SourceAnalysisRepo
   }
 
   return `analysis-reports/${sanitizeReportFileStem(report.assetName || report.assetId)}${SOURCE_ANALYSIS_REPORT_SUFFIX}`;
+}
+
+function formatMarkdownImagePath(path: string): string {
+  const normalized = path.trim();
+  if (/[\s()]/.test(normalized)) {
+    return `<${normalized.replace(/>/g, '%3E')}>`;
+  }
+
+  return normalized;
+}
+
+function formatMarkdownImage(alt: string, path: string): string {
+  return `![${alt.replace(/\[|\]/g, '')}](${formatMarkdownImagePath(path)})`;
+}
+
+function formatTranscriptSpeaker(line: {
+  speakerId: string | null;
+  speakerTurnId: string | null;
+}): string {
+  if (line.speakerId) {
+    return line.speakerId;
+  }
+
+  if (line.speakerTurnId) {
+    return line.speakerTurnId;
+  }
+
+  return 'unknown speaker';
+}
+
+function formatPerceptionProvider(
+  provider:
+    | {
+        provider?: string;
+        model?: string;
+        analyzedAt?: string;
+      }
+    | null
+    | undefined,
+): string | null {
+  if (!provider) {
+    return null;
+  }
+
+  const providerName =
+    typeof provider.provider === 'string' && provider.provider.trim().length > 0
+      ? provider.provider.trim()
+      : 'unknown';
+  const model =
+    typeof provider.model === 'string' && provider.model.trim().length > 0
+      ? provider.model.trim()
+      : 'unknown';
+  const analyzedAt =
+    typeof provider.analyzedAt === 'string' && provider.analyzedAt.trim().length > 0
+      ? provider.analyzedAt.trim()
+      : null;
+
+  return analyzedAt ? `${providerName}/${model} at ${analyzedAt}` : `${providerName}/${model}`;
 }
 
 async function persistSourceAnalysisMarkdownReport(
@@ -4558,12 +5222,13 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
             summary: report.summary,
             metadata: report.metadata,
             coverage: report.coverage,
+            quality: report.quality,
             sectionCounts: {
               moments: report.moments.count,
               chapters: report.chapters.count,
               highlights: report.highlights.count,
               speakerTurns: report.speakerTurns.count,
-              visual: report.visual.items.length,
+              visual: report.visual.items.length + report.visual.observations.length,
             },
             warnings: report.warnings,
             errors: report.errors,
@@ -4926,7 +5591,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
         analyzeMissing: {
           type: 'boolean',
           description:
-            'Generate fresh analysis for assets without cached bundle data (default: false)',
+            'Generate fresh analysis for missing or low-quality source reports before selecting (default: true)',
         },
         useSemantic: {
           type: 'boolean',
@@ -5148,16 +5813,15 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
           typeof args.gapSec === 'number' && Number.isFinite(args.gapSec) && args.gapSec >= 0
             ? args.gapSec
             : 0.25;
+        const sourceSearchArgs = {
+          ...args,
+          analyzeMissing: args.analyzeMissing !== false,
+          limit: Math.min(requestedSelectCount * 3, 50),
+        } as Record<string, unknown>;
         const searchResult =
           args.useIndexedSearch === true
-            ? await searchIndexedSourceLibraryMatches({
-                ...args,
-                limit: Math.min(requestedSelectCount * 3, 50),
-              } as Record<string, unknown>)
-            : await searchSourceLibraryMatches({
-                ...args,
-                limit: Math.min(requestedSelectCount * 3, 50),
-              } as Record<string, unknown>);
+            ? await searchIndexedSourceLibraryMatches(sourceSearchArgs)
+            : await searchSourceLibraryMatches(sourceSearchArgs);
         const selects = buildSourceSelectSegments(searchResult.matches, {
           paddingSec,
           gapSec,
