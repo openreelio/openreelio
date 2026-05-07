@@ -30,10 +30,21 @@ use crate::core::analysis::esd::{self, EditingStyleDocument, EsdGenerator, EsdSu
 use crate::core::analysis::style_planner::{StylePlanResult, StylePlanner, StylePlanningContext};
 use crate::core::analysis::{AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata};
 use crate::core::commands::AddEffectCommand;
+#[cfg(feature = "ai-providers")]
+use crate::core::credentials::{CredentialType, CredentialVault};
 use crate::core::effects::{curve_points_to_json, CurvePoint, EffectType, ParamValue};
 use crate::core::ffmpeg::{MediaInfo, SharedFFmpegState};
 use crate::core::jobs::{Job, JobStatus, JobType, Priority};
+#[cfg(feature = "ai-providers")]
+use crate::core::settings::{ProviderType, SettingsManager};
+#[cfg(feature = "ai-providers")]
+use crate::ipc::commands::system::get_app_data_dir;
 use crate::AppState;
+
+#[cfg(feature = "ai-providers")]
+use crate::core::analysis::openai_perception::{
+    analyze_keyframes_with_openai, transcribe_with_openai, OpenAiPerceptionConfig,
+};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -218,6 +229,195 @@ async fn submit_analysis_job_and_wait(
     }
 }
 
+#[cfg(feature = "ai-providers")]
+async fn resolve_openai_perception_config(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+) -> Result<Option<OpenAiPerceptionConfig>, String> {
+    let app_data_dir = get_app_data_dir(app)?;
+    let settings = SettingsManager::new(app_data_dir.clone()).load();
+    if settings.ai.local_only_mode {
+        return Ok(None);
+    }
+
+    let provider = settings
+        .ai
+        .vision_provider
+        .unwrap_or(settings.ai.primary_provider);
+    if provider != ProviderType::OpenAI {
+        return Ok(None);
+    }
+
+    let vault_path = app_data_dir.join("credentials.vault");
+    if !vault_path.exists() {
+        return Err(
+            "OpenAI perception provider is selected but the OpenAI credential is missing"
+                .to_string(),
+        );
+    }
+
+    let api_key = {
+        let mut guard = state.credential_vault.lock().await;
+        if guard.is_none() {
+            *guard = Some(
+                CredentialVault::new(vault_path)
+                    .map_err(|error| format!("Failed to initialize credential vault: {error}"))?,
+            );
+        }
+        let vault = guard
+            .as_ref()
+            .ok_or_else(|| "Credential vault unavailable".to_string())?;
+        vault
+            .retrieve(CredentialType::OpenaiApiKey)
+            .await
+            .map_err(|error| {
+                format!(
+                    "OpenAI perception provider is selected but credential lookup failed: {error}"
+                )
+            })?
+    };
+
+    Ok(Some(OpenAiPerceptionConfig::new(
+        api_key,
+        settings.ai.vision_model,
+    )))
+}
+
+#[cfg(feature = "ai-providers")]
+async fn maybe_enhance_bundle_with_openai(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+    ffmpeg_state: &State<'_, SharedFFmpegState>,
+    asset_context: &ResolvedAssetContext,
+    options: &AnalysisOptions,
+    bundle: &mut AnalysisBundle,
+) -> Result<(), String> {
+    if options.local_only {
+        return Ok(());
+    }
+
+    let mut changed = false;
+    let config = match resolve_openai_perception_config(app, state).await {
+        Ok(Some(config)) => {
+            changed |= bundle.errors.remove("perception_provider").is_some();
+            config
+        }
+        Ok(None) => return Ok(()),
+        Err(error) => {
+            bundle.add_error("perception_provider", error);
+            AnalysisJobRunner::new(&asset_context.project_path)
+                .save_bundle(bundle)
+                .map_err(|error| format!("Failed to save provider warning: {error}"))?;
+            return Ok(());
+        }
+    };
+
+    if options.visual && needs_openai_frame_observations(bundle) {
+        match bundle.shots.as_deref() {
+            Some(shots) if !shots.is_empty() => {
+                let contact_sheet_path = bundle
+                    .contact_sheet
+                    .as_ref()
+                    .map(|artifact| PathBuf::from(&artifact.path));
+                match analyze_keyframes_with_openai(&config, shots, contact_sheet_path.as_deref())
+                    .await
+                {
+                    Ok((frames, observations)) => {
+                        bundle.errors.remove("perception_provider");
+                        bundle.errors.remove("openai_vision");
+                        if !frames.is_empty() {
+                            bundle.frame_analysis = Some(frames);
+                        }
+                        if !observations.is_empty() {
+                            bundle.frame_observations = Some(observations);
+                        }
+                        changed = true;
+                    }
+                    Err(error) => {
+                        bundle.add_error("openai_vision", error.to_string());
+                        changed = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if options.transcript && bundle.metadata.has_audio && needs_openai_transcript_detail(bundle) {
+        let video_path =
+            resolve_asset_media_path(&asset_context.project_path, &asset_context.asset_path);
+        let analysis_dir = AnalysisJobRunner::new(&asset_context.project_path)
+            .asset_analysis_dir(&bundle.asset_id)
+            .map_err(|error| format!("Failed to resolve analysis artifact directory: {error}"))?;
+        let ffmpeg_path = {
+            let ffmpeg = ffmpeg_state.read().await;
+            ffmpeg
+                .info()
+                .ok_or_else(|| "FFmpeg is not available for OpenAI transcription".to_string())?
+                .ffmpeg_path
+                .clone()
+        };
+        match transcribe_with_openai(&config, &video_path, &analysis_dir, &ffmpeg_path).await {
+            Ok((segments, detail)) => {
+                bundle.errors.remove("perception_provider");
+                bundle.errors.remove("openai_transcript");
+                bundle.transcript = Some(segments);
+                bundle.transcript_detail = Some(detail);
+                bundle.errors.remove("transcript");
+                changed = true;
+            }
+            Err(error) => {
+                bundle.add_error("openai_transcript", error.to_string());
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        AnalysisJobRunner::new(&asset_context.project_path)
+            .save_bundle(bundle)
+            .map_err(|error| format!("Failed to save OpenAI-enhanced analysis bundle: {error}"))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "ai-providers"))]
+async fn maybe_enhance_bundle_with_openai(
+    _app: &tauri::AppHandle,
+    _state: &State<'_, AppState>,
+    _ffmpeg_state: &State<'_, SharedFFmpegState>,
+    _asset_context: &ResolvedAssetContext,
+    _options: &AnalysisOptions,
+    _bundle: &mut AnalysisBundle,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(feature = "ai-providers")]
+fn needs_openai_frame_observations(bundle: &AnalysisBundle) -> bool {
+    !bundle
+        .frame_observations
+        .as_ref()
+        .is_some_and(|observations| {
+            observations
+                .iter()
+                .any(|observation| observation.provider.provider == "openai")
+        })
+        && bundle.frame_observations.as_ref().is_none_or(Vec::is_empty)
+}
+
+#[cfg(feature = "ai-providers")]
+fn needs_openai_transcript_detail(bundle: &AnalysisBundle) -> bool {
+    !bundle.transcript_detail.as_ref().is_some_and(|detail| {
+        detail
+            .provider
+            .as_ref()
+            .is_some_and(|provider| provider.provider == "openai")
+            && !detail.speaker_segments.is_empty()
+    })
+}
+
 // =============================================================================
 // Commands
 // =============================================================================
@@ -234,6 +434,7 @@ async fn submit_analysis_job_and_wait(
 #[specta::specta]
 #[tracing::instrument(skip(state, ffmpeg_state))]
 pub async fn analyze_video_full(
+    app: tauri::AppHandle,
     asset_id: String,
     options: AnalysisOptions,
     state: State<'_, AppState>,
@@ -241,7 +442,7 @@ pub async fn analyze_video_full(
 ) -> Result<AnalysisBundle, String> {
     let asset_context = resolve_asset_context(&asset_id, &state, &ffmpeg_state).await?;
 
-    submit_analysis_job_and_wait(
+    let mut bundle = submit_analysis_job_and_wait(
         &asset_id,
         &asset_context.project_path,
         &asset_context.asset_path,
@@ -249,7 +450,19 @@ pub async fn analyze_video_full(
         &options,
         &state,
     )
-    .await
+    .await?;
+
+    maybe_enhance_bundle_with_openai(
+        &app,
+        &state,
+        &ffmpeg_state,
+        &asset_context,
+        &options,
+        &mut bundle,
+    )
+    .await?;
+
+    Ok(bundle)
 }
 
 /// Retrieves a cached analysis bundle for an asset.

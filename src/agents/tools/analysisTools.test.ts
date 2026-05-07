@@ -114,6 +114,41 @@ function getToolResult<T>(result: ToolExecutionResult): T {
   return result.result;
 }
 
+function semanticFrameAnalysis(shotIndex = 0) {
+  return [
+    {
+      shotIndex,
+      cameraAngle: 'wide',
+      subjectPosition: 'center',
+      motionDirection: 'static',
+      visualComplexity: 0.5,
+    },
+  ];
+}
+
+function semanticFrameObservations(shotIndex = 0) {
+  return [
+    {
+      shotIndex,
+      timeSec: 2,
+      imagePath: `shots/${shotIndex + 1}.jpg`,
+      description: 'Semantic source frame observation.',
+      subjects: ['subject'],
+      actions: ['action'],
+      setting: 'setting',
+      visibleText: [],
+      objects: [],
+      editUsefulness: 'Useful source context.',
+      confidence: 0.9,
+      provider: {
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        analyzedAt: '2026-03-07T00:00:00Z',
+      },
+    },
+  ];
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -1001,7 +1036,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 8,
@@ -1085,7 +1121,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 6, segmentType: 'broll', confidence: 0.85, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 6,
@@ -1145,7 +1182,8 @@ describe('reference style transfer analysis tools', () => {
             speechRegions: [],
           },
           segments: [],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 5,
@@ -1205,7 +1243,8 @@ describe('reference style transfer analysis tools', () => {
             speechRegions: [],
           },
           segments: [],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 5,
@@ -1265,7 +1304,8 @@ describe('reference style transfer analysis tools', () => {
             speechRegions: [],
           },
           segments: [],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 5,
@@ -1329,6 +1369,7 @@ describe('reference style transfer analysis tools', () => {
 
       const mockBundle = {
         assetId: 'source-1',
+        schemaVersion: 2,
         shots: [
           {
             startSec: 0,
@@ -1355,6 +1396,75 @@ describe('reference style transfer analysis tools', () => {
             speakerId: 'speaker_1',
           },
         ],
+        transcriptDetail: {
+          full: 'Hello crowd and welcome back',
+          words: [
+            {
+              text: 'Hello',
+              startSec: 0,
+              endSec: 0.6,
+              segmentIndex: 0,
+              wordIndex: 0,
+              confidence: 0.97,
+              speakerId: 'speaker_1',
+              speakerTurnId: null,
+            },
+            {
+              text: 'crowd',
+              startSec: 0.6,
+              endSec: 1.2,
+              segmentIndex: 0,
+              wordIndex: 1,
+              confidence: 0.97,
+              speakerId: 'speaker_1',
+              speakerTurnId: null,
+            },
+            {
+              text: 'and',
+              startSec: 1.2,
+              endSec: 1.8,
+              segmentIndex: 0,
+              wordIndex: 2,
+              confidence: 0.97,
+              speakerId: 'speaker_1',
+              speakerTurnId: null,
+            },
+            {
+              text: 'welcome',
+              startSec: 1.8,
+              endSec: 2.4,
+              segmentIndex: 0,
+              wordIndex: 3,
+              confidence: 0.97,
+              speakerId: 'speaker_1',
+              speakerTurnId: null,
+            },
+            {
+              text: 'back',
+              startSec: 2.4,
+              endSec: 3,
+              segmentIndex: 0,
+              wordIndex: 4,
+              confidence: 0.97,
+              speakerId: 'speaker_1',
+              speakerTurnId: null,
+            },
+          ],
+          speakerSegments: [
+            {
+              startSec: 0,
+              endSec: 3,
+              speakerId: 'speaker_1',
+              text: 'Hello crowd and welcome back',
+              confidence: 0.97,
+            },
+          ],
+          provider: {
+            provider: 'openai',
+            model: 'gpt-4o-transcribe-diarize',
+            analyzedAt: '2026-03-07T00:00:30Z',
+          },
+        },
         audioProfile: {
           bpm: 120,
           spectralCentroidHz: 1400,
@@ -1382,6 +1492,26 @@ describe('reference style transfer analysis tools', () => {
             subjectPosition: 'center',
             motionDirection: 'static',
             visualComplexity: 0.42,
+          },
+        ],
+        frameObservations: [
+          {
+            shotIndex: 0,
+            timeSec: 2,
+            imagePath: 'shots/0001.jpg',
+            description: 'A singer faces a live crowd on a bright concert stage.',
+            subjects: ['singer', 'crowd'],
+            actions: ['singing', 'addressing audience'],
+            setting: 'concert stage',
+            visibleText: ['LIVE'],
+            objects: ['microphone'],
+            editUsefulness: 'Use as opening performance context.',
+            confidence: 0.91,
+            provider: {
+              provider: 'openai',
+              model: 'gpt-4.1-mini',
+              analyzedAt: '2026-03-07T00:00:20Z',
+            },
           },
         ],
         contactSheet: {
@@ -1480,9 +1610,67 @@ describe('reference style transfer analysis tools', () => {
       expect(data.audio.speechDurationSec).toBe(11);
       expect(data.audio.speechSharePercent).toBeCloseTo(91.67, 1);
       expect(data.transcript.speakerTurnCount).toBe(1);
+      expect(data.transcript.fullText).toBe('Hello crowd and welcome back');
+      expect(data.transcript.provider.provider).toBe('openai');
+      expect(data.transcript.wordTimingCount).toBe(5);
+      expect(data.transcript.speakerSegmentCount).toBe(1);
+      expect(data.transcript.speakerSegments[0].speakerId).toBe('speaker_1');
+      expect(data.transcript.segments).toEqual([
+        {
+          index: 0,
+          startSec: 0,
+          endSec: 3,
+          speakerId: 'speaker_1',
+          speakerTurnId: null,
+          language: 'en',
+          confidence: 0.97,
+          text: 'Hello crowd and welcome back',
+        },
+      ]);
       expect(data.speakerTurns.count).toBe(1);
       expect(data.speakerTurns.items[0].label).toBe('speaker_1');
       expect(data.visual.contactSheet.path).toBe('/analysis/source-1/contact-sheet.jpg');
+      expect(data.visual.semanticCoverage).toBe('semantic');
+      expect(data.visual.observationCount).toBe(1);
+      expect(data.visual.observations[0]).toEqual(
+        expect.objectContaining({
+          shotIndex: 0,
+          startSec: 0,
+          endSec: 4,
+          timeSec: 2,
+          imagePath: 'shots/0001.jpg',
+          description: 'A singer faces a live crowd on a bright concert stage.',
+          subjects: ['singer', 'crowd'],
+          actions: ['singing', 'addressing audience'],
+          setting: 'concert stage',
+          visibleText: ['LIVE'],
+          objects: ['microphone'],
+          editUsefulness: 'Use as opening performance context.',
+          confidence: 0.91,
+          provider: expect.objectContaining({
+            provider: 'openai',
+            model: 'gpt-4.1-mini',
+          }),
+        }),
+      );
+      expect(data.visual.keyframes).toEqual([
+        {
+          shotIndex: 0,
+          startSec: 0,
+          endSec: 4,
+          keyframePath: 'shots/0001.jpg',
+          keyframeSelectionMethod: 'thumbnail',
+          label: 'Shot 1 keyframe',
+        },
+        {
+          shotIndex: 1,
+          startSec: 4,
+          endSec: 12,
+          keyframePath: 'shots/0002.jpg',
+          keyframeSelectionMethod: 'thumbnail',
+          label: 'Shot 2 keyframe',
+        },
+      ]);
       expect(data.visual.items).toEqual([
         {
           shotIndex: 0,
@@ -1498,7 +1686,7 @@ describe('reference style transfer analysis tools', () => {
           summary: 'Shot 1 | wide angle | center subject | static motion | complexity 0.42',
         },
       ]);
-      expect(String(data.summary)).toContain('Performance or stage moment');
+      expect(String(data.summary)).toContain('A singer faces a live crowd');
       expect(data.moments.items[0].sceneLabel).toBe('Performance moment');
       expect(String(data.moments.items[0].summary)).toContain('Performance or stage moment');
       expect(String(data.moments.items[0].summary)).toContain(
@@ -1506,12 +1694,17 @@ describe('reference style transfer analysis tools', () => {
       );
       expect(String(data.moments.items[0].summary)).toContain('Text: on-screen text reads "LIVE"');
       expect(data.semantic.whatIsHappening.length).toBeGreaterThan(0);
+      expect(data.semantic.whatIsHappening[0]).toContain('A singer faces a live crowd');
       expect(data.semantic.whoIsPresent.length).toBeGreaterThan(0);
       expect(data.semantic.whatIsHeard.length).toBeGreaterThan(0);
       expect(data.semantic.onScreenText.length).toBeGreaterThan(0);
       expect(data.semantic.likelySetting).toContain('stage or live event setting');
       expect(data.semantic.sceneTimeline[0].title).toBe('Performance moment');
       expect(data.semantic.usefulMoments[0].kind).toBe('text');
+      expect(data.quality.status).toBe('ready');
+      expect(data.quality.score).toBe(100);
+      expect(data.quality.criticalSignals).toContain('timed transcript');
+      expect(data.quality.criticalSignals).toContain('semantic visual cues');
       expect(data.chapters.count).toBeGreaterThan(0);
       expect(data.highlights.count).toBeGreaterThan(0);
       expect(data.annotations.objectDetectionCount).toBe(1);
@@ -1521,6 +1714,8 @@ describe('reference style transfer analysis tools', () => {
       expect(data.reportPath).toBe('media/concert.analysis.md');
       expect(String(data.content)).toContain('# Source Analysis Report: concert.mp4');
       expect(String(data.markdown)).toContain('# Source Analysis Report: concert.mp4');
+      expect(String(data.markdown)).toContain('## Analysis Quality');
+      expect(String(data.markdown)).toContain('- Status: ready');
       expect(String(data.markdown)).toContain('## Executive Summary');
       expect(String(data.markdown)).toContain('## Scene Timeline');
       expect(String(data.markdown)).toContain('## Useful Moments');
@@ -1533,6 +1728,18 @@ describe('reference style transfer analysis tools', () => {
       expect(String(data.markdown)).toContain('Likely setting: stage or live event setting');
       expect(String(data.markdown)).toContain('Best usable moment: 00:00-00:03 | text |');
       expect(String(data.markdown)).toContain('00:00-00:03 | Performance moment |');
+      expect(String(data.markdown)).toContain('## Full Transcript');
+      expect(String(data.markdown)).toContain(
+        '00:00-00:03 | speaker_1 | Hello crowd and welcome back',
+      );
+      expect(String(data.markdown)).toContain(
+        '- Provider: openai/gpt-4o-transcribe-diarize at 2026-03-07T00:00:30Z',
+      );
+      expect(String(data.markdown)).toContain('- Word timings: 5');
+      expect(String(data.markdown)).toContain('## Speaker-Aware Transcript Segments');
+      expect(String(data.markdown)).toContain(
+        '00:00-00:03 | speaker_1 | Hello crowd and welcome back',
+      );
       expect(String(data.markdown)).toContain('## Visual Breakdown');
       expect(String(data.markdown).match(/Dominant camera angles:/g)?.length ?? 0).toBe(1);
       expect(String(data.markdown).match(/Dominant motion:/g)?.length ?? 0).toBe(1);
@@ -1540,7 +1747,22 @@ describe('reference style transfer analysis tools', () => {
         '00:00-00:04 | Shot 1 | wide angle | center subject | static motion | complexity 0.42',
       );
       expect(String(data.markdown)).toContain('Keyframe: shots/0001.jpg');
+      expect(String(data.markdown)).toContain('## Frame Observations');
+      expect(String(data.markdown)).toContain(
+        'A singer faces a live crowd on a bright concert stage.',
+      );
+      expect(String(data.markdown)).toContain('- Subjects: singer, crowd');
+      expect(String(data.markdown)).toContain('- Visible text: LIVE');
+      expect(String(data.markdown)).toContain(
+        '- Provider: openai/gpt-4.1-mini at 2026-03-07T00:00:20Z | confidence 0.91',
+      );
+      expect(String(data.markdown)).toContain('![Shot 1 observation](shots/0001.jpg)');
       expect(String(data.markdown)).toContain('## Visual Artifacts');
+      expect(String(data.markdown)).toContain(
+        '![Contact sheet](/analysis/source-1/contact-sheet.jpg)',
+      );
+      expect(String(data.markdown)).toContain('## Keyframe Gallery');
+      expect(String(data.markdown)).toContain('![Shot 1 keyframe](shots/0001.jpg)');
       expect(String(data.markdown)).toContain('## Chapters');
       expect(String(data.markdown)).toContain('## Candidate Highlights');
       expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'get_analysis_bundle', {
@@ -1601,6 +1823,10 @@ describe('reference style transfer analysis tools', () => {
             subjectPosition: 'center',
             motionDirection: 'static',
             visualComplexity: 0.5,
+          })),
+          frameObservations: Array.from({ length: 13 }, (_, index) => ({
+            ...semanticFrameObservations(index)[0],
+            timeSec: index * 2 + 1,
           })),
           contactSheet: null,
           metadata: {
@@ -1691,6 +1917,7 @@ describe('reference style transfer analysis tools', () => {
               visualComplexity: 0.7,
             },
           ],
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 4,
@@ -1727,6 +1954,118 @@ describe('reference style transfer analysis tools', () => {
       ]);
       expect(String(data.markdown)).not.toContain('00:00-00:00');
       expect(String(data.markdown)).not.toContain('Shot 101');
+    });
+
+    it('should regenerate cached local visual fallback and mark final report as partial', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'source-local-fallback',
+            name: 'local-fallback.mp4',
+            kind: 'video',
+            uri: '/media/local-fallback.mp4',
+            relativePath: 'media/local-fallback.mp4',
+            durationSec: 5,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      const localFallbackBundle = {
+        assetId: 'source-local-fallback',
+        shots: [
+          {
+            startSec: 0,
+            endSec: 5,
+            confidence: 0.91,
+            keyframePath: 'shots/0001.jpg',
+            keyframeSelectionMethod: 'midpoint',
+          },
+        ],
+        transcript: [],
+        audioProfile: null,
+        segments: [
+          {
+            startSec: 0,
+            endSec: 5,
+            segmentType: 'establishing',
+            confidence: 0.82,
+            features: {},
+          },
+        ],
+        frameAnalysis: [
+          {
+            shotIndex: 0,
+            cameraAngle: 'unknown',
+            subjectPosition: 'unknown',
+            motionDirection: 'unknown',
+            visualComplexity: 0.5,
+          },
+        ],
+        contactSheet: null,
+        metadata: {
+          durationSec: 5,
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          codec: 'h264',
+          hasAudio: false,
+        },
+        analyzedAt: '2026-03-07T00:00:00Z',
+        errors: {},
+      };
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce(localFallbackBundle)
+        .mockResolvedValueOnce(localFallbackBundle)
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('generate_source_analysis_report', {
+        assetId: 'source-local-fallback',
+        options: {
+          transcript: false,
+          audio: false,
+        },
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.bundleSource).toBe('generated');
+      expect(data.visual.semanticCoverage).toBe('local_fallback');
+      expect(data.quality.status).toBe('partial');
+      expect(data.quality.score).toBe(76);
+      expect(data.quality.degradedSignals).toContain('semantic visual descriptions');
+      expect(data.warnings).toContain(
+        'Visual semantic analysis is local fallback only. Frame descriptions contain composition metrics, not true scene understanding.',
+      );
+      expect(String(data.markdown)).toContain('## Analysis Quality');
+      expect(String(data.markdown)).toContain('- Status: partial');
+      expect(String(data.markdown)).toContain(
+        'Run a vision-capable provider over the extracted keyframes/contact sheet for actual scene descriptions.',
+      );
+      expect(String(data.markdown)).toContain('![Shot 1 keyframe](shots/0001.jpg)');
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'get_analysis_bundle', {
+        assetId: 'source-local-fallback',
+      });
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(2, 'analyze_video_full', {
+        assetId: 'source-local-fallback',
+        options: {
+          shots: true,
+          transcript: false,
+          audio: false,
+          segments: true,
+          visual: true,
+          localOnly: false,
+        },
+      });
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(3, 'get_annotation', {
+        assetId: 'source-local-fallback',
+      });
     });
 
     it('should regenerate the bundle when cached coverage is incomplete', async () => {
@@ -1893,7 +2232,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 10, segmentType: 'talk', confidence: 0.8, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 10,
             width: null,
@@ -2039,6 +2379,7 @@ describe('reference style transfer analysis tools', () => {
               visualComplexity: 0.4,
             },
           ],
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 8,
             width: 1920,
@@ -2148,7 +2489,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 6, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 6,
             width: 1920,
@@ -2232,7 +2574,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 6, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 6,
             width: 1920,
@@ -2311,6 +2654,7 @@ describe('reference style transfer analysis tools', () => {
               visualComplexity: 0.42,
             },
           ],
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 6,
             width: 1920,
@@ -2336,6 +2680,94 @@ describe('reference style transfer analysis tools', () => {
       expect(data.matches[0].whyMatched).toContain('cameraAngle');
       expect(data.matches[0].keyframePath).toBe('shots/0001.jpg');
       expect(String(data.matches[0].preview)).toContain('wide angle');
+    });
+
+    it('should keep same-shot frame observations distinct in direct visual search', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'search-visual-observations',
+            name: 'visual-observations.mp4',
+            kind: 'video',
+            uri: '/media/visual-observations.mp4',
+            durationSec: 6,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'search-visual-observations',
+          shots: [
+            {
+              startSec: 0,
+              endSec: 6,
+              confidence: 0.9,
+              keyframePath: 'shots/0001.jpg',
+              keyframeSelectionMethod: 'thumbnail',
+            },
+          ],
+          transcript: [],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18.2],
+            peakDb: -4,
+            silenceRegions: [],
+          },
+          segments: [],
+          frameAnalysis: [],
+          frameObservations: [
+            {
+              ...semanticFrameObservations()[0],
+              description: 'A product slide fills the presentation screen.',
+            },
+            {
+              ...semanticFrameObservations()[0],
+              timeSec: 4,
+              description: 'A close-up reaction shot shows the presenter smiling.',
+              subjects: ['presenter'],
+              actions: ['smiling'],
+            },
+          ],
+          metadata: {
+            durationSec: 6,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('search_source_analysis_report', {
+        assetId: 'search-visual-observations',
+        query: 'close-up reaction presenter',
+        sections: ['visual'],
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.matches[0]).toEqual(
+        expect.objectContaining({
+          sectionType: 'visual',
+          index: 1,
+          preview: 'A close-up reaction shot shows the presenter smiling.',
+          metadata: expect.objectContaining({
+            shotIndex: 0,
+            subjects: ['presenter'],
+          }),
+        }),
+      );
     });
 
     it('should search moments beyond the twelfth shot', async () => {
@@ -2389,7 +2821,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 26, segmentType: 'performance', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 26,
             width: 1920,
@@ -2464,7 +2897,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 50, segmentType: 'performance', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 50,
             width: 1920,
@@ -2555,7 +2989,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 4, segmentType: 'performance', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 4,
             width: 1920,
@@ -2591,7 +3026,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 4,
             width: 1920,
@@ -2673,7 +3109,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 8, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 8,
             width: 1920,
@@ -2747,7 +3184,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 6, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 6,
             width: 1920,
@@ -2866,7 +3304,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 4,
             width: 1920,
@@ -2991,7 +3430,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 8,
@@ -3095,7 +3535,8 @@ describe('reference style transfer analysis tools', () => {
             speechRegions: [{ startSec: 0, endSec: 4 }],
           },
           segments: [],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 8,
@@ -3180,6 +3621,44 @@ describe('reference style transfer analysis tools', () => {
               visualComplexity: 0.42,
             },
           ],
+          frameObservations: [
+            {
+              shotIndex: 0,
+              timeSec: 3,
+              imagePath: 'shots/0001.jpg',
+              description: 'A keynote speaker points at a product screen.',
+              subjects: ['keynote speaker'],
+              actions: ['pointing at screen'],
+              setting: 'conference stage',
+              visibleText: ['Launch'],
+              objects: ['screen', 'microphone'],
+              editUsefulness: 'Useful as product reveal b-roll.',
+              confidence: 0.88,
+              provider: {
+                provider: 'openai',
+                model: 'gpt-4.1-mini',
+                analyzedAt: '2026-03-07T00:00:00Z',
+              },
+            },
+            {
+              shotIndex: 0,
+              timeSec: 4,
+              imagePath: 'shots/0001-alt.jpg',
+              description: 'A close-up reaction shot shows the presenter smiling.',
+              subjects: ['presenter'],
+              actions: ['smiling'],
+              setting: 'conference stage',
+              visibleText: [],
+              objects: ['microphone'],
+              editUsefulness: 'Useful as audience reaction context.',
+              confidence: 0.86,
+              provider: {
+                provider: 'openai',
+                model: 'gpt-4.1-mini',
+                analyzedAt: '2026-03-07T00:00:00Z',
+              },
+            },
+          ],
           contactSheet: null,
           metadata: {
             durationSec: 6,
@@ -3239,6 +3718,35 @@ describe('reference style transfer analysis tools', () => {
               cameraAngle: 'wide',
             }),
           }),
+          expect.objectContaining({
+            id: 'idx-visual:visualObservation:0',
+            sectionType: 'visual',
+            sectionIndex: 0,
+            searchText: expect.stringContaining('keynote speaker'),
+            metadata: expect.objectContaining({
+              shotIndex: 0,
+              keyframePath: 'shots/0001.jpg',
+              description: 'A keynote speaker points at a product screen.',
+              subjects: ['keynote speaker'],
+              visibleText: ['Launch'],
+              provider: expect.objectContaining({
+                provider: 'openai',
+                model: 'gpt-4.1-mini',
+              }),
+            }),
+          }),
+          expect.objectContaining({
+            id: 'idx-visual:visualObservation:1',
+            sectionType: 'visual',
+            sectionIndex: 1,
+            searchText: expect.stringContaining('close-up reaction'),
+            metadata: expect.objectContaining({
+              shotIndex: 0,
+              keyframePath: 'shots/0001-alt.jpg',
+              description: 'A close-up reaction shot shows the presenter smiling.',
+              subjects: ['presenter'],
+            }),
+          }),
         ]),
       });
     });
@@ -3289,7 +3797,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 8,
@@ -3406,7 +3915,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 4, segmentType: 'performance', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 10,
             width: 1920,
@@ -3484,7 +3994,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 10,
@@ -3569,7 +4080,8 @@ describe('reference style transfer analysis tools', () => {
             silenceRegions: [],
           },
           segments: [],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 4,
             width: 1920,
@@ -3624,7 +4136,8 @@ describe('reference style transfer analysis tools', () => {
             silenceRegions: [],
           },
           segments: [],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 4,
             width: 1920,
@@ -3681,7 +4194,8 @@ describe('reference style transfer analysis tools', () => {
             silenceRegions: [],
           },
           segments: [],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 4,
             width: 1920,
@@ -3764,7 +4278,8 @@ describe('reference style transfer analysis tools', () => {
           segments: [
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 10,
             width: 1920,
@@ -3871,7 +4386,8 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
             { startSec: 4, endSec: 8, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
-          frameAnalysis: [],
+          frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 10,
             width: 1920,

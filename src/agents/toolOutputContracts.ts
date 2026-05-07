@@ -116,6 +116,7 @@ function matchesReadSourceAnalysisReportPath(path: string): boolean {
     path === 'data.bundleSource' ||
     matchesObjectPath('data.metadata') ||
     matchesObjectPath('data.coverage') ||
+    matchesObjectPath('data.quality') ||
     matchesObjectPath('data.sectionCounts') ||
     matchesObjectPath('data.document') ||
     path === 'data.warnings' ||
@@ -131,6 +132,8 @@ function matchesGenerateSourceAnalysisReportPath(path: string): boolean {
     path === 'data.markdown' ||
     path === 'data.semantic' ||
     path.startsWith('data.semantic.') ||
+    path === 'data.transcript' ||
+    path.startsWith('data.transcript.') ||
     path === 'data.visual' ||
     path.startsWith('data.visual.')
   );

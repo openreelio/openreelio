@@ -246,6 +246,7 @@ export class Thinker {
         '- Do not assume timeline clips are the only available media. Imported assets may exist without timeline placement.',
         '- When the request implies searching or selecting moments from source footage, prefer using source-discovery analysis tools before asking for clarification.',
         '- For deep source-video inspection, prefer the canonical source-analysis report reader so transcript, frame, OCR, and highlight signals are consolidated in one read step.',
+        '- Before source-footage edit actions, inspect the source-analysis quality status. If it is partial or insufficient and the edit depends on dialogue, sound, visible action, people, or text, refresh/regenerate analysis or use source selects with analyzeMissing enabled instead of editing from weak metadata.',
         '- Use timeline-only reasoning only when the request explicitly limits scope to existing timeline clips.',
       ].join('\n'),
     );

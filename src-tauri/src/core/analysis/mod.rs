@@ -30,6 +30,8 @@ pub mod diarization_runner;
 pub mod dtw;
 pub mod ducking;
 pub mod esd;
+#[cfg(feature = "ai-providers")]
+pub mod openai_perception;
 pub mod segmentation;
 pub mod speaker_turns;
 pub mod style_planner;
@@ -40,7 +42,7 @@ pub use types::*;
 
 use std::path::{Path, PathBuf};
 
-use crate::core::annotations::models::{ShotResult, TranscriptSegment};
+use crate::core::annotations::models::{estimate_word_timings, ShotResult, TranscriptSegment};
 use crate::core::captions::{
     audio::{extract_audio_for_transcription, load_audio_samples},
     whisper::{
@@ -63,6 +65,8 @@ const BUNDLE_FILENAME: &str = "bundle.json";
 
 /// Name of the generated contact-sheet image
 const CONTACT_SHEET_FILENAME: &str = "contact-sheet.jpg";
+
+const LOCAL_WHISPER_MODEL: WhisperModel = WhisperModel::Base;
 
 // =============================================================================
 // Analysis Job Runner
@@ -273,6 +277,13 @@ impl AnalysisJobRunner {
                         .unwrap_or(&[]),
                 );
                 bundle.transcript = Some(transcript.clone());
+                if !transcript.is_empty() {
+                    bundle.transcript_detail = Some(build_transcript_detail_from_segments(
+                        &transcript,
+                        "whisper",
+                        LOCAL_WHISPER_MODEL.name(),
+                    ));
+                }
                 emit_progress(
                     "transcript",
                     "completed",
@@ -509,7 +520,7 @@ impl AnalysisJobRunner {
             ));
         }
 
-        let model = WhisperModel::Base;
+        let model = LOCAL_WHISPER_MODEL;
         let model_path = default_models_dir().join(model.filename());
         if !model_path.exists() {
             return Err(CoreError::NotFound(format!(
@@ -676,6 +687,42 @@ impl AnalysisJobRunner {
         // Default to local analysis; vision API results can update the bundle later
         let frames = analyzer.analyze_frames_local(video_path, shots_ref).await?;
         Ok(Some(frames))
+    }
+}
+
+fn build_transcript_detail_from_segments(
+    transcript: &[TranscriptSegment],
+    provider: &str,
+    model: &str,
+) -> types::TranscriptDetail {
+    let full = transcript
+        .iter()
+        .map(|segment| segment.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let words = estimate_word_timings(transcript);
+    let speaker_segments = transcript
+        .iter()
+        .filter_map(|segment| {
+            segment
+                .speaker_id
+                .as_ref()
+                .map(|speaker_id| types::SpeakerSegment {
+                    start_sec: segment.start_sec,
+                    end_sec: segment.end_sec,
+                    speaker_id: speaker_id.clone(),
+                    text: segment.text.trim().to_string(),
+                    confidence: Some(segment.confidence),
+                })
+        })
+        .collect();
+
+    types::TranscriptDetail {
+        full,
+        words,
+        speaker_segments,
+        provider: Some(types::PerceptionProviderMetadata::new(provider, model)),
     }
 }
 

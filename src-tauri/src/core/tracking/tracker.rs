@@ -539,7 +539,7 @@ pub fn track_frames(
 
         // Template drift correction: refresh template periodically
         if config.template_refresh_interval > 0
-            && i as u32 % config.template_refresh_interval == 0
+            && (i as u32).is_multiple_of(config.template_refresh_interval)
             && conf >= config.template_refresh_min_confidence
         {
             let (new_tpl, new_w, new_h, rx0, ry0) = extract_template(
