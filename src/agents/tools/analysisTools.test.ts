@@ -2682,6 +2682,94 @@ describe('reference style transfer analysis tools', () => {
       expect(String(data.matches[0].preview)).toContain('wide angle');
     });
 
+    it('should keep same-shot frame observations distinct in direct visual search', async () => {
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'search-visual-observations',
+            name: 'visual-observations.mp4',
+            kind: 'video',
+            uri: '/media/visual-observations.mp4',
+            durationSec: 6,
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'search-visual-observations',
+          shots: [
+            {
+              startSec: 0,
+              endSec: 6,
+              confidence: 0.9,
+              keyframePath: 'shots/0001.jpg',
+              keyframeSelectionMethod: 'thumbnail',
+            },
+          ],
+          transcript: [],
+          audioProfile: {
+            bpm: 100,
+            spectralCentroidHz: 1000,
+            loudnessProfile: [-18.2],
+            peakDb: -4,
+            silenceRegions: [],
+          },
+          segments: [],
+          frameAnalysis: [],
+          frameObservations: [
+            {
+              ...semanticFrameObservations()[0],
+              description: 'A product slide fills the presentation screen.',
+            },
+            {
+              ...semanticFrameObservations()[0],
+              timeSec: 4,
+              description: 'A close-up reaction shot shows the presenter smiling.',
+              subjects: ['presenter'],
+              actions: ['smiling'],
+            },
+          ],
+          metadata: {
+            durationSec: 6,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('search_source_analysis_report', {
+        assetId: 'search-visual-observations',
+        query: 'close-up reaction presenter',
+        sections: ['visual'],
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.matches[0]).toEqual(
+        expect.objectContaining({
+          sectionType: 'visual',
+          index: 1,
+          preview: 'A close-up reaction shot shows the presenter smiling.',
+          metadata: expect.objectContaining({
+            shotIndex: 0,
+            subjects: ['presenter'],
+          }),
+        }),
+      );
+    });
+
     it('should search moments beyond the twelfth shot', async () => {
       setupStores({
         assets: [
@@ -3552,6 +3640,24 @@ describe('reference style transfer analysis tools', () => {
                 analyzedAt: '2026-03-07T00:00:00Z',
               },
             },
+            {
+              shotIndex: 0,
+              timeSec: 4,
+              imagePath: 'shots/0001-alt.jpg',
+              description: 'A close-up reaction shot shows the presenter smiling.',
+              subjects: ['presenter'],
+              actions: ['smiling'],
+              setting: 'conference stage',
+              visibleText: [],
+              objects: ['microphone'],
+              editUsefulness: 'Useful as audience reaction context.',
+              confidence: 0.86,
+              provider: {
+                provider: 'openai',
+                model: 'gpt-4.1-mini',
+                analyzedAt: '2026-03-07T00:00:00Z',
+              },
+            },
           ],
           contactSheet: null,
           metadata: {
@@ -3615,8 +3721,10 @@ describe('reference style transfer analysis tools', () => {
           expect.objectContaining({
             id: 'idx-visual:visualObservation:0',
             sectionType: 'visual',
+            sectionIndex: 0,
             searchText: expect.stringContaining('keynote speaker'),
             metadata: expect.objectContaining({
+              shotIndex: 0,
               keyframePath: 'shots/0001.jpg',
               description: 'A keynote speaker points at a product screen.',
               subjects: ['keynote speaker'],
@@ -3625,6 +3733,18 @@ describe('reference style transfer analysis tools', () => {
                 provider: 'openai',
                 model: 'gpt-4.1-mini',
               }),
+            }),
+          }),
+          expect.objectContaining({
+            id: 'idx-visual:visualObservation:1',
+            sectionType: 'visual',
+            sectionIndex: 1,
+            searchText: expect.stringContaining('close-up reaction'),
+            metadata: expect.objectContaining({
+              shotIndex: 0,
+              keyframePath: 'shots/0001-alt.jpg',
+              description: 'A close-up reaction shot shows the presenter smiling.',
+              subjects: ['presenter'],
             }),
           }),
         ]),

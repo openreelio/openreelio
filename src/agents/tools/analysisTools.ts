@@ -952,9 +952,9 @@ function buildSourceReportChunks(report: SourceAnalysisReport): SourceReportChun
       },
     })),
     ...report.visual.observations.map((observation) => ({
-      id: `${report.assetId}:visualObservation:${observation.shotIndex}`,
+      id: `${report.assetId}:visualObservation:${observation.observationIndex}`,
       sectionType: 'visual' as const,
-      sectionIndex: observation.shotIndex,
+      sectionIndex: observation.observationIndex,
       startSec: observation.startSec,
       endSec: observation.endSec,
       searchText: [
@@ -972,6 +972,7 @@ function buildSourceReportChunks(report: SourceAnalysisReport): SourceReportChun
         preview: observation.description,
         keyframePath: observation.imagePath,
         durationSec: observation.endSec - observation.startSec,
+        shotIndex: observation.shotIndex,
         description: observation.description,
         subjects: observation.subjects,
         actions: observation.actions,
@@ -1855,6 +1856,7 @@ function buildFrameObservationItems(
     }
   >,
 ): Array<{
+  observationIndex: number;
   shotIndex: number;
   startSec: number;
   endSec: number;
@@ -1896,6 +1898,7 @@ function buildFrameObservationItems(
 
     return [
       {
+        observationIndex: fallbackIndex,
         shotIndex: resolvedShotIndex,
         startSec: shot ? (roundTo(shot.startSec) ?? timeSec) : timeSec,
         endSec: shot ? (roundTo(shot.endSec) ?? timeSec) : timeSec,
@@ -2235,6 +2238,7 @@ type SourceLibraryMatch = {
     subjectPosition?: string | null;
     motionDirection?: string | null;
     visualComplexity?: number;
+    shotIndex?: number;
     description?: string;
     subjects?: string[];
     actions?: string[];
@@ -2828,7 +2832,7 @@ function searchSourceAnalysisReport(
 
       candidates.push({
         sectionType: 'visual',
-        index: observation.shotIndex,
+        index: observation.observationIndex,
         startSec: observation.startSec,
         endSec: observation.endSec,
         score: match.score,
@@ -2837,6 +2841,7 @@ function searchSourceAnalysisReport(
         keyframePath: observation.imagePath,
         metadata: {
           durationSec: roundTo(observation.endSec - observation.startSec) ?? 0,
+          shotIndex: observation.shotIndex,
           description: observation.description,
           subjects: observation.subjects,
           actions: observation.actions,
