@@ -1922,10 +1922,6 @@ function buildFrameObservationItems(
   });
 }
 
-function isUnknownVisualValue(value: string | null | undefined): boolean {
-  return !value || value === 'unknown';
-}
-
 function isLocalVisualFallbackOnly(
   frameAnalysis: Array<{
     cameraAngle?: string | null;
@@ -1933,15 +1929,7 @@ function isLocalVisualFallbackOnly(
     motionDirection?: string | null;
   }>,
 ): boolean {
-  return (
-    frameAnalysis.length > 0 &&
-    frameAnalysis.every(
-      (entry) =>
-        isUnknownVisualValue(entry.cameraAngle) &&
-        isUnknownVisualValue(entry.subjectPosition) &&
-        isUnknownVisualValue(entry.motionDirection),
-    )
-  );
+  return frameAnalysis.length > 0;
 }
 
 function resolveVisualSemanticCoverage(
@@ -1956,11 +1944,7 @@ function resolveVisualSemanticCoverage(
     return 'semantic';
   }
 
-  if (frameAnalysis.length === 0) {
-    return 'missing';
-  }
-
-  return isLocalVisualFallbackOnly(frameAnalysis) ? 'local_fallback' : 'semantic';
+  return isLocalVisualFallbackOnly(frameAnalysis) ? 'local_fallback' : 'missing';
 }
 
 function buildKeyframeGallery(
@@ -5591,7 +5575,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
         analyzeMissing: {
           type: 'boolean',
           description:
-            'Generate fresh analysis for missing or low-quality source reports before selecting (default: true)',
+            'Generate fresh analysis for assets without cached bundle data (default: false)',
         },
         useSemantic: {
           type: 'boolean',
@@ -5815,7 +5799,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
             : 0.25;
         const sourceSearchArgs = {
           ...args,
-          analyzeMissing: args.analyzeMissing !== false,
+          analyzeMissing: args.analyzeMissing === true,
           limit: Math.min(requestedSelectCount * 3, 50),
         } as Record<string, unknown>;
         const searchResult =

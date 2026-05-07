@@ -517,7 +517,7 @@ pub struct ContactSheetArtifact {
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisBundle {
     /// Analysis schema version. Version 2 adds transcript detail and frame observations.
-    #[serde(default = "default_analysis_schema_version")]
+    #[serde(default = "legacy_analysis_schema_version")]
     pub schema_version: u32,
     /// Asset ID this bundle belongs to
     pub asset_id: String,
@@ -553,7 +553,7 @@ impl AnalysisBundle {
     /// Creates a new empty bundle for an asset
     pub fn new(asset_id: &str, metadata: VideoMetadata) -> Self {
         Self {
-            schema_version: default_analysis_schema_version(),
+            schema_version: current_analysis_schema_version(),
             asset_id: asset_id.to_string(),
             shots: None,
             transcript: None,
@@ -592,8 +592,12 @@ impl AnalysisBundle {
     }
 }
 
-fn default_analysis_schema_version() -> u32 {
+fn current_analysis_schema_version() -> u32 {
     2
+}
+
+fn legacy_analysis_schema_version() -> u32 {
+    1
 }
 
 // =============================================================================
@@ -972,7 +976,7 @@ mod tests {
 
         let parsed: AnalysisBundle = serde_json::from_str(json).unwrap();
 
-        assert_eq!(parsed.schema_version, 2);
+        assert_eq!(parsed.schema_version, 1);
         assert!(parsed.frame_observations.is_none());
         assert!(parsed.transcript_detail.is_none());
     }

@@ -126,6 +126,29 @@ function semanticFrameAnalysis(shotIndex = 0) {
   ];
 }
 
+function semanticFrameObservations(shotIndex = 0) {
+  return [
+    {
+      shotIndex,
+      timeSec: 2,
+      imagePath: `shots/${shotIndex + 1}.jpg`,
+      description: 'Semantic source frame observation.',
+      subjects: ['subject'],
+      actions: ['action'],
+      setting: 'setting',
+      visibleText: [],
+      objects: [],
+      editUsefulness: 'Useful source context.',
+      confidence: 0.9,
+      provider: {
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        analyzedAt: '2026-03-07T00:00:00Z',
+      },
+    },
+  ];
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -1014,6 +1037,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 8,
@@ -1098,6 +1122,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 6, segmentType: 'broll', confidence: 0.85, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 6,
@@ -1158,6 +1183,7 @@ describe('reference style transfer analysis tools', () => {
           },
           segments: [],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 5,
@@ -1218,6 +1244,7 @@ describe('reference style transfer analysis tools', () => {
           },
           segments: [],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 5,
@@ -1278,6 +1305,7 @@ describe('reference style transfer analysis tools', () => {
           },
           segments: [],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 5,
@@ -1796,6 +1824,10 @@ describe('reference style transfer analysis tools', () => {
             motionDirection: 'static',
             visualComplexity: 0.5,
           })),
+          frameObservations: Array.from({ length: 13 }, (_, index) => ({
+            ...semanticFrameObservations(index)[0],
+            timeSec: index * 2 + 1,
+          })),
           contactSheet: null,
           metadata: {
             durationSec: 26,
@@ -1885,6 +1917,7 @@ describe('reference style transfer analysis tools', () => {
               visualComplexity: 0.7,
             },
           ],
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 4,
@@ -2200,6 +2233,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 10, segmentType: 'talk', confidence: 0.8, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 10,
             width: null,
@@ -2345,6 +2379,7 @@ describe('reference style transfer analysis tools', () => {
               visualComplexity: 0.4,
             },
           ],
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 8,
             width: 1920,
@@ -2455,6 +2490,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 6, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 6,
             width: 1920,
@@ -2539,6 +2575,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 6, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 6,
             width: 1920,
@@ -2617,6 +2654,7 @@ describe('reference style transfer analysis tools', () => {
               visualComplexity: 0.42,
             },
           ],
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 6,
             width: 1920,
@@ -2696,6 +2734,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 26, segmentType: 'performance', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 26,
             width: 1920,
@@ -2771,6 +2810,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 50, segmentType: 'performance', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 50,
             width: 1920,
@@ -2862,6 +2902,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 4, segmentType: 'performance', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 4,
             width: 1920,
@@ -2898,6 +2939,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 4,
             width: 1920,
@@ -2980,6 +3022,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 8, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 8,
             width: 1920,
@@ -3054,6 +3097,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 6, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 6,
             width: 1920,
@@ -3173,6 +3217,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 4,
             width: 1920,
@@ -3298,6 +3343,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 8,
@@ -3402,6 +3448,7 @@ describe('reference style transfer analysis tools', () => {
           },
           segments: [],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 8,
@@ -3631,6 +3678,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 8,
@@ -3748,6 +3796,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 4, segmentType: 'performance', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 10,
             width: 1920,
@@ -3826,6 +3875,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           contactSheet: null,
           metadata: {
             durationSec: 10,
@@ -3911,6 +3961,7 @@ describe('reference style transfer analysis tools', () => {
           },
           segments: [],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 4,
             width: 1920,
@@ -3966,6 +4017,7 @@ describe('reference style transfer analysis tools', () => {
           },
           segments: [],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 4,
             width: 1920,
@@ -4023,6 +4075,7 @@ describe('reference style transfer analysis tools', () => {
           },
           segments: [],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 4,
             width: 1920,
@@ -4106,6 +4159,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 0, endSec: 4, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 10,
             width: 1920,
@@ -4213,6 +4267,7 @@ describe('reference style transfer analysis tools', () => {
             { startSec: 4, endSec: 8, segmentType: 'talk', confidence: 0.9, features: {} },
           ],
           frameAnalysis: semanticFrameAnalysis(),
+          frameObservations: semanticFrameObservations(),
           metadata: {
             durationSec: 10,
             width: 1920,

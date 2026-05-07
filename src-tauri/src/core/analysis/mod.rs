@@ -66,6 +66,8 @@ const BUNDLE_FILENAME: &str = "bundle.json";
 /// Name of the generated contact-sheet image
 const CONTACT_SHEET_FILENAME: &str = "contact-sheet.jpg";
 
+const LOCAL_WHISPER_MODEL: WhisperModel = WhisperModel::Base;
+
 // =============================================================================
 // Analysis Job Runner
 // =============================================================================
@@ -275,11 +277,13 @@ impl AnalysisJobRunner {
                         .unwrap_or(&[]),
                 );
                 bundle.transcript = Some(transcript.clone());
-                bundle.transcript_detail = Some(build_transcript_detail_from_segments(
-                    &transcript,
-                    "whisper",
-                    "base",
-                ));
+                if !transcript.is_empty() {
+                    bundle.transcript_detail = Some(build_transcript_detail_from_segments(
+                        &transcript,
+                        "whisper",
+                        LOCAL_WHISPER_MODEL.name(),
+                    ));
+                }
                 emit_progress(
                     "transcript",
                     "completed",
@@ -516,7 +520,7 @@ impl AnalysisJobRunner {
             ));
         }
 
-        let model = WhisperModel::Base;
+        let model = LOCAL_WHISPER_MODEL;
         let model_path = default_models_dir().join(model.filename());
         if !model_path.exists() {
             return Err(CoreError::NotFound(format!(
@@ -708,7 +712,7 @@ fn build_transcript_detail_from_segments(
                     start_sec: segment.start_sec,
                     end_sec: segment.end_sec,
                     speaker_id: speaker_id.clone(),
-                    text: segment.text.clone(),
+                    text: segment.text.trim().to_string(),
                     confidence: Some(segment.confidence),
                 })
         })

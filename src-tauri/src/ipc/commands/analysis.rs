@@ -287,6 +287,7 @@ async fn resolve_openai_perception_config(
 async fn maybe_enhance_bundle_with_openai(
     app: &tauri::AppHandle,
     state: &State<'_, AppState>,
+    ffmpeg_state: &State<'_, SharedFFmpegState>,
     asset_context: &ResolvedAssetContext,
     options: &AnalysisOptions,
     bundle: &mut AnalysisBundle,
@@ -295,8 +296,12 @@ async fn maybe_enhance_bundle_with_openai(
         return Ok(());
     }
 
+    let mut changed = false;
     let config = match resolve_openai_perception_config(app, state).await {
-        Ok(Some(config)) => config,
+        Ok(Some(config)) => {
+            changed |= bundle.errors.remove("perception_provider").is_some();
+            config
+        }
         Ok(None) => return Ok(()),
         Err(error) => {
             bundle.add_error("perception_provider", error);
@@ -307,7 +312,6 @@ async fn maybe_enhance_bundle_with_openai(
         }
     };
 
-    let mut changed = false;
     if options.visual && needs_openai_frame_observations(bundle) {
         match bundle.shots.as_deref() {
             Some(shots) if !shots.is_empty() => {
@@ -319,6 +323,8 @@ async fn maybe_enhance_bundle_with_openai(
                     .await
                 {
                     Ok((frames, observations)) => {
+                        bundle.errors.remove("perception_provider");
+                        bundle.errors.remove("openai_vision");
                         if !frames.is_empty() {
                             bundle.frame_analysis = Some(frames);
                         }
@@ -343,15 +349,18 @@ async fn maybe_enhance_bundle_with_openai(
         let analysis_dir = AnalysisJobRunner::new(&asset_context.project_path)
             .asset_analysis_dir(&bundle.asset_id)
             .map_err(|error| format!("Failed to resolve analysis artifact directory: {error}"))?;
-        match transcribe_with_openai(
-            &config,
-            &video_path,
-            &analysis_dir,
-            &PathBuf::from("ffmpeg"),
-        )
-        .await
-        {
+        let ffmpeg_path = {
+            let ffmpeg = ffmpeg_state.read().await;
+            ffmpeg
+                .info()
+                .ok_or_else(|| "FFmpeg is not available for OpenAI transcription".to_string())?
+                .ffmpeg_path
+                .clone()
+        };
+        match transcribe_with_openai(&config, &video_path, &analysis_dir, &ffmpeg_path).await {
             Ok((segments, detail)) => {
+                bundle.errors.remove("perception_provider");
+                bundle.errors.remove("openai_transcript");
                 bundle.transcript = Some(segments);
                 bundle.transcript_detail = Some(detail);
                 bundle.errors.remove("transcript");
@@ -377,6 +386,7 @@ async fn maybe_enhance_bundle_with_openai(
 async fn maybe_enhance_bundle_with_openai(
     _app: &tauri::AppHandle,
     _state: &State<'_, AppState>,
+    _ffmpeg_state: &State<'_, SharedFFmpegState>,
     _asset_context: &ResolvedAssetContext,
     _options: &AnalysisOptions,
     _bundle: &mut AnalysisBundle,
@@ -386,33 +396,15 @@ async fn maybe_enhance_bundle_with_openai(
 
 #[cfg(feature = "ai-providers")]
 fn needs_openai_frame_observations(bundle: &AnalysisBundle) -> bool {
-    let has_openai_observations = bundle
+    !bundle
         .frame_observations
         .as_ref()
         .is_some_and(|observations| {
             observations
                 .iter()
                 .any(|observation| observation.provider.provider == "openai")
-        });
-    if has_openai_observations {
-        return false;
-    }
-
-    bundle.frame_analysis.as_ref().is_none_or(|frames| {
-        frames.is_empty()
-            || frames.iter().all(|frame| {
-                matches!(
-                    frame.camera_angle,
-                    crate::core::analysis::CameraAngle::Unknown
-                ) && matches!(
-                    frame.subject_position,
-                    crate::core::analysis::SubjectPosition::Unknown
-                ) && matches!(
-                    frame.motion_direction,
-                    crate::core::analysis::MotionDirection::Unknown
-                )
-            })
-    })
+        })
+        && bundle.frame_observations.as_ref().is_none_or(Vec::is_empty)
 }
 
 #[cfg(feature = "ai-providers")]
@@ -460,7 +452,15 @@ pub async fn analyze_video_full(
     )
     .await?;
 
-    maybe_enhance_bundle_with_openai(&app, &state, &asset_context, &options, &mut bundle).await?;
+    maybe_enhance_bundle_with_openai(
+        &app,
+        &state,
+        &ffmpeg_state,
+        &asset_context,
+        &options,
+        &mut bundle,
+    )
+    .await?;
 
     Ok(bundle)
 }
