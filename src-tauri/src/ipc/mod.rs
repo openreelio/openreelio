@@ -3,21 +3,25 @@
 //! Handles communication between Tauri backend and React frontend.
 //! All Tauri commands and events are defined here.
 
+#[cfg(feature = "gui")]
 mod ai_command_defaults;
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 mod commands;
+#[cfg(feature = "gui")]
 mod dto;
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 mod events;
 mod payloads;
 
 #[allow(unused_imports)]
+#[cfg(feature = "gui")]
 pub(crate) use ai_command_defaults::*;
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 pub use commands::*;
 #[allow(unused_imports)]
+#[cfg(feature = "gui")]
 pub(crate) use dto::*;
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 pub use events::*;
 pub use payloads::*;
 

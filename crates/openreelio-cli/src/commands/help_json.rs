@@ -347,6 +347,30 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 },
                 "example": "openreelio-cli plan template --type split-and-move"
             },
+            "command.execute": {
+                "description": "Execute any supported backend edit command using the shared CommandPayload parser",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "type": { "type": "string", "required": true, "desc": "Backend command type, e.g. SplitClip or AddMask" },
+                    "payload": { "type": "string", "required": false, "desc": "Inline JSON object payload" },
+                    "payload-file": { "type": "string", "required": false, "desc": "Path to a JSON object payload file" }
+                },
+                "example": "openreelio-cli command execute --path ./project --type SplitClip --payload '{\"sequenceId\":\"seq_1\",\"trackId\":\"track_v1\",\"clipId\":\"clip_1\",\"splitTime\":5}'"
+            },
+            "command.validate": {
+                "description": "Validate a backend command payload without executing it",
+                "params": {
+                    "type": { "type": "string", "required": true, "desc": "Backend command type" },
+                    "payload": { "type": "string", "required": false, "desc": "Inline JSON object payload" },
+                    "payload-file": { "type": "string", "required": false, "desc": "Path to a JSON object payload file" }
+                },
+                "example": "openreelio-cli command validate --type RenameTrack --payload '{\"sequenceId\":\"seq_1\",\"trackId\":\"track_v1\",\"name\":\"Main Video\"}'"
+            },
+            "command.schema": {
+                "description": "Print the backend command surface available to headless agents",
+                "params": {},
+                "example": "openreelio-cli command schema"
+            },
             "state.dump": {
                 "description": "Dump full project state as JSON",
                 "params": {

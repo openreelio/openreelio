@@ -149,6 +149,16 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
                         ));
                     }
                 }
+
+                if let Err(error) = openreelio_core::ipc::CommandPayload::parse(
+                    step.command_type.clone(),
+                    step.payload.clone(),
+                ) {
+                    errors.push(format!(
+                        "Step '{}' has invalid command payload for '{}': {}",
+                        step.id, step.command_type, error
+                    ));
+                }
             }
 
             // Cycle detection
@@ -236,53 +246,12 @@ fn execute_step(
     project: &mut openreelio_core::ActiveProject,
     step: &PlanStep,
 ) -> anyhow::Result<openreelio_core::commands::CommandResult> {
-    use openreelio_core::commands::*;
-
-    let payload = &step.payload;
-    let cmd: Box<dyn Command> = match step.command_type.as_str() {
-        "InsertClip" => Box::new(serde_json::from_value::<InsertClipCommand>(
-            payload.clone(),
-        )?),
-        "RemoveClip" => Box::new(serde_json::from_value::<RemoveClipCommand>(
-            payload.clone(),
-        )?),
-        "MoveClip" => Box::new(serde_json::from_value::<MoveClipCommand>(payload.clone())?),
-        "TrimClip" => Box::new(serde_json::from_value::<TrimClipCommand>(payload.clone())?),
-        "SplitClip" => Box::new(serde_json::from_value::<SplitClipCommand>(payload.clone())?),
-        "SetClipSpeed" => Box::new(serde_json::from_value::<SetClipSpeedCommand>(
-            payload.clone(),
-        )?),
-        "AddTrack" => Box::new(serde_json::from_value::<AddTrackCommand>(payload.clone())?),
-        "RemoveTrack" => Box::new(serde_json::from_value::<RemoveTrackCommand>(
-            payload.clone(),
-        )?),
-        "AddEffect" => Box::new(serde_json::from_value::<AddEffectCommand>(payload.clone())?),
-        "RemoveEffect" => Box::new(serde_json::from_value::<RemoveEffectCommand>(
-            payload.clone(),
-        )?),
-        "CreateCaption" => Box::new(serde_json::from_value::<CreateCaptionCommand>(
-            payload.clone(),
-        )?),
-        "DeleteCaption" => Box::new(serde_json::from_value::<DeleteCaptionCommand>(
-            payload.clone(),
-        )?),
-        "UpdateCaption" => Box::new(serde_json::from_value::<UpdateCaptionCommand>(
-            payload.clone(),
-        )?),
-        "ImportAsset" => Box::new(serde_json::from_value::<ImportAssetCommand>(
-            payload.clone(),
-        )?),
-        "RemoveAsset" => Box::new(serde_json::from_value::<RemoveAssetCommand>(
-            payload.clone(),
-        )?),
-        "AddMarker" => Box::new(serde_json::from_value::<AddMarkerCommand>(payload.clone())?),
-        "RemoveMarker" => Box::new(serde_json::from_value::<RemoveMarkerCommand>(
-            payload.clone(),
-        )?),
-        other => {
-            return Err(anyhow::anyhow!("Unknown command type: '{}'", other));
-        }
-    };
+    let typed_payload = openreelio_core::ipc::CommandPayload::parse(
+        step.command_type.clone(),
+        step.payload.clone(),
+    )
+    .map_err(|error| anyhow::anyhow!("Invalid command '{}': {}", step.command_type, error))?;
+    let cmd = typed_payload.build_command(&project.path);
 
     project
         .executor

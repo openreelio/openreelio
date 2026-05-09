@@ -29,6 +29,7 @@ import type { RiskLevel, ValidationResult } from '../../core/types';
 import type { AgentPlan, AgentPlanResult } from '@/bindings';
 import { createLogger } from '@/services/logger';
 import { isMetaToolsEnabled } from '@/config/featureFlags';
+import { normalizeMarkerColor } from '@/agents/tools/markerColor';
 import { getVisibleMetaToolNames } from '@/agents/tools/metaTools';
 import { getWorkspaceToolNames } from '@/agents/tools/workspaceTools';
 import { useProjectStore } from '@/stores/projectStore';
@@ -52,6 +53,8 @@ const logger = createLogger('BackendToolExecutor');
  * command-shaped and do not rely on extra frontend orchestration.
  */
 const BACKEND_DIRECT_TOOLS = new Set([
+  'add_effect',
+  'add_marker',
   'move_clip',
   'trim_clip',
   'split_clip',
@@ -59,6 +62,8 @@ const BACKEND_DIRECT_TOOLS = new Set([
   'change_clip_speed',
   'add_track',
   'remove_track',
+  'rename_track',
+  'remove_effect',
   'remove_marker',
 ]);
 
@@ -66,6 +71,30 @@ function normalizeToolNameForBackend(toolName: string): string {
   // Backend CommandPayload parsing uses camelCase aliases. Agent tool names are
   // snake_case, so normalize before sending to execute_agent_plan.
   return toolName.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase());
+}
+
+function normalizeBackendParamsForBackend(
+  toolName: string,
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  const isAddMarker = toolName === 'add_marker' || toolName === 'addMarker';
+  if (!isAddMarker || !Object.prototype.hasOwnProperty.call(params, 'color')) {
+    return params;
+  }
+
+  const nextParams = { ...params };
+  const color = normalizeMarkerColor(nextParams.color);
+  if (color) {
+    nextParams.color = color;
+  } else {
+    delete nextParams.color;
+  }
+
+  return nextParams;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -330,7 +359,7 @@ export class BackendToolExecutor implements IToolExecutor {
       return {
         requestedToolName: toolName,
         effectiveToolName: action,
-        params: metaToolArgs,
+        params: normalizeBackendParamsForBackend(action, metaToolArgs),
         metaAction: action,
       };
     }
@@ -342,7 +371,7 @@ export class BackendToolExecutor implements IToolExecutor {
     return {
       requestedToolName: toolName,
       effectiveToolName: toolName,
-      params: args,
+      params: normalizeBackendParamsForBackend(toolName, args),
     };
   }
 
@@ -404,10 +433,14 @@ export class BackendToolExecutor implements IToolExecutor {
           const backendStepId = `${step.id}__${index + 1}`;
           const dependsOn = index === 0 ? firstStepDependsOn : [generatedIds[index - 1]];
 
+          const normalizedParams = normalizeBackendParamsForBackend(
+            subStep.toolName,
+            subStep.params,
+          );
           backendSteps.push({
             id: backendStepId,
             toolName: normalizeToolNameForBackend(subStep.toolName),
-            params: subStep.params as Record<string, never>,
+            params: normalizedParams as Record<string, never>,
             description: `Execute ${subStep.toolName}`,
             riskLevel: 'low',
             dependsOn,
@@ -429,10 +462,11 @@ export class BackendToolExecutor implements IToolExecutor {
         continue;
       }
 
+      const normalizedParams = normalizeBackendParamsForBackend(step.toolName, step.params);
       backendSteps.push({
         id: step.id,
         toolName: normalizeToolNameForBackend(step.toolName),
-        params: step.params as Record<string, never>,
+        params: normalizedParams as Record<string, never>,
         description: `Execute ${step.toolName}`,
         riskLevel: 'low',
         dependsOn: firstStepDependsOn,
@@ -518,7 +552,13 @@ export class BackendToolExecutor implements IToolExecutor {
     context: ExecutionContext,
   ): Promise<ToolExecutionResult> {
     if (toolName === 'execute_plan') {
-      const legacyRoute = this.tryBuildLegacyExecutePlanRoute(args, context);
+      let legacyRoute: LegacyExecutePlanRoute | null;
+      try {
+        legacyRoute = this.tryBuildLegacyExecutePlanRoute(args, context);
+      } catch (err) {
+        return createFailureResult(`execute_plan validation failed: ${getErrorMessage(err)}`, 0);
+      }
+
       if (legacyRoute) {
         for (const step of legacyRoute.plan.steps) {
           if ((step.dependsOn?.length ?? 0) > 0) {
@@ -617,7 +657,13 @@ export class BackendToolExecutor implements IToolExecutor {
       return this.buildUnsupportedMutationFailure(toolName);
     }
 
-    const executionTarget = this.resolveBackendExecutionTarget(toolName, args);
+    let executionTarget: BackendExecutionTarget | null;
+    try {
+      executionTarget = this.resolveBackendExecutionTarget(toolName, args);
+    } catch (err) {
+      return createFailureResult(`${toolName} validation failed: ${getErrorMessage(err)}`, 0);
+    }
+
     if (!executionTarget) {
       if (this.isUnsafeMutatingFallback(toolName)) {
         const preflightFailure = this.getMutationPreflightFailure(toolName, args, context);
@@ -645,15 +691,18 @@ export class BackendToolExecutor implements IToolExecutor {
     let steps: AgentPlan['steps'];
     try {
       steps = expander
-        ? expander(executionTarget.params).map((sub, i) => ({
-            id: `step-${i + 1}`,
-            toolName: normalizeToolNameForBackend(sub.toolName),
-            params: sub.params as Record<string, never>,
-            description: `Execute ${sub.toolName}`,
-            riskLevel: 'low' as const,
-            dependsOn: sub.dependsOn ?? (i > 0 ? [`step-${i}`] : []),
-            optional: false,
-          }))
+        ? expander(executionTarget.params).map((sub, i) => {
+            const normalizedParams = normalizeBackendParamsForBackend(sub.toolName, sub.params);
+            return {
+              id: `step-${i + 1}`,
+              toolName: normalizeToolNameForBackend(sub.toolName),
+              params: normalizedParams as Record<string, never>,
+              description: `Execute ${sub.toolName}`,
+              riskLevel: 'low' as const,
+              dependsOn: sub.dependsOn ?? (i > 0 ? [`step-${i}`] : []),
+              optional: false,
+            };
+          })
         : [
             {
               id: 'step-1',
@@ -667,7 +716,7 @@ export class BackendToolExecutor implements IToolExecutor {
           ];
     } catch (err) {
       const duration = performance.now() - start;
-      const errorMsg = err instanceof Error ? err.message : String(err);
+      const errorMsg = getErrorMessage(err);
       logger.warn('Compound tool expansion failed', {
         requestedToolName: toolName,
         effectiveToolName: executionTarget.effectiveToolName,
@@ -746,11 +795,35 @@ export class BackendToolExecutor implements IToolExecutor {
     let successCount = 0;
     let failureCount = 0;
 
-    // Resolve each tool's execution target while preserving original order
-    const resolvedTools = request.tools.map((tool) => ({
-      requestTool: tool,
-      executionTarget: this.resolveBackendExecutionTarget(tool.name, tool.args),
-    }));
+    // Resolve each tool's execution target while preserving original order.
+    const resolvedTools: Array<{
+      requestTool: BatchExecutionRequest['tools'][number];
+      executionTarget: BackendExecutionTarget | null;
+    }> = [];
+    for (const tool of request.tools) {
+      try {
+        resolvedTools.push({
+          requestTool: tool,
+          executionTarget: this.resolveBackendExecutionTarget(tool.name, tool.args),
+        });
+      } catch (err) {
+        return {
+          success: false,
+          results: [
+            {
+              tool: tool.name,
+              result: createFailureResult(
+                `${tool.name} validation failed: ${getErrorMessage(err)}`,
+                performance.now() - start,
+              ),
+            },
+          ],
+          totalDuration: performance.now() - start,
+          successCount: 0,
+          failureCount: 1,
+        };
+      }
+    }
 
     const allBackend = resolvedTools.every((t) => t.executionTarget !== null);
 
@@ -819,7 +892,7 @@ export class BackendToolExecutor implements IToolExecutor {
           try {
             subSteps = exp(executionTarget.params);
           } catch (err) {
-            const errorMsg = err instanceof Error ? err.message : String(err);
+            const errorMsg = getErrorMessage(err);
             expansionError = `${executionTarget.effectiveToolName} validation failed: ${errorMsg}`;
             logger.warn('Batch compound expansion failed', {
               requestedToolName: requestTool.name,
@@ -845,10 +918,14 @@ export class BackendToolExecutor implements IToolExecutor {
             } else {
               dependsOn = [];
             }
+            const normalizedParams = normalizeBackendParamsForBackend(
+              subSteps[j].toolName,
+              subSteps[j].params,
+            );
             allSteps.push({
               id: `step-${stepCounter + 1}`,
               toolName: normalizeToolNameForBackend(subSteps[j].toolName),
-              params: subSteps[j].params as Record<string, never>,
+              params: normalizedParams as Record<string, never>,
               description: `Execute ${subSteps[j].toolName}`,
               riskLevel: 'low' as const,
               dependsOn,
@@ -955,7 +1032,7 @@ export class BackendToolExecutor implements IToolExecutor {
             }
           }
         } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : String(err);
+          const errorMsg = getErrorMessage(err);
           for (const t of backendTools) {
             results.push({
               tool: t.requestTool.name,
@@ -977,12 +1054,16 @@ export class BackendToolExecutor implements IToolExecutor {
   }
 
   canExecuteBatchAtomically(request: BatchExecutionRequest): boolean {
-    return (
-      request.tools.length > 1 &&
-      request.tools.every(
-        (tool) => this.resolveBackendExecutionTarget(tool.name, tool.args) !== null,
-      )
-    );
+    try {
+      return (
+        request.tools.length > 1 &&
+        request.tools.every(
+          (tool) => this.resolveBackendExecutionTarget(tool.name, tool.args) !== null,
+        )
+      );
+    } catch {
+      return false;
+    }
   }
 
   // Delegate all metadata methods to the frontend executor
