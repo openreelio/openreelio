@@ -403,7 +403,7 @@ describe('BackendToolExecutor', () => {
       expect(frontend.execute).not.toHaveBeenCalled();
     });
 
-    it('should route backend-safe edit meta-tool actions to backend IPC', async () => {
+    it('should route backend-safe edit meta-tool split_clip action to backend IPC', async () => {
       const extendedTools = [
         ...TOOL_DEFS,
         { name: 'edit', description: 'Editing meta-tool', category: 'timeline', parameters: {} },
@@ -475,7 +475,7 @@ describe('BackendToolExecutor', () => {
       });
     });
 
-    it('should route backend-safe edit meta-tool actions to backend IPC', async () => {
+    it('should route backend-safe edit meta-tool rename_track action to backend IPC', async () => {
       const extendedTools = [
         ...TOOL_DEFS,
         { name: 'edit', description: 'Editing meta-tool', category: 'timeline', parameters: {} },
