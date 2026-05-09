@@ -27,5 +27,8 @@ pub use events::{ChannelBroadcaster, EventBroadcaster, NullBroadcaster};
 // Re-export all core modules from the main library
 pub use openreelio_lib::core::*;
 
+// Re-export command payload parsing for headless clients and the CLI.
+pub use openreelio_lib::ipc;
+
 // Re-export the ActiveProject struct
 pub use openreelio_lib::ActiveProject;

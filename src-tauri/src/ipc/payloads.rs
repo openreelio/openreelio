@@ -468,6 +468,7 @@ pub struct RemoveTrackPayload {
 pub struct RenameTrackPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
+    #[serde(alias = "name")]
     pub new_name: String,
 }
 
@@ -510,6 +511,7 @@ pub struct ToggleTrackVisibilityPayload {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddMarkerPayload {
     pub sequence_id: SequenceId,
+    #[serde(alias = "time")]
     pub time_sec: TimeSec,
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1209,6 +1211,79 @@ pub enum CommandPayload {
 }
 
 impl CommandPayload {
+    pub const SUPPORTED_COMMAND_TYPES: &'static [&'static str] = &[
+        "InsertClip",
+        "InsertEdit",
+        "OverwriteEdit",
+        "RippleDelete",
+        "Lift",
+        "ExtractEdit",
+        "CloseGap",
+        "CloseAllGaps",
+        "RemoveClip",
+        "MoveClip",
+        "TrimClip",
+        "SplitClip",
+        "SetClipTransform",
+        "SetClipSpeed",
+        "ReverseClip",
+        "SetClipEnabled",
+        "LinkClips",
+        "UnlinkClips",
+        "GroupClips",
+        "UngroupClips",
+        "DetachAudio",
+        "CreateFreezeFrame",
+        "SetTimeRemap",
+        "ClearTimeRemap",
+        "SetClipMute",
+        "SetClipAudio",
+        "AddAudioKeyframe",
+        "RemoveAudioKeyframe",
+        "MoveAudioKeyframe",
+        "SetAudioKeyframeValue",
+        "SetAudioFadeIn",
+        "SetAudioFadeOut",
+        "SetTrackBlendMode",
+        "SetClipBlendMode",
+        "ImportAsset",
+        "RemoveAsset",
+        "CreateSequence",
+        "SetMasterVolume",
+        "CreateTrack",
+        "RemoveTrack",
+        "RenameTrack",
+        "ReorderTracks",
+        "ToggleTrackMute",
+        "ToggleTrackLock",
+        "ToggleTrackVisibility",
+        "AddMarker",
+        "RemoveMarker",
+        "CreateCaption",
+        "DeleteCaption",
+        "UpdateCaption",
+        "AddEffect",
+        "RemoveEffect",
+        "UpdateEffect",
+        "AddMask",
+        "UpdateMask",
+        "RemoveMask",
+        "AddTextClip",
+        "UpdateTextClip",
+        "RemoveTextClip",
+        "CreateFolder",
+        "RenameFile",
+        "MoveFile",
+        "DeleteFile",
+        "ApplyAudioDucking",
+        "CreateCompoundClip",
+        "UnnestCompoundClip",
+        "CreateAdjustmentLayer",
+        "PasteEffects",
+        "PasteAttributes",
+        "RemoveAttributes",
+    ];
+
     /// Hard limit to prevent DoS via massive IPC payloads.
     ///
     /// This is intentionally conservative: edit commands should remain small and

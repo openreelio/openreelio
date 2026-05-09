@@ -10,7 +10,6 @@
 //! Run `cargo run --manifest-path src-tauri/Cargo.toml --bin export_bindings` to regenerate `src/bindings.ts`.
 
 pub mod core;
-#[cfg(feature = "gui")]
 pub mod ipc;
 
 use std::path::{Path, PathBuf};
