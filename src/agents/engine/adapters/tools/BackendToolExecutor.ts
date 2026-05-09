@@ -77,7 +77,8 @@ function normalizeBackendParamsForBackend(
   toolName: string,
   params: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (toolName !== 'add_marker' || !Object.prototype.hasOwnProperty.call(params, 'color')) {
+  const isAddMarker = toolName === 'add_marker' || toolName === 'addMarker';
+  if (!isAddMarker || !Object.prototype.hasOwnProperty.call(params, 'color')) {
     return params;
   }
 
@@ -690,15 +691,18 @@ export class BackendToolExecutor implements IToolExecutor {
     let steps: AgentPlan['steps'];
     try {
       steps = expander
-        ? expander(executionTarget.params).map((sub, i) => ({
-            id: `step-${i + 1}`,
-            toolName: normalizeToolNameForBackend(sub.toolName),
-            params: sub.params as Record<string, never>,
-            description: `Execute ${sub.toolName}`,
-            riskLevel: 'low' as const,
-            dependsOn: sub.dependsOn ?? (i > 0 ? [`step-${i}`] : []),
-            optional: false,
-          }))
+        ? expander(executionTarget.params).map((sub, i) => {
+            const normalizedParams = normalizeBackendParamsForBackend(sub.toolName, sub.params);
+            return {
+              id: `step-${i + 1}`,
+              toolName: normalizeToolNameForBackend(sub.toolName),
+              params: normalizedParams as Record<string, never>,
+              description: `Execute ${sub.toolName}`,
+              riskLevel: 'low' as const,
+              dependsOn: sub.dependsOn ?? (i > 0 ? [`step-${i}`] : []),
+              optional: false,
+            };
+          })
         : [
             {
               id: 'step-1',
@@ -914,10 +918,14 @@ export class BackendToolExecutor implements IToolExecutor {
             } else {
               dependsOn = [];
             }
+            const normalizedParams = normalizeBackendParamsForBackend(
+              subSteps[j].toolName,
+              subSteps[j].params,
+            );
             allSteps.push({
               id: `step-${stepCounter + 1}`,
               toolName: normalizeToolNameForBackend(subSteps[j].toolName),
-              params: subSteps[j].params as Record<string, never>,
+              params: normalizedParams as Record<string, never>,
               description: `Execute ${subSteps[j].toolName}`,
               riskLevel: 'low' as const,
               dependsOn,

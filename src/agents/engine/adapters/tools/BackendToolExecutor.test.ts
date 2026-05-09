@@ -1169,6 +1169,31 @@ describe('BackendToolExecutor', () => {
       );
     });
 
+    it('should reject invalid marker colors before backend IPC in batch', async () => {
+      const result = await backend.executeBatch(
+        {
+          tools: [
+            {
+              name: 'add_marker',
+              args: { sequenceId: 'seq-1', time: 1.5, label: 'Hook', color: 'not-a-color' },
+            },
+            { name: 'split_clip', args: { clipId: 'c1', atTimelineSec: 5 } },
+          ],
+          mode: 'sequential',
+          stopOnError: true,
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.failureCount).toBe(1);
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].tool).toBe('add_marker');
+      expect(result.results[0].result.error).toContain('Invalid marker color');
+      expect(mockInvoke).not.toHaveBeenCalled();
+      expect(frontend.execute).not.toHaveBeenCalled();
+    });
+
     it('should batch backend-safe edit meta-tool actions through one backend plan', async () => {
       const extendedTools = [
         ...TOOL_DEFS,
@@ -1615,6 +1640,54 @@ describe('BackendToolExecutor', () => {
       });
     });
 
+    it('should normalize backend-style marker sub-steps for single compound execute', async () => {
+      registerCompoundExpander('ripple_edit', () => [
+        {
+          toolName: 'addMarker',
+          params: { sequenceId: 'seq-1', time: 2, label: 'Beat', color: 'blue' },
+        },
+      ]);
+
+      const extendedTools = [
+        ...TOOL_DEFS,
+        { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
+      ];
+      const extendedFrontend = createMockFrontendExecutor(extendedTools);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'compound-marker',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { markerId: 'marker-1' }, durationMs: 4 },
+        ],
+        operationIds: ['op-1'],
+        executionTimeMs: 4,
+      });
+
+      const result = await extendedBackend.execute('ripple_edit', { clipId: 'clip-1' }, CONTEXT);
+
+      expect(result.success).toBe(true);
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          steps: [
+            expect.objectContaining({
+              toolName: 'addMarker',
+              params: {
+                sequenceId: 'seq-1',
+                time: 2,
+                label: 'Beat',
+                color: { r: 0, g: 0, b: 1 },
+              },
+            }),
+          ],
+        }),
+      });
+      expect(extendedFrontend.execute).not.toHaveBeenCalled();
+    });
+
     it('should expand compound tool in batch and map results back', async () => {
       registerCompoundExpander('ripple_edit', (args) => [
         { toolName: 'trimClip', params: { clipId: args.clipId, newSourceOut: args.trimEnd } },
@@ -1686,6 +1759,61 @@ describe('BackendToolExecutor', () => {
           ]),
         }),
       });
+    });
+
+    it('should normalize backend-style marker sub-steps for compound batch execution', async () => {
+      registerCompoundExpander('ripple_edit', () => [
+        {
+          toolName: 'addMarker',
+          params: { sequenceId: 'seq-1', time: 2, label: 'Beat', color: '#FF000080' },
+        },
+      ]);
+
+      const extendedTools = [
+        ...TOOL_DEFS,
+        { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
+      ];
+      const extendedFrontend = createMockFrontendExecutor(extendedTools);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'batch-compound-marker',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { markerId: 'marker-1' }, durationMs: 4 },
+        ],
+        operationIds: ['op-1'],
+        executionTimeMs: 4,
+      });
+
+      const result = await extendedBackend.executeBatch(
+        {
+          tools: [{ name: 'ripple_edit', args: { clipId: 'clip-1' } }],
+          mode: 'sequential',
+          stopOnError: true,
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          steps: [
+            expect.objectContaining({
+              toolName: 'addMarker',
+              params: {
+                sequenceId: 'seq-1',
+                time: 2,
+                label: 'Beat',
+                color: { r: 1, g: 0, b: 0, a: 128 / 255 },
+              },
+            }),
+          ],
+        }),
+      });
+      expect(extendedFrontend.executeBatch).not.toHaveBeenCalled();
     });
 
     it('should return validation failure when compound expander throws', async () => {

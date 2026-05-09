@@ -1856,6 +1856,28 @@ impl CommandPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn supported_command_types_are_unique_and_recognized_by_parser() {
+        let mut seen = HashSet::new();
+
+        for command_type in CommandPayload::SUPPORTED_COMMAND_TYPES {
+            assert!(
+                seen.insert(*command_type),
+                "duplicate supported command type: {command_type}"
+            );
+
+            if let Err(error) =
+                CommandPayload::parse((*command_type).to_string(), serde_json::json!({}))
+            {
+                assert!(
+                    !error.contains("unknown variant"),
+                    "{command_type} is listed but not recognized by CommandPayload::parse: {error}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn parse_update_caption_payload_is_supported() {

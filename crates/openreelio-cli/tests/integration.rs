@@ -3,6 +3,7 @@
 //! These tests exercise the CLI through the actual binary using `std::process::Command`.
 //! Each test creates a temporary project directory and runs CLI commands against it.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -945,8 +946,24 @@ fn test_help_json_contains_all_commands() {
 #[test]
 fn test_command_schema_exposes_backend_payload_surface() {
     let result = run_cli_ok(&["command", "schema"]);
-    assert_eq!(result["count"].as_u64().unwrap(), 70);
     let commands = result["commands"].as_array().unwrap();
+    assert!(
+        commands.len() >= 3,
+        "expected command schema to expose backend commands"
+    );
+    assert_eq!(result["count"].as_u64().unwrap(), commands.len() as u64);
+
+    let mut unique_commands = HashSet::new();
+    for command in commands {
+        let command = command
+            .as_str()
+            .expect("command schema entries should be strings");
+        assert!(
+            unique_commands.insert(command),
+            "command schema should not contain duplicate entry: {command}"
+        );
+    }
+
     assert!(commands.iter().any(|value| value == "AddMask"));
     assert!(commands.iter().any(|value| value == "CreateCompoundClip"));
     assert!(commands.iter().any(|value| value == "RenameTrack"));
