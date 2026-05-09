@@ -184,6 +184,12 @@ const TOOL_DEFS: TestToolDef[] = [
     parameters: { type: 'object', properties: {} },
   },
   {
+    name: 'add_marker',
+    description: 'Add a timeline marker',
+    category: 'timeline',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
     name: 'analyze_video',
     description: 'Analyze video content',
     category: 'analysis',
@@ -469,13 +475,24 @@ describe('BackendToolExecutor', () => {
       });
     });
 
-    it('should fall back to frontend execution when an edit meta-tool action is not backend-safe', async () => {
+    it('should route backend-safe edit meta-tool actions to backend IPC', async () => {
       const extendedTools = [
         ...TOOL_DEFS,
         { name: 'edit', description: 'Editing meta-tool', category: 'timeline', parameters: {} },
       ];
       const extendedFrontend = createMockFrontendExecutor(extendedTools);
       const extendedBackend = createBackendToolExecutor(extendedFrontend);
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'plan-edit-rename',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { trackId: 'track-1' }, durationMs: 5 },
+        ],
+        operationIds: ['op-1'],
+        executionTimeMs: 5,
+      });
 
       const result = await extendedBackend.execute(
         'edit',
@@ -484,12 +501,18 @@ describe('BackendToolExecutor', () => {
       );
 
       expect(result.success).toBe(true);
-      expect(extendedFrontend.execute).toHaveBeenCalledWith(
-        'edit',
-        { action: 'rename_track', sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
-        CONTEXT,
-      );
-      expect(mockInvoke).not.toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          goal: 'Execute rename_track',
+          steps: [
+            expect.objectContaining({
+              toolName: 'renameTrack',
+              params: { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+            }),
+          ],
+        }),
+      });
+      expect(extendedFrontend.execute).not.toHaveBeenCalled();
     });
 
     it('should fall back to frontend execution for mutating transition tools that are not backend-safe', async () => {
@@ -508,7 +531,19 @@ describe('BackendToolExecutor', () => {
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
-    it('should fall back to frontend execution for mutating track tools that are not backend-safe', async () => {
+    it('should route backend-safe track tools to backend IPC', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'plan-rename-track',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { trackId: 'track-1' }, durationMs: 5 },
+        ],
+        operationIds: ['op-1'],
+        executionTimeMs: 5,
+      });
+
       const result = await backend.execute(
         'rename_track',
         { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
@@ -516,12 +551,70 @@ describe('BackendToolExecutor', () => {
       );
 
       expect(result.success).toBe(true);
-      expect(frontend.execute).toHaveBeenCalledWith(
-        'rename_track',
-        { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          goal: 'Execute rename_track',
+          steps: [
+            expect.objectContaining({
+              toolName: 'renameTrack',
+              params: { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+            }),
+          ],
+        }),
+      });
+      expect(frontend.execute).not.toHaveBeenCalled();
+    });
+
+    it('should normalize marker string colors before backend IPC', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'plan-add-marker',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { markerId: 'marker-1' }, durationMs: 5 },
+        ],
+        operationIds: ['op-1'],
+        executionTimeMs: 5,
+      });
+
+      const result = await backend.execute(
+        'add_marker',
+        { sequenceId: 'seq-1', time: 1.5, label: 'Hook', color: '#FF000080' },
         CONTEXT,
       );
+
+      expect(result.success).toBe(true);
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          goal: 'Execute add_marker',
+          steps: [
+            expect.objectContaining({
+              toolName: 'addMarker',
+              params: {
+                sequenceId: 'seq-1',
+                time: 1.5,
+                label: 'Hook',
+                color: { r: 1, g: 0, b: 0, a: 128 / 255 },
+              },
+            }),
+          ],
+        }),
+      });
+      expect(frontend.execute).not.toHaveBeenCalled();
+    });
+
+    it('should reject invalid marker colors before backend IPC', async () => {
+      const result = await backend.execute(
+        'add_marker',
+        { sequenceId: 'seq-1', time: 1.5, label: 'Hook', color: 'not-a-color' },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Invalid marker color');
       expect(mockInvoke).not.toHaveBeenCalled();
+      expect(frontend.execute).not.toHaveBeenCalled();
     });
 
     it('should route analysis tool to frontend executor', async () => {
@@ -892,6 +985,53 @@ describe('BackendToolExecutor', () => {
       expect(extendedFrontend.execute).not.toHaveBeenCalled();
     });
 
+    it('should normalize marker colors when promoting legacy execute_plan batches', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'legacy-marker-plan',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [
+          { stepId: 'marker-step', success: true, data: { markerId: 'm1' }, durationMs: 4 },
+        ],
+        operationIds: ['op-1'],
+        executionTimeMs: 4,
+      });
+
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'marker-step',
+              toolName: 'add_marker',
+              params: { sequenceId: 'seq-1', time: 2, label: 'Beat', color: 'blue' },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          steps: [
+            expect.objectContaining({
+              id: 'marker-step',
+              toolName: 'addMarker',
+              params: {
+                sequenceId: 'seq-1',
+                time: 2,
+                label: 'Beat',
+                color: { r: 0, g: 0, b: 1 },
+              },
+            }),
+          ],
+        }),
+      });
+      expect(frontend.execute).not.toHaveBeenCalled();
+    });
+
     it('should fail fast when a legacy execute_plan includes frontend-only mutation tools', async () => {
       const extendedTools = [
         ...TOOL_DEFS,
@@ -910,8 +1050,13 @@ describe('BackendToolExecutor', () => {
           { id: 'step-a', toolName: 'split_clip', params: { clipId: 'clip-1', atTimelineSec: 5 } },
           {
             id: 'step-b',
-            toolName: 'rename_track',
-            params: { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+            toolName: 'add_transition',
+            params: {
+              sequenceId: 'seq-1',
+              trackId: 'track-1',
+              clipId: 'clip-1',
+              transitionType: 'dissolve',
+            },
           },
         ],
       };
@@ -993,8 +1138,13 @@ describe('BackendToolExecutor', () => {
           tools: [
             { name: 'split_clip', args: { clipId: 'c1', atTimelineSec: 5 } },
             {
-              name: 'rename_track',
-              args: { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+              name: 'add_transition',
+              args: {
+                sequenceId: 'seq-1',
+                trackId: 'track-1',
+                clipId: 'clip-1',
+                transitionType: 'dissolve',
+              },
             },
           ],
           mode: 'sequential',
@@ -1006,10 +1156,15 @@ describe('BackendToolExecutor', () => {
       expect(result.success).toBe(true);
       expect(result.successCount).toBe(2);
       expect(result.failureCount).toBe(0);
-      expect(result.results.map((entry) => entry.tool)).toEqual(['split_clip', 'rename_track']);
+      expect(result.results.map((entry) => entry.tool)).toEqual(['split_clip', 'add_transition']);
       expect(frontend.execute).toHaveBeenCalledWith(
-        'rename_track',
-        { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+        'add_transition',
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          clipId: 'clip-1',
+          transitionType: 'dissolve',
+        },
         CONTEXT,
       );
     });

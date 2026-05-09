@@ -463,7 +463,7 @@ const META_TOOLS: ToolDefinition[] = [
   {
     name: 'execute_plan',
     description:
-      'Execute a batch of editing operations sequentially. Stops on first failure; already-executed steps are NOT rolled back. ' +
+      'Execute a batch of editing operations sequentially. Backend-safe steps run atomically with rollback on failure; unsupported mutating steps are rejected. ' +
       'Each step specifies a tool name and its parameters. Use this for complex multi-step edits.',
     category: 'timeline',
     parameters: {
