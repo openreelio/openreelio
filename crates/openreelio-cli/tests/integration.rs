@@ -789,7 +789,7 @@ fn test_plan_validate_valid() {
             {
                 "id": "step_1",
                 "commandType": "AddTrack",
-                "payload": { "sequenceId": "seq_1", "name": "New Track", "kind": "Video" },
+                "payload": { "sequenceId": "seq_1", "name": "New Track", "kind": "video" },
                 "dependsOn": []
             }
         ]
@@ -922,6 +922,9 @@ fn test_help_json_contains_all_commands() {
         "plan.execute",
         "plan.validate",
         "plan.template",
+        "command.execute",
+        "command.validate",
+        "command.schema",
         "state.dump",
         "state.ops",
         "state.snapshot",
@@ -937,6 +940,89 @@ fn test_help_json_contains_all_commands() {
             cmd
         );
     }
+}
+
+#[test]
+fn test_command_schema_exposes_backend_payload_surface() {
+    let result = run_cli_ok(&["command", "schema"]);
+    assert_eq!(result["count"].as_u64().unwrap(), 70);
+    let commands = result["commands"].as_array().unwrap();
+    assert!(commands.iter().any(|value| value == "AddMask"));
+    assert!(commands.iter().any(|value| value == "CreateCompoundClip"));
+    assert!(commands.iter().any(|value| value == "RenameTrack"));
+}
+
+#[test]
+fn test_command_validate_uses_shared_payload_aliases() {
+    let result = run_cli_ok(&[
+        "command",
+        "validate",
+        "--type",
+        "RenameTrack",
+        "--payload",
+        r#"{"sequenceId":"seq_1","trackId":"track_v1","name":"Main Video"}"#,
+    ]);
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["commandType"], "RenameTrack");
+}
+
+#[test]
+fn test_command_execute_runs_generic_backend_command() {
+    let dir = create_temp_project("command_execute_test");
+    let path = project_path(&dir, "command_execute_test");
+    let info = run_cli_ok(&["project", "info", "--path", &path]);
+    let sequence_id = info["activeSequenceId"].as_str().unwrap();
+
+    let result = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "AddMarker",
+        "--payload",
+        &format!(
+            r#"{{"sequenceId":"{}","time":1.5,"label":"Hook"}}"#,
+            sequence_id
+        ),
+    ]);
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["commandType"], "AddMarker");
+    assert!(!result["opId"].as_str().unwrap().is_empty());
+}
+
+#[test]
+fn test_plan_validate_rejects_invalid_command_payload() {
+    let dir = create_temp_project("plan_payload_invalid_test");
+    let path = project_path(&dir, "plan_payload_invalid_test");
+
+    let plan = serde_json::json!({
+        "id": "invalid_payload_plan",
+        "steps": [
+            {
+                "id": "step_1",
+                "commandType": "AddTrack",
+                "payload": { "sequenceId": "seq_1", "name": "New Track", "kind": "invalid-kind" },
+                "dependsOn": []
+            }
+        ]
+    });
+    let plan_file = dir.path().join("invalid_payload_plan.json");
+    std::fs::write(&plan_file, serde_json::to_string(&plan).unwrap()).unwrap();
+
+    let result = run_cli_ok(&[
+        "plan",
+        "validate",
+        "--path",
+        &path,
+        "--file",
+        plan_file.to_str().unwrap(),
+    ]);
+    assert_eq!(result["status"], "error");
+    assert!(result["errors"][0]
+        .as_str()
+        .unwrap()
+        .contains("invalid command payload"));
 }
 
 // =============================================================================

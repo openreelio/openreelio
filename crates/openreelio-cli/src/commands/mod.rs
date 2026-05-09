@@ -10,6 +10,7 @@
 mod analysis;
 mod asset;
 mod caption;
+mod command;
 mod help_json;
 mod plan;
 mod project;
@@ -79,6 +80,12 @@ pub enum Commands {
         action: plan::PlanAction,
     },
 
+    /// Generic backend command execution and schema inspection
+    Command {
+        #[command(subcommand)]
+        action: command::CommandAction,
+    },
+
     /// State inspection and debugging
     State {
         #[command(subcommand)]
@@ -99,6 +106,7 @@ pub fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Caption { action } => caption::execute(action),
         Commands::Render { action } => render::execute(action),
         Commands::Plan { action } => plan::execute(action),
+        Commands::Command { action } => command::execute(action),
         Commands::State { action } => state::execute(action),
         Commands::HelpJson => help_json::execute(),
     }
