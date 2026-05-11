@@ -101,6 +101,7 @@ where
     }
 }
 
+#[cfg(any(feature = "gui", test))]
 fn parse_optional_video_export_request(
     payload: &serde_json::Value,
 ) -> Result<Option<crate::core::render::VideoExportRequest>, String> {
