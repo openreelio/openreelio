@@ -17,6 +17,16 @@ import { defineConfig, devices } from '@playwright/test';
 /**
  * See https://playwright.dev/docs/test-configuration.
  */
+const e2eServerMode = process.env.E2E_SERVER_MODE === 'dev' ? 'dev' : 'preview';
+const e2eHost = process.env.E2E_HOST ?? '127.0.0.1';
+const e2ePort = Number(process.env.E2E_PORT ?? (e2eServerMode === 'preview' ? '4173' : '5173'));
+const e2eBaseUrl = process.env.E2E_BASE_URL ?? `http://${e2eHost}:${e2ePort}`;
+const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const e2eWebServerCommand =
+  e2eServerMode === 'dev'
+    ? `${npmCommand} run dev -- --host ${e2eHost} --port ${e2ePort} --strictPort`
+    : `${npmCommand} run build && ${npmCommand} exec -- vite preview --host ${e2eHost} --port ${e2ePort} --strictPort`;
+
 export default defineConfig({
   testDir: './tests/e2e',
   /* Run tests in files in parallel */
@@ -32,7 +42,7 @@ export default defineConfig({
   /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
   use: {
     /* Base URL to use in actions like `await page.goto('/')`. */
-    baseURL: 'http://localhost:5173',
+    baseURL: e2eBaseUrl,
 
     /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
     trace: 'on-first-retry',
@@ -56,10 +66,10 @@ export default defineConfig({
 
   /* Run your local dev server before starting the tests */
   webServer: {
-    // On Windows PowerShell, running `npm` can fail when script execution is disabled
-    // (because it resolves to `npm.ps1`). Using `npm.cmd` avoids that.
-    command: process.platform === 'win32' ? 'npm.cmd run dev' : 'npm run dev',
-    url: 'http://localhost:5173',
+    // Preview is the default because it validates the same bundled graph shipped by Tauri.
+    // Set E2E_SERVER_MODE=dev to exercise Vite's dev server explicitly.
+    command: e2eWebServerCommand,
+    url: e2eBaseUrl,
     reuseExistingServer: !process.env.CI,
     timeout: 120 * 1000, // 2 minutes for initial build
   },
