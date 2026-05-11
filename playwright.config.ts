@@ -19,7 +19,11 @@ import { defineConfig, devices } from '@playwright/test';
  */
 const e2eServerMode = process.env.E2E_SERVER_MODE === 'dev' ? 'dev' : 'preview';
 const e2eHost = process.env.E2E_HOST ?? '127.0.0.1';
-const e2ePort = Number(process.env.E2E_PORT ?? (e2eServerMode === 'preview' ? '4173' : '5173'));
+const e2ePortRaw = process.env.E2E_PORT ?? (e2eServerMode === 'preview' ? '4173' : '5173');
+const e2ePort = Number(e2ePortRaw);
+if (!Number.isInteger(e2ePort) || e2ePort < 1 || e2ePort > 65535) {
+  throw new Error(`E2E_PORT must be an integer between 1 and 65535, received '${e2ePortRaw}'`);
+}
 const e2eBaseUrl = process.env.E2E_BASE_URL ?? `http://${e2eHost}:${e2ePort}`;
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const e2eWebServerCommand =
