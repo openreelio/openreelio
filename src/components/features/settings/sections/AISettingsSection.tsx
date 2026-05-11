@@ -14,6 +14,7 @@
 import React, { useCallback, useState, useEffect } from 'react';
 import type { AISettings, ProviderType, ProposalReviewMode } from '@/stores/settingsStore';
 import { CostControlPanel } from './CostControlPanel';
+import { ExternalAgentRuntimeSettings } from './ExternalAgentRuntimeSettings';
 import { useAIModels, getDefaultModel } from '@/hooks/useAIModels';
 import { useCredentials, type CredentialProvider } from '@/hooks/useCredentials';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
@@ -359,6 +360,7 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
 }) => {
   const { status: credentialStatus, isLoading: credentialsLoading } = useCredentials();
   const videoGenerationEnabled = isVideoGenerationEnabled();
+  const usesApiRuntime = settings.assistantRuntime === 'api';
 
   // Handlers
   const handleProviderChange = useCallback(
@@ -456,7 +458,9 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
 
     if (!credentialProvider) return null;
 
-    const providerLabels: Partial<Record<CredentialProvider, { label: string; placeholder: string }>> = {
+    const providerLabels: Partial<
+      Record<CredentialProvider, { label: string; placeholder: string }>
+    > = {
       openai: { label: 'OpenAI API Key', placeholder: 'sk-...' },
       anthropic: { label: 'Anthropic API Key', placeholder: 'sk-ant-...' },
       google: { label: 'Google API Key', placeholder: 'AIza...' },
@@ -487,131 +491,157 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
 
   return (
     <div className="space-y-8">
+      <ExternalAgentRuntimeSettings settings={settings} onUpdate={onUpdate} disabled={disabled} />
+
       {/* Provider Configuration */}
-      <section>
-        <SectionHeader
-          title="Provider Configuration"
-          description="Configure your AI provider and API credentials"
-        />
-        <div className="space-y-4">
-          {/* Provider Selection */}
-          <div>
-            <label
-              htmlFor="primary-provider"
-              className="block text-sm font-medium text-editor-text-muted mb-1"
-            >
-              Primary Provider
-            </label>
-            <select
-              id="primary-provider"
-              value={settings.primaryProvider}
-              onChange={handleProviderChange}
-              disabled={disabled}
-              className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text focus:outline-none focus:border-primary-500 disabled:opacity-50"
-            >
-              {PROVIDER_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <p className="mt-1 text-xs text-editor-text-muted">
-              {PROVIDER_OPTIONS.find((o) => o.value === settings.primaryProvider)?.description}
+      {usesApiRuntime ? (
+        <section>
+          <SectionHeader
+            title="Provider Configuration"
+            description="Configure the API provider and model used by the built-in OpenReelio agent"
+          />
+          <div className="space-y-4">
+            {/* Provider Selection */}
+            <div>
+              <label
+                htmlFor="primary-provider"
+                className="block text-sm font-medium text-editor-text-muted mb-1"
+              >
+                API Provider
+              </label>
+              <select
+                id="primary-provider"
+                value={settings.primaryProvider}
+                onChange={handleProviderChange}
+                disabled={disabled}
+                className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text focus:outline-none focus:border-primary-500 disabled:opacity-50"
+              >
+                {PROVIDER_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-editor-text-muted">
+                {PROVIDER_OPTIONS.find((o) => o.value === settings.primaryProvider)?.description}
+              </p>
+            </div>
+
+            {/* API Key / URL Field */}
+            {renderApiKeyField()}
+
+            {/* Model Selection */}
+            <div>
+              <label
+                htmlFor="primary-model"
+                className="block text-sm font-medium text-editor-text-muted mb-1"
+              >
+                API Model
+              </label>
+              <ModelSelector
+                id="primary-model"
+                provider={settings.primaryProvider}
+                value={settings.primaryModel}
+                onChange={handleModelChange}
+                disabled={disabled}
+              />
+              <p className="mt-1 text-xs text-editor-text-muted">
+                Select the model used only by the built-in API model runtime
+              </p>
+            </div>
+          </div>
+        </section>
+      ) : (
+        <section>
+          <SectionHeader
+            title="Built-in API Model"
+            description="Inactive while Codex account agent is selected"
+          />
+          <div className="rounded border border-editor-border bg-editor-bg px-3 py-2">
+            <p className="text-xs leading-5 text-editor-text-muted">
+              The provider, model, API key, generation parameters, and cost controls below apply
+              only to the built-in API model runtime. Switch back to Built-in API model to edit
+              those settings.
             </p>
           </div>
-
-          {/* API Key / URL Field */}
-          {renderApiKeyField()}
-
-          {/* Model Selection */}
-          <div>
-            <label
-              htmlFor="primary-model"
-              className="block text-sm font-medium text-editor-text-muted mb-1"
-            >
-              Model
-            </label>
-            <ModelSelector
-              id="primary-model"
-              provider={settings.primaryProvider}
-              value={settings.primaryModel}
-              onChange={handleModelChange}
-              disabled={disabled}
-            />
-            <p className="mt-1 text-xs text-editor-text-muted">
-              Select the AI model to use for editing operations
-            </p>
-          </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* Generation Parameters */}
-      <section>
-        <SectionHeader
-          title="Generation Parameters"
-          description="Fine-tune AI response generation"
-        />
-        <div className="space-y-4">
-          {/* Temperature */}
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label htmlFor="temperature" className="text-sm font-medium text-editor-text-muted">
-                Temperature
-              </label>
-              <span className="text-sm text-editor-text">{settings.temperature.toFixed(1)}</span>
+      {usesApiRuntime && (
+        <section>
+          <SectionHeader
+            title="Generation Parameters"
+            description="Fine-tune AI response generation"
+          />
+          <div className="space-y-4">
+            {/* Temperature */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label htmlFor="temperature" className="text-sm font-medium text-editor-text-muted">
+                  Temperature
+                </label>
+                <span className="text-sm text-editor-text">{settings.temperature.toFixed(1)}</span>
+              </div>
+              <input
+                id="temperature"
+                type="range"
+                min="0"
+                max="1"
+                step="0.1"
+                value={settings.temperature}
+                onChange={handleTemperatureChange}
+                disabled={disabled}
+                className="w-full h-2 bg-editor-border rounded-lg appearance-none cursor-pointer disabled:opacity-50"
+              />
+              <div className="flex justify-between text-xs text-editor-text-muted mt-1">
+                <span>Precise</span>
+                <span>Creative</span>
+              </div>
             </div>
-            <input
-              id="temperature"
-              type="range"
-              min="0"
-              max="1"
-              step="0.1"
-              value={settings.temperature}
-              onChange={handleTemperatureChange}
-              disabled={disabled}
-              className="w-full h-2 bg-editor-border rounded-lg appearance-none cursor-pointer disabled:opacity-50"
-            />
-            <div className="flex justify-between text-xs text-editor-text-muted mt-1">
-              <span>Precise</span>
-              <span>Creative</span>
-            </div>
-          </div>
 
-          {/* Max Tokens */}
-          <div>
-            <label
-              htmlFor="max-tokens"
-              className="block text-sm font-medium text-editor-text-muted mb-1"
-            >
-              Max Tokens
-            </label>
-            <input
-              id="max-tokens"
-              type="number"
-              min="256"
-              max="128000"
-              value={settings.maxTokens}
-              onChange={handleMaxTokensChange}
-              disabled={disabled}
-              className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text focus:outline-none focus:border-primary-500 disabled:opacity-50"
-            />
-            <p className="mt-1 text-xs text-editor-text-muted">
-              Maximum number of tokens in the response (256-128,000)
-            </p>
+            {/* Max Tokens */}
+            <div>
+              <label
+                htmlFor="max-tokens"
+                className="block text-sm font-medium text-editor-text-muted mb-1"
+              >
+                Max Tokens
+              </label>
+              <input
+                id="max-tokens"
+                type="number"
+                min="256"
+                max="128000"
+                value={settings.maxTokens}
+                onChange={handleMaxTokensChange}
+                disabled={disabled}
+                className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text focus:outline-none focus:border-primary-500 disabled:opacity-50"
+              />
+              <p className="mt-1 text-xs text-editor-text-muted">
+                Maximum number of tokens in the response (256-128,000)
+              </p>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* Cost Controls */}
-      <section>
-        <CostControlPanel settings={settings} onUpdate={onUpdate} disabled={disabled} />
-      </section>
+      {usesApiRuntime && (
+        <section>
+          <CostControlPanel settings={settings} onUpdate={onUpdate} disabled={disabled} />
+        </section>
+      )}
 
       {/* Behavior Settings */}
       <section>
         <SectionHeader
           title="Behavior"
-          description="Configure how AI interacts with your workflow"
+          description={
+            usesApiRuntime
+              ? 'Configure how the built-in API model interacts with your workflow'
+              : 'Application defaults; Codex tool approval requests still require OpenReelio approval'
+          }
         />
         <div className="space-y-4">
           {/* Proposal Review Mode */}
