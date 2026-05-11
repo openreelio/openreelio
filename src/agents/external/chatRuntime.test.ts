@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { persistPermissionAudit } from '@/agents/engine/core/permissionAudit';
 import type { MessagePart } from '@/agents/engine/core/conversation';
@@ -125,6 +125,10 @@ class FakeExternalAgentSessionPersistence implements ExternalAgentSessionPersist
 describe('ExternalAgentChatRuntimeController', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('should start an external session with project cwd and send user messages through the adapter', async () => {
@@ -629,6 +633,66 @@ describe('ExternalAgentChatRuntimeController', () => {
     controller.resolveApproval('decline');
 
     await expect(decisionPromise).resolves.toBe('decline');
+    expect(conversation.getMessageParts('assistant-1')?.[0]).toMatchObject({
+      status: 'denied',
+    });
+    expect(persistPermissionAudit).toHaveBeenCalledWith(
+      'session-1',
+      null,
+      'codex:12',
+      expect.objectContaining({
+        subjectType: 'approval',
+        subject: 'external_agent.codex.file_change.Codex file change',
+        source: 'interactive_approval',
+      }),
+      'deny',
+      'interactive_approval',
+    );
+  });
+
+  it('should mark approval parts denied when the request times out', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const approvalBroker = new ExternalAgentApprovalBroker({ timeoutMs: 50 });
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+      approvalBroker,
+    });
+
+    await controller.sendMessage('Edit files');
+    vi.useFakeTimers();
+    const decisionPromise = approvalBroker.requestDecision({
+      id: 'codex:12',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      turnId: 'turn_1',
+      itemId: 'patch_1',
+      requestId: 12,
+      approvalType: 'file_change',
+      tool: 'Codex file change',
+      description: 'Approve Codex file changes',
+      args: { grantRoot: '/project' },
+      reason: null,
+      requestedAt: 1000,
+    });
+    adapter.emit({
+      type: 'approval_requested',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'patch_1',
+      requestId: 12,
+      approvalType: 'file_change',
+      tool: 'Codex file change',
+      description: 'Approve Codex file changes',
+      args: { grantRoot: '/project' },
+    });
+
+    vi.advanceTimersByTime(50);
+
+    await expect(decisionPromise).resolves.toBe('decline');
+    expect(controller.getState().pendingToolPermissionRequest).toBeNull();
     expect(conversation.getMessageParts('assistant-1')?.[0]).toMatchObject({
       status: 'denied',
     });

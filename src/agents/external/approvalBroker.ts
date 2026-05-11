@@ -14,6 +14,11 @@ export interface ExternalAgentApprovalBrokerSnapshot {
   pending: ExternalAgentApprovalRequest | null;
 }
 
+export type ExternalAgentApprovalDecisionListener = (
+  request: ExternalAgentApprovalRequest,
+  decision: ExternalAgentApprovalDecision,
+) => void;
+
 interface PendingDecision {
   request: ExternalAgentApprovalRequest;
   resolve: (decision: ExternalAgentApprovalDecision) => void;
@@ -25,6 +30,7 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 export class ExternalAgentApprovalBroker {
   private readonly pending = new Map<string, PendingDecision>();
   private readonly listeners = new Set<(snapshot: ExternalAgentApprovalBrokerSnapshot) => void>();
+  private readonly decisionListeners = new Set<ExternalAgentApprovalDecisionListener>();
   private readonly fallbackDecision: ExternalAgentApprovalDecision;
   private readonly timeoutMs: number;
 
@@ -62,6 +68,11 @@ export class ExternalAgentApprovalBroker {
     return () => this.listeners.delete(listener);
   }
 
+  subscribeDecision(listener: ExternalAgentApprovalDecisionListener): () => void {
+    this.decisionListeners.add(listener);
+    return () => this.decisionListeners.delete(listener);
+  }
+
   getSnapshot(): ExternalAgentApprovalBrokerSnapshot {
     return {
       pending: this.getLatestPendingRequest(),
@@ -79,6 +90,7 @@ export class ExternalAgentApprovalBroker {
     }
     this.pending.delete(requestId);
     pending.resolve(decision);
+    this.notifyDecision(pending.request, decision);
     this.notify();
     return true;
   }
@@ -108,6 +120,15 @@ export class ExternalAgentApprovalBroker {
     const snapshot = this.getSnapshot();
     for (const listener of this.listeners) {
       listener(snapshot);
+    }
+  }
+
+  private notifyDecision(
+    request: ExternalAgentApprovalRequest,
+    decision: ExternalAgentApprovalDecision,
+  ): void {
+    for (const listener of this.decisionListeners) {
+      listener(request, decision);
     }
   }
 }

@@ -31,7 +31,11 @@ describe('ExternalAgentApprovalBroker', () => {
   it('should resolve a pending approval with the user decision', async () => {
     const broker = new ExternalAgentApprovalBroker({ timeoutMs: 0 });
     const snapshots: Array<string | null> = [];
+    const decisions: Array<{ id: string; decision: string }> = [];
     broker.subscribe((snapshot) => snapshots.push(snapshot.pending?.id ?? null));
+    broker.subscribeDecision((resolvedRequest, decision) => {
+      decisions.push({ id: resolvedRequest.id, decision });
+    });
 
     const decisionPromise = broker.requestDecision(request());
 
@@ -39,6 +43,7 @@ describe('ExternalAgentApprovalBroker', () => {
     expect(broker.resolve('codex-1', 'accept')).toBe(true);
     await expect(decisionPromise).resolves.toBe('accept');
     expect(broker.getSnapshot().pending).toBeNull();
+    expect(decisions).toEqual([{ id: 'codex-1', decision: 'accept' }]);
   });
 
   it('should return false when resolving an unknown request', () => {

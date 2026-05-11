@@ -92,6 +92,7 @@ export class ExternalAgentChatRuntimeController {
   private activeConversationSessionId: string | null = null;
   private unsubscribe: (() => void) | null = null;
   private unsubscribeApprovalBroker: (() => void) | null = null;
+  private unsubscribeApprovalDecisions: (() => void) | null = null;
   private callbacks: Pick<
     ExternalAgentChatRuntimeControllerOptions,
     'onStateChange' | 'onComplete' | 'onAbort' | 'onError'
@@ -115,6 +116,11 @@ export class ExternalAgentChatRuntimeController {
             ? mapApprovalRequestToPermissionRequest(snapshot.pending)
             : null,
         });
+      }) ?? null;
+    this.unsubscribeApprovalDecisions =
+      options.approvalBroker?.subscribeDecision((request, decision) => {
+        this.persistApprovalDecision(request, decision);
+        this.updateApprovalPartStatus(request.id, decision === 'decline' || decision === 'cancel');
       }) ?? null;
   }
 
@@ -217,8 +223,10 @@ export class ExternalAgentChatRuntimeController {
     this.shutdownTrackedExternalSessions(this.options.adapter);
     this.unsubscribe?.();
     this.unsubscribeApprovalBroker?.();
+    this.unsubscribeApprovalDecisions?.();
     this.unsubscribe = null;
     this.unsubscribeApprovalBroker = null;
+    this.unsubscribeApprovalDecisions = null;
     this.clearExternalSessionState();
   }
 
@@ -228,8 +236,6 @@ export class ExternalAgentChatRuntimeController {
       return;
     }
 
-    this.persistApprovalDecision(pending, decision);
-    this.updateApprovalPartStatus(pending.id, decision === 'decline' || decision === 'cancel');
     this.options.approvalBroker?.resolve(pending.id, decision);
   }
 
