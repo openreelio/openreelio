@@ -30,6 +30,9 @@ const TOOL_NAMES_BY_SCOPE: Record<Exclude<AgentToolScope, '*'>, Set<string>> = {
   workspace: new Set(getWorkspaceToolNames()),
   workspace_read: new Set(getReadOnlyWorkspaceToolNames()),
 };
+const EXTERNAL_AGENT_DISPLAY_NAMES: Record<string, string> = {
+  codex: 'Codex',
+};
 
 export function resolveAgentDefinition(agentId?: string | null): AgentDefinition | undefined {
   if (!agentId) {
@@ -51,6 +54,10 @@ export function listSelectableAgentDefinitions(): AgentDefinition[] {
 }
 
 export function getAgentDisplayName(agentId?: string | null): string {
+  if (agentId && EXTERNAL_AGENT_DISPLAY_NAMES[agentId]) {
+    return EXTERNAL_AGENT_DISPLAY_NAMES[agentId];
+  }
+
   return resolveAgentDefinition(agentId)?.name ?? 'Unknown';
 }
 

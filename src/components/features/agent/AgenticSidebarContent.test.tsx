@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetFeatureFlags, setFeatureFlag } from '@/config/featureFlags';
 import { useConversationStore } from '@/stores/conversationStore';
 import { useProjectStore } from '@/stores';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
@@ -12,10 +13,12 @@ import { createDefaultLayout, useWorkspaceLayoutStore } from '@/stores/workspace
 import { loadProjectPromptContext } from '@/agents/engine/core/projectPromptContext';
 import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
 import { createBackendToolExecutor } from '@/agents/engine/adapters/tools/BackendToolExecutor';
+import { useExternalAgentHostStatus } from '@/agents/external';
 import { AgenticSidebarContent } from './AgenticSidebarContent';
 
 let latestSessionListProps: Record<string, unknown> | null = null;
 let latestAgenticChatProps: Record<string, unknown> | null = null;
+let latestExternalAgentChatProps: Record<string, unknown> | null = null;
 
 vi.mock('./AgenticChat', () => ({
   AgenticChat: forwardRef((_props, _ref) => {
@@ -24,6 +27,27 @@ vi.mock('./AgenticChat', () => ({
     latestAgenticChatProps = props as Record<string, unknown>;
     return <div data-testid="agentic-chat">TPAO Runtime</div>;
   }),
+}));
+
+vi.mock('./ExternalAgentChat', () => ({
+  ExternalAgentChat: forwardRef((_props, _ref) => {
+    void _ref;
+    const props = _props as Record<string, unknown>;
+    latestExternalAgentChatProps = props;
+    return <div data-testid="external-agent-chat">Codex Runtime</div>;
+  }),
+}));
+
+vi.mock('@/agents/external', () => ({
+  EXTERNAL_AGENT_STATUS_REFRESH_EVENT: 'openreelio:external-agent-status-refresh',
+  useExternalAgentHostStatus: vi.fn(() => ({
+    loading: false,
+    summary: {
+      enabled: false,
+      readyRuntimeCount: 0,
+      runtimes: [],
+    },
+  })),
 }));
 
 vi.mock('./SessionList', () => ({
@@ -103,7 +127,26 @@ describe('AgenticSidebarContent', () => {
     resetFeatureFlags();
     latestSessionListProps = null;
     latestAgenticChatProps = null;
+    latestExternalAgentChatProps = null;
+    vi.mocked(useExternalAgentHostStatus).mockReturnValue({
+      loading: false,
+      summary: {
+        enabled: false,
+        readyRuntimeCount: 0,
+        runtimes: [],
+      },
+    });
     vi.mocked(loadProjectPromptContext).mockResolvedValue({ knowledge: [] });
+    useSettingsStore.setState((state) => ({
+      ...state,
+      settings: {
+        ...state.settings,
+        ai: {
+          ...state.settings.ai,
+          assistantRuntime: 'api',
+        },
+      },
+    }));
 
     useProjectStore.setState((state) => ({
       ...state,
@@ -264,6 +307,104 @@ describe('AgenticSidebarContent', () => {
 
     expect(screen.getByTestId('agentic-chat')).toBeInTheDocument();
     expect(screen.queryByTestId('agent-runtime-disabled-state')).not.toBeInTheDocument();
+  });
+
+  it('should render the Codex external runtime when Codex account agent is selected', async () => {
+    useSettingsStore.setState((state) => ({
+      ...state,
+      settings: {
+        ...state.settings,
+        ai: {
+          ...state.settings.ai,
+          assistantRuntime: 'codex',
+        },
+      },
+    }));
+    useProjectStore.setState((state) => ({
+      ...state,
+      meta: {
+        id: 'project-1',
+        name: 'Project',
+        path: '/project',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        modifiedAt: '2026-01-01T00:00:00.000Z',
+      },
+    }));
+    vi.mocked(useExternalAgentHostStatus).mockReturnValue({
+      loading: false,
+      summary: {
+        enabled: true,
+        readyRuntimeCount: 1,
+        runtimes: [
+          {
+            runtimeId: 'codex',
+            displayName: 'Codex',
+            ready: true,
+            reason: null,
+            installStatus: 'installed',
+            authStatus: 'signed-in',
+            capabilities: {
+              streamingEvents: true,
+              interrupt: true,
+              mcpClient: true,
+              approvalAware: true,
+              localAccountAuth: true,
+              sessionResume: false,
+              structuredToolCalls: true,
+            },
+          },
+        ],
+      },
+    });
+
+    render(<AgenticSidebarContent />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('external-agent-chat')).toBeInTheDocument();
+    expect(screen.queryByTestId('agentic-chat')).not.toBeInTheDocument();
+    expect(latestExternalAgentChatProps).toMatchObject({
+      projectId: 'project-1',
+      projectPath: '/project',
+      ready: true,
+    });
+  });
+
+  it('should create Codex sessions from the sidebar new-chat handler in external mode', async () => {
+    useSettingsStore.setState((state) => ({
+      ...state,
+      settings: {
+        ...state.settings,
+        ai: {
+          ...state.settings.ai,
+          assistantRuntime: 'codex',
+        },
+      },
+    }));
+    const createSession = vi.fn().mockResolvedValue('session-codex');
+    useConversationStore.setState({ createSession });
+
+    let registeredNewChat: (() => void) | null = null;
+    render(
+      <AgenticSidebarContent
+        onRegisterNewChat={(handler) => {
+          registeredNewChat = handler;
+        }}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      registeredNewChat?.();
+      await Promise.resolve();
+    });
+
+    expect(createSession).toHaveBeenCalledWith('codex', {
+      preserveDraftConversation: false,
+    });
   });
 
   it('should render an explicit disabled state when the canonical runtime is disabled', () => {

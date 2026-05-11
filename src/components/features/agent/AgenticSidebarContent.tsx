@@ -8,6 +8,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import { AgenticChat } from './AgenticChat';
+import { ExternalAgentChat } from './ExternalAgentChat';
 import { AgentArtifactReviewPanel } from './AgentArtifactReviewPanel';
 import type { AgentRuntimeChatHandle } from './AgentRuntimeChatShell';
 import { AgenticSidebarWorkspace } from './AgenticSidebarWorkspace';
@@ -29,7 +30,9 @@ import {
   type ProjectPromptContext,
 } from '@/agents/engine/core/projectPromptContext';
 import { useFeatureFlag, useSidebarRuntimePolicy } from '@/config/featureFlags';
+import { useExternalAgentHostStatus } from '@/agents/external';
 import { useConversationStore, useProjectStore } from '@/stores';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { useAgentDelegationStore } from '@/stores/agentDelegationStore';
@@ -90,6 +93,12 @@ export function AgenticSidebarContent({
   // ===========================================================================
 
   const backendToolsEnabled = useFeatureFlag('USE_BACKEND_TOOLS');
+  const assistantRuntime = useSettingsStore((state) => state.settings.ai.assistantRuntime);
+  const useCodexExternalRuntime = assistantRuntime === 'codex';
+  const externalAgentStatus = useExternalAgentHostStatus({
+    hostEnabled: useCodexExternalRuntime,
+    codexEnabled: useCodexExternalRuntime,
+  });
 
   const llmClient = useMemo(() => {
     logger.info('Creating TauriLLMAdapter');
@@ -266,6 +275,12 @@ export function AgenticSidebarContent({
     },
     [abortCurrentSession, createSession, runSessionTransition],
   );
+  const createNewExternalSession = useCallback(() => {
+    abortCurrentSession();
+    void runSessionTransition('new', async () => {
+      await createSession('codex', { preserveDraftConversation: false });
+    });
+  }, [abortCurrentSession, createSession, runSessionTransition]);
   const canCreateNew = Boolean(currentProjectId) && !isSessionTransitionPending;
 
   const handleSessionSwitch = useCallback(
@@ -452,8 +467,20 @@ export function AgenticSidebarContent({
 
   // Register new chat handler with parent (AISidebar)
   useEffect(() => {
-    onRegisterNewChat?.(() => createNewSession(DEFAULT_AGENT_PROFILE_ID), canCreateNew);
-  }, [canCreateNew, createNewSession, onRegisterNewChat]);
+    onRegisterNewChat?.(
+      () =>
+        useCodexExternalRuntime
+          ? createNewExternalSession()
+          : createNewSession(DEFAULT_AGENT_PROFILE_ID),
+      canCreateNew,
+    );
+  }, [
+    canCreateNew,
+    createNewExternalSession,
+    createNewSession,
+    onRegisterNewChat,
+    useCodexExternalRuntime,
+  ]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -611,6 +638,35 @@ export function AgenticSidebarContent({
     [activeDelegationRecord, updateDelegationRecord],
   );
 
+  const handleExternalComplete = useCallback(() => {
+    logger.info('External agent session completed');
+    onSessionComplete?.();
+  }, [onSessionComplete]);
+
+  const handleExternalAbort = useCallback(() => {
+    logger.info('External agent session aborted');
+  }, []);
+
+  const handleExternalError = useCallback((error: Error) => {
+    logger.error('External agent session error', { error: error.message });
+  }, []);
+
+  const codexRuntimeSummary = useMemo(
+    () =>
+      externalAgentStatus.summary.runtimes.find((runtime) => runtime.runtimeId === 'codex') ?? null,
+    [externalAgentStatus.summary.runtimes],
+  );
+  const codexRuntimeReady = Boolean(useCodexExternalRuntime && codexRuntimeSummary?.ready);
+  const codexUnavailableReason = externalAgentStatus.loading
+    ? 'Checking Codex availability...'
+    : (codexRuntimeSummary?.reason ?? null);
+  const workspaceRuntimeState =
+    useCodexExternalRuntime || runtimePolicy.selectedRuntime !== 'disabled'
+      ? isSessionTransitionPending
+        ? 'transitioning'
+        : 'ready'
+      : 'disabled';
+
   // ===========================================================================
   // Render
   // ===========================================================================
@@ -624,18 +680,12 @@ export function AgenticSidebarContent({
       className={className}
       showSessionList={showSessionList}
       onToggleSessionList={() => setShowSessionList((prev) => !prev)}
-      onNewSession={createNewSession}
+      onNewSession={useCodexExternalRuntime ? createNewExternalSession : createNewSession}
       onSwitchSession={handleSessionSwitch}
-      activeAgentName={activeAgentDefinition?.name}
+      activeAgentName={useCodexExternalRuntime ? 'Codex' : activeAgentDefinition?.name}
       delegatedFrom={delegatedFromContext}
       delegatedChildren={delegatedChildItems}
-      runtimeState={
-        runtimePolicy.selectedRuntime === 'disabled'
-          ? 'disabled'
-          : isSessionTransitionPending
-            ? 'transitioning'
-            : 'ready'
-      }
+      runtimeState={workspaceRuntimeState}
       sessionTransitionLabel={sessionTransitionLabel}
     >
       {shouldShowArtifactReviewPanel ? (
@@ -665,6 +715,21 @@ export function AgenticSidebarContent({
           </div>
           <AgentArtifactReviewPanel className="min-h-0 flex-1" layout="compact" />
         </section>
+      ) : useCodexExternalRuntime ? (
+        <ExternalAgentChat
+          key={`external-agent-workspace-${chatSurfaceKey}`}
+          ref={chatHandleRef}
+          projectId={currentProjectId}
+          projectPath={currentProjectPath}
+          ready={codexRuntimeReady}
+          unavailableReason={codexUnavailableReason}
+          onComplete={handleExternalComplete}
+          onAbort={handleExternalAbort}
+          onError={handleExternalError}
+          onStartSession={createNewExternalSession}
+          disabled={isSessionTransitionPending || externalAgentStatus.loading}
+          className="flex-1"
+        />
       ) : (
         <AgenticChat
           key={`agent-workspace-${chatSurfaceKey}`}
