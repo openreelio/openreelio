@@ -172,8 +172,14 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
 }
 
 pub(crate) fn validate_edit_plan(plan: &EditPlan) -> Vec<String> {
-    let step_ids: HashSet<&str> = plan.steps.iter().map(|s| s.id.as_str()).collect();
+    let mut step_ids = HashSet::new();
     let mut errors = Vec::new();
+
+    for step in &plan.steps {
+        if !step_ids.insert(step.id.as_str()) {
+            errors.push(format!("Duplicate step id '{}'", step.id));
+        }
+    }
 
     for step in &plan.steps {
         for dep in &step.depends_on {

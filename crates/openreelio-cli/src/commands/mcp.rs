@@ -728,6 +728,10 @@ fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
 
     let mut errors = Vec::new();
     let mut step_ids = std::collections::HashSet::new();
+    if plan.get("id").and_then(Value::as_str).unwrap_or_default().is_empty() {
+        errors.push("plan.id is required".to_string());
+    }
+
     for step in steps {
         let step_id = step.get("id").and_then(Value::as_str).unwrap_or_default();
         if step_id.is_empty() {
@@ -739,20 +743,7 @@ fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
         let command_type = step.get("commandType").and_then(Value::as_str);
         let payload = step.get("payload").cloned();
         match (command_type, payload) {
-            (Some(command_type), Some(payload)) if payload.is_object() => {
-                if let Err(error) = CommandPayload::parse(command_type.to_string(), payload) {
-                    errors.push(format!(
-                        "Step '{}' has invalid command payload for '{}': {}",
-                        if step_id.is_empty() {
-                            "<missing>"
-                        } else {
-                            step_id
-                        },
-                        command_type,
-                        error
-                    ));
-                }
-            }
+            (Some(_), Some(payload)) if payload.is_object() => {}
             _ => errors.push(format!(
                 "Step '{}' must include commandType and object payload",
                 if step_id.is_empty() {
@@ -783,6 +774,12 @@ fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
                 ));
             }
         }
+    }
+
+    if errors.is_empty() {
+        let edit_plan: plan::EditPlan = serde_json::from_value(plan.clone())
+            .map_err(|error| ToolError::InvalidArguments(format!("Invalid plan JSON: {error}")))?;
+        errors.extend(plan::validate_edit_plan(&edit_plan));
     }
 
     Ok(if errors.is_empty() {
@@ -984,6 +981,58 @@ mod tests {
         assert_eq!(response["error"]["code"], -32001);
         let reopened = openreelio_core::ActiveProject::open(project_path).expect("reopen");
         assert_eq!(reopened.state.op_count, initial_op_count);
+    }
+
+    #[test]
+    fn should_report_plan_cycles_when_validating_mcp_plan() {
+        let state = McpServerState::default();
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.plan.validate",
+                    "arguments": {
+                        "plan": {
+                            "id": "cyclic-plan",
+                            "steps": [
+                                {
+                                    "id": "step-a",
+                                    "commandType": "AddTrack",
+                                    "payload": {
+                                        "sequenceId": "sequence-1",
+                                        "name": "A",
+                                        "kind": "video"
+                                    },
+                                    "dependsOn": ["step-b"]
+                                },
+                                {
+                                    "id": "step-b",
+                                    "commandType": "AddTrack",
+                                    "payload": {
+                                        "sequenceId": "sequence-1",
+                                        "name": "B",
+                                        "kind": "video"
+                                    },
+                                    "dependsOn": ["step-a"]
+                                }
+                            ]
+                        }
+                    }
+                }),
+            ),
+        );
+
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text content");
+        let result: Value = serde_json::from_str(text).expect("validate result JSON");
+        assert_eq!(result["status"], "error");
+        let errors = result["errors"].as_array().expect("errors");
+        assert!(errors.iter().any(|error| error
+            .as_str()
+            .expect("error")
+            .contains("Cycle detected")));
     }
 
     #[test]
