@@ -73,6 +73,20 @@ export interface FeatureFlags {
    * @default true
    */
   USE_META_TOOLS: boolean;
+
+  /**
+   * Enable the vendor-neutral External Agent Host shell.
+   * This does not replace the canonical TPAO sidebar runtime.
+   * @default false
+   */
+  USE_EXTERNAL_AGENT_HOST: boolean;
+
+  /**
+   * Enable the Codex reference adapter for the External Agent Host.
+   * This flag has no effect unless USE_EXTERNAL_AGENT_HOST is enabled.
+   * @default false
+   */
+  USE_CODEX_AGENT: boolean;
 }
 
 /**
@@ -114,6 +128,8 @@ const DEFAULT_FLAGS: FeatureFlags = {
   USE_AGENT_LOOP: false,
   USE_BACKEND_TOOLS: true,
   USE_META_TOOLS: true,
+  USE_EXTERNAL_AGENT_HOST: false,
+  USE_CODEX_AGENT: false,
 };
 
 /**
@@ -125,6 +141,8 @@ export const FEATURE_FLAG_KEYS: readonly FeatureFlagKey[] = [
   'USE_AGENT_LOOP',
   'USE_BACKEND_TOOLS',
   'USE_META_TOOLS',
+  'USE_EXTERNAL_AGENT_HOST',
+  'USE_CODEX_AGENT',
 ] as const;
 
 // =============================================================================
@@ -481,6 +499,22 @@ export function isBackendToolsEnabled(): boolean {
  */
 export function isMetaToolsEnabled(): boolean {
   return getFeatureFlag('USE_META_TOOLS');
+}
+
+/**
+ * Check if the vendor-neutral External Agent Host shell is enabled.
+ *
+ * This is intentionally separate from the canonical sidebar runtime policy.
+ */
+export function isExternalAgentHostEnabled(): boolean {
+  return getFeatureFlag('USE_EXTERNAL_AGENT_HOST');
+}
+
+/**
+ * Check if the Codex reference adapter is enabled for External Agent Host.
+ */
+export function isCodexAgentEnabled(): boolean {
+  return isExternalAgentHostEnabled() && getFeatureFlag('USE_CODEX_AGENT');
 }
 
 // =============================================================================

@@ -147,6 +147,20 @@ pub struct ResumeCheckpointRow {
     pub consumed_at: Option<i64>,
 }
 
+/// Durable link between an OpenReelio conversation session and an external
+/// agent runtime session.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalAgentSessionLinkRow {
+    pub conversation_session_id: String,
+    pub project_id: String,
+    pub runtime_id: String,
+    pub external_session_id: String,
+    pub metadata_json: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 /// A single message within a conversation session.
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -206,6 +220,9 @@ const COMPACTION_SELECT_COLUMNS: &str = r#"id, session_id, run_id, tier, trigger
 
 const RESUME_CHECKPOINT_SELECT_COLUMNS: &str = r#"id, session_id, run_id, checkpoint_kind,
     status, resume_cursor_json, session_state_json, pending_work_json, created_at, consumed_at"#;
+
+const EXTERNAL_AGENT_SESSION_LINK_SELECT_COLUMNS: &str = r#"conversation_session_id, project_id,
+    runtime_id, external_session_id, metadata_json, created_at, updated_at"#;
 
 fn session_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     Ok(SessionRow {
@@ -338,6 +355,20 @@ fn resume_checkpoint_row_from_sql(
         pending_work_json: row.get(7)?,
         created_at: row.get(8)?,
         consumed_at: row.get(9)?,
+    })
+}
+
+fn external_agent_session_link_row_from_sql(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ExternalAgentSessionLinkRow> {
+    Ok(ExternalAgentSessionLinkRow {
+        conversation_session_id: row.get(0)?,
+        project_id: row.get(1)?,
+        runtime_id: row.get(2)?,
+        external_session_id: row.get(3)?,
+        metadata_json: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -548,6 +579,18 @@ impl ConversationDb {
                     FOREIGN KEY(run_id) REFERENCES ai_runs(id) ON DELETE SET NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS ai_external_agent_sessions (
+                    conversation_session_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    runtime_id TEXT NOT NULL,
+                    external_session_id TEXT NOT NULL,
+                    metadata_json TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY(conversation_session_id, runtime_id),
+                    FOREIGN KEY(conversation_session_id) REFERENCES ai_sessions(id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_ai_sessions_project
                     ON ai_sessions(project_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_ai_messages_session
@@ -568,6 +611,8 @@ impl ConversationDb {
                     ON ai_compactions(session_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_ai_resume_checkpoints_session
                     ON ai_resume_checkpoints(session_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_ai_external_agent_sessions_project
+                    ON ai_external_agent_sessions(project_id, runtime_id, updated_at DESC);
                 "#,
             )
             .map_err(|e| CoreError::Internal(format!("Failed to initialize schema: {}", e)))?;
@@ -973,6 +1018,95 @@ impl ConversationDb {
                 session_id
             )));
         }
+        Ok(())
+    }
+
+    // =========================================================================
+    // External Agent Session Links
+    // =========================================================================
+
+    /// Retrieves the durable external runtime session link for a conversation
+    /// session and runtime.
+    pub fn get_external_agent_session_link(
+        &self,
+        conversation_session_id: &str,
+        runtime_id: &str,
+    ) -> CoreResult<Option<ExternalAgentSessionLinkRow>> {
+        let sql = format!(
+            "SELECT {EXTERNAL_AGENT_SESSION_LINK_SELECT_COLUMNS} \
+             FROM ai_external_agent_sessions \
+             WHERE conversation_session_id = ?1 AND runtime_id = ?2"
+        );
+        self.conn
+            .query_row(
+                &sql,
+                params![conversation_session_id, runtime_id],
+                external_agent_session_link_row_from_sql,
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(CoreError::Internal(format!(
+                    "Failed to get external agent session link: {other}"
+                ))),
+            })
+    }
+
+    /// Creates or replaces the durable external runtime session link for a
+    /// conversation session and runtime.
+    pub fn upsert_external_agent_session_link(
+        &self,
+        row: &ExternalAgentSessionLinkRow,
+    ) -> CoreResult<()> {
+        let session_project_id: String = self
+            .conn
+            .query_row(
+                "SELECT project_id FROM ai_sessions WHERE id = ?1",
+                params![&row.conversation_session_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => CoreError::NotFound(format!(
+                    "Conversation session '{}' not found",
+                    row.conversation_session_id
+                )),
+                other => CoreError::Internal(format!(
+                    "Failed to verify external agent session link project: {other}"
+                )),
+            })?;
+
+        if session_project_id != row.project_id {
+            return Err(CoreError::ValidationError(format!(
+                "External agent session link project '{}' does not match conversation session project '{}'",
+                row.project_id, session_project_id
+            )));
+        }
+
+        self.conn
+            .execute(
+                r#"INSERT INTO ai_external_agent_sessions
+                    (conversation_session_id, project_id, runtime_id, external_session_id,
+                     metadata_json, created_at, updated_at)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                   ON CONFLICT(conversation_session_id, runtime_id) DO UPDATE SET
+                     project_id = excluded.project_id,
+                     external_session_id = excluded.external_session_id,
+                     metadata_json = excluded.metadata_json,
+                     updated_at = excluded.updated_at"#,
+                params![
+                    &row.conversation_session_id,
+                    &row.project_id,
+                    &row.runtime_id,
+                    &row.external_session_id,
+                    &row.metadata_json,
+                    row.created_at,
+                    row.updated_at,
+                ],
+            )
+            .map_err(|e| {
+                CoreError::Internal(format!("Failed to upsert external agent session link: {e}"))
+            })?;
+
         Ok(())
     }
 
@@ -2497,6 +2631,128 @@ mod tests {
         let s = db.get_session("s1").unwrap();
         assert!(s.model_provider.is_none());
         assert!(s.model_id.is_none());
+    }
+
+    #[test]
+    fn test_external_agent_session_link_persists_runtime_session_for_conversation_session() {
+        let db = ConversationDb::in_memory().unwrap();
+        db.create_session("s1", "proj-1", "codex", None, None)
+            .unwrap();
+
+        let link = ExternalAgentSessionLinkRow {
+            conversation_session_id: "s1".to_string(),
+            project_id: "proj-1".to_string(),
+            runtime_id: "codex".to_string(),
+            external_session_id: "thr_123".to_string(),
+            metadata_json: Some(r#"{"source":"appServer"}"#.to_string()),
+            created_at: 1_000,
+            updated_at: 1_000,
+        };
+
+        db.upsert_external_agent_session_link(&link).unwrap();
+
+        let persisted = db
+            .get_external_agent_session_link("s1", "codex")
+            .unwrap()
+            .expect("external agent session link should exist");
+
+        assert_eq!(persisted.conversation_session_id, "s1");
+        assert_eq!(persisted.project_id, "proj-1");
+        assert_eq!(persisted.runtime_id, "codex");
+        assert_eq!(persisted.external_session_id, "thr_123");
+        assert_eq!(
+            persisted.metadata_json.as_deref(),
+            Some(r#"{"source":"appServer"}"#)
+        );
+        assert_eq!(persisted.created_at, 1_000);
+        assert_eq!(persisted.updated_at, 1_000);
+    }
+
+    #[test]
+    fn test_external_agent_session_link_upsert_replaces_stale_external_session_id() {
+        let db = ConversationDb::in_memory().unwrap();
+        db.create_session("s1", "proj-1", "codex", None, None)
+            .unwrap();
+
+        db.upsert_external_agent_session_link(&ExternalAgentSessionLinkRow {
+            conversation_session_id: "s1".to_string(),
+            project_id: "proj-1".to_string(),
+            runtime_id: "codex".to_string(),
+            external_session_id: "thr_stale".to_string(),
+            metadata_json: None,
+            created_at: 1_000,
+            updated_at: 1_000,
+        })
+        .unwrap();
+
+        db.upsert_external_agent_session_link(&ExternalAgentSessionLinkRow {
+            conversation_session_id: "s1".to_string(),
+            project_id: "proj-1".to_string(),
+            runtime_id: "codex".to_string(),
+            external_session_id: "thr_fresh".to_string(),
+            metadata_json: Some(r#"{"resumed":false}"#.to_string()),
+            created_at: 1_000,
+            updated_at: 2_000,
+        })
+        .unwrap();
+
+        let persisted = db
+            .get_external_agent_session_link("s1", "codex")
+            .unwrap()
+            .expect("external agent session link should exist");
+
+        assert_eq!(persisted.external_session_id, "thr_fresh");
+        assert_eq!(persisted.created_at, 1_000);
+        assert_eq!(persisted.updated_at, 2_000);
+        assert_eq!(
+            persisted.metadata_json.as_deref(),
+            Some(r#"{"resumed":false}"#)
+        );
+    }
+
+    #[test]
+    fn test_external_agent_session_link_rejects_mismatched_project_id() {
+        let db = ConversationDb::in_memory().unwrap();
+        db.create_session("s1", "proj-1", "codex", None, None)
+            .unwrap();
+
+        let result = db.upsert_external_agent_session_link(&ExternalAgentSessionLinkRow {
+            conversation_session_id: "s1".to_string(),
+            project_id: "proj-2".to_string(),
+            runtime_id: "codex".to_string(),
+            external_session_id: "thr_123".to_string(),
+            metadata_json: None,
+            created_at: 1_000,
+            updated_at: 1_000,
+        });
+
+        assert!(matches!(result, Err(CoreError::ValidationError(_))));
+        assert!(db
+            .get_external_agent_session_link("s1", "codex")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_external_agent_session_link_cascades_when_conversation_session_is_deleted() {
+        let db = ConversationDb::in_memory().unwrap();
+        db.create_session("s1", "proj-1", "codex", None, None)
+            .unwrap();
+        db.upsert_external_agent_session_link(&ExternalAgentSessionLinkRow {
+            conversation_session_id: "s1".to_string(),
+            project_id: "proj-1".to_string(),
+            runtime_id: "codex".to_string(),
+            external_session_id: "thr_123".to_string(),
+            metadata_json: None,
+            created_at: 1_000,
+            updated_at: 1_000,
+        })
+        .unwrap();
+
+        db.delete_session("s1").unwrap();
+
+        let persisted = db.get_external_agent_session_link("s1", "codex").unwrap();
+        assert!(persisted.is_none());
     }
 
     #[test]

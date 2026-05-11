@@ -37,6 +37,8 @@ pub mod helpers;
 // Domain modules (extracted from commands_legacy.rs)
 pub mod ai_legacy;
 pub mod asset;
+pub mod codex;
+pub mod codex_app_server;
 pub mod jobs;
 pub mod project;
 pub mod render;
@@ -62,6 +64,7 @@ pub mod source_monitor;
 
 // Effect preset commands (save/load/list/delete presets)
 pub mod effect_presets;
+pub mod external_agent;
 
 // Agent commands (trace writing, plan execution, memory persistence)
 pub mod agent;
@@ -78,6 +81,8 @@ pub mod transcript_editing;
 // Re-export all domain modules
 pub use ai_legacy::*;
 pub use asset::*;
+pub use codex::*;
+pub use codex_app_server::*;
 pub use jobs::*;
 pub use project::*;
 pub use render::*;
@@ -103,6 +108,7 @@ pub use source_monitor::*;
 
 // Re-export effect preset commands
 pub use effect_presets::*;
+pub use external_agent::*;
 
 // Re-export agent commands
 pub use agent::*;

@@ -117,11 +117,22 @@ export interface PerformanceSettings {
 /** AI provider type */
 export type ProviderType = 'openai' | 'anthropic' | 'gemini' | 'local';
 
+/** Top-level assistant runtime selection */
+export type AssistantRuntime = 'api' | 'codex';
+
+/** Codex reasoning effort selection */
+export type CodexReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+
 /** Proposal review mode */
 export type ProposalReviewMode = 'always' | 'smart' | 'auto_apply';
 
 /** AI settings for provider configuration and behavior */
 export interface AISettings {
+  // Assistant Runtime
+  assistantRuntime: AssistantRuntime;
+  codexModel: string;
+  codexReasoningEffort: CodexReasoningEffort;
+
   // Provider Configuration
   primaryProvider: ProviderType;
   primaryModel: string;
@@ -297,6 +308,9 @@ const DEFAULT_SETTINGS: AppSettings = {
     cacheSizeMb: 1024,
   },
   ai: {
+    assistantRuntime: 'api',
+    codexModel: 'gpt-5.4',
+    codexReasoningEffort: 'medium',
     primaryProvider: 'anthropic',
     primaryModel: 'claude-sonnet-4-5-20251015',
     visionProvider: null,

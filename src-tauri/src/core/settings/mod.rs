@@ -625,10 +625,50 @@ pub enum ProposalReviewMode {
     AutoApply,
 }
 
+/// Top-level AI assistant runtime.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantRuntime {
+    /// Use OpenReelio's built-in API-backed agent runtime.
+    #[default]
+    Api,
+    /// Use the user's locally authenticated Codex agent through app-server.
+    Codex,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexReasoningEffort {
+    Low,
+    #[default]
+    Medium,
+    High,
+    Xhigh,
+}
+
+fn default_codex_model() -> String {
+    crate::core::codex::DEFAULT_CODEX_MODEL.to_string()
+}
+
+const MAX_CODEX_MODEL_LENGTH: usize = 128;
+
 /// AI settings for provider configuration and behavior
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AISettings {
+    // === Assistant Runtime ===
+    /// Top-level assistant runtime used by the sidebar.
+    #[serde(default)]
+    pub assistant_runtime: AssistantRuntime,
+
+    /// Codex app-server model used by the account-backed runtime.
+    #[serde(default = "default_codex_model")]
+    pub codex_model: String,
+
+    /// Codex reasoning effort used by turn/start.
+    #[serde(default)]
+    pub codex_reasoning_effort: CodexReasoningEffort,
+
     // === Provider Configuration ===
     /// Primary AI provider for reasoning/editing tasks
     #[serde(default)]
@@ -802,6 +842,9 @@ fn default_video_gen_per_request_limit() -> u32 {
 impl Default for AISettings {
     fn default() -> Self {
         Self {
+            assistant_runtime: AssistantRuntime::default(),
+            codex_model: default_codex_model(),
+            codex_reasoning_effort: CodexReasoningEffort::default(),
             primary_provider: ProviderType::default(),
             primary_model: default_primary_model(),
             vision_provider: None,
@@ -834,6 +877,16 @@ impl Default for AISettings {
 impl AISettings {
     /// Normalize and clamp AI settings values to valid ranges
     pub fn normalize(&mut self) {
+        self.codex_model = self
+            .codex_model
+            .trim()
+            .chars()
+            .take(MAX_CODEX_MODEL_LENGTH)
+            .collect();
+        if self.codex_model.is_empty() {
+            self.codex_model = default_codex_model();
+        }
+
         self.primary_model = self.primary_model.trim().to_string();
         if self.primary_model.is_empty() {
             self.primary_model = default_model_for_provider(self.primary_provider);
@@ -1177,6 +1230,9 @@ mod tests {
     fn test_default_ai_settings() {
         let ai_settings = AISettings::default();
 
+        // Runtime default
+        assert_eq!(ai_settings.assistant_runtime, AssistantRuntime::Api);
+
         // Provider defaults
         assert_eq!(ai_settings.primary_provider, ProviderType::Anthropic);
         assert_eq!(ai_settings.primary_model, "claude-sonnet-4-5-20251015");
@@ -1299,6 +1355,18 @@ mod tests {
         ai_settings.normalize();
 
         assert_eq!(ai_settings.primary_model, "gpt-5.2");
+    }
+
+    #[test]
+    fn test_ai_settings_normalization_trims_and_clamps_codex_model() {
+        let mut ai_settings = AISettings {
+            codex_model: format!("  {}  ", "x".repeat(MAX_CODEX_MODEL_LENGTH + 4)),
+            ..Default::default()
+        };
+
+        ai_settings.normalize();
+
+        assert_eq!(ai_settings.codex_model.len(), MAX_CODEX_MODEL_LENGTH);
     }
 
     #[test]

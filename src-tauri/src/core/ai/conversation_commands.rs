@@ -11,8 +11,9 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::conversation::{
-    AgentRunRow, CompactionRecordRow, ConversationDb, DelegationRecordRow, MessageRow,
-    MessageWithParts, PartRow, PermissionDecisionRow, ResumeCheckpointRow, SessionRow,
+    AgentRunRow, CompactionRecordRow, ConversationDb, DelegationRecordRow,
+    ExternalAgentSessionLinkRow, MessageRow, MessageWithParts, PartRow, PermissionDecisionRow,
+    ResumeCheckpointRow, SessionRow,
 };
 
 // =============================================================================
@@ -296,6 +297,38 @@ pub struct ResumeCheckpointDto {
     pub consumed_at: Option<i64>,
 }
 
+/// Durable external runtime session link for an OpenReelio conversation session.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalAgentSessionLinkDto {
+    pub conversation_session_id: String,
+    pub project_id: String,
+    pub runtime_id: String,
+    pub external_session_id: String,
+    pub metadata_json: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Input payload for loading an external runtime session link.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct GetExternalAgentSessionLinkInput {
+    pub conversation_session_id: String,
+    pub runtime_id: String,
+}
+
+/// Input payload for creating or updating an external runtime session link.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertExternalAgentSessionLinkInput {
+    pub conversation_session_id: String,
+    pub project_id: String,
+    pub runtime_id: String,
+    pub external_session_id: String,
+    pub metadata_json: Option<String>,
+}
+
 /// Input payload for creating a delegation record.
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -537,6 +570,20 @@ impl From<&ResumeCheckpointRow> for ResumeCheckpointDto {
             pending_work_json: row.pending_work_json.clone(),
             created_at: row.created_at,
             consumed_at: row.consumed_at,
+        }
+    }
+}
+
+impl From<&ExternalAgentSessionLinkRow> for ExternalAgentSessionLinkDto {
+    fn from(row: &ExternalAgentSessionLinkRow) -> Self {
+        Self {
+            conversation_session_id: row.conversation_session_id.clone(),
+            project_id: row.project_id.clone(),
+            runtime_id: row.runtime_id.clone(),
+            external_session_id: row.external_session_id.clone(),
+            metadata_json: row.metadata_json.clone(),
+            created_at: row.created_at,
+            updated_at: row.updated_at,
         }
     }
 }
@@ -871,6 +918,63 @@ pub async fn get_agent_session(
         session: AgentSessionDto::from(&session),
         runs: runs.iter().map(AgentRunDto::from).collect(),
     })
+}
+
+/// Loads the external runtime session link for an OpenReelio AI conversation session.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_external_agent_session_link(
+    app: tauri::AppHandle,
+    input: GetExternalAgentSessionLinkInput,
+) -> Result<Option<ExternalAgentSessionLinkDto>, String> {
+    let db_mutex = get_or_init_db(&app)?;
+    let db = db_mutex.lock().await;
+
+    let row = db
+        .get_external_agent_session_link(&input.conversation_session_id, &input.runtime_id)
+        .map_err(|e| format!("Failed to get external agent session link: {e}"))?;
+
+    Ok(row.as_ref().map(ExternalAgentSessionLinkDto::from))
+}
+
+/// Creates or updates the external runtime session link for an OpenReelio AI conversation session.
+#[tauri::command]
+#[specta::specta]
+pub async fn upsert_external_agent_session_link(
+    app: tauri::AppHandle,
+    input: UpsertExternalAgentSessionLinkInput,
+) -> Result<ExternalAgentSessionLinkDto, String> {
+    let db_mutex = get_or_init_db(&app)?;
+    let db = db_mutex.lock().await;
+
+    let session = db
+        .get_session(&input.conversation_session_id)
+        .map_err(|e| format!("Failed to validate conversation session: {e}"))?;
+    if session.project_id != input.project_id {
+        return Err(format!(
+            "Conversation session {} belongs to project {}, not {}",
+            input.conversation_session_id, session.project_id, input.project_id
+        ));
+    }
+
+    let existing = db
+        .get_external_agent_session_link(&input.conversation_session_id, &input.runtime_id)
+        .map_err(|e| format!("Failed to inspect external agent session link: {e}"))?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let row = ExternalAgentSessionLinkRow {
+        conversation_session_id: input.conversation_session_id,
+        project_id: input.project_id,
+        runtime_id: input.runtime_id,
+        external_session_id: input.external_session_id,
+        metadata_json: input.metadata_json,
+        created_at: existing.as_ref().map(|link| link.created_at).unwrap_or(now),
+        updated_at: now,
+    };
+
+    db.upsert_external_agent_session_link(&row)
+        .map_err(|e| format!("Failed to upsert external agent session link: {e}"))?;
+
+    Ok(ExternalAgentSessionLinkDto::from(&row))
 }
 
 /// Starts a new run and atomically marks the owning session as active.

@@ -124,32 +124,11 @@ export default defineConfig(({ mode }) => {
               return 'vendor';
             }
 
-            if (
-              normalizedId.includes('/src/components/timeline/') ||
-              normalizedId.includes('/src/hooks/useTimeline') ||
-              normalizedId.includes('/src/services/timeline') ||
-              normalizedId.includes('/src/components/preview/') ||
-              normalizedId.includes('/src/hooks/useAudioPlayback') ||
-              normalizedId.includes('/src/services/PlaybackController')
-            ) {
-              return 'feature-editing-core';
-            }
-
-            if (
-              normalizedId.includes('/src/components/features/ai/') ||
-              normalizedId.includes('/src/components/features/agent/') ||
-              normalizedId.includes('/src/stores/aiStore') ||
-              normalizedId.includes('/src/agents/')
-            ) {
-              return 'feature-ai';
-            }
-
-            if (
-              normalizedId.includes('/src/components/explorer/') ||
-              normalizedId.includes('/src/components/features/inspector/') ||
-              normalizedId.includes('/src/components/features/search/')
-            ) {
-              return 'feature-workspace-panels';
+            if (normalizedId.includes('/src/')) {
+              // Keep app modules in Rollup's automatic chunks. The previous
+              // feature-level chunks introduced cross-feature cycles that can
+              // become TDZ errors in production builds.
+              return undefined;
             }
 
             return undefined;

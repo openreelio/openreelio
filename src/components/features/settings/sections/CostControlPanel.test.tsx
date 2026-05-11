@@ -11,6 +11,9 @@ import { CostControlPanel, type CostControlPanelProps } from './CostControlPanel
 import type { AISettings } from '@/stores/settingsStore';
 
 const defaultAISettings: AISettings = {
+  assistantRuntime: 'api',
+  codexModel: 'gpt-5.4',
+  codexReasoningEffort: 'medium',
   primaryProvider: 'anthropic',
   primaryModel: 'claude-sonnet-4-5-20251015',
   visionProvider: null,
@@ -30,7 +33,12 @@ const defaultAISettings: AISettings = {
   autoCaptionOnImport: false,
   proposalReviewMode: 'always',
   cacheDurationHours: 24,
-  localOnlyMode: false, seedanceApiKey: null, videoGenProvider: null, videoGenDefaultQuality: 'pro', videoGenBudgetCents: null, videoGenPerRequestLimitCents: 100,
+  localOnlyMode: false,
+  seedanceApiKey: null,
+  videoGenProvider: null,
+  videoGenDefaultQuality: 'pro',
+  videoGenBudgetCents: null,
+  videoGenPerRequestLimitCents: 100,
 };
 
 describe('CostControlPanel', () => {
@@ -106,7 +114,7 @@ describe('CostControlPanel', () => {
       fireEvent.blur(input);
 
       expect(mockOnUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({ monthlyBudgetCents: 2500 })
+        expect.objectContaining({ monthlyBudgetCents: 2500 }),
       );
     });
 
@@ -123,7 +131,7 @@ describe('CostControlPanel', () => {
       fireEvent.blur(input);
 
       expect(mockOnUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({ monthlyBudgetCents: null })
+        expect.objectContaining({ monthlyBudgetCents: null }),
       );
     });
   });
@@ -149,7 +157,7 @@ describe('CostControlPanel', () => {
       fireEvent.blur(input);
 
       expect(mockOnUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({ perRequestLimitCents: 100 })
+        expect.objectContaining({ perRequestLimitCents: 100 }),
       );
     });
   });

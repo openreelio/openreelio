@@ -1,0 +1,826 @@
+//! Codex runtime detection helpers.
+
+use serde::{Deserialize, Serialize};
+use specta::Type;
+use std::env;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use tokio::process::Command;
+use tokio::time::{timeout, Duration};
+
+pub const CODEX_CLI_ENV_VAR: &str = "OPENREELIO_CODEX_CLI";
+pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.4";
+pub const DEFAULT_CODEX_REASONING_EFFORT: &str = "medium";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodexExecutablePlatform {
+    Windows,
+    Unix,
+}
+
+impl CodexExecutablePlatform {
+    fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Unix
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexStatusProbeResult {
+    pub installed: bool,
+    pub version: Option<String>,
+    pub auth_status: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModelInfo {
+    pub slug: String,
+    pub display_name: String,
+    pub default_reasoning_effort: String,
+    pub supported_reasoning_efforts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModelCatalogResult {
+    pub installed: bool,
+    pub default_model: String,
+    pub default_reasoning_effort: String,
+    pub models: Vec<CodexModelInfo>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCodexModelCatalog {
+    #[serde(default)]
+    models: Vec<RawCodexModelInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCodexModelInfo {
+    slug: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    default_reasoning_level: Option<String>,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<RawCodexReasoningLevel>,
+    #[serde(default)]
+    visibility: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCodexReasoningLevel {
+    effort: String,
+}
+
+pub fn resolve_codex_executable() -> Option<PathBuf> {
+    let platform = CodexExecutablePlatform::current();
+    if let Some(path) = env::var_os(CODEX_CLI_ENV_VAR)
+        .map(PathBuf::from)
+        .filter(|path| is_supported_codex_executable(path, platform))
+    {
+        return Some(path);
+    }
+
+    let home_dir = dirs::home_dir();
+    let user_profile = env::var_os("USERPROFILE").map(PathBuf::from);
+    let appdata = env::var_os("APPDATA").map(PathBuf::from);
+    let local_appdata = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let mut candidates = collect_codex_executable_candidates(
+        env::var_os("PATH"),
+        home_dir,
+        user_profile,
+        appdata,
+        local_appdata,
+    );
+
+    candidates.extend(find_wsl_windows_user_codex_candidates(platform));
+    resolve_first_runnable_candidate(candidates, platform)
+}
+
+pub fn create_codex_command() -> Result<Command, String> {
+    let executable = resolve_codex_executable().ok_or_else(|| {
+        "Codex executable was not found in PATH or common install locations.".to_string()
+    })?;
+    let mut command = Command::new(executable);
+    command.kill_on_drop(true);
+    Ok(command)
+}
+
+pub fn codex_command_label() -> String {
+    resolve_codex_executable()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "codex".to_string())
+}
+
+pub fn parse_codex_version(stdout: &str, stderr: &str) -> Option<String> {
+    let candidate = stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+
+    Some(candidate.to_string())
+}
+
+pub fn parse_codex_auth_status(
+    stdout: &str,
+    stderr: &str,
+    command_succeeded: bool,
+) -> (String, Option<String>) {
+    let output = stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let normalized = output.to_lowercase();
+
+    if normalized.contains("not logged in")
+        || normalized.contains("not signed in")
+        || normalized.contains("not authenticated")
+        || normalized.contains("login required")
+    {
+        return ("signed-out".to_string(), Some(output));
+    }
+
+    if normalized.contains("api key") || normalized.contains("api-key") {
+        return ("api-key".to_string(), None);
+    }
+
+    if normalized.contains("logged in")
+        || normalized.contains("signed in")
+        || normalized.contains("authenticated")
+    {
+        return ("signed-in".to_string(), None);
+    }
+
+    if command_succeeded {
+        (
+            "unknown".to_string(),
+            Some("codex login status returned an unrecognized status".to_string()),
+        )
+    } else {
+        (
+            "error".to_string(),
+            Some(if output.is_empty() {
+                "codex login status failed without output".to_string()
+            } else {
+                format!("codex login status failed: {output}")
+            }),
+        )
+    }
+}
+
+pub async fn probe_codex_status() -> CodexStatusProbeResult {
+    let mut version_command = match create_codex_command() {
+        Ok(command) => command,
+        Err(reason) => {
+            return CodexStatusProbeResult {
+                installed: false,
+                version: None,
+                auth_status: "unknown".to_string(),
+                reason: Some(reason),
+            };
+        }
+    };
+
+    let version_output = match timeout(
+        Duration::from_secs(5),
+        version_command.arg("--version").output(),
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(_) => {
+            return CodexStatusProbeResult {
+                installed: false,
+                version: None,
+                auth_status: "unknown".to_string(),
+                reason: Some("codex --version timed out".to_string()),
+            };
+        }
+    };
+
+    match version_output {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let version = parse_codex_version(&stdout, &stderr);
+            let mut auth_command = match create_codex_command() {
+                Ok(command) => command,
+                Err(reason) => {
+                    return CodexStatusProbeResult {
+                        installed: true,
+                        version,
+                        auth_status: "error".to_string(),
+                        reason: Some(reason),
+                    };
+                }
+            };
+            let auth_output = match timeout(
+                Duration::from_secs(5),
+                auth_command.arg("login").arg("status").output(),
+            )
+            .await
+            {
+                Ok(output) => output,
+                Err(_) => {
+                    return CodexStatusProbeResult {
+                        installed: true,
+                        version,
+                        auth_status: "error".to_string(),
+                        reason: Some("codex login status timed out".to_string()),
+                    };
+                }
+            };
+
+            match auth_output {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let (auth_status, auth_reason) =
+                        parse_codex_auth_status(&stdout, &stderr, output.status.success());
+
+                    CodexStatusProbeResult {
+                        installed: true,
+                        version,
+                        auth_status,
+                        reason: auth_reason,
+                    }
+                }
+                Err(error) => CodexStatusProbeResult {
+                    installed: true,
+                    version,
+                    auth_status: "error".to_string(),
+                    reason: Some(format_codex_io_error(
+                        "Failed to run codex login status",
+                        &error,
+                    )),
+                },
+            }
+        }
+        Ok(output) => CodexStatusProbeResult {
+            installed: false,
+            version: None,
+            auth_status: "unknown".to_string(),
+            reason: Some(format!(
+                "codex --version failed with status {}",
+                output.status
+            )),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => CodexStatusProbeResult {
+            installed: false,
+            version: None,
+            auth_status: "unknown".to_string(),
+            reason: Some(
+                "Codex executable was not found in PATH or common install locations.".to_string(),
+            ),
+        },
+        Err(error) => CodexStatusProbeResult {
+            installed: false,
+            version: None,
+            auth_status: "unknown".to_string(),
+            reason: Some(format_codex_io_error(
+                "Failed to run codex --version",
+                &error,
+            )),
+        },
+    }
+}
+
+pub async fn get_codex_model_catalog() -> CodexModelCatalogResult {
+    let mut command = match create_codex_command() {
+        Ok(command) => command,
+        Err(reason) => {
+            return CodexModelCatalogResult {
+                installed: false,
+                default_model: DEFAULT_CODEX_MODEL.to_string(),
+                default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
+                models: default_codex_models(),
+                reason: Some(reason),
+            };
+        }
+    };
+
+    let output = match timeout(
+        Duration::from_secs(10),
+        command.arg("debug").arg("models").output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return CodexModelCatalogResult {
+                installed: false,
+                default_model: DEFAULT_CODEX_MODEL.to_string(),
+                default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
+                models: default_codex_models(),
+                reason: Some(format_codex_io_error(
+                    "Failed to read Codex model catalog",
+                    &error,
+                )),
+            };
+        }
+        Err(_) => {
+            return CodexModelCatalogResult {
+                installed: true,
+                default_model: DEFAULT_CODEX_MODEL.to_string(),
+                default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
+                models: default_codex_models(),
+                reason: Some("Codex model catalog request timed out.".to_string()),
+            };
+        }
+    };
+
+    if !output.status.success() {
+        return CodexModelCatalogResult {
+            installed: true,
+            default_model: DEFAULT_CODEX_MODEL.to_string(),
+            default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
+            models: default_codex_models(),
+            reason: Some(collect_command_output(&output.stdout, &output.stderr)),
+        };
+    }
+
+    match parse_codex_model_catalog(&String::from_utf8_lossy(&output.stdout)) {
+        Ok(models) => CodexModelCatalogResult {
+            installed: true,
+            default_model: DEFAULT_CODEX_MODEL.to_string(),
+            default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
+            models,
+            reason: None,
+        },
+        Err(reason) => CodexModelCatalogResult {
+            installed: true,
+            default_model: DEFAULT_CODEX_MODEL.to_string(),
+            default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
+            models: default_codex_models(),
+            reason: Some(reason),
+        },
+    }
+}
+
+fn parse_codex_model_catalog(input: &str) -> Result<Vec<CodexModelInfo>, String> {
+    let catalog: RawCodexModelCatalog = serde_json::from_str(input)
+        .map_err(|error| format!("Failed to parse Codex model catalog: {error}"))?;
+    let models = catalog
+        .models
+        .into_iter()
+        .filter(|model| model.visibility.as_deref() != Some("hide"))
+        .filter(|model| model.slug != "gpt-5.5")
+        .map(|model| {
+            let supported_reasoning_efforts = model
+                .supported_reasoning_levels
+                .into_iter()
+                .map(|level| level.effort)
+                .filter(|effort| !effort.trim().is_empty())
+                .collect::<Vec<_>>();
+            CodexModelInfo {
+                display_name: model.display_name.unwrap_or_else(|| model.slug.clone()),
+                slug: model.slug,
+                default_reasoning_effort: model
+                    .default_reasoning_level
+                    .unwrap_or_else(|| DEFAULT_CODEX_REASONING_EFFORT.to_string()),
+                supported_reasoning_efforts: if supported_reasoning_efforts.is_empty() {
+                    default_reasoning_efforts()
+                } else {
+                    supported_reasoning_efforts
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if models.is_empty() {
+        Ok(default_codex_models())
+    } else {
+        Ok(models)
+    }
+}
+
+fn default_codex_models() -> Vec<CodexModelInfo> {
+    [
+        ("gpt-5.4", "gpt-5.4"),
+        ("gpt-5.4-mini", "GPT-5.4-Mini"),
+        ("gpt-5.3-codex", "gpt-5.3-codex"),
+        ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"),
+        ("gpt-5.2", "gpt-5.2"),
+    ]
+    .into_iter()
+    .map(|(slug, display_name)| CodexModelInfo {
+        slug: slug.to_string(),
+        display_name: display_name.to_string(),
+        default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
+        supported_reasoning_efforts: default_reasoning_efforts(),
+    })
+    .collect()
+}
+
+fn default_reasoning_efforts() -> Vec<String> {
+    ["low", "medium", "high", "xhigh"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+
+fn collect_command_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let combined = stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if combined.is_empty() {
+        "Codex model catalog command failed without output.".to_string()
+    } else {
+        combined
+    }
+}
+
+pub fn format_codex_io_error(action: &str, error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return format!(
+            "{action}: Codex executable was not found in PATH or common install locations."
+        );
+    }
+
+    if error.raw_os_error() == Some(193) || error.to_string().contains("Win32") {
+        return format!(
+            "{action}: The selected Codex launcher is not executable on this OS. Use a native Codex CLI launcher such as codex.cmd or codex.exe."
+        );
+    }
+
+    format!("{action}: {error}")
+}
+
+fn collect_codex_executable_candidates(
+    path_env: Option<OsString>,
+    home_dir: Option<PathBuf>,
+    user_profile: Option<PathBuf>,
+    appdata: Option<PathBuf>,
+    local_appdata: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    collect_codex_executable_candidates_for_platform(
+        path_env,
+        home_dir,
+        user_profile,
+        appdata,
+        local_appdata,
+        CodexExecutablePlatform::current(),
+    )
+}
+
+fn collect_codex_executable_candidates_for_platform(
+    path_env: Option<OsString>,
+    home_dir: Option<PathBuf>,
+    user_profile: Option<PathBuf>,
+    appdata: Option<PathBuf>,
+    local_appdata: Option<PathBuf>,
+    platform: CodexExecutablePlatform,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    for root in [user_profile.as_ref(), home_dir.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        push_codex_home_candidates(&mut candidates, root, platform);
+    }
+
+    for root in [appdata.as_ref(), local_appdata.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        push_candidate_names(&mut candidates, &root.join("npm"), platform);
+    }
+
+    if let Some(path_env) = path_env {
+        for directory in env::split_paths(&path_env) {
+            push_candidate_names(&mut candidates, &directory, platform);
+        }
+    }
+
+    for directory in default_codex_search_directories(platform) {
+        push_candidate_names(&mut candidates, &directory, platform);
+    }
+
+    dedupe_paths(candidates)
+}
+
+fn push_codex_home_candidates(
+    candidates: &mut Vec<PathBuf>,
+    root: &Path,
+    platform: CodexExecutablePlatform,
+) {
+    let mut directories = match platform {
+        CodexExecutablePlatform::Windows => vec![
+            root.join(".codex").join("bin").join("windows"),
+            root.join(".codex").join("bin"),
+        ],
+        CodexExecutablePlatform::Unix => vec![
+            root.join(".codex").join("bin").join("wsl"),
+            root.join(".codex").join("bin").join("linux"),
+            root.join(".codex").join("bin").join("macos"),
+            root.join(".codex").join("bin"),
+        ],
+    };
+    directories.extend([
+        root.join(".local").join("bin"),
+        root.join(".cargo").join("bin"),
+        root.join(".npm-global").join("bin"),
+        root.join(".bun").join("bin"),
+    ]);
+
+    for directory in directories {
+        push_candidate_names(candidates, &directory, platform);
+    }
+
+    push_candidate_names(
+        candidates,
+        &root.join("AppData").join("Roaming").join("npm"),
+        platform,
+    );
+}
+
+fn push_candidate_names(
+    candidates: &mut Vec<PathBuf>,
+    directory: &Path,
+    platform: CodexExecutablePlatform,
+) {
+    for name in codex_executable_names(platform) {
+        candidates.push(directory.join(name));
+    }
+}
+
+fn codex_executable_names(platform: CodexExecutablePlatform) -> &'static [&'static str] {
+    match platform {
+        CodexExecutablePlatform::Windows => &["codex.exe", "codex.cmd", "codex.bat"],
+        CodexExecutablePlatform::Unix => &["codex"],
+    }
+}
+
+fn default_codex_search_directories(platform: CodexExecutablePlatform) -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    match platform {
+        CodexExecutablePlatform::Windows => directories.extend([
+            PathBuf::from(r"C:\Program Files\OpenAI\Codex"),
+            PathBuf::from(r"C:\Program Files\Codex"),
+        ]),
+        CodexExecutablePlatform::Unix => directories.extend([
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+        ]),
+    }
+    directories
+}
+
+fn find_wsl_windows_user_codex_candidates(platform: CodexExecutablePlatform) -> Vec<PathBuf> {
+    if platform == CodexExecutablePlatform::Windows {
+        return Vec::new();
+    }
+
+    let users_root = Path::new("/mnt/c/Users");
+    let Ok(entries) = std::fs::read_dir(users_root) else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let root = entry.path();
+        push_codex_home_candidates(&mut candidates, &root, platform);
+    }
+    dedupe_paths(candidates)
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut deduped = Vec::new();
+    for path in paths {
+        if !deduped.iter().any(|candidate| candidate == &path) {
+            deduped.push(path);
+        }
+    }
+    deduped
+}
+
+fn is_supported_codex_executable(path: &Path, platform: CodexExecutablePlatform) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+
+    match platform {
+        CodexExecutablePlatform::Windows => path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "exe" | "cmd" | "bat"
+                )
+            })
+            .unwrap_or(false),
+        CodexExecutablePlatform::Unix => path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .map(|file_name| file_name == "codex")
+            .unwrap_or(false),
+    }
+}
+
+fn resolve_first_runnable_candidate(
+    candidates: Vec<PathBuf>,
+    platform: CodexExecutablePlatform,
+) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .find(|candidate| is_supported_codex_executable(candidate, platform))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        collect_codex_executable_candidates_for_platform, format_codex_io_error,
+        parse_codex_auth_status, parse_codex_model_catalog, parse_codex_version,
+        resolve_first_runnable_candidate, CodexExecutablePlatform,
+    };
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parses_codex_version_from_stdout() {
+        assert_eq!(
+            parse_codex_version("codex 0.50.0\n", ""),
+            Some("codex 0.50.0".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_codex_version_from_stderr_when_stdout_is_empty() {
+        assert_eq!(
+            parse_codex_version("", "codex-cli 1.2.3\n"),
+            Some("codex-cli 1.2.3".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_for_empty_output() {
+        assert_eq!(parse_codex_version("", "\n"), None);
+    }
+
+    #[test]
+    fn parses_chatgpt_login_status_as_signed_in() {
+        let (auth_status, reason) = parse_codex_auth_status("Logged in using ChatGPT\n", "", true);
+
+        assert_eq!(auth_status, "signed-in");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn parses_api_key_login_status_as_api_key() {
+        let (auth_status, reason) = parse_codex_auth_status("Logged in using API key\n", "", true);
+
+        assert_eq!(auth_status, "api-key");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn parses_signed_out_status_before_logged_in_substring() {
+        let (auth_status, reason) = parse_codex_auth_status("Not logged in\n", "", false);
+
+        assert_eq!(auth_status, "signed-out");
+        assert_eq!(reason, Some("Not logged in".to_string()));
+    }
+
+    #[test]
+    fn reports_unrecognized_successful_login_status_as_unknown() {
+        let (auth_status, reason) = parse_codex_auth_status("Account state: pending\n", "", true);
+
+        assert_eq!(auth_status, "unknown");
+        assert_eq!(
+            reason,
+            Some("codex login status returned an unrecognized status".to_string())
+        );
+    }
+
+    #[test]
+    fn reports_unrecognized_failed_login_status_as_error() {
+        let (auth_status, reason) = parse_codex_auth_status("", "unexpected auth failure\n", false);
+
+        assert_eq!(auth_status, "error");
+        assert_eq!(
+            reason,
+            Some("codex login status failed: unexpected auth failure".to_string())
+        );
+    }
+
+    #[test]
+    fn prefers_codex_account_binary_locations_before_path() {
+        let candidates = collect_codex_executable_candidates_for_platform(
+            Some(OsString::from("/tmp/path-bin")),
+            Some(PathBuf::from("/home/openreelio")),
+            Some(PathBuf::from("/mnt/c/Users/openreelio")),
+            Some(PathBuf::from("/mnt/c/Users/openreelio/AppData/Roaming")),
+            None,
+            CodexExecutablePlatform::Unix,
+        );
+
+        assert_eq!(
+            candidates.first(),
+            Some(&PathBuf::from(
+                "/mnt/c/Users/openreelio/.codex/bin/wsl/codex"
+            ))
+        );
+        assert!(candidates.contains(&PathBuf::from(
+            "/mnt/c/Users/openreelio/AppData/Roaming/npm/codex"
+        )));
+        assert!(candidates.contains(&PathBuf::from("/tmp/path-bin/codex")));
+    }
+
+    #[test]
+    fn resolves_codex_from_user_profile_without_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let codex_path = temp_dir.path().join(".codex/bin/wsl/codex");
+        fs::create_dir_all(codex_path.parent().expect("codex parent")).expect("codex dir");
+        fs::write(&codex_path, b"").expect("codex file");
+
+        let candidates = collect_codex_executable_candidates_for_platform(
+            None,
+            None,
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            CodexExecutablePlatform::Unix,
+        );
+
+        assert_eq!(
+            resolve_first_runnable_candidate(candidates, CodexExecutablePlatform::Unix),
+            Some(codex_path)
+        );
+    }
+
+    #[test]
+    fn resolves_windows_codex_cmd_instead_of_wsl_or_shell_shims() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let wsl_codex_path = temp_dir.path().join(".codex/bin/wsl/codex");
+        fs::create_dir_all(wsl_codex_path.parent().expect("wsl parent")).expect("wsl dir");
+        fs::write(&wsl_codex_path, b"").expect("wsl file");
+
+        let shell_shim_path = temp_dir.path().join("AppData/Roaming/npm/codex");
+        let cmd_path = temp_dir.path().join("AppData/Roaming/npm/codex.cmd");
+        fs::create_dir_all(cmd_path.parent().expect("cmd parent")).expect("cmd dir");
+        fs::write(&shell_shim_path, b"#!/bin/sh").expect("shell shim");
+        fs::write(&cmd_path, b"@ECHO off").expect("cmd shim");
+
+        let candidates = collect_codex_executable_candidates_for_platform(
+            None,
+            None,
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            CodexExecutablePlatform::Windows,
+        );
+
+        assert!(!candidates.contains(&wsl_codex_path));
+        assert!(!candidates.contains(&shell_shim_path));
+        assert!(candidates.contains(&cmd_path));
+        assert_eq!(
+            resolve_first_runnable_candidate(candidates, CodexExecutablePlatform::Windows),
+            Some(cmd_path)
+        );
+    }
+
+    #[test]
+    fn normalizes_windows_exec_format_errors_to_english() {
+        let error = std::io::Error::from_raw_os_error(193);
+
+        let message = format_codex_io_error("Failed to run Codex command", &error);
+
+        assert!(message.contains("not executable on this OS"));
+        assert!(message.contains("codex.cmd"));
+    }
+
+    #[test]
+    fn parses_visible_codex_model_catalog_entries() {
+        let models = parse_codex_model_catalog(
+            r#"{"models":[{"slug":"gpt-5.5","visibility":"list"},{"slug":"gpt-5.4","display_name":"gpt-5.4","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],"visibility":"list"},{"slug":"hidden","visibility":"hide"}]}"#,
+        )
+        .expect("models");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].slug, "gpt-5.4");
+        assert_eq!(models[0].supported_reasoning_efforts, vec!["low", "high"]);
+    }
+}

@@ -77,54 +77,12 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("Invalid plan JSON: {}", e))?;
 
             let mut project = super::load_project(&path)?;
-            let mut results = Vec::new();
-            let mut succeeded = 0;
-
-            let sorted_steps = topological_sort(&plan.steps)?;
-            for step in sorted_steps {
-                // Build command from type + payload using the same pattern as IPC
-                match execute_step(&mut project, step) {
-                    Ok(result) => {
-                        results.push(serde_json::json!({
-                            "stepId": step.id,
-                            "status": "ok",
-                            "opId": result.op_id,
-                            "createdIds": result.created_ids,
-                            "deletedIds": result.deleted_ids,
-                        }));
-                        succeeded += 1;
-                    }
-                    Err(e) => {
-                        results.push(serde_json::json!({
-                            "stepId": step.id,
-                            "status": "error",
-                            "error": e.to_string(),
-                        }));
-                        // Rollback: undo all successful steps in reverse
-                        let mut rollback_failures = Vec::new();
-                        for _ in 0..succeeded {
-                            if let Err(undo_err) = project.executor.undo(&mut project.state) {
-                                rollback_failures.push(undo_err.to_string());
-                            }
-                        }
-                        return output::print_json(&serde_json::json!({
-                            "status": "error",
-                            "message": format!("Plan failed at step '{}': {}", step.id, e),
-                            "rolledBack": succeeded,
-                            "rollbackFailures": rollback_failures,
-                            "stepResults": results,
-                        }));
-                    }
-                }
+            let result = apply_edit_plan(&mut project, &plan)?;
+            if result["status"] == "ok" {
+                super::save_project(&mut project)?;
             }
 
-            super::save_project(&mut project)?;
-            output::print_json(&serde_json::json!({
-                "status": "ok",
-                "planId": plan.id,
-                "stepsExecuted": succeeded,
-                "stepResults": results,
-            }))
+            output::print_json(&result)
         }
 
         PlanAction::Validate { path, file } => {
@@ -136,35 +94,7 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
 
             let _project = super::load_project(&path)?;
 
-            // Validate step dependencies form a DAG
-            let step_ids: HashSet<&str> = plan.steps.iter().map(|s| s.id.as_str()).collect();
-
-            let mut errors = Vec::new();
-            for step in &plan.steps {
-                for dep in &step.depends_on {
-                    if !step_ids.contains(dep.as_str()) {
-                        errors.push(format!(
-                            "Step '{}' depends on '{}' which does not exist",
-                            step.id, dep
-                        ));
-                    }
-                }
-
-                if let Err(error) = openreelio_core::ipc::CommandPayload::parse(
-                    step.command_type.clone(),
-                    step.payload.clone(),
-                ) {
-                    errors.push(format!(
-                        "Step '{}' has invalid command payload for '{}': {}",
-                        step.id, step.command_type, error
-                    ));
-                }
-            }
-
-            // Cycle detection
-            if let Err(cycle_err) = topological_sort(&plan.steps) {
-                errors.push(cycle_err.to_string());
-            }
+            let errors = validate_edit_plan(&plan);
 
             if errors.is_empty() {
                 output::print_json(&serde_json::json!({
@@ -239,6 +169,95 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
             output::print_json_pretty(&template)
         }
     }
+}
+
+pub(crate) fn validate_edit_plan(plan: &EditPlan) -> Vec<String> {
+    let mut step_ids = HashSet::new();
+    let mut errors = Vec::new();
+
+    for step in &plan.steps {
+        if !step_ids.insert(step.id.as_str()) {
+            errors.push(format!("Duplicate step id '{}'", step.id));
+        }
+    }
+
+    for step in &plan.steps {
+        for dep in &step.depends_on {
+            if !step_ids.contains(dep.as_str()) {
+                errors.push(format!(
+                    "Step '{}' depends on '{}' which does not exist",
+                    step.id, dep
+                ));
+            }
+        }
+
+        if let Err(error) = openreelio_core::ipc::CommandPayload::parse(
+            step.command_type.clone(),
+            step.payload.clone(),
+        ) {
+            errors.push(format!(
+                "Step '{}' has invalid command payload for '{}': {}",
+                step.id, step.command_type, error
+            ));
+        }
+    }
+
+    if let Err(cycle_err) = topological_sort(&plan.steps) {
+        errors.push(cycle_err.to_string());
+    }
+
+    errors
+}
+
+pub(crate) fn apply_edit_plan(
+    project: &mut openreelio_core::ActiveProject,
+    plan: &EditPlan,
+) -> anyhow::Result<serde_json::Value> {
+    let mut results = Vec::new();
+    let mut succeeded = 0;
+
+    let sorted_steps = topological_sort(&plan.steps)?;
+    for step in sorted_steps {
+        match execute_step(project, step) {
+            Ok(result) => {
+                results.push(serde_json::json!({
+                    "stepId": step.id,
+                    "status": "ok",
+                    "opId": result.op_id,
+                    "createdIds": result.created_ids,
+                    "deletedIds": result.deleted_ids,
+                }));
+                succeeded += 1;
+            }
+            Err(e) => {
+                results.push(serde_json::json!({
+                    "stepId": step.id,
+                    "status": "error",
+                    "error": e.to_string(),
+                }));
+                let mut rollback_failures = Vec::new();
+                for _ in 0..succeeded {
+                    if let Err(undo_err) = project.executor.undo(&mut project.state) {
+                        rollback_failures.push(undo_err.to_string());
+                    }
+                }
+                return Ok(serde_json::json!({
+                    "status": "error",
+                    "message": format!("Plan failed at step '{}': {}", step.id, e),
+                    "rolledBack": succeeded,
+                    "rollbackFailures": rollback_failures,
+                    "stepResults": results,
+                }));
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "status": "ok",
+        "planId": plan.id,
+        "stepsExecuted": succeeded,
+        "stepResults": results,
+    }))
 }
 
 /// Execute a single plan step by dispatching to the appropriate command.

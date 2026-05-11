@@ -12,6 +12,8 @@ import {
   resetFeatureFlags,
   isAgenticEngineEnabled,
   isAgentLoopEnabled,
+  isCodexAgentEnabled,
+  isExternalAgentHostEnabled,
   resolveSidebarRuntimePolicy,
   getAllFeatureFlags,
   FEATURE_FLAG_KEYS,
@@ -53,7 +55,7 @@ describe('featureFlags', () => {
     it('should return true when flag is enabled via localStorage', () => {
       localStorageMock.setItem(
         'openreelio-feature-flags',
-        JSON.stringify({ USE_AGENTIC_ENGINE: true })
+        JSON.stringify({ USE_AGENTIC_ENGINE: true }),
       );
 
       expect(getFeatureFlag('USE_AGENTIC_ENGINE')).toBe(true);
@@ -62,7 +64,7 @@ describe('featureFlags', () => {
     it('should return false when flag is explicitly disabled', () => {
       localStorageMock.setItem(
         'openreelio-feature-flags',
-        JSON.stringify({ USE_AGENTIC_ENGINE: false })
+        JSON.stringify({ USE_AGENTIC_ENGINE: false }),
       );
 
       expect(getFeatureFlag('USE_AGENTIC_ENGINE')).toBe(false);
@@ -86,9 +88,7 @@ describe('featureFlags', () => {
     it('should set flag value in localStorage', () => {
       setFeatureFlag('USE_AGENTIC_ENGINE', true);
 
-      const stored = JSON.parse(
-        localStorageMock.getItem('openreelio-feature-flags') ?? '{}'
-      );
+      const stored = JSON.parse(localStorageMock.getItem('openreelio-feature-flags') ?? '{}');
       expect(stored.USE_AGENTIC_ENGINE).toBe(true);
     });
 
@@ -96,14 +96,12 @@ describe('featureFlags', () => {
       // First set initial state
       localStorageMock.setItem(
         'openreelio-feature-flags',
-        JSON.stringify({ USE_AGENTIC_ENGINE: false, OTHER_FLAG: true })
+        JSON.stringify({ USE_AGENTIC_ENGINE: false, OTHER_FLAG: true }),
       );
 
       setFeatureFlag('USE_AGENTIC_ENGINE', true);
 
-      const stored = JSON.parse(
-        localStorageMock.getItem('openreelio-feature-flags') ?? '{}'
-      );
+      const stored = JSON.parse(localStorageMock.getItem('openreelio-feature-flags') ?? '{}');
       expect(stored.USE_AGENTIC_ENGINE).toBe(true);
       // Note: OTHER_FLAG may or may not be preserved depending on implementation
     });
@@ -120,7 +118,7 @@ describe('featureFlags', () => {
     it('should remove all feature flags from localStorage', () => {
       localStorageMock.setItem(
         'openreelio-feature-flags',
-        JSON.stringify({ USE_AGENTIC_ENGINE: true })
+        JSON.stringify({ USE_AGENTIC_ENGINE: true }),
       );
 
       resetFeatureFlags();
@@ -149,7 +147,7 @@ describe('featureFlags', () => {
     it('should be a convenience wrapper for getFeatureFlag', () => {
       localStorageMock.setItem(
         'openreelio-feature-flags',
-        JSON.stringify({ USE_AGENTIC_ENGINE: true })
+        JSON.stringify({ USE_AGENTIC_ENGINE: true }),
       );
 
       expect(isAgenticEngineEnabled()).toBe(getFeatureFlag('USE_AGENTIC_ENGINE'));
@@ -167,7 +165,7 @@ describe('featureFlags', () => {
     it('should reflect localStorage overrides', () => {
       localStorageMock.setItem(
         'openreelio-feature-flags',
-        JSON.stringify({ USE_AGENTIC_ENGINE: true })
+        JSON.stringify({ USE_AGENTIC_ENGINE: true }),
       );
 
       const flags = getAllFeatureFlags();
@@ -179,6 +177,11 @@ describe('featureFlags', () => {
   describe('FEATURE_FLAG_KEYS', () => {
     it('should include USE_AGENTIC_ENGINE', () => {
       expect(FEATURE_FLAG_KEYS).toContain('USE_AGENTIC_ENGINE');
+    });
+
+    it('should include external agent host flags', () => {
+      expect(FEATURE_FLAG_KEYS).toContain('USE_EXTERNAL_AGENT_HOST');
+      expect(FEATURE_FLAG_KEYS).toContain('USE_CODEX_AGENT');
     });
 
     it('should be a readonly array', () => {
@@ -249,6 +252,21 @@ describe('featureFlags', () => {
         track: 'canonical',
         compatibilityRuntime: 'fast',
         compatibilityRuntimeEnabled: true,
+      });
+    });
+
+    it('should keep the canonical runtime selected when External Agent Host flags are enabled', () => {
+      setFeatureFlag('USE_EXTERNAL_AGENT_HOST', true);
+      setFeatureFlag('USE_CODEX_AGENT', true);
+
+      expect(isExternalAgentHostEnabled()).toBe(true);
+      expect(isCodexAgentEnabled()).toBe(true);
+      expect(resolveSidebarRuntimePolicy()).toEqual({
+        canonicalRuntime: 'tpao',
+        selectedRuntime: 'tpao',
+        track: 'canonical',
+        compatibilityRuntime: null,
+        compatibilityRuntimeEnabled: false,
       });
     });
 
