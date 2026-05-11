@@ -832,6 +832,83 @@ async getAvailableAiModels(providerType: string) : Promise<Result<string[], stri
     return { status: "error", error: e  as any };
 }
 },
+async getCodexStatus() : Promise<Result<CodexStatusProbeResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_codex_status") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async getCodexModelCatalog() : Promise<Result<CodexModelCatalogResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_codex_model_catalog") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async startCodexAppServer(input: StartCodexAppServerInput) : Promise<Result<CodexAppServerStartResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_codex_app_server", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async writeCodexAppServerMessage(input: CodexAppServerWriteInput) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("write_codex_app_server_message", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async stopCodexAppServer(input: CodexAppServerSessionInput) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("stop_codex_app_server", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async createExternalAgentApprovalToken(input: CreateExternalAgentApprovalTokenInput) : Promise<Result<ExternalAgentApprovalTokenGrant, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_external_agent_approval_token", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async getExternalAgentSetupInfo(input: ExternalAgentSetupInfoInput) : Promise<Result<ExternalAgentSetupInfo, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_external_agent_setup_info", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async configureCodexAgentRuntime(input: ConfigureCodexAgentRuntimeInput) : Promise<Result<ConfigureCodexAgentRuntimeResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("configure_codex_agent_runtime", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async startCodexLogin() : Promise<Result<CodexAgentLoginResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_codex_login") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async consumeExternalAgentApprovalToken(input: ConsumeExternalAgentApprovalTokenInput) : Promise<Result<ExternalAgentApprovalTokenValidation, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("consume_external_agent_approval_token", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async revokeExternalAgentApprovalToken(input: RevokeExternalAgentApprovalTokenInput) : Promise<Result<RevokeExternalAgentApprovalTokenResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("revoke_external_agent_approval_token", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
 /**
  * Creates a new AI conversation session for the given project.
  * 
@@ -880,6 +957,26 @@ async createAgentSession(input: CreateAgentSessionInputDto) : Promise<Result<Age
 async getAgentSession(sessionId: string) : Promise<Result<AgentSessionDetailDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_agent_session", { sessionId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Loads the external runtime session link for an OpenReelio AI conversation session.
+ */
+async getExternalAgentSessionLink(input: GetExternalAgentSessionLinkInput) : Promise<Result<ExternalAgentSessionLinkDto | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_external_agent_session_link", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Creates or updates the external runtime session link for an OpenReelio AI conversation session.
+ */
+async upsertExternalAgentSessionLink(input: UpsertExternalAgentSessionLinkInput) : Promise<Result<ExternalAgentSessionLinkDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("upsert_external_agent_session_link", { input }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -2453,7 +2550,7 @@ needsConfirmation: boolean | null;
  * AI's understanding of the intent
  */
 intent: AIIntentDto | null }
-export type AISettingsDto = { primaryProvider: ProviderTypeDto; primaryModel: string; visionProvider: ProviderTypeDto | null; visionModel: string | null; openaiApiKey: string | null; anthropicApiKey: string | null; googleApiKey: string | null; ollamaUrl: string | null; temperature: number; maxTokens: number; frameExtractionRate: number; monthlyBudgetCents: number | null; perRequestLimitCents: number; currentMonthUsageCents: number; currentUsageMonth: number | null; autoAnalyzeOnImport: boolean; autoCaptionOnImport: boolean; proposalReviewMode: ProposalReviewModeDto; cacheDurationHours: number; localOnlyMode: boolean; seedanceApiKey?: string | null; videoGenProvider?: string | null; videoGenDefaultQuality?: string; videoGenBudgetCents?: number | null; videoGenPerRequestLimitCents?: number }
+export type AISettingsDto = { assistantRuntime?: AssistantRuntimeDto; codexModel?: string; codexReasoningEffort?: CodexReasoningEffortDto; primaryProvider: ProviderTypeDto; primaryModel: string; visionProvider: ProviderTypeDto | null; visionModel: string | null; openaiApiKey: string | null; anthropicApiKey: string | null; googleApiKey: string | null; ollamaUrl: string | null; temperature: number; maxTokens: number; frameExtractionRate: number; monthlyBudgetCents: number | null; perRequestLimitCents: number; currentMonthUsageCents: number; currentUsageMonth: number | null; autoAnalyzeOnImport: boolean; autoCaptionOnImport: boolean; proposalReviewMode: ProposalReviewModeDto; cacheDurationHours: number; localOnlyMode: boolean; seedanceApiKey?: string | null; videoGenProvider?: string | null; videoGenDefaultQuality?: string; videoGenBudgetCents?: number | null; videoGenPerRequestLimitCents?: number }
 /**
  * A plan produced by the AI planner, consisting of ordered steps
  * to be executed atomically with rollback support.
@@ -2993,6 +3090,7 @@ duration: number | null;
  * Associated tags
  */
 tags: string[] }
+export type AssistantRuntimeDto = "api" | "codex"
 /**
  * Audio codec selection
  */
@@ -3542,6 +3640,14 @@ sourceInSec: number;
  * End time within source (seconds)
  */
 sourceOutSec: number }
+export type CodexAgentLoginResult = { success: boolean; authStatus: string; message: string | null }
+export type CodexAppServerSessionInput = { serverId: string }
+export type CodexAppServerStartResult = { serverId: string; eventName: string; command: string; args: string[]; cwd: string }
+export type CodexAppServerWriteInput = { serverId: string; message: JsonValue }
+export type CodexModelCatalogResult = { installed: boolean; defaultModel: string; defaultReasoningEffort: string; models: CodexModelInfo[]; reason: string | null }
+export type CodexModelInfo = { slug: string; displayName: string; defaultReasoningEffort: string; supportedReasoningEfforts: string[] }
+export type CodexReasoningEffortDto = "low" | "medium" | "high" | "xhigh"
+export type CodexStatusProbeResult = { installed: boolean; version: string | null; authStatus: string; reason: string | null }
 /**
  * Color (RGBA)
  */
@@ -3605,6 +3711,8 @@ deletedIds: string[] }
  * Persisted compaction record DTO aligned with the frontend session kernel vocabulary.
  */
 export type CompactionRecordDto = { id: string; sessionId: string; runId: string | null; tier: string; trigger: string; summaryMessageId: string | null; sourceMessageCount: number; retainedMessageCount: number; estimatedTokensSaved: number | null; continuationSummaryJson: string | null; stateRehydrationJson: string | null; createdAt: number }
+export type ConfigureCodexAgentRuntimeInput = { projectPath: string | null }
+export type ConfigureCodexAgentRuntimeResult = { installed: boolean; version: string | null; authStatus: string; ready: boolean; requiresLogin: boolean; pluginMarketplaceConfigured: boolean; mcpConfigured: boolean; message: string | null }
 /**
  * Response for configure_seedance_provider
  */
@@ -3669,6 +3777,7 @@ errorCode: ConnectionErrorCode | null;
  * Detailed error message (only present on failure)
  */
 errorDetails: string | null }
+export type ConsumeExternalAgentApprovalTokenInput = { token: string; sessionId: string; planId: string | null; projectId: string; runtimeId: string; requiredScope: string }
 /**
  * A generated contact sheet image composed from representative shot keyframes.
  */
@@ -3797,6 +3906,7 @@ export type CreateCompoundClipArgs = { sequenceId: string; trackId: string; clip
  * Input payload for creating a delegation record.
  */
 export type CreateDelegationRecordInput = { id: string | null; parentSessionId: string; childSessionId: string; parentRunId: string; agentProfileId: string; delegatedGoal: string; contextPacketJson: string; allowedToolsDeltaJson: string | null; permissionSnapshotJson: string | null; status: string | null; mergeStatus: string | null; summaryMessageId: string | null; resultJson: string | null; errorMessage: string | null; completedAt: number | null }
+export type CreateExternalAgentApprovalTokenInput = { sessionId: string; runId: string | null; planId: string | null; projectId: string; runtimeId: string; scopes: string[]; ttlMs: number | null }
 /**
  * Input payload for creating a resume checkpoint.
  */
@@ -4081,6 +4191,15 @@ export type ExportQualityTier =
  */
 "custom"
 export type ExportSettingsDto = { defaultFormat: string; defaultVideoCodec: string; defaultAudioCodec: string; defaultExportLocation: string | null; openFolderAfterExport: boolean }
+export type ExternalAgentApprovalTokenGrant = { token: string; tokenId: string; sessionId: string; runId: string | null; planId: string | null; projectId: string; runtimeId: string; scopes: string[]; createdAt: number; expiresAt: number }
+export type ExternalAgentApprovalTokenInfo = { tokenId: string; sessionId: string; runId: string | null; planId: string | null; projectId: string; runtimeId: string; scopes: string[]; createdAt: number; expiresAt: number }
+export type ExternalAgentApprovalTokenValidation = { valid: boolean; reason: string | null; grant: ExternalAgentApprovalTokenInfo | null }
+/**
+ * Durable external runtime session link for an OpenReelio conversation session.
+ */
+export type ExternalAgentSessionLinkDto = { conversationSessionId: string; projectId: string; runtimeId: string; externalSessionId: string; metadataJson: string | null; createdAt: number; updatedAt: number }
+export type ExternalAgentSetupInfo = { codexLoginCommand: string; codexPluginMarketplaceRoot: string | null; codexPluginMarketplaceCommand: string | null; codexMcpCommand: string | null; codexMcpCommandReason: string | null }
+export type ExternalAgentSetupInfoInput = { projectPath: string | null }
 export type ExternalDiarizationRunSummary = { assetId: string; inputAudioPath: string; outputJsonPath: string; transcriptSegmentCount: number; speakerCount: number; speakerTurnCount: number }
 /**
  * FFmpeg availability and version information.
@@ -4320,6 +4439,10 @@ annotation: AssetAnnotation | null;
  * Analysis status
  */
 status: AnalysisStatus }
+/**
+ * Input payload for loading an external runtime session link.
+ */
+export type GetExternalAgentSessionLinkInput = { conversationSessionId: string; runtimeId: string }
 /**
  * GPU acceleration status
  */
@@ -5494,6 +5617,8 @@ trackId: string;
  * Timeline position corresponding to the source monitor's playhead.
  */
 timelineSec: number }
+export type RevokeExternalAgentApprovalTokenInput = { token: string }
+export type RevokeExternalAgentApprovalTokenResult = { revoked: boolean }
 /**
  * Statistical profile of shot durations in a video
  */
@@ -6042,6 +6167,7 @@ transformsPath: string }
  * Input payload for starting a new agent run.
  */
 export type StartAgentRunInput = { sessionId: string; runtimeKind: string | null; trigger: string | null; maxIterations: number | null; maxToolCalls: number | null; plannedStepCount: number | null; inputMessageId: string | null; traceId: string | null; id: string | null }
+export type StartCodexAppServerInput = { serverId: string | null; cwd: string | null; model: string | null; reasoningEffort: string | null }
 export type StartTerminalSessionInput = { sessionId: string; cwd: string | null; cols: number | null; rows: number | null; profileId?: string | null; shell?: string | null; shellArgs?: string[] | null }
 /**
  * State change types for event broadcasting.
@@ -7113,6 +7239,10 @@ export type UpdateCheckResultDto = { status: string; version: string | null; not
  * Input payload for updating a delegation record.
  */
 export type UpdateDelegationRecordInput = { id: string; status: string | null; mergeStatus: string | null; summaryMessageId: string | null; resultJson: string | null; errorMessage: string | null; completedAt: number | null }
+/**
+ * Input payload for creating or updating an external runtime session link.
+ */
+export type UpsertExternalAgentSessionLinkInput = { conversationSessionId: string; projectId: string; runtimeId: string; externalSessionId: string; metadataJson: string | null }
 /**
  * Result of validating an EditScript.
  */

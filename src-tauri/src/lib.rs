@@ -898,6 +898,14 @@ pub struct AppState {
 
     /// Active integrated terminal sessions keyed by session ID.
     pub terminal_sessions: Mutex<HashMap<String, Arc<crate::ipc::terminal::TerminalSessionHandle>>>,
+
+    /// Active Codex app-server process transports keyed by server ID.
+    pub codex_app_server_sessions:
+        Mutex<HashMap<String, Arc<crate::ipc::codex_app_server::CodexAppServerProcessHandle>>>,
+
+    /// Runtime-only approval tokens issued for external agent mutation windows.
+    pub external_agent_approval_tokens:
+        Mutex<crate::core::external_agent::ExternalAgentApprovalTokenStore>,
 }
 
 /// Runtime source monitor state for dual-viewer workflow.
@@ -1027,6 +1035,10 @@ impl AppState {
             workspace_watcher_lifecycle: Mutex::new(()),
             workspace_event_loop: Mutex::new(None),
             terminal_sessions: Mutex::new(HashMap::new()),
+            codex_app_server_sessions: Mutex::new(HashMap::new()),
+            external_agent_approval_tokens: Mutex::new(
+                crate::core::external_agent::ExternalAgentApprovalTokenStore::default(),
+            ),
         }
     }
 
@@ -1263,12 +1275,26 @@ mod tauri_app {
                 $crate::ipc::complete_with_ai_raw,
                 $crate::ipc::chat_with_ai,
                 $crate::ipc::get_available_ai_models,
+                // External agent status commands
+                $crate::ipc::get_codex_status,
+                $crate::ipc::get_codex_model_catalog,
+                $crate::ipc::start_codex_app_server,
+                $crate::ipc::write_codex_app_server_message,
+                $crate::ipc::stop_codex_app_server,
+                $crate::ipc::create_external_agent_approval_token,
+                $crate::ipc::get_external_agent_setup_info,
+                $crate::ipc::configure_codex_agent_runtime,
+                $crate::ipc::start_codex_login,
+                $crate::ipc::consume_external_agent_approval_token,
+                $crate::ipc::revoke_external_agent_approval_token,
                 // AI Conversation persistence commands
                 $crate::core::ai::conversation_commands::create_ai_session,
                 $crate::core::ai::conversation_commands::list_ai_sessions,
                 $crate::core::ai::conversation_commands::get_ai_session,
                 $crate::core::ai::conversation_commands::create_agent_session,
                 $crate::core::ai::conversation_commands::get_agent_session,
+                $crate::core::ai::conversation_commands::get_external_agent_session_link,
+                $crate::core::ai::conversation_commands::upsert_external_agent_session_link,
                 $crate::core::ai::conversation_commands::start_agent_run,
                 $crate::core::ai::conversation_commands::update_agent_run_phase,
                 $crate::core::ai::conversation_commands::create_agent_delegation_record,
@@ -1710,12 +1736,26 @@ mod tauri_app {
             ipc::complete_with_ai_raw,
             ipc::chat_with_ai,
             ipc::get_available_ai_models,
+            // External agent status commands
+            ipc::get_codex_status,
+            ipc::get_codex_model_catalog,
+            ipc::start_codex_app_server,
+            ipc::write_codex_app_server_message,
+            ipc::stop_codex_app_server,
+            ipc::create_external_agent_approval_token,
+            ipc::get_external_agent_setup_info,
+            ipc::configure_codex_agent_runtime,
+            ipc::start_codex_login,
+            ipc::consume_external_agent_approval_token,
+            ipc::revoke_external_agent_approval_token,
             // AI Conversation persistence commands
             crate::core::ai::conversation_commands::create_ai_session,
             crate::core::ai::conversation_commands::list_ai_sessions,
             crate::core::ai::conversation_commands::get_ai_session,
             crate::core::ai::conversation_commands::create_agent_session,
             crate::core::ai::conversation_commands::get_agent_session,
+            crate::core::ai::conversation_commands::get_external_agent_session_link,
+            crate::core::ai::conversation_commands::upsert_external_agent_session_link,
             crate::core::ai::conversation_commands::start_agent_run,
             crate::core::ai::conversation_commands::update_agent_run_phase,
             crate::core::ai::conversation_commands::create_agent_delegation_record,

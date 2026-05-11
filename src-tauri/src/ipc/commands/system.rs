@@ -199,8 +199,40 @@ pub enum ProposalReviewModeDto {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantRuntimeDto {
+    Api,
+    Codex,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexReasoningEffortDto {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
+fn default_codex_model_dto() -> String {
+    crate::core::codex::DEFAULT_CODEX_MODEL.to_string()
+}
+
+fn default_codex_reasoning_effort_dto() -> CodexReasoningEffortDto {
+    CodexReasoningEffortDto::Medium
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AISettingsDto {
+    // Assistant Runtime
+    #[serde(default = "default_assistant_runtime_dto")]
+    pub assistant_runtime: AssistantRuntimeDto,
+    #[serde(default = "default_codex_model_dto")]
+    pub codex_model: String,
+    #[serde(default = "default_codex_reasoning_effort_dto")]
+    pub codex_reasoning_effort: CodexReasoningEffortDto,
+
     // Provider Configuration
     pub primary_provider: ProviderTypeDto,
     pub primary_model: String,
@@ -244,6 +276,10 @@ pub struct AISettingsDto {
     pub video_gen_budget_cents: Option<u32>,
     #[serde(default = "default_video_gen_per_request_limit_dto")]
     pub video_gen_per_request_limit_cents: u32,
+}
+
+fn default_assistant_runtime_dto() -> AssistantRuntimeDto {
+    AssistantRuntimeDto::Api
 }
 
 fn default_video_gen_default_quality_dto() -> String {
@@ -313,6 +349,25 @@ impl From<AppSettings> for AppSettingsDto {
                 cache_size_mb: s.performance.cache_size_mb,
             },
             ai: AISettingsDto {
+                assistant_runtime: match s.ai.assistant_runtime {
+                    crate::core::settings::AssistantRuntime::Api => AssistantRuntimeDto::Api,
+                    crate::core::settings::AssistantRuntime::Codex => AssistantRuntimeDto::Codex,
+                },
+                codex_model: s.ai.codex_model,
+                codex_reasoning_effort: match s.ai.codex_reasoning_effort {
+                    crate::core::settings::CodexReasoningEffort::Low => {
+                        CodexReasoningEffortDto::Low
+                    }
+                    crate::core::settings::CodexReasoningEffort::Medium => {
+                        CodexReasoningEffortDto::Medium
+                    }
+                    crate::core::settings::CodexReasoningEffort::High => {
+                        CodexReasoningEffortDto::High
+                    }
+                    crate::core::settings::CodexReasoningEffort::Xhigh => {
+                        CodexReasoningEffortDto::Xhigh
+                    }
+                },
                 primary_provider: match s.ai.primary_provider {
                     crate::core::settings::ProviderType::OpenAI => ProviderTypeDto::Openai,
                     crate::core::settings::ProviderType::Anthropic => ProviderTypeDto::Anthropic,
@@ -426,6 +481,17 @@ impl From<AppSettingsDto> for AppSettings {
                 cache_size_mb: dto.performance.cache_size_mb,
             },
             ai: AISettings {
+                assistant_runtime: match dto.ai.assistant_runtime {
+                    AssistantRuntimeDto::Api => AssistantRuntime::Api,
+                    AssistantRuntimeDto::Codex => AssistantRuntime::Codex,
+                },
+                codex_model: dto.ai.codex_model,
+                codex_reasoning_effort: match dto.ai.codex_reasoning_effort {
+                    CodexReasoningEffortDto::Low => CodexReasoningEffort::Low,
+                    CodexReasoningEffortDto::Medium => CodexReasoningEffort::Medium,
+                    CodexReasoningEffortDto::High => CodexReasoningEffort::High,
+                    CodexReasoningEffortDto::Xhigh => CodexReasoningEffort::Xhigh,
+                },
                 primary_provider: match dto.ai.primary_provider {
                     ProviderTypeDto::Openai => ProviderType::OpenAI,
                     ProviderTypeDto::Anthropic => ProviderType::Anthropic,
