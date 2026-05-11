@@ -2540,9 +2540,7 @@ fn build_text_summary(ocr_texts: &[String]) -> Option<String> {
 }
 
 fn build_visual_cue_summary(frame_analysis: Option<&CachedFrameAnalysis>) -> Option<String> {
-    let Some(frame_analysis) = frame_analysis else {
-        return None;
-    };
+    let frame_analysis = frame_analysis?;
 
     let mut parts = Vec::new();
     if !frame_analysis.camera_angle.trim().is_empty() && frame_analysis.camera_angle != "unknown" {
@@ -2745,74 +2743,76 @@ fn build_scene_label(
     "Visual moment".to_string()
 }
 
-fn build_semantic_moment_summary(
-    dominant_segment_type: Option<&str>,
-    transcript_excerpt: Option<&str>,
-    top_object_labels: &[String],
-    people_summary: Option<&str>,
-    audio_summary: Option<&str>,
-    text_summary: Option<&str>,
-    visual_cue_summary: Option<&str>,
-    setting_hints: &[String],
-) -> String {
-    let quoted_excerpt = quote_snippet(transcript_excerpt, 96);
+struct SemanticMomentSummaryInput<'a> {
+    dominant_segment_type: Option<&'a str>,
+    transcript_excerpt: Option<&'a str>,
+    top_object_labels: &'a [String],
+    people_summary: Option<&'a str>,
+    audio_summary: Option<&'a str>,
+    text_summary: Option<&'a str>,
+    visual_cue_summary: Option<&'a str>,
+    setting_hints: &'a [String],
+}
+
+fn build_semantic_moment_summary(input: SemanticMomentSummaryInput<'_>) -> String {
+    let quoted_excerpt = quote_snippet(input.transcript_excerpt, 96);
     let primary = if let Some(ref quoted_excerpt) = quoted_excerpt {
-        if dominant_segment_type == Some("performance") {
+        if input.dominant_segment_type == Some("performance") {
             format!(
                 "Performance or stage moment with captured lyrics or banter: {}",
                 quoted_excerpt
             )
-        } else if dominant_segment_type == Some("talk") {
+        } else if input.dominant_segment_type == Some("talk") {
             format!("Spoken moment: {}", quoted_excerpt)
         } else {
             format!("Transcript indicates: {}", quoted_excerpt)
         }
-    } else if dominant_segment_type == Some("performance") {
-        if top_object_labels.is_empty() {
+    } else if input.dominant_segment_type == Some("performance") {
+        if input.top_object_labels.is_empty() {
             "Performance-oriented moment".to_string()
         } else {
             format!(
                 "Performance-oriented moment featuring {}",
-                format_natural_list(top_object_labels, 3)
+                format_natural_list(input.top_object_labels, 3)
             )
         }
-    } else if dominant_segment_type == Some("reaction") {
+    } else if input.dominant_segment_type == Some("reaction") {
         "Reaction or cutaway moment".to_string()
-    } else if dominant_segment_type == Some("establishing") {
+    } else if input.dominant_segment_type == Some("establishing") {
         "Establishing shot of the scene".to_string()
-    } else if dominant_segment_type == Some("montage") {
+    } else if input.dominant_segment_type == Some("montage") {
         "Montage or quick-cut sequence".to_string()
-    } else if !top_object_labels.is_empty() {
+    } else if !input.top_object_labels.is_empty() {
         format!(
             "Visual moment featuring {}",
-            format_natural_list(top_object_labels, 3)
+            format_natural_list(input.top_object_labels, 3)
         )
-    } else if text_summary.is_some() {
+    } else if input.text_summary.is_some() {
         "Text-led shot with visible graphics or signage".to_string()
     } else {
-        humanize_segment_type(dominant_segment_type)
+        humanize_segment_type(input.dominant_segment_type)
             .unwrap_or_else(|| "Visual moment with limited semantic cues".to_string())
     };
 
     let mut sentences = vec![ensure_sentence(&primary)];
-    if let Some(people_summary) = people_summary {
+    if let Some(people_summary) = input.people_summary {
         sentences.push(ensure_sentence(&format!("People: {}", people_summary)));
     }
     if quoted_excerpt.is_none() {
-        if let Some(audio_summary) = audio_summary {
+        if let Some(audio_summary) = input.audio_summary {
             sentences.push(ensure_sentence(&format!("Audio: {}", audio_summary)));
         }
     }
-    if let Some(text_summary) = text_summary {
+    if let Some(text_summary) = input.text_summary {
         sentences.push(ensure_sentence(&format!("Text: {}", text_summary)));
     }
-    if !setting_hints.is_empty() {
+    if !input.setting_hints.is_empty() {
         sentences.push(ensure_sentence(&format!(
             "Likely setting: {}",
-            format_natural_list(setting_hints, 2)
+            format_natural_list(input.setting_hints, 2)
         )));
     }
-    if let Some(visual_cue_summary) = visual_cue_summary {
+    if let Some(visual_cue_summary) = input.visual_cue_summary {
         sentences.push(ensure_sentence(&format!("Framing: {}", visual_cue_summary)));
     }
 
@@ -3396,16 +3396,16 @@ fn build_report_moments(
                 &top_object_labels,
                 text_summary.as_deref(),
             );
-            let summary = build_semantic_moment_summary(
-                dominant_segment_type.as_deref(),
-                transcript_excerpt.as_deref(),
-                &top_object_labels,
-                people_summary.as_deref(),
-                audio_summary.as_deref(),
-                text_summary.as_deref(),
-                visual_summary.as_deref(),
-                &setting_hints,
-            );
+            let summary = build_semantic_moment_summary(SemanticMomentSummaryInput {
+                dominant_segment_type: dominant_segment_type.as_deref(),
+                transcript_excerpt: transcript_excerpt.as_deref(),
+                top_object_labels: &top_object_labels,
+                people_summary: people_summary.as_deref(),
+                audio_summary: audio_summary.as_deref(),
+                text_summary: text_summary.as_deref(),
+                visual_cue_summary: visual_summary.as_deref(),
+                setting_hints: &setting_hints,
+            });
 
             json!({
                 "index": index,
