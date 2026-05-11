@@ -19,6 +19,11 @@ import { defineConfig, devices } from '@playwright/test';
  */
 const e2eServerMode = process.env.E2E_SERVER_MODE === 'dev' ? 'dev' : 'preview';
 const e2eHost = process.env.E2E_HOST ?? '127.0.0.1';
+if (!/^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/.test(e2eHost)) {
+  throw new Error(
+    `E2E_HOST must contain only letters, digits, dots, and hyphens, received '${e2eHost}'`,
+  );
+}
 const e2ePortRaw = process.env.E2E_PORT ?? (e2eServerMode === 'preview' ? '4173' : '5173');
 const e2ePort = Number(e2ePortRaw);
 if (!Number.isInteger(e2ePort) || e2ePort < 1 || e2ePort > 65535) {
