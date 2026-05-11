@@ -409,6 +409,14 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 },
                 "example": "openreelio-cli render start --path ./project --output output.mp4"
             },
+            "mcp": {
+                "description": "Serve read-only OpenReelio MCP tools for external AI agents",
+                "params": {
+                    "project": { "type": "string", "required": false, "desc": "Project directory path to expose through read-only tools" },
+                    "stdio": { "type": "boolean", "required": false, "desc": "Serve MCP JSON-RPC over stdio" }
+                },
+                "example": "openreelio-cli mcp --stdio --project ./project"
+            },
             "help-json": {
                 "description": "Output this command schema as JSON for agent consumption",
                 "params": {},

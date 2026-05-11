@@ -12,6 +12,7 @@ mod asset;
 mod caption;
 mod command;
 mod help_json;
+mod mcp;
 mod plan;
 mod project;
 mod render;
@@ -92,6 +93,9 @@ pub enum Commands {
         action: state::StateAction,
     },
 
+    /// Model Context Protocol server for external AI agents
+    Mcp(mcp::McpAction),
+
     /// Output full command schema as JSON (for agent consumption)
     HelpJson,
 }
@@ -108,6 +112,7 @@ pub fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Plan { action } => plan::execute(action),
         Commands::Command { action } => command::execute(action),
         Commands::State { action } => state::execute(action),
+        Commands::Mcp(action) => mcp::execute(action),
         Commands::HelpJson => help_json::execute(),
     }
 }
