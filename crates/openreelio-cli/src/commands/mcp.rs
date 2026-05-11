@@ -728,7 +728,12 @@ fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
 
     let mut errors = Vec::new();
     let mut step_ids = std::collections::HashSet::new();
-    if plan.get("id").and_then(Value::as_str).unwrap_or_default().is_empty() {
+    if plan
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .is_empty()
+    {
         errors.push("plan.id is required".to_string());
     }
 
@@ -1029,10 +1034,9 @@ mod tests {
         let result: Value = serde_json::from_str(text).expect("validate result JSON");
         assert_eq!(result["status"], "error");
         let errors = result["errors"].as_array().expect("errors");
-        assert!(errors.iter().any(|error| error
-            .as_str()
-            .expect("error")
-            .contains("Cycle detected")));
+        assert!(errors
+            .iter()
+            .any(|error| error.as_str().expect("error").contains("Cycle detected")));
     }
 
     #[test]
