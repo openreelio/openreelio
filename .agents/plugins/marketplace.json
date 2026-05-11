@@ -1,0 +1,20 @@
+{
+  "name": "openreelio",
+  "interface": {
+    "displayName": "OpenReelio Agents"
+  },
+  "plugins": [
+    {
+      "name": "openreelio-codex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/openreelio-codex"
+      },
+      "policy": {
+        "installation": "INSTALLED_BY_DEFAULT",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

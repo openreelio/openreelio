@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "openreelio": {
+      "command": "openreelio-cli",
+      "args": ["mcp", "--stdio", "--project", "${OPENREELIO_PROJECT_PATH}"]
+    }
+  }
+}

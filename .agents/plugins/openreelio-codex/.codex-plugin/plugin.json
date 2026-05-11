@@ -1,0 +1,33 @@
+{
+  "name": "openreelio-codex",
+  "version": "0.1.0",
+  "description": "Use OpenReelio read-only MCP tools and video-editing guidance from Codex.",
+  "author": {
+    "name": "OpenReelio Team",
+    "email": "maintainers@openreelio.dev",
+    "url": "https://github.com/openreelio/openreelio"
+  },
+  "homepage": "https://github.com/openreelio/openreelio",
+  "repository": "https://github.com/openreelio/openreelio",
+  "license": "MIT",
+  "keywords": ["openreelio", "video-editing", "mcp", "codex"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "OpenReelio",
+    "shortDescription": "Plan OpenReelio edits through safe read-only project tools.",
+    "longDescription": "Provides Codex with OpenReelio video-editing guidance plus read-only MCP access to host context, project metadata, timeline snapshots, command schemas, and validation tools.",
+    "developerName": "OpenReelio Team",
+    "category": "Productivity",
+    "capabilities": ["Read", "Interactive"],
+    "websiteURL": "https://github.com/openreelio/openreelio",
+    "privacyPolicyURL": "https://github.com/openreelio/openreelio",
+    "termsOfServiceURL": "https://github.com/openreelio/openreelio",
+    "defaultPrompt": [
+      "Inspect this OpenReelio project and summarize the edit state.",
+      "Validate this OpenReelio command plan before I apply it.",
+      "Suggest a video edit plan for the current timeline."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

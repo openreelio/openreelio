@@ -1,0 +1,9 @@
+{
+  "mcp": {
+    "openreelio": {
+      "type": "local",
+      "command": ["openreelio-cli", "mcp", "--stdio", "--project", "${OPENREELIO_PROJECT_PATH}"],
+      "enabled": true
+    }
+  }
+}
