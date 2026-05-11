@@ -52,6 +52,32 @@ describe('TauriExternalAgentSessionPersistence', () => {
     ).resolves.toBeNull();
   });
 
+  it('should return null when no persisted link exists', async () => {
+    const invokeCommand = vi.fn().mockResolvedValue(null);
+    const persistence = new TauriExternalAgentSessionPersistence(invokeCommand);
+
+    await expect(
+      persistence.load({
+        projectId: 'project-1',
+        conversationSessionId: 'session-1',
+        runtimeId: 'codex',
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it('should propagate load failures from the backend', async () => {
+    const invokeCommand = vi.fn().mockRejectedValue(new Error('IPC timeout'));
+    const persistence = new TauriExternalAgentSessionPersistence(invokeCommand);
+
+    await expect(
+      persistence.load({
+        projectId: 'project-1',
+        conversationSessionId: 'session-1',
+        runtimeId: 'codex',
+      }),
+    ).rejects.toThrow('IPC timeout');
+  });
+
   it('should save external runtime session links with metadata', async () => {
     const invokeCommand = vi.fn().mockResolvedValue(undefined);
     const persistence = new TauriExternalAgentSessionPersistence(invokeCommand);
@@ -89,5 +115,19 @@ describe('TauriExternalAgentSessionPersistence', () => {
     ).rejects.toThrow('Cannot persist other-runtime session under codex runtime');
 
     expect(invokeCommand).not.toHaveBeenCalled();
+  });
+
+  it('should propagate save failures from the backend', async () => {
+    const invokeCommand = vi.fn().mockRejectedValue(new Error('Database error'));
+    const persistence = new TauriExternalAgentSessionPersistence(invokeCommand);
+
+    await expect(
+      persistence.save({
+        projectId: 'project-1',
+        conversationSessionId: 'session-1',
+        runtimeId: 'codex',
+        externalSession: { sessionId: 'thr_123', runtimeId: 'codex' },
+      }),
+    ).rejects.toThrow('Database error');
   });
 });

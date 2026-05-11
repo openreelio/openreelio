@@ -154,6 +154,33 @@ describe('ExternalAgentChatRuntimeController', () => {
     expect(states).toContain('running');
   });
 
+  it('should create a conversation session when no active session exists', async () => {
+    const conversation = new FakeConversationGateway();
+    conversation.activeSessionId = null;
+    conversation.ensureSession.mockImplementationOnce(async () => {
+      conversation.activeSessionId = 'session-created';
+      return 'session-created';
+    });
+    const adapter = new FakeExternalAgentAdapter();
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+    });
+
+    await controller.sendMessage('Initialize session');
+
+    expect(conversation.ensureSession).toHaveBeenCalledWith('codex');
+    expect(adapter.startSession).toHaveBeenCalledWith({
+      projectId: 'project-1',
+      cwd: null,
+    });
+    expect(adapter.sendMessage).toHaveBeenCalledWith('thr_123', {
+      content: 'Initialize session',
+      cwd: null,
+    });
+  });
+
   it('should stream assistant deltas into the active assistant message and finalize on turn completion', async () => {
     const conversation = new FakeConversationGateway();
     const adapter = new FakeExternalAgentAdapter();
@@ -193,6 +220,28 @@ describe('ExternalAgentChatRuntimeController', () => {
     ]);
     expect(conversation.finalizeMessage).toHaveBeenCalledWith('assistant-1');
     expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('should ignore runtime events for untracked external sessions', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+    });
+
+    await controller.sendMessage('Start session');
+    adapter.emit({
+      type: 'assistant_delta',
+      runtimeId: 'codex',
+      sessionId: 'thr_wrong_session',
+      itemId: 'item_1',
+      content: 'This should be ignored',
+    });
+
+    expect(conversation.getMessageParts('assistant-1')).toEqual([]);
+    expect(conversation.finalizeMessage).not.toHaveBeenCalled();
   });
 
   it('should interrupt the active external session', async () => {
@@ -412,6 +461,29 @@ describe('ExternalAgentChatRuntimeController', () => {
     expect(adapter.shutdown).toHaveBeenCalledWith('thr_123');
   });
 
+  it('should ignore runtime events after disposal', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+    });
+
+    await controller.sendMessage('Start a session');
+    controller.dispose();
+    adapter.emit({
+      type: 'assistant_delta',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'item_1',
+      content: 'Late arrival',
+    });
+
+    expect(conversation.getMessageParts('assistant-1')).toEqual([]);
+    expect(conversation.finalizeMessage).not.toHaveBeenCalled();
+  });
+
   it('should shut down tracked runtime sessions before switching adapters', async () => {
     const conversation = new FakeConversationGateway();
     const adapter = new FakeExternalAgentAdapter();
@@ -512,6 +584,64 @@ describe('ExternalAgentChatRuntimeController', () => {
         source: 'interactive_approval',
       }),
       'allow_always',
+      'interactive_approval',
+    );
+  });
+
+  it('should mark approval parts denied when the user declines a request', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const approvalBroker = new ExternalAgentApprovalBroker({ timeoutMs: 0 });
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+      approvalBroker,
+    });
+
+    await controller.sendMessage('Edit files');
+    const decisionPromise = approvalBroker.requestDecision({
+      id: 'codex:12',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      turnId: 'turn_1',
+      itemId: 'patch_1',
+      requestId: 12,
+      approvalType: 'file_change',
+      tool: 'Codex file change',
+      description: 'Approve Codex file changes',
+      args: { grantRoot: '/project' },
+      reason: null,
+      requestedAt: 1000,
+    });
+    adapter.emit({
+      type: 'approval_requested',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'patch_1',
+      requestId: 12,
+      approvalType: 'file_change',
+      tool: 'Codex file change',
+      description: 'Approve Codex file changes',
+      args: { grantRoot: '/project' },
+    });
+
+    controller.resolveApproval('decline');
+
+    await expect(decisionPromise).resolves.toBe('decline');
+    expect(conversation.getMessageParts('assistant-1')?.[0]).toMatchObject({
+      status: 'denied',
+    });
+    expect(persistPermissionAudit).toHaveBeenCalledWith(
+      'session-1',
+      null,
+      'codex:12',
+      expect.objectContaining({
+        subjectType: 'approval',
+        subject: 'external_agent.codex.file_change.Codex file change',
+        source: 'interactive_approval',
+      }),
+      'deny',
       'interactive_approval',
     );
   });
