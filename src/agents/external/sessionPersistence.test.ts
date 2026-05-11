@@ -74,4 +74,20 @@ describe('TauriExternalAgentSessionPersistence', () => {
       },
     });
   });
+
+  it('should reject runtime mismatches before persisting external session links', async () => {
+    const invokeCommand = vi.fn().mockResolvedValue(undefined);
+    const persistence = new TauriExternalAgentSessionPersistence(invokeCommand);
+
+    await expect(
+      persistence.save({
+        projectId: 'project-1',
+        conversationSessionId: 'session-1',
+        runtimeId: 'codex',
+        externalSession: { sessionId: 'thr_123', runtimeId: 'other-runtime' },
+      }),
+    ).rejects.toThrow('Cannot persist other-runtime session under codex runtime');
+
+    expect(invokeCommand).not.toHaveBeenCalled();
+  });
 });

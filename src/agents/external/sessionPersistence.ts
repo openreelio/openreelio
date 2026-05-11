@@ -36,9 +36,7 @@ type TauriInvoke = (command: string, args?: Record<string, unknown>) => Promise<
 export class TauriExternalAgentSessionPersistence implements ExternalAgentSessionPersistence {
   constructor(private readonly invokeCommand: TauriInvoke = invoke) {}
 
-  async load(
-    input: LoadExternalAgentSessionLinkInput,
-  ): Promise<ExternalAgentSessionHandle | null> {
+  async load(input: LoadExternalAgentSessionLinkInput): Promise<ExternalAgentSessionHandle | null> {
     const link = (await this.invokeCommand('get_external_agent_session_link', {
       input: {
         conversationSessionId: input.conversationSessionId,
@@ -57,6 +55,12 @@ export class TauriExternalAgentSessionPersistence implements ExternalAgentSessio
   }
 
   async save(input: SaveExternalAgentSessionLinkInput): Promise<void> {
+    if (input.externalSession.runtimeId !== input.runtimeId) {
+      throw new Error(
+        `Cannot persist ${input.externalSession.runtimeId} session under ${input.runtimeId} runtime`,
+      );
+    }
+
     await this.invokeCommand('upsert_external_agent_session_link', {
       input: {
         conversationSessionId: input.conversationSessionId,

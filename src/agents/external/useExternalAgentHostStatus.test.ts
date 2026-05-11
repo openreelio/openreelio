@@ -3,6 +3,18 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setFeatureFlag, resetFeatureFlags } from '@/config/featureFlags';
 import { useExternalAgentHostStatus } from './useExternalAgentHostStatus';
+import type { ExternalAgentHostSummary, ExternalAgentRuntimeSummary } from './host';
+
+function findRuntime(
+  summary: ExternalAgentHostSummary,
+  runtimeId: string,
+): ExternalAgentRuntimeSummary {
+  const runtime = summary.runtimes.find((candidate) => candidate.runtimeId === runtimeId);
+  if (!runtime) {
+    throw new Error(`Expected ${runtimeId} runtime summary`);
+  }
+  return runtime;
+}
 
 describe('useExternalAgentHostStatus', () => {
   beforeEach(() => {
@@ -16,7 +28,7 @@ describe('useExternalAgentHostStatus', () => {
           installed: true,
           authStatus: 'signed-in',
         }),
-      })
+      }),
     );
 
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -25,7 +37,7 @@ describe('useExternalAgentHostStatus', () => {
       enabled: false,
       readyRuntimeCount: 0,
     });
-    expect(result.current.summary.runtimes[0]).toMatchObject({
+    expect(findRuntime(result.current.summary, 'codex')).toMatchObject({
       runtimeId: 'codex',
       ready: false,
       reason: 'External Agent Host is disabled',
@@ -43,14 +55,14 @@ describe('useExternalAgentHostStatus', () => {
           version: '0.50.0',
           authStatus: 'signed-in',
         }),
-      })
+      }),
     );
 
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     expect(result.current.summary.enabled).toBe(true);
     expect(result.current.summary.readyRuntimeCount).toBe(1);
-    expect(result.current.summary.runtimes[0]).toMatchObject({
+    expect(findRuntime(result.current.summary, 'codex')).toMatchObject({
       runtimeId: 'codex',
       displayName: 'Codex',
       ready: true,
@@ -69,17 +81,40 @@ describe('useExternalAgentHostStatus', () => {
           version: '0.50.0',
           authStatus: 'signed-in',
         }),
-      })
+      }),
     );
 
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     expect(result.current.summary.enabled).toBe(true);
     expect(result.current.summary.readyRuntimeCount).toBe(1);
-    expect(result.current.summary.runtimes[0]).toMatchObject({
+    expect(findRuntime(result.current.summary, 'codex')).toMatchObject({
       runtimeId: 'codex',
       ready: true,
       authStatus: 'signed-in',
+    });
+  });
+
+  it('should stop loading and expose a failed Codex summary when probing rejects', async () => {
+    const { result } = renderHook(() =>
+      useExternalAgentHostStatus({
+        hostEnabled: true,
+        codexEnabled: true,
+        codexProbe: async () => {
+          throw new Error('probe failed');
+        },
+      }),
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(result.current.summary.enabled).toBe(true);
+    expect(result.current.summary.readyRuntimeCount).toBe(0);
+    expect(findRuntime(result.current.summary, 'codex')).toMatchObject({
+      runtimeId: 'codex',
+      ready: false,
+      authStatus: 'error',
+      reason: 'probe failed',
     });
   });
 });

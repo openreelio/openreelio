@@ -99,6 +99,15 @@ export function AgenticSidebarContent({
     hostEnabled: useCodexExternalRuntime,
     codexEnabled: useCodexExternalRuntime,
   });
+  const codexRuntimeSummary = useMemo(
+    () =>
+      externalAgentStatus.summary.runtimes.find((runtime) => runtime.runtimeId === 'codex') ?? null,
+    [externalAgentStatus.summary.runtimes],
+  );
+  const codexRuntimeReady = Boolean(useCodexExternalRuntime && codexRuntimeSummary?.ready);
+  const codexUnavailableReason = externalAgentStatus.loading
+    ? 'Checking Codex availability...'
+    : (codexRuntimeSummary?.reason ?? null);
 
   const llmClient = useMemo(() => {
     logger.info('Creating TauriLLMAdapter');
@@ -276,12 +285,19 @@ export function AgenticSidebarContent({
     [abortCurrentSession, createSession, runSessionTransition],
   );
   const createNewExternalSession = useCallback(() => {
+    if (!codexRuntimeReady) {
+      return;
+    }
+
     abortCurrentSession();
     void runSessionTransition('new', async () => {
       await createSession('codex', { preserveDraftConversation: false });
     });
-  }, [abortCurrentSession, createSession, runSessionTransition]);
-  const canCreateNew = Boolean(currentProjectId) && !isSessionTransitionPending;
+  }, [abortCurrentSession, codexRuntimeReady, createSession, runSessionTransition]);
+  const canCreateNew =
+    Boolean(currentProjectId) &&
+    !isSessionTransitionPending &&
+    (!useCodexExternalRuntime || codexRuntimeReady);
 
   const handleSessionSwitch = useCallback(
     (sessionId: string) => {
@@ -426,6 +442,18 @@ export function AgenticSidebarContent({
     [createNewSession, handleDelegateToSpecialist, specialistDefinitionById],
   );
 
+  const handleWorkspaceNewSession = useCallback(
+    (agentProfileId?: string) => {
+      if (useCodexExternalRuntime) {
+        createNewExternalSession();
+        return;
+      }
+
+      createNewSession(agentProfileId ?? DEFAULT_AGENT_PROFILE_ID);
+    },
+    [createNewExternalSession, createNewSession, useCodexExternalRuntime],
+  );
+
   const activeDelegationRecord = useMemo(
     () => delegationRecords.find((record) => record.childSessionId === activeSessionId) ?? null,
     [activeSessionId, delegationRecords],
@@ -467,20 +495,8 @@ export function AgenticSidebarContent({
 
   // Register new chat handler with parent (AISidebar)
   useEffect(() => {
-    onRegisterNewChat?.(
-      () =>
-        useCodexExternalRuntime
-          ? createNewExternalSession()
-          : createNewSession(DEFAULT_AGENT_PROFILE_ID),
-      canCreateNew,
-    );
-  }, [
-    canCreateNew,
-    createNewExternalSession,
-    createNewSession,
-    onRegisterNewChat,
-    useCodexExternalRuntime,
-  ]);
+    onRegisterNewChat?.(() => handleWorkspaceNewSession(DEFAULT_AGENT_PROFILE_ID), canCreateNew);
+  }, [canCreateNew, handleWorkspaceNewSession, onRegisterNewChat]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -651,21 +667,15 @@ export function AgenticSidebarContent({
     logger.error('External agent session error', { error: error.message });
   }, []);
 
-  const codexRuntimeSummary = useMemo(
-    () =>
-      externalAgentStatus.summary.runtimes.find((runtime) => runtime.runtimeId === 'codex') ?? null,
-    [externalAgentStatus.summary.runtimes],
-  );
-  const codexRuntimeReady = Boolean(useCodexExternalRuntime && codexRuntimeSummary?.ready);
-  const codexUnavailableReason = externalAgentStatus.loading
-    ? 'Checking Codex availability...'
-    : (codexRuntimeSummary?.reason ?? null);
-  const workspaceRuntimeState =
-    useCodexExternalRuntime || runtimePolicy.selectedRuntime !== 'disabled'
-      ? isSessionTransitionPending
-        ? 'transitioning'
-        : 'ready'
-      : 'disabled';
+  const workspaceRuntimeState = isSessionTransitionPending
+    ? 'transitioning'
+    : useCodexExternalRuntime
+      ? codexRuntimeReady
+        ? 'ready'
+        : 'disabled'
+      : runtimePolicy.selectedRuntime !== 'disabled'
+        ? 'ready'
+        : 'disabled';
 
   // ===========================================================================
   // Render
@@ -680,12 +690,21 @@ export function AgenticSidebarContent({
       className={className}
       showSessionList={showSessionList}
       onToggleSessionList={() => setShowSessionList((prev) => !prev)}
-      onNewSession={useCodexExternalRuntime ? createNewExternalSession : createNewSession}
+      onNewSession={handleWorkspaceNewSession}
       onSwitchSession={handleSessionSwitch}
+      canCreateNewSession={canCreateNew}
       activeAgentName={useCodexExternalRuntime ? 'Codex' : activeAgentDefinition?.name}
       delegatedFrom={delegatedFromContext}
       delegatedChildren={delegatedChildItems}
       runtimeState={workspaceRuntimeState}
+      runtimeDisabledTitle={
+        useCodexExternalRuntime ? 'Codex runtime is unavailable' : 'AI runtime is disabled'
+      }
+      runtimeDisabledDescription={
+        useCodexExternalRuntime
+          ? (codexUnavailableReason ?? 'Codex is not ready for external agent sessions.')
+          : 'Enable `USE_AGENTIC_ENGINE` to restore the canonical TPAO runtime.'
+      }
       sessionTransitionLabel={sessionTransitionLabel}
     >
       {shouldShowArtifactReviewPanel ? (
@@ -727,7 +746,7 @@ export function AgenticSidebarContent({
           onAbort={handleExternalAbort}
           onError={handleExternalError}
           onStartSession={createNewExternalSession}
-          disabled={isSessionTransitionPending || externalAgentStatus.loading}
+          disabled={isSessionTransitionPending || externalAgentStatus.loading || !codexRuntimeReady}
           className="flex-1"
         />
       ) : (

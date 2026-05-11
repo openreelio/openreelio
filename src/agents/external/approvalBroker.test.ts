@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ExternalAgentApprovalBroker } from './approvalBroker';
 import type { ExternalAgentApprovalRequest } from './types';
@@ -24,6 +24,10 @@ function request(
 }
 
 describe('ExternalAgentApprovalBroker', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('should resolve a pending approval with the user decision', async () => {
     const broker = new ExternalAgentApprovalBroker({ timeoutMs: 0 });
     const snapshots: Array<string | null> = [];
@@ -52,6 +56,14 @@ describe('ExternalAgentApprovalBroker', () => {
 
     await expect(decisionPromise).resolves.toBe('decline');
     expect(broker.getSnapshot().pending).toBeNull();
-    vi.useRealTimers();
+  });
+
+  it('should preserve epoch timestamps when ordering pending approvals', () => {
+    const broker = new ExternalAgentApprovalBroker({ timeoutMs: 0, now: () => 2_000 });
+
+    void broker.requestDecision(request({ id: 'epoch', requestedAt: 0 }));
+
+    expect(broker.getSnapshot().pending?.requestedAt).toBe(0);
+    broker.declineAll();
   });
 });

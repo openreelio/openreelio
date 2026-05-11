@@ -13,10 +13,13 @@ export interface AgenticSidebarWorkspaceProps {
   onToggleSessionList: () => void;
   onNewSession: (agentProfileId?: string) => void;
   onSwitchSession: (sessionId: string) => void;
+  canCreateNewSession?: boolean;
   activeAgentName?: string;
   delegatedFrom?: DelegatedParentContext | null;
   delegatedChildren?: DelegatedChildItem[];
   runtimeState: 'disabled' | 'transitioning' | 'ready';
+  runtimeDisabledTitle?: string;
+  runtimeDisabledDescription?: string;
   sessionTransitionLabel: 'new' | 'switch' | 'delegate' | null;
   children: ReactNode;
 }
@@ -39,21 +42,27 @@ export function AgenticSidebarWorkspace({
   onToggleSessionList,
   onNewSession,
   onSwitchSession,
+  canCreateNewSession = true,
   activeAgentName,
   delegatedFrom = null,
   delegatedChildren = [],
   runtimeState,
+  runtimeDisabledTitle = 'AI runtime is disabled',
+  runtimeDisabledDescription = 'Enable `USE_AGENTIC_ENGINE` to restore the canonical TPAO runtime.',
   sessionTransitionLabel,
   children,
 }: AgenticSidebarWorkspaceProps): JSX.Element {
   const handleNewSession = useCallback(
     (agentProfileId?: string) => {
+      if (!canCreateNewSession) {
+        return;
+      }
       onNewSession(agentProfileId);
       if (showSessionList) {
         onToggleSessionList();
       }
     },
-    [onNewSession, onToggleSessionList, showSessionList],
+    [canCreateNewSession, onNewSession, onToggleSessionList, showSessionList],
   );
 
   const handleSwitchSession = useCallback(
@@ -89,6 +98,7 @@ export function AgenticSidebarWorkspace({
             className="min-h-0 flex-1"
             onNewSession={handleNewSession}
             onSwitchSession={handleSwitchSession}
+            canCreateNewSession={canCreateNewSession}
           />
         </div>
       )}
@@ -126,10 +136,8 @@ export function AgenticSidebarWorkspace({
             className="flex flex-1 items-center justify-center px-6 py-8"
           >
             <div className="max-w-sm text-center">
-              <p className="text-sm font-medium text-text-primary">AI runtime is disabled</p>
-              <p className="mt-2 text-xs text-text-secondary">
-                Enable `USE_AGENTIC_ENGINE` to restore the canonical TPAO runtime.
-              </p>
+              <p className="text-sm font-medium text-text-primary">{runtimeDisabledTitle}</p>
+              <p className="mt-2 text-xs text-text-secondary">{runtimeDisabledDescription}</p>
             </div>
           </div>
         ) : runtimeState === 'transitioning' ? (

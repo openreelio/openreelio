@@ -44,6 +44,7 @@ const defaultSettings: AISettings = {
 
 describe('ExternalAgentRuntimeSettings', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.mocked(invoke).mockImplementation((command) => {
       if (command === 'get_codex_status') {
         return Promise.resolve({
@@ -246,7 +247,7 @@ describe('ExternalAgentRuntimeSettings', () => {
   it('should let users select the Codex model and reasoning effort from the catalog', async () => {
     const onUpdate = vi.fn();
 
-    render(
+    const { rerender } = render(
       <ExternalAgentRuntimeSettings
         settings={{ ...defaultSettings, assistantRuntime: 'codex' }}
         onUpdate={onUpdate}
@@ -262,9 +263,21 @@ describe('ExternalAgentRuntimeSettings', () => {
       codexReasoningEffort: 'low',
     });
 
+    rerender(
+      <ExternalAgentRuntimeSettings
+        settings={{
+          ...defaultSettings,
+          assistantRuntime: 'codex',
+          codexModel: 'gpt-5.4-mini',
+          codexReasoningEffort: 'low',
+        }}
+        onUpdate={onUpdate}
+        disabled={false}
+      />,
+    );
     const effortSelect = screen.getByLabelText(/reasoning effort/i);
-    await userEvent.selectOptions(effortSelect, 'high');
+    await userEvent.selectOptions(effortSelect, 'medium');
 
-    expect(onUpdate).toHaveBeenCalledWith({ codexReasoningEffort: 'high' });
+    expect(onUpdate).toHaveBeenCalledWith({ codexReasoningEffort: 'medium' });
   });
 });

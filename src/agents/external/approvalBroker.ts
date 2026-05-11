@@ -47,7 +47,7 @@ export class ExternalAgentApprovalBroker {
       this.pending.set(request.id, {
         request: {
           ...request,
-          requestedAt: request.requestedAt || (this.options.now?.() ?? Date.now()),
+          requestedAt: request.requestedAt ?? this.options.now?.() ?? Date.now(),
         },
         resolve,
         timeoutId,

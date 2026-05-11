@@ -20,6 +20,7 @@ import { formatDelegationStatus } from './agentDelegationUi';
 interface SessionListProps {
   onNewSession?: (agentProfileId?: string) => void;
   onSwitchSession?: (sessionId: string) => void;
+  canCreateNewSession?: boolean;
   className?: string;
 }
 
@@ -77,7 +78,12 @@ function summarizeDelegationView(
 // Component
 // =============================================================================
 
-export function SessionList({ onNewSession, onSwitchSession, className = '' }: SessionListProps) {
+export function SessionList({
+  onNewSession,
+  onSwitchSession,
+  canCreateNewSession = true,
+  className = '',
+}: SessionListProps) {
   const sessions = useConversationStore((s) => s.sessions);
   const activeSessionId = useConversationStore((s) => s.activeSessionId);
   const switchSession = useConversationStore((s) => s.switchSession);
@@ -137,7 +143,8 @@ export function SessionList({ onNewSession, onSwitchSession, className = '' }: S
         <span className="text-xs font-medium text-text-secondary">Sessions</span>
         <button
           onClick={() => onNewSession?.()}
-          className="p-1 rounded hover:bg-surface-active transition-colors"
+          disabled={!canCreateNewSession}
+          className="p-1 rounded transition-colors hover:bg-surface-active disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
           aria-label="New session"
           title="New session"
           data-testid="new-session-btn"

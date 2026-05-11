@@ -4,6 +4,7 @@ import { isCodexAgentEnabled, isExternalAgentHostEnabled } from '@/config/featur
 
 import { CodexReferenceAdapter, type CodexStatusProbe } from './adapters/CodexReferenceAdapter';
 import { buildExternalAgentHostSummary, type ExternalAgentHostSummary } from './host';
+import type { ExternalAgentRuntimeCapabilities, ExternalAgentRuntimeStatus } from './types';
 
 export const EXTERNAL_AGENT_STATUS_REFRESH_EVENT = 'openreelio:external-agent-status-refresh';
 
@@ -24,8 +25,18 @@ const EMPTY_SUMMARY: ExternalAgentHostSummary = {
   runtimes: [],
 };
 
+const FALLBACK_CODEX_CAPABILITIES: ExternalAgentRuntimeCapabilities = {
+  streamingEvents: false,
+  interrupt: false,
+  mcpClient: false,
+  approvalAware: false,
+  localAccountAuth: false,
+  sessionResume: false,
+  structuredToolCalls: false,
+};
+
 export function useExternalAgentHostStatus(
-  options: UseExternalAgentHostStatusOptions = {}
+  options: UseExternalAgentHostStatusOptions = {},
 ): UseExternalAgentHostStatusResult {
   const hostEnabled = options.hostEnabled ?? isExternalAgentHostEnabled();
   const codexEnabled = options.codexEnabled ?? isCodexAgentEnabled();
@@ -44,37 +55,70 @@ export function useExternalAgentHostStatus(
     async function refresh(): Promise<void> {
       setLoading(true);
       const codexAdapter = new CodexReferenceAdapter(codexProbeRef.current);
-      const codexCapabilities = await codexAdapter.capabilities();
-      const codexStatus =
-        hostEnabled && codexEnabled
-          ? await codexAdapter.detect()
-          : {
-              runtimeId: codexAdapter.id,
-              displayName: codexAdapter.displayName,
-              installStatus: 'unknown' as const,
-              authStatus: 'unknown' as const,
-              available: false,
-              version: null,
-              reason: null,
-            };
+      try {
+        const codexCapabilities = await codexAdapter.capabilities();
+        const codexStatus =
+          hostEnabled && codexEnabled
+            ? await codexAdapter.detect()
+            : {
+                runtimeId: codexAdapter.id,
+                displayName: codexAdapter.displayName,
+                installStatus: 'unknown' as const,
+                authStatus: 'unknown' as const,
+                available: false,
+                version: null,
+                reason: null,
+              };
 
-      if (cancelled) {
-        return;
+        if (cancelled) {
+          return;
+        }
+
+        setSummary(
+          buildExternalAgentHostSummary({
+            hostEnabled,
+            runtimes: [
+              {
+                status: codexStatus,
+                capabilities: codexCapabilities,
+                adapterEnabled: codexEnabled,
+              },
+            ],
+          }),
+        );
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        const fallbackStatus: ExternalAgentRuntimeStatus = {
+          runtimeId: codexAdapter.id,
+          displayName: codexAdapter.displayName,
+          installStatus: 'unknown',
+          authStatus: 'error',
+          available: false,
+          version: null,
+          reason: message,
+        };
+
+        setSummary(
+          buildExternalAgentHostSummary({
+            hostEnabled,
+            runtimes: [
+              {
+                status: fallbackStatus,
+                capabilities: FALLBACK_CODEX_CAPABILITIES,
+                adapterEnabled: codexEnabled,
+              },
+            ],
+          }),
+        );
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-
-      setSummary(
-        buildExternalAgentHostSummary({
-          hostEnabled,
-          runtimes: [
-            {
-              status: codexStatus,
-              capabilities: codexCapabilities,
-              adapterEnabled: codexEnabled,
-            },
-          ],
-        })
-      );
-      setLoading(false);
     }
 
     void refresh();

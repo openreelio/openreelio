@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { persistPermissionAudit } from '@/agents/engine/core/permissionAudit';
 import type { MessagePart } from '@/agents/engine/core/conversation';
@@ -123,6 +123,10 @@ class FakeExternalAgentSessionPersistence implements ExternalAgentSessionPersist
 }
 
 describe('ExternalAgentChatRuntimeController', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('should start an external session with project cwd and send user messages through the adapter', async () => {
     const conversation = new FakeConversationGateway();
     const adapter = new FakeExternalAgentAdapter();
@@ -332,6 +336,100 @@ describe('ExternalAgentChatRuntimeController', () => {
     ]);
     expect(conversation.finalizeMessage).toHaveBeenCalledWith('assistant-1');
     expect(onError).toHaveBeenCalledWith(new Error('Usage limit exceeded'));
+  });
+
+  it('should keep tool calls intact when streaming file changes for the same item', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+    });
+
+    await controller.sendMessage('Modify the timeline');
+    adapter.emit({
+      type: 'tool_started',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'tool_1',
+      tool: 'apply_patch',
+      args: { file: 'src/App.tsx' },
+      description: 'Patch App.tsx',
+    });
+    adapter.emit({
+      type: 'file_change',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'tool_1',
+      diff: 'diff --git a/src/App.tsx b/src/App.tsx',
+      files: ['src/App.tsx'],
+    });
+    adapter.emit({
+      type: 'tool_completed',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'tool_1',
+      tool: 'apply_patch',
+      success: true,
+      durationMs: 42,
+      result: { changed: true },
+    });
+
+    const parts = conversation.getMessageParts('assistant-1') ?? [];
+    expect(parts).toHaveLength(3);
+    expect(parts[0]).toMatchObject({
+      type: 'tool_call',
+      stepId: 'tool_1',
+      status: 'completed',
+      tool: 'apply_patch',
+    });
+    expect(parts[1]).toEqual({
+      type: 'patch',
+      diff: 'diff --git a/src/App.tsx b/src/App.tsx',
+      files: ['src/App.tsx'],
+    });
+    expect(parts[2]).toMatchObject({
+      type: 'tool_result',
+      stepId: 'tool_1',
+      tool: 'apply_patch',
+      success: true,
+    });
+  });
+
+  it('should shut down tracked runtime sessions when disposed', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+    });
+
+    await controller.sendMessage('Start a session');
+    controller.dispose();
+
+    expect(adapter.shutdown).toHaveBeenCalledWith('thr_123');
+  });
+
+  it('should shut down tracked runtime sessions before switching adapters', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const nextAdapter = new FakeExternalAgentAdapter();
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+    });
+
+    await controller.sendMessage('Start a session');
+    controller.updateContext({
+      adapter: nextAdapter,
+      projectId: 'project-1',
+    });
+
+    expect(adapter.shutdown).toHaveBeenCalledWith('thr_123');
+    expect(nextAdapter.shutdown).not.toHaveBeenCalled();
   });
 
   it('should surface Codex approval requests and resolve them through the broker', async () => {

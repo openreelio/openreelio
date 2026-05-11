@@ -86,6 +86,7 @@ export class ExternalAgentChatRuntimeController {
   private readonly messageIdByExternalSessionId = new Map<string, string>();
   private readonly textDeltaMessages = new Set<string>();
   private readonly itemPartIndex = new Map<string, number>();
+  private readonly patchPartIndex = new Map<string, number>();
   private readonly approvalPartIndex = new Map<string, { messageId: string; partIndex: number }>();
   private readonly conversationSessionsPendingPersistence = new Set<string>();
   private activeConversationSessionId: string | null = null;
@@ -127,12 +128,12 @@ export class ExternalAgentChatRuntimeController {
     onError?: (error: Error) => void;
   }): void {
     if (input.adapter && input.adapter !== this.options.adapter) {
+      const previousAdapter = this.options.adapter;
+      this.shutdownTrackedExternalSessions(previousAdapter);
       this.unsubscribe?.();
       this.options.adapter = input.adapter;
       this.unsubscribe = input.adapter.subscribe?.((event) => this.handleEvent(event)) ?? null;
-      this.sessionByConversationSessionId.clear();
-      this.messageIdByExternalSessionId.clear();
-      this.activeConversationSessionId = null;
+      this.clearExternalSessionState();
     }
 
     this.projectId = input.projectId;
@@ -213,10 +214,12 @@ export class ExternalAgentChatRuntimeController {
 
   dispose(): void {
     this.options.approvalBroker?.declineAll();
+    this.shutdownTrackedExternalSessions(this.options.adapter);
     this.unsubscribe?.();
     this.unsubscribeApprovalBroker?.();
     this.unsubscribe = null;
     this.unsubscribeApprovalBroker = null;
+    this.clearExternalSessionState();
   }
 
   resolveApproval(decision: ExternalAgentApprovalDecision): void {
@@ -420,7 +423,7 @@ export class ExternalAgentChatRuntimeController {
     }
 
     const key = this.itemKey(event.sessionId, event.itemId);
-    const existingIndex = this.itemPartIndex.get(key);
+    const existingIndex = this.patchPartIndex.get(key);
     const patch = {
       type: 'patch' as const,
       diff: event.diff,
@@ -434,7 +437,7 @@ export class ExternalAgentChatRuntimeController {
 
     const partIndex = this.options.conversation.getMessageParts(messageId)?.length ?? 0;
     this.options.conversation.appendPart(messageId, patch);
-    this.itemPartIndex.set(key, partIndex);
+    this.patchPartIndex.set(key, partIndex);
   }
 
   private handleApprovalRequest(
@@ -582,6 +585,26 @@ export class ExternalAgentChatRuntimeController {
 
   private itemKey(sessionId: string, itemId: string): string {
     return `${sessionId}:${itemId}`;
+  }
+
+  private shutdownTrackedExternalSessions(adapter: ExternalAgentRuntimeAdapter): void {
+    const externalSessionIds = new Set(
+      [...this.sessionByConversationSessionId.values()].map((session) => session.sessionId),
+    );
+    for (const sessionId of externalSessionIds) {
+      void adapter.shutdown(sessionId).catch(() => undefined);
+    }
+  }
+
+  private clearExternalSessionState(): void {
+    this.sessionByConversationSessionId.clear();
+    this.messageIdByExternalSessionId.clear();
+    this.textDeltaMessages.clear();
+    this.itemPartIndex.clear();
+    this.patchPartIndex.clear();
+    this.approvalPartIndex.clear();
+    this.conversationSessionsPendingPersistence.clear();
+    this.activeConversationSessionId = null;
   }
 
   private updateApprovalPartStatus(requestId: string, denied: boolean): void {

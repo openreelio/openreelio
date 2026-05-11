@@ -382,6 +382,42 @@ describe('AgenticSidebarContent', () => {
         },
       },
     }));
+    useProjectStore.setState((state) => ({
+      ...state,
+      meta: {
+        id: 'project-1',
+        name: 'Project',
+        path: '/project',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        modifiedAt: '2026-01-01T00:00:00.000Z',
+      },
+    }));
+    vi.mocked(useExternalAgentHostStatus).mockReturnValue({
+      loading: false,
+      summary: {
+        enabled: true,
+        readyRuntimeCount: 1,
+        runtimes: [
+          {
+            runtimeId: 'codex',
+            displayName: 'Codex',
+            ready: true,
+            reason: null,
+            installStatus: 'installed',
+            authStatus: 'signed-in',
+            capabilities: {
+              streamingEvents: true,
+              interrupt: true,
+              mcpClient: true,
+              approvalAware: true,
+              localAccountAuth: true,
+              sessionResume: false,
+              structuredToolCalls: true,
+            },
+          },
+        ],
+      },
+    });
     const createSession = vi.fn().mockResolvedValue('session-codex');
     useConversationStore.setState({ createSession });
 
@@ -405,6 +441,84 @@ describe('AgenticSidebarContent', () => {
     expect(createSession).toHaveBeenCalledWith('codex', {
       preserveDraftConversation: false,
     });
+  });
+
+  it('should disable Codex new-chat actions until the runtime is ready', async () => {
+    useSettingsStore.setState((state) => ({
+      ...state,
+      settings: {
+        ...state.settings,
+        ai: {
+          ...state.settings.ai,
+          assistantRuntime: 'codex',
+        },
+      },
+    }));
+    useProjectStore.setState((state) => ({
+      ...state,
+      meta: {
+        id: 'project-1',
+        name: 'Project',
+        path: '/project',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        modifiedAt: '2026-01-01T00:00:00.000Z',
+      },
+    }));
+    vi.mocked(useExternalAgentHostStatus).mockReturnValue({
+      loading: false,
+      summary: {
+        enabled: true,
+        readyRuntimeCount: 0,
+        runtimes: [
+          {
+            runtimeId: 'codex',
+            displayName: 'Codex',
+            ready: false,
+            reason: 'Codex is not authenticated',
+            installStatus: 'installed',
+            authStatus: 'signed-out',
+            capabilities: {
+              streamingEvents: true,
+              interrupt: true,
+              mcpClient: true,
+              approvalAware: true,
+              localAccountAuth: true,
+              sessionResume: false,
+              structuredToolCalls: true,
+            },
+          },
+        ],
+      },
+    });
+    const createSession = vi.fn().mockResolvedValue('session-codex');
+    useConversationStore.setState({ createSession });
+
+    let registeredNewChat: (() => void) | null = null;
+    let canCreateNew = true;
+    render(
+      <AgenticSidebarContent
+        onRegisterNewChat={(handler, canCreate) => {
+          registeredNewChat = handler;
+          canCreateNew = canCreate;
+        }}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('agent-runtime-disabled-state')).toBeInTheDocument();
+    expect(screen.getByText('Codex runtime is unavailable')).toBeInTheDocument();
+    expect(screen.getByText('Codex is not authenticated')).toBeInTheDocument();
+    expect(screen.queryByTestId('external-agent-chat')).not.toBeInTheDocument();
+    expect(canCreateNew).toBe(false);
+
+    await act(async () => {
+      registeredNewChat?.();
+      await Promise.resolve();
+    });
+
+    expect(createSession).not.toHaveBeenCalled();
   });
 
   it('should render an explicit disabled state when the canonical runtime is disabled', () => {

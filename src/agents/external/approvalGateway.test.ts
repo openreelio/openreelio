@@ -87,6 +87,41 @@ describe('ExternalAgentApprovalGateway', () => {
     ).resolves.toEqual(issuedGrant);
   });
 
+  it('normalizes required identifiers before issuing and auditing tokens', async () => {
+    const issuedGrant = grant();
+    const invokeCommand = vi.fn().mockResolvedValue(issuedGrant);
+    const auditRecorder = {
+      recordPermissionDecision: vi.fn().mockResolvedValue(undefined),
+    };
+    const gateway = new ExternalAgentApprovalGateway({ invoke: invokeCommand, auditRecorder });
+
+    await gateway.issuePlanApplyToken({
+      sessionId: ' session-1 ',
+      runId: ' run-1 ',
+      planId: ' plan-1 ',
+      projectId: ' project-1 ',
+      runtimeId: ' codex ',
+    });
+
+    expect(invokeCommand).toHaveBeenCalledWith('create_external_agent_approval_token', {
+      input: expect.objectContaining({
+        sessionId: 'session-1',
+        runId: 'run-1',
+        planId: 'plan-1',
+        projectId: 'project-1',
+        runtimeId: 'codex',
+      }),
+    });
+    expect(auditRecorder.recordPermissionDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'session-1',
+        runId: 'run-1',
+        stepId: 'plan-1',
+        subject: 'codex:openreelio.plan.apply:plan-1',
+      }),
+    );
+  });
+
   it('consumes plan-apply tokens with the required approval scope', async () => {
     const validation = { valid: true, reason: null, grant: null };
     const invokeCommand = vi.fn().mockResolvedValue(validation);
@@ -137,6 +172,21 @@ describe('ExternalAgentApprovalGateway', () => {
         runtimeId: 'codex',
       }),
     ).rejects.toThrow('planId is required');
+    expect(invokeCommand).not.toHaveBeenCalled();
+  });
+
+  it('rejects blank required identifiers before issuing IPC tokens', async () => {
+    const invokeCommand = vi.fn();
+    const gateway = new ExternalAgentApprovalGateway({ invoke: invokeCommand });
+
+    await expect(
+      gateway.issuePlanApplyToken({
+        sessionId: ' ',
+        planId: 'plan-1',
+        projectId: 'project-1',
+        runtimeId: 'codex',
+      }),
+    ).rejects.toThrow('sessionId is required');
     expect(invokeCommand).not.toHaveBeenCalled();
   });
 });

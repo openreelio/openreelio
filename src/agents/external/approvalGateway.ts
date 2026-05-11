@@ -42,23 +42,41 @@ export class ExternalAgentApprovalGateway {
   async issuePlanApplyToken(
     input: CreateExternalAgentPlanApplyApprovalInput,
   ): Promise<ExternalAgentApprovalTokenGrant> {
-    if (!input.planId.trim()) {
+    const normalizedInput: CreateExternalAgentPlanApplyApprovalInput = {
+      ...input,
+      sessionId: input.sessionId.trim(),
+      runId: input.runId?.trim() || null,
+      planId: input.planId.trim(),
+      projectId: input.projectId.trim(),
+      runtimeId: input.runtimeId.trim(),
+    };
+
+    if (!normalizedInput.sessionId) {
+      throw new Error('sessionId is required for external agent plan apply approval');
+    }
+    if (!normalizedInput.planId) {
       throw new Error('planId is required for external agent plan apply approval');
+    }
+    if (!normalizedInput.projectId) {
+      throw new Error('projectId is required for external agent plan apply approval');
+    }
+    if (!normalizedInput.runtimeId) {
+      throw new Error('runtimeId is required for external agent plan apply approval');
     }
 
     const grant = (await this.invokeCommand('create_external_agent_approval_token', {
       input: {
-        sessionId: input.sessionId,
-        runId: input.runId ?? null,
-        planId: input.planId,
-        projectId: input.projectId,
-        runtimeId: input.runtimeId,
+        sessionId: normalizedInput.sessionId,
+        runId: normalizedInput.runId ?? null,
+        planId: normalizedInput.planId,
+        projectId: normalizedInput.projectId,
+        runtimeId: normalizedInput.runtimeId,
         scopes: [PLAN_APPLY_APPROVAL_SCOPE],
-        ttlMs: input.ttlMs ?? DEFAULT_PLAN_APPLY_APPROVAL_TTL_MS,
+        ttlMs: normalizedInput.ttlMs ?? DEFAULT_PLAN_APPLY_APPROVAL_TTL_MS,
       },
     })) as ExternalAgentApprovalTokenGrant;
 
-    await this.persistPlanApplyAudit(input, grant);
+    await this.persistPlanApplyAudit(normalizedInput, grant);
     return grant;
   }
 
