@@ -650,6 +650,8 @@ fn default_codex_model() -> String {
     crate::core::codex::DEFAULT_CODEX_MODEL.to_string()
 }
 
+const MAX_CODEX_MODEL_LENGTH: usize = 128;
+
 /// AI settings for provider configuration and behavior
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -875,7 +877,12 @@ impl Default for AISettings {
 impl AISettings {
     /// Normalize and clamp AI settings values to valid ranges
     pub fn normalize(&mut self) {
-        self.codex_model = self.codex_model.trim().to_string();
+        self.codex_model = self
+            .codex_model
+            .trim()
+            .chars()
+            .take(MAX_CODEX_MODEL_LENGTH)
+            .collect();
         if self.codex_model.is_empty() {
             self.codex_model = default_codex_model();
         }
@@ -1348,6 +1355,18 @@ mod tests {
         ai_settings.normalize();
 
         assert_eq!(ai_settings.primary_model, "gpt-5.2");
+    }
+
+    #[test]
+    fn test_ai_settings_normalization_trims_and_clamps_codex_model() {
+        let mut ai_settings = AISettings {
+            codex_model: format!("  {}  ", "x".repeat(MAX_CODEX_MODEL_LENGTH + 4)),
+            ..Default::default()
+        };
+
+        ai_settings.normalize();
+
+        assert_eq!(ai_settings.codex_model.len(), MAX_CODEX_MODEL_LENGTH);
     }
 
     #[test]

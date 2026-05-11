@@ -109,7 +109,9 @@ pub fn create_codex_command() -> Result<Command, String> {
     let executable = resolve_codex_executable().ok_or_else(|| {
         "Codex executable was not found in PATH or common install locations.".to_string()
     })?;
-    Ok(Command::new(executable))
+    let mut command = Command::new(executable);
+    command.kill_on_drop(true);
+    Ok(command)
 }
 
 pub fn codex_command_label() -> String {

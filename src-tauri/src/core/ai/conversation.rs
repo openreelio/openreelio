@@ -1058,6 +1058,30 @@ impl ConversationDb {
         &self,
         row: &ExternalAgentSessionLinkRow,
     ) -> CoreResult<()> {
+        let session_project_id: String = self
+            .conn
+            .query_row(
+                "SELECT project_id FROM ai_sessions WHERE id = ?1",
+                params![&row.conversation_session_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => CoreError::NotFound(format!(
+                    "Conversation session '{}' not found",
+                    row.conversation_session_id
+                )),
+                other => CoreError::Internal(format!(
+                    "Failed to verify external agent session link project: {other}"
+                )),
+            })?;
+
+        if session_project_id != row.project_id {
+            return Err(CoreError::ValidationError(format!(
+                "External agent session link project '{}' does not match conversation session project '{}'",
+                row.project_id, session_project_id
+            )));
+        }
+
         self.conn
             .execute(
                 r#"INSERT INTO ai_external_agent_sessions
@@ -2684,6 +2708,29 @@ mod tests {
             persisted.metadata_json.as_deref(),
             Some(r#"{"resumed":false}"#)
         );
+    }
+
+    #[test]
+    fn test_external_agent_session_link_rejects_mismatched_project_id() {
+        let db = ConversationDb::in_memory().unwrap();
+        db.create_session("s1", "proj-1", "codex", None, None)
+            .unwrap();
+
+        let result = db.upsert_external_agent_session_link(&ExternalAgentSessionLinkRow {
+            conversation_session_id: "s1".to_string(),
+            project_id: "proj-2".to_string(),
+            runtime_id: "codex".to_string(),
+            external_session_id: "thr_123".to_string(),
+            metadata_json: None,
+            created_at: 1_000,
+            updated_at: 1_000,
+        });
+
+        assert!(matches!(result, Err(CoreError::ValidationError(_))));
+        assert!(db
+            .get_external_agent_session_link("s1", "codex")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

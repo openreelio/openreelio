@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex;
@@ -59,10 +59,16 @@ impl CodexAppServerProcessHandle {
             return Ok(());
         };
 
-        child
-            .kill()
-            .await
-            .map_err(|error| format!("Failed to stop Codex app-server: {error}"))?;
+        let still_running = child
+            .try_wait()
+            .map_err(|error| format!("Failed to inspect Codex app-server: {error}"))?
+            .is_none();
+        if still_running {
+            child
+                .kill()
+                .await
+                .map_err(|error| format!("Failed to stop Codex app-server: {error}"))?;
+        }
         let _ = child.wait().await;
         child_guard.take();
         Ok(())
@@ -122,10 +128,16 @@ pub async fn start_codex_app_server(
     let stderr = child.stderr.take();
 
     let handle = Arc::new(CodexAppServerProcessHandle::new(stdin, child));
-    sessions.insert(server_id.clone(), handle);
+    sessions.insert(server_id.clone(), handle.clone());
     drop(sessions);
 
-    spawn_stdout_reader(app.clone(), server_id.clone(), event_name.clone(), stdout);
+    spawn_stdout_reader(
+        app.clone(),
+        server_id.clone(),
+        event_name.clone(),
+        stdout,
+        handle,
+    );
     if let Some(stderr) = stderr {
         spawn_stderr_reader(app, event_name.clone(), stderr);
     }
@@ -233,6 +245,7 @@ fn spawn_stdout_reader(
     server_id: String,
     event_name: String,
     stdout: tokio::process::ChildStdout,
+    handle: Arc<CodexAppServerProcessHandle>,
 ) {
     tauri::async_runtime::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -246,6 +259,7 @@ fn spawn_stdout_reader(
                     let _ = app.emit(&event_name, event);
                 }
                 Ok(None) => {
+                    remove_codex_app_server_session_if_current(&app, &server_id, &handle).await;
                     let _ = app.emit(
                         &event_name,
                         CodexAppServerStreamEvent::Exit { exit_code: None },
@@ -253,6 +267,7 @@ fn spawn_stdout_reader(
                     break;
                 }
                 Err(error) => {
+                    remove_codex_app_server_session_if_current(&app, &server_id, &handle).await;
                     let _ = app.emit(
                         &event_name,
                         CodexAppServerStreamEvent::Error {
@@ -266,6 +281,22 @@ fn spawn_stdout_reader(
 
         tracing::debug!("Codex app-server stdout reader ended for {}", server_id);
     });
+}
+
+async fn remove_codex_app_server_session_if_current(
+    app: &tauri::AppHandle,
+    server_id: &str,
+    handle: &Arc<CodexAppServerProcessHandle>,
+) {
+    let state = app.state::<AppState>();
+    let mut sessions = state.codex_app_server_sessions.lock().await;
+    let should_remove = sessions
+        .get(server_id)
+        .map(|current| Arc::ptr_eq(current, handle))
+        .unwrap_or(false);
+    if should_remove {
+        sessions.remove(server_id);
+    }
 }
 
 fn spawn_stderr_reader(
