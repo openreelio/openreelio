@@ -6,18 +6,30 @@ export interface CodexAppServerClientInfo {
   version?: string;
 }
 
+export interface CodexInitializeCapabilities {
+  experimentalApi: boolean;
+  optOutNotificationMethods?: string[] | null;
+}
+
 export interface CodexAppServerClientOptions {
   clientInfo?: CodexAppServerClientInfo;
+  capabilities?: CodexInitializeCapabilities;
 }
 
 export interface CodexStartThreadInput {
   cwd?: string;
   model?: string;
   approvalPolicy?: string;
+  approvalsReviewer?: string;
   sandbox?: string | CodexJsonObject;
   sandboxPolicy?: CodexJsonObject;
+  permissions?: CodexJsonObject;
+  config?: CodexJsonObject;
+  baseInstructions?: string;
+  developerInstructions?: string;
   personality?: string;
   serviceName?: string;
+  dynamicTools?: CodexDynamicToolSpec[];
 }
 
 export interface CodexResumeThreadInput extends CodexStartThreadInput {
@@ -29,9 +41,29 @@ export interface CodexStartTurnInput {
   model?: string;
   effort?: string;
   approvalPolicy?: string;
+  approvalsReviewer?: string;
   sandboxPolicy?: CodexJsonObject;
+  permissions?: CodexJsonObject;
   personality?: string;
   summary?: string;
+}
+
+export interface CodexDynamicToolSpec {
+  namespace?: string;
+  name: string;
+  description: string;
+  inputSchema: CodexJsonObject;
+  deferLoading?: boolean;
+}
+
+export interface CodexDynamicToolCallOutputContentItem {
+  type: 'inputText';
+  text: string;
+}
+
+export interface CodexDynamicToolCallResponse {
+  contentItems: CodexDynamicToolCallOutputContentItem[];
+  success: boolean;
 }
 
 export interface CodexThread {
@@ -133,6 +165,7 @@ export class CodexAppServerClient {
   private readonly requestHandlers = new Set<CodexAppServerRequestHandler>();
   private readonly unsubscribeTransport: () => void;
   private readonly clientInfo: CodexAppServerClientInfo;
+  private readonly capabilities: CodexInitializeCapabilities;
 
   constructor(
     private readonly transport: CodexAppServerTransport,
@@ -142,6 +175,9 @@ export class CodexAppServerClient {
       name: 'openreelio',
       title: 'OpenReelio',
       version: '0.1.0',
+    };
+    this.capabilities = options.capabilities ?? {
+      experimentalApi: true,
     };
     this.unsubscribeTransport = this.transport.onMessage((message) => this.handleMessage(message));
   }
@@ -154,7 +190,7 @@ export class CodexAppServerClient {
     if (!this.initializePromise) {
       this.initializePromise = this.request('initialize', {
         clientInfo: this.clientInfo,
-        capabilities: null,
+        capabilities: this.capabilities,
       }).then(async () => {
         await this.notify('initialized', {});
         this.initialized = true;
@@ -172,9 +208,15 @@ export class CodexAppServerClient {
         cwd: input.cwd,
         model: input.model,
         approvalPolicy: input.approvalPolicy,
+        approvalsReviewer: input.approvalsReviewer,
         sandbox: input.sandbox ?? input.sandboxPolicy,
+        permissions: input.permissions,
+        config: input.config,
+        baseInstructions: input.baseInstructions,
+        developerInstructions: input.developerInstructions,
         personality: input.personality,
         serviceName: input.serviceName ?? 'openreelio',
+        dynamicTools: input.dynamicTools,
       }),
     );
 
@@ -190,7 +232,12 @@ export class CodexAppServerClient {
         cwd: input.cwd,
         model: input.model,
         approvalPolicy: input.approvalPolicy,
+        approvalsReviewer: input.approvalsReviewer,
         sandbox: input.sandbox ?? input.sandboxPolicy,
+        permissions: input.permissions,
+        config: input.config,
+        baseInstructions: input.baseInstructions,
+        developerInstructions: input.developerInstructions,
         personality: input.personality,
       }),
     );
@@ -213,7 +260,9 @@ export class CodexAppServerClient {
         model: input.model,
         effort: input.effort,
         approvalPolicy: input.approvalPolicy,
+        approvalsReviewer: input.approvalsReviewer,
         sandboxPolicy: input.sandboxPolicy,
+        permissions: input.permissions,
         personality: input.personality,
         summary: input.summary,
       }),

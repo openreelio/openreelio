@@ -84,6 +84,37 @@ describe('mapCodexNotificationToExternalEvents', () => {
     ]);
   });
 
+  it('should format dynamic OpenReelio tool calls with their namespace', () => {
+    const events = mapCodexNotificationToExternalEvents({
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      notification: {
+        method: 'item/started',
+        params: {
+          item: {
+            id: 'tool_1',
+            type: 'dynamicToolCall',
+            namespace: 'openreelio',
+            tool: 'host_context',
+            arguments: {},
+          },
+        },
+      },
+    });
+
+    expect(events).toEqual([
+      {
+        type: 'tool_started',
+        runtimeId: 'codex',
+        sessionId: 'thr_123',
+        itemId: 'tool_1',
+        tool: 'openreelio.host_context',
+        description: 'Run openreelio.host_context',
+        args: {},
+      },
+    ]);
+  });
+
   it('should normalize Codex JSON error payload strings into readable messages', () => {
     const events = mapCodexNotificationToExternalEvents({
       runtimeId: 'codex',

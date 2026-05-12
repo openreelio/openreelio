@@ -15,6 +15,7 @@ import type {
 } from '../types';
 import type {
   CodexAppServerClient,
+  CodexDynamicToolCallResponse,
   CodexAppServerNotification,
   CodexAppServerRequest,
   CodexJsonObject,
@@ -22,6 +23,12 @@ import type {
 } from './CodexAppServerClient';
 import { mapCodexNotificationToExternalEvents } from './CodexNotificationMapper';
 import { createCodexTauriAppServerClient } from './CodexTauriAppServerTransport';
+import {
+  OPENREELIO_CODEX_DYNAMIC_TOOLS,
+  buildOpenReelioCodexDeveloperInstructions,
+  handleOpenReelioCodexDynamicToolCall,
+  type OpenReelioCodexSessionContext,
+} from './openreelioCodexTools';
 
 export interface CodexStatusProbeResult {
   installed: boolean;
@@ -37,6 +44,13 @@ type CodexAppServerClientPort = Pick<
   'startThread' | 'startTurn' | 'interruptTurn' | 'unsubscribeThread'
 > &
   Partial<Pick<CodexAppServerClient, 'resumeThread' | 'onNotification' | 'onServerRequest'>>;
+
+interface CodexSessionState {
+  threadId: string;
+  lastTurnId: string | null;
+  projectId: string;
+  cwd: string | null;
+}
 
 export interface CodexReferenceAdapterOptions {
   appServerClient?: CodexAppServerClientPort;
@@ -62,7 +76,7 @@ const CODEX_CAPABILITIES: ExternalAgentRuntimeCapabilities = {
 export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
   readonly id = 'codex' as const;
   readonly displayName = 'Codex';
-  private readonly sessions = new Map<string, { threadId: string; lastTurnId: string | null }>();
+  private readonly sessions = new Map<string, CodexSessionState>();
   private readonly turnSessionIds = new Map<string, string>();
   private readonly runtimeEventHandlers = new Set<ExternalAgentRuntimeEventHandler>();
   private readonly attachedClients = new Set<CodexAppServerClientPort>();
@@ -109,15 +123,27 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
       serviceName: 'openreelio',
       cwd: input.cwd ?? undefined,
       model: this.resolveModel(),
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+      sandbox: 'workspace-write',
+      developerInstructions: this.buildDeveloperInstructions(input),
+      dynamicTools: OPENREELIO_CODEX_DYNAMIC_TOOLS,
     });
     const sessionId = thread.id;
-    this.sessions.set(sessionId, { threadId: thread.id, lastTurnId: null });
+    this.sessions.set(sessionId, {
+      threadId: thread.id,
+      lastTurnId: null,
+      projectId: input.projectId,
+      cwd: input.cwd ?? null,
+    });
 
     if (input.prompt?.trim()) {
       const turn = await client.startTurn(thread.id, input.prompt, {
         cwd: input.cwd ?? undefined,
         model: this.resolveModel(),
         effort: this.resolveReasoningEffort(),
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user',
       });
       this.rememberTurn(sessionId, turn);
     }
@@ -138,8 +164,17 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
       threadId: input.externalSessionId,
       cwd: input.cwd ?? undefined,
       model: this.resolveModel(),
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+      sandbox: 'workspace-write',
+      developerInstructions: this.buildDeveloperInstructions(input),
     });
-    this.sessions.set(thread.id, { threadId: thread.id, lastTurnId: null });
+    this.sessions.set(thread.id, {
+      threadId: thread.id,
+      lastTurnId: null,
+      projectId: input.projectId,
+      cwd: input.cwd ?? null,
+    });
 
     return { sessionId: thread.id, runtimeId: this.id };
   }
@@ -147,10 +182,13 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
   async sendMessage(sessionId: string, message: AgentUserMessage): Promise<void> {
     const client = await this.getAppServerClient();
     const session = this.requireSession(sessionId);
+    session.cwd = message.cwd ?? session.cwd;
     const turn = await client.startTurn(session.threadId, message.content, {
       cwd: message.cwd ?? undefined,
       model: this.resolveModel(),
       effort: this.resolveReasoningEffort(),
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
     });
     this.rememberTurn(sessionId, turn);
   }
@@ -216,7 +254,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     return client;
   }
 
-  private requireSession(sessionId: string): { threadId: string; lastTurnId: string | null } {
+  private requireSession(sessionId: string): CodexSessionState {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`Codex session ${sessionId} is not active`);
@@ -231,6 +269,13 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
 
   private resolveReasoningEffort(): string {
     return this.options.reasoningEffort?.trim() || DEFAULT_CODEX_REASONING_EFFORT;
+  }
+
+  private buildDeveloperInstructions(context: OpenReelioCodexSessionContext): string {
+    return buildOpenReelioCodexDeveloperInstructions({
+      projectId: context.projectId,
+      cwd: context.cwd ?? null,
+    });
   }
 
   private rememberTurn(sessionId: string, turn: CodexTurn): void {
@@ -267,6 +312,10 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
 
   private async handleServerRequest(request: CodexAppServerRequest): Promise<unknown> {
     const sessionId = this.resolveSessionIdFromParams(request.params);
+    const dynamicToolResponse = await this.handleDynamicToolRequest(request, sessionId);
+    if (dynamicToolResponse) {
+      return dynamicToolResponse;
+    }
 
     if (request.method.endsWith('/requestApproval')) {
       const approvalRequest = this.toApprovalRequest(request, sessionId);
@@ -291,6 +340,22 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     }
 
     throw new Error(`Unsupported Codex app-server request: ${request.method}`);
+  }
+
+  private async handleDynamicToolRequest(
+    request: CodexAppServerRequest,
+    sessionId: string | null,
+  ): Promise<CodexDynamicToolCallResponse | null> {
+    const params = request.params ?? {};
+    const resolvedSessionId = sessionId ?? getString(params, 'threadId') ?? 'unknown';
+    const session = this.sessions.get(resolvedSessionId);
+    return await handleOpenReelioCodexDynamicToolCall(request, {
+      runtimeId: this.id,
+      sessionId: resolvedSessionId,
+      projectId: session?.projectId ?? 'unknown',
+      cwd: session?.cwd ?? getString(params, 'cwd'),
+      approvalDecisionProvider: this.options.approvalDecisionProvider,
+    });
   }
 
   private toApprovalRequest(
