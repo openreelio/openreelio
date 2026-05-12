@@ -141,6 +141,54 @@ describe('ExternalAgentRuntimeSettings', () => {
     });
   });
 
+  it('should treat native Codex app tools as ready even when optional MCP setup fails', async () => {
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === 'get_codex_status') {
+        return Promise.resolve({
+          installed: true,
+          version: 'codex-cli 0.130.0',
+          authStatus: 'signed-in',
+          reason: null,
+        });
+      }
+      if (command === 'configure_codex_agent_runtime') {
+        return Promise.resolve({
+          installed: true,
+          version: 'codex-cli 0.130.0',
+          authStatus: 'signed-in',
+          ready: false,
+          requiresLogin: false,
+          pluginMarketplaceConfigured: true,
+          mcpConfigured: false,
+          message: 'Codex MCP setup failed.',
+        });
+      }
+      if (command === 'get_codex_model_catalog') {
+        return Promise.resolve({
+          installed: true,
+          defaultModel: 'gpt-5.4',
+          defaultReasoningEffort: 'medium',
+          models: [],
+          reason: null,
+        });
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+
+    render(
+      <ExternalAgentRuntimeSettings
+        settings={{ ...defaultSettings, assistantRuntime: 'codex' }}
+        onUpdate={vi.fn()}
+        disabled={false}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText(/Codex is ready with OpenReelio app tools/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText('Codex MCP setup failed.')).not.toBeInTheDocument();
+  });
+
   it('should start Codex login from the settings panel when sign-in is required', async () => {
     vi.mocked(invoke).mockImplementation((command) => {
       if (command === 'get_codex_status') {

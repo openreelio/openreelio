@@ -149,10 +149,13 @@ export function ExternalAgentRuntimeSettings({
     setupResult?.installed ?? codexRuntime?.installStatus === 'installed',
   );
   const authenticated = isAuthenticated(effectiveAuthStatus);
-  const toolsReady = Boolean(
-    setupResult?.pluginMarketplaceConfigured && setupResult?.mcpConfigured,
+  const nativeToolsReady = Boolean(
+    codexRuntime?.ready && codexRuntime.capabilities.structuredToolCalls,
   );
-  const runtimeReady = Boolean(setupResult?.ready || (codexRuntime?.ready && toolsReady));
+  const toolsReady = Boolean(
+    nativeToolsReady || (setupResult?.pluginMarketplaceConfigured && setupResult?.mcpConfigured),
+  );
+  const runtimeReady = Boolean(setupResult?.ready || nativeToolsReady);
   const requiresLogin = Boolean(
     codexInstalled &&
     (setupResult?.requiresLogin ||
@@ -182,7 +185,13 @@ export function ExternalAgentRuntimeSettings({
         },
       );
       setSetupResult(result);
-      if (!result.ready && result.installed && !result.requiresLogin && result.message) {
+      if (
+        !result.ready &&
+        !nativeToolsReady &&
+        result.installed &&
+        !result.requiresLogin &&
+        result.message
+      ) {
         setActionError(result.message);
       }
       refreshExternalAgentStatus();
@@ -191,7 +200,7 @@ export function ExternalAgentRuntimeSettings({
     } finally {
       setIsConfiguring(false);
     }
-  }, [codexSelected, projectPath, refreshExternalAgentStatus]);
+  }, [codexSelected, nativeToolsReady, projectPath, refreshExternalAgentStatus]);
 
   useEffect(() => {
     if (!codexSelected) {
@@ -295,7 +304,7 @@ export function ExternalAgentRuntimeSettings({
     if (!codexInstalled) {
       return setupResult?.message ?? codexRuntime?.reason ?? 'Codex CLI was not found.';
     }
-    if (runtimeReady) return 'Codex is ready with OpenReelio tools.';
+    if (runtimeReady) return 'Codex is ready with OpenReelio app tools.';
     if (requiresLogin) return 'Sign in to Codex to continue.';
     if (effectiveAuthStatus === 'error') {
       return (
@@ -438,7 +447,7 @@ export function ExternalAgentRuntimeSettings({
             </div>
           </div>
 
-          {actionError && (
+          {actionError && !runtimeReady && (
             <p className="mt-2 rounded border border-yellow-600/20 bg-yellow-600/10 px-2 py-1.5 text-xs leading-5 text-yellow-200">
               {actionError}
             </p>
