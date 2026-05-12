@@ -17,7 +17,7 @@
  * ```
  */
 
-import { createContext, useContext, type ReactNode } from 'react';
+import { createContext, createElement, useContext, type ReactElement, type ReactNode } from 'react';
 import type {
   AssetDropData,
   ClipMoveData,
@@ -95,12 +95,8 @@ export interface TimelineOperationsProviderProps {
 export function TimelineOperationsProvider({
   children,
   operations,
-}: TimelineOperationsProviderProps): JSX.Element {
-  return (
-    <TimelineOperationsContext.Provider value={operations}>
-      {children}
-    </TimelineOperationsContext.Provider>
-  );
+}: TimelineOperationsProviderProps): ReactElement {
+  return createElement(TimelineOperationsContext.Provider, { value: operations }, children);
 }
 
 // =============================================================================
