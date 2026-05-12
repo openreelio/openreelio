@@ -14,139 +14,14 @@
  * @module components/shared/ErrorOverlay
  */
 
+import { useCallback, useEffect, useId } from 'react';
 import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useState,
-} from 'react';
-
-// =============================================================================
-// Types
-// =============================================================================
-
-export type ErrorSeverity = 'warning' | 'error' | 'critical';
-
-export type ErrorCategory = 'network' | 'ffmpeg' | 'render' | 'ipc' | 'unknown';
-
-export interface ErrorOverlayProps {
-  /** The error to display */
-  error: Error | null;
-  /** Error severity level */
-  severity?: ErrorSeverity;
-  /** Custom title for the error */
-  title?: string;
-  /** Callback when dismissed */
-  onDismiss?: () => void;
-  /** Callback for retry action */
-  onRetry?: () => void;
-  /** Custom label for retry button */
-  retryLabel?: string;
-  /** Whether to show error details (stack trace) */
-  showDetails?: boolean;
-  /** React component stack (from error boundary) */
-  componentStack?: string;
-}
-
-export interface UseErrorOverlayOptions {
-  /** Default severity for errors */
-  defaultSeverity?: ErrorSeverity;
-}
-
-export interface ErrorState {
-  error: Error;
-  severity: ErrorSeverity;
-  title?: string;
-}
-
-// =============================================================================
-// Error Categorization
-// =============================================================================
-
-/**
- * Categorizes an error based on its message and name.
- * Used to provide more helpful error messages and recovery suggestions.
- */
-export function categorizeError(error: Error): ErrorCategory {
-  const message = error.message.toLowerCase();
-  const name = error.name.toLowerCase();
-
-  // Network errors
-  if (
-    message.includes('fetch') ||
-    message.includes('network') ||
-    message.includes('cors') ||
-    message.includes('timeout')
-  ) {
-    return 'network';
-  }
-
-  // FFmpeg errors
-  if (
-    message.includes('ffmpeg') ||
-    message.includes('encoder') ||
-    message.includes('codec')
-  ) {
-    return 'ffmpeg';
-  }
-
-  // Render/chunk errors
-  if (
-    name === 'chunkloaderror' ||
-    message.includes('chunk') ||
-    message.includes('loading')
-  ) {
-    return 'render';
-  }
-
-  // Tauri IPC errors
-  if (
-    message.includes('ipc') ||
-    message.includes('invoke') ||
-    message.includes('tauri')
-  ) {
-    return 'ipc';
-  }
-
-  return 'unknown';
-}
-
-/**
- * Get user-friendly title based on error category.
- */
-function getErrorTitle(category: ErrorCategory): string {
-  switch (category) {
-    case 'network':
-      return 'Network Error';
-    case 'ffmpeg':
-      return 'Video Processing Error';
-    case 'render':
-      return 'Render Error';
-    case 'ipc':
-      return 'Application Error';
-    default:
-      return 'Error';
-  }
-}
-
-/**
- * Get recovery suggestion based on error category.
- */
-function getRecoverySuggestion(category: ErrorCategory): string {
-  switch (category) {
-    case 'network':
-      return 'Please check your internet connection and try again.';
-    case 'ffmpeg':
-      return 'There was an issue processing the video. Try a different format or codec.';
-    case 'render':
-      return 'The application encountered a rendering issue. Please reload.';
-    case 'ipc':
-      return 'Communication with the backend failed. Please restart the application.';
-    default:
-      return 'An unexpected error occurred.';
-  }
-}
+  categorizeError,
+  getErrorTitle,
+  getRecoverySuggestion,
+  type ErrorOverlayProps,
+  type ErrorSeverity,
+} from './errorOverlayModel';
 
 // =============================================================================
 // Styles
@@ -411,9 +286,7 @@ export function ErrorOverlay({
               <pre style={styles.stack}>{error.stack}</pre>
               {componentStack && (
                 <>
-                  <p style={{ ...styles.summary, marginTop: '12px' }}>
-                    Component Stack
-                  </p>
+                  <p style={{ ...styles.summary, marginTop: '12px' }}>Component Stack</p>
                   <pre style={styles.componentStack}>{componentStack}</pre>
                 </>
               )}
@@ -454,74 +327,6 @@ export function ErrorOverlay({
       </div>
     </div>
   );
-}
-
-// =============================================================================
-// useErrorOverlay Hook
-// =============================================================================
-
-interface ShowErrorOptions {
-  severity?: ErrorSeverity;
-  title?: string;
-}
-
-/**
- * Hook for managing error overlay state.
- *
- * @example
- * ```tsx
- * const { showError, clearError, ErrorOverlayComponent } = useErrorOverlay();
- *
- * try {
- *   await riskyOperation();
- * } catch (error) {
- *   showError(error as Error, { severity: 'error' });
- * }
- *
- * return <ErrorOverlayComponent />;
- * ```
- */
-export function useErrorOverlay(options: UseErrorOverlayOptions = {}) {
-  const { defaultSeverity = 'error' } = options;
-  const [errorState, setErrorState] = useState<ErrorState | null>(null);
-
-  const showError = useCallback(
-    (error: Error, opts: ShowErrorOptions = {}) => {
-      setErrorState({
-        error,
-        severity: opts.severity ?? defaultSeverity,
-        title: opts.title,
-      });
-    },
-    [defaultSeverity]
-  );
-
-  const clearError = useCallback(() => {
-    setErrorState(null);
-  }, []);
-
-  const ErrorOverlayComponent = useMemo(
-    () =>
-      function ErrorOverlayWrapper() {
-        return (
-          <ErrorOverlay
-            error={errorState?.error ?? null}
-            severity={errorState?.severity}
-            title={errorState?.title}
-            onDismiss={clearError}
-          />
-        );
-      },
-    [errorState, clearError]
-  );
-
-  return {
-    error: errorState?.error ?? null,
-    errorState,
-    showError,
-    clearError,
-    ErrorOverlayComponent,
-  };
 }
 
 // =============================================================================
