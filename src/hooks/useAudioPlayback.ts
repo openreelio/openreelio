@@ -486,7 +486,7 @@ export function useAudioPlayback({
 
       return buffer !== null;
     },
-    [assets, loadAudioBuffer],
+    [assets, loadAudioBuffer, syncFailedAssetIds],
   );
 
   /**

@@ -12,7 +12,10 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { applyProjectState, refreshProjectState } from '@/utils/stateRefreshHelper';
-import { getClipSourceTimeAtTimelineTime, getClipTimelineTimeAtSourceTime } from '@/utils/clipTiming';
+import {
+  getClipSourceTimeAtTimelineTime,
+  getClipTimelineTimeAtSourceTime,
+} from '@/utils/clipTiming';
 
 const logger = createLogger('useTranscriptEditing');
 
@@ -116,9 +119,11 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
     setSelection(null);
   }, [clipInfo?.clipId]);
 
+  const selectedAssetId = clipInfo?.assetId ?? null;
+
   // Load transcript words when clip selection changes
   useEffect(() => {
-    if (!clipInfo) {
+    if (!selectedAssetId) {
       setWords([]);
       setError(null);
       return;
@@ -129,7 +134,7 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
     setError(null);
 
     invoke<TranscriptWord[]>('get_transcript_words', {
-      assetId: clipInfo.assetId,
+      assetId: selectedAssetId,
     })
       .then((result) => {
         if (!cancelled && isMountedRef.current) {
@@ -150,7 +155,7 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
     return () => {
       cancelled = true;
     };
-  }, [clipInfo?.assetId, loadTrigger]);
+  }, [selectedAssetId, loadTrigger]);
 
   // Cleanup on unmount
   useEffect(() => {
