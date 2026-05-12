@@ -9,7 +9,7 @@ describe('TauriExternalAgentSessionPersistence', () => {
       projectId: 'project-1',
       runtimeId: 'codex',
       externalSessionId: 'thr_123',
-      metadataJson: null,
+      metadataJson: '{"source":"appServer"}',
       createdAt: 1_000,
       updatedAt: 1_000,
     });
@@ -21,7 +21,11 @@ describe('TauriExternalAgentSessionPersistence', () => {
         conversationSessionId: 'session-1',
         runtimeId: 'codex',
       }),
-    ).resolves.toEqual({ sessionId: 'thr_123', runtimeId: 'codex' });
+    ).resolves.toEqual({
+      sessionId: 'thr_123',
+      runtimeId: 'codex',
+      metadata: { source: 'appServer' },
+    });
 
     expect(invokeCommand).toHaveBeenCalledWith('get_external_agent_session_link', {
       input: {

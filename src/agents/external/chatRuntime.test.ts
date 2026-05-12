@@ -267,7 +267,11 @@ describe('ExternalAgentChatRuntimeController', () => {
     const conversation = new FakeConversationGateway();
     const adapter = new FakeExternalAgentAdapter();
     const sessionPersistence = new FakeExternalAgentSessionPersistence();
-    sessionPersistence.nextLoadResult = { sessionId: 'thr_existing', runtimeId: 'codex' };
+    sessionPersistence.nextLoadResult = {
+      sessionId: 'thr_existing',
+      runtimeId: 'codex',
+      metadata: { openReelioToolProtocolVersion: 2 },
+    };
     const controller = new ExternalAgentChatRuntimeController({
       adapter,
       conversation,
@@ -301,7 +305,11 @@ describe('ExternalAgentChatRuntimeController', () => {
     const adapter = new FakeExternalAgentAdapter();
     adapter.resumeSession.mockRejectedValueOnce(new Error('thread not found'));
     const sessionPersistence = new FakeExternalAgentSessionPersistence();
-    sessionPersistence.nextLoadResult = { sessionId: 'thr_stale', runtimeId: 'codex' };
+    sessionPersistence.nextLoadResult = {
+      sessionId: 'thr_stale',
+      runtimeId: 'codex',
+      metadata: { openReelioToolProtocolVersion: 2 },
+    };
     const controller = new ExternalAgentChatRuntimeController({
       adapter,
       conversation,
@@ -326,11 +334,40 @@ describe('ExternalAgentChatRuntimeController', () => {
       conversationSessionId: 'session-1',
       runtimeId: 'codex',
       externalSession: { sessionId: 'thr_123', runtimeId: 'codex' },
-      metadata: { source: 'appServer' },
+      metadata: { source: 'appServer', openReelioToolProtocolVersion: 2 },
     });
     expect(adapter.sendMessage).toHaveBeenCalledWith('thr_123', {
       content: 'Start over if needed',
       cwd: '/project',
+    });
+  });
+
+  it('should start a fresh Codex session when the persisted link predates OpenReelio dynamic tools', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const sessionPersistence = new FakeExternalAgentSessionPersistence();
+    sessionPersistence.nextLoadResult = { sessionId: 'thr_legacy', runtimeId: 'codex' };
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+      cwd: '/project',
+      sessionPersistence,
+    });
+
+    await controller.sendMessage('Use the current OpenReelio context');
+
+    expect(adapter.resumeSession).not.toHaveBeenCalled();
+    expect(adapter.startSession).toHaveBeenCalledWith({
+      projectId: 'project-1',
+      cwd: '/project',
+    });
+    expect(sessionPersistence.save).toHaveBeenCalledWith({
+      projectId: 'project-1',
+      conversationSessionId: 'session-1',
+      runtimeId: 'codex',
+      externalSession: { sessionId: 'thr_123', runtimeId: 'codex' },
+      metadata: { source: 'appServer', openReelioToolProtocolVersion: 2 },
     });
   });
 

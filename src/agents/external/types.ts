@@ -41,6 +41,7 @@ export interface AgentRuntimeReadiness {
 export interface ExternalAgentSessionHandle {
   sessionId: string;
   runtimeId: ExternalAgentRuntimeId | string;
+  metadata?: Record<string, unknown> | null;
 }
 
 export type ExternalAgentApprovalScope = 'openreelio.plan.apply';

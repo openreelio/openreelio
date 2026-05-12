@@ -77,6 +77,8 @@ const INITIAL_STATE: ExternalAgentChatRuntimeState = {
   pendingToolPermissionRequest: null,
 };
 
+const CODEX_OPENREELIO_TOOL_PROTOCOL_VERSION = 2;
+
 export class ExternalAgentChatRuntimeController {
   private projectId: string | null;
   private cwd: string | null;
@@ -248,7 +250,11 @@ export class ExternalAgentChatRuntimeController {
     }
 
     const persisted = await this.loadPersistedExternalSession(conversationSessionId);
-    if (persisted && this.options.adapter.resumeSession) {
+    if (
+      persisted &&
+      this.isPersistedExternalSessionCompatible(persisted) &&
+      this.options.adapter.resumeSession
+    ) {
       try {
         const resumed = await this.options.adapter.resumeSession({
           projectId: this.projectId ?? 'unknown',
@@ -298,8 +304,32 @@ export class ExternalAgentChatRuntimeController {
       conversationSessionId,
       runtimeId: this.options.adapter.id,
       externalSession,
-      metadata: { source: 'appServer' },
+      metadata: this.buildExternalSessionMetadata(),
     });
+  }
+
+  private buildExternalSessionMetadata(): Record<string, unknown> {
+    if (this.options.adapter.id === 'codex') {
+      return {
+        source: 'appServer',
+        openReelioToolProtocolVersion: CODEX_OPENREELIO_TOOL_PROTOCOL_VERSION,
+      };
+    }
+
+    return { source: 'appServer' };
+  }
+
+  private isPersistedExternalSessionCompatible(
+    externalSession: ExternalAgentSessionHandle,
+  ): boolean {
+    if (this.options.adapter.id !== 'codex') {
+      return true;
+    }
+
+    return (
+      externalSession.metadata?.openReelioToolProtocolVersion ===
+      CODEX_OPENREELIO_TOOL_PROTOCOL_VERSION
+    );
   }
 
   private async persistExternalSessionAfterTurnStart(
