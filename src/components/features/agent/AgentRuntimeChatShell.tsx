@@ -318,18 +318,23 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
     return (
       <div
         data-testid={chatTestId}
-        className={`flex h-full min-w-0 flex-col bg-surface-base ${className}`}
+        className={`flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-surface-base ${className}`}
       >
-        <AgentSessionPersistenceBanner />
+        <AgentSessionPersistenceBanner className="shrink-0" />
         <AgentSessionArtifactSummary
           messages={messages}
           activeArtifactFocus={artifactFocus}
           onSelectArtifact={handleArtifactFocus}
+          className="shrink-0"
         />
         {artifactFocus && (
-          <AgentArtifactFocusBanner focus={artifactFocus} onClear={clearArtifactSelection} />
+          <AgentArtifactFocusBanner
+            focus={artifactFocus}
+            onClear={clearArtifactSelection}
+            className="shrink-0"
+          />
         )}
-        <AgentArtifactDetailPanel messages={messages} focus={artifactFocus} />
+        <AgentArtifactDetailPanel messages={messages} focus={artifactFocus} className="shrink-0" />
 
         <ChatMessageList
           messages={messages}

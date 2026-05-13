@@ -170,7 +170,8 @@ describe('ConversationMessageItem', () => {
       expect(screen.getByTestId('text-part')).toBeInTheDocument();
     });
 
-    it('should render tool call and result parts', () => {
+    it('should collapse tool-only artifacts behind a compact summary', async () => {
+      const user = userEvent.setup();
       const message: ConversationMessage = {
         id: 'msg-7',
         role: 'assistant',
@@ -195,6 +196,13 @@ describe('ConversationMessageItem', () => {
         timestamp: Date.now(),
       };
       render(<ConversationMessageItem message={message} />);
+
+      expect(screen.getByTestId('assistant-artifact-group')).toBeInTheDocument();
+      expect(screen.getByText('Work Details')).toBeInTheDocument();
+      expect(screen.queryByTestId('tool-call-part')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('tool-result-part')).not.toBeInTheDocument();
+
+      await user.click(screen.getByTestId('assistant-artifact-toggle'));
 
       expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
       expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();

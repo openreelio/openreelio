@@ -6,7 +6,8 @@
  * with Allow / Allow Always / Deny buttons.
  */
 
-import { Shield, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { useState } from 'react';
+import { ChevronRight, Shield, ShieldAlert, ShieldCheck } from 'lucide-react';
 import type { ToolApprovalPart } from '@/agents/engine/core/conversation';
 import type { RiskLevel } from '@/agents/engine/core/types';
 
@@ -26,10 +27,7 @@ interface ToolApprovalPartRendererProps {
 // Helpers
 // =============================================================================
 
-const riskConfig: Record<
-  RiskLevel,
-  { label: string; color: string; icon: typeof Shield }
-> = {
+const riskConfig: Record<RiskLevel, { label: string; color: string; icon: typeof Shield }> = {
   low: {
     label: 'Low Risk',
     color: 'text-green-400 bg-green-500/10',
@@ -93,54 +91,65 @@ export function ToolApprovalPartRenderer({
   onDeny,
   className = '',
 }: ToolApprovalPartRendererProps) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const risk = riskConfig[part.riskLevel];
   const status = statusConfig[part.status];
   const RiskIcon = risk.icon;
+  const canAct = part.status === 'pending';
+  const hasArgs = Object.keys(part.args).length > 0;
 
   return (
     <div
-      className={`p-3 border rounded-lg ${status.color} ${className}`}
+      className={`rounded-lg border px-2.5 py-2 ${status.color} ${className}`}
       data-testid="tool-approval-part"
     >
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2 mb-1.5">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-text-secondary">
-            {status.label}
-          </span>
-          <span
-            className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded ${risk.color}`}
-          >
-            <RiskIcon className="w-3 h-3" />
-            {risk.label}
-          </span>
+      <div className="flex min-w-0 items-start gap-2">
+        <button
+          type="button"
+          onClick={() => setDetailsOpen((prev) => !prev)}
+          className="mt-0.5 rounded p-0.5 text-text-tertiary transition-colors hover:bg-surface-active hover:text-text-secondary"
+          aria-expanded={detailsOpen}
+          data-testid="tool-approval-details-toggle"
+        >
+          <ChevronRight
+            className={`h-3.5 w-3.5 transition-transform ${detailsOpen ? 'rotate-90' : ''}`}
+            aria-hidden="true"
+          />
+          <span className="sr-only">Toggle approval details</span>
+        </button>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="text-xs font-medium text-text-secondary">{status.label}</span>
+            <span className="truncate text-xs font-mono text-text-primary">{part.tool}</span>
+            <span
+              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${risk.color}`}
+            >
+              <RiskIcon className="w-3 h-3" />
+              {risk.label}
+            </span>
+          </div>
+          {part.description && (
+            <p className="mt-0.5 break-words text-xs text-text-tertiary">{part.description}</p>
+          )}
         </div>
       </div>
 
-      {/* Tool info */}
-      <div className="mb-2">
-        <span className="text-sm font-mono font-medium text-text-primary">
-          {part.tool}
-        </span>
-        {part.description && (
-          <p className="text-xs text-text-tertiary mt-0.5">
-            {part.description}
-          </p>
-        )}
-      </div>
+      {detailsOpen && (
+        <div
+          className="mt-2 rounded border border-border-subtle bg-surface-base/50 px-2 py-1.5 text-xs font-mono text-text-secondary"
+          data-testid="tool-approval-details"
+        >
+          {hasArgs ? formatArgs(part.args) : 'No arguments'}
+        </div>
+      )}
 
-      {/* Args preview */}
-      <div className="mb-2.5 px-2 py-1.5 bg-surface-base/50 rounded text-xs font-mono text-text-secondary truncate">
-        {formatArgs(part.args)}
-      </div>
-
-      {/* Action buttons */}
-      {part.status === 'pending' && (
-        <div className="flex gap-2">
+      {canAct && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
           {onAllow && (
             <button
               onClick={onAllow}
-              className="px-3 py-1 text-xs bg-green-600 hover:bg-green-500 text-white rounded transition-colors"
+              className="rounded bg-green-600 px-2.5 py-1 text-xs text-white transition-colors hover:bg-green-500"
               data-testid="tool-approval-allow-btn"
             >
               Allow
@@ -149,16 +158,16 @@ export function ToolApprovalPartRenderer({
           {onAllowAlways && (
             <button
               onClick={onAllowAlways}
-              className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
+              className="rounded border border-border-subtle bg-surface-base px-2.5 py-1 text-xs text-text-secondary transition-colors hover:bg-surface-active"
               data-testid="tool-approval-allow-always-btn"
             >
-              Allow Always
+              Always
             </button>
           )}
           {onDeny && (
             <button
               onClick={onDeny}
-              className="px-3 py-1 text-xs bg-red-600 hover:bg-red-500 text-white rounded transition-colors"
+              className="rounded border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-xs text-red-300 transition-colors hover:bg-red-500/20"
               data-testid="tool-approval-deny-btn"
             >
               Deny

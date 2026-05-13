@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronRight } from 'lucide-react';
 
 interface AssistantArtifactGroupProps {
   toolCallCount: number;
@@ -35,20 +36,10 @@ export function AssistantArtifactGroup({
   const userOverrodeOpenStateRef = useRef(false);
 
   useEffect(() => {
-    if (highlighted) {
-      setIsOpen(true);
-      return;
-    }
-
-    if (hasRunningArtifacts || hasFailedArtifacts) {
-      setIsOpen(true);
-      return;
-    }
-
     if (!userOverrodeOpenStateRef.current) {
       setIsOpen(defaultOpen);
     }
-  }, [defaultOpen, hasFailedArtifacts, hasRunningArtifacts, highlighted]);
+  }, [defaultOpen, highlighted]);
 
   const badges = useMemo(() => {
     const result: string[] = [];
@@ -75,8 +66,8 @@ export function AssistantArtifactGroup({
 
   return (
     <div
-      className={`overflow-hidden rounded-xl border bg-surface-elevated/70 ${
-        highlighted ? 'border-primary-500/40 ring-1 ring-primary-500/30' : 'border-border-subtle'
+      className={`overflow-hidden rounded-lg border bg-surface-base/40 ${
+        highlighted ? 'border-primary-500/40 ring-1 ring-primary-500/20' : 'border-border-subtle'
       } ${className}`}
       data-testid="assistant-artifact-group"
     >
@@ -86,16 +77,19 @@ export function AssistantArtifactGroup({
           userOverrodeOpenStateRef.current = true;
           setIsOpen((prev) => !prev);
         }}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-surface-active"
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-surface-active"
         aria-expanded={isOpen}
         data-testid="assistant-artifact-toggle"
       >
-        <span className="text-xs text-text-tertiary">{isOpen ? '\u25BC' : '\u25B6'}</span>
+        <ChevronRight
+          className={`h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform ${
+            isOpen ? 'rotate-90' : ''
+          }`}
+          aria-hidden="true"
+        />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-medium uppercase tracking-[0.08em] text-text-tertiary">
-              Work Details
-            </span>
+            <span className="text-[11px] font-medium text-text-secondary">Work Details</span>
             <span
               className={`rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${status.tone}`}
             >
@@ -118,7 +112,7 @@ export function AssistantArtifactGroup({
       </button>
 
       {isOpen && (
-        <div className="space-y-2 border-t border-border-subtle px-3 py-3">{children}</div>
+        <div className="space-y-2 border-t border-border-subtle px-2.5 py-2">{children}</div>
       )}
     </div>
   );

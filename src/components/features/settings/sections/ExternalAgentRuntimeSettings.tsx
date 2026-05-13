@@ -150,7 +150,7 @@ export function ExternalAgentRuntimeSettings({
   );
   const authenticated = isAuthenticated(effectiveAuthStatus);
   const nativeToolsReady = Boolean(
-    codexRuntime?.ready && codexRuntime.capabilities.structuredToolCalls,
+    codexRuntime?.ready && codexRuntime.capabilities?.structuredToolCalls,
   );
   const toolsReady = Boolean(
     nativeToolsReady || (setupResult?.pluginMarketplaceConfigured && setupResult?.mcpConfigured),
