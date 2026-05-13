@@ -2,7 +2,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CodexReferenceAdapter } from './CodexReferenceAdapter';
-import type { CodexDynamicToolCallResponse } from './CodexAppServerClient';
+import {
+  isCodexDynamicToolCallOutputTextItem,
+  type CodexDynamicToolCallResponse,
+} from './CodexAppServerClient';
 
 const projectStoreMocks = vi.hoisted(() => ({
   refreshFromBackendMutation: vi.fn(),
@@ -1105,7 +1108,7 @@ describe('CodexReferenceAdapter', () => {
 
 function getFirstTextContent(response: unknown): string {
   const item = (response as CodexDynamicToolCallResponse).contentItems[0];
-  if (!item || item.type !== 'inputText') {
+  if (!isCodexDynamicToolCallOutputTextItem(item)) {
     throw new Error('Expected first Codex dynamic tool response item to be inputText');
   }
 

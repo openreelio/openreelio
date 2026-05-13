@@ -66,6 +66,12 @@ export type CodexDynamicToolCallOutputContentItem =
       imageUrl: string;
     };
 
+export function isCodexDynamicToolCallOutputTextItem(
+  item: CodexDynamicToolCallOutputContentItem | undefined,
+): item is Extract<CodexDynamicToolCallOutputContentItem, { type: 'inputText' }> {
+  return item?.type === 'inputText';
+}
+
 export interface CodexDynamicToolCallResponse {
   contentItems: CodexDynamicToolCallOutputContentItem[];
   success: boolean;
