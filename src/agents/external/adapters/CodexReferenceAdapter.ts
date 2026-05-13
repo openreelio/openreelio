@@ -125,7 +125,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
       model: this.resolveModel(),
       approvalPolicy: 'on-request',
       approvalsReviewer: 'user',
-      sandbox: 'workspace-write',
+      sandbox: 'read-only',
       developerInstructions: this.buildDeveloperInstructions(input),
       dynamicTools: OPENREELIO_CODEX_DYNAMIC_TOOLS,
     });
@@ -166,7 +166,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
       model: this.resolveModel(),
       approvalPolicy: 'on-request',
       approvalsReviewer: 'user',
-      sandbox: 'workspace-write',
+      sandbox: 'read-only',
       developerInstructions: this.buildDeveloperInstructions(input),
     });
     this.sessions.set(thread.id, {
@@ -319,6 +319,12 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
 
     if (request.method.endsWith('/requestApproval')) {
       const approvalRequest = this.toApprovalRequest(request, sessionId);
+      const autoDenyReason = getAutoDenyApprovalReason(approvalRequest);
+      if (autoDenyReason) {
+        this.emitAutoDeniedApproval(approvalRequest, autoDenyReason);
+        return 'decline';
+      }
+
       for (const handler of this.runtimeEventHandlers) {
         handler({
           type: 'approval_requested',
@@ -347,7 +353,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     sessionId: string | null,
   ): Promise<CodexDynamicToolCallResponse | null> {
     const params = request.params ?? {};
-    const resolvedSessionId = sessionId ?? getString(params, 'threadId') ?? 'unknown';
+    const resolvedSessionId = sessionId ?? this.getThreadIdFromParams(params) ?? 'unknown';
     const session = this.sessions.get(resolvedSessionId);
     return await handleOpenReelioCodexDynamicToolCall(request, {
       runtimeId: this.id,
@@ -355,6 +361,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
       projectId: session?.projectId ?? 'unknown',
       cwd: session?.cwd ?? getString(params, 'cwd'),
       approvalDecisionProvider: this.options.approvalDecisionProvider,
+      sessionKnown: Boolean(session),
     });
   }
 
@@ -366,7 +373,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const approvalType = request.method.includes('fileChange')
       ? 'file_change'
       : request.method.includes('commandExecution')
-        ? 'command'
+        ? 'os_command'
         : 'unknown';
     const itemId = getString(params, 'itemId');
     const turnId = getString(params, 'turnId');
@@ -377,8 +384,8 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const tool =
       approvalType === 'file_change'
         ? 'Codex file change'
-        : approvalType === 'command'
-          ? 'Codex command'
+        : approvalType === 'os_command'
+          ? 'Codex OS command'
           : 'Codex approval';
     const description =
       reason ??
@@ -391,7 +398,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     return {
       id: `codex:${request.id}`,
       runtimeId: this.id,
-      sessionId: sessionId ?? getString(params, 'threadId') ?? 'unknown',
+      sessionId: sessionId ?? this.getThreadIdFromParams(params) ?? 'unknown',
       turnId,
       itemId,
       requestId: request.id,
@@ -415,7 +422,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const params = notification.params;
     const turn = asObject(params?.turn);
     const turnId = getString(turn, 'id') ?? getString(params, 'turnId');
-    const threadId = getString(turn, 'threadId') ?? getString(params, 'threadId');
+    const threadId = this.getThreadIdFromParams(params);
     if (!turnId || !threadId || !this.sessions.has(threadId)) {
       return;
     }
@@ -427,21 +434,95 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     }
   }
 
+  private emitAutoDeniedApproval(request: ExternalAgentApprovalRequest, reason: string): void {
+    const itemId = request.itemId ?? `approval:${request.requestId}`;
+    for (const handler of this.runtimeEventHandlers) {
+      handler({
+        type: 'tool_started',
+        runtimeId: this.id,
+        sessionId: request.sessionId,
+        itemId,
+        tool: request.tool,
+        description: request.description,
+        args: request.args,
+      });
+      handler({
+        type: 'tool_completed',
+        runtimeId: this.id,
+        sessionId: request.sessionId,
+        itemId,
+        tool: request.tool,
+        success: false,
+        error: reason,
+        durationMs: 0,
+      });
+    }
+  }
+
   private resolveSessionIdFromParams(params?: CodexJsonObject): string | null {
-    const item = asObject(params?.item);
-    const turn = asObject(params?.turn);
-    const threadId =
-      getString(params, 'threadId') ?? getString(item, 'threadId') ?? getString(turn, 'threadId');
+    const threadId = this.getThreadIdFromParams(params);
 
     if (threadId && this.sessions.has(threadId)) {
       return threadId;
     }
 
+    const item = asObject(params?.item);
+    const turn = asObject(params?.turn);
     const turnId =
       getString(params, 'turnId') ?? getString(item, 'turnId') ?? getString(turn, 'id');
 
     return turnId ? (this.turnSessionIds.get(turnId) ?? null) : null;
   }
+
+  private getThreadIdFromParams(params?: CodexJsonObject): string | null {
+    const item = asObject(params?.item);
+    const turn = asObject(params?.turn);
+    const thread = asObject(params?.thread);
+    return (
+      getString(params, 'threadId') ??
+      getString(params, 'sessionId') ??
+      getString(item, 'threadId') ??
+      getString(item, 'sessionId') ??
+      getString(turn, 'threadId') ??
+      getString(turn, 'sessionId') ??
+      getString(thread, 'id') ??
+      getString(thread, 'threadId') ??
+      null
+    );
+  }
+}
+
+function getAutoDenyApprovalReason(request: ExternalAgentApprovalRequest): string | null {
+  if (request.approvalType !== 'os_command') {
+    return null;
+  }
+
+  const command = typeof request.args.command === 'string' ? request.args.command : '';
+  if (!command.trim()) {
+    return 'Codex OS command was blocked because no command text was provided.';
+  }
+
+  if (isDangerousOsCommand(command)) {
+    return 'Codex OS command was blocked by OpenReelio safety policy before user approval.';
+  }
+
+  return null;
+}
+
+function isDangerousOsCommand(command: string): boolean {
+  const normalized = command.toLowerCase();
+  const dangerousPatterns = [
+    /\b(rm|unlink|remove-item|del|erase|rmdir|rd)\b/,
+    /\b(format|mkfs|diskpart)\b/,
+    /\bsudo\b/,
+    /\b(chmod\s+777|chown)\b/,
+    /(\bcurl\b|\bwget\b).*\|\s*(sh|bash|pwsh|powershell)\b/,
+    /\b(cat|type)\b.*(\.ssh|id_rsa|id_ed25519|\.env|credentials|secret|token)/,
+    /(\.openreelio|project\.ops\.jsonl|project\.state\.json).*(>|>>|\btee\b|\bsed\s+-i\b|\brm\b|\bdel\b|\bmove\b|\bmv\b|\bcopy\b|\bcp\b)/,
+    /(>|>>|\btee\b|\bsed\s+-i\b).*(\.openreelio|project\.ops\.jsonl|project\.state\.json)/,
+  ];
+
+  return dangerousPatterns.some((pattern) => pattern.test(normalized));
 }
 
 function getString(input: CodexJsonObject | null | undefined, key: string): string | null {

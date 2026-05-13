@@ -56,10 +56,15 @@ export interface CodexDynamicToolSpec {
   deferLoading?: boolean;
 }
 
-export interface CodexDynamicToolCallOutputContentItem {
-  type: 'inputText';
-  text: string;
-}
+export type CodexDynamicToolCallOutputContentItem =
+  | {
+      type: 'inputText';
+      text: string;
+    }
+  | {
+      type: 'inputImage';
+      imageUrl: string;
+    };
 
 export interface CodexDynamicToolCallResponse {
   contentItems: CodexDynamicToolCallOutputContentItem[];

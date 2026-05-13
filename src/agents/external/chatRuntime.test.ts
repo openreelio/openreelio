@@ -270,7 +270,7 @@ describe('ExternalAgentChatRuntimeController', () => {
     sessionPersistence.nextLoadResult = {
       sessionId: 'thr_existing',
       runtimeId: 'codex',
-      metadata: { openReelioToolProtocolVersion: 2 },
+      metadata: { openReelioToolProtocolVersion: 3 },
     };
     const controller = new ExternalAgentChatRuntimeController({
       adapter,
@@ -308,7 +308,7 @@ describe('ExternalAgentChatRuntimeController', () => {
     sessionPersistence.nextLoadResult = {
       sessionId: 'thr_stale',
       runtimeId: 'codex',
-      metadata: { openReelioToolProtocolVersion: 2 },
+      metadata: { openReelioToolProtocolVersion: 3 },
     };
     const controller = new ExternalAgentChatRuntimeController({
       adapter,
@@ -334,7 +334,7 @@ describe('ExternalAgentChatRuntimeController', () => {
       conversationSessionId: 'session-1',
       runtimeId: 'codex',
       externalSession: { sessionId: 'thr_123', runtimeId: 'codex' },
-      metadata: { source: 'appServer', openReelioToolProtocolVersion: 2 },
+      metadata: { source: 'appServer', openReelioToolProtocolVersion: 3 },
     });
     expect(adapter.sendMessage).toHaveBeenCalledWith('thr_123', {
       content: 'Start over if needed',
@@ -367,7 +367,7 @@ describe('ExternalAgentChatRuntimeController', () => {
       conversationSessionId: 'session-1',
       runtimeId: 'codex',
       externalSession: { sessionId: 'thr_123', runtimeId: 'codex' },
-      metadata: { source: 'appServer', openReelioToolProtocolVersion: 2 },
+      metadata: { source: 'appServer', openReelioToolProtocolVersion: 3 },
     });
   });
 
