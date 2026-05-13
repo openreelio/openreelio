@@ -1216,6 +1216,7 @@ mod tauri_app {
                 $crate::ipc::create_sequence,
                 $crate::ipc::get_sequence,
                 // Edit commands
+                $crate::ipc::validate_command_payload,
                 $crate::ipc::execute_command,
                 $crate::ipc::undo,
                 $crate::ipc::redo,
@@ -1677,6 +1678,7 @@ mod tauri_app {
             ipc::create_sequence,
             ipc::get_sequence,
             // Edit commands
+            ipc::validate_command_payload,
             ipc::execute_command,
             ipc::undo,
             ipc::redo,
