@@ -206,7 +206,7 @@ export function ConversationMessageItem({
       (part.type === 'tool_call' && part.status === 'failed') ||
       (part.type === 'tool_result' && !part.success),
   );
-  const shouldOpenArtifactsByDefault = false;
+  const shouldOpenArtifactsByDefault = hasRunningArtifacts || hasFailedArtifacts;
 
   return (
     <div className={`flex justify-start ${className}`} data-testid="conversation-message-assistant">

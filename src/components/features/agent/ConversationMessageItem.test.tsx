@@ -246,6 +246,47 @@ describe('ConversationMessageItem', () => {
       expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
       expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();
     });
+
+    it('should reveal running and failed artifacts by default', () => {
+      const runningMessage: ConversationMessage = {
+        id: 'msg-7c',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool_call',
+            stepId: 's1',
+            tool: 'render_preview',
+            args: {},
+            description: 'Render preview',
+            riskLevel: 'medium',
+            status: 'running',
+          },
+        ],
+        timestamp: Date.now(),
+      };
+      const { rerender } = render(<ConversationMessageItem message={runningMessage} />);
+
+      expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
+
+      const failedMessage: ConversationMessage = {
+        id: 'msg-7d',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool_result',
+            stepId: 's1',
+            tool: 'render_preview',
+            success: false,
+            error: 'Render failed',
+            duration: 100,
+          },
+        ],
+        timestamp: Date.now(),
+      };
+      rerender(<ConversationMessageItem message={failedMessage} />);
+
+      expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();
+    });
   });
 
   describe('className', () => {
