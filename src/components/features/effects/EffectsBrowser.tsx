@@ -9,16 +9,8 @@ import { memo, type ReactNode } from 'react';
 import { Wand2, Search, Star } from 'lucide-react';
 import type { EffectCategory } from '@/types';
 import { EFFECT_CATEGORY_LABELS } from '@/types';
-import {
-  useEffectSearch,
-  getEffectTypeKey,
-  type EffectEntry,
-} from '@/hooks/useEffectSearch';
-import {
-  EFFECT_CATEGORIES,
-  CATEGORY_ICONS,
-  TOTAL_EFFECT_COUNT,
-} from './effectCategoryData';
+import { useEffectSearch, getEffectTypeKey, type EffectEntry } from '@/hooks/useEffectSearch';
+import { EFFECT_CATEGORIES, CATEGORY_ICONS, totalEffectCount } from './effectCategoryData';
 
 // =============================================================================
 // Types
@@ -89,7 +81,9 @@ export const EffectsBrowser = memo(function EffectsBrowser({
         </button>
         <button
           type="button"
-          aria-label={favorited ? `Remove ${effect.label} from favorites` : `Add ${effect.label} to favorites`}
+          aria-label={
+            favorited ? `Remove ${effect.label} from favorites` : `Add ${effect.label} to favorites`
+          }
           className={`p-1 mr-1 rounded transition-opacity focus-visible:ring-1 focus-visible:ring-primary-500 focus-visible:outline-none ${
             favorited
               ? 'opacity-100 text-yellow-400'
@@ -168,9 +162,7 @@ export const EffectsBrowser = memo(function EffectsBrowser({
                       {EFFECT_CATEGORY_LABELS[catId] ?? category.id}
                     </span>
                   </div>
-                  <div className="space-y-0.5">
-                    {category.effects.map(renderEffectButton)}
-                  </div>
+                  <div className="space-y-0.5">{category.effects.map(renderEffectButton)}</div>
                 </div>
               );
             })}
@@ -181,7 +173,7 @@ export const EffectsBrowser = memo(function EffectsBrowser({
       {/* Footer */}
       <div className="p-3 border-t border-editor-border mt-4">
         <p className="text-xs text-editor-text-muted text-center italic">
-          {TOTAL_EFFECT_COUNT} effects available
+          {totalEffectCount} effects available
         </p>
       </div>
     </div>

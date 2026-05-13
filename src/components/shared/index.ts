@@ -4,11 +4,7 @@
  * Components used across multiple features.
  */
 
-export {
-  ErrorBoundary,
-  type ErrorBoundaryProps,
-  type FallbackProps,
-} from './ErrorBoundary';
+export { ErrorBoundary, type ErrorBoundaryProps, type FallbackProps } from './ErrorBoundary';
 
 export { withErrorBoundary, type WithErrorBoundaryOptions } from './withErrorBoundary';
 
@@ -22,15 +18,13 @@ export {
   ExportErrorBoundary,
 } from './FeatureErrorBoundaries';
 
-export {
-  ErrorOverlay,
-  useErrorOverlay,
-  categorizeError,
-} from './ErrorOverlay';
+export { ErrorOverlay } from './ErrorOverlay';
+export { useErrorOverlay } from './useErrorOverlay';
+export { categorizeError } from './errorOverlayModel';
 export type {
   ErrorSeverity,
   ErrorCategory,
   ErrorOverlayProps,
   UseErrorOverlayOptions,
   ErrorState,
-} from './ErrorOverlay';
+} from './errorOverlayModel';

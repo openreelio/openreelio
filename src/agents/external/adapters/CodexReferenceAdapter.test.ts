@@ -1,9 +1,30 @@
-import { describe, expect, it } from 'vitest';
-import { vi } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CodexReferenceAdapter } from './CodexReferenceAdapter';
 
+const projectStoreMocks = vi.hoisted(() => ({
+  refreshFromBackendMutation: vi.fn(),
+}));
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn(),
+}));
+
+vi.mock('@/stores/projectStore', () => ({
+  useProjectStore: {
+    getState: () => ({
+      refreshFromBackendMutation: projectStoreMocks.refreshFromBackendMutation,
+    }),
+  },
+}));
+
 describe('CodexReferenceAdapter', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    projectStoreMocks.refreshFromBackendMutation.mockResolvedValue(1);
+  });
+
   it('should expose app-server and MCP capabilities without starting Codex', async () => {
     const adapter = new CodexReferenceAdapter(async () => ({
       installed: true,
@@ -81,15 +102,27 @@ describe('CodexReferenceAdapter', () => {
         cwd: '/project',
       }),
     ).resolves.toEqual({ sessionId: 'thr_123', runtimeId: 'codex' });
-    expect(appServerClient.startThread).toHaveBeenCalledWith({
-      serviceName: 'openreelio',
-      cwd: '/project',
-      model: 'gpt-5.4',
-    });
+    expect(appServerClient.startThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        serviceName: 'openreelio',
+        cwd: '/project',
+        model: 'gpt-5.4',
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user',
+        sandbox: 'workspace-write',
+        developerInstructions: expect.stringContaining('OpenReelio'),
+        dynamicTools: expect.arrayContaining([
+          expect.objectContaining({ namespace: 'openreelio', name: 'host_context' }),
+          expect.objectContaining({ namespace: 'openreelio', name: 'command_execute' }),
+        ]),
+      }),
+    );
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_123', 'Inspect this timeline', {
       cwd: '/project',
       model: 'gpt-5.4',
       effort: 'medium',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
     });
   });
 
@@ -111,6 +144,8 @@ describe('CodexReferenceAdapter', () => {
       cwd: '/project',
       model: 'gpt-5.4',
       effort: 'medium',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
     });
     expect(appServerClient.interruptTurn).toHaveBeenCalledWith('thr_123', 'turn_2');
     expect(appServerClient.unsubscribeThread).toHaveBeenCalledWith('thr_123');
@@ -135,16 +170,24 @@ describe('CodexReferenceAdapter', () => {
     ).resolves.toEqual({ sessionId: 'thr_existing', runtimeId: 'codex' });
     await adapter.sendMessage('thr_existing', { content: 'Continue', cwd: '/project' });
 
-    expect(appServerClient.resumeThread).toHaveBeenCalledWith({
-      threadId: 'thr_existing',
-      cwd: '/project',
-      model: 'gpt-5.4',
-    });
+    expect(appServerClient.resumeThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: 'thr_existing',
+        cwd: '/project',
+        model: 'gpt-5.4',
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user',
+        sandbox: 'workspace-write',
+        developerInstructions: expect.stringContaining('OpenReelio'),
+      }),
+    );
     expect(appServerClient.startThread).not.toHaveBeenCalled();
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_existing', 'Continue', {
       cwd: '/project',
       model: 'gpt-5.4',
       effort: 'medium',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
     });
   });
 
@@ -179,11 +222,14 @@ describe('CodexReferenceAdapter', () => {
       projectId: 'project-1',
       cwd: '/project',
     });
-    expect(appServerClient.startThread).toHaveBeenCalledWith({
-      serviceName: 'openreelio',
-      cwd: '/project',
-      model: 'gpt-5.4',
-    });
+    expect(appServerClient.startThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        serviceName: 'openreelio',
+        cwd: '/project',
+        model: 'gpt-5.4',
+        developerInstructions: expect.stringContaining('OpenReelio'),
+      }),
+    );
   });
 
   it('should forward app-server notifications as external runtime events', async () => {
@@ -316,5 +362,179 @@ describe('CodexReferenceAdapter', () => {
         }),
       }),
     );
+  });
+
+  it('should answer OpenReelio dynamic host context calls from the active app project', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_project_info') {
+        return {
+          id: 'project-1',
+          name: 'Launch Cut',
+          path: '/project',
+          createdAt: '2026-05-13T00:00:00Z',
+        };
+      }
+      if (command === 'get_project_state') {
+        return {
+          meta: {
+            name: 'Launch Cut',
+            version: '1',
+            createdAt: '2026-05-13T00:00:00Z',
+            modifiedAt: '2026-05-13T00:00:00Z',
+            description: null,
+            author: null,
+          },
+          assets: [],
+          sequences: [],
+          effects: [],
+          activeSequenceId: null,
+          textClips: [],
+          isDirty: false,
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+    const response = await respondToRequest({
+      id: 12,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_1',
+        namespace: 'openreelio',
+        tool: 'host_context',
+        arguments: {},
+      },
+    });
+
+    expect(response).toMatchObject({
+      success: true,
+      contentItems: [
+        {
+          type: 'inputText',
+          text: expect.stringContaining('"appName": "OpenReelio"'),
+        },
+      ],
+    });
+    expect(response).toMatchObject({
+      contentItems: [
+        {
+          text: expect.stringContaining('"projectName": "Launch Cut"'),
+        },
+      ],
+    });
+  });
+
+  it('should require approval before executing an OpenReelio dynamic edit command', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockResolvedValue({
+      opId: 'op_1',
+      createdIds: ['track_1'],
+      deletedIds: [],
+    });
+    projectStoreMocks.refreshFromBackendMutation.mockResolvedValue(7);
+    const approvalDecisionProvider = vi.fn().mockResolvedValue('accept');
+    const adapter = new CodexReferenceAdapter(undefined, {
+      appServerClient,
+      approvalDecisionProvider,
+    });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+    const response = await respondToRequest({
+      id: 13,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_2',
+        namespace: 'openreelio',
+        tool: 'command_execute',
+        arguments: {
+          commandType: 'CreateTrack',
+          payload: {
+            sequenceId: 'seq_1',
+            name: 'B-roll',
+            kind: 'video',
+          },
+          reason: 'Add a B-roll track',
+        },
+      },
+    });
+
+    expect(approvalDecisionProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'codex:openreelio:13:tool_2',
+        runtimeId: 'codex',
+        sessionId: 'thr_123',
+        turnId: 'turn_1',
+        itemId: 'tool_2',
+        requestId: 13,
+        approvalType: 'command',
+        tool: 'OpenReelio command',
+        description: 'Add a B-roll track',
+        args: expect.objectContaining({
+          commandType: 'CreateTrack',
+          projectId: 'project-1',
+          cwd: '/project',
+        }),
+      }),
+    );
+    expect(invoke).toHaveBeenCalledWith('execute_command', {
+      commandType: 'CreateTrack',
+      payload: {
+        sequenceId: 'seq_1',
+        name: 'B-roll',
+        kind: 'video',
+      },
+    });
+    expect(projectStoreMocks.refreshFromBackendMutation).toHaveBeenCalled();
+    expect(response).toMatchObject({
+      success: true,
+      contentItems: [
+        {
+          type: 'inputText',
+          text: expect.stringContaining('"status": "ok"'),
+        },
+      ],
+    });
+    expect(response).toMatchObject({
+      contentItems: [
+        {
+          text: expect.stringContaining('"stateVersion": 7'),
+        },
+      ],
+    });
   });
 });

@@ -16,6 +16,7 @@
 
 import {
   createContext,
+  createElement,
   useCallback,
   useContext,
   useEffect,
@@ -23,6 +24,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactElement,
   type ReactNode,
 } from 'react';
 
@@ -160,7 +162,7 @@ const KeyboardScopeContext = createContext<KeyboardScopeContextValue | null>(nul
  * Manages all registered keyboard scopes and dispatches events
  * to the scope with the highest z-index.
  */
-export function KeyboardScopeProvider({ children }: { children: ReactNode }) {
+export function KeyboardScopeProvider({ children }: { children: ReactNode }): ReactElement {
   const scopesRef = useRef<Map<string, KeyboardScope>>(new Map());
   const [, setUpdateCounter] = useState(0);
 
@@ -168,15 +170,21 @@ export function KeyboardScopeProvider({ children }: { children: ReactNode }) {
     setUpdateCounter((c) => c + 1);
   }, []);
 
-  const registerScope = useCallback((scope: KeyboardScope) => {
-    scopesRef.current.set(scope.id, scope);
-    forceUpdate();
-  }, [forceUpdate]);
+  const registerScope = useCallback(
+    (scope: KeyboardScope) => {
+      scopesRef.current.set(scope.id, scope);
+      forceUpdate();
+    },
+    [forceUpdate],
+  );
 
-  const unregisterScope = useCallback((scopeId: string) => {
-    scopesRef.current.delete(scopeId);
-    forceUpdate();
-  }, [forceUpdate]);
+  const unregisterScope = useCallback(
+    (scopeId: string) => {
+      scopesRef.current.delete(scopeId);
+      forceUpdate();
+    },
+    [forceUpdate],
+  );
 
   const getActiveScope = useCallback((): KeyboardScope | null => {
     let highest: KeyboardScope | null = null;
@@ -228,14 +236,10 @@ export function KeyboardScopeProvider({ children }: { children: ReactNode }) {
       getActiveScope,
       _forceUpdate: forceUpdate,
     }),
-    [forceUpdate, getActiveScope, registerScope, unregisterScope]
+    [forceUpdate, getActiveScope, registerScope, unregisterScope],
   );
 
-  return (
-    <KeyboardScopeContext.Provider value={contextValue}>
-      {children}
-    </KeyboardScopeContext.Provider>
-  );
+  return createElement(KeyboardScopeContext.Provider, { value: contextValue }, children);
 }
 
 // =============================================================================
@@ -284,7 +288,7 @@ export function useScopedShortcuts(
   scopeId: string,
   zIndex: number,
   shortcuts: Record<string, ShortcutHandler>,
-  options: ScopedShortcutsOptions = {}
+  options: ScopedShortcutsOptions = {},
 ): void {
   const context = useContext(KeyboardScopeContext);
   const { allowInInputs = false, enabled = true } = options;
@@ -319,7 +323,7 @@ export function useRegisterShortcuts(
   scopeId: string,
   priority: ScopePriorityLevel,
   shortcuts: Record<string, ShortcutHandler>,
-  options: ShortcutOptions = {}
+  options: ShortcutOptions = {},
 ): void {
   useScopedShortcuts(scopeId, priority, shortcuts, options);
 }
@@ -352,7 +356,7 @@ export function useIsShortcutsActive(scopeId?: string): boolean {
 export function useScopedKeyHandler(
   scopeId: string,
   shortcuts: Record<string, ShortcutHandler>,
-  options: ShortcutOptions = {}
+  options: ShortcutOptions = {},
 ): (event: ReactKeyboardEvent) => void {
   const context = useContext(KeyboardScopeContext);
   const { allowInInputs = false, enabled = true } = options;
@@ -378,7 +382,7 @@ export function useScopedKeyHandler(
         handler();
       }
     },
-    [allowInInputs, context, enabled, scopeId, shortcuts]
+    [allowInInputs, context, enabled, scopeId, shortcuts],
   );
 }
 

@@ -170,8 +170,5 @@ export const EFFECT_CATEGORIES: CategoryWithIcon[] = [
   },
 ];
 
-/** Total effect count (constant, computed once) */
-export const TOTAL_EFFECT_COUNT = EFFECT_CATEGORIES.reduce(
-  (acc, cat) => acc + cat.effects.length,
-  0,
-);
+/** Total effect count (computed once) */
+export const totalEffectCount = EFFECT_CATEGORIES.reduce((acc, cat) => acc + cat.effects.length, 0);

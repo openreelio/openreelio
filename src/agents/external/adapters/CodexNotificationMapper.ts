@@ -273,10 +273,15 @@ function mapFileChangeItem(
 
 function formatToolName(item: CodexJsonObject, fallback: string): string {
   const server = getString(item, 'server');
+  const namespace = getString(item, 'namespace');
   const tool = getString(item, 'tool');
 
   if (server && tool) {
     return `${server}/${tool}`;
+  }
+
+  if (namespace && tool) {
+    return `${namespace}.${tool}`;
   }
 
   return tool ?? fallback;

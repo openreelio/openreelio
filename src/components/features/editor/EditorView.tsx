@@ -161,15 +161,14 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   const handleToggleMixer = useCallback(() => setShowMixer((prev) => !prev), []);
 
   useEffect(() => {
-    const validClipIds = sequence?.tracks.flatMap((track) => track.clips.map((clip) => clip.id)) ?? [];
+    const validClipIds =
+      sequence?.tracks.flatMap((track) => track.clips.map((clip) => clip.id)) ?? [];
     const validTrackIds = sequence?.tracks.map((track) => track.id) ?? [];
     sanitizeSelection(validClipIds, validTrackIds);
   }, [sanitizeSelection, sequence]);
 
   // AI Sidebar state
-  const {
-    toggle: toggleAiSidebar,
-  } = useDockableAIPanel({
+  const { toggle: toggleAiSidebar } = useDockableAIPanel({
     autoCollapseBreakpoint: AI_AUTO_COLLAPSE_BREAKPOINT,
     initialWidth: 320,
   });
@@ -1259,7 +1258,6 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       />
     ),
     [
-      sequence?.name,
       appVersion,
       handleOpenExport,
       handleExportEdl,

@@ -51,6 +51,7 @@ export class TauriExternalAgentSessionPersistence implements ExternalAgentSessio
     return {
       sessionId: link.externalSessionId,
       runtimeId: link.runtimeId,
+      metadata: parseMetadata(link.metadataJson),
     };
   }
 
@@ -70,6 +71,22 @@ export class TauriExternalAgentSessionPersistence implements ExternalAgentSessio
         metadataJson: input.metadata ? JSON.stringify(input.metadata) : null,
       },
     });
+  }
+}
+
+function parseMetadata(metadataJson: string | null): Record<string, unknown> | null {
+  if (!metadataJson) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(metadataJson);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
   }
 }
 

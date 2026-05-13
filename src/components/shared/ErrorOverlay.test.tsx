@@ -7,11 +7,9 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import {
-  ErrorOverlay,
-  useErrorOverlay,
-  categorizeError,
-} from './ErrorOverlay';
+import { ErrorOverlay } from './ErrorOverlay';
+import { categorizeError } from './errorOverlayModel';
+import { useErrorOverlay } from './useErrorOverlay';
 
 describe('ErrorOverlay', () => {
   beforeEach(() => {
@@ -39,12 +37,7 @@ describe('ErrorOverlay', () => {
     });
 
     it('should display custom title', () => {
-      render(
-        <ErrorOverlay
-          error={new Error('Test')}
-          title="Custom Error Title"
-        />
-      );
+      render(<ErrorOverlay error={new Error('Test')} title="Custom Error Title" />);
       expect(screen.getByText('Custom Error Title')).toBeInTheDocument();
     });
   });
@@ -55,25 +48,19 @@ describe('ErrorOverlay', () => {
 
   describe('severity levels', () => {
     it('should render warning severity with correct styling', () => {
-      render(
-        <ErrorOverlay error={new Error('Warning')} severity="warning" />
-      );
+      render(<ErrorOverlay error={new Error('Warning')} severity="warning" />);
       const dialog = screen.getByRole('alertdialog');
       expect(dialog).toHaveClass('warning');
     });
 
     it('should render error severity with correct styling', () => {
-      render(
-        <ErrorOverlay error={new Error('Error')} severity="error" />
-      );
+      render(<ErrorOverlay error={new Error('Error')} severity="error" />);
       const dialog = screen.getByRole('alertdialog');
       expect(dialog).toHaveClass('error');
     });
 
     it('should render critical severity with correct styling', () => {
-      render(
-        <ErrorOverlay error={new Error('Critical')} severity="critical" />
-      );
+      render(<ErrorOverlay error={new Error('Critical')} severity="critical" />);
       const dialog = screen.getByRole('alertdialog');
       expect(dialog).toHaveClass('critical');
     });
@@ -92,12 +79,7 @@ describe('ErrorOverlay', () => {
   describe('dismiss behavior', () => {
     it('should call onDismiss when dismiss button is clicked', () => {
       const onDismiss = vi.fn();
-      render(
-        <ErrorOverlay
-          error={new Error('Test')}
-          onDismiss={onDismiss}
-        />
-      );
+      render(<ErrorOverlay error={new Error('Test')} onDismiss={onDismiss} />);
 
       fireEvent.click(screen.getByText('Dismiss'));
       expect(onDismiss).toHaveBeenCalledTimes(1);
@@ -105,11 +87,7 @@ describe('ErrorOverlay', () => {
 
     it('should not show dismiss button for critical errors', () => {
       render(
-        <ErrorOverlay
-          error={new Error('Critical')}
-          severity="critical"
-          onDismiss={vi.fn()}
-        />
+        <ErrorOverlay error={new Error('Critical')} severity="critical" onDismiss={vi.fn()} />,
       );
 
       expect(screen.queryByText('Dismiss')).not.toBeInTheDocument();
@@ -117,13 +95,7 @@ describe('ErrorOverlay', () => {
 
     it('should close on Escape key for non-critical errors', () => {
       const onDismiss = vi.fn();
-      render(
-        <ErrorOverlay
-          error={new Error('Test')}
-          severity="warning"
-          onDismiss={onDismiss}
-        />
-      );
+      render(<ErrorOverlay error={new Error('Test')} severity="warning" onDismiss={onDismiss} />);
 
       fireEvent.keyDown(document, { key: 'Escape' });
       expect(onDismiss).toHaveBeenCalledTimes(1);
@@ -132,11 +104,7 @@ describe('ErrorOverlay', () => {
     it('should not close on Escape key for critical errors', () => {
       const onDismiss = vi.fn();
       render(
-        <ErrorOverlay
-          error={new Error('Critical')}
-          severity="critical"
-          onDismiss={onDismiss}
-        />
+        <ErrorOverlay error={new Error('Critical')} severity="critical" onDismiss={onDismiss} />,
       );
 
       fireEvent.keyDown(document, { key: 'Escape' });
@@ -151,48 +119,27 @@ describe('ErrorOverlay', () => {
   describe('retry/recovery action', () => {
     it('should show retry button when onRetry is provided', () => {
       const onRetry = vi.fn();
-      render(
-        <ErrorOverlay
-          error={new Error('Test')}
-          onRetry={onRetry}
-        />
-      );
+      render(<ErrorOverlay error={new Error('Test')} onRetry={onRetry} />);
 
       expect(screen.getByText('Retry')).toBeInTheDocument();
     });
 
     it('should call onRetry when retry button is clicked', () => {
       const onRetry = vi.fn();
-      render(
-        <ErrorOverlay
-          error={new Error('Test')}
-          onRetry={onRetry}
-        />
-      );
+      render(<ErrorOverlay error={new Error('Test')} onRetry={onRetry} />);
 
       fireEvent.click(screen.getByText('Retry'));
       expect(onRetry).toHaveBeenCalledTimes(1);
     });
 
     it('should show custom recovery label', () => {
-      render(
-        <ErrorOverlay
-          error={new Error('Test')}
-          onRetry={vi.fn()}
-          retryLabel="Try Again"
-        />
-      );
+      render(<ErrorOverlay error={new Error('Test')} onRetry={vi.fn()} retryLabel="Try Again" />);
 
       expect(screen.getByText('Try Again')).toBeInTheDocument();
     });
 
     it('should show reload button for critical errors', () => {
-      render(
-        <ErrorOverlay
-          error={new Error('Critical')}
-          severity="critical"
-        />
-      );
+      render(<ErrorOverlay error={new Error('Critical')} severity="critical" />);
 
       expect(screen.getByText('Reload Application')).toBeInTheDocument();
     });
@@ -207,12 +154,7 @@ describe('ErrorOverlay', () => {
       const error = new Error('Test error');
       error.stack = 'Error: Test error\n    at test.ts:1:1';
 
-      render(
-        <ErrorOverlay
-          error={error}
-          showDetails={true}
-        />
-      );
+      render(<ErrorOverlay error={error} showDetails={true} />);
 
       expect(screen.getByText(/Error Details/i)).toBeInTheDocument();
     });
@@ -221,12 +163,7 @@ describe('ErrorOverlay', () => {
       const error = new Error('Test error');
       error.stack = 'Error: Test error\n    at test.ts:1:1';
 
-      render(
-        <ErrorOverlay
-          error={error}
-          showDetails={true}
-        />
-      );
+      render(<ErrorOverlay error={error} showDetails={true} />);
 
       // Click to expand details
       fireEvent.click(screen.getByText(/Error Details/i));
@@ -234,9 +171,7 @@ describe('ErrorOverlay', () => {
     });
 
     it('should not show details by default', () => {
-      render(
-        <ErrorOverlay error={new Error('Test')} />
-      );
+      render(<ErrorOverlay error={new Error('Test')} />);
 
       expect(screen.queryByText(/Error Details/i)).not.toBeInTheDocument();
     });
@@ -253,7 +188,7 @@ describe('ErrorOverlay', () => {
           error={new Error('Test')}
           componentStack="in MyComponent\nin ParentComponent"
           showDetails={true}
-        />
+        />,
       );
 
       fireEvent.click(screen.getByText(/Error Details/i));

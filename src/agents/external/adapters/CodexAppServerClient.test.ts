@@ -57,7 +57,7 @@ describe('CodexAppServerClient', () => {
       id: 1,
       params: {
         clientInfo: { name: 'openreelio', title: 'OpenReelio', version: '0.1.0' },
-        capabilities: null,
+        capabilities: { experimentalApi: true },
       },
     });
 
@@ -90,7 +90,7 @@ describe('CodexAppServerClient', () => {
       id: 1,
       params: {
         clientInfo: { name: 'openreelio', title: 'OpenReelio', version: '0.1.0' },
-        capabilities: null,
+        capabilities: { experimentalApi: true },
       },
     });
 
