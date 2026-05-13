@@ -26,6 +26,7 @@ import { createCodexTauriAppServerClient } from './CodexTauriAppServerTransport'
 import {
   OPENREELIO_CODEX_DYNAMIC_TOOLS,
   buildOpenReelioCodexDeveloperInstructions,
+  clearOpenReelioCodexSession,
   handleOpenReelioCodexDynamicToolCall,
   type OpenReelioCodexSessionContext,
 } from './openreelioCodexTools';
@@ -208,6 +209,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const session = this.requireSession(sessionId);
     await client.unsubscribeThread(session.threadId);
     this.sessions.delete(sessionId);
+    clearOpenReelioCodexSession(sessionId);
     if (session.lastTurnId) {
       this.turnSessionIds.delete(session.lastTurnId);
     }
@@ -435,7 +437,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
   }
 
   private emitAutoDeniedApproval(request: ExternalAgentApprovalRequest, reason: string): void {
-    const itemId = request.itemId ?? `approval:${request.requestId}`;
+    const itemId = `_auto_denied:${request.itemId ?? `approval:${request.requestId}`}`;
     for (const handler of this.runtimeEventHandlers) {
       handler({
         type: 'tool_started',
@@ -511,9 +513,11 @@ function getAutoDenyApprovalReason(request: ExternalAgentApprovalRequest): strin
 
 function isDangerousOsCommand(command: string): boolean {
   const normalized = command.toLowerCase();
+  const shellCommandPrefix = String.raw`(?:^|[;&|]\s*)`;
   const dangerousPatterns = [
-    /\b(rm|unlink|remove-item|del|erase|rmdir|rd)\b/,
-    /\b(format|mkfs|diskpart)\b/,
+    new RegExp(`${shellCommandPrefix}(rm|unlink|remove-item|del|erase|rmdir|rd)\\s+`),
+    new RegExp(`${shellCommandPrefix}format\\s+([a-z]:|/[a-z])`),
+    new RegExp(`${shellCommandPrefix}(mkfs(\\.[a-z0-9]+)?|diskpart)\\b`),
     /\bsudo\b/,
     /\b(chmod\s+777|chown)\b/,
     /(\bcurl\b|\bwget\b).*\|\s*(sh|bash|pwsh|powershell)\b/,

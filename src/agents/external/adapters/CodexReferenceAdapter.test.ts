@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CodexReferenceAdapter } from './CodexReferenceAdapter';
+import type { CodexDynamicToolCallResponse } from './CodexAppServerClient';
 
 const projectStoreMocks = vi.hoisted(() => ({
   refreshFromBackendMutation: vi.fn(),
@@ -21,7 +22,7 @@ vi.mock('@/stores/projectStore', () => ({
 
 describe('CodexReferenceAdapter', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     projectStoreMocks.refreshFromBackendMutation.mockResolvedValue(1);
   });
 
@@ -117,6 +118,12 @@ describe('CodexReferenceAdapter', () => {
         ]),
       }),
     );
+    const startThreadInput = appServerClient.startThread.mock.calls[0]?.[0] as any;
+    const commandExecuteTool = startThreadInput.dynamicTools.find(
+      (tool: any) => tool.name === 'command_execute',
+    );
+    expect(commandExecuteTool.inputSchema.properties.commandType.enum).toContain('CreateTrack');
+    expect(commandExecuteTool.inputSchema.properties.commandType.enum).not.toContain('DeleteFile');
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_123', 'Inspect this timeline', {
       cwd: '/project',
       model: 'gpt-5.4',
@@ -441,7 +448,7 @@ describe('CodexReferenceAdapter', () => {
         },
       ],
     });
-    const hostContext = JSON.parse((response as any).contentItems[0].text);
+    const hostContext = JSON.parse(getFirstTextContent(response));
     expect(hostContext).not.toHaveProperty('contextToken');
   });
 
@@ -511,10 +518,10 @@ describe('CodexReferenceAdapter', () => {
     })) as any;
 
     expect(projectStateResponse.success).toBe(true);
-    expect(projectStateResponse.contentItems[0].text).toContain('"contextToken"');
-    expect(projectStateResponse.contentItems[0].text).toContain('"projectState"');
+    expect(getFirstTextContent(projectStateResponse)).toContain('"contextToken"');
+    expect(getFirstTextContent(projectStateResponse)).toContain('"projectState"');
     expect(commandSchemaResponse.success).toBe(true);
-    expect(commandSchemaResponse.contentItems[0].text).toContain('"mutationTool"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"mutationTool"');
   });
 
   it('should require approval before executing an OpenReelio dynamic edit command', async () => {
@@ -592,7 +599,7 @@ describe('CodexReferenceAdapter', () => {
         arguments: {},
       },
     })) as any;
-    const contextToken = JSON.parse(contextResponse.contentItems[0].text).contextToken;
+    const contextToken = JSON.parse(getFirstTextContent(contextResponse)).contextToken;
 
     const response = await respondToRequest({
       id: 13,
@@ -702,7 +709,7 @@ describe('CodexReferenceAdapter', () => {
     })) as any;
 
     expect(response.success).toBe(false);
-    expect(response.contentItems[0].text).toContain('not linked to an active OpenReelio session');
+    expect(getFirstTextContent(response)).toContain('not linked to an active OpenReelio session');
     expect(invoke).not.toHaveBeenCalled();
   });
 
@@ -752,7 +759,7 @@ describe('CodexReferenceAdapter', () => {
     })) as any;
 
     expect(response.success).toBe(false);
-    expect(response.contentItems[0].text).toContain('requires a fresh mutation contextToken');
+    expect(getFirstTextContent(response)).toContain('requires a fresh mutation contextToken');
     expect(approvalDecisionProvider).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
   });
@@ -816,7 +823,7 @@ describe('CodexReferenceAdapter', () => {
         arguments: {},
       },
     })) as any;
-    const contextToken = JSON.parse(contextResponse.contentItems[0].text).contextToken;
+    const contextToken = JSON.parse(getFirstTextContent(contextResponse)).contextToken;
 
     const response = (await respondToRequest({
       id: 27,
@@ -840,7 +847,7 @@ describe('CodexReferenceAdapter', () => {
     })) as any;
 
     expect(response.success).toBe(false);
-    expect(response.contentItems[0].text).toContain('invalid CreateTrack payload before approval');
+    expect(getFirstTextContent(response)).toContain('invalid CreateTrack payload before approval');
     expect(approvalDecisionProvider).not.toHaveBeenCalled();
     expect(invoke).toHaveBeenCalledWith('validate_command_payload', {
       commandType: 'CreateTrack',
@@ -894,12 +901,67 @@ describe('CodexReferenceAdapter', () => {
     expect(approvalDecisionProvider).not.toHaveBeenCalled();
     expect(handler).toHaveBeenCalledWith(
       expect.objectContaining({
+        type: 'tool_started',
+        runtimeId: 'codex',
+        sessionId: 'thr_123',
+        itemId: '_auto_denied:cmd_unsafe',
+        tool: 'Codex OS command',
+      }),
+    );
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({
         type: 'tool_completed',
         runtimeId: 'codex',
         sessionId: 'thr_123',
-        itemId: 'cmd_unsafe',
+        itemId: '_auto_denied:cmd_unsafe',
         tool: 'Codex OS command',
         success: false,
+      }),
+    );
+    expect(handler.mock.calls.some(([event]) => event.type === 'approval_requested')).toBe(false);
+  });
+
+  it('should request approval for benign formatting commands', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    const approvalDecisionProvider = vi.fn().mockResolvedValue('accept');
+    const adapter = new CodexReferenceAdapter(undefined, {
+      appServerClient,
+      approvalDecisionProvider,
+    });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const decision = await respondToRequest({
+      id: 29,
+      method: 'item/commandExecution/requestApproval',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        itemId: 'cmd_format',
+        command: 'npm run format',
+        cwd: '/project',
+      },
+    });
+
+    expect(decision).toBe('accept');
+    expect(approvalDecisionProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalType: 'os_command',
+        args: expect.objectContaining({ command: 'npm run format' }),
       }),
     );
   });
@@ -987,7 +1049,7 @@ describe('CodexReferenceAdapter', () => {
     })) as any;
 
     expect(response.success).toBe(false);
-    expect(response.contentItems[0].text).toContain('not in the supported command enum');
+    expect(getFirstTextContent(response)).toContain('not in the supported command enum');
     expect(approvalDecisionProvider).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
   });
@@ -1035,8 +1097,17 @@ describe('CodexReferenceAdapter', () => {
     })) as any;
 
     expect(response.success).toBe(false);
-    expect(response.contentItems[0].text).toContain('Workspace filesystem commands');
+    expect(getFirstTextContent(response)).toContain('Workspace filesystem commands');
     expect(approvalDecisionProvider).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
   });
 });
+
+function getFirstTextContent(response: unknown): string {
+  const item = (response as CodexDynamicToolCallResponse).contentItems[0];
+  if (!item || item.type !== 'inputText') {
+    throw new Error('Expected first Codex dynamic tool response item to be inputText');
+  }
+
+  return item.text;
+}

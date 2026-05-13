@@ -730,7 +730,7 @@ function inferApprovalRiskLevel(
   if (approvalType === 'openreelio_edit_command') {
     return 'medium';
   }
-  return 'medium';
+  return 'high';
 }
 
 function formatApprovalTool(

@@ -629,6 +629,67 @@ describe('ExternalAgentChatRuntimeController', () => {
     );
   });
 
+  it('should treat unknown approval types as high risk', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const approvalBroker = new ExternalAgentApprovalBroker({ timeoutMs: 0 });
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+      approvalBroker,
+    });
+
+    await controller.sendMessage('Inspect request');
+    const decisionPromise = approvalBroker.requestDecision({
+      id: 'codex:42',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      turnId: 'turn_1',
+      itemId: 'approval_unknown',
+      requestId: 42,
+      approvalType: 'unknown',
+      tool: 'Codex approval',
+      description: 'Unknown approval request',
+      args: {},
+      reason: null,
+      requestedAt: 1000,
+    });
+    adapter.emit({
+      type: 'approval_requested',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'approval_unknown',
+      requestId: 42,
+      approvalType: 'unknown',
+      tool: 'Codex approval',
+      description: 'Unknown approval request',
+      args: {},
+    });
+
+    expect(controller.getState().pendingToolPermissionRequest).toEqual({
+      id: 'codex:42',
+      tool: 'Codex approval',
+      description: 'Unknown approval request',
+      args: {},
+      riskLevel: 'high',
+    });
+    expect(conversation.getMessageParts('assistant-1')).toEqual([
+      {
+        type: 'tool_approval',
+        stepId: 'codex:42',
+        tool: 'Codex approval',
+        args: {},
+        description: 'Unknown approval request',
+        riskLevel: 'high',
+        status: 'pending',
+      },
+    ]);
+
+    controller.resolveApproval('decline');
+    await expect(decisionPromise).resolves.toBe('decline');
+  });
+
   it('should mark approval parts denied when the user declines a request', async () => {
     const conversation = new FakeConversationGateway();
     const adapter = new FakeExternalAgentAdapter();

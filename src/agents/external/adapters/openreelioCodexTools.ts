@@ -104,6 +104,10 @@ const OPENREELIO_WORKSPACE_COMMAND_TYPES = new Set<string>([
   'DeleteFile',
 ]);
 
+const OPENREELIO_EXECUTABLE_COMMAND_TYPES = OPENREELIO_COMMAND_TYPES.filter(
+  (commandType) => !OPENREELIO_WORKSPACE_COMMAND_TYPES.has(commandType),
+);
+
 const CONTEXT_TOKEN_TTL_MS = 10 * 60 * 1000;
 
 interface ContextTokenRecord {
@@ -117,6 +121,10 @@ interface ContextTokenRecord {
 
 const contextTokensBySessionId = new Map<string, ContextTokenRecord>();
 
+export function clearOpenReelioCodexSession(sessionId: string): void {
+  contextTokensBySessionId.delete(sessionId);
+}
+
 const EMPTY_OBJECT_SCHEMA: CodexJsonObject = {
   type: 'object',
   properties: {},
@@ -129,8 +137,8 @@ const COMMAND_EXECUTE_SCHEMA: CodexJsonObject = {
   properties: {
     commandType: {
       type: 'string',
-      enum: OPENREELIO_COMMAND_TYPES,
-      description: 'PascalCase OpenReelio backend command type.',
+      enum: OPENREELIO_EXECUTABLE_COMMAND_TYPES,
+      description: 'PascalCase OpenReelio edit command type executable through command_execute.',
     },
     payload: {
       type: 'object',
