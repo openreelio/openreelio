@@ -187,7 +187,12 @@ export type ExternalAgentRuntimeEvent =
       sessionId: string;
       itemId: string | null;
       requestId: number;
-      approvalType: 'command' | 'file_change' | 'unknown';
+      approvalType:
+        | 'os_command'
+        | 'file_change'
+        | 'openreelio_edit_command'
+        | 'openreelio_workspace_command'
+        | 'unknown';
       reason?: string | null;
       tool?: string | null;
       description?: string | null;
@@ -211,7 +216,12 @@ export interface ExternalAgentApprovalRequest {
   turnId: string | null;
   itemId: string | null;
   requestId: number;
-  approvalType: 'command' | 'file_change' | 'unknown';
+  approvalType:
+    | 'os_command'
+    | 'file_change'
+    | 'openreelio_edit_command'
+    | 'openreelio_workspace_command'
+    | 'unknown';
   tool: string;
   description: string;
   args: Record<string, unknown>;

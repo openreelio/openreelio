@@ -77,7 +77,7 @@ const INITIAL_STATE: ExternalAgentChatRuntimeState = {
   pendingToolPermissionRequest: null,
 };
 
-const CODEX_OPENREELIO_TOOL_PROTOCOL_VERSION = 2;
+const CODEX_OPENREELIO_TOOL_PROTOCOL_VERSION = 3;
 
 export class ExternalAgentChatRuntimeController {
   private projectId: string | null;
@@ -721,23 +721,32 @@ function inferRiskLevel(tool: string): RiskLevel {
 function inferApprovalRiskLevel(
   approvalType: Extract<ExternalAgentRuntimeEvent, { type: 'approval_requested' }>['approvalType'],
 ): RiskLevel {
-  if (approvalType === 'command') {
+  if (approvalType === 'os_command') {
     return 'critical';
   }
-  if (approvalType === 'file_change') {
+  if (approvalType === 'file_change' || approvalType === 'openreelio_workspace_command') {
     return 'high';
   }
-  return 'medium';
+  if (approvalType === 'openreelio_edit_command') {
+    return 'medium';
+  }
+  return 'high';
 }
 
 function formatApprovalTool(
   approvalType: Extract<ExternalAgentRuntimeEvent, { type: 'approval_requested' }>['approvalType'],
 ): string {
-  if (approvalType === 'command') {
-    return 'Codex command';
+  if (approvalType === 'os_command') {
+    return 'Codex OS command';
   }
   if (approvalType === 'file_change') {
     return 'Codex file change';
+  }
+  if (approvalType === 'openreelio_edit_command') {
+    return 'OpenReelio edit';
+  }
+  if (approvalType === 'openreelio_workspace_command') {
+    return 'OpenReelio workspace change';
   }
   return 'Codex approval';
 }

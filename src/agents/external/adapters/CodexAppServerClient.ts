@@ -56,9 +56,20 @@ export interface CodexDynamicToolSpec {
   deferLoading?: boolean;
 }
 
-export interface CodexDynamicToolCallOutputContentItem {
-  type: 'inputText';
-  text: string;
+export type CodexDynamicToolCallOutputContentItem =
+  | {
+      type: 'inputText';
+      text: string;
+    }
+  | {
+      type: 'inputImage';
+      imageUrl: string;
+    };
+
+export function isCodexDynamicToolCallOutputTextItem(
+  item: CodexDynamicToolCallOutputContentItem | undefined,
+): item is Extract<CodexDynamicToolCallOutputContentItem, { type: 'inputText' }> {
+  return item?.type === 'inputText';
 }
 
 export interface CodexDynamicToolCallResponse {

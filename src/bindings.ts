@@ -278,6 +278,16 @@ async getSequence(sequenceId: string) : Promise<Result<Sequence, string>> {
 }
 },
 /**
+ * Validates an edit command payload without mutating project state.
+ */
+async validateCommandPayload(commandType: string, payload: JsonValue) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("validate_command_payload", { commandType, payload }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Executes an edit command
  */
 async executeCommand(commandType: string, payload: JsonValue) : Promise<Result<CommandResultDto, string>> {

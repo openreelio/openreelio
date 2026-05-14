@@ -170,7 +170,8 @@ describe('ConversationMessageItem', () => {
       expect(screen.getByTestId('text-part')).toBeInTheDocument();
     });
 
-    it('should render tool call and result parts', () => {
+    it('should collapse tool-only artifacts behind a compact summary', async () => {
+      const user = userEvent.setup();
       const message: ConversationMessage = {
         id: 'msg-7',
         role: 'assistant',
@@ -195,6 +196,13 @@ describe('ConversationMessageItem', () => {
         timestamp: Date.now(),
       };
       render(<ConversationMessageItem message={message} />);
+
+      expect(screen.getByTestId('assistant-artifact-group')).toBeInTheDocument();
+      expect(screen.getByText('Work Details')).toBeInTheDocument();
+      expect(screen.queryByTestId('tool-call-part')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('tool-result-part')).not.toBeInTheDocument();
+
+      await user.click(screen.getByTestId('assistant-artifact-toggle'));
 
       expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
       expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();
@@ -236,6 +244,47 @@ describe('ConversationMessageItem', () => {
       await user.click(screen.getByTestId('assistant-artifact-toggle'));
 
       expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
+      expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();
+    });
+
+    it('should reveal running and failed artifacts by default', () => {
+      const runningMessage: ConversationMessage = {
+        id: 'msg-7c',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool_call',
+            stepId: 's1',
+            tool: 'render_preview',
+            args: {},
+            description: 'Render preview',
+            riskLevel: 'medium',
+            status: 'running',
+          },
+        ],
+        timestamp: Date.now(),
+      };
+      const { rerender } = render(<ConversationMessageItem message={runningMessage} />);
+
+      expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
+
+      const failedMessage: ConversationMessage = {
+        id: 'msg-7d',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool_result',
+            stepId: 's1',
+            tool: 'render_preview',
+            success: false,
+            error: 'Render failed',
+            duration: 100,
+          },
+        ],
+        timestamp: Date.now(),
+      };
+      rerender(<ConversationMessageItem message={failedMessage} />);
+
       expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();
     });
   });

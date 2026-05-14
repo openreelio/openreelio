@@ -270,7 +270,7 @@ describe('ExternalAgentChatRuntimeController', () => {
     sessionPersistence.nextLoadResult = {
       sessionId: 'thr_existing',
       runtimeId: 'codex',
-      metadata: { openReelioToolProtocolVersion: 2 },
+      metadata: { openReelioToolProtocolVersion: 3 },
     };
     const controller = new ExternalAgentChatRuntimeController({
       adapter,
@@ -308,7 +308,7 @@ describe('ExternalAgentChatRuntimeController', () => {
     sessionPersistence.nextLoadResult = {
       sessionId: 'thr_stale',
       runtimeId: 'codex',
-      metadata: { openReelioToolProtocolVersion: 2 },
+      metadata: { openReelioToolProtocolVersion: 3 },
     };
     const controller = new ExternalAgentChatRuntimeController({
       adapter,
@@ -334,7 +334,7 @@ describe('ExternalAgentChatRuntimeController', () => {
       conversationSessionId: 'session-1',
       runtimeId: 'codex',
       externalSession: { sessionId: 'thr_123', runtimeId: 'codex' },
-      metadata: { source: 'appServer', openReelioToolProtocolVersion: 2 },
+      metadata: { source: 'appServer', openReelioToolProtocolVersion: 3 },
     });
     expect(adapter.sendMessage).toHaveBeenCalledWith('thr_123', {
       content: 'Start over if needed',
@@ -367,7 +367,7 @@ describe('ExternalAgentChatRuntimeController', () => {
       conversationSessionId: 'session-1',
       runtimeId: 'codex',
       externalSession: { sessionId: 'thr_123', runtimeId: 'codex' },
-      metadata: { source: 'appServer', openReelioToolProtocolVersion: 2 },
+      metadata: { source: 'appServer', openReelioToolProtocolVersion: 3 },
     });
   });
 
@@ -627,6 +627,71 @@ describe('ExternalAgentChatRuntimeController', () => {
       'allow_always',
       'interactive_approval',
     );
+  });
+
+  it('should treat unknown approval types as high risk', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const approvalBroker = new ExternalAgentApprovalBroker({ timeoutMs: 0 });
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+      approvalBroker,
+    });
+
+    await controller.sendMessage('Inspect request');
+    const decisionPromise = approvalBroker.requestDecision({
+      id: 'codex:42',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      turnId: 'turn_1',
+      itemId: 'approval_unknown',
+      requestId: 42,
+      approvalType: 'unknown',
+      tool: 'Codex approval',
+      description: 'Unknown approval request',
+      args: {},
+      reason: null,
+      requestedAt: 1000,
+    });
+    adapter.emit({
+      type: 'approval_requested',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'approval_unknown',
+      requestId: 42,
+      approvalType: 'unknown',
+      tool: 'Codex approval',
+      description: 'Unknown approval request',
+      args: {},
+    });
+
+    expect(controller.getState().pendingToolPermissionRequest).toEqual({
+      id: 'codex:42',
+      tool: 'Codex approval',
+      description: 'Unknown approval request',
+      args: {},
+      riskLevel: 'high',
+    });
+    expect(conversation.getMessageParts('assistant-1')).toEqual([
+      {
+        type: 'tool_approval',
+        stepId: 'codex:42',
+        tool: 'Codex approval',
+        args: {},
+        description: 'Unknown approval request',
+        riskLevel: 'high',
+        status: 'pending',
+      },
+    ]);
+
+    controller.resolveApproval('decline');
+    await expect(decisionPromise).resolves.toBe('decline');
+    expect(controller.getState().pendingToolPermissionRequest).toBeNull();
+    expect(conversation.getMessageParts('assistant-1')?.[0]).toMatchObject({
+      status: 'denied',
+    });
   });
 
   it('should mark approval parts denied when the user declines a request', async () => {

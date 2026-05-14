@@ -118,6 +118,16 @@ pub async fn get_sequence(
     Ok(sequence.clone())
 }
 
+/// Validates an edit command payload without mutating project state.
+#[tauri::command]
+#[specta::specta]
+pub async fn validate_command_payload(
+    command_type: String,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    CommandPayload::parse(command_type, payload).map(|_| ())
+}
+
 /// Executes an edit command
 #[tauri::command]
 #[specta::specta]

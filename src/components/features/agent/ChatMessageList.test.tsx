@@ -22,7 +22,7 @@ describe('ChatMessageList', () => {
     });
   });
 
-  it('scrolls to and expands the latest matching artifact message when focused', async () => {
+  it('scrolls to the latest matching artifact message without expanding inline details', async () => {
     const messages: ConversationMessage[] = [
       {
         id: 'msg-1',
@@ -74,7 +74,7 @@ describe('ChatMessageList', () => {
       expect(scrollIntoView).toHaveBeenCalled();
     });
 
-    expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
     expect(screen.getByTestId('assistant-artifact-group')).toBeInTheDocument();
+    expect(screen.queryByTestId('tool-call-part')).not.toBeInTheDocument();
   });
 });

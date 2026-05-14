@@ -87,44 +87,53 @@ export function ChatInputArea({
   // desync the agent.
   const hasBlockingDecision =
     (phase === 'awaiting_approval' && !!pendingPlan) || !!pendingToolPermissionRequest;
+  const hasDecisionSurface =
+    !!pendingClarificationQuestion ||
+    (phase === 'awaiting_approval' && !!pendingPlan) ||
+    !!pendingToolPermissionRequest;
+  const trayPendingToolPermissionRequest = pendingToolPermissionRequest ? null : undefined;
 
   return (
-    <div className="min-w-0 border-t border-border-subtle px-3 py-2">
-      <div className="overflow-visible rounded-lg border border-border-subtle bg-surface-elevated/60">
-        <div className="space-y-2 px-3 pt-2">
-          {pendingClarificationQuestion && (
-            <AgentClarificationDock question={pendingClarificationQuestion} />
-          )}
+    <div className="max-h-[45%] min-w-0 shrink-0 overflow-visible border-t border-border-subtle bg-surface-base px-3 py-2">
+      <div className="flex max-h-full min-h-0 flex-col gap-2 overflow-visible">
+        {hasDecisionSurface && (
+          <div className="min-h-0 shrink overflow-y-auto pr-1">
+            <div className="space-y-2">
+              {pendingClarificationQuestion && (
+                <AgentClarificationDock question={pendingClarificationQuestion} />
+              )}
 
-          {phase === 'awaiting_approval' && pendingPlan && (
-            <ApprovalPartRenderer
-              part={{
-                type: 'approval',
-                plan: pendingPlan,
-                status: 'pending',
-              }}
-              onApprove={onApprove}
-              onReject={onReject}
-            />
-          )}
+              {phase === 'awaiting_approval' && pendingPlan && (
+                <ApprovalPartRenderer
+                  part={{
+                    type: 'approval',
+                    plan: pendingPlan,
+                    status: 'pending',
+                  }}
+                  onApprove={onApprove}
+                  onReject={onReject}
+                />
+              )}
 
-          {pendingToolPermissionRequest && (
-            <ToolApprovalPartRenderer
-              part={{
-                type: 'tool_approval',
-                stepId: pendingToolPermissionRequest.id,
-                tool: pendingToolPermissionRequest.tool,
-                args: pendingToolPermissionRequest.args,
-                description: pendingToolPermissionRequest.description,
-                riskLevel: pendingToolPermissionRequest.riskLevel,
-                status: 'pending',
-              }}
-              onAllow={onToolAllow}
-              onAllowAlways={onToolAllowAlways}
-              onDeny={onToolDeny}
-            />
-          )}
-        </div>
+              {pendingToolPermissionRequest && (
+                <ToolApprovalPartRenderer
+                  part={{
+                    type: 'tool_approval',
+                    stepId: pendingToolPermissionRequest.id,
+                    tool: pendingToolPermissionRequest.tool,
+                    args: pendingToolPermissionRequest.args,
+                    description: pendingToolPermissionRequest.description,
+                    riskLevel: pendingToolPermissionRequest.riskLevel,
+                    status: 'pending',
+                  }}
+                  onAllow={onToolAllow}
+                  onAllowAlways={onToolAllowAlways}
+                  onDeny={onToolDeny}
+                />
+              )}
+            </div>
+          </div>
+        )}
 
         <AgentComposerTray
           currentAgentName={currentAgentName}
@@ -136,12 +145,12 @@ export function ChatInputArea({
           queueSize={queueSize}
           runtimeSummary={runtimeSummary}
           pendingClarificationQuestion={pendingClarificationQuestion}
-          pendingToolPermissionRequest={pendingToolPermissionRequest}
+          pendingToolPermissionRequest={trayPendingToolPermissionRequest}
           specialistDefinitions={specialistDefinitions}
           onStartSession={onStartSession}
         />
 
-        <div className="px-3 py-2">
+        <div className="shrink-0">
           <div className="flex min-w-0 items-end gap-2">
             <PromptInput
               value={input}

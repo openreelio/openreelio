@@ -144,7 +144,7 @@ export function ConversationMessageItem({
 
     return (
       <div className={`flex justify-end ${className}`} data-testid="conversation-message-user">
-        <div className="w-full px-4 py-2 rounded-md bg-primary-600/15 border border-primary-500/20 text-text-primary">
+        <div className="max-w-[86%] px-3 py-2 rounded-lg bg-primary-600/15 border border-primary-500/20 text-text-primary">
           <p className="text-sm whitespace-pre-wrap">{textContent}</p>
           <div className="flex items-center gap-2 mt-1">
             <span className="text-xs opacity-60 block">
@@ -206,8 +206,7 @@ export function ConversationMessageItem({
       (part.type === 'tool_call' && part.status === 'failed') ||
       (part.type === 'tool_result' && !part.success),
   );
-  const shouldOpenArtifactsByDefault =
-    inlineParts.length === 0 || hasRunningArtifacts || hasFailedArtifacts || highlightArtifacts;
+  const shouldOpenArtifactsByDefault = hasRunningArtifacts || hasFailedArtifacts;
 
   return (
     <div className={`flex justify-start ${className}`} data-testid="conversation-message-assistant">
