@@ -688,6 +688,10 @@ describe('ExternalAgentChatRuntimeController', () => {
 
     controller.resolveApproval('decline');
     await expect(decisionPromise).resolves.toBe('decline');
+    expect(controller.getState().pendingToolPermissionRequest).toBeNull();
+    expect(conversation.getMessageParts('assistant-1')?.[0]).toMatchObject({
+      status: 'denied',
+    });
   });
 
   it('should mark approval parts denied when the user declines a request', async () => {
