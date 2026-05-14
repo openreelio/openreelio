@@ -697,9 +697,19 @@ function issueContextToken(
 }
 
 function createContextToken(): string {
-  const uuid = globalThis.crypto?.randomUUID?.();
+  const cryptoApi = globalThis.crypto;
+  const uuid = cryptoApi?.randomUUID?.();
   if (uuid) {
     return `orctx:${uuid}`;
+  }
+
+  if (cryptoApi?.getRandomValues) {
+    const randomWords = new Uint32Array(4);
+    cryptoApi.getRandomValues(randomWords);
+    const randomPart = Array.from(randomWords, (word) =>
+      word.toString(36).padStart(7, '0'),
+    ).join('');
+    return `orctx:${Date.now()}:${randomPart}`;
   }
 
   return `orctx:${Date.now()}:${Math.random().toString(36).slice(2)}`;

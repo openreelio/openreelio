@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CodexReferenceAdapter } from './CodexReferenceAdapter';
 import {
@@ -27,6 +27,10 @@ describe('CodexReferenceAdapter', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     projectStoreMocks.refreshFromBackendMutation.mockResolvedValue(1);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('should expose app-server and MCP capabilities without starting Codex', async () => {
@@ -525,6 +529,74 @@ describe('CodexReferenceAdapter', () => {
     expect(getFirstTextContent(projectStateResponse)).toContain('"projectState"');
     expect(commandSchemaResponse.success).toBe(true);
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"mutationTool"');
+  });
+
+  it('should issue context tokens from crypto random values when randomUUID is unavailable', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    const getRandomValues = vi.fn((array: Uint32Array) => {
+      array.set([1, 35, 1295, 46655]);
+      return array;
+    });
+    vi.stubGlobal('crypto', {
+      randomUUID: undefined,
+      getRandomValues,
+    });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_project_state') {
+        return {
+          meta: {
+            name: 'Launch Cut',
+            version: '1',
+            createdAt: '2026-05-13T00:00:00Z',
+            modifiedAt: '2026-05-13T00:00:00Z',
+            description: null,
+            author: null,
+          },
+          assets: [],
+          sequences: [],
+          effects: [],
+          activeSequenceId: null,
+          textClips: [],
+          isDirty: false,
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+    const response = (await respondToRequest({
+      id: 16,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_project_state',
+        namespace: 'openreelio',
+        tool: 'project_state',
+        arguments: {},
+      },
+    })) as CodexDynamicToolCallResponse;
+
+    const projectStateResponse = JSON.parse(getFirstTextContent(response));
+    expect(projectStateResponse.contextToken).toMatch(
+      /^orctx:\d+:0000001000000z00000zz0000zzz$/,
+    );
+    expect(getRandomValues).toHaveBeenCalledWith(expect.any(Uint32Array));
   });
 
   it('should require approval before executing an OpenReelio dynamic edit command', async () => {
