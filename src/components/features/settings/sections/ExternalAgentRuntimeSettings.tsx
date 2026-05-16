@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, Loader2, RefreshCw } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Download, Loader2, RefreshCw, UploadCloud } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 
 import { useExternalAgentHostStatus, EXTERNAL_AGENT_STATUS_REFRESH_EVENT } from '@/agents/external';
@@ -29,6 +29,21 @@ interface CodexAgentLoginResult {
   message: string | null;
 }
 
+interface CodexCliInstallResult {
+  success: boolean;
+  version: string | null;
+  attemptedCommand: string | null;
+  message: string | null;
+}
+
+interface CodexCliUpdateResult {
+  success: boolean;
+  beforeVersion: string | null;
+  afterVersion: string | null;
+  attemptedCommand: string | null;
+  message: string | null;
+}
+
 interface CodexModelInfo {
   slug: string;
   displayName: string;
@@ -45,6 +60,12 @@ interface CodexModelCatalogResult {
 }
 
 const FALLBACK_CODEX_MODELS: CodexModelInfo[] = [
+  {
+    slug: 'gpt-5.5',
+    displayName: 'gpt-5.5',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+  },
   {
     slug: 'gpt-5.4',
     displayName: 'gpt-5.4',
@@ -88,10 +109,32 @@ function formatAuthStatus(authStatus?: string | null): string {
 
 function formatActionError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  if (message.includes('Win32') || message.includes('os error 193') || message.includes('%1')) {
+  if (isLauncherExecutableError(message)) {
     return 'The selected Codex launcher is not executable on this OS. OpenReelio needs a native Codex CLI launcher such as codex.cmd or codex.exe.';
   }
   return message;
+}
+
+function isLauncherExecutableError(message?: string | null): boolean {
+  const normalized = message?.toLowerCase() ?? '';
+  return (
+    normalized.includes('win32') ||
+    normalized.includes('os error 193') ||
+    normalized.includes('%1') ||
+    normalized.includes('not executable on this os')
+  );
+}
+
+function parseCodexCliVersion(label?: string | null): { major: number; minor: number } | null {
+  const match = label?.match(/\b(\d+)\.(\d+)(?:\.\d+)?/);
+  if (!match) return null;
+  return { major: Number(match[1]), minor: Number(match[2]) };
+}
+
+function shouldOfferCodexUpdate(version?: string | null): boolean {
+  const parsed = parseCodexCliVersion(version);
+  if (!parsed) return false;
+  return parsed.major === 0 && parsed.minor < 130;
 }
 
 function SetupPill({
@@ -134,6 +177,8 @@ export function ExternalAgentRuntimeSettings({
   const [modelCatalog, setModelCatalog] = useState<CodexModelCatalogResult | null>(null);
   const [isConfiguring, setIsConfiguring] = useState(false);
   const [isSigningIn, setIsSigningIn] = useState(false);
+  const [isInstalling, setIsInstalling] = useState(false);
+  const [isUpdating, setIsUpdating] = useState(false);
   const lastAutoConfigureKeyRef = useRef<string | null>(null);
   const codexSelected = settings.assistantRuntime === 'codex';
   const codexStatus = useExternalAgentHostStatus({
@@ -152,10 +197,10 @@ export function ExternalAgentRuntimeSettings({
   const nativeToolsReady = Boolean(
     codexRuntime?.ready && codexRuntime.capabilities?.structuredToolCalls,
   );
-  const toolsReady = Boolean(
-    nativeToolsReady || (setupResult?.pluginMarketplaceConfigured && setupResult?.mcpConfigured),
-  );
   const runtimeReady = Boolean(setupResult?.ready || nativeToolsReady);
+  const toolsReady = Boolean(
+    runtimeReady || (setupResult?.pluginMarketplaceConfigured && setupResult?.mcpConfigured),
+  );
   const requiresLogin = Boolean(
     codexInstalled &&
     (setupResult?.requiresLogin ||
@@ -168,10 +213,45 @@ export function ExternalAgentRuntimeSettings({
   const reasoningEfforts = selectedCodexModel?.supportedReasoningEfforts.length
     ? selectedCodexModel.supportedReasoningEfforts
     : ['low', 'medium', 'high', 'xhigh'];
+  const codexVersion = setupResult?.version ?? codexRuntime?.version ?? null;
+  const codexNeedsUpdate = Boolean(codexInstalled && shouldOfferCodexUpdate(codexVersion));
+  const launcherExecutableError = isLauncherExecutableError(
+    setupResult?.message ?? codexRuntime?.reason,
+  );
+  const codexStatusKnown = Boolean(setupResult || codexRuntime) && !codexStatus.loading;
+  const canInstallCodex = Boolean(
+    codexSelected && codexStatusKnown && !codexInstalled && !launcherExecutableError,
+  );
+  const isRuntimeActionPending = isConfiguring || isSigningIn || isInstalling || isUpdating;
 
   const refreshExternalAgentStatus = useCallback(() => {
     window.dispatchEvent(new Event(EXTERNAL_AGENT_STATUS_REFRESH_EVENT));
   }, []);
+
+  const applyModelCatalogResult = useCallback(
+    (result: CodexModelCatalogResult) => {
+      setModelCatalog(result);
+      const configuredModel = settings.codexModel?.trim();
+      const configuredModelAvailable = Boolean(
+        configuredModel && result.models.some((model) => model.slug === configuredModel),
+      );
+      const defaultModel =
+        result.models.find((model) => model.slug === result.defaultModel) ?? result.models[0];
+      if (!configuredModelAvailable && defaultModel) {
+        onUpdate({
+          codexModel: defaultModel.slug,
+          codexReasoningEffort:
+            defaultModel.defaultReasoningEffort as AISettings['codexReasoningEffort'],
+        });
+      }
+    },
+    [onUpdate, settings.codexModel],
+  );
+
+  const loadCodexModels = useCallback(async () => {
+    const result = await invoke<CodexModelCatalogResult>('get_codex_model_catalog');
+    applyModelCatalogResult(result);
+  }, [applyModelCatalogResult]);
 
   const configureCodex = useCallback(async () => {
     if (!codexSelected) return;
@@ -222,20 +302,13 @@ export function ExternalAgentRuntimeSettings({
     }
 
     let cancelled = false;
-    async function loadCodexModels(): Promise<void> {
+    async function loadCodexModelsForSelection(): Promise<void> {
       try {
         const result = await invoke<CodexModelCatalogResult>('get_codex_model_catalog');
         if (cancelled) {
           return;
         }
-        setModelCatalog(result);
-        if (!settings.codexModel && result.defaultModel) {
-          onUpdate({
-            codexModel: result.defaultModel,
-            codexReasoningEffort:
-              result.defaultReasoningEffort as AISettings['codexReasoningEffort'],
-          });
-        }
+        applyModelCatalogResult(result);
       } catch {
         if (!cancelled) {
           setModelCatalog(null);
@@ -243,11 +316,11 @@ export function ExternalAgentRuntimeSettings({
       }
     }
 
-    void loadCodexModels();
+    void loadCodexModelsForSelection();
     return () => {
       cancelled = true;
     };
-  }, [codexSelected, onUpdate, settings.codexModel]);
+  }, [applyModelCatalogResult, codexSelected]);
 
   const handleRuntimeSelect = useCallback(
     (runtime: AssistantRuntime) => {
@@ -296,9 +369,47 @@ export function ExternalAgentRuntimeSettings({
     }
   }, [configureCodex, refreshExternalAgentStatus]);
 
+  const handleInstall = useCallback(async () => {
+    setIsInstalling(true);
+    setActionError(null);
+    try {
+      const result = await invoke<CodexCliInstallResult>('install_codex_cli');
+      if (!result.success) {
+        setActionError(result.message ?? 'Codex CLI installation did not complete.');
+      }
+      await loadCodexModels().catch(() => setModelCatalog(null));
+      await configureCodex();
+      refreshExternalAgentStatus();
+    } catch (error) {
+      setActionError(formatActionError(error));
+    } finally {
+      setIsInstalling(false);
+    }
+  }, [configureCodex, loadCodexModels, refreshExternalAgentStatus]);
+
+  const handleUpdate = useCallback(async () => {
+    setIsUpdating(true);
+    setActionError(null);
+    try {
+      const result = await invoke<CodexCliUpdateResult>('update_codex_cli');
+      if (!result.success) {
+        setActionError(result.message ?? 'Codex CLI update did not complete.');
+      }
+      await loadCodexModels().catch(() => setModelCatalog(null));
+      await configureCodex();
+      refreshExternalAgentStatus();
+    } catch (error) {
+      setActionError(formatActionError(error));
+    } finally {
+      setIsUpdating(false);
+    }
+  }, [configureCodex, loadCodexModels, refreshExternalAgentStatus]);
+
   const statusLine = useMemo(() => {
     if (!codexSelected) return 'OpenReelio will use the API provider and model below.';
     if (isSigningIn) return 'Opening the Codex sign-in flow...';
+    if (isInstalling) return 'Installing Codex CLI...';
+    if (isUpdating) return 'Updating Codex CLI...';
     if (isConfiguring) return 'Connecting Codex to OpenReelio tools...';
     if (!hasProject) return 'Open a project to attach OpenReelio tools.';
     if (!codexInstalled) {
@@ -319,7 +430,9 @@ export function ExternalAgentRuntimeSettings({
     effectiveAuthStatus,
     hasProject,
     isConfiguring,
+    isInstalling,
     isSigningIn,
+    isUpdating,
     requiresLogin,
     runtimeReady,
     setupResult?.message,
@@ -367,9 +480,9 @@ export function ExternalAgentRuntimeSettings({
                 Codex Model
               </span>
               <select
-                value={settings.codexModel || selectedCodexModel?.slug || 'gpt-5.4'}
+                value={selectedCodexModel?.slug || settings.codexModel || 'gpt-5.5'}
                 onChange={(event) => handleCodexModelChange(event.target.value)}
-                disabled={disabled || isSigningIn || isConfiguring}
+                disabled={disabled || isRuntimeActionPending}
                 className="h-8 w-full rounded border border-editor-border bg-editor-bg px-2 text-xs text-editor-text outline-none focus:border-primary-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {codexModels.map((model) => (
@@ -386,7 +499,7 @@ export function ExternalAgentRuntimeSettings({
               <select
                 value={settings.codexReasoningEffort || selectedCodexModel?.defaultReasoningEffort}
                 onChange={(event) => handleCodexReasoningEffortChange(event.target.value)}
-                disabled={disabled || isSigningIn || isConfiguring}
+                disabled={disabled || isRuntimeActionPending}
                 className="h-8 w-full rounded border border-editor-border bg-editor-bg px-2 text-xs capitalize text-editor-text outline-none focus:border-primary-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {reasoningEfforts.map((effort) => (
@@ -410,19 +523,47 @@ export function ExternalAgentRuntimeSettings({
                 <SetupPill label="OpenReelio tools" ready={toolsReady} pending={isConfiguring} />
               </div>
               <p className="mt-2 text-xs leading-5 text-editor-text-muted">{statusLine}</p>
-              {setupResult?.version && (
-                <p className="mt-1 truncate text-[11px] text-editor-text-muted">
-                  {setupResult.version}
-                </p>
+              {codexVersion && (
+                <p className="mt-1 truncate text-[11px] text-editor-text-muted">{codexVersion}</p>
               )}
             </div>
 
             <div className="flex shrink-0 items-center gap-2">
+              {canInstallCodex && (
+                <button
+                  type="button"
+                  onClick={handleInstall}
+                  disabled={disabled || isRuntimeActionPending}
+                  className="inline-flex h-8 items-center gap-1.5 rounded bg-primary-500 px-3 text-xs font-medium text-white hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isInstalling ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Download className="h-3.5 w-3.5" />
+                  )}
+                  Install Codex
+                </button>
+              )}
+              {codexNeedsUpdate && (
+                <button
+                  type="button"
+                  onClick={handleUpdate}
+                  disabled={disabled || isRuntimeActionPending}
+                  className="inline-flex h-8 items-center gap-1.5 rounded border border-editor-border px-2 text-xs text-editor-text hover:bg-editor-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isUpdating ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <UploadCloud className="h-3.5 w-3.5" />
+                  )}
+                  Update Codex
+                </button>
+              )}
               {requiresLogin && (
                 <button
                   type="button"
                   onClick={handleSignIn}
-                  disabled={disabled || isSigningIn || isConfiguring}
+                  disabled={disabled || isRuntimeActionPending}
                   className="inline-flex h-8 items-center gap-1.5 rounded bg-primary-500 px-3 text-xs font-medium text-white hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {isSigningIn && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
@@ -432,7 +573,7 @@ export function ExternalAgentRuntimeSettings({
               <button
                 type="button"
                 onClick={configureCodex}
-                disabled={disabled || isSigningIn || isConfiguring}
+                disabled={disabled || isRuntimeActionPending}
                 className="inline-flex h-8 items-center gap-1.5 rounded border border-editor-border px-2 text-xs text-editor-text hover:bg-editor-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label="Reconnect Codex"
                 title="Reconnect Codex"
@@ -447,7 +588,7 @@ export function ExternalAgentRuntimeSettings({
             </div>
           </div>
 
-          {actionError && !runtimeReady && (
+          {actionError && (!runtimeReady || codexNeedsUpdate || !codexInstalled) && (
             <p className="mt-2 rounded border border-yellow-600/20 bg-yellow-600/10 px-2 py-1.5 text-xs leading-5 text-yellow-200">
               {actionError}
             </p>

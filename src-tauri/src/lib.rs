@@ -1286,6 +1286,8 @@ mod tauri_app {
                 $crate::ipc::get_external_agent_setup_info,
                 $crate::ipc::configure_codex_agent_runtime,
                 $crate::ipc::start_codex_login,
+                $crate::ipc::install_codex_cli,
+                $crate::ipc::update_codex_cli,
                 $crate::ipc::consume_external_agent_approval_token,
                 $crate::ipc::revoke_external_agent_approval_token,
                 // AI Conversation persistence commands
@@ -1748,6 +1750,8 @@ mod tauri_app {
             ipc::get_external_agent_setup_info,
             ipc::configure_codex_agent_runtime,
             ipc::start_codex_login,
+            ipc::install_codex_cli,
+            ipc::update_codex_cli,
             ipc::consume_external_agent_approval_token,
             ipc::revoke_external_agent_approval_token,
             // AI Conversation persistence commands

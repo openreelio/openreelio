@@ -98,6 +98,25 @@ pub struct CodexAgentLoginResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct CodexCliInstallResult {
+    pub success: bool,
+    pub version: Option<String>,
+    pub attempted_command: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexCliUpdateResult {
+    pub success: bool,
+    pub before_version: Option<String>,
+    pub after_version: Option<String>,
+    pub attempted_command: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct ExternalAgentApprovalTokenGrant {
     pub token: String,
     pub token_id: String,
@@ -198,21 +217,34 @@ pub async fn configure_codex_agent_runtime(
     }
 
     let authenticated = is_authenticated(&status.auth_status);
-    let plugin_result = configure_codex_plugin_marketplace().await;
-    let mcp_result = match input
-        .project_path
-        .map(|path| path.trim().to_string())
-        .filter(|path| !path.is_empty())
-    {
-        Some(project_path) => configure_codex_mcp(&project_path).await,
-        None => Err("Open a project before enabling OpenReelio tools for Codex.".to_string()),
+    let (plugin_result, mcp_result) = if authenticated {
+        let plugin_result = configure_codex_plugin_marketplace().await;
+        let mcp_result = match input
+            .project_path
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+        {
+            Some(project_path) => configure_codex_mcp(&project_path).await,
+            None => Err("Open a project before enabling OpenReelio tools for Codex.".to_string()),
+        };
+        (plugin_result, mcp_result)
+    } else {
+        (
+            Err("Codex needs sign-in.".to_string()),
+            Err("Codex needs sign-in.".to_string()),
+        )
     };
 
     let plugin_marketplace_configured = plugin_result.is_ok();
     let mcp_configured = mcp_result.is_ok();
-    let ready = authenticated && plugin_marketplace_configured && mcp_configured;
+    let app_server_ready = status.app_server_ready != Some(false);
+    let ready = authenticated && app_server_ready;
     let message = if ready {
         Some("Codex is connected with OpenReelio tools.".to_string())
+    } else if status.app_server_ready == Some(false) {
+        status
+            .reason
+            .or_else(|| Some("Codex app-server could not start.".to_string()))
     } else if !authenticated {
         status
             .reason
@@ -497,8 +529,13 @@ fn is_authenticated(auth_status: &str) -> bool {
 }
 
 async fn configure_codex_plugin_marketplace() -> Result<(), String> {
-    let marketplace_root = find_repo_agents_root()
-        .ok_or_else(|| "OpenReelio plugin marketplace was not found.".to_string())?;
+    let Some(marketplace_root) = find_repo_agents_root() else {
+        return Ok(());
+    };
+    if !codex_plugin_marketplace_supported().await {
+        return Ok(());
+    }
+
     let args = vec![
         "plugin".to_string(),
         "marketplace".to_string(),
@@ -516,6 +553,171 @@ async fn configure_codex_plugin_marketplace() -> Result<(), String> {
                 Err(error)
             }
         })
+}
+
+pub async fn install_codex_cli() -> CodexCliInstallResult {
+    let before = crate::core::codex::probe_codex_status().await;
+    if before.installed {
+        return CodexCliInstallResult {
+            success: true,
+            version: before.version,
+            attempted_command: None,
+            message: Some("Codex CLI is already installed.".to_string()),
+        };
+    }
+
+    let npm = match find_npm_command().await {
+        Some(command) => command,
+        None => {
+            return CodexCliInstallResult {
+                success: false,
+                version: None,
+                attempted_command: Some("npm install -g @openai/codex@latest".to_string()),
+                message: Some(
+                    "npm was not found. Install Node.js with npm, then install Codex from OpenReelio again."
+                        .to_string(),
+                ),
+            };
+        }
+    };
+    let attempted_command = format!("{npm} install -g @openai/codex@latest");
+    let install_result = run_external_command(
+        &npm,
+        &["install", "-g", "@openai/codex@latest"],
+        Duration::from_secs(300),
+    )
+    .await;
+    let after = crate::core::codex::probe_codex_status().await;
+    let success = after.installed;
+
+    CodexCliInstallResult {
+        success,
+        version: after.version,
+        attempted_command: Some(attempted_command),
+        message: if success {
+            Some("Codex CLI installation completed.".to_string())
+        } else {
+            Some(match install_result {
+                Ok(output) if output.is_empty() => {
+                    "Codex CLI installation did not complete.".to_string()
+                }
+                Ok(output) => output,
+                Err(error) => error,
+            })
+        },
+    }
+}
+
+pub async fn update_codex_cli() -> CodexCliUpdateResult {
+    let before = crate::core::codex::probe_codex_status().await;
+    if !before.installed {
+        return CodexCliUpdateResult {
+            success: false,
+            before_version: before.version,
+            after_version: None,
+            attempted_command: None,
+            message: before
+                .reason
+                .or_else(|| Some("Codex CLI is not installed.".to_string())),
+        };
+    }
+
+    let mut attempted_commands = vec!["codex update".to_string()];
+    let mut update_result = run_codex_command(&["update"], &[], Duration::from_secs(300)).await;
+
+    if update_result
+        .as_ref()
+        .err()
+        .is_some_and(|error| is_unsupported_update_command(error))
+    {
+        attempted_commands.push("codex --upgrade".to_string());
+        update_result = run_codex_command(&["--upgrade"], &[], Duration::from_secs(300)).await;
+    }
+
+    let mut after = crate::core::codex::probe_codex_status().await;
+    if update_result.is_err() || detected_codex_version_still_needs_update(&before, &after) {
+        match run_npm_codex_install().await {
+            Some((attempted_command, npm_result)) => {
+                attempted_commands.push(attempted_command);
+                update_result = npm_result;
+                after = crate::core::codex::probe_codex_status().await;
+            }
+            None if update_result.is_err() => {
+                attempted_commands.push("npm install -g @openai/codex@latest".to_string());
+                update_result = Err(
+                    "npm was not found. Install Node.js with npm, then update Codex from OpenReelio again."
+                        .to_string(),
+                );
+            }
+            None => {}
+        }
+    }
+
+    let success =
+        update_result.is_ok() && after.installed && !codex_cli_version_needs_update(&after.version);
+    let before_version = before.version.clone();
+    let after_version = after.version.clone();
+
+    CodexCliUpdateResult {
+        success,
+        before_version,
+        after_version: after_version.clone(),
+        attempted_command: Some(attempted_commands.join(" -> ")),
+        message: if success {
+            Some("Codex CLI update completed.".to_string())
+        } else if update_result.is_ok() && after.installed {
+            Some(format!(
+                "Codex update command completed, but OpenReelio still detects {}. A different Codex launcher may be earlier in OpenReelio's search path.",
+                after_version
+                    .as_deref()
+                    .unwrap_or("the same Codex CLI version")
+            ))
+        } else {
+            Some(match update_result {
+                Ok(output) if output.is_empty() => "Codex CLI update did not complete.".to_string(),
+                Ok(output) => output,
+                Err(error) => error,
+            })
+        },
+    }
+}
+
+async fn run_npm_codex_install() -> Option<(String, Result<String, String>)> {
+    let npm = find_npm_command().await?;
+    let attempted_command = format!("{npm} install -g @openai/codex@latest");
+    let result = run_external_command(
+        &npm,
+        &["install", "-g", "@openai/codex@latest"],
+        Duration::from_secs(300),
+    )
+    .await;
+    Some((attempted_command, result))
+}
+
+fn detected_codex_version_still_needs_update(
+    before: &crate::core::codex::CodexStatusProbeResult,
+    after: &crate::core::codex::CodexStatusProbeResult,
+) -> bool {
+    codex_cli_version_needs_update(&before.version)
+        && codex_cli_version_needs_update(&after.version)
+}
+
+fn codex_cli_version_needs_update(version: &Option<String>) -> bool {
+    let Some((major, minor, _patch)) = version
+        .as_deref()
+        .and_then(crate::core::codex::parse_codex_version_numbers)
+    else {
+        return false;
+    };
+
+    major == 0 && minor < 130
+}
+
+async fn codex_plugin_marketplace_supported() -> bool {
+    run_codex_command(&["plugin", "--help"], &[], Duration::from_secs(10))
+        .await
+        .map(|output| output.to_lowercase().contains("marketplace"))
+        .unwrap_or(false)
 }
 
 async fn configure_codex_mcp(project_path: &str) -> Result<(), String> {
@@ -598,9 +800,80 @@ async fn run_codex_command_owned(
     }
 }
 
+async fn find_npm_command() -> Option<String> {
+    for candidate in npm_command_candidates() {
+        if run_external_command(candidate, &["--version"], Duration::from_secs(10))
+            .await
+            .is_ok()
+        {
+            return Some((*candidate).to_string());
+        }
+    }
+
+    None
+}
+
+fn npm_command_candidates() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["npm.cmd", "npm"]
+    } else {
+        &["npm"]
+    }
+}
+
+async fn run_external_command(
+    executable: &str,
+    args: &[&str],
+    timeout_duration: Duration,
+) -> Result<String, String> {
+    let output = timeout(
+        timeout_duration,
+        tokio::process::Command::new(executable)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .map_err(|_| format!("{executable} command timed out."))?
+    .map_err(|error| {
+        crate::core::codex::format_codex_io_error(
+            &format!("Failed to run {executable} command"),
+            &error,
+        )
+    })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if output.status.success() {
+        Ok(combined)
+    } else if combined.is_empty() {
+        Err(format!(
+            "{executable} command failed with status {}",
+            output.status
+        ))
+    } else {
+        Err(combined)
+    }
+}
+
 fn is_already_configured_error(output: &str) -> bool {
     let lower = output.to_lowercase();
     lower.contains("already") || lower.contains("exists")
+}
+
+fn is_unsupported_update_command(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("unexpected argument")
+        || lower.contains("unrecognized subcommand")
+        || lower.contains("unknown command")
 }
 
 fn invalid_validation(reason: impl Into<String>) -> ExternalAgentApprovalTokenValidation {

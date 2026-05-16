@@ -13,7 +13,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 const defaultSettings: AISettings = {
   assistantRuntime: 'api',
-  codexModel: 'gpt-5.4',
+  codexModel: 'gpt-5.5',
   codexReasoningEffort: 'medium',
   primaryProvider: 'anthropic',
   primaryModel: 'claude-sonnet-4-5-20251015',
@@ -69,12 +69,12 @@ describe('ExternalAgentRuntimeSettings', () => {
       if (command === 'get_codex_model_catalog') {
         return Promise.resolve({
           installed: true,
-          defaultModel: 'gpt-5.4',
+          defaultModel: 'gpt-5.5',
           defaultReasoningEffort: 'medium',
           models: [
             {
-              slug: 'gpt-5.4',
-              displayName: 'gpt-5.4',
+              slug: 'gpt-5.5',
+              displayName: 'gpt-5.5',
               defaultReasoningEffort: 'medium',
               supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
             },
@@ -93,6 +93,23 @@ describe('ExternalAgentRuntimeSettings', () => {
           success: true,
           authStatus: 'signed-in',
           message: 'Codex sign-in completed.',
+        });
+      }
+      if (command === 'install_codex_cli') {
+        return Promise.resolve({
+          success: true,
+          version: 'codex-cli 0.130.0',
+          attemptedCommand: null,
+          message: 'Codex CLI is already installed.',
+        });
+      }
+      if (command === 'update_codex_cli') {
+        return Promise.resolve({
+          success: true,
+          beforeVersion: 'codex-cli 0.130.0',
+          afterVersion: 'codex-cli 0.130.0',
+          attemptedCommand: 'codex update',
+          message: 'Codex CLI update completed.',
         });
       }
       return Promise.reject(new Error(`Unexpected command: ${command}`));
@@ -166,7 +183,7 @@ describe('ExternalAgentRuntimeSettings', () => {
       if (command === 'get_codex_model_catalog') {
         return Promise.resolve({
           installed: true,
-          defaultModel: 'gpt-5.4',
+          defaultModel: 'gpt-5.5',
           defaultReasoningEffort: 'medium',
           models: [],
           reason: null,
@@ -214,7 +231,7 @@ describe('ExternalAgentRuntimeSettings', () => {
       if (command === 'get_codex_model_catalog') {
         return Promise.resolve({
           installed: true,
-          defaultModel: 'gpt-5.4',
+          defaultModel: 'gpt-5.5',
           defaultReasoningEffort: 'medium',
           models: [],
           reason: null,
@@ -244,6 +261,126 @@ describe('ExternalAgentRuntimeSettings', () => {
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('start_codex_login');
   });
 
+  it('should install Codex CLI from the settings panel when it is missing', async () => {
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === 'get_codex_status') {
+        return Promise.resolve({
+          installed: false,
+          version: null,
+          authStatus: 'unknown',
+          reason: 'Codex CLI was not found.',
+        });
+      }
+      if (command === 'configure_codex_agent_runtime') {
+        return Promise.resolve({
+          installed: false,
+          version: null,
+          authStatus: 'unknown',
+          ready: false,
+          requiresLogin: false,
+          pluginMarketplaceConfigured: false,
+          mcpConfigured: false,
+          message: 'Codex CLI was not found.',
+        });
+      }
+      if (command === 'get_codex_model_catalog') {
+        return Promise.resolve({
+          installed: false,
+          defaultModel: 'gpt-5.5',
+          defaultReasoningEffort: 'medium',
+          models: [],
+          reason: 'Codex CLI was not found.',
+        });
+      }
+      if (command === 'install_codex_cli') {
+        return Promise.resolve({
+          success: true,
+          version: 'codex-cli 0.130.0',
+          attemptedCommand: 'npm install -g @openai/codex',
+          message: 'Codex CLI installation completed.',
+        });
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+
+    render(
+      <ExternalAgentRuntimeSettings
+        settings={{ ...defaultSettings, assistantRuntime: 'codex' }}
+        onUpdate={vi.fn()}
+        disabled={false}
+      />,
+    );
+
+    const installButton = await screen.findByRole('button', { name: /install codex/i });
+    await userEvent.click(installButton);
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('install_codex_cli');
+  });
+
+  it('should update an old Codex CLI from the settings panel', async () => {
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === 'get_codex_status') {
+        return Promise.resolve({
+          installed: true,
+          version: 'codex-cli 0.118.0',
+          authStatus: 'signed-in',
+          reason: null,
+        });
+      }
+      if (command === 'configure_codex_agent_runtime') {
+        return Promise.resolve({
+          installed: true,
+          version: 'codex-cli 0.118.0',
+          authStatus: 'signed-in',
+          ready: true,
+          requiresLogin: false,
+          pluginMarketplaceConfigured: true,
+          mcpConfigured: true,
+          message: 'Codex is connected with OpenReelio tools.',
+        });
+      }
+      if (command === 'get_codex_model_catalog') {
+        return Promise.resolve({
+          installed: true,
+          defaultModel: 'gpt-5.4',
+          defaultReasoningEffort: 'medium',
+          models: [
+            {
+              slug: 'gpt-5.4',
+              displayName: 'gpt-5.4',
+              defaultReasoningEffort: 'medium',
+              supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+            },
+          ],
+          reason: null,
+        });
+      }
+      if (command === 'update_codex_cli') {
+        return Promise.resolve({
+          success: true,
+          beforeVersion: 'codex-cli 0.118.0',
+          afterVersion: 'codex-cli 0.130.0',
+          attemptedCommand: 'codex update',
+          message: 'Codex CLI update completed.',
+        });
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+
+    render(
+      <ExternalAgentRuntimeSettings
+        settings={{ ...defaultSettings, assistantRuntime: 'codex' }}
+        onUpdate={vi.fn()}
+        disabled={false}
+      />,
+    );
+
+    const updateButton = await screen.findByRole('button', { name: /update codex/i });
+    await userEvent.click(updateButton);
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('update_codex_cli');
+  });
+
   it('should not show sign-in when Codex cannot be launched on this OS', async () => {
     vi.mocked(invoke).mockImplementation((command) => {
       if (command === 'get_codex_status') {
@@ -271,7 +408,7 @@ describe('ExternalAgentRuntimeSettings', () => {
       if (command === 'get_codex_model_catalog') {
         return Promise.resolve({
           installed: false,
-          defaultModel: 'gpt-5.4',
+          defaultModel: 'gpt-5.5',
           defaultReasoningEffort: 'medium',
           models: [],
           reason: 'Codex is unavailable',
@@ -327,5 +464,63 @@ describe('ExternalAgentRuntimeSettings', () => {
     await userEvent.selectOptions(effortSelect, 'medium');
 
     expect(onUpdate).toHaveBeenCalledWith({ codexReasoningEffort: 'medium' });
+  });
+
+  it('should replace an unavailable saved Codex model with the catalog default', async () => {
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === 'get_codex_status') {
+        return Promise.resolve({
+          installed: true,
+          version: 'codex-cli 0.129.0',
+          authStatus: 'signed-in',
+          reason: null,
+        });
+      }
+      if (command === 'configure_codex_agent_runtime') {
+        return Promise.resolve({
+          installed: true,
+          version: 'codex-cli 0.129.0',
+          authStatus: 'signed-in',
+          ready: true,
+          requiresLogin: false,
+          pluginMarketplaceConfigured: true,
+          mcpConfigured: true,
+          message: 'Codex is connected with OpenReelio tools.',
+        });
+      }
+      if (command === 'get_codex_model_catalog') {
+        return Promise.resolve({
+          installed: true,
+          defaultModel: 'gpt-5.4',
+          defaultReasoningEffort: 'medium',
+          models: [
+            {
+              slug: 'gpt-5.4',
+              displayName: 'gpt-5.4',
+              defaultReasoningEffort: 'medium',
+              supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+            },
+          ],
+          reason: null,
+        });
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+    const onUpdate = vi.fn();
+
+    render(
+      <ExternalAgentRuntimeSettings
+        settings={{ ...defaultSettings, assistantRuntime: 'codex', codexModel: 'gpt-5.5' }}
+        onUpdate={onUpdate}
+        disabled={false}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(onUpdate).toHaveBeenCalledWith({
+        codexModel: 'gpt-5.4',
+        codexReasoningEffort: 'medium',
+      }),
+    );
   });
 });

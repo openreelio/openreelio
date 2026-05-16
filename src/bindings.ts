@@ -905,6 +905,20 @@ async startCodexLogin() : Promise<Result<CodexAgentLoginResult, string>> {
     return { status: "error", error: e  as any };
 }
 },
+async installCodexCli() : Promise<Result<CodexCliInstallResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("install_codex_cli") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+async updateCodexCli() : Promise<Result<CodexCliUpdateResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_codex_cli") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
 async consumeExternalAgentApprovalToken(input: ConsumeExternalAgentApprovalTokenInput) : Promise<Result<ExternalAgentApprovalTokenValidation, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("consume_external_agent_approval_token", { input }) };
@@ -3654,10 +3668,12 @@ export type CodexAgentLoginResult = { success: boolean; authStatus: string; mess
 export type CodexAppServerSessionInput = { serverId: string }
 export type CodexAppServerStartResult = { serverId: string; eventName: string; command: string; args: string[]; cwd: string }
 export type CodexAppServerWriteInput = { serverId: string; message: JsonValue }
+export type CodexCliInstallResult = { success: boolean; version: string | null; attemptedCommand: string | null; message: string | null }
+export type CodexCliUpdateResult = { success: boolean; beforeVersion: string | null; afterVersion: string | null; attemptedCommand: string | null; message: string | null }
 export type CodexModelCatalogResult = { installed: boolean; defaultModel: string; defaultReasoningEffort: string; models: CodexModelInfo[]; reason: string | null }
 export type CodexModelInfo = { slug: string; displayName: string; defaultReasoningEffort: string; supportedReasoningEfforts: string[] }
 export type CodexReasoningEffortDto = "low" | "medium" | "high" | "xhigh"
-export type CodexStatusProbeResult = { installed: boolean; version: string | null; authStatus: string; reason: string | null }
+export type CodexStatusProbeResult = { installed: boolean; version: string | null; authStatus: string; appServerReady: boolean | null; reason: string | null }
 /**
  * Color (RGBA)
  */

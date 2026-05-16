@@ -343,6 +343,7 @@ describe('AgenticSidebarContent', () => {
             reason: null,
             installStatus: 'installed',
             authStatus: 'signed-in',
+            version: 'codex-cli 0.130.0',
             capabilities: {
               streamingEvents: true,
               interrupt: true,
@@ -405,6 +406,7 @@ describe('AgenticSidebarContent', () => {
             reason: null,
             installStatus: 'installed',
             authStatus: 'signed-in',
+            version: 'codex-cli 0.130.0',
             capabilities: {
               streamingEvents: true,
               interrupt: true,
@@ -477,6 +479,7 @@ describe('AgenticSidebarContent', () => {
             reason: 'Codex is not authenticated',
             installStatus: 'installed',
             authStatus: 'signed-out',
+            version: 'codex-cli 0.130.0',
             capabilities: {
               streamingEvents: true,
               interrupt: true,
