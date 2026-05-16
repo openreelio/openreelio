@@ -17,8 +17,6 @@ import {
   type AgentRuntimeSummary,
 } from './AgentComposerTray';
 import { PromptInput } from './PromptInput';
-import { ApprovalPartRenderer } from './parts/ApprovalPartRenderer';
-import { ToolApprovalPartRenderer } from './parts/ToolApprovalPartRenderer';
 
 // =============================================================================
 // Types
@@ -61,11 +59,6 @@ export function ChatInputArea({
   onInputChange,
   onSubmit,
   onStop,
-  onApprove,
-  onReject,
-  onToolAllow,
-  onToolAllowAlways,
-  onToolDeny,
   placeholder,
   disabled,
   isRunning,
@@ -87,49 +80,17 @@ export function ChatInputArea({
   // desync the agent.
   const hasBlockingDecision =
     (phase === 'awaiting_approval' && !!pendingPlan) || !!pendingToolPermissionRequest;
-  const hasDecisionSurface =
-    !!pendingClarificationQuestion ||
-    (phase === 'awaiting_approval' && !!pendingPlan) ||
-    !!pendingToolPermissionRequest;
-  const trayPendingToolPermissionRequest = pendingToolPermissionRequest ? null : undefined;
+  const hasDecisionSurface = !!pendingClarificationQuestion;
+  const trayPendingToolPermissionRequest = pendingToolPermissionRequest ?? undefined;
 
   return (
-    <div className="max-h-[45%] min-w-0 shrink-0 overflow-visible border-t border-border-subtle bg-surface-base px-3 py-2">
+    <div className="relative z-10 min-w-0 shrink-0 border-t border-border-subtle bg-surface-base px-3 py-2">
       <div className="flex max-h-full min-h-0 flex-col gap-2 overflow-visible">
         {hasDecisionSurface && (
           <div className="min-h-0 shrink overflow-y-auto pr-1">
             <div className="space-y-2">
               {pendingClarificationQuestion && (
                 <AgentClarificationDock question={pendingClarificationQuestion} />
-              )}
-
-              {phase === 'awaiting_approval' && pendingPlan && (
-                <ApprovalPartRenderer
-                  part={{
-                    type: 'approval',
-                    plan: pendingPlan,
-                    status: 'pending',
-                  }}
-                  onApprove={onApprove}
-                  onReject={onReject}
-                />
-              )}
-
-              {pendingToolPermissionRequest && (
-                <ToolApprovalPartRenderer
-                  part={{
-                    type: 'tool_approval',
-                    stepId: pendingToolPermissionRequest.id,
-                    tool: pendingToolPermissionRequest.tool,
-                    args: pendingToolPermissionRequest.args,
-                    description: pendingToolPermissionRequest.description,
-                    riskLevel: pendingToolPermissionRequest.riskLevel,
-                    status: 'pending',
-                  }}
-                  onAllow={onToolAllow}
-                  onAllowAlways={onToolAllowAlways}
-                  onDeny={onToolDeny}
-                />
               )}
             </div>
           </div>
