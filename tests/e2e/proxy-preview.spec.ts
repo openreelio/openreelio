@@ -23,11 +23,7 @@ async function dismissBlockingFFmpegWarning(page: Page): Promise<void> {
 
 async function seedProxyPreviewState(page: Page): Promise<void> {
   const origin = new URL(page.url()).origin;
-  await page.evaluate(async (baseUrl) => {
-    const { useProjectStore } = await import('../../src/stores/projectStore.ts');
-    const { usePlaybackStore } = await import('../../src/stores/playbackStore.ts');
-    const { useWorkspaceLayoutStore } = await import('../../src/stores/workspaceLayoutStore.ts');
-
+  await page.evaluate((baseUrl) => {
     const now = new Date().toISOString();
     const fixtureBase = `${baseUrl}/tests/e2e/fixtures`;
 
@@ -110,36 +106,35 @@ async function seedProxyPreviewState(page: Page): Promise<void> {
       markers: [],
     };
 
-    useProjectStore.setState({
-      isLoaded: true,
-      isLoading: false,
-      isDirty: false,
-      meta: {
+    const hooks = window.__OPENREELIO_E2E__;
+    if (!hooks) {
+      throw new Error('OpenReelio E2E hooks are not available in this build.');
+    }
+
+    hooks.seedProxyPreviewState({
+      project: {
         id: 'project_proxy_qa_1',
         name: 'Proxy QA Project',
         path: '/tmp/proxy-qa',
         createdAt: now,
         modifiedAt: now,
       },
-      assets: new Map([[asset.id, asset]]),
-      sequences: new Map([[sequence.id, sequence]]),
+      assets: [asset],
+      sequences: [sequence],
       activeSequenceId: sequence.id,
       selectedAssetId: asset.id,
-      error: null,
+      playback: {
+        currentTime: 0,
+        duration: 8,
+        isPlaying: false,
+        playbackRate: 1,
+        volume: 1,
+        isMuted: false,
+        loop: false,
+        syncWithTimeline: true,
+      },
+      activePanel: { zoneId: 'center-top', panelId: 'program-monitor' },
     });
-
-    usePlaybackStore.setState({
-      currentTime: 0,
-      duration: 8,
-      isPlaying: false,
-      playbackRate: 1,
-      volume: 1,
-      isMuted: false,
-      loop: false,
-      syncWithTimeline: true,
-    });
-
-    useWorkspaceLayoutStore.getState().setActivePanel('center-top', 'program-monitor');
   }, origin);
 }
 
@@ -176,9 +171,8 @@ test.describe('Proxy Preview QA', () => {
     const source = await proxyVideo.getAttribute('src');
     expect(source).toContain('sample-video.mp4');
 
-    await page.evaluate(async () => {
-      const { usePlaybackStore } = await import('../../src/stores/playbackStore.ts');
-      usePlaybackStore.getState().seek(2.5, 'proxy-qa-seek');
+    await page.evaluate(() => {
+      window.__OPENREELIO_E2E__?.seekPlayback(2.5, 'proxy-qa-seek');
     });
 
     await page.waitForTimeout(200);
@@ -188,10 +182,12 @@ test.describe('Proxy Preview QA', () => {
     expect(Math.abs(videoTimeAfterSeek - 2.5)).toBeLessThanOrEqual(0.2);
 
     const readPlaybackSnapshot = async () =>
-      page.evaluate(async () => {
-        const { usePlaybackStore } = await import('../../src/stores/playbackStore.ts');
-        const state = usePlaybackStore.getState();
-        return { currentTime: state.currentTime, isPlaying: state.isPlaying };
+      page.evaluate(() => {
+        const hooks = window.__OPENREELIO_E2E__;
+        if (!hooks) {
+          throw new Error('OpenReelio E2E hooks are not available in this build.');
+        }
+        return hooks.readPlaybackSnapshot();
       });
 
     const beforePlay = await readPlaybackSnapshot();

@@ -33,8 +33,8 @@ const e2eBaseUrl = process.env.E2E_BASE_URL ?? `http://${e2eHost}:${e2ePort}`;
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const e2eWebServerCommand =
   e2eServerMode === 'dev'
-    ? `${npmCommand} run dev -- --host ${e2eHost} --port ${e2ePort} --strictPort`
-    : `${npmCommand} run build && ${npmCommand} exec -- vite preview --host ${e2eHost} --port ${e2ePort} --strictPort`;
+    ? `${npmCommand} run dev -- --mode e2e --host ${e2eHost} --port ${e2ePort} --strictPort`
+    : `${npmCommand} run build -- --mode e2e && node scripts/prepare-e2e-fixtures.mjs && ${npmCommand} exec -- vite preview --host ${e2eHost} --port ${e2ePort} --strictPort`;
 
 export default defineConfig({
   testDir: './tests/e2e',
