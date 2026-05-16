@@ -160,6 +160,7 @@ export type CodexAppServerIncomingMessage =
 export interface CodexAppServerTransport {
   send(message: CodexAppServerOutgoingMessage): Promise<void> | void;
   onMessage(handler: (message: CodexAppServerIncomingMessage) => void): () => void;
+  onError?(handler: (error: Error) => void): () => void;
 }
 
 interface PendingRequest {
@@ -175,8 +176,10 @@ export class CodexAppServerClient {
   private readonly notificationHandlers = new Set<CodexAppServerNotificationHandler>();
   private readonly requestHandlers = new Set<CodexAppServerRequestHandler>();
   private readonly unsubscribeTransport: () => void;
+  private readonly unsubscribeTransportError: (() => void) | null;
   private readonly clientInfo: CodexAppServerClientInfo;
   private readonly capabilities: CodexInitializeCapabilities;
+  private transportError: Error | null = null;
 
   constructor(
     private readonly transport: CodexAppServerTransport,
@@ -191,6 +194,8 @@ export class CodexAppServerClient {
       experimentalApi: true,
     };
     this.unsubscribeTransport = this.transport.onMessage((message) => this.handleMessage(message));
+    this.unsubscribeTransportError =
+      this.transport.onError?.((error) => this.handleTransportError(error)) ?? null;
   }
 
   async initialize(): Promise<void> {
@@ -304,6 +309,7 @@ export class CodexAppServerClient {
 
   dispose(): void {
     this.unsubscribeTransport();
+    this.unsubscribeTransportError?.();
     for (const [, pending] of this.pendingRequests) {
       pending.reject(new Error('Codex app-server client disposed'));
     }
@@ -313,6 +319,10 @@ export class CodexAppServerClient {
   }
 
   private async request<T = unknown>(method: string, params?: CodexJsonObject): Promise<T> {
+    if (this.transportError) {
+      throw this.transportError;
+    }
+
     const id = this.nextRequestId++;
     const response = new Promise<T>((resolve, reject) => {
       this.pendingRequests.set(id, {
@@ -402,6 +412,17 @@ export class CodexAppServerClient {
         },
       });
     }
+  }
+
+  private handleTransportError(error: Error): void {
+    const normalizedError = new Error(normalizeCodexAppServerErrorMessage(error.message));
+    this.transportError = normalizedError;
+    for (const [, pending] of this.pendingRequests) {
+      pending.reject(normalizedError);
+    }
+    this.pendingRequests.clear();
+    this.initializePromise = Promise.reject(normalizedError);
+    this.initializePromise.catch(() => undefined);
   }
 }
 

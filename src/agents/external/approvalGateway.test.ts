@@ -157,6 +157,10 @@ describe('ExternalAgentApprovalGateway', () => {
     expect(gateway.buildMcpApprovalEnvironment(grant())).toEqual({
       OPENREELIO_MCP_APPROVAL_TOKEN: 'or_mcp_test_token',
       OPENREELIO_MCP_APPROVAL_EXPIRES_AT_MS: '601000',
+      OPENREELIO_MCP_APPROVAL_SESSION_ID: 'session-1',
+      OPENREELIO_MCP_APPROVAL_PLAN_ID: 'plan-1',
+      OPENREELIO_MCP_APPROVAL_PROJECT_ID: 'project-1',
+      OPENREELIO_MCP_APPROVAL_RUNTIME_ID: 'codex',
     });
   });
 

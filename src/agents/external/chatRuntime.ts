@@ -113,6 +113,9 @@ export class ExternalAgentChatRuntimeController {
     this.unsubscribe = options.adapter.subscribe?.((event) => this.handleEvent(event)) ?? null;
     this.unsubscribeApprovalBroker =
       options.approvalBroker?.subscribe((snapshot) => {
+        if (snapshot.pending) {
+          this.handleBrokerApprovalRequest(snapshot.pending);
+        }
         this.setState({
           pendingToolPermissionRequest: snapshot.pending
             ? mapApprovalRequestToPermissionRequest(snapshot.pending)
@@ -507,6 +510,34 @@ export class ExternalAgentChatRuntimeController {
     this.approvalPartIndex.set(approvalId, { messageId, partIndex });
   }
 
+  private handleBrokerApprovalRequest(request: ExternalAgentApprovalRequest): void {
+    const messageId = this.messageIdByExternalSessionId.get(request.sessionId);
+    if (!messageId) {
+      return;
+    }
+
+    const parts = this.options.conversation.getMessageParts(messageId) ?? [];
+    const existingIndex = parts.findIndex(
+      (part) => part.type === 'tool_approval' && part.stepId === request.id,
+    );
+    if (existingIndex >= 0) {
+      this.approvalPartIndex.set(request.id, { messageId, partIndex: existingIndex });
+      return;
+    }
+
+    const partIndex = parts.length;
+    this.options.conversation.appendPart(messageId, {
+      type: 'tool_approval',
+      stepId: request.id,
+      tool: request.tool,
+      args: request.args,
+      description: request.description || request.reason || 'Approve Codex request',
+      riskLevel: inferApprovalRiskLevel(request.approvalType),
+      status: 'pending',
+    });
+    this.approvalPartIndex.set(request.id, { messageId, partIndex });
+  }
+
   private handleTurnCompleted(
     event: Extract<ExternalAgentRuntimeEvent, { type: 'turn_completed' }>,
   ): void {
@@ -727,7 +758,7 @@ function inferApprovalRiskLevel(
   if (approvalType === 'file_change' || approvalType === 'openreelio_workspace_command') {
     return 'high';
   }
-  if (approvalType === 'openreelio_edit_command') {
+  if (approvalType === 'openreelio_edit_command' || approvalType === 'openreelio_plan_apply') {
     return 'medium';
   }
   return 'high';
@@ -744,6 +775,9 @@ function formatApprovalTool(
   }
   if (approvalType === 'openreelio_edit_command') {
     return 'OpenReelio edit';
+  }
+  if (approvalType === 'openreelio_plan_apply') {
+    return 'OpenReelio plan apply';
   }
   if (approvalType === 'openreelio_workspace_command') {
     return 'OpenReelio workspace change';

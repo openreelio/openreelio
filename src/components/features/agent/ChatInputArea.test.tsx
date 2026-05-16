@@ -32,7 +32,7 @@ const baseProps = {
 };
 
 describe('ChatInputArea', () => {
-  it('renders a single compact permission decision surface while blocking input', () => {
+  it('keeps the composer compact while blocking input for permission requests', () => {
     render(
       <ChatInputArea
         {...baseProps}
@@ -48,8 +48,8 @@ describe('ChatInputArea', () => {
       />,
     );
 
-    expect(screen.getByTestId('tool-approval-part')).toBeInTheDocument();
+    expect(screen.queryByTestId('tool-approval-part')).not.toBeInTheDocument();
     expect(screen.getByTestId('prompt-input')).toBeDisabled();
-    expect(screen.queryByText(/Permission:/)).not.toBeInTheDocument();
+    expect(screen.getByText('Permission: OpenReelio edit')).toBeInTheDocument();
   });
 });

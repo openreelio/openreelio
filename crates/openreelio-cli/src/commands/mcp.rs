@@ -9,6 +9,7 @@ use openreelio_core::ipc::CommandPayload;
 use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 #[derive(Args)]
 pub struct McpAction {
@@ -29,6 +30,11 @@ struct McpServerState {
     approval_token: Option<String>,
     approval_expires_at_ms: Option<i64>,
     approval_expiry_error: Option<String>,
+    approval_plan_id: Option<String>,
+    approval_project_id: Option<String>,
+    approval_runtime_id: Option<String>,
+    approval_session_id: Option<String>,
+    approval_consumed: Arc<Mutex<bool>>,
 }
 
 pub fn execute(action: McpAction) -> anyhow::Result<()> {
@@ -40,6 +46,11 @@ pub fn execute(action: McpAction) -> anyhow::Result<()> {
         approval_token: std::env::var("OPENREELIO_MCP_APPROVAL_TOKEN").ok(),
         approval_expires_at_ms,
         approval_expiry_error,
+        approval_plan_id: read_trimmed_env("OPENREELIO_MCP_APPROVAL_PLAN_ID"),
+        approval_project_id: read_trimmed_env("OPENREELIO_MCP_APPROVAL_PROJECT_ID"),
+        approval_runtime_id: read_trimmed_env("OPENREELIO_MCP_APPROVAL_RUNTIME_ID"),
+        approval_session_id: read_trimmed_env("OPENREELIO_MCP_APPROVAL_SESSION_ID"),
+        approval_consumed: Arc::new(Mutex::new(false)),
     };
 
     if action.stdio {
@@ -64,10 +75,10 @@ pub fn execute(action: McpAction) -> anyhow::Result<()> {
 
 impl McpServerState {
     fn has_active_approval_token(&self) -> bool {
-        self.active_approval_token().is_ok()
+        self.active_approval_token(None).is_ok()
     }
 
-    fn active_approval_token(&self) -> Result<&str, ToolError> {
+    fn active_approval_token(&self, plan_id: Option<&str>) -> Result<&str, ToolError> {
         let Some(token) = self.approval_token.as_deref() else {
             return Err(ToolError::PermissionDenied(
                 "openreelio.plan.apply requires an approval token".to_string(),
@@ -88,7 +99,38 @@ impl McpServerState {
             }
         }
 
+        if *self.approval_consumed.lock().map_err(|_| {
+            ToolError::PermissionDenied("approvalToken state is poisoned".to_string())
+        })? {
+            return Err(ToolError::PermissionDenied(
+                "approvalToken has already been consumed".to_string(),
+            ));
+        }
+
+        if let (Some(expected_plan_id), Some(actual_plan_id)) =
+            (self.approval_plan_id.as_deref(), plan_id)
+        {
+            if expected_plan_id != actual_plan_id {
+                return Err(ToolError::PermissionDenied(format!(
+                    "approvalToken is scoped to plan '{expected_plan_id}', not '{actual_plan_id}'"
+                )));
+            }
+        }
+
         Ok(token)
+    }
+
+    fn consume_approval_token(&self) -> Result<(), ToolError> {
+        let mut consumed = self.approval_consumed.lock().map_err(|_| {
+            ToolError::PermissionDenied("approvalToken state is poisoned".to_string())
+        })?;
+        if *consumed {
+            return Err(ToolError::PermissionDenied(
+                "approvalToken has already been consumed".to_string(),
+            ));
+        }
+        *consumed = true;
+        Ok(())
     }
 }
 
@@ -114,6 +156,13 @@ fn read_approval_expiry_from_env() -> (Option<i64>, Option<String>) {
             )),
         ),
     }
+}
+
+fn read_trimmed_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn serve_stdio(state: McpServerState) -> anyhow::Result<()> {
@@ -430,6 +479,7 @@ fn call_tool(state: &McpServerState, name: &str, arguments: Value) -> Result<Val
 
 fn build_host_context(state: &McpServerState) -> Value {
     let project = load_project_summary(state);
+    let approval_grant = build_approval_grant_context(state);
     serde_json::json!({
         "host": {
             "appId": "openreelio",
@@ -466,7 +516,29 @@ fn build_host_context(state: &McpServerState) -> Value {
             "approvalMode": if state.has_active_approval_token() { "approve-mutations" } else { "read-only" },
             "rawMediaAccess": "none",
             "filesystemAccess": if state.project.is_some() { "project-readonly" } else { "none" }
-        }
+        },
+        "approvalGrant": approval_grant
+    })
+}
+
+fn build_approval_grant_context(state: &McpServerState) -> Value {
+    let (consumed, state_error) = match state.approval_consumed.lock() {
+        Ok(consumed) => (*consumed, Value::Null),
+        Err(_) => (true, serde_json::json!("approvalToken state is poisoned")),
+    };
+
+    serde_json::json!({
+        "available": state.has_active_approval_token(),
+        "consumed": consumed,
+        "expiresAtMs": state.approval_expires_at_ms,
+        "expiryError": state.approval_expiry_error,
+        "scopes": {
+            "planId": state.approval_plan_id,
+            "projectId": state.approval_project_id,
+            "runtimeId": state.approval_runtime_id,
+            "sessionId": state.approval_session_id
+        },
+        "stateError": state_error
     })
 }
 
@@ -805,7 +877,17 @@ fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
 }
 
 fn apply_plan(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
-    let expected_token = state.active_approval_token()?;
+    state.active_approval_token(None)?;
+
+    let plan_value = arguments
+        .get("plan")
+        .cloned()
+        .ok_or_else(|| ToolError::InvalidArguments("plan is required".to_string()))?;
+    let plan_id = plan_value
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::InvalidArguments("plan.id is required".to_string()))?;
+    let expected_token = state.active_approval_token(Some(plan_id))?;
     let actual_token = arguments
         .get("approvalToken")
         .and_then(Value::as_str)
@@ -820,10 +902,6 @@ fn apply_plan(state: &McpServerState, arguments: Value) -> Result<Value, ToolErr
     let project_path = state.project.as_ref().ok_or_else(|| {
         ToolError::InvalidArguments("A project path is required to apply a plan".to_string())
     })?;
-    let plan_value = arguments
-        .get("plan")
-        .cloned()
-        .ok_or_else(|| ToolError::InvalidArguments("plan is required".to_string()))?;
     let edit_plan: plan::EditPlan = serde_json::from_value(plan_value)
         .map_err(|error| ToolError::InvalidArguments(format!("Invalid plan JSON: {error}")))?;
 
@@ -836,6 +914,8 @@ fn apply_plan(state: &McpServerState, arguments: Value) -> Result<Value, ToolErr
             "errors": validation_errors,
         }));
     }
+
+    state.consume_approval_token()?;
 
     let mut project = super::load_project(project_path)
         .map_err(|error| ToolError::Execution(error.to_string()))?;
@@ -949,11 +1029,8 @@ mod tests {
 
         let state = McpServerState {
             project: Some(project_path.clone()),
-            client_name: None,
-            client_version: None,
             approval_token: Some("expected-token".to_string()),
-            approval_expires_at_ms: None,
-            approval_expiry_error: None,
+            ..Default::default()
         };
         let plan = serde_json::json!({
             "id": "denied-plan",
@@ -986,6 +1063,57 @@ mod tests {
         assert_eq!(response["error"]["code"], -32001);
         let reopened = openreelio_core::ActiveProject::open(project_path).expect("reopen");
         assert_eq!(reopened.state.op_count, initial_op_count);
+    }
+
+    #[test]
+    fn should_reject_plan_apply_when_approval_token_is_scoped_to_another_plan() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("wrong_plan_scope_project");
+        let project =
+            openreelio_core::ActiveProject::create("Wrong Plan Scope", project_path.clone())
+                .expect("project");
+        let sequence_id = project.state.active_sequence_id.clone().expect("sequence");
+        drop(project);
+
+        let state = McpServerState {
+            project: Some(project_path),
+            approval_token: Some("scoped-token".to_string()),
+            approval_plan_id: Some("expected-plan".to_string()),
+            ..Default::default()
+        };
+        let plan = serde_json::json!({
+            "id": "actual-plan",
+            "steps": [{
+                "id": "step-1",
+                "commandType": "AddTrack",
+                "payload": {
+                    "sequenceId": sequence_id,
+                    "name": "Wrong Scope Track",
+                    "kind": "video"
+                },
+                "dependsOn": []
+            }]
+        });
+
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.plan.apply",
+                    "arguments": {
+                        "approvalToken": "scoped-token",
+                        "plan": plan
+                    }
+                }),
+            ),
+        );
+
+        assert_eq!(response["error"]["code"], -32001);
+        assert!(response["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("expected-plan"));
     }
 
     #[test]
@@ -1069,11 +1197,9 @@ mod tests {
 
         let state = McpServerState {
             project: Some(project_path.clone()),
-            client_name: None,
-            client_version: None,
             approval_token: Some("expired-token".to_string()),
             approval_expires_at_ms: Some(1),
-            approval_expiry_error: None,
+            ..Default::default()
         };
         let plan = serde_json::json!({
             "id": "expired-plan",
@@ -1130,11 +1256,9 @@ mod tests {
 
         let state = McpServerState {
             project: Some(project_path.clone()),
-            client_name: None,
-            client_version: None,
             approval_token: Some("approved-token".to_string()),
-            approval_expires_at_ms: None,
-            approval_expiry_error: None,
+            approval_plan_id: Some("approved-plan".to_string()),
+            ..Default::default()
         };
         let plan = serde_json::json!({
             "id": "approved-plan",
@@ -1184,6 +1308,37 @@ mod tests {
             .tracks
             .iter()
             .any(|track| track.name == "Approved Track"));
+
+        let replay_response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.plan.apply",
+                    "arguments": {
+                        "approvalToken": "approved-token",
+                        "plan": {
+                            "id": "approved-plan",
+                            "steps": [{
+                                "id": "step-1",
+                                "commandType": "AddTrack",
+                                "payload": {
+                                    "sequenceId": sequence_id,
+                                    "name": "Replay Track",
+                                    "kind": "video"
+                                },
+                                "dependsOn": []
+                            }]
+                        }
+                    }
+                }),
+            ),
+        );
+        assert_eq!(replay_response["error"]["code"], -32001);
+        assert!(replay_response["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("already been consumed"));
     }
 
     #[test]

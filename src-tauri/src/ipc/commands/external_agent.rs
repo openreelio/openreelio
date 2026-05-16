@@ -3,8 +3,9 @@
 use crate::core::external_agent::{
     build_external_agent_setup_info,
     configure_codex_agent_runtime as configure_codex_agent_runtime_core,
-    start_codex_login as start_codex_login_core, CodexAgentLoginResult,
-    ConfigureCodexAgentRuntimeInput, ConfigureCodexAgentRuntimeResult,
+    install_codex_cli as install_codex_cli_core, start_codex_login as start_codex_login_core,
+    update_codex_cli as update_codex_cli_core, CodexAgentLoginResult, CodexCliInstallResult,
+    CodexCliUpdateResult, ConfigureCodexAgentRuntimeInput, ConfigureCodexAgentRuntimeResult,
     ConsumeExternalAgentApprovalTokenInput, CreateExternalAgentApprovalTokenInput,
     ExternalAgentApprovalTokenGrant, ExternalAgentApprovalTokenValidation, ExternalAgentSetupInfo,
     ExternalAgentSetupInfoInput, RevokeExternalAgentApprovalTokenInput,
@@ -44,6 +45,18 @@ pub async fn configure_codex_agent_runtime(
 #[specta::specta]
 pub async fn start_codex_login() -> Result<CodexAgentLoginResult, String> {
     Ok(start_codex_login_core().await)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn install_codex_cli() -> Result<CodexCliInstallResult, String> {
+    Ok(install_codex_cli_core().await)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_codex_cli() -> Result<CodexCliUpdateResult, String> {
+    Ok(update_codex_cli_core().await)
 }
 
 #[tauri::command]

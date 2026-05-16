@@ -309,7 +309,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   },
   ai: {
     assistantRuntime: 'api',
-    codexModel: 'gpt-5.4',
+    codexModel: 'gpt-5.5',
     codexReasoningEffort: 'medium',
     primaryProvider: 'anthropic',
     primaryModel: 'claude-sonnet-4-5-20251015',

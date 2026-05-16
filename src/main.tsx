@@ -18,6 +18,10 @@ try {
   logger.error('Agent system initialization failed — AI features may be unavailable', { err });
 }
 
+if (import.meta.env.MODE === 'e2e') {
+  void import('./e2e/openreelioE2eHooks');
+}
+
 /**
  * Root error fallback for catastrophic failures.
  * Shows a basic UI that allows the user to reload the application.

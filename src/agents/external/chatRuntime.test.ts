@@ -629,6 +629,61 @@ describe('ExternalAgentChatRuntimeController', () => {
     );
   });
 
+  it('should surface broker-only OpenReelio approval requests as chat cards', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const approvalBroker = new ExternalAgentApprovalBroker({ timeoutMs: 0 });
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+      approvalBroker,
+    });
+
+    await controller.sendMessage('Apply the OpenReelio plan');
+    const decisionPromise = approvalBroker.requestDecision({
+      id: 'codex:openreelio-plan:99:shorts-cleanup-v1',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      turnId: 'turn_1',
+      itemId: 'plan_apply_1',
+      requestId: 99,
+      approvalType: 'openreelio_plan_apply',
+      tool: 'OpenReelio plan apply',
+      description: 'Apply approved shorts cleanup plan',
+      args: { planId: 'shorts-cleanup-v1', stepCount: 42 },
+      reason: null,
+      requestedAt: 1000,
+    });
+
+    expect(controller.getState().pendingToolPermissionRequest).toEqual({
+      id: 'codex:openreelio-plan:99:shorts-cleanup-v1',
+      tool: 'OpenReelio plan apply',
+      description: 'Apply approved shorts cleanup plan',
+      args: { planId: 'shorts-cleanup-v1', stepCount: 42 },
+      riskLevel: 'medium',
+    });
+    expect(conversation.getMessageParts('assistant-1')).toEqual([
+      {
+        type: 'tool_approval',
+        stepId: 'codex:openreelio-plan:99:shorts-cleanup-v1',
+        tool: 'OpenReelio plan apply',
+        args: { planId: 'shorts-cleanup-v1', stepCount: 42 },
+        description: 'Apply approved shorts cleanup plan',
+        riskLevel: 'medium',
+        status: 'pending',
+      },
+    ]);
+
+    controller.resolveApproval('accept');
+
+    await expect(decisionPromise).resolves.toBe('accept');
+    expect(controller.getState().pendingToolPermissionRequest).toBeNull();
+    expect(conversation.getMessageParts('assistant-1')?.[0]).toMatchObject({
+      status: 'approved',
+    });
+  });
+
   it('should treat unknown approval types as high risk', async () => {
     const conversation = new FakeConversationGateway();
     const adapter = new FakeExternalAgentAdapter();

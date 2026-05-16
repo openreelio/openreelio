@@ -78,7 +78,7 @@ export function AgenticSidebarWorkspace({
   return (
     <div
       data-testid="agentic-sidebar-content"
-      className={`relative flex min-w-0 flex-1 overflow-hidden ${className}`}
+      className={`relative flex min-h-0 min-w-0 flex-1 overflow-hidden ${className}`}
     >
       {showSessionList && (
         <div className="absolute inset-y-0 left-0 z-20 flex w-[82%] max-w-[240px] min-w-0 flex-col border-r border-border-subtle bg-surface-base shadow-xl">
@@ -103,7 +103,7 @@ export function AgenticSidebarWorkspace({
         </div>
       )}
 
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <div className="flex items-center px-2 py-1 border-b border-border-subtle bg-surface-base">
           <button
             onClick={onToggleSessionList}

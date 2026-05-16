@@ -14,6 +14,7 @@ class MockCodexTransport implements CodexAppServerTransport {
   });
 
   private handler: ((message: CodexAppServerIncomingMessage) => void) | null = null;
+  private errorHandler: ((error: Error) => void) | null = null;
 
   onMessage(handler: (message: CodexAppServerIncomingMessage) => void): () => void {
     this.handler = handler;
@@ -22,8 +23,19 @@ class MockCodexTransport implements CodexAppServerTransport {
     };
   }
 
+  onError(handler: (error: Error) => void): () => void {
+    this.errorHandler = handler;
+    return () => {
+      this.errorHandler = null;
+    };
+  }
+
   receive(message: CodexAppServerIncomingMessage): void {
     this.handler?.(message);
+  }
+
+  fail(error: Error): void {
+    this.errorHandler?.(error);
   }
 }
 
@@ -231,6 +243,20 @@ describe('CodexAppServerClient', () => {
     });
 
     await expect(threadPromise).rejects.toThrow('Not authenticated');
+  });
+
+  it('rejects pending requests when the app-server transport fails before responding', async () => {
+    const transport = new MockCodexTransport();
+    const client = new CodexAppServerClient(transport);
+    const initPromise = client.initialize();
+
+    await waitForSent(transport, 1);
+    transport.fail(
+      new Error('Codex app-server exited with exit code 1. Last stderr: migration failed'),
+    );
+
+    await expect(initPromise).rejects.toThrow('migration failed');
+    await expect(client.startThread()).rejects.toThrow('migration failed');
   });
 
   it('normalizes JSON-RPC model compatibility errors before surfacing them', async () => {

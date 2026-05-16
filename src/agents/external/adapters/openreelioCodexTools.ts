@@ -1,6 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
 
-import type { CommandResultDto, ProjectInfo, ProjectStateDto } from '@/bindings';
+import type {
+  AgentPlan,
+  AgentPlanResult,
+  CommandResultDto,
+  ExternalAgentApprovalTokenGrant,
+  ExternalAgentApprovalTokenValidation,
+  PlanRiskLevel,
+  ProjectInfo,
+  ProjectStateDto,
+} from '@/bindings';
 
 import type { ExternalAgentApprovalDecisionProvider, ExternalAgentApprovalRequest } from '../types';
 import type {
@@ -116,7 +125,7 @@ interface ContextTokenRecord {
   projectId: string;
   issuedAt: number;
   activeSequenceId: string | null;
-  source: 'project_state' | 'timeline_snapshot' | 'assets_list';
+  source: 'project_state' | 'timeline_snapshot' | 'assets_list' | 'selection_read';
 }
 
 const contextTokensBySessionId = new Map<string, ContextTokenRecord>();
@@ -157,6 +166,56 @@ const COMMAND_EXECUTE_SCHEMA: CodexJsonObject = {
   additionalProperties: false,
 };
 
+const COMMAND_VALIDATE_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  required: ['commandType', 'payload'],
+  properties: {
+    commandType: {
+      type: 'string',
+      enum: OPENREELIO_EXECUTABLE_COMMAND_TYPES,
+      description: 'PascalCase OpenReelio edit command type to validate.',
+    },
+    payload: {
+      type: 'object',
+      description: 'CamelCase JSON payload matching the command type.',
+    },
+  },
+  additionalProperties: false,
+};
+
+const PLAN_OBJECT_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  description:
+    'OpenReelio AgentPlan with id, goal, approvalGranted, and ordered steps using toolName and params.',
+};
+
+const PLAN_VALIDATE_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  required: ['plan'],
+  properties: {
+    plan: PLAN_OBJECT_SCHEMA,
+  },
+  additionalProperties: false,
+};
+
+const PLAN_APPLY_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  required: ['plan', 'reason', 'contextToken'],
+  properties: {
+    plan: PLAN_OBJECT_SCHEMA,
+    reason: {
+      type: 'string',
+      description: 'Short user-facing reason for the plan approval prompt.',
+    },
+    contextToken: {
+      type: 'string',
+      description:
+        'Fresh mutation context token returned by openreelio.project_state, timeline_snapshot, assets_list, or selection_read in this session.',
+    },
+  },
+  additionalProperties: false,
+};
+
 export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
   {
     namespace: 'openreelio',
@@ -187,10 +246,59 @@ export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
   },
   {
     namespace: 'openreelio',
+    name: 'selection_read',
+    description:
+      'Read current timeline selection, selected project asset, playhead, and active editing tool state.',
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'diagnostics_read',
+    description:
+      'Read non-mutating project/runtime diagnostics relevant to planning safe OpenReelio edits.',
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'preview_describe',
+    description:
+      'Read preview/playback state and whether raw frame inspection is available through the OpenReelio bridge.',
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
     name: 'command_schema',
     description:
       'Read the supported OpenReelio event-sourced edit command types and payload conventions.',
     inputSchema: EMPTY_OBJECT_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'command_validate',
+    description:
+      'Validate one OpenReelio edit command payload without mutating the project or asking for approval.',
+    inputSchema: COMMAND_VALIDATE_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'plan_validate',
+    description:
+      'Validate an OpenReelio AgentPlan and every step payload without mutating the project or asking for approval.',
+    inputSchema: PLAN_VALIDATE_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'diff_preview',
+    description:
+      'Preview a non-mutating structural summary of an OpenReelio AgentPlan after validation.',
+    inputSchema: PLAN_VALIDATE_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'plan_apply',
+    description:
+      'Apply a validated OpenReelio AgentPlan atomically through execute_agent_plan after explicit user approval.',
+    inputSchema: PLAN_APPLY_SCHEMA,
   },
   {
     namespace: 'openreelio',
@@ -228,8 +336,9 @@ export function buildOpenReelioCodexDeveloperInstructions(
     '- Project truth is the OpenReelio command log, not direct JSON state mutation.',
     '- Use OpenReelio dynamic tools before claiming project, timeline, asset, or selection facts.',
     '- Use openreelio.host_context first when the user asks where you are, what you can use, or what environment this is.',
-    '- Use openreelio.timeline_snapshot, openreelio.assets_list, and openreelio.command_schema before proposing concrete edits.',
-    '- Apply edits through openreelio.command_execute with the fresh contextToken returned by openreelio.project_state, openreelio.timeline_snapshot, or openreelio.assets_list so the app can validate, approve, persist, undo, and refresh the UI.',
+    '- Use openreelio.timeline_snapshot, openreelio.assets_list, openreelio.selection_read, and openreelio.command_schema before proposing concrete edits.',
+    '- Prefer openreelio.plan_validate and openreelio.plan_apply for multi-step edits. Use openreelio.command_execute only for a narrow single-command edit.',
+    '- Apply edits with the fresh contextToken returned by openreelio.project_state, openreelio.timeline_snapshot, openreelio.assets_list, or openreelio.selection_read so the app can validate, approve, persist, undo, and refresh the UI.',
     '- Do not manually edit .openreelio state files or invent command payloads without checking the schema and current IDs.',
     '- Do not use shell or filesystem tools to mutate OpenReelio project state; OpenReelio edits must go through the command log.',
     '- Shell and filesystem tools are secondary; prefer OpenReelio tools for video-editing state and mutations.',
@@ -269,8 +378,30 @@ export async function handleOpenReelioCodexDynamicToolCall(
         return toolResponse(buildTimelineSnapshot(await readProjectState(), context));
       case 'assets_list':
         return toolResponse(buildAssetsList(await readProjectState(), context));
+      case 'selection_read':
+        return toolResponse(await buildSelectionResponse(context));
+      case 'diagnostics_read':
+        return toolResponse(await buildDiagnosticsResponse());
+      case 'preview_describe':
+        return toolResponse(await buildPreviewDescription());
       case 'command_schema':
         return toolResponse(buildCommandSchema());
+      case 'command_validate': {
+        const result = await validateCommandToolCall(toolCall.arguments);
+        return toolResponse(result, result.status === 'ok');
+      }
+      case 'plan_validate': {
+        const result = await validatePlanToolCall(toolCall.arguments);
+        return toolResponse(result, result.status === 'ok');
+      }
+      case 'diff_preview': {
+        const result = await previewPlanDiff(toolCall.arguments);
+        return toolResponse(result, result.status === 'ok');
+      }
+      case 'plan_apply': {
+        const result = await applyApprovedPlan(toolCall.arguments, request, context);
+        return toolResponse(result, result.status === 'ok');
+      }
       case 'command_execute': {
         const result = await executeApprovedCommand(toolCall.arguments, request, context);
         return toolResponse(result, result.status === 'ok');
@@ -419,15 +550,27 @@ async function buildHostContext(context: OpenReelioCodexToolContext): Promise<Co
       timelineRead: true,
       assetRead: true,
       commandSchemaRead: true,
+      commandValidate: true,
+      planValidate: true,
+      planApplyWithApproval: true,
+      diffPreview: true,
+      selectionRead: true,
+      diagnosticsRead: true,
+      previewDescribe: true,
       commandExecuteWithApproval: true,
       undoableCommandLog: true,
     },
     policy: {
-      mutationPath: 'openreelio.command_execute',
+      mutationPath: 'openreelio.plan_apply',
       approvalRequiredForMutations: true,
       directStateFileEdits: 'forbidden',
       contextTokenRequiredForMutations: true,
-      mutationContextSources: ['project_state', 'timeline_snapshot', 'assets_list'],
+      mutationContextSources: [
+        'project_state',
+        'timeline_snapshot',
+        'assets_list',
+        'selection_read',
+      ],
     },
   };
 }
@@ -441,6 +584,125 @@ async function buildProjectStateResponse(
     contextToken: contextToken.token,
     contextTokenExpiresAt: contextToken.issuedAt + CONTEXT_TOKEN_TTL_MS,
     projectState: state as unknown as CodexJsonObject,
+  };
+}
+
+async function buildSelectionResponse(
+  context: OpenReelioCodexToolContext,
+): Promise<CodexJsonObject> {
+  const [state, timelineModule, playbackModule, projectModule, editorToolModule] =
+    await Promise.all([
+      readProjectState(),
+      import('@/stores/timelineStore'),
+      import('@/stores/playbackStore'),
+      import('@/stores/projectStore'),
+      import('@/stores/editorToolStore'),
+    ]);
+  const timelineState = timelineModule.useTimelineStore.getState();
+  const playbackState = playbackModule.usePlaybackStore.getState();
+  const projectStoreState = projectModule.useProjectStore.getState();
+  const editorToolState = editorToolModule.useEditorToolStore.getState();
+  const selectedClipIds = [...timelineState.selectedClipIds];
+  const selectedTrackIds = [...timelineState.selectedTrackIds];
+  const contextToken = issueContextToken(context, state, 'selection_read');
+
+  return {
+    contextToken: contextToken.token,
+    contextTokenExpiresAt: contextToken.issuedAt + CONTEXT_TOKEN_TTL_MS,
+    activeSequenceId: state.activeSequenceId,
+    selectedClipIds,
+    selectedTrackIds,
+    selectedAssetId: projectStoreState.selectedAssetId,
+    playheadSec: playbackState.currentTime,
+    playback: {
+      isPlaying: playbackState.isPlaying,
+      duration: playbackState.duration,
+      playbackRate: playbackState.playbackRate,
+      muted: playbackState.isMuted,
+    },
+    activeTool: editorToolState.activeTool,
+    selectedClips: selectedClipIds.map((clipId) => findClipSummary(state, clipId)).filter(Boolean),
+    selectedTracks: selectedTrackIds
+      .map((trackId) => findTrackSummary(state, trackId))
+      .filter(Boolean),
+  };
+}
+
+async function buildDiagnosticsResponse(): Promise<CodexJsonObject> {
+  const [projectInfo, projectState] = await Promise.all([
+    readOptionalProjectInfo(),
+    readOptionalProjectState(),
+  ]);
+  let frontendError: string | null = null;
+  try {
+    const projectModule = await import('@/stores/projectStore');
+    frontendError = projectModule.useProjectStore.getState().error;
+  } catch {
+    frontendError = null;
+  }
+
+  const missingAssets =
+    projectState?.assets
+      ?.filter((asset) => asset.missing)
+      .map((asset) => ({
+        id: asset.id,
+        name: asset.name,
+        kind: asset.kind,
+      })) ?? [];
+
+  return {
+    available: Boolean(projectInfo ?? projectState),
+    projectId: projectInfo?.id ?? null,
+    projectName: projectInfo?.name ?? projectState?.meta?.name ?? null,
+    activeSequenceId: projectState?.activeSequenceId ?? null,
+    isDirty: projectState?.isDirty ?? null,
+    assetCount: projectState?.assets?.length ?? 0,
+    sequenceCount: projectState?.sequences?.length ?? 0,
+    missingAssetCount: missingAssets.length,
+    missingAssets,
+    frontendError,
+    policy: {
+      mutationRequiresApproval: true,
+      commandPayloadValidation: true,
+      planApplyPath: 'execute_agent_plan',
+      directStateFileEdits: 'forbidden',
+    },
+  };
+}
+
+async function buildPreviewDescription(): Promise<CodexJsonObject> {
+  const [state, playbackModule, previewModule] = await Promise.all([
+    readOptionalProjectState(),
+    import('@/stores/playbackStore'),
+    import('@/stores/previewStore'),
+  ]);
+  const playbackState = playbackModule.usePlaybackStore.getState();
+  const previewState = previewModule.usePreviewStore.getState();
+  const activeSequence = state?.sequences.find(
+    (sequence) => sequence.id === state.activeSequenceId,
+  );
+
+  return {
+    available: Boolean(state),
+    activeSequenceId: state?.activeSequenceId ?? null,
+    activeSequence: activeSequence ? summarizeSequence(activeSequence) : null,
+    playheadSec: playbackState.currentTime,
+    durationSec: playbackState.duration,
+    isPlaying: playbackState.isPlaying,
+    playbackRate: playbackState.playbackRate,
+    preview: {
+      zoomLevel: previewState.zoomLevel,
+      zoomMode: previewState.zoomMode,
+      panX: previewState.panX,
+      panY: previewState.panY,
+    },
+    mediaInspection: {
+      rawFrameAccess: false,
+      transcriptAccess: false,
+      waveformAccess: false,
+      message:
+        'Raw frame, transcript, and waveform analysis are not exposed through this Codex bridge yet.',
+    },
   };
 }
 
@@ -516,7 +778,8 @@ async function executeApprovedCommand(
     return {
       status: 'denied',
       commandType,
-      message: 'The OpenReelio command was not approved by the user.',
+      message:
+        'The OpenReelio command was not approved. Approve it with the chat approval card; plain chat replies do not grant tool execution.',
     };
   }
 
@@ -530,6 +793,166 @@ async function executeApprovedCommand(
   return {
     status: 'ok',
     commandType,
+    result,
+    refresh,
+  };
+}
+
+async function validateCommandToolCall(args: CodexJsonObject | null): Promise<CodexJsonObject> {
+  if (!args) {
+    throw new Error('OpenReelio command_validate requires object arguments.');
+  }
+
+  const commandType = getString(args, 'commandType')?.trim();
+  if (!commandType) {
+    throw new Error('OpenReelio command_validate requires commandType.');
+  }
+  const unsupported = getUnsupportedExecutableCommandMessage(commandType);
+  if (unsupported) {
+    return {
+      status: 'error',
+      commandType,
+      message: unsupported,
+    };
+  }
+
+  const payload = asObject(args.payload);
+  if (!payload) {
+    throw new Error('OpenReelio command_validate requires an object payload.');
+  }
+
+  const validation = await validateCommandPayload(commandType, payload);
+  if (!validation.valid) {
+    return {
+      status: 'error',
+      commandType,
+      message: validation.message,
+    };
+  }
+
+  return {
+    status: 'ok',
+    commandType,
+    message: 'Command payload is valid.',
+  };
+}
+
+async function validatePlanToolCall(args: CodexJsonObject | null): Promise<CodexJsonObject> {
+  const validation = await validateAgentPlanArgument(args);
+  if (!validation.valid) {
+    return {
+      status: 'error',
+      message: validation.message,
+    };
+  }
+
+  return {
+    status: 'ok',
+    planId: validation.plan.id,
+    goal: validation.plan.goal,
+    totalSteps: validation.plan.steps.length,
+    steps: validation.plan.steps.map((step) => ({
+      id: step.id,
+      toolName: step.toolName,
+      riskLevel: step.riskLevel,
+      optional: step.optional ?? false,
+      dependsOn: step.dependsOn ?? [],
+    })),
+  };
+}
+
+async function previewPlanDiff(args: CodexJsonObject | null): Promise<CodexJsonObject> {
+  const validation = await validateAgentPlanArgument(args);
+  if (!validation.valid) {
+    return {
+      status: 'error',
+      message: validation.message,
+    };
+  }
+
+  return {
+    status: 'ok',
+    previewType: 'structural',
+    renderedVisualDiffAvailable: false,
+    planId: validation.plan.id,
+    goal: validation.plan.goal,
+    totalSteps: validation.plan.steps.length,
+    commands: validation.plan.steps.map((step, index) => ({
+      index,
+      stepId: step.id,
+      commandType: step.toolName,
+      description: step.description,
+      riskLevel: step.riskLevel,
+      params: step.params,
+    })),
+  };
+}
+
+async function applyApprovedPlan(
+  args: CodexJsonObject | null,
+  request: CodexAppServerRequest,
+  context: OpenReelioCodexToolContext,
+): Promise<CodexJsonObject> {
+  if (!args) {
+    throw new Error('OpenReelio plan_apply requires object arguments.');
+  }
+
+  const validation = await validateAgentPlanArgument(args);
+  if (!validation.valid) {
+    return {
+      status: 'error',
+      message: validation.message,
+    };
+  }
+
+  const contextToken = getString(args, 'contextToken')?.trim() ?? null;
+  const tokenValidation = validateContextToken(context, contextToken);
+  if (!tokenValidation.valid) {
+    return {
+      status: 'error',
+      planId: validation.plan.id,
+      message: tokenValidation.message.replace(/command_execute/g, 'plan_apply'),
+    };
+  }
+
+  const reason = getString(args, 'reason')?.trim() || `Apply plan ${validation.plan.id}`;
+  const decision = context.approvalDecisionProvider
+    ? await context.approvalDecisionProvider(
+        buildPlanApprovalRequest({
+          request,
+          context,
+          plan: validation.plan,
+          reason,
+        }),
+      )
+    : 'decline';
+
+  if (decision !== 'accept' && decision !== 'acceptForSession') {
+    return {
+      status: 'denied',
+      planId: validation.plan.id,
+      message:
+        'The OpenReelio plan was not approved. Approve it with the chat approval card; plain chat replies do not grant tool execution.',
+    };
+  }
+
+  const approvalGrant = await issueAndConsumePlanApplyApproval(context, validation.plan.id);
+  const plan: AgentPlan = {
+    ...validation.plan,
+    approvalGranted: true,
+    sessionId: validation.plan.sessionId ?? context.sessionId,
+  };
+  const result = await invoke<AgentPlanResult>('execute_agent_plan', { plan });
+  contextTokensBySessionId.delete(context.sessionId);
+  const refresh = await refreshProjectStoreAfterMutation();
+
+  return {
+    status: result.success ? 'ok' : 'error',
+    planId: validation.plan.id,
+    approval: {
+      tokenId: approvalGrant.tokenId,
+      consumed: true,
+    },
     result,
     refresh,
   };
@@ -549,6 +972,214 @@ async function validateCommandPayload(
       message: `OpenReelio command_execute rejected an invalid ${commandType} payload before approval: ${message}`,
     };
   }
+}
+
+function getUnsupportedExecutableCommandMessage(commandType: string): string | null {
+  if (!OPENREELIO_COMMAND_TYPE_SET.has(commandType)) {
+    return `OpenReelio command '${commandType}' is not in the supported command enum.`;
+  }
+
+  if (OPENREELIO_WORKSPACE_COMMAND_TYPES.has(commandType)) {
+    return 'Workspace filesystem commands are not available through Codex timeline editing. Use the dedicated OpenReelio workspace flow instead.';
+  }
+
+  return null;
+}
+
+async function validateAgentPlanArgument(
+  args: CodexJsonObject | null,
+): Promise<{ valid: true; plan: AgentPlan } | { valid: false; message: string }> {
+  if (!args) {
+    return { valid: false, message: 'OpenReelio plan validation requires object arguments.' };
+  }
+  const rawPlan = asObject(args.plan);
+  if (!rawPlan) {
+    return { valid: false, message: 'OpenReelio plan validation requires an object plan.' };
+  }
+
+  const normalized = normalizeAgentPlan(rawPlan);
+  if (!normalized.valid) {
+    return normalized;
+  }
+
+  const dependencyValidation = validatePlanDependencies(normalized.plan);
+  if (!dependencyValidation.valid) {
+    return dependencyValidation;
+  }
+
+  for (const step of normalized.plan.steps) {
+    const unsupported = getUnsupportedExecutableCommandMessage(step.toolName);
+    if (unsupported) {
+      return {
+        valid: false,
+        message: `Plan step '${step.id}' is invalid: ${unsupported}`,
+      };
+    }
+    const params = asObject(step.params);
+    if (!params) {
+      return {
+        valid: false,
+        message: `Plan step '${step.id}' params must be an object.`,
+      };
+    }
+    const payloadValidation = await validateCommandPayload(step.toolName, params);
+    if (!payloadValidation.valid) {
+      return {
+        valid: false,
+        message: `Plan step '${step.id}' rejected invalid ${step.toolName} params: ${payloadValidation.message}`,
+      };
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeAgentPlan(
+  rawPlan: CodexJsonObject,
+): { valid: true; plan: AgentPlan } | { valid: false; message: string } {
+  const id = getString(rawPlan, 'id')?.trim();
+  const goal = getString(rawPlan, 'goal')?.trim();
+  const rawSteps = rawPlan.steps;
+  if (!id) {
+    return { valid: false, message: 'AgentPlan.id is required.' };
+  }
+  if (!goal) {
+    return { valid: false, message: 'AgentPlan.goal is required.' };
+  }
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
+    return { valid: false, message: 'AgentPlan.steps must contain at least one step.' };
+  }
+
+  const steps: AgentPlan['steps'] = [];
+  for (const [index, rawStep] of rawSteps.entries()) {
+    const stepObject = asObject(rawStep);
+    if (!stepObject) {
+      return { valid: false, message: `AgentPlan.steps[${index}] must be an object.` };
+    }
+    const stepId = getString(stepObject, 'id')?.trim();
+    const toolName = getString(stepObject, 'toolName')?.trim();
+    const params = asObject(stepObject.params);
+    const description =
+      getString(stepObject, 'description')?.trim() || (toolName ? `Run ${toolName}` : '');
+    const riskLevel = normalizePlanRiskLevel(getString(stepObject, 'riskLevel'));
+    const dependsOn = normalizeStringArray(stepObject.dependsOn);
+    const optional = typeof stepObject.optional === 'boolean' ? stepObject.optional : false;
+
+    if (!stepId) {
+      return { valid: false, message: `AgentPlan.steps[${index}].id is required.` };
+    }
+    if (!toolName) {
+      return { valid: false, message: `AgentPlan.steps[${index}].toolName is required.` };
+    }
+    if (!params) {
+      return { valid: false, message: `AgentPlan.steps[${index}].params must be an object.` };
+    }
+
+    steps.push({
+      id: stepId,
+      toolName,
+      params: params as AgentPlan['steps'][number]['params'],
+      description,
+      riskLevel,
+      dependsOn,
+      optional,
+    });
+  }
+
+  return {
+    valid: true,
+    plan: {
+      id,
+      goal,
+      steps,
+      approvalGranted: Boolean(rawPlan.approvalGranted),
+      sessionId: getString(rawPlan, 'sessionId'),
+    },
+  };
+}
+
+function normalizePlanRiskLevel(value: string | null): PlanRiskLevel {
+  return value === 'low' || value === 'medium' || value === 'high' || value === 'critical'
+    ? value
+    : 'medium';
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+}
+
+function validatePlanDependencies(
+  plan: AgentPlan,
+): { valid: true } | { valid: false; message: string } {
+  const stepIds = new Set<string>();
+  const dependencyMap = new Map<string, string[]>();
+  for (const step of plan.steps) {
+    if (stepIds.has(step.id)) {
+      return { valid: false, message: `AgentPlan contains duplicate step id '${step.id}'.` };
+    }
+    stepIds.add(step.id);
+    dependencyMap.set(step.id, step.dependsOn ?? []);
+  }
+
+  for (const step of plan.steps) {
+    for (const dependency of step.dependsOn ?? []) {
+      if (dependency === step.id) {
+        return { valid: false, message: `Plan step '${step.id}' cannot depend on itself.` };
+      }
+      if (!stepIds.has(dependency)) {
+        return {
+          valid: false,
+          message: `Plan step '${step.id}' depends on unknown step '${dependency}'.`,
+        };
+      }
+    }
+  }
+
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const stack: string[] = [];
+
+  const findCycle = (stepId: string): string[] | null => {
+    const activeIndex = stack.indexOf(stepId);
+    if (activeIndex >= 0) {
+      return [...stack.slice(activeIndex), stepId];
+    }
+    if (visited.has(stepId)) {
+      return null;
+    }
+
+    visiting.add(stepId);
+    stack.push(stepId);
+    for (const dependency of dependencyMap.get(stepId) ?? []) {
+      const cycle = findCycle(dependency);
+      if (cycle) {
+        return cycle;
+      }
+    }
+    stack.pop();
+    visiting.delete(stepId);
+    visited.add(stepId);
+    return null;
+  };
+
+  for (const stepId of stepIds) {
+    if (visiting.has(stepId) || visited.has(stepId)) {
+      continue;
+    }
+    const cycle = findCycle(stepId);
+    if (cycle) {
+      return {
+        valid: false,
+        message: `Plan contains cyclic dependency: ${cycle.join(' -> ')}`,
+      };
+    }
+  }
+
+  return { valid: true };
 }
 
 function buildCommandApprovalRequest(input: {
@@ -578,6 +1209,82 @@ function buildCommandApprovalRequest(input: {
     reason: input.reason,
     requestedAt: Date.now(),
   };
+}
+
+function buildPlanApprovalRequest(input: {
+  request: CodexAppServerRequest;
+  context: OpenReelioCodexToolContext;
+  plan: AgentPlan;
+  reason: string;
+}): ExternalAgentApprovalRequest {
+  const params = input.request.params ?? {};
+  return {
+    id: `codex:openreelio-plan:${input.request.id}:${getString(params, 'callId') ?? input.plan.id}`,
+    runtimeId: input.context.runtimeId,
+    sessionId: input.context.sessionId,
+    turnId: getString(params, 'turnId'),
+    itemId: getString(params, 'callId'),
+    requestId: input.request.id,
+    approvalType: 'openreelio_plan_apply',
+    tool: 'OpenReelio plan apply',
+    description: input.reason,
+    args: {
+      planId: input.plan.id,
+      goal: input.plan.goal,
+      stepCount: input.plan.steps.length,
+      commands: input.plan.steps.map((step) => ({
+        id: step.id,
+        toolName: step.toolName,
+        description: step.description,
+        riskLevel: step.riskLevel,
+      })),
+      projectId: input.context.projectId,
+      cwd: input.context.cwd ?? null,
+    },
+    reason: input.reason,
+    requestedAt: Date.now(),
+  };
+}
+
+async function issueAndConsumePlanApplyApproval(
+  context: OpenReelioCodexToolContext,
+  planId: string,
+): Promise<ExternalAgentApprovalTokenGrant> {
+  const grant = await invoke<ExternalAgentApprovalTokenGrant>(
+    'create_external_agent_approval_token',
+    {
+      input: {
+        sessionId: context.sessionId,
+        runId: null,
+        planId,
+        projectId: context.projectId,
+        runtimeId: context.runtimeId,
+        scopes: ['openreelio.plan.apply'],
+        ttlMs: 10 * 60 * 1000,
+      },
+    },
+  );
+  const validation = await invoke<ExternalAgentApprovalTokenValidation>(
+    'consume_external_agent_approval_token',
+    {
+      input: {
+        token: grant.token,
+        sessionId: context.sessionId,
+        planId,
+        projectId: context.projectId,
+        runtimeId: context.runtimeId,
+        requiredScope: 'openreelio.plan.apply',
+      },
+    },
+  );
+
+  if (!validation.valid) {
+    throw new Error(
+      validation.reason ?? 'OpenReelio plan approval token was rejected before plan execution.',
+    );
+  }
+
+  return grant;
 }
 
 async function readProjectState(): Promise<ProjectStateDto> {
@@ -655,6 +1362,64 @@ function summarizeSequence(sequence: unknown): CodexJsonObject {
   };
 }
 
+function findClipSummary(state: ProjectStateDto, clipId: string): CodexJsonObject | null {
+  for (const sequence of state.sequences) {
+    const sequenceObject = asObject(sequence) ?? {};
+    const tracks = Array.isArray(sequenceObject.tracks) ? sequenceObject.tracks : [];
+    for (const track of tracks) {
+      const trackObject = asObject(track) ?? {};
+      const clips = Array.isArray(trackObject.clips) ? trackObject.clips : [];
+      const clip = clips.find((candidate) => asObject(candidate)?.id === clipId);
+      const clipObject = asObject(clip);
+      if (!clipObject) {
+        continue;
+      }
+      const place = asObject(clipObject.place) ?? {};
+      const range = asObject(clipObject.range) ?? {};
+      return {
+        id: clipObject.id,
+        assetId: clipObject.assetId,
+        sequenceId: sequenceObject.id,
+        trackId: trackObject.id,
+        trackName: trackObject.name,
+        timelineInSec: place.timelineInSec,
+        durationSec: place.durationSec,
+        sourceInSec: range.sourceInSec,
+        sourceOutSec: range.sourceOutSec,
+        speed: clipObject.speed,
+        enabled: clipObject.enabled,
+      };
+    }
+  }
+
+  return null;
+}
+
+function findTrackSummary(state: ProjectStateDto, trackId: string): CodexJsonObject | null {
+  for (const sequence of state.sequences) {
+    const sequenceObject = asObject(sequence) ?? {};
+    const tracks = Array.isArray(sequenceObject.tracks) ? sequenceObject.tracks : [];
+    const track = tracks.find((candidate) => asObject(candidate)?.id === trackId);
+    const trackObject = asObject(track);
+    if (!trackObject) {
+      continue;
+    }
+    const clips = Array.isArray(trackObject.clips) ? trackObject.clips : [];
+    return {
+      id: trackObject.id,
+      sequenceId: sequenceObject.id,
+      name: trackObject.name,
+      kind: trackObject.kind,
+      muted: trackObject.muted,
+      locked: trackObject.locked,
+      visible: trackObject.visible,
+      clipCount: clips.length,
+    };
+  }
+
+  return null;
+}
+
 function buildAssetsList(
   state: ProjectStateDto,
   context: OpenReelioCodexToolContext,
@@ -706,9 +1471,9 @@ function createContextToken(): string {
   if (cryptoApi?.getRandomValues) {
     const randomWords = new Uint32Array(4);
     cryptoApi.getRandomValues(randomWords);
-    const randomPart = Array.from(randomWords, (word) =>
-      word.toString(36).padStart(7, '0'),
-    ).join('');
+    const randomPart = Array.from(randomWords, (word) => word.toString(36).padStart(7, '0')).join(
+      '',
+    );
     return `orctx:${Date.now()}:${randomPart}`;
   }
 

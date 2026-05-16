@@ -29,6 +29,7 @@ export interface ExternalAgentRuntimeSummary {
   reason: string | null;
   installStatus: ExternalAgentRuntimeStatus['installStatus'];
   authStatus: ExternalAgentAuthStatus;
+  version: string | null;
   capabilities: ExternalAgentRuntimeCapabilities;
 }
 
@@ -103,6 +104,7 @@ export function buildExternalAgentHostSummary(
       reason: readiness.reason,
       installStatus: runtime.status.installStatus,
       authStatus: runtime.status.authStatus,
+      version: runtime.status.version,
       capabilities: runtime.capabilities,
     };
   });

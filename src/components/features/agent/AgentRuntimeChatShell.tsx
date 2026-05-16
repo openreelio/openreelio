@@ -22,6 +22,7 @@ import { useProjectStore } from '@/stores';
 import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
 import { ChatMessageList, type ChatMessageListProps } from './ChatMessageList';
 import { ChatInputArea } from './ChatInputArea';
+import { AgentRuntimeApprovalOverlay } from './AgentRuntimeApprovalOverlay';
 import { AgentArtifactFocusBanner } from './AgentArtifactFocusBanner';
 import { AgentArtifactDetailPanel } from './AgentArtifactDetailPanel';
 import { AgentSessionPersistenceBanner } from './AgentSessionPersistenceBanner';
@@ -318,7 +319,7 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
     return (
       <div
         data-testid={chatTestId}
-        className={`flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-surface-base ${className}`}
+        className={`relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-surface-base ${className}`}
       >
         <AgentSessionPersistenceBanner className="shrink-0" />
         <AgentSessionArtifactSummary
@@ -347,6 +348,16 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
           onToolAllowAlways={onToolAllowAlways}
           onToolDeny={onToolDeny}
           artifactFocus={artifactFocus}
+        />
+
+        <AgentRuntimeApprovalOverlay
+          pendingPlan={phase === 'awaiting_approval' ? plan : null}
+          pendingToolPermissionRequest={pendingToolPermissionRequest}
+          onApprove={onApprove}
+          onReject={onReject}
+          onToolAllow={onToolAllow}
+          onToolAllowAlways={onToolAllowAlways}
+          onToolDeny={onToolDeny}
         />
 
         <ChatInputArea
