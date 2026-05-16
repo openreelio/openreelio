@@ -976,6 +976,66 @@ describe('CodexReferenceAdapter', () => {
     expect(getFirstTextContent(response)).toContain('"tokenId": "grant-1"');
   });
 
+  it('should reject OpenReelio dynamic plans with cyclic dependencies', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const response = (await respondToRequest({
+      id: 32,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_plan_validate',
+        namespace: 'openreelio',
+        tool: 'plan_validate',
+        arguments: {
+          plan: {
+            id: 'cyclic-plan',
+            goal: 'Create an invalid dependency graph',
+            steps: [
+              {
+                id: 'step_a',
+                toolName: 'CreateTrack',
+                params: { sequenceId: 'seq_1', name: 'A', kind: 'video' },
+                dependsOn: ['step_b'],
+              },
+              {
+                id: 'step_b',
+                toolName: 'CreateTrack',
+                params: { sequenceId: 'seq_1', name: 'B', kind: 'video' },
+                dependsOn: ['step_a'],
+              },
+            ],
+          },
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(false);
+    expect(getFirstTextContent(response)).toContain('"status": "error"');
+    expect(getFirstTextContent(response)).toContain(
+      'Plan contains cyclic dependency: step_a -> step_b -> step_a',
+    );
+    expect(invoke).not.toHaveBeenCalledWith('validate_command_payload', expect.anything());
+  });
+
   it('should reject OpenReelio dynamic tool calls for unknown Codex sessions', async () => {
     const requestHandlers: Array<(request: any) => unknown> = [];
     const appServerClient = {

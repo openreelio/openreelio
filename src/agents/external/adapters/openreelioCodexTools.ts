@@ -1116,11 +1116,13 @@ function validatePlanDependencies(
   plan: AgentPlan,
 ): { valid: true } | { valid: false; message: string } {
   const stepIds = new Set<string>();
+  const dependencyMap = new Map<string, string[]>();
   for (const step of plan.steps) {
     if (stepIds.has(step.id)) {
       return { valid: false, message: `AgentPlan contains duplicate step id '${step.id}'.` };
     }
     stepIds.add(step.id);
+    dependencyMap.set(step.id, step.dependsOn ?? []);
   }
 
   for (const step of plan.steps) {
@@ -1134,6 +1136,46 @@ function validatePlanDependencies(
           message: `Plan step '${step.id}' depends on unknown step '${dependency}'.`,
         };
       }
+    }
+  }
+
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const stack: string[] = [];
+
+  const findCycle = (stepId: string): string[] | null => {
+    const activeIndex = stack.indexOf(stepId);
+    if (activeIndex >= 0) {
+      return [...stack.slice(activeIndex), stepId];
+    }
+    if (visited.has(stepId)) {
+      return null;
+    }
+
+    visiting.add(stepId);
+    stack.push(stepId);
+    for (const dependency of dependencyMap.get(stepId) ?? []) {
+      const cycle = findCycle(dependency);
+      if (cycle) {
+        return cycle;
+      }
+    }
+    stack.pop();
+    visiting.delete(stepId);
+    visited.add(stepId);
+    return null;
+  };
+
+  for (const stepId of stepIds) {
+    if (visiting.has(stepId) || visited.has(stepId)) {
+      continue;
+    }
+    const cycle = findCycle(stepId);
+    if (cycle) {
+      return {
+        valid: false,
+        message: `Plan contains cyclic dependency: ${cycle.join(' -> ')}`,
+      };
     }
   }
 

@@ -238,20 +238,14 @@ pub async fn configure_codex_agent_runtime(
     let plugin_marketplace_configured = plugin_result.is_ok();
     let mcp_configured = mcp_result.is_ok();
     let app_server_ready = status.app_server_ready != Some(false);
-    let ready = authenticated && app_server_ready;
-    let message = if ready {
-        Some("Codex is connected with OpenReelio tools.".to_string())
-    } else if status.app_server_ready == Some(false) {
-        status
-            .reason
-            .or_else(|| Some("Codex app-server could not start.".to_string()))
-    } else if !authenticated {
-        status
-            .reason
-            .or_else(|| Some("Codex needs sign-in.".to_string()))
-    } else {
-        plugin_result.err().or_else(|| mcp_result.err())
-    };
+    let (ready, message) = resolve_codex_configuration_readiness(
+        authenticated,
+        app_server_ready,
+        status.app_server_ready == Some(false),
+        status.reason,
+        plugin_result.err(),
+        mcp_result.err(),
+    );
 
     ConfigureCodexAgentRuntimeResult {
         installed: true,
@@ -263,6 +257,30 @@ pub async fn configure_codex_agent_runtime(
         mcp_configured,
         message,
     }
+}
+
+fn resolve_codex_configuration_readiness(
+    authenticated: bool,
+    app_server_ready: bool,
+    app_server_failed: bool,
+    status_reason: Option<String>,
+    plugin_error: Option<String>,
+    mcp_error: Option<String>,
+) -> (bool, Option<String>) {
+    let ready = authenticated && app_server_ready && mcp_error.is_none();
+    let message = if ready {
+        Some("Codex is connected with OpenReelio tools.".to_string())
+    } else if app_server_failed {
+        status_reason.or_else(|| Some("Codex app-server could not start.".to_string()))
+    } else if !authenticated {
+        status_reason.or_else(|| Some("Codex needs sign-in.".to_string()))
+    } else if let Some(error) = mcp_error {
+        Some(error)
+    } else {
+        plugin_error
+    };
+
+    (ready, message)
 }
 
 pub async fn start_codex_login() -> CodexAgentLoginResult {
@@ -934,6 +952,24 @@ mod tests {
         assert_eq!(
             info.codex_mcp_command_reason,
             Some("Open a project to generate a project-scoped MCP command.".to_string())
+        );
+    }
+
+    #[test]
+    fn does_not_mark_codex_ready_when_mcp_configuration_fails() {
+        let (ready, message) = resolve_codex_configuration_readiness(
+            true,
+            true,
+            false,
+            None,
+            None,
+            Some("Open a project before enabling OpenReelio tools for Codex.".to_string()),
+        );
+
+        assert!(!ready);
+        assert_eq!(
+            message,
+            Some("Open a project before enabling OpenReelio tools for Codex.".to_string())
         );
     }
 

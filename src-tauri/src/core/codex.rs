@@ -562,7 +562,7 @@ fn default_codex_models_for_version(version: Option<&str>) -> Vec<CodexModelInfo
     };
 
     entries
-        .into_iter()
+        .iter()
         .map(|(slug, display_name)| CodexModelInfo {
             slug: (*slug).to_string(),
             display_name: (*display_name).to_string(),

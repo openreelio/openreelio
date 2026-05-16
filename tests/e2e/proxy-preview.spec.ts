@@ -172,7 +172,11 @@ test.describe('Proxy Preview QA', () => {
     expect(source).toContain('sample-video.mp4');
 
     await page.evaluate(() => {
-      window.__OPENREELIO_E2E__?.seekPlayback(2.5, 'proxy-qa-seek');
+      const hooks = window.__OPENREELIO_E2E__;
+      if (!hooks || typeof hooks.seekPlayback !== 'function') {
+        throw new Error('OpenReelio E2E seek hook is not available in this build.');
+      }
+      hooks.seekPlayback(2.5, 'proxy-qa-seek');
     });
 
     await page.waitForTimeout(200);
