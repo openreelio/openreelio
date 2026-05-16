@@ -97,6 +97,10 @@ export interface ConsumeExternalAgentPlanApplyApprovalInput {
 export interface ExternalAgentMcpApprovalEnvironment {
   OPENREELIO_MCP_APPROVAL_TOKEN: string;
   OPENREELIO_MCP_APPROVAL_EXPIRES_AT_MS: string;
+  OPENREELIO_MCP_APPROVAL_SESSION_ID: string;
+  OPENREELIO_MCP_APPROVAL_PLAN_ID: string;
+  OPENREELIO_MCP_APPROVAL_PROJECT_ID: string;
+  OPENREELIO_MCP_APPROVAL_RUNTIME_ID: string;
 }
 
 export interface StartAgentSessionInput {
@@ -191,6 +195,7 @@ export type ExternalAgentRuntimeEvent =
         | 'os_command'
         | 'file_change'
         | 'openreelio_edit_command'
+        | 'openreelio_plan_apply'
         | 'openreelio_workspace_command'
         | 'unknown';
       reason?: string | null;
@@ -220,6 +225,7 @@ export interface ExternalAgentApprovalRequest {
     | 'os_command'
     | 'file_change'
     | 'openreelio_edit_command'
+    | 'openreelio_plan_apply'
     | 'openreelio_workspace_command'
     | 'unknown';
   tool: string;

@@ -627,9 +627,7 @@ describe('CodexReferenceAdapter', () => {
     })) as CodexDynamicToolCallResponse;
 
     const projectStateResponse = JSON.parse(getFirstTextContent(response));
-    expect(projectStateResponse.contextToken).toMatch(
-      /^orctx:\d+:0000001000000z00000zz0000zzz$/,
-    );
+    expect(projectStateResponse.contextToken).toMatch(/^orctx:\d+:0000001000000z00000zz0000zzz$/);
     expect(getRandomValues).toHaveBeenCalledWith(expect.any(Uint32Array));
   });
 
@@ -782,6 +780,200 @@ describe('CodexReferenceAdapter', () => {
         },
       ],
     });
+  });
+
+  it('should validate, approve, token-gate, and atomically apply OpenReelio dynamic plans', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    const agentPlanResult = {
+      planId: 'plan_1',
+      success: true,
+      totalSteps: 1,
+      stepsCompleted: 1,
+      stepResults: [],
+      operationIds: ['op_1'],
+      rollbackReport: null,
+      errorMessage: null,
+      executionTimeMs: 12,
+    };
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'get_project_state') {
+        return {
+          meta: {
+            name: 'Launch Cut',
+            version: '1',
+            createdAt: '2026-05-13T00:00:00Z',
+            modifiedAt: '2026-05-13T00:00:00Z',
+            description: null,
+            author: null,
+          },
+          assets: [],
+          sequences: [],
+          effects: [],
+          activeSequenceId: 'seq_1',
+          textClips: [],
+          isDirty: false,
+        };
+      }
+      if (command === 'validate_command_payload') {
+        return null;
+      }
+      if (command === 'create_external_agent_approval_token') {
+        return {
+          token: 'grant-token',
+          tokenId: 'grant-1',
+          sessionId: 'thr_123',
+          runId: null,
+          planId: 'plan_1',
+          projectId: 'project-1',
+          runtimeId: 'codex',
+          scopes: ['openreelio.plan.apply'],
+          createdAt: 1,
+          expiresAt: 2,
+        };
+      }
+      if (command === 'consume_external_agent_approval_token') {
+        return {
+          valid: true,
+          reason: null,
+          grant: null,
+        };
+      }
+      if (command === 'execute_agent_plan') {
+        expect(args).toMatchObject({
+          plan: {
+            id: 'plan_1',
+            approvalGranted: true,
+            sessionId: 'thr_123',
+          },
+        });
+        return agentPlanResult;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    projectStoreMocks.refreshFromBackendMutation.mockResolvedValue(8);
+    const approvalDecisionProvider = vi.fn().mockResolvedValue('accept');
+    const adapter = new CodexReferenceAdapter(undefined, {
+      appServerClient,
+      approvalDecisionProvider,
+    });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+    const contextResponse = (await respondToRequest({
+      id: 30,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_context',
+        namespace: 'openreelio',
+        tool: 'project_state',
+        arguments: {},
+      },
+    })) as any;
+    const contextToken = JSON.parse(getFirstTextContent(contextResponse)).contextToken;
+
+    const plan = {
+      id: 'plan_1',
+      goal: 'Add a B-roll track',
+      approvalGranted: false,
+      steps: [
+        {
+          id: 'step_1',
+          toolName: 'CreateTrack',
+          params: {
+            sequenceId: 'seq_1',
+            name: 'B-roll',
+            kind: 'video',
+          },
+          description: 'Add a B-roll video track',
+          riskLevel: 'medium',
+        },
+      ],
+    };
+    const response = (await respondToRequest({
+      id: 31,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_plan_apply',
+        namespace: 'openreelio',
+        tool: 'plan_apply',
+        arguments: {
+          plan,
+          reason: 'Apply a one-step B-roll track plan',
+          contextToken,
+        },
+      },
+    })) as any;
+
+    expect(approvalDecisionProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalType: 'openreelio_plan_apply',
+        tool: 'OpenReelio plan apply',
+        description: 'Apply a one-step B-roll track plan',
+        args: expect.objectContaining({
+          planId: 'plan_1',
+          stepCount: 1,
+          projectId: 'project-1',
+        }),
+      }),
+    );
+    expect(invoke).toHaveBeenCalledWith('validate_command_payload', {
+      commandType: 'CreateTrack',
+      payload: {
+        sequenceId: 'seq_1',
+        name: 'B-roll',
+        kind: 'video',
+      },
+    });
+    expect(invoke).toHaveBeenCalledWith('create_external_agent_approval_token', {
+      input: expect.objectContaining({
+        sessionId: 'thr_123',
+        planId: 'plan_1',
+        projectId: 'project-1',
+        runtimeId: 'codex',
+        scopes: ['openreelio.plan.apply'],
+      }),
+    });
+    expect(invoke).toHaveBeenCalledWith('consume_external_agent_approval_token', {
+      input: expect.objectContaining({
+        token: 'grant-token',
+        sessionId: 'thr_123',
+        planId: 'plan_1',
+        projectId: 'project-1',
+        runtimeId: 'codex',
+        requiredScope: 'openreelio.plan.apply',
+      }),
+    });
+    expect(invoke).toHaveBeenCalledWith(
+      'execute_agent_plan',
+      expect.objectContaining({
+        plan: expect.objectContaining({
+          id: 'plan_1',
+          approvalGranted: true,
+          sessionId: 'thr_123',
+        }),
+      }),
+    );
+    expect(projectStoreMocks.refreshFromBackendMutation).toHaveBeenCalled();
+    expect(response.success).toBe(true);
+    expect(getFirstTextContent(response)).toContain('"status": "ok"');
+    expect(getFirstTextContent(response)).toContain('"tokenId": "grant-1"');
   });
 
   it('should reject OpenReelio dynamic tool calls for unknown Codex sessions', async () => {

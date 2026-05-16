@@ -108,6 +108,10 @@ export class ExternalAgentApprovalGateway {
     return {
       OPENREELIO_MCP_APPROVAL_TOKEN: grant.token,
       OPENREELIO_MCP_APPROVAL_EXPIRES_AT_MS: String(grant.expiresAt),
+      OPENREELIO_MCP_APPROVAL_SESSION_ID: grant.sessionId,
+      OPENREELIO_MCP_APPROVAL_PLAN_ID: grant.planId ?? '',
+      OPENREELIO_MCP_APPROVAL_PROJECT_ID: grant.projectId,
+      OPENREELIO_MCP_APPROVAL_RUNTIME_ID: grant.runtimeId,
     };
   }
 
