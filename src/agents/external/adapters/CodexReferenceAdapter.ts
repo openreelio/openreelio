@@ -35,6 +35,7 @@ export interface CodexStatusProbeResult {
   installed: boolean;
   version?: string | null;
   authStatus: ExternalAgentAuthStatus;
+  appServerReady?: boolean | null;
   reason?: string | null;
 }
 
@@ -61,7 +62,7 @@ export interface CodexReferenceAdapterOptions {
   reasoningEffort?: string;
 }
 
-const DEFAULT_CODEX_APP_SERVER_MODEL = 'gpt-5.4';
+const DEFAULT_CODEX_APP_SERVER_MODEL = 'gpt-5.5';
 const DEFAULT_CODEX_REASONING_EFFORT = 'medium';
 
 const CODEX_CAPABILITIES: ExternalAgentRuntimeCapabilities = {
@@ -92,7 +93,8 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const probe = await this.probeStatus();
     const installStatus = probe.installed ? 'installed' : 'missing';
     const authenticated = probe.authStatus === 'signed-in' || probe.authStatus === 'api-key';
-    const available = probe.installed && authenticated;
+    const appServerReady = probe.appServerReady !== false;
+    const available = probe.installed && authenticated && appServerReady;
 
     return {
       runtimeId: this.id,
@@ -226,6 +228,10 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
 
     if (probe.authStatus === 'error') {
       return 'Codex authentication status could not be read';
+    }
+
+    if (probe.appServerReady === false) {
+      return 'Codex app-server could not initialize';
     }
 
     return 'Codex is unavailable';

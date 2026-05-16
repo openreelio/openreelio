@@ -87,6 +87,40 @@ describe('CodexReferenceAdapter', () => {
     expect(appServerClientFactory).not.toHaveBeenCalled();
   });
 
+  it('should not mark signed-in Codex as available when app-server initialization fails', async () => {
+    const adapter = new CodexReferenceAdapter(async () => ({
+      installed: true,
+      version: '0.130.0-alpha.5',
+      authStatus: 'signed-in',
+      appServerReady: false,
+      reason: 'codex app-server exited before initialization: migration failed',
+    }));
+
+    await expect(adapter.detect()).resolves.toEqual({
+      runtimeId: 'codex',
+      displayName: 'Codex',
+      installStatus: 'installed',
+      authStatus: 'signed-in',
+      available: false,
+      version: '0.130.0-alpha.5',
+      reason: 'codex app-server exited before initialization: migration failed',
+    });
+  });
+
+  it('should use a fallback app-server unavailable reason when the probe omits details', async () => {
+    const adapter = new CodexReferenceAdapter(async () => ({
+      installed: true,
+      version: '0.130.0-alpha.5',
+      authStatus: 'signed-in',
+      appServerReady: false,
+    }));
+
+    const status = await adapter.detect();
+
+    expect(status.available).toBe(false);
+    expect(status.reason).toBe('Codex app-server could not initialize');
+  });
+
   it('should start an app-server thread and optional first turn when connected', async () => {
     const appServerClient = {
       startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
@@ -114,7 +148,7 @@ describe('CodexReferenceAdapter', () => {
       expect.objectContaining({
         serviceName: 'openreelio',
         cwd: '/project',
-        model: 'gpt-5.4',
+        model: 'gpt-5.5',
         approvalPolicy: 'on-request',
         approvalsReviewer: 'user',
         sandbox: 'read-only',
@@ -133,7 +167,7 @@ describe('CodexReferenceAdapter', () => {
     expect(commandExecuteTool.inputSchema.properties.commandType.enum).not.toContain('DeleteFile');
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_123', 'Inspect this timeline', {
       cwd: '/project',
-      model: 'gpt-5.4',
+      model: 'gpt-5.5',
       effort: 'medium',
       approvalPolicy: 'on-request',
       approvalsReviewer: 'user',
@@ -156,7 +190,7 @@ describe('CodexReferenceAdapter', () => {
 
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_123', 'Add captions', {
       cwd: '/project',
-      model: 'gpt-5.4',
+      model: 'gpt-5.5',
       effort: 'medium',
       approvalPolicy: 'on-request',
       approvalsReviewer: 'user',
@@ -188,7 +222,7 @@ describe('CodexReferenceAdapter', () => {
       expect.objectContaining({
         threadId: 'thr_existing',
         cwd: '/project',
-        model: 'gpt-5.4',
+        model: 'gpt-5.5',
         approvalPolicy: 'on-request',
         approvalsReviewer: 'user',
         sandbox: 'read-only',
@@ -198,7 +232,7 @@ describe('CodexReferenceAdapter', () => {
     expect(appServerClient.startThread).not.toHaveBeenCalled();
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_existing', 'Continue', {
       cwd: '/project',
-      model: 'gpt-5.4',
+      model: 'gpt-5.5',
       effort: 'medium',
       approvalPolicy: 'on-request',
       approvalsReviewer: 'user',
@@ -240,7 +274,7 @@ describe('CodexReferenceAdapter', () => {
       expect.objectContaining({
         serviceName: 'openreelio',
         cwd: '/project',
-        model: 'gpt-5.4',
+        model: 'gpt-5.5',
         developerInstructions: expect.stringContaining('OpenReelio'),
       }),
     );

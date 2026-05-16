@@ -45,8 +45,10 @@ export class CodexTauriAppServerTransport implements CodexAppServerTransport {
   private readonly invokeCommand: TauriInvoke;
   private readonly listenEvent: TauriListen;
   private readonly handlers = new Set<(message: CodexAppServerIncomingMessage) => void>();
+  private readonly errorHandlers = new Set<(error: Error) => void>();
   private readonly unlistenPromise: Promise<UnlistenFn>;
   private disposed = false;
+  private lastStderrLine: string | null = null;
 
   private constructor(
     readonly startResult: CodexAppServerStartResult,
@@ -93,6 +95,11 @@ export class CodexTauriAppServerTransport implements CodexAppServerTransport {
     return () => this.handlers.delete(handler);
   }
 
+  onError(handler: (error: Error) => void): () => void {
+    this.errorHandlers.add(handler);
+    return () => this.errorHandlers.delete(handler);
+  }
+
   async dispose(): Promise<void> {
     if (this.disposed) {
       return;
@@ -102,6 +109,7 @@ export class CodexTauriAppServerTransport implements CodexAppServerTransport {
     const unlisten = await this.unlistenPromise;
     unlisten();
     this.handlers.clear();
+    this.errorHandlers.clear();
 
     if (this.options.autoStopOnDispose ?? true) {
       await this.invokeCommand('stop_codex_app_server', {
@@ -111,12 +119,39 @@ export class CodexTauriAppServerTransport implements CodexAppServerTransport {
   }
 
   private handleStreamEvent(event: CodexAppServerStreamEvent): void {
-    if (event.type !== 'message') {
+    if (this.disposed) {
       return;
     }
 
-    for (const handler of this.handlers) {
-      handler(event.message);
+    if (event.type === 'message') {
+      for (const handler of this.handlers) {
+        handler(event.message);
+      }
+      return;
+    }
+
+    if (event.type === 'stderr') {
+      this.lastStderrLine = event.text;
+      return;
+    }
+
+    if (event.type === 'error') {
+      this.emitError(event.message);
+      return;
+    }
+
+    if (event.type === 'exit') {
+      const suffix = this.lastStderrLine ? ` Last stderr: ${this.lastStderrLine}` : '';
+      const exitCode =
+        event.exitCode === null ? 'without an exit code' : `with exit code ${event.exitCode}`;
+      this.emitError(`Codex app-server exited ${exitCode}.${suffix}`);
+    }
+  }
+
+  private emitError(message: string): void {
+    const error = new Error(message);
+    for (const handler of this.errorHandlers) {
+      handler(error);
     }
   }
 }

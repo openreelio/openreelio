@@ -87,6 +87,69 @@ describe('CodexTauriAppServerTransport', () => {
     expect(handler).toHaveBeenCalledWith({ id: 1, result: {} });
   });
 
+  it('should surface backend stderr and exit events as transport errors', async () => {
+    let listener: (event: { payload: CodexAppServerStreamEvent }) => void = () => undefined;
+    const invokeCommand = vi.fn().mockResolvedValue({
+      serverId: 'server-1',
+      eventName: 'codex:app-server:server-1',
+      command: 'codex',
+      args: ['app-server'],
+      cwd: '/project',
+    });
+    const listenEvent = vi.fn().mockImplementation(async (_eventName, handler) => {
+      listener = handler;
+      return vi.fn();
+    });
+    const transport = await CodexTauriAppServerTransport.start(
+      {},
+      { invoke: invokeCommand, listen: listenEvent },
+    );
+    const errorHandler = vi.fn();
+    transport.onError(errorHandler);
+
+    listener({
+      payload: { type: 'stderr', text: 'failed to initialize sqlite state db' },
+    });
+    listener({
+      payload: { type: 'exit', exitCode: 1 },
+    });
+
+    expect(errorHandler).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('failed to initialize sqlite state db'),
+      }),
+    );
+  });
+
+  it('should surface backend stream error events as transport errors', async () => {
+    let listener: (event: { payload: CodexAppServerStreamEvent }) => void = () => undefined;
+    const invokeCommand = vi.fn().mockResolvedValue({
+      serverId: 'server-1',
+      eventName: 'codex:app-server:server-1',
+      command: 'codex',
+      args: ['app-server'],
+      cwd: '/project',
+    });
+    const listenEvent = vi.fn().mockImplementation(async (_eventName, handler) => {
+      listener = handler;
+      return vi.fn();
+    });
+    const transport = await CodexTauriAppServerTransport.start(
+      {},
+      { invoke: invokeCommand, listen: listenEvent },
+    );
+    const errorHandler = vi.fn();
+    transport.onError(errorHandler);
+
+    listener({
+      payload: { type: 'error', message: 'Malformed app-server JSON' },
+    });
+
+    expect(errorHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Malformed app-server JSON' }),
+    );
+  });
+
   it('should stop the backend process when disposed by default', async () => {
     const unlisten = vi.fn();
     const invokeCommand = vi

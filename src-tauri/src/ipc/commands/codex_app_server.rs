@@ -92,7 +92,10 @@ pub async fn start_codex_app_server(
     }
 
     let codex_command = crate::core::codex::codex_command_label();
-    let codex_model = resolve_codex_app_server_model(input.model);
+    let codex_model = crate::core::codex::normalize_codex_model_for_installed_cli(
+        resolve_codex_app_server_model(input.model),
+    )
+    .await;
     let codex_reasoning_effort = resolve_codex_app_server_reasoning_effort(input.reasoning_effort);
     let mut command = crate::core::codex::create_codex_command()?;
     command

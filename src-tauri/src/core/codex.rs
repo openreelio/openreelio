@@ -5,11 +5,14 @@ use specta::Type;
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::task::JoinHandle;
+use tokio::time::{sleep, timeout, Duration};
 
 pub const CODEX_CLI_ENV_VAR: &str = "OPENREELIO_CODEX_CLI";
-pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.4";
+pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
 pub const DEFAULT_CODEX_REASONING_EFFORT: &str = "medium";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +37,7 @@ pub struct CodexStatusProbeResult {
     pub installed: bool,
     pub version: Option<String>,
     pub auth_status: String,
+    pub app_server_ready: Option<bool>,
     pub reason: Option<String>,
 }
 
@@ -188,6 +192,7 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                 installed: false,
                 version: None,
                 auth_status: "unknown".to_string(),
+                app_server_ready: None,
                 reason: Some(reason),
             };
         }
@@ -205,6 +210,7 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                 installed: false,
                 version: None,
                 auth_status: "unknown".to_string(),
+                app_server_ready: None,
                 reason: Some("codex --version timed out".to_string()),
             };
         }
@@ -222,6 +228,7 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                         installed: true,
                         version,
                         auth_status: "error".to_string(),
+                        app_server_ready: None,
                         reason: Some(reason),
                     };
                 }
@@ -238,6 +245,7 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                         installed: true,
                         version,
                         auth_status: "error".to_string(),
+                        app_server_ready: None,
                         reason: Some("codex login status timed out".to_string()),
                     };
                 }
@@ -249,18 +257,35 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     let (auth_status, auth_reason) =
                         parse_codex_auth_status(&stdout, &stderr, output.status.success());
+                    let authenticated = auth_status == "signed-in" || auth_status == "api-key";
+                    let app_server_probe = if authenticated {
+                        let app_server_model = default_codex_model_for_version(version.as_deref());
+                        match probe_codex_app_server_initialization(
+                            app_server_model,
+                            DEFAULT_CODEX_REASONING_EFFORT,
+                        )
+                        .await
+                        {
+                            Ok(()) => (Some(true), None),
+                            Err(reason) => (Some(false), Some(reason)),
+                        }
+                    } else {
+                        (None, None)
+                    };
 
                     CodexStatusProbeResult {
                         installed: true,
                         version,
                         auth_status,
-                        reason: auth_reason,
+                        app_server_ready: app_server_probe.0,
+                        reason: app_server_probe.1.or(auth_reason),
                     }
                 }
                 Err(error) => CodexStatusProbeResult {
                     installed: true,
                     version,
                     auth_status: "error".to_string(),
+                    app_server_ready: None,
                     reason: Some(format_codex_io_error(
                         "Failed to run codex login status",
                         &error,
@@ -272,6 +297,7 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
             installed: false,
             version: None,
             auth_status: "unknown".to_string(),
+            app_server_ready: None,
             reason: Some(format!(
                 "codex --version failed with status {}",
                 output.status
@@ -281,6 +307,7 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
             installed: false,
             version: None,
             auth_status: "unknown".to_string(),
+            app_server_ready: None,
             reason: Some(
                 "Codex executable was not found in PATH or common install locations.".to_string(),
             ),
@@ -289,12 +316,89 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
             installed: false,
             version: None,
             auth_status: "unknown".to_string(),
+            app_server_ready: None,
             reason: Some(format_codex_io_error(
                 "Failed to run codex --version",
                 &error,
             )),
         },
     }
+}
+
+async fn probe_codex_app_server_initialization(model: &str, effort: &str) -> Result<(), String> {
+    let mut command = create_codex_command()?;
+    command
+        .arg("app-server")
+        .arg("-c")
+        .arg(format!("model={}", quote_toml_string(model)))
+        .arg("-c")
+        .arg(format!(
+            "model_reasoning_effort={}",
+            quote_toml_string(effort)
+        ))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format_codex_io_error("Failed to start codex app-server", &error))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to open Codex app-server stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to open Codex app-server stderr".to_string())?;
+    let stdout_task = tokio::spawn(read_process_stream(stdout));
+    let stderr_task = tokio::spawn(read_process_stream(stderr));
+
+    // The app-server is not an MCP server; requiring an `initialize` response here
+    // incorrectly marks older but usable Codex builds as unavailable. A successful
+    // smoke test means the process starts and stays alive for the readiness window.
+    sleep(Duration::from_millis(1_200)).await;
+
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let stdout = await_process_output(stdout_task).await;
+            let stderr = await_process_output(stderr_task).await;
+            Err(format!(
+                "codex app-server exited during startup with status {status}: {}",
+                collect_command_output(&stdout, &stderr)
+            ))
+        }
+        Ok(None) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err(format_codex_io_error(
+                "Failed to inspect codex app-server startup",
+                &error,
+            ))
+        }
+    }
+}
+
+async fn read_process_stream<R>(mut stream: R) -> Vec<u8>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut output = Vec::new();
+    let _ = stream.read_to_end(&mut output).await;
+    output
+}
+
+async fn await_process_output(task: JoinHandle<Vec<u8>>) -> Vec<u8> {
+    timeout(Duration::from_millis(500), task)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
 }
 
 pub async fn get_codex_model_catalog() -> CodexModelCatalogResult {
@@ -331,41 +435,69 @@ pub async fn get_codex_model_catalog() -> CodexModelCatalogResult {
             };
         }
         Err(_) => {
-            return CodexModelCatalogResult {
-                installed: true,
-                default_model: DEFAULT_CODEX_MODEL.to_string(),
-                default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
-                models: default_codex_models(),
-                reason: Some("Codex model catalog request timed out.".to_string()),
-            };
+            return fallback_codex_model_catalog(
+                true,
+                Some("Codex model catalog request timed out.".to_string()),
+            )
+            .await;
         }
     };
 
     if !output.status.success() {
-        return CodexModelCatalogResult {
-            installed: true,
-            default_model: DEFAULT_CODEX_MODEL.to_string(),
-            default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
-            models: default_codex_models(),
-            reason: Some(collect_command_output(&output.stdout, &output.stderr)),
-        };
+        return fallback_codex_model_catalog(
+            true,
+            Some(collect_command_output(&output.stdout, &output.stderr)),
+        )
+        .await;
     }
 
     match parse_codex_model_catalog(&String::from_utf8_lossy(&output.stdout)) {
-        Ok(models) => CodexModelCatalogResult {
-            installed: true,
-            default_model: DEFAULT_CODEX_MODEL.to_string(),
-            default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
-            models,
-            reason: None,
-        },
-        Err(reason) => CodexModelCatalogResult {
-            installed: true,
-            default_model: DEFAULT_CODEX_MODEL.to_string(),
-            default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
-            models: default_codex_models(),
-            reason: Some(reason),
-        },
+        Ok(models) => {
+            let (default_model, default_reasoning_effort) = resolve_codex_catalog_default(&models);
+            CodexModelCatalogResult {
+                installed: true,
+                default_model,
+                default_reasoning_effort,
+                models,
+                reason: None,
+            }
+        }
+        Err(reason) => fallback_codex_model_catalog(true, Some(reason)).await,
+    }
+}
+
+async fn fallback_codex_model_catalog(
+    installed: bool,
+    reason: Option<String>,
+) -> CodexModelCatalogResult {
+    let version = if installed {
+        read_codex_version_label().await
+    } else {
+        None
+    };
+    let default_model = default_codex_model_for_version(version.as_deref()).to_string();
+
+    CodexModelCatalogResult {
+        installed,
+        default_model,
+        default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
+        models: default_codex_models_for_version(version.as_deref()),
+        reason,
+    }
+}
+
+fn resolve_codex_catalog_default(models: &[CodexModelInfo]) -> (String, String) {
+    let model = models
+        .iter()
+        .find(|model| model.slug == DEFAULT_CODEX_MODEL)
+        .or_else(|| models.first());
+
+    match model {
+        Some(model) => (model.slug.clone(), model.default_reasoning_effort.clone()),
+        None => (
+            DEFAULT_CODEX_MODEL.to_string(),
+            DEFAULT_CODEX_REASONING_EFFORT.to_string(),
+        ),
     }
 }
 
@@ -376,7 +508,6 @@ fn parse_codex_model_catalog(input: &str) -> Result<Vec<CodexModelInfo>, String>
         .models
         .into_iter()
         .filter(|model| model.visibility.as_deref() != Some("hide"))
-        .filter(|model| model.slug != "gpt-5.5")
         .map(|model| {
             let supported_reasoning_efforts = model
                 .supported_reasoning_levels
@@ -407,21 +538,97 @@ fn parse_codex_model_catalog(input: &str) -> Result<Vec<CodexModelInfo>, String>
 }
 
 fn default_codex_models() -> Vec<CodexModelInfo> {
-    [
-        ("gpt-5.4", "gpt-5.4"),
-        ("gpt-5.4-mini", "GPT-5.4-Mini"),
-        ("gpt-5.3-codex", "gpt-5.3-codex"),
-        ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"),
-        ("gpt-5.2", "gpt-5.2"),
-    ]
-    .into_iter()
-    .map(|(slug, display_name)| CodexModelInfo {
-        slug: slug.to_string(),
-        display_name: display_name.to_string(),
-        default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
-        supported_reasoning_efforts: default_reasoning_efforts(),
+    default_codex_models_for_version(None)
+}
+
+fn default_codex_models_for_version(version: Option<&str>) -> Vec<CodexModelInfo> {
+    let entries: &[(&str, &str)] = if codex_version_supports_gpt_5_5(version) {
+        &[
+            ("gpt-5.5", "gpt-5.5"),
+            ("gpt-5.4", "gpt-5.4"),
+            ("gpt-5.4-mini", "GPT-5.4-Mini"),
+            ("gpt-5.3-codex", "gpt-5.3-codex"),
+            ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"),
+            ("gpt-5.2", "gpt-5.2"),
+        ]
+    } else {
+        &[
+            ("gpt-5.4", "gpt-5.4"),
+            ("gpt-5.4-mini", "GPT-5.4-Mini"),
+            ("gpt-5.3-codex", "gpt-5.3-codex"),
+            ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"),
+            ("gpt-5.2", "gpt-5.2"),
+        ]
+    };
+
+    entries
+        .into_iter()
+        .map(|(slug, display_name)| CodexModelInfo {
+            slug: (*slug).to_string(),
+            display_name: (*display_name).to_string(),
+            default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
+            supported_reasoning_efforts: default_reasoning_efforts(),
+        })
+        .collect()
+}
+
+pub fn normalize_codex_model_for_version(requested_model: String, version: Option<&str>) -> String {
+    if requested_model == DEFAULT_CODEX_MODEL && !codex_version_supports_gpt_5_5(version) {
+        return "gpt-5.4".to_string();
+    }
+
+    requested_model
+}
+
+pub async fn normalize_codex_model_for_installed_cli(requested_model: String) -> String {
+    let version = read_codex_version_label().await;
+    normalize_codex_model_for_version(requested_model, version.as_deref())
+}
+
+fn default_codex_model_for_version(version: Option<&str>) -> &'static str {
+    if codex_version_supports_gpt_5_5(version) {
+        DEFAULT_CODEX_MODEL
+    } else {
+        "gpt-5.4"
+    }
+}
+
+fn codex_version_supports_gpt_5_5(version: Option<&str>) -> bool {
+    let Some((major, minor, _patch)) = version.and_then(parse_codex_version_numbers) else {
+        return true;
+    };
+
+    major > 0 || minor >= 130
+}
+
+pub(crate) fn parse_codex_version_numbers(label: &str) -> Option<(u64, u64, u64)> {
+    label.split_whitespace().find_map(|token| {
+        let token = token.trim_start_matches('v');
+        let numeric = token
+            .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+            .find(|part| part.contains('.'))?;
+        let mut parts = numeric.split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        let patch = parts.next().unwrap_or("0").parse().ok()?;
+        Some((major, minor, patch))
     })
-    .collect()
+}
+
+async fn read_codex_version_label() -> Option<String> {
+    let mut command = create_codex_command().ok()?;
+    let output = timeout(Duration::from_secs(5), command.arg("--version").output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    parse_codex_version(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
 }
 
 fn default_reasoning_efforts() -> Vec<String> {
@@ -442,10 +649,14 @@ fn collect_command_output(stdout: &[u8], stderr: &[u8]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     if combined.is_empty() {
-        "Codex model catalog command failed without output.".to_string()
+        "Codex command failed without output.".to_string()
     } else {
         combined
     }
+}
+
+fn quote_toml_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 pub fn format_codex_io_error(action: &str, error: &std::io::Error) -> String {
@@ -651,9 +862,11 @@ fn resolve_first_runnable_candidate(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_codex_executable_candidates_for_platform, format_codex_io_error,
-        parse_codex_auth_status, parse_codex_model_catalog, parse_codex_version,
-        resolve_first_runnable_candidate, CodexExecutablePlatform,
+        collect_codex_executable_candidates_for_platform, default_reasoning_efforts,
+        format_codex_io_error, normalize_codex_model_for_version, parse_codex_auth_status,
+        parse_codex_model_catalog, parse_codex_version, parse_codex_version_numbers,
+        resolve_codex_catalog_default, resolve_first_runnable_candidate, CodexExecutablePlatform,
+        DEFAULT_CODEX_MODEL,
     };
     use std::ffi::OsString;
     use std::fs;
@@ -819,8 +1032,57 @@ mod tests {
         )
         .expect("models");
 
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].slug, "gpt-5.4");
-        assert_eq!(models[0].supported_reasoning_efforts, vec!["low", "high"]);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].slug, "gpt-5.5");
+        assert_eq!(
+            models[0].supported_reasoning_efforts,
+            default_reasoning_efforts()
+        );
+        assert_eq!(models[1].slug, "gpt-5.4");
+        assert_eq!(models[1].supported_reasoning_efforts, vec!["low", "high"]);
+    }
+
+    #[test]
+    fn uses_first_catalog_model_as_default_when_latest_model_is_unavailable() {
+        let models = parse_codex_model_catalog(
+            r#"{"models":[{"slug":"gpt-5.4","display_name":"gpt-5.4","default_reasoning_level":"high","visibility":"list"}]}"#,
+        )
+        .expect("models");
+
+        assert_eq!(
+            resolve_codex_catalog_default(&models),
+            ("gpt-5.4".to_string(), "high".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_codex_cli_semver_from_version_labels() {
+        assert_eq!(
+            parse_codex_version_numbers("codex-cli 0.130.0-alpha.5"),
+            Some((0, 130, 0))
+        );
+        assert_eq!(parse_codex_version_numbers("codex 1.2.3"), Some((1, 2, 3)));
+    }
+
+    #[test]
+    fn keeps_latest_codex_model_for_newer_cli_versions() {
+        assert_eq!(
+            normalize_codex_model_for_version(
+                DEFAULT_CODEX_MODEL.to_string(),
+                Some("codex-cli 0.130.0-alpha.5"),
+            ),
+            DEFAULT_CODEX_MODEL
+        );
+    }
+
+    #[test]
+    fn downgrades_latest_codex_model_for_older_cli_versions() {
+        assert_eq!(
+            normalize_codex_model_for_version(
+                DEFAULT_CODEX_MODEL.to_string(),
+                Some("codex-cli 0.118.0"),
+            ),
+            "gpt-5.4"
+        );
     }
 }
