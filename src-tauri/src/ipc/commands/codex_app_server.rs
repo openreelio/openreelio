@@ -198,6 +198,19 @@ pub async fn stop_codex_app_server(
     Ok(())
 }
 
+pub async fn shutdown_all_codex_app_servers(state: &AppState) {
+    let handles: Vec<Arc<CodexAppServerProcessHandle>> = {
+        let mut sessions = state.codex_app_server_sessions.lock().await;
+        sessions.drain().map(|(_, handle)| handle).collect()
+    };
+
+    for handle in handles {
+        if let Err(error) = handle.stop().await {
+            tracing::warn!("Failed to stop Codex app-server during cleanup: {error}");
+        }
+    }
+}
+
 async fn resolve_codex_app_server_cwd(
     requested_cwd: Option<String>,
     state: &State<'_, AppState>,
@@ -239,8 +252,28 @@ async fn resolve_codex_app_server_cwd(
         ));
     }
 
-    cwd.canonicalize()
-        .map_err(|error| format!("Failed to canonicalize Codex app-server cwd: {error}"))
+    let canonical_cwd = cwd
+        .canonicalize()
+        .map_err(|error| format!("Failed to canonicalize Codex app-server cwd: {error}"))?;
+
+    let project_path = {
+        let guard = state.project.lock().await;
+        guard.as_ref().map(|project| project.path.clone())
+    };
+
+    if let Some(project_path) = project_path {
+        let canonical_project = project_path
+            .canonicalize()
+            .map_err(|error| format!("Failed to canonicalize project directory: {error}"))?;
+        if !canonical_cwd.starts_with(&canonical_project) {
+            return Err(format!(
+                "Codex app-server cwd must stay inside the active project: {}",
+                canonical_cwd.display()
+            ));
+        }
+    }
+
+    Ok(canonical_cwd)
 }
 
 fn spawn_stdout_reader(
@@ -321,13 +354,24 @@ fn spawn_stderr_reader(
 fn build_codex_app_server_path() -> Option<std::ffi::OsString> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir.parent().unwrap_or(manifest_dir.as_path());
-    let cli_dir = repo_root.join("target").join("debug");
-    if !cli_dir.is_dir() {
+    let mut tool_dirs = crate::core::external_agent::bundled_tool_directories();
+    tool_dirs.extend([
+        repo_root.join("target").join("release"),
+        repo_root.join("target").join("debug"),
+    ]);
+    tool_dirs.retain(|dir| dir.is_dir());
+
+    if tool_dirs.is_empty() {
         return None;
     }
 
     let current_path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::join_paths(std::iter::once(cli_dir).chain(std::env::split_paths(&current_path))).ok()
+    std::env::join_paths(
+        tool_dirs
+            .into_iter()
+            .chain(std::env::split_paths(&current_path)),
+    )
+    .ok()
 }
 
 fn resolve_codex_app_server_model(requested_model: Option<String>) -> String {

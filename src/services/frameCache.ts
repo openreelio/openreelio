@@ -125,7 +125,7 @@ export class FrameCache {
 
     // Check TTL expiration
     if (this.isExpired(entry)) {
-      this.entries.delete(key);
+      this.delete(key);
       this.misses++;
       return null;
     }
@@ -181,7 +181,7 @@ export class FrameCache {
     }
 
     if (this.isExpired(entry)) {
-      this.entries.delete(key);
+      this.delete(key);
       return false;
     }
 

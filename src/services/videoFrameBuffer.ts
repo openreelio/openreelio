@@ -98,6 +98,9 @@ const FRAME_FETCH_TIMEOUT_MS = 5000;
 /** Maximum concurrent fetch operations per asset */
 const MAX_CONCURRENT_FETCHES = 2;
 
+/** Maximum queued frame fetches waiting for a concurrency slot */
+const MAX_FETCH_QUEUE_SIZE = 64;
+
 /** How far ahead to prefetch the next frame (seconds) */
 const NEXT_FRAME_OFFSET = FRAME_EXTRACTION.PREFETCH_INTERVAL_SEC;
 
@@ -142,11 +145,7 @@ export class VideoFrameBuffer {
    * @param timestamp - Desired frame time in seconds
    * @returns Frame URL or null if unavailable
    */
-  async getFrame(
-    assetId: string,
-    assetPath: string,
-    timestamp: number,
-  ): Promise<string | null> {
+  async getFrame(assetId: string, assetPath: string, timestamp: number): Promise<string | null> {
     const startTime = performance.now();
 
     // Get or create buffer state for this asset
@@ -156,7 +155,13 @@ export class VideoFrameBuffer {
     const cacheKey = createFrameCacheKey(assetId, timestamp);
     const cached = frameCache.get(cacheKey);
     if (cached) {
-      this.updateCurrentFrame(state, { key: cacheKey, url: cached, timestamp, loadedAt: Date.now(), sizeBytes: 0 });
+      this.updateCurrentFrame(state, {
+        key: cacheKey,
+        url: cached,
+        timestamp,
+        loadedAt: Date.now(),
+        sizeBytes: 0,
+      });
       this.triggerPrefetch(state, timestamp);
       return cached;
     }
@@ -250,9 +255,8 @@ export class VideoFrameBuffer {
       activeAssets: this.assetBuffers.size,
       bufferedFrames,
       cacheHitRate: cacheStats.hitRate,
-      avgFetchLatencyMs: this.stats.fetchCount > 0
-        ? this.stats.totalFetchLatencyMs / this.stats.fetchCount
-        : 0,
+      avgFetchLatencyMs:
+        this.stats.fetchCount > 0 ? this.stats.totalFetchLatencyMs / this.stats.fetchCount : 0,
       smartSeekCount: this.stats.smartSeekCount,
       fullSeekCount: this.stats.fullSeekCount,
       prefetchHits: this.stats.prefetchHits,
@@ -310,10 +314,7 @@ export class VideoFrameBuffer {
    * Iterate forward from current position to target time.
    * More efficient for small time jumps during scrubbing.
    */
-  private async iterateToTime(
-    state: AssetBufferState,
-    targetTime: number,
-  ): Promise<string | null> {
+  private async iterateToTime(state: AssetBufferState, targetTime: number): Promise<string | null> {
     const interval = FRAME_EXTRACTION.PREFETCH_INTERVAL_SEC;
     let currentTime = state.iterationPosition || state.lastFetchTime;
 
@@ -383,6 +384,15 @@ export class VideoFrameBuffer {
   ): Promise<string | null> {
     // Wait for permit if at capacity
     if (this.activeFetchCount >= MAX_CONCURRENT_FETCHES) {
+      if (this.fetchQueue.length >= MAX_FETCH_QUEUE_SIZE) {
+        logger.warn('Frame fetch queue full, dropping request', {
+          assetId,
+          timestamp: timestamp.toFixed(3),
+          queued: this.fetchQueue.length,
+        });
+        return null;
+      }
+
       await new Promise<void>((resolve) => {
         this.fetchQueue.push(resolve);
       });
@@ -393,22 +403,36 @@ export class VideoFrameBuffer {
     try {
       const safeAssetName = assetId.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
       const timeMs = Math.floor(timestamp * 1000);
-      const outputPath = await buildFrameOutputPath(safeAssetName, timeMs, FRAME_EXTRACTION.OUTPUT_FORMAT);
+      const outputPath = await buildFrameOutputPath(
+        safeAssetName,
+        timeMs,
+        FRAME_EXTRACTION.OUTPUT_FORMAT,
+      );
 
       // Create timeout promise
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('Frame fetch timeout')), FRAME_FETCH_TIMEOUT_MS);
+        timeoutId = setTimeout(
+          () => reject(new Error('Frame fetch timeout')),
+          FRAME_FETCH_TIMEOUT_MS,
+        );
       });
 
       // Race extraction against timeout
-      await Promise.race([
-        extractFrameIPC({
-          inputPath: assetPath,
-          timeSec: timestamp,
-          outputPath,
-        }),
-        timeoutPromise,
-      ]);
+      try {
+        await Promise.race([
+          extractFrameIPC({
+            inputPath: assetPath,
+            timeSec: timestamp,
+            outputPath,
+          }),
+          timeoutPromise,
+        ]);
+      } finally {
+        if (timeoutId !== null) {
+          clearTimeout(timeoutId);
+        }
+      }
 
       const frameUrl = convertFileSrc(outputPath);
 

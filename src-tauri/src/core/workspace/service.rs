@@ -15,7 +15,7 @@ use crate::core::CoreResult;
 use super::ignore::IgnoreRules;
 use super::index::{AssetIndex, IndexEntry};
 use super::scanner::WorkspaceScanner;
-use super::watcher::{WorkspaceEvent, WorkspaceWatcher};
+use super::watcher::{WorkspaceEvent, WorkspaceWatcher, WORKSPACE_EVENT_CHANNEL_CAPACITY};
 
 /// Result of a workspace scan operation
 #[derive(Debug, Clone)]
@@ -59,8 +59,8 @@ pub struct WorkspaceService {
     scanner: WorkspaceScanner,
     index: AssetIndex,
     watcher: Option<WorkspaceWatcher>,
-    event_tx: mpsc::UnboundedSender<WorkspaceEvent>,
-    event_rx: Option<mpsc::UnboundedReceiver<WorkspaceEvent>>,
+    event_tx: mpsc::Sender<WorkspaceEvent>,
+    event_rx: Option<mpsc::Receiver<WorkspaceEvent>>,
     ignore_rules: Arc<IgnoreRules>,
 }
 
@@ -166,7 +166,7 @@ impl WorkspaceService {
         let scanner =
             WorkspaceScanner::with_ignore_rules(project_root.clone(), (*ignore_rules).clone());
         let index = AssetIndex::open(&project_root)?;
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::channel(WORKSPACE_EVENT_CHANNEL_CAPACITY);
 
         Ok(Self {
             project_root,
@@ -277,7 +277,7 @@ impl WorkspaceService {
     }
 
     /// Take the event receiver (can only be called once)
-    pub fn take_event_rx(&mut self) -> Option<mpsc::UnboundedReceiver<WorkspaceEvent>> {
+    pub fn take_event_rx(&mut self) -> Option<mpsc::Receiver<WorkspaceEvent>> {
         self.event_rx.take()
     }
 

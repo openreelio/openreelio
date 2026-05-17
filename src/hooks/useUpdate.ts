@@ -12,6 +12,8 @@ import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useUpdate');
 
+let startupUpdateCheckStarted = false;
+
 export interface UseUpdateState {
   /** Current update info */
   updateInfo: UpdateInfo | null;
@@ -131,8 +133,15 @@ export function useUpdate(options: UseUpdateOptions = {}): UseUpdateReturn {
   const shouldCheckOnStartup = general?.checkUpdatesOnStartup ?? false;
 
   useEffect(() => {
-    if (checkOnMount && settingsLoaded && shouldCheckOnStartup && !hasCheckedRef.current) {
+    if (
+      checkOnMount &&
+      settingsLoaded &&
+      shouldCheckOnStartup &&
+      !hasCheckedRef.current &&
+      !startupUpdateCheckStarted
+    ) {
       hasCheckedRef.current = true;
+      startupUpdateCheckStarted = true;
       logger.info('Checking for updates on startup...');
       checkForUpdates().catch((e) => {
         logger.warn('Startup update check failed', { error: e });

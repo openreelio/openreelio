@@ -114,22 +114,46 @@ fn should_download_ffmpeg() -> bool {
         return false;
     }
 
-    // Check if binaries already exist
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
     let binaries_dir = PathBuf::from(&manifest_dir).join("binaries");
 
-    #[cfg(target_os = "windows")]
-    let ffmpeg_exists = binaries_dir.join("ffmpeg.exe").exists();
-
-    #[cfg(not(target_os = "windows"))]
-    let ffmpeg_exists = binaries_dir.join("ffmpeg").exists();
-
-    if ffmpeg_exists {
+    if bundled_ffmpeg_binaries_are_usable(&binaries_dir) {
         return false;
     }
 
-    // Download if binaries don't exist
+    println!(
+        "cargo:warning=Bundled FFmpeg binaries are missing or not executable for this platform; downloading replacements."
+    );
     true
+}
+
+fn bundled_ffmpeg_binaries_are_usable(binaries_dir: &Path) -> bool {
+    let (ffmpeg_name, ffprobe_name) = get_binary_names(detect_platform());
+    let ffmpeg_path = binaries_dir.join(ffmpeg_name);
+    let ffprobe_path = binaries_dir.join(ffprobe_name);
+
+    if !ffmpeg_path.exists() || !ffprobe_path.exists() {
+        return false;
+    }
+
+    let ffmpeg_result = verify_binary(&ffmpeg_path);
+    let ffprobe_result = verify_binary(&ffprobe_path);
+    match (ffmpeg_result, ffprobe_result) {
+        (Ok(()), Ok(())) => true,
+        (ffmpeg_result, ffprobe_result) => {
+            if let Err(error) = ffmpeg_result {
+                println!(
+                    "cargo:warning=Existing bundled ffmpeg is not usable for this platform: {error}"
+                );
+            }
+            if let Err(error) = ffprobe_result {
+                println!(
+                    "cargo:warning=Existing bundled ffprobe is not usable for this platform: {error}"
+                );
+            }
+            false
+        }
+    }
 }
 
 /// Download FFmpeg binaries to OUT_DIR

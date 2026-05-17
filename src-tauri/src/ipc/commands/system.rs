@@ -830,12 +830,14 @@ pub async fn app_cleanup(_state: State<'_, AppState>) -> Result<AppCleanupResult
     tracing::info!("App cleanup requested");
 
     crate::ipc::shutdown_all_terminal_sessions(&_state).await;
+    crate::ipc::shutdown_all_codex_app_servers(&_state).await;
+    crate::ipc::stop_workspace_watcher(&_state).await;
+    let workers_shutdown = _state.shutdown_worker_pool().await;
 
     // Currently the frontend handles prompting/saving unsaved projects.
-    // Background workers are spawned as async tasks and will stop when the process exits.
     Ok(AppCleanupResult {
         project_saved: false,
-        workers_shutdown: true,
+        workers_shutdown,
         error: None,
     })
 }

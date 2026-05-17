@@ -412,6 +412,11 @@ pub async fn create_project(
         created_at: project.state.meta.created_at.clone(),
     };
 
+    if previous_scope.is_some() {
+        super::workspace::stop_workspace_watcher(&state).await;
+        super::codex_app_server::shutdown_all_codex_app_servers(&state).await;
+    }
+
     // Store in app state
     let mut guard = state.project.lock().await;
 
@@ -470,6 +475,11 @@ pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<Pr
         path: path.clone(),
         created_at: project.state.meta.created_at.clone(),
     };
+
+    if previous_scope.is_some() {
+        super::workspace::stop_workspace_watcher(&state).await;
+        super::codex_app_server::shutdown_all_codex_app_servers(&state).await;
+    }
 
     // Store in app state
     let mut guard = state.project.lock().await;
@@ -597,6 +607,11 @@ pub async fn open_or_init_project(
         created_at: project.state.meta.created_at.clone(),
     };
 
+    if previous_scope.is_some() {
+        super::workspace::stop_workspace_watcher(&state).await;
+        super::codex_app_server::shutdown_all_codex_app_servers(&state).await;
+    }
+
     // Store in app state
     let mut guard = state.project.lock().await;
 
@@ -641,6 +656,8 @@ pub async fn close_project(
     };
 
     forbid_project_asset_protocol(&state, &previous_scope.0, &previous_scope.1);
+    super::workspace::stop_workspace_watcher(&state).await;
+    super::codex_app_server::shutdown_all_codex_app_servers(&state).await;
     reset_runtime_state_for_project_change(&state).await;
     Ok(true)
 }

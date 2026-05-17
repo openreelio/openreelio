@@ -13,7 +13,13 @@ env:
 permissions:
   contents: read
 
-# Code Signing Environment Variables (set via GitHub Secrets):
+# Signing Environment Variables (set via GitHub Secrets):
+#
+# Required for automatic updates:
+#   TAURI_SIGNING_PRIVATE_KEY - Tauri updater private key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD - Tauri updater key password, if any
+#
+# Future optional OS code signing:
 # Windows Authenticode:
 #   WINDOWS_CERTIFICATE - Base64-encoded PFX certificate file
 #   WINDOWS_CERTIFICATE_PASSWORD - PFX password
@@ -28,8 +34,41 @@ permissions:
 #   APPLE_SIGNING_IDENTITY - Certificate identity (e.g., "Developer ID Application: OpenReelio")
 
 jobs:
+  validate-release-version:
+    name: Validate Release Version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Verify tag and project versions
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+
+          if [ "$TAG_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "Release tag version ($TAG_VERSION) must match package.json version ($PACKAGE_VERSION)." >&2
+            exit 1
+          fi
+
+          npm run version:check
+
   create-release:
     name: Create Release
+    needs: validate-release-version
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -40,26 +79,79 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
 
       - name: Create Release
         id: create_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          cat > release-notes.md <<'EOF'
-            ## What's Changed
+          CURRENT_TAG="${{ github.ref_name }}"
+          PREVIOUS_TAG="$(git tag --merged "$CURRENT_TAG" --sort=-creatordate | grep -v "^${CURRENT_TAG}$" | head -n 1 || true)"
 
-            <!-- Release notes will be added here -->
+          if [ -n "$PREVIOUS_TAG" ]; then
+            RANGE="${PREVIOUS_TAG}..${CURRENT_TAG}"
+            COMPARE_URL="https://github.com/${REPOSITORY}/compare/${PREVIOUS_TAG}...${CURRENT_TAG}"
+          else
+            RANGE="$CURRENT_TAG"
+            COMPARE_URL="https://github.com/${REPOSITORY}/commits/${CURRENT_TAG}"
+          fi
 
-            ## Downloads
+          GENERATE_ARGS=(-f "tag_name=${CURRENT_TAG}" -f "target_commitish=${{ github.sha }}")
+          if [ -n "$PREVIOUS_TAG" ]; then
+            GENERATE_ARGS+=(-f "previous_tag_name=${PREVIOUS_TAG}")
+          fi
 
-            | Platform | Download |
-            |----------|----------|
-            | Windows | [OpenReelio-${{ github.ref_name }}-windows-x64.msi](#) |
-            | macOS (Intel) | [OpenReelio-${{ github.ref_name }}-macos-x64.dmg](#) |
-            | macOS (Apple Silicon) | [OpenReelio-${{ github.ref_name }}-macos-arm64.dmg](#) |
-            | Linux | [OpenReelio-${{ github.ref_name }}-linux-x64.AppImage](#) |
-          EOF
+          if gh api "repos/${REPOSITORY}/releases/generate-notes" "${GENERATE_ARGS[@]}" > generated-release-notes.json; then
+            RELEASE_TITLE="$(jq -r --arg tag "$CURRENT_TAG" '.name // "Release \($tag)"' generated-release-notes.json)"
+            jq -r '.body // ""' generated-release-notes.json > generated-release-notes.md
+          else
+            echo "GitHub generated release notes failed; falling back to commit history."
+            RELEASE_TITLE="Release ${CURRENT_TAG}"
+            : > generated-release-notes.md
+          fi
+
+          if git log "$RANGE" --pretty=format:'- %s (%h) by %an' > commit-history.md; then
+            :
+          else
+            echo "- No commit history available for ${RANGE}." > commit-history.md
+          fi
+
+          if git shortlog -sne "$RANGE" > contributors.raw && [ -s contributors.raw ]; then
+            sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+(.+)$/- \1/' contributors.raw > contributors.md
+          else
+            echo "- No contributor data available for ${RANGE}." > contributors.md
+          fi
+
+          {
+            cat generated-release-notes.md
+            echo
+            echo "## Commit History"
+            echo
+            if [ -n "$PREVIOUS_TAG" ]; then
+              echo "Changes since ${PREVIOUS_TAG}:"
+            else
+              echo "Initial release commit history:"
+            fi
+            echo
+            cat commit-history.md
+            echo
+            echo "## Contributors"
+            echo
+            echo "Thank you to everyone who contributed commits to this release:"
+            echo
+            cat contributors.md
+            echo
+            echo "## Full Changelog"
+            echo
+            echo "${COMPARE_URL}"
+            echo
+            echo "## Downloads"
+            echo
+            echo "Installers and updater assets are attached to this release after CI finishes."
+          } > release-notes.md
 
           PRERELEASE_FLAG=""
           if [[ "${{ contains(github.ref_name, '-') }}" == "true" ]]; then
@@ -67,12 +159,16 @@ jobs:
           fi
 
           if gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" > release.json 2>/dev/null; then
-            echo "Release ${{ github.ref_name }} already exists; reusing it."
+            echo "Release ${{ github.ref_name }} already exists; updating generated notes."
+            gh release edit "${{ github.ref_name }}" \
+              --title "$RELEASE_TITLE" \
+              --notes-file release-notes.md
+            gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" > release.json
           else
             gh release create "${{ github.ref_name }}" \
               --draft \
               $PRERELEASE_FLAG \
-              --title "Release ${{ github.ref_name }}" \
+              --title "$RELEASE_TITLE" \
               --notes-file release-notes.md
             gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" > release.json
           fi
@@ -137,192 +233,84 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      # ==========================================================================
-      # Windows Code Signing Setup
-      # ==========================================================================
-      - name: Import Windows Code Signing Certificate
-        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE != ''
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          # Decode the certificate from base64
-          $certBytes = [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
-          $certPath = "$env:RUNNER_TEMP\certificate.pfx"
-          [IO.File]::WriteAllBytes($certPath, $certBytes)
-
-          # Import the certificate to the Windows certificate store
-          $securePassword = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
-
-          # Clean up the certificate file
-          Remove-Item $certPath -Force
-
-          Write-Host "Windows code signing certificate imported successfully"
-        shell: pwsh
-
-      # ==========================================================================
-      # macOS Code Signing Setup
-      # ==========================================================================
-      - name: Import macOS Code Signing Certificate
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        run: |
-          # Create a temporary keychain
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
-
-          # Create keychain and set as default
-          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security default-keychain -s $KEYCHAIN_PATH
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-
-          # Set keychain timeout to prevent re-locking
-          security set-keychain-settings -t 3600 -u $KEYCHAIN_PATH
-
-          # Decode and import certificate
-          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
-          security import $RUNNER_TEMP/certificate.p12 -k $KEYCHAIN_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
-
-          # Allow codesign to access the keychain
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-
-          # Add keychain to search list
-          security list-keychains -d user -s $KEYCHAIN_PATH
-
-          # Clean up certificate file
-          rm -f $RUNNER_TEMP/certificate.p12
-
-          echo "macOS code signing certificate imported successfully"
+      - name: Clear stale bundled runtime tools
         shell: bash
+        run: |
+          mkdir -p src-tauri/binaries
+          find src-tauri/binaries -maxdepth 1 -type f \
+            \( -name 'ffmpeg*' -o -name 'ffprobe*' -o -name 'openreelio-cli*' \) \
+            -delete
 
-      - name: Download pinned FFmpeg binaries
+      - name: Download FFmpeg binaries for target platform
         working-directory: src-tauri
         env:
-          OPENREELIO_DOWNLOAD_FFMPEG: "1"
-          OPENREELIO_REQUIRE_FFMPEG_CHECKSUMS: "1"
-        run: cargo build --release
+          OPENREELIO_DOWNLOAD_FFMPEG: '1'
+          # Current upstream FFmpeg URLs are mutable. Keep this explicit so the
+          # release job does not pretend these downloads are checksum-pinned.
+          OPENREELIO_ALLOW_UNVERIFIED_FFMPEG: '1'
+        run: cargo build --release --target ${{ matrix.target }}
         timeout-minutes: 15
 
-      - name: Verify FFmpeg binaries exist
+      - name: Build bundled OpenReelio CLI
         shell: bash
         run: |
-          echo "Checking for FFmpeg binaries..."
-          ls -la src-tauri/binaries/ || echo "No binaries directory yet"
-          if [ -d "src-tauri/binaries" ]; then
-            echo "Binaries found:"
-            ls -la src-tauri/binaries/
+          cargo build --release -p openreelio-cli --target ${{ matrix.target }}
+
+          CLI_NAME="openreelio-cli"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            CLI_NAME="openreelio-cli.exe"
           fi
+
+          CLI_PATH="target/${{ matrix.target }}/release/${CLI_NAME}"
+          if [ ! -f "$CLI_PATH" ]; then
+            echo "Missing built CLI binary: $CLI_PATH" >&2
+            exit 1
+          fi
+
+          cp "$CLI_PATH" "src-tauri/binaries/${CLI_NAME}"
+
+      - name: Verify bundled runtime tools
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            FFMPEG="src-tauri/binaries/ffmpeg.exe"
+            FFPROBE="src-tauri/binaries/ffprobe.exe"
+            OPENREELIO_CLI="src-tauri/binaries/openreelio-cli.exe"
+          else
+            FFMPEG="src-tauri/binaries/ffmpeg"
+            FFPROBE="src-tauri/binaries/ffprobe"
+            OPENREELIO_CLI="src-tauri/binaries/openreelio-cli"
+          fi
+
+          "$FFMPEG" -version
+          "$FFPROBE" -version
+          "$OPENREELIO_CLI" --version
+
+          echo "Bundled runtime tools:"
+          ls -la src-tauri/binaries/
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Verify version files
+        run: npm run version:check
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@fce9c6108b31ea247710505d3aaaa893ee6768d4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OPENREELIO_ENABLE_UPDATER: "1"
+          OPENREELIO_ENABLE_UPDATER: '1'
           # Updater signing key (required for auto-update)
           # Generate with: npx tauri signer generate -w ~/.tauri/openreelio.key
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Windows Code Signing (Authenticode)
-          # signtool will automatically find the certificate in the store
-          WINDOWS_CERTIFICATE_NAME: ${{ secrets.WINDOWS_CERTIFICATE_NAME }}
-          # macOS Code Signing
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: --target ${{ matrix.target }}
+          args: >-
+            --target ${{ matrix.target }}
+            --config '{"bundle":{"createUpdaterArtifacts":true}}'
           # Generate updater JSON artifacts
           updaterJsonPreferNsis: true
-
-      # ==========================================================================
-      # Windows Authenticode Signing (Post-Build)
-      # ==========================================================================
-      - name: Sign Windows Executables
-        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_NAME != ''
-        env:
-          WINDOWS_CERTIFICATE_NAME: ${{ secrets.WINDOWS_CERTIFICATE_NAME }}
-        run: |
-          # Find all unsigned executables and installers
-          $buildDir = "src-tauri/target/${{ matrix.target }}/release/bundle"
-
-          if (Test-Path $buildDir) {
-            # Sign MSI installer
-            $msiFiles = Get-ChildItem -Path $buildDir -Filter "*.msi" -Recurse
-            foreach ($msi in $msiFiles) {
-              Write-Host "Signing $($msi.FullName)..."
-              & signtool sign /n "$env:WINDOWS_CERTIFICATE_NAME" /t http://timestamp.digicert.com /fd sha256 "$($msi.FullName)"
-              if ($LASTEXITCODE -ne 0) {
-                Write-Warning "Failed to sign $($msi.FullName)"
-              }
-            }
-
-            # Sign NSIS installer (exe)
-            $exeFiles = Get-ChildItem -Path $buildDir -Filter "*-setup.exe" -Recurse
-            foreach ($exe in $exeFiles) {
-              Write-Host "Signing $($exe.FullName)..."
-              & signtool sign /n "$env:WINDOWS_CERTIFICATE_NAME" /t http://timestamp.digicert.com /fd sha256 "$($exe.FullName)"
-              if ($LASTEXITCODE -ne 0) {
-                Write-Warning "Failed to sign $($exe.FullName)"
-              }
-            }
-          } else {
-            Write-Host "Build directory not found: $buildDir"
-          }
-        shell: pwsh
-
-      # ==========================================================================
-      # macOS Notarization (Post-Build)
-      # ==========================================================================
-      - name: Notarize macOS Application
-        if: runner.os == 'macOS' && env.APPLE_ID != ''
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          # Find the DMG file
-          DMG_PATH=$(find src-tauri/target -name "*.dmg" -type f | head -n 1)
-
-          if [ -z "$DMG_PATH" ]; then
-            echo "No DMG file found, skipping notarization"
-            exit 0
-          fi
-
-          echo "Notarizing: $DMG_PATH"
-
-          # Submit for notarization
-          xcrun notarytool submit "$DMG_PATH" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
-
-          if [ $? -eq 0 ]; then
-            echo "Notarization successful, stapling ticket..."
-            xcrun stapler staple "$DMG_PATH"
-            echo "Notarization complete!"
-          else
-            echo "Notarization failed"
-            exit 1
-          fi
-        shell: bash
-
-      # ==========================================================================
-      # Cleanup Keychain (macOS)
-      # ==========================================================================
-      - name: Cleanup macOS Keychain
-        if: runner.os == 'macOS' && always()
-        run: |
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          if [ -f "$KEYCHAIN_PATH" ]; then
-            security delete-keychain $KEYCHAIN_PATH || true
-          fi
-        shell: bash
 
   generate-update-manifest:
     name: Generate Update Manifest
@@ -384,24 +372,49 @@ jobs:
             return signature;
           }
 
-          const platforms = {};
+          const candidates = {
+            windowsNsis: null,
+            windowsMsi: null,
+            darwinX64: null,
+            darwinArm64: null,
+            linuxX64: null,
+          };
+
           for (const asset of assets) {
             const name = asset.name.toLowerCase();
-            const url = asset.browser_download_url;
-            if (name.endsWith('.nsis.zip')) {
-              const sigAsset = assets.find((a) => a.name === asset.name + '.sig');
-              platforms['windows-x86_64'] = { signature: await fetchSignature(sigAsset, asset.name), url };
+            if (name.endsWith('.sig')) {
+              continue;
+            }
+
+            if (name.endsWith('.exe') && (name.includes('setup') || name.includes('nsis'))) {
+              candidates.windowsNsis = asset;
+            } else if (name.endsWith('.msi')) {
+              candidates.windowsMsi = asset;
             } else if (name.includes('x64') && name.endsWith('.app.tar.gz')) {
-              const sigAsset = assets.find((a) => a.name === asset.name + '.sig');
-              platforms['darwin-x86_64'] = { signature: await fetchSignature(sigAsset, asset.name), url };
+              candidates.darwinX64 = asset;
             } else if (name.includes('aarch64') && name.endsWith('.app.tar.gz')) {
-              const sigAsset = assets.find((a) => a.name === asset.name + '.sig');
-              platforms['darwin-aarch64'] = { signature: await fetchSignature(sigAsset, asset.name), url };
-            } else if (name.endsWith('.appimage.tar.gz')) {
-              const sigAsset = assets.find((a) => a.name === asset.name + '.sig');
-              platforms['linux-x86_64'] = { signature: await fetchSignature(sigAsset, asset.name), url };
+              candidates.darwinArm64 = asset;
+            } else if (name.endsWith('.appimage')) {
+              candidates.linuxX64 = asset;
             }
           }
+
+          const platforms = {};
+          async function addPlatform(platform, asset) {
+            if (!asset) {
+              return;
+            }
+            const sigAsset = assets.find((a) => a.name === asset.name + '.sig');
+            platforms[platform] = {
+              signature: await fetchSignature(sigAsset, asset.name),
+              url: asset.browser_download_url,
+            };
+          }
+
+          await addPlatform('windows-x86_64', candidates.windowsNsis || candidates.windowsMsi);
+          await addPlatform('darwin-x86_64', candidates.darwinX64);
+          await addPlatform('darwin-aarch64', candidates.darwinArm64);
+          await addPlatform('linux-x86_64', candidates.linuxX64);
 
           const requiredPlatforms = ['windows-x86_64', 'darwin-x86_64', 'darwin-aarch64', 'linux-x86_64'];
           const missingPlatforms = requiredPlatforms.filter((platform) => !platforms[platform]?.signature);

@@ -179,6 +179,52 @@ describe('FrameCache', () => {
       expect(cache.has('key1')).toBe(false);
     });
 
+    it('should revoke expired blob URLs on get()', () => {
+      const originalRevoke = URL.revokeObjectURL;
+      const revokeMock = vi.fn();
+      Object.defineProperty(URL, 'revokeObjectURL', {
+        configurable: true,
+        value: revokeMock,
+      });
+      cache.set('key1', 'blob:http://localhost/frame1', 100);
+
+      vi.advanceTimersByTime(defaultConfig.ttlMs + 1000);
+
+      expect(cache.get('key1')).toBeNull();
+      expect(revokeMock).toHaveBeenCalledWith('blob:http://localhost/frame1');
+      if (originalRevoke) {
+        Object.defineProperty(URL, 'revokeObjectURL', {
+          configurable: true,
+          value: originalRevoke,
+        });
+      } else {
+        Reflect.deleteProperty(URL, 'revokeObjectURL');
+      }
+    });
+
+    it('should revoke expired blob URLs on has()', () => {
+      const originalRevoke = URL.revokeObjectURL;
+      const revokeMock = vi.fn();
+      Object.defineProperty(URL, 'revokeObjectURL', {
+        configurable: true,
+        value: revokeMock,
+      });
+      cache.set('key1', 'blob:http://localhost/frame1', 100);
+
+      vi.advanceTimersByTime(defaultConfig.ttlMs + 1000);
+
+      expect(cache.has('key1')).toBe(false);
+      expect(revokeMock).toHaveBeenCalledWith('blob:http://localhost/frame1');
+      if (originalRevoke) {
+        Object.defineProperty(URL, 'revokeObjectURL', {
+          configurable: true,
+          value: originalRevoke,
+        });
+      } else {
+        Reflect.deleteProperty(URL, 'revokeObjectURL');
+      }
+    });
+
     it('should clean up expired entries on prune()', () => {
       cache.set('key1', 'url1', 100);
       cache.set('key2', 'url2', 100);

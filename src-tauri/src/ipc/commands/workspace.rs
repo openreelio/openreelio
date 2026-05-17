@@ -23,7 +23,7 @@ use crate::core::project::{OpKind, Operation};
 use crate::core::workspace::{
     ignore::IgnoreRules,
     service::{FileTreeEntry, WorkspaceService},
-    watcher::{WorkspaceEvent, WorkspaceWatcher},
+    watcher::{WorkspaceEvent, WorkspaceWatcher, WORKSPACE_EVENT_CHANNEL_CAPACITY},
 };
 use crate::core::CoreError;
 use crate::{ActiveProject, AppState};
@@ -236,6 +236,23 @@ pub async fn scan_workspace(state: State<'_, AppState>) -> Result<WorkspaceScanR
     Ok(dto)
 }
 
+/// Stops the active workspace watcher and event-processing loop.
+async fn stop_workspace_watcher_unlocked(state: &AppState) {
+    if let Some(handle) = state.workspace_event_loop.lock().await.take() {
+        handle.abort();
+    }
+
+    if let Some(mut watcher) = state.workspace_watcher.lock().await.take() {
+        watcher.stop();
+    }
+}
+
+/// Stops workspace watching while holding the watcher lifecycle lock.
+pub async fn stop_workspace_watcher(state: &AppState) {
+    let _lifecycle_guard = state.workspace_watcher_lifecycle.lock().await;
+    stop_workspace_watcher_unlocked(state).await;
+}
+
 /// Start (or restart) the workspace filesystem watcher for the given project.
 ///
 /// Stops any previously running watcher and event-processing loop, then
@@ -254,13 +271,11 @@ async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Res
 
     let _lifecycle_guard = state.workspace_watcher_lifecycle.lock().await;
 
-    if let Some(handle) = state.workspace_event_loop.lock().await.take() {
-        handle.abort();
-    }
-    state.workspace_watcher.lock().await.take();
+    stop_workspace_watcher_unlocked(state).await;
 
     let ignore_rules = Arc::new(IgnoreRules::load(&project_root));
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<WorkspaceEvent>();
+    let (event_tx, event_rx) =
+        tokio::sync::mpsc::channel::<WorkspaceEvent>(WORKSPACE_EVENT_CHANNEL_CAPACITY);
     let watcher =
         WorkspaceWatcher::start(project_root.clone(), Arc::clone(&ignore_rules), event_tx)
             .map_err(|e| format!("Failed to start workspace watcher: {e}"))?;

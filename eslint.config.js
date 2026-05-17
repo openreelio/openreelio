@@ -55,9 +55,11 @@ export default tseslint.config(
       'vite.config.{js,ts}',
       'tailwind.config.js',
       'postcss.config.js',
+      'scripts/**/*.{js,mjs}',
     ],
     languageOptions: {
       globals: {
+        console: 'readonly',
         process: 'readonly',
         URL: 'readonly',
       },

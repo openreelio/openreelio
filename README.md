@@ -77,11 +77,11 @@ OpenReelio is an AI-powered desktop video editor designed for content creators. 
 
 ## Installation
 
-### Prerequisites
+### Prerequisites for Source Builds
 
-- [Rust](https://rustup.rs/) 1.85+
+- [Rust](https://rustup.rs/) 1.88+
 - [Node.js](https://nodejs.org/) 20+
-- [FFmpeg](https://ffmpeg.org/) 6+
+- [FFmpeg](https://ffmpeg.org/) 6+ or bundled FFmpeg binaries in `src-tauri/binaries`
 - (Optional) LLVM/Clang for Whisper: building with `--features whisper` requires `libclang` (bindgen). On Windows, install LLVM and set `LIBCLANG_PATH` to the folder containing `libclang.dll`.
 
 ### From Source
@@ -104,6 +104,8 @@ npm run tauri build
 ### Pre-built Binaries
 
 Download the latest release from the [Releases](https://github.com/openreelio/openreelio/releases) page.
+Pre-built installers include OpenReelio's required runtime tools, including FFmpeg/FFprobe and the OpenReelio CLI used for local MCP integration.
+Automatic updates use the signed `latest.json` manifest from GitHub Releases. Windows/macOS OS code signing is optional and may show first-run warnings until paid certificates are configured.
 
 #### Windows
 

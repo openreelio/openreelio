@@ -82,13 +82,11 @@ export interface SubmitGenerationParams {
 // =============================================================================
 
 const POLL_INTERVAL_MS = 3000;
-const VALID_MODES: readonly VideoGenMode[] = [
-  'text_to_video',
-  'image_to_video',
-  'multimodal',
-];
+const MAX_RETAINED_JOBS = 200;
+const VALID_MODES: readonly VideoGenMode[] = ['text_to_video', 'image_to_video', 'multimodal'];
 const VALID_QUALITIES: readonly VideoGenQuality[] = ['basic', 'pro', 'cinema'];
 const VALID_ASPECT_RATIOS = new Set(['16:9', '9:16', '1:1', '4:3', '3:4', '21:9']);
+const TERMINAL_JOB_STATUSES = new Set<VideoGenJobStatus>(['completed', 'failed', 'cancelled']);
 
 function normalizeMode(mode?: VideoGenMode): VideoGenMode {
   return mode && VALID_MODES.includes(mode) ? mode : 'text_to_video';
@@ -115,6 +113,23 @@ function normalizeReferencePaths(values: string[] | undefined, maxItems: number)
     .map((value) => value.trim())
     .filter((value) => value.length > 0)
     .slice(0, maxItems);
+}
+
+function trimRetainedJobs(jobs: Map<string, VideoGenJob>): void {
+  if (jobs.size <= MAX_RETAINED_JOBS) return;
+
+  const removable = Array.from(jobs.values())
+    .filter((job) => TERMINAL_JOB_STATUSES.has(job.status))
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.completedAt ?? left.createdAt);
+      const rightTime = Date.parse(right.completedAt ?? right.createdAt);
+      return leftTime - rightTime;
+    });
+
+  for (const job of removable) {
+    if (jobs.size <= MAX_RETAINED_JOBS) break;
+    jobs.delete(job.id);
+  }
 }
 
 // =============================================================================
@@ -204,6 +219,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
           createdAt: new Date().toISOString(),
           completedAt: null,
         });
+        trimRetainedJobs(state.jobs);
       });
 
       try {
@@ -258,7 +274,9 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
           if (job) {
             job.status = 'failed';
             job.error = message;
+            job.completedAt = new Date().toISOString();
           }
+          trimRetainedJobs(state.jobs);
         });
         logger.error('Video generation submission failed', { error: message });
         throw error;
@@ -321,10 +339,12 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
                     j.status = 'failed';
                     j.error = status.error ?? 'Unknown error';
                     j.completedAt = new Date().toISOString();
+                    trimRetainedJobs(state.jobs);
                     break;
                   case 'cancelled':
                     j.status = 'cancelled';
                     j.completedAt = new Date().toISOString();
+                    trimRetainedJobs(state.jobs);
                     break;
                   default:
                     logger.warn('Unknown poll status received', {
@@ -337,12 +357,14 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
 
               // Trigger download+import for completed jobs
               if (status.status === 'completed') {
-                get().onJobCompleted(job.id).catch((err) => {
-                  logger.error('Auto-import failed for job', {
-                    jobId: job.id,
-                    error: String(err),
+                get()
+                  .onJobCompleted(job.id)
+                  .catch((err) => {
+                    logger.error('Auto-import failed for job', {
+                      jobId: job.id,
+                      error: String(err),
+                    });
                   });
-                });
               }
             } catch (error) {
               logger.warn('Poll failed for job', {
@@ -403,6 +425,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
             j.status = 'cancelled';
             j.completedAt = new Date().toISOString();
           }
+          trimRetainedJobs(state.jobs);
         });
         logger.info('Video generation cancelled locally (no provider ID yet)', { jobId });
         return;
@@ -419,6 +442,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
             j.status = 'cancelled';
             j.completedAt = new Date().toISOString();
           }
+          trimRetainedJobs(state.jobs);
         });
 
         logger.info('Video generation cancelled', { jobId });
@@ -445,10 +469,9 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
 
       try {
         // Download the generated video
-        const downloadResult = await invoke<{ outputPath: string }>(
-          'download_generated_video',
-          { providerJobId: job.providerJobId },
-        );
+        const downloadResult = await invoke<{ outputPath: string }>('download_generated_video', {
+          providerJobId: job.providerJobId,
+        });
 
         set((state) => {
           const j = state.jobs.get(jobId);
@@ -476,6 +499,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
             j.assetId = importResult.id;
             j.completedAt = new Date().toISOString();
           }
+          trimRetainedJobs(state.jobs);
         });
 
         logger.info('Video generation completed and imported', {
@@ -491,6 +515,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
             j.error = `Import failed: ${message}`;
             j.completedAt = new Date().toISOString();
           }
+          trimRetainedJobs(state.jobs);
         });
         logger.error('Download/import failed', { jobId, error: message });
       } finally {
@@ -503,11 +528,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
     clearCompletedJobs: () => {
       set((state) => {
         for (const [id, job] of state.jobs) {
-          if (
-            job.status === 'completed' ||
-            job.status === 'failed' ||
-            job.status === 'cancelled'
-          ) {
+          if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
             state.jobs.delete(id);
           }
         }
@@ -519,9 +540,8 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
     },
 
     getActiveJobs: () => {
-      const terminalStatuses: VideoGenJobStatus[] = ['completed', 'failed', 'cancelled'];
       return Array.from(get().jobs.values()).filter(
-        (job) => !terminalStatuses.includes(job.status),
+        (job) => !TERMINAL_JOB_STATUSES.has(job.status),
       );
     },
   })),
@@ -531,11 +551,8 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
 // Selectors
 // =============================================================================
 
-export const selectAllJobs = () =>
-  Array.from(useVideoGenStore.getState().jobs.values());
+export const selectAllJobs = () => Array.from(useVideoGenStore.getState().jobs.values());
 
-export const selectActiveJobs = () =>
-  useVideoGenStore.getState().getActiveJobs();
+export const selectActiveJobs = () => useVideoGenStore.getState().getActiveJobs();
 
-export const selectJobById = (id: string) =>
-  useVideoGenStore.getState().getJob(id);
+export const selectJobById = (id: string) => useVideoGenStore.getState().getJob(id);

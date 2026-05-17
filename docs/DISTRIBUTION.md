@@ -4,7 +4,7 @@ This document explains distribution options for OpenReelio releases.
 
 ## Table of Contents
 
-1. [Open Source Distribution (No Signing)](#open-source-distribution-no-signing)
+1. [Open Source Distribution (No OS Code Signing)](#open-source-distribution-no-os-code-signing)
 2. [User Installation Guide](#user-installation-guide)
 3. [Code Signing (Optional - When Funded)](#code-signing-optional---when-funded)
 4. [GitHub Secrets Setup](#github-secrets-setup)
@@ -16,23 +16,38 @@ This document explains distribution options for OpenReelio releases.
 
 ---
 
-## Open Source Distribution (No Signing)
+## Open Source Distribution (No OS Code Signing)
 
-**Code signing is OPTIONAL for open source projects.** Many popular open source applications distribute without code signing, including early versions of VS Code, Obsidian, and most Electron/Tauri apps.
+**OS code signing is optional for open source projects.** Windows Authenticode and Apple Developer ID certificates remove operating system warnings, but they are paid credentials and are not required for GitHub Releases distribution.
+
+**Tauri updater signing is different and required.** The updater's minisign key pair is free, but release builds must be signed with `TAURI_SIGNING_PRIVATE_KEY` so installed apps can verify update artifacts.
 
 ### What Happens Without Signing?
 
-| Platform | User Experience | User Action Required |
-|----------|-----------------|---------------------|
-| **Windows** | SmartScreen warning: "Windows protected your PC" | Click "More info" → "Run anyway" |
-| **macOS** | Gatekeeper blocks: "cannot be opened" | Right-click → "Open" or System Preferences → Security |
-| **Linux** | No warning | None |
+| Platform    | User Experience                                  | User Action Required                                  |
+| ----------- | ------------------------------------------------ | ----------------------------------------------------- |
+| **Windows** | SmartScreen warning: "Windows protected your PC" | Click "More info" → "Run anyway"                      |
+| **macOS**   | Gatekeeper blocks: "cannot be opened"            | Right-click → "Open" or System Preferences → Security |
+| **Linux**   | No warning                                       | None                                                  |
 
 ### Recommended Approach for Open Source
 
-1. **Ship without signing** - Most users understand open source warnings
+1. **Ship without OS code signing** - Most users understand open source warnings
 2. **Document bypass steps** - Clear instructions in README
-3. **Add signing later** - When funding/sponsorship is available
+3. **Keep Tauri updater signing enabled** - Required for automatic updates
+4. **Add OS code signing later** - When funding/sponsorship is available
+
+### Bundled Runtime Tools
+
+Pre-built installers must include all non-user-installable runtime tools. The release workflow currently bundles and verifies:
+
+| Tool           | Why it is bundled             | Verification               |
+| -------------- | ----------------------------- | -------------------------- |
+| FFmpeg         | Video/audio processing        | `ffmpeg -version`          |
+| FFprobe        | Media metadata/probing        | `ffprobe -version`         |
+| OpenReelio CLI | Local MCP/runtime integration | `openreelio-cli --version` |
+
+Codex CLI is not bundled as a guaranteed runtime dependency. If a feature requires a Codex account or external Codex CLI, keep that feature optional or provide a first-party bundled runtime before making it part of the default install path.
 
 ---
 
@@ -68,17 +83,18 @@ Include these instructions in your README.md:
 ## Code Signing (Optional - When Funded)
 
 Code signing removes OS warnings and provides a more professional experience. Consider this when:
+
 - You receive sponsorship/funding
 - Enterprise users require signed binaries
 - Download numbers increase significantly
 
 ### Cost Summary
 
-| Item | Cost | Frequency |
-|------|------|-----------|
-| Apple Developer Program | $99 | Annual |
-| Windows Standard Certificate | $200-500 | Annual |
-| Windows EV Certificate | $400-700 | Annual |
+| Item                         | Cost     | Frequency |
+| ---------------------------- | -------- | --------- |
+| Apple Developer Program      | $99      | Annual    |
+| Windows Standard Certificate | $200-500 | Annual    |
+| Windows EV Certificate       | $400-700 | Annual    |
 
 **Minimum**: ~$300/year (Apple + Standard Windows)
 **Recommended**: ~$500-800/year (Apple + EV Windows)
@@ -103,19 +119,19 @@ All sensitive signing credentials are stored as GitHub repository secrets. Navig
 
 ### Required Secrets
 
-| Secret Name | Description | Platform |
-|-------------|-------------|----------|
-| `WINDOWS_CERTIFICATE` | Base64-encoded PFX certificate | Windows |
-| `WINDOWS_CERTIFICATE_PASSWORD` | PFX certificate password | Windows |
-| `WINDOWS_CERTIFICATE_NAME` | Certificate subject name (e.g., "OpenReelio") | Windows |
-| `APPLE_CERTIFICATE` | Base64-encoded P12 certificate | macOS |
-| `APPLE_CERTIFICATE_PASSWORD` | P12 certificate password | macOS |
-| `APPLE_ID` | Apple ID email for notarization | macOS |
-| `APPLE_ID_PASSWORD` | App-specific password (from appleid.apple.com) | macOS |
-| `APPLE_TEAM_ID` | Apple Developer Team ID | macOS |
-| `APPLE_SIGNING_IDENTITY` | Certificate identity (e.g., "Developer ID Application: OpenReelio") | macOS |
-| `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater signing key | All |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Tauri signing key password (if any) | All |
+| Secret Name                          | Description                                                                | Platform |
+| ------------------------------------ | -------------------------------------------------------------------------- | -------- |
+| `TAURI_SIGNING_PRIVATE_KEY`          | Tauri updater signing key; required for automatic updates                  | All      |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Tauri signing key password, if any                                         | All      |
+| `WINDOWS_CERTIFICATE`                | Optional base64-encoded PFX certificate for OS code signing                | Windows  |
+| `WINDOWS_CERTIFICATE_PASSWORD`       | Optional PFX certificate password                                          | Windows  |
+| `WINDOWS_CERTIFICATE_NAME`           | Optional certificate subject name, e.g. `OpenReelio`                       | Windows  |
+| `APPLE_CERTIFICATE`                  | Optional base64-encoded P12 certificate for OS code signing                | macOS    |
+| `APPLE_CERTIFICATE_PASSWORD`         | Optional P12 certificate password                                          | macOS    |
+| `APPLE_ID`                           | Optional Apple ID email for notarization                                   | macOS    |
+| `APPLE_ID_PASSWORD`                  | Optional app-specific password from appleid.apple.com                      | macOS    |
+| `APPLE_TEAM_ID`                      | Optional Apple Developer Team ID                                           | macOS    |
+| `APPLE_SIGNING_IDENTITY`             | Optional certificate identity, e.g. `Developer ID Application: OpenReelio` | macOS    |
 
 ---
 
@@ -129,6 +145,7 @@ All sensitive signing credentials are stored as GitHub repository secrets. Navig
    - EV certificates (~$400-700/year) provide instant SmartScreen reputation
 
 2. **Export Certificate as PFX**
+
    ```powershell
    # Export from certificate store
    $cert = Get-ChildItem -Path Cert:\CurrentUser\My | Where-Object { $_.Subject -like "*OpenReelio*" }
@@ -136,6 +153,7 @@ All sensitive signing credentials are stored as GitHub repository secrets. Navig
    ```
 
 3. **Convert to Base64**
+
    ```powershell
    [Convert]::ToBase64String([IO.File]::ReadAllBytes("certificate.pfx")) | Set-Content certificate.txt
    ```
@@ -148,6 +166,7 @@ All sensitive signing credentials are stored as GitHub repository secrets. Navig
 ### Option 2: Azure Trusted Signing (Cloud-Based)
 
 For organizations, consider Azure Trusted Signing:
+
 - No hardware token required
 - Integrates with GitHub Actions
 - See: https://learn.microsoft.com/en-us/azure/trusted-signing/
@@ -219,9 +238,7 @@ The public key is already configured in `src-tauri/tauri.conf.json`:
   "plugins": {
     "updater": {
       "pubkey": "YOUR_PUBLIC_KEY_HERE",
-      "endpoints": [
-        "https://github.com/openreelio/openreelio/releases/latest/download/latest.json"
-      ]
+      "endpoints": ["https://github.com/openreelio/openreelio/releases/latest/download/latest.json"]
     }
   }
 }
@@ -239,8 +256,12 @@ The public key is already configured in `src-tauri/tauri.conf.json`:
 ### 1. Prepare Release
 
 ```bash
-# Update version in package.json and tauri.conf.json
-npm version patch  # or minor, major
+# Update package.json/package-lock.json without creating a tag yet
+npm version patch --no-git-tag-version  # or minor, major
+
+# Sync Cargo.toml and tauri.conf.json to package.json
+npm run version:sync
+npm run version:check
 
 # Commit version bump
 git add .
@@ -251,7 +272,7 @@ git push origin main
 ### 2. Create Release Tag
 
 ```bash
-# Create and push a version tag
+# Create and push a version tag that exactly matches package.json
 git tag v0.1.0
 git push origin v0.1.0
 ```
@@ -259,12 +280,17 @@ git push origin v0.1.0
 ### 3. Automatic Build
 
 The GitHub Actions workflow will automatically:
-1. Create a draft release
-2. Build for Windows, macOS (Intel + ARM), and Linux
-3. Sign Windows and macOS builds
-4. Notarize macOS builds
-5. Generate update manifest (latest.json)
-6. Upload all artifacts to the release
+
+1. Verify the Git tag version matches `package.json`, `Cargo.toml`, and `tauri.conf.json`
+2. Generate release notes from GitHub's release notes API, the raw commit history, and the contributor shortlog
+3. Create a draft release
+4. Build for Windows, macOS (Intel + ARM), and Linux
+5. Bundle and verify FFmpeg, FFprobe, and OpenReelio CLI in each installer
+6. Enable Tauri updater artifact generation for the release build
+7. Sign updater artifacts with the Tauri updater private key
+8. Leave OS code signing/notarization optional for a later paid-certificate workflow
+9. Generate the GitHub Releases `latest.json` updater manifest
+10. Upload all artifacts to the release
 
 ### 4. Publish Release
 
@@ -280,6 +306,7 @@ The GitHub Actions workflow will automatically:
 ### Windows SmartScreen Warning
 
 If users see SmartScreen warnings despite signing:
+
 - Ensure using an EV certificate (provides instant reputation)
 - Standard certificates require building reputation over time
 - Users can click "More info" > "Run anyway"
@@ -287,11 +314,13 @@ If users see SmartScreen warnings despite signing:
 ### macOS Notarization Failures
 
 Common issues:
+
 - **Invalid credentials**: Verify Apple ID and app-specific password
 - **Hardened runtime issues**: Check entitlements
 - **Unsigned code**: Ensure all bundled binaries are signed
 
 Check notarization status:
+
 ```bash
 xcrun notarytool history --apple-id YOUR_APPLE_ID --password YOUR_PASSWORD --team-id YOUR_TEAM_ID
 ```
@@ -305,6 +334,7 @@ xcrun notarytool history --apple-id YOUR_APPLE_ID --password YOUR_PASSWORD --tea
 ### Certificate Expiration
 
 Certificates typically expire after 1-3 years:
+
 - Set calendar reminders before expiration
 - Budget for renewal costs
 - Have a plan for re-signing releases
@@ -313,12 +343,12 @@ Certificates typically expire after 1-3 years:
 
 ## Cost Summary
 
-| Item | Cost | Frequency |
-|------|------|-----------|
-| Apple Developer Program | $99 | Annual |
-| Windows Standard Code Signing | $200-500 | Annual |
-| Windows EV Code Signing | $400-700 | Annual |
-| Azure Trusted Signing | ~$10/month | Monthly |
+| Item                          | Cost       | Frequency |
+| ----------------------------- | ---------- | --------- |
+| Apple Developer Program       | $99        | Annual    |
+| Windows Standard Code Signing | $200-500   | Annual    |
+| Windows EV Code Signing       | $400-700   | Annual    |
+| Azure Trusted Signing         | ~$10/month | Monthly   |
 
 **Minimum setup cost**: ~$300/year (Apple + Standard Windows)
 **Recommended setup cost**: ~$500-800/year (Apple + EV Windows)

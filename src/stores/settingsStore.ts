@@ -258,7 +258,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     showWelcomeOnStartup: true,
     hasCompletedSetup: false,
     recentProjectsLimit: 10,
-    checkUpdatesOnStartup: false,
+    checkUpdatesOnStartup: true,
     defaultProjectLocation: null,
   },
   editor: {

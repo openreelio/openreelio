@@ -506,22 +506,72 @@ fn find_openreelio_cli_command() -> String {
 }
 
 fn find_openreelio_cli_executable() -> String {
+    for candidate in openreelio_cli_candidates() {
+        if candidate.is_file() {
+            return display_path(&candidate);
+        }
+    }
+
+    "openreelio-cli".to_string()
+}
+
+fn openreelio_cli_candidates() -> Vec<PathBuf> {
+    let binary_name = openreelio_cli_binary_name();
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir.parent().unwrap_or(manifest_dir.as_path());
-    let cli_binary = repo_root
-        .join("target")
-        .join("debug")
-        .join(if cfg!(windows) {
-            "openreelio-cli.exe"
-        } else {
-            "openreelio-cli"
-        });
 
-    if cli_binary.is_file() {
-        display_path(&cli_binary)
-    } else {
-        "openreelio-cli".to_string()
+    let mut candidates = Vec::new();
+    for directory in bundled_tool_directories() {
+        candidates.push(directory.join(binary_name));
     }
+
+    for profile in ["release", "debug"] {
+        candidates.push(repo_root.join("target").join(profile).join(binary_name));
+    }
+
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        for profile in ["release", "debug"] {
+            candidates.push(PathBuf::from(&target_dir).join(profile).join(binary_name));
+        }
+    }
+
+    dedupe_pathbufs(candidates)
+}
+
+fn openreelio_cli_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "openreelio-cli.exe"
+    } else {
+        "openreelio-cli"
+    }
+}
+
+pub(crate) fn bundled_tool_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            directories.push(exe_dir.join("binaries"));
+            directories.push(exe_dir.join("resources").join("binaries"));
+
+            if let Some(contents_dir) = exe_dir.parent() {
+                directories.push(contents_dir.join("Resources").join("binaries"));
+            }
+        }
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    directories.push(manifest_dir.join("binaries"));
+
+    dedupe_pathbufs(directories)
+}
+
+fn dedupe_pathbufs(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    paths
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
 }
 
 fn display_path(path: &Path) -> String {

@@ -209,7 +209,7 @@ pub struct GeneralSettings {
     pub recent_projects_limit: u32,
 
     /// Check for updates on startup
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub check_updates_on_startup: bool,
 
     /// Default project location
@@ -224,7 +224,7 @@ impl Default for GeneralSettings {
             show_welcome_on_startup: true,
             has_completed_setup: false,
             recent_projects_limit: default_recent_limit(),
-            check_updates_on_startup: false,
+            check_updates_on_startup: true,
             default_project_location: None,
         }
     }

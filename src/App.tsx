@@ -185,6 +185,7 @@ function App(): JSX.Element {
   if (isTauri && settingsLoaded && !general.hasCompletedSetup) {
     return (
       <>
+        <UpdateBanner checkOnMount={settingsLoaded && general.checkUpdatesOnStartup} />
         <Suspense fallback={<ScreenLoadingFallback />}>
           <SetupWizard
             onComplete={() => {

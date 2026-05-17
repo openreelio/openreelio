@@ -31,9 +31,9 @@
     "format": "prettier --write src/",
     "analyze": "vite build --mode analyze",
     "analyze:stats": "vite build && npx source-map-explorer dist/assets/*.js --html stats.html",
-    "version:check": "npx tsx scripts/sync-version.ts --check",
-    "version:sync": "npx tsx scripts/sync-version.ts --fix",
-    "generate-signing-keys": "npx tsx scripts/generate-signing-keys.ts",
+    "version:check": "node scripts/with-node-temp.mjs npx tsx scripts/sync-version.ts --check",
+    "version:sync": "node scripts/with-node-temp.mjs npx tsx scripts/sync-version.ts --fix",
+    "generate-signing-keys": "node scripts/with-node-temp.mjs npx tsx scripts/generate-signing-keys.ts",
     "prepare": "husky"
   },
   "dependencies": {

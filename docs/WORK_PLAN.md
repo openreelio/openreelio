@@ -302,7 +302,7 @@ URGENCY  │  Bug Fixes  │             │
    - [ ] Final QA testing on Windows/macOS/Linux
    - [ ] README.md installation instructions (bypass OS warnings)
    - [ ] Create release tag and GitHub Release
-   - [ ] Verify auto-updater works without signing
+   - [ ] Verify auto-updater works without OS code signing; Tauri updater signing is still required
 
 2. **Code Signing** (DEFERRED - When funding available)
    - [ ] Windows Authenticode ($200-700/year)

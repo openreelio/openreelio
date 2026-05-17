@@ -24,6 +24,10 @@ pub enum WorkspaceEvent {
     FileModified(String),
 }
 
+/// Maximum number of filesystem events buffered between the watcher thread and
+/// the async workspace event loop.
+pub const WORKSPACE_EVENT_CHANNEL_CAPACITY: usize = 1024;
+
 /// File system watcher for the project workspace
 pub struct WorkspaceWatcher {
     /// Stop signal sender — dropping this stops the watcher
@@ -38,7 +42,7 @@ impl WorkspaceWatcher {
     pub fn start(
         project_root: PathBuf,
         ignore_rules: Arc<IgnoreRules>,
-        event_tx: mpsc::UnboundedSender<WorkspaceEvent>,
+        event_tx: mpsc::Sender<WorkspaceEvent>,
     ) -> Result<Self, String> {
         let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
         let root_clone = project_root.clone();
@@ -117,9 +121,20 @@ impl WorkspaceWatcher {
                                 _ => continue,
                             };
 
-                            if event_tx.send(ws_event).is_err() {
-                                tracing::debug!("Workspace event channel closed, stopping watcher");
-                                return;
+                            match event_tx.try_send(ws_event) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    tracing::warn!(
+                                        capacity = WORKSPACE_EVENT_CHANNEL_CAPACITY,
+                                        "Workspace event channel full; dropping filesystem event"
+                                    );
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    tracing::debug!(
+                                        "Workspace event channel closed, stopping watcher"
+                                    );
+                                    return;
+                                }
                             }
                         }
                     }
@@ -191,7 +206,7 @@ mod tests {
     async fn test_watcher_start_and_stop() {
         let dir = tempfile::tempdir().unwrap();
         let rules = Arc::new(IgnoreRules::defaults());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(WORKSPACE_EVENT_CHANNEL_CAPACITY);
 
         let mut watcher = WorkspaceWatcher::start(dir.path().to_path_buf(), rules, tx).unwrap();
 
@@ -206,7 +221,7 @@ mod tests {
     async fn test_watcher_detects_new_file() {
         let dir = tempfile::tempdir().unwrap();
         let rules = Arc::new(IgnoreRules::defaults());
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(WORKSPACE_EVENT_CHANNEL_CAPACITY);
 
         let _watcher = WorkspaceWatcher::start(dir.path().to_path_buf(), rules, tx).unwrap();
 
@@ -237,7 +252,7 @@ mod tests {
     async fn test_watcher_ignores_non_media() {
         let dir = tempfile::tempdir().unwrap();
         let rules = Arc::new(IgnoreRules::defaults());
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(WORKSPACE_EVENT_CHANNEL_CAPACITY);
 
         let _watcher = WorkspaceWatcher::start(dir.path().to_path_buf(), rules, tx).unwrap();
 

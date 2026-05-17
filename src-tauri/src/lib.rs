@@ -849,6 +849,10 @@ pub struct AppState {
     pub project: Mutex<Option<ActiveProject>>,
     /// Background job worker pool
     pub job_pool: Mutex<WorkerPool>,
+    /// Shutdown signal for background job workers.
+    pub worker_shutdown: OnceLock<Arc<tokio::sync::Notify>>,
+    /// Join handles for background job worker tasks.
+    pub worker_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Memory pool for efficient allocation
     pub memory_pool: Mutex<MemoryPool>,
     /// Cache manager for asset and render caching
@@ -1023,6 +1027,8 @@ impl AppState {
         Self {
             project: Mutex::new(None),
             job_pool: Mutex::new(WorkerPool::with_defaults()),
+            worker_shutdown: OnceLock::new(),
+            worker_handles: Mutex::new(Vec::new()),
             memory_pool: Mutex::new(MemoryPool::new()),
             cache_manager: Mutex::new(CacheManager::new()),
             ai_gateway: Mutex::new(AIGateway::with_defaults()),
@@ -1116,6 +1122,40 @@ impl AppState {
     /// Checks if a project is currently open
     pub async fn has_project(&self) -> bool {
         self.project.lock().await.is_some()
+    }
+
+    /// Requests background job workers to stop and aborts any that do not exit promptly.
+    pub async fn shutdown_worker_pool(&self) -> bool {
+        if let Some(shutdown) = self.worker_shutdown.get() {
+            shutdown.notify_waiters();
+        }
+
+        let handles: Vec<tokio::task::JoinHandle<()>> =
+            self.worker_handles.lock().await.drain(..).collect();
+        if handles.is_empty() {
+            return true;
+        }
+
+        let mut clean = true;
+        for mut handle in handles {
+            tokio::select! {
+                result = &mut handle => match result {
+                    Ok(()) => {}
+                    Err(error) => {
+                        tracing::warn!("Background worker task ended with error: {error}");
+                        clean = false;
+                    }
+                },
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(2)) => {
+                    handle.abort();
+                    let _ = handle.await;
+                    tracing::warn!("Background worker did not stop within timeout");
+                    clean = false;
+                }
+            }
+        }
+
+        clean
     }
 }
 
@@ -1470,10 +1510,15 @@ mod tauri_app {
             .manage(ffmpeg_state.clone())
             .plugin(tauri_plugin_dialog::init());
 
-        // The updater requires valid signing keys and a release manifest endpoint.
-        // In local MSI distribution mode we disable it by default to avoid noisy
-        // startup errors and confusing UX.
-        let builder = if std::env::var("OPENREELIO_ENABLE_UPDATER").ok().as_deref() == Some("1") {
+        // Enable updater for release builds by default. Development builds can
+        // opt in with OPENREELIO_ENABLE_UPDATER=1; release builds can opt out
+        // with OPENREELIO_ENABLE_UPDATER=0 for offline/internal distribution.
+        let updater_enabled = match std::env::var("OPENREELIO_ENABLE_UPDATER").ok().as_deref() {
+            Some("1") | Some("true") | Some("TRUE") => true,
+            Some("0") | Some("false") | Some("FALSE") => false,
+            _ => !cfg!(debug_assertions),
+        };
+        let builder = if updater_enabled {
             builder.plugin(tauri_plugin_updater::Builder::new().build())
         } else {
             builder
@@ -1551,6 +1596,7 @@ mod tauri_app {
             let ffmpeg_for_workers = ffmpeg_state.clone();
             let app_handle_for_workers = app.handle().clone();
             let shutdown = Arc::new(Notify::new());
+            let _ = app_state.worker_shutdown.set(Arc::clone(&shutdown));
 
             // Get cache directory for job outputs
             let cache_dir = app
@@ -1594,6 +1640,7 @@ mod tauri_app {
             // Only start workers if we successfully acquired the job pool
             if let Some((queue_arc, active_jobs_arc, num_workers)) = job_queue {
                 let shutdown_clone = Arc::clone(&shutdown);
+                let app_handle_for_worker_state = app_handle_for_workers.clone();
 
                 // Spawn workers using the cloned Arc references
                 tauri::async_runtime::spawn(async move {
@@ -1601,7 +1648,7 @@ mod tauri_app {
                     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
                     // Start worker tasks that consume from the queue
-                    crate::core::jobs::start_workers_with_arcs(
+                    let handles = crate::core::jobs::start_workers_with_arcs(
                         queue_arc,
                         active_jobs_arc,
                         num_workers,
@@ -1610,6 +1657,12 @@ mod tauri_app {
                         cache_dir,
                         shutdown_clone,
                     );
+                    app_handle_for_worker_state
+                        .state::<AppState>()
+                        .worker_handles
+                        .lock()
+                        .await
+                        .extend(handles);
 
                     tracing::info!(
                         "Started {} background workers for job processing",
