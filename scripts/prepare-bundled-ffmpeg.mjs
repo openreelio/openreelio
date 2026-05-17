@@ -169,16 +169,7 @@ async function downloadFile(url, outputPath) {
 async function extractArchive(format, archivePath, outputDir) {
   if (format === 'zip') {
     if (process.platform === 'win32') {
-      await run('powershell.exe', [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        'Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force',
-        archivePath,
-        outputDir,
-      ]);
+      await run('tar', ['-xf', archivePath, '-C', outputDir]);
       return;
     }
 
