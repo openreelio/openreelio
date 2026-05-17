@@ -296,7 +296,7 @@ jobs:
         run: npm run version:check
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@fce9c6108b31ea247710505d3aaaa893ee6768d4
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENREELIO_ENABLE_UPDATER: '1'
