@@ -188,25 +188,45 @@ jobs:
             echo "Installers and updater assets are attached to this release after CI finishes."
           } > release-notes.md
 
-          PRERELEASE_FLAG=""
+          IS_PRERELEASE=false
           if [[ "${{ contains(github.ref_name, '-') }}" == "true" ]]; then
-            PRERELEASE_FLAG="--prerelease"
+            IS_PRERELEASE=true
           fi
 
-          if gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" > release.json 2>/dev/null; then
-            echo "Release ${{ github.ref_name }} already exists; updating generated notes."
-            gh release edit "${{ github.ref_name }}" \
-              --title "$RELEASE_TITLE" \
-              --notes-file release-notes.md
-            gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" > release.json
+          EXISTING_RELEASE_ID="$(
+            gh api "repos/${REPOSITORY}/releases?per_page=100" |
+              jq -r --arg tag "$CURRENT_TAG" '.[] | select(.tag_name == $tag) | .id' |
+              head -n 1
+          )"
+
+          if [ -n "$EXISTING_RELEASE_ID" ]; then
+            echo "Release ${CURRENT_TAG} already exists; updating generated notes."
+            jq -n \
+              --arg name "$RELEASE_TITLE" \
+              --rawfile body release-notes.md \
+              --argjson draft true \
+              --argjson prerelease "$IS_PRERELEASE" \
+              '{name: $name, body: $body, draft: $draft, prerelease: $prerelease}' > release-payload.json
+            gh api --method PATCH "repos/${REPOSITORY}/releases/${EXISTING_RELEASE_ID}" \
+              --input release-payload.json > release.json
           else
-            gh release create "${{ github.ref_name }}" \
-              --draft \
-              $PRERELEASE_FLAG \
-              --target "${{ github.sha }}" \
-              --title "$RELEASE_TITLE" \
-              --notes-file release-notes.md
-            gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" > release.json
+            jq -n \
+              --arg tag_name "$CURRENT_TAG" \
+              --arg target_commitish "${{ github.sha }}" \
+              --arg name "$RELEASE_TITLE" \
+              --rawfile body release-notes.md \
+              --argjson draft true \
+              --argjson prerelease "$IS_PRERELEASE" \
+              '{
+                tag_name: $tag_name,
+                target_commitish: $target_commitish,
+                name: $name,
+                body: $body,
+                draft: $draft,
+                prerelease: $prerelease
+              }' > release-payload.json
+            gh api --method POST "repos/${REPOSITORY}/releases" \
+              --input release-payload.json > release.json
           fi
 
           RELEASE_ID="$(jq -r '.id' release.json)"
