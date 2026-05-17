@@ -119,6 +119,41 @@ jobs:
             echo "- No commit history available for ${RANGE}." > commit-history.md
           fi
 
+          COMMIT_HISTORY_ASSET="openreelio-${CURRENT_TAG}-commit-history.md"
+          {
+            echo "# OpenReelio ${CURRENT_TAG} Commit History"
+            echo
+            if [ -n "$PREVIOUS_TAG" ]; then
+              echo "Changes since ${PREVIOUS_TAG}:"
+            else
+              echo "Initial release commit history:"
+            fi
+            echo
+            cat commit-history.md
+          } > "$COMMIT_HISTORY_ASSET"
+
+          MAX_GENERATED_NOTES_BYTES=65000
+          if [ "$(wc -c < generated-release-notes.md)" -gt "$MAX_GENERATED_NOTES_BYTES" ]; then
+            head -c "$MAX_GENERATED_NOTES_BYTES" generated-release-notes.md > generated-release-notes.body.md
+            {
+              echo
+              echo
+              echo "_Generated release notes were truncated to keep the GitHub release body under the platform limit._"
+            } >> generated-release-notes.body.md
+          else
+            cp generated-release-notes.md generated-release-notes.body.md
+          fi
+
+          MAX_BODY_COMMITS=150
+          COMMIT_COUNT="$(wc -l < commit-history.md | tr -d ' ')"
+          head -n "$MAX_BODY_COMMITS" commit-history.md > commit-history.body.md
+          if [ "$COMMIT_COUNT" -gt "$MAX_BODY_COMMITS" ]; then
+            {
+              echo
+              echo "- ... and $((COMMIT_COUNT - MAX_BODY_COMMITS)) more commits. See the attached ${COMMIT_HISTORY_ASSET} file for the complete commit history."
+            } >> commit-history.body.md
+          fi
+
           if git shortlog -sne "$RANGE" > contributors.raw && [ -s contributors.raw ]; then
             sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+(.+)$/- \1/' contributors.raw > contributors.md
           else
@@ -126,7 +161,7 @@ jobs:
           fi
 
           {
-            cat generated-release-notes.md
+            cat generated-release-notes.body.md
             echo
             echo "## Commit History"
             echo
@@ -136,7 +171,7 @@ jobs:
               echo "Initial release commit history:"
             fi
             echo
-            cat commit-history.md
+            cat commit-history.body.md
             echo
             echo "## Contributors"
             echo
@@ -172,6 +207,8 @@ jobs:
               --notes-file release-notes.md
             gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" > release.json
           fi
+
+          gh release upload "${{ github.ref_name }}" "$COMMIT_HISTORY_ASSET" --clobber
 
           echo "id=$(jq -r '.id' release.json)" >> "$GITHUB_OUTPUT"
           echo "upload_url=$(jq -r '.upload_url' release.json)" >> "$GITHUB_OUTPUT"

@@ -284,13 +284,14 @@ The GitHub Actions workflow will automatically:
 1. Verify the Git tag version matches `package.json`, `Cargo.toml`, and `tauri.conf.json`
 2. Generate release notes from GitHub's release notes API, the raw commit history, and the contributor shortlog
 3. Create a draft release
-4. Build for Windows, macOS (Intel + ARM), and Linux
-5. Bundle and verify FFmpeg, FFprobe, and OpenReelio CLI in each installer
-6. Enable Tauri updater artifact generation for the release build
-7. Sign updater artifacts with the Tauri updater private key
-8. Leave OS code signing/notarization optional for a later paid-certificate workflow
-9. Generate the GitHub Releases `latest.json` updater manifest
-10. Upload all artifacts to the release
+4. Attach the complete raw commit history as a release asset when the release body would exceed GitHub's body limit
+5. Build for Windows, macOS (Intel + ARM), and Linux
+6. Bundle and verify FFmpeg, FFprobe, and OpenReelio CLI in each installer
+7. Enable Tauri updater artifact generation for the release build
+8. Sign updater artifacts with the Tauri updater private key
+9. Leave OS code signing/notarization optional for a later paid-certificate workflow
+10. Generate the GitHub Releases `latest.json` updater manifest
+11. Upload all artifacts to the release
 
 ### 4. Publish Release
 
