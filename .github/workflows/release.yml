@@ -195,18 +195,27 @@ jobs:
 
           EXISTING_RELEASE_ID="$(
             gh api "repos/${REPOSITORY}/releases?per_page=100" |
-              jq -r --arg tag "$CURRENT_TAG" '.[] | select(.tag_name == $tag) | .id' |
+              jq -r --arg tag "$CURRENT_TAG" '.[] | select(.tag_name == $tag or (.draft == true and .name == $tag)) | .id' |
               head -n 1
           )"
 
           if [ -n "$EXISTING_RELEASE_ID" ]; then
             echo "Release ${CURRENT_TAG} already exists; updating generated notes."
             jq -n \
+              --arg tag_name "$CURRENT_TAG" \
+              --arg target_commitish "${{ github.sha }}" \
               --arg name "$RELEASE_TITLE" \
               --rawfile body release-notes.md \
               --argjson draft true \
               --argjson prerelease "$IS_PRERELEASE" \
-              '{name: $name, body: $body, draft: $draft, prerelease: $prerelease}' > release-payload.json
+              '{
+                tag_name: $tag_name,
+                target_commitish: $target_commitish,
+                name: $name,
+                body: $body,
+                draft: $draft,
+                prerelease: $prerelease
+              }' > release-payload.json
             gh api --method PATCH "repos/${REPOSITORY}/releases/${EXISTING_RELEASE_ID}" \
               --input release-payload.json > release.json
           else
@@ -403,14 +412,16 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Download release artifacts info
-        id: get-release
+      - name: Create latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          RELEASE_TAG: ${{ github.ref_name }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          MANIFEST="$(node <<'NODE'
+          node --input-type=module <<'NODE'
+          import { writeFileSync } from 'node:fs';
+
           const [owner, repo] = process.env.REPOSITORY.split('/');
           const headers = {
             Accept: 'application/vnd.github+json',
@@ -428,12 +439,13 @@ jobs:
 
           const release = await githubJson(`/repos/${owner}/${repo}/releases/${process.env.RELEASE_ID}`);
           const assets = release.assets;
-          const version = release.tag_name.replace(/^v/, '');
+          const releaseTag = process.env.RELEASE_TAG;
+          const version = releaseTag.replace(/^v/, '');
           const notes = release.body || '';
           const pub_date = release.published_at || new Date().toISOString();
 
           function releaseAssetUrl(asset) {
-            return `https://github.com/${owner}/${repo}/releases/download/${release.tag_name}/${encodeURIComponent(asset.name)}`;
+            return `https://github.com/${owner}/${repo}/releases/download/${releaseTag}/${encodeURIComponent(asset.name)}`;
           }
 
           async function fetchSignature(sigAsset, assetName) {
@@ -506,24 +518,40 @@ jobs:
             throw new Error(`Missing signed updater artifacts for: ${missingPlatforms.join(', ')}`);
           }
 
-          process.stdout.write(JSON.stringify({ version, notes, pub_date, platforms }, null, 2));
+          writeFileSync('latest.json', JSON.stringify({ version, notes, pub_date, platforms }, null, 2));
+          console.log(`Generated latest.json for ${Object.keys(platforms).length} platforms.`);
           NODE
-          )"
-          {
-            echo 'result<<EOF'
-            echo "$MANIFEST"
-            echo EOF
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Create latest.json
-        run: |
-          echo '${{ steps.get-release.outputs.result }}' > latest.json
           cat latest.json
 
       - name: Upload latest.json to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" latest.json --clobber
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          EXISTING_LATEST_ASSET_ID="$(
+            gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}/assets" |
+              jq -r '.[] | select(.name == "latest.json") | .id' |
+              head -n 1
+          )"
+
+          if [ -n "$EXISTING_LATEST_ASSET_ID" ]; then
+            gh api --method DELETE "repos/${REPOSITORY}/releases/assets/${EXISTING_LATEST_ASSET_ID}"
+          fi
+
+          UPLOAD_URL="$(
+            gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}" --jq '.upload_url' |
+              sed 's/{.*//'
+          )"
+
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --header "Content-Type: application/json" \
+            --data-binary "@latest.json" \
+            "${UPLOAD_URL}?name=latest.json"
 
   publish-release:
     name: Publish Release
@@ -536,4 +564,17 @@ jobs:
       - name: Publish Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "${{ github.ref_name }}" --draft=false
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          jq -n \
+            --arg tag_name "${{ github.ref_name }}" \
+            --arg target_commitish "${{ github.sha }}" \
+            '{
+              tag_name: $tag_name,
+              target_commitish: $target_commitish,
+              draft: false
+            }' > publish-payload.json
+
+          gh api --method PATCH "repos/${REPOSITORY}/releases/${RELEASE_ID}" \
+            --input publish-payload.json
