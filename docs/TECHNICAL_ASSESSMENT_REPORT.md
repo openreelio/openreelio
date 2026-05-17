@@ -68,6 +68,7 @@ Risk:
 
 Controls implemented:
 - Build-time FFmpeg download is now explicit opt-in (`OPENREELIO_DOWNLOAD_FFMPEG=1`).
+- Release CI prepares bundled FFmpeg/FFprobe with `scripts/prepare-bundled-ffmpeg.mjs` instead of triggering a duplicate Rust release build before Tauri packaging.
 
 Residual risk:
 - Download authenticity is not cryptographically pinned to a known checksum.
@@ -131,4 +132,3 @@ Notes:
 - Some DTO fields (e.g. `fileSize`) use Rust `u64` which serializes as JSON number.
 - JavaScript numbers can lose precision above `2^53 - 1`.
 - Mitigation options: migrate wire format to string for large integers, or clamp/document invariants (file sizes remain well below the safe range for expected workloads).
-

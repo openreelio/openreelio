@@ -318,14 +318,12 @@ jobs:
             \( -name 'ffmpeg*' -o -name 'ffprobe*' -o -name 'openreelio-cli*' \) \
             -delete
 
-      - name: Download FFmpeg binaries for target platform
-        working-directory: src-tauri
+      - name: Prepare FFmpeg binaries for target platform
         env:
-          OPENREELIO_DOWNLOAD_FFMPEG: '1'
           # Current upstream FFmpeg URLs are mutable. Keep this explicit so the
           # release job does not pretend these downloads are checksum-pinned.
           OPENREELIO_ALLOW_UNVERIFIED_FFMPEG: '1'
-        run: cargo build --release --target ${{ matrix.target }}
+        run: node scripts/prepare-bundled-ffmpeg.mjs ${{ matrix.target }}
         timeout-minutes: 15
 
       - name: Build bundled OpenReelio CLI

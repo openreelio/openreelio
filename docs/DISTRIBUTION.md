@@ -49,6 +49,8 @@ Pre-built installers must include all non-user-installable runtime tools. The re
 
 Codex CLI is not bundled as a guaranteed runtime dependency. If a feature requires a Codex account or external Codex CLI, keep that feature optional or provide a first-party bundled runtime before making it part of the default install path.
 
+Release CI prepares FFmpeg/FFprobe with `scripts/prepare-bundled-ffmpeg.mjs` before the Tauri bundle step, then verifies each binary. This avoids requiring users to install FFmpeg separately and avoids a duplicate Rust release build just to fetch runtime tools.
+
 ---
 
 ## User Installation Guide
