@@ -432,11 +432,20 @@ jobs:
           const notes = release.body || '';
           const pub_date = release.published_at || new Date().toISOString();
 
+          function releaseAssetUrl(asset) {
+            return `https://github.com/${owner}/${repo}/releases/download/${release.tag_name}/${encodeURIComponent(asset.name)}`;
+          }
+
           async function fetchSignature(sigAsset, assetName) {
             if (!sigAsset) {
               throw new Error(`No signature file found for ${assetName}`);
             }
-            const response = await fetch(sigAsset.browser_download_url, { headers });
+            const response = await fetch(sigAsset.url, {
+              headers: {
+                ...headers,
+                Accept: 'application/octet-stream',
+              },
+            });
             if (!response.ok) {
               throw new Error(`Failed to download signature for ${assetName}: ${response.statusText}`);
             }
@@ -482,7 +491,7 @@ jobs:
             const sigAsset = assets.find((a) => a.name === asset.name + '.sig');
             platforms[platform] = {
               signature: await fetchSignature(sigAsset, asset.name),
-              url: asset.browser_download_url,
+              url: releaseAssetUrl(asset),
             };
           }
 
