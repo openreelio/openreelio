@@ -894,21 +894,19 @@ async fn run_external_command(
     args: &[&str],
     timeout_duration: Duration,
 ) -> Result<String, String> {
-    let output = timeout(
-        timeout_duration,
-        tokio::process::Command::new(executable)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output(),
-    )
-    .await
-    .map_err(|_| format!("{executable} command timed out."))?
-    .map_err(|error| {
-        crate::core::codex::format_codex_io_error(
-            &format!("Failed to run {executable} command"),
-            &error,
-        )
-    })?;
+    let mut command = tokio::process::Command::new(executable);
+    crate::core::process::configure_tokio_command(&mut command);
+    command.args(args).stdin(std::process::Stdio::null());
+
+    let output = timeout(timeout_duration, command.output())
+        .await
+        .map_err(|_| format!("{executable} command timed out."))?
+        .map_err(|error| {
+            crate::core::codex::format_codex_io_error(
+                &format!("Failed to run {executable} command"),
+                &error,
+            )
+        })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
