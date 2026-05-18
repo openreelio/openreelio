@@ -408,7 +408,7 @@ const META_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   {
     name: 'text',
-    description: `Create and edit on-screen text, captions, and subtitles. Use when the user asks for subtitles, captions, or text styling. Actions: ${TEXT_ACTIONS.join(', ')}. Note: auto_transcribe requires the whisper feature; if unavailable, use the query meta-tool with analyze_asset action and analysisTypes ["transcript"] or ["textOcr"] instead.`,
+    description: `Create and edit on-screen text, captions, and subtitles. Use when the user asks for subtitles, captions, or text styling. Actions: ${TEXT_ACTIONS.join(', ')}. Note: auto_transcribe uses local Whisper when available and falls back to a configured transcript analysis provider; for on-screen text or lyrics, use the query meta-tool with analyze_asset action and analysisTypes ["textOcr"] instead.`,
     category: 'clip',
     parameters: {
       type: 'object',
@@ -445,6 +445,7 @@ const META_TOOLS: ToolDefinition[] = [
         position: { type: 'string', description: 'Position: top, center, bottom' },
         language: { type: 'string', description: 'Language code for transcription' },
         model: { type: 'string', description: 'Transcription model name' },
+        provider: { type: 'string', description: 'Optional transcript analysis provider fallback' },
         async: { type: 'boolean', description: 'Run transcription as a background job' },
         relativePath: {
           type: 'string',

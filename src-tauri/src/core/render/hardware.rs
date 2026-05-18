@@ -139,7 +139,9 @@ pub fn detect_available_encoders(ffmpeg_path: &Path) -> AvailableEncoders {
 
 /// Query FFmpeg for the list of supported encoders
 fn query_ffmpeg_encoders(ffmpeg_path: &Path) -> Result<String, String> {
-    let output = Command::new(ffmpeg_path)
+    let mut command = Command::new(ffmpeg_path);
+    crate::core::process::configure_std_command(&mut command);
+    let output = command
         .args(["-encoders", "-hide_banner"])
         .output()
         .map_err(|e| format!("Failed to execute ffmpeg: {}", e))?;
@@ -431,7 +433,9 @@ fn parse_hwaccel_output(output: &str) -> Vec<HardwareDecoderInfo> {
 
 /// Query FFmpeg for the list of supported hardware acceleration methods
 fn query_ffmpeg_hwaccels(ffmpeg_path: &Path) -> Result<String, String> {
-    let output = Command::new(ffmpeg_path)
+    let mut command = Command::new(ffmpeg_path);
+    crate::core::process::configure_std_command(&mut command);
+    let output = command
         .args(["-hwaccels", "-hide_banner"])
         .output()
         .map_err(|e| format!("Failed to execute ffmpeg: {}", e))?;

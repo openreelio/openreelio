@@ -112,7 +112,12 @@ export function AssistantArtifactGroup({
       </button>
 
       {isOpen && (
-        <div className="space-y-2 border-t border-border-subtle px-2.5 py-2">{children}</div>
+        <div
+          className="max-h-72 space-y-2 overflow-y-auto overscroll-contain border-t border-border-subtle px-2.5 py-2"
+          data-testid="assistant-artifact-group-body"
+        >
+          {children}
+        </div>
       )}
     </div>
   );

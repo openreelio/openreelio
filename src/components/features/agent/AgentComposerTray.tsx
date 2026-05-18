@@ -161,11 +161,11 @@ export function AgentComposerTray({
   return (
     <div
       ref={trayRef}
-      className="relative flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-border-subtle px-3 py-1.5"
+      className="relative flex min-h-[37px] min-w-0 items-center gap-2 border-b border-border-subtle px-3 py-1.5"
       data-testid="agent-composer-tray"
     >
-      <div className="flex min-w-0 flex-1 items-center gap-2">
-        <span className="min-w-0 max-w-[12rem] truncate rounded border border-border-subtle bg-surface-base px-2 py-0.5 text-xs font-medium text-text-secondary">
+      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+        <span className="min-w-0 max-w-full truncate rounded border border-border-subtle bg-surface-base px-2 py-0.5 text-xs font-medium text-text-secondary">
           {currentAgentName}
         </span>
         {isExperimentalSession && (
@@ -176,10 +176,10 @@ export function AgentComposerTray({
         {currentAgentDescription && <span className="sr-only">{currentAgentDescription}</span>}
       </div>
 
-      <div className="flex min-w-0 shrink-0 items-center justify-end gap-1.5 overflow-visible">
+      <div className="ml-auto flex min-w-0 max-w-[58%] shrink items-center justify-end gap-1.5 overflow-visible">
         {showRuntime && (
           <div
-            className={`inline-flex min-w-0 max-w-[10rem] items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] ${runtimeTone}`}
+            className={`inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] ${runtimeTone}`}
             data-testid="agent-runtime-pill"
           >
             <span className="truncate">{runtimeLabel}</span>

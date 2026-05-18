@@ -594,7 +594,7 @@ describe('AgenticSidebarContent', () => {
     expect(screen.getByTestId('agentic-chat')).toBeInTheDocument();
   });
 
-  it('shows a transition state while switching sessions', async () => {
+  it('keeps the chat surface mounted while switching sessions', async () => {
     const user = userEvent.setup();
     const deferred = createDeferred<void>();
     const switchSession = vi.fn().mockReturnValue(deferred.promise);
@@ -605,8 +605,8 @@ describe('AgenticSidebarContent', () => {
     await user.click(screen.getByTestId('toggle-sessions-btn'));
     await user.click(screen.getByTestId('mock-session-switch-btn'));
 
-    expect(screen.getByTestId('agent-session-transition-state')).toBeInTheDocument();
-    expect(screen.queryByTestId('agentic-chat')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('agent-session-transition-state')).not.toBeInTheDocument();
+    expect(screen.getByTestId('agentic-chat')).toBeInTheDocument();
     expect(switchSession).toHaveBeenCalledWith('session-2');
     expect(latestSessionListProps).not.toBeNull();
 

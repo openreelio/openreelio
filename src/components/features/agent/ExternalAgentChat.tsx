@@ -1,11 +1,16 @@
-import { forwardRef, useMemo } from 'react';
+import { forwardRef, useCallback, useMemo } from 'react';
 
 import {
   CodexReferenceAdapter,
   ExternalAgentApprovalBroker,
   createTauriExternalAgentSessionPersistence,
+  getExternalAgentApprovalPermissionArgs,
+  getExternalAgentApprovalPermissionToolName,
   useExternalAgentChatRuntime,
+  type ExternalAgentApprovalDecision,
+  type ExternalAgentApprovalRequest,
 } from '@/agents/external';
+import { usePermissionStore } from '@/stores/permissionStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 
 import { AgentRuntimeChatShell, type AgentRuntimeChatHandle } from './AgentRuntimeChatShell';
@@ -42,7 +47,32 @@ export const ExternalAgentChat = forwardRef<AgentRuntimeChatHandle, ExternalAgen
     },
     ref,
   ) {
-    const approvalBroker = useMemo(() => new ExternalAgentApprovalBroker(), []);
+    const resolveExternalApprovalPolicy = useCallback(
+      (request: ExternalAgentApprovalRequest): ExternalAgentApprovalDecision | null => {
+        const resolution = usePermissionStore
+          .getState()
+          .resolvePermissionDetails(
+            getExternalAgentApprovalPermissionToolName(request),
+            getExternalAgentApprovalPermissionArgs(request),
+          );
+
+        if (resolution.permission === 'allow') {
+          return 'accept';
+        }
+        if (resolution.permission === 'deny') {
+          return 'decline';
+        }
+        return null;
+      },
+      [],
+    );
+    const approvalBroker = useMemo(
+      () =>
+        new ExternalAgentApprovalBroker({
+          policyResolver: resolveExternalApprovalPolicy,
+        }),
+      [resolveExternalApprovalPolicy],
+    );
     const sessionPersistence = useMemo(() => createTauriExternalAgentSessionPersistence(), []);
     const codexModel = useSettingsStore((state) => state.settings.ai.codexModel);
     const codexReasoningEffort = useSettingsStore(

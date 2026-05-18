@@ -9,6 +9,7 @@
     "core:window:default",
     "core:window:allow-create",
     "core:window:allow-center",
+    "core:window:allow-close",
     "core:window:allow-set-focus",
     "core:path:default",
     "core:app:default",

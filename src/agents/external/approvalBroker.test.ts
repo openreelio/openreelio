@@ -63,6 +63,39 @@ describe('ExternalAgentApprovalBroker', () => {
     expect(broker.getSnapshot().pending).toBeNull();
   });
 
+  it('should auto-resolve approvals from policy without showing a pending request', async () => {
+    const policyResolver = vi.fn(() => 'accept' as const);
+    const broker = new ExternalAgentApprovalBroker({ timeoutMs: 0, policyResolver });
+    const snapshots: Array<string | null> = [];
+    const decisions: Array<{ id: string; decision: string }> = [];
+    broker.subscribe((snapshot) => snapshots.push(snapshot.pending?.id ?? null));
+    broker.subscribeDecision((resolvedRequest, decision) => {
+      decisions.push({ id: resolvedRequest.id, decision });
+    });
+
+    await expect(broker.requestDecision(request())).resolves.toBe('accept');
+
+    expect(policyResolver).toHaveBeenCalledWith(expect.objectContaining({ id: 'codex-1' }));
+    expect(snapshots).toEqual([null]);
+    expect(broker.getSnapshot().pending).toBeNull();
+    expect(decisions).toEqual([{ id: 'codex-1', decision: 'accept' }]);
+  });
+
+  it('should fall back to pending user approval when policy resolution fails', async () => {
+    const policyResolver = vi.fn().mockRejectedValue(new Error('policy unavailable'));
+    const broker = new ExternalAgentApprovalBroker({ timeoutMs: 0, policyResolver });
+    const snapshots: Array<string | null> = [];
+    broker.subscribe((snapshot) => snapshots.push(snapshot.pending?.id ?? null));
+
+    const decisionPromise = broker.requestDecision(request());
+    await Promise.resolve();
+
+    expect(policyResolver).toHaveBeenCalledWith(expect.objectContaining({ id: 'codex-1' }));
+    expect(snapshots).toEqual([null, 'codex-1']);
+    expect(broker.resolveLatest('accept')).toBe(true);
+    await expect(decisionPromise).resolves.toBe('accept');
+  });
+
   it('should preserve epoch timestamps when ordering pending approvals', () => {
     const broker = new ExternalAgentApprovalBroker({ timeoutMs: 0, now: () => 2_000 });
 

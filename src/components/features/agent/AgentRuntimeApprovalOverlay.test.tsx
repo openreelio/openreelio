@@ -26,7 +26,10 @@ describe('AgentRuntimeApprovalOverlay', () => {
       />,
     );
 
-    expect(screen.getByTestId('agent-runtime-approval-overlay')).toBeInTheDocument();
+    const overlay = screen.getByTestId('agent-runtime-approval-overlay');
+    expect(overlay).toBeInTheDocument();
+    expect(overlay).toHaveClass('bottom-2');
+    expect(overlay).not.toHaveClass('inset-0');
     expect(screen.getByRole('dialog', { name: 'Agent approval request' })).toBeInTheDocument();
     expect(screen.getByTestId('tool-approval-part')).toBeInTheDocument();
 

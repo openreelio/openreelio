@@ -114,6 +114,7 @@ pub fn create_codex_command() -> Result<Command, String> {
         "Codex executable was not found in PATH or common install locations.".to_string()
     })?;
     let mut command = Command::new(executable);
+    crate::core::process::configure_tokio_command(&mut command);
     command.kill_on_drop(true);
     Ok(command)
 }

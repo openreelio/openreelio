@@ -16,11 +16,15 @@ function renderRuntimeShell({
   abort = vi.fn(),
   phase = 'executing',
   isRunning = true,
+  pendingToolPermissionRequest = null,
 }: {
   executeMessage?: ReturnType<typeof vi.fn>;
   abort?: ReturnType<typeof vi.fn>;
   phase?: ComponentProps<typeof AgentRuntimeChatShell>['phase'];
   isRunning?: boolean;
+  pendingToolPermissionRequest?: ComponentProps<
+    typeof AgentRuntimeChatShell
+  >['pendingToolPermissionRequest'];
 } = {}) {
   return render(
     <AgentRuntimeChatShell
@@ -38,7 +42,7 @@ function renderRuntimeShell({
       }}
       plan={null}
       pendingClarificationQuestion={null}
-      pendingToolPermissionRequest={null}
+      pendingToolPermissionRequest={pendingToolPermissionRequest}
       onApprove={() => {}}
       onReject={() => {}}
       onRetry={() => {}}
@@ -125,6 +129,24 @@ describe('AgentRuntimeChatShell', () => {
       useMessageQueueStore.setState({ queue: [] });
       useAgentArtifactReviewStore.getState().clearSelection();
     });
+  });
+
+  it('scopes approval overlays to the message area so the composer remains mounted', () => {
+    renderRuntimeShell({
+      pendingToolPermissionRequest: {
+        id: 'permission-1',
+        tool: 'a_very_long_codex_permission_tool_name_that_should_not_move_the_composer',
+        args: { command: 'npm test' },
+        description: 'Approve a Codex command',
+        riskLevel: 'high',
+      },
+    });
+
+    const messageArea = screen.getByTestId('agent-runtime-shell-message-area');
+    const overlay = screen.getByTestId('agent-runtime-approval-overlay');
+
+    expect(messageArea).toContainElement(overlay);
+    expect(screen.getByTestId('chat-input-area')).toBeInTheDocument();
   });
 
   it('does not dequeue queued prompts after the user stops execution', async () => {

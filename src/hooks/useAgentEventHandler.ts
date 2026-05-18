@@ -24,266 +24,289 @@ import { isAgentError } from '@/agents/engine';
  * Hook that returns an event handler translating AgentEvents
  * into conversationStore actions.
  *
- * Tracks the target sessionId so that events arriving after a
- * session switch are silently dropped instead of mutating the
- * wrong conversation.
+ * Tracks the target sessionId so events continue to update the
+ * original transcript even after the user opens another session.
  */
 export function useAgentEventHandler() {
   const messageIdRef = useRef<string | null>(null);
-  /** The session this handler is bound to. Set on session_start. */
-  const boundSessionIdRef = useRef<string | null>(null);
+  const messageIdBySessionRef = useRef<Map<string, string>>(new Map());
 
-  const handleEvent = useCallback((event: AgentEvent) => {
-    const store = useConversationStore.getState();
+  const getOnlyTrackedMessageId = useCallback((): string | null => {
+    const tracked = Array.from(messageIdBySessionRef.current.values());
+    return tracked.length === 1 ? tracked[0] : null;
+  }, []);
 
-    // Guard: once bound, only accept events for the same active session.
-    // This blocks late events after explicit session switch or clear.
-    if (
-      boundSessionIdRef.current &&
-      event.type !== 'session_start' &&
-      store.activeSessionId !== boundSessionIdRef.current
-    ) {
-      // Active session was explicitly switched to a different session — discard stale events
-      return;
-    }
+  const getMessageIdForEvent = useCallback(
+    (event: AgentEvent): string | null => {
+      const sessionId =
+        event.sessionId || (event.type === 'session_complete' ? event.summary.sessionId : null);
 
-    switch (event.type) {
-      case 'session_start': {
-        if (
-          store.activeSessionId !== event.sessionId ||
-          store.activeConversation?.id !== event.sessionId
-        ) {
-          return;
-        }
-
-        // Bind this handler to the engine's session
-        boundSessionIdRef.current = event.sessionId;
-        // Start a new assistant message for this session
-        const msgId = store.startAssistantMessage(event.sessionId);
-        messageIdRef.current = msgId;
-        break;
+      if (sessionId) {
+        return messageIdBySessionRef.current.get(sessionId) ?? null;
       }
 
-      case 'thinking_complete': {
-        if (messageIdRef.current) {
-          store.appendPart(messageIdRef.current, createThinkingPart(event.thought));
+      return getOnlyTrackedMessageId() ?? messageIdRef.current;
+    },
+    [getOnlyTrackedMessageId],
+  );
+
+  const forgetMessageIdForEvent = useCallback(
+    (event: AgentEvent, messageId: string): void => {
+      const sessionId =
+        event.sessionId || (event.type === 'session_complete' ? event.summary.sessionId : null);
+
+      if (sessionId) {
+        if (messageIdBySessionRef.current.get(sessionId) === messageId) {
+          messageIdBySessionRef.current.delete(sessionId);
         }
-        break;
+      } else {
+        for (const [trackedSessionId, trackedMessageId] of messageIdBySessionRef.current) {
+          if (trackedMessageId === messageId) {
+            messageIdBySessionRef.current.delete(trackedSessionId);
+          }
+        }
       }
 
-      case 'clarification_required': {
-        if (messageIdRef.current) {
-          store.appendPart(messageIdRef.current, createClarificationPart(event.question));
-        }
-        break;
+      if (messageIdRef.current === messageId) {
+        messageIdRef.current = getOnlyTrackedMessageId();
       }
+    },
+    [getOnlyTrackedMessageId],
+  );
 
-      case 'planning_complete': {
-        if (messageIdRef.current) {
-          store.appendPart(messageIdRef.current, createPlanPart(event.plan, 'proposed'));
+  const handleEvent = useCallback(
+    (event: AgentEvent) => {
+      const store = useConversationStore.getState();
+
+      switch (event.type) {
+        case 'session_start': {
+          const msgId = store.startAssistantMessage(event.sessionId);
+          messageIdBySessionRef.current.set(event.sessionId, msgId);
+          messageIdRef.current = msgId;
+          break;
         }
-        break;
-      }
 
-      case 'approval_required': {
-        if (messageIdRef.current) {
-          store.appendPart(messageIdRef.current, createApprovalPart(event.plan, 'pending'));
+        case 'thinking_complete': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            store.appendPart(messageId, createThinkingPart(event.thought));
+          }
+          break;
         }
-        break;
-      }
 
-      case 'approval_response': {
-        if (messageIdRef.current) {
-          // Update approval/plan status parts so UI reflects the user decision.
-          const conv = store.activeConversation;
-          if (conv) {
-            const msg = conv.messages.find((m) => m.id === messageIdRef.current);
-            if (msg) {
-              const approvalPartIndex = msg.parts.findIndex(
+        case 'clarification_required': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            store.appendPart(messageId, createClarificationPart(event.question));
+          }
+          break;
+        }
+
+        case 'planning_complete': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            store.appendPart(messageId, createPlanPart(event.plan, 'proposed'));
+          }
+          break;
+        }
+
+        case 'approval_required': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            store.appendPart(messageId, createApprovalPart(event.plan, 'pending'));
+          }
+          break;
+        }
+
+        case 'approval_response': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            // Update approval/plan status parts so UI reflects the user decision.
+            const parts = store.getMessageParts(messageId);
+            if (parts) {
+              const approvalPartIndex = parts.findIndex(
                 (p) => p.type === 'approval' && p.status === 'pending',
               );
               if (approvalPartIndex >= 0) {
-                store.updatePart(messageIdRef.current, approvalPartIndex, {
+                store.updatePart(messageId, approvalPartIndex, {
                   status: event.approved ? 'approved' : 'rejected',
                 });
               }
 
-              const planPartIndex = msg.parts.findIndex(
+              const planPartIndex = parts.findIndex(
                 (p) => p.type === 'plan' && p.status === 'proposed',
               );
               if (planPartIndex >= 0) {
-                store.updatePart(messageIdRef.current, planPartIndex, {
+                store.updatePart(messageId, planPartIndex, {
                   status: event.approved ? 'approved' : 'rejected',
                 });
               }
             }
           }
+          break;
         }
-        break;
-      }
 
-      case 'execution_start': {
-        if (messageIdRef.current) {
-          store.appendPart(messageIdRef.current, {
-            type: 'tool_call',
-            stepId: event.step.id,
-            tool: event.step.tool,
-            args: event.step.args,
-            description: event.step.description,
-            riskLevel: event.step.riskLevel,
-            status: 'running',
-            startedAt: event.timestamp,
-          });
+        case 'execution_start': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            store.appendPart(messageId, {
+              type: 'tool_call',
+              stepId: event.step.id,
+              tool: event.step.tool,
+              args: event.step.args,
+              description: event.step.description,
+              riskLevel: event.step.riskLevel,
+              status: 'running',
+              startedAt: event.timestamp,
+            });
+          }
+          break;
         }
-        break;
-      }
 
-      case 'execution_complete': {
-        if (messageIdRef.current) {
-          // Update the tool_call status to completed
-          const conv = store.activeConversation;
-          if (conv) {
-            const msg = conv.messages.find((m) => m.id === messageIdRef.current);
-            if (msg) {
-              const callIndex = msg.parts.findIndex(
+        case 'execution_complete': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            // Update the tool_call status to completed
+            const parts = store.getMessageParts(messageId);
+            if (parts) {
+              const callIndex = parts.findIndex(
                 (p) =>
                   p.type === 'tool_call' && p.stepId === event.step.id && p.status === 'running',
               );
               if (callIndex >= 0) {
-                store.updatePart(messageIdRef.current, callIndex, {
+                store.updatePart(messageId, callIndex, {
                   status: event.result.success ? 'completed' : 'failed',
                 });
               }
             }
+
+            // Add tool result part
+            store.appendPart(
+              messageId,
+              createToolResultPart(
+                event.step.id,
+                event.step.tool,
+                event.result.success,
+                event.result.duration,
+                event.result.data,
+                event.result.error,
+              ),
+            );
           }
-
-          // Add tool result part
-          store.appendPart(
-            messageIdRef.current,
-            createToolResultPart(
-              event.step.id,
-              event.step.tool,
-              event.result.success,
-              event.result.duration,
-              event.result.data,
-              event.result.error,
-            ),
-          );
+          break;
         }
-        break;
-      }
 
-      case 'observation_complete': {
-        if (messageIdRef.current) {
-          store.appendPart(messageIdRef.current, createTextPart(event.observation.summary));
+        case 'observation_complete': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            store.appendPart(messageId, createTextPart(event.observation.summary));
+          }
+          break;
         }
-        break;
-      }
 
-      case 'session_complete': {
-        if (messageIdRef.current) {
-          store.finalizeMessage(messageIdRef.current);
-          messageIdRef.current = null;
+        case 'session_complete': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            store.finalizeMessage(messageId);
+            forgetMessageIdForEvent(event, messageId);
+          }
+          break;
         }
-        boundSessionIdRef.current = null;
-        break;
-      }
 
-      case 'session_failed': {
-        if (messageIdRef.current) {
-          const error = event.error;
-          store.appendPart(
-            messageIdRef.current,
-            createErrorPart(
-              isAgentError(error) ? error.code : 'UNKNOWN',
-              error.message,
-              isAgentError(error) ? error.phase : 'unknown',
-              isAgentError(error) ? error.recoverable : false,
-            ),
-          );
-          store.finalizeMessage(messageIdRef.current);
-          messageIdRef.current = null;
+        case 'session_failed': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            const error = event.error;
+            store.appendPart(
+              messageId,
+              createErrorPart(
+                isAgentError(error) ? error.code : 'UNKNOWN',
+                error.message,
+                isAgentError(error) ? error.phase : 'unknown',
+                isAgentError(error) ? error.recoverable : false,
+              ),
+            );
+            store.finalizeMessage(messageId);
+            forgetMessageIdForEvent(event, messageId);
+          }
+          break;
         }
-        boundSessionIdRef.current = null;
-        break;
-      }
 
-      case 'session_aborted': {
-        if (messageIdRef.current) {
-          store.appendPart(
-            messageIdRef.current,
-            createTextPart(`Session aborted: ${event.reason}`),
-          );
-          store.finalizeMessage(messageIdRef.current);
-          messageIdRef.current = null;
+        case 'session_aborted': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            store.appendPart(messageId, createTextPart(`Session aborted: ${event.reason}`));
+            store.finalizeMessage(messageId);
+            forgetMessageIdForEvent(event, messageId);
+          }
+          break;
         }
-        boundSessionIdRef.current = null;
-        break;
-      }
 
-      case 'tool_permission_request': {
-        if (messageIdRef.current) {
-          store.appendPart(messageIdRef.current, {
-            type: 'tool_approval',
-            stepId: event.step.id,
-            tool: event.step.tool,
-            args: event.step.args,
-            description: event.step.description,
-            riskLevel: event.step.riskLevel,
-            status: 'pending',
-          });
+        case 'tool_permission_request': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            store.appendPart(messageId, {
+              type: 'tool_approval',
+              stepId: event.step.id,
+              tool: event.step.tool,
+              args: event.step.args,
+              description: event.step.description,
+              riskLevel: event.step.riskLevel,
+              status: 'pending',
+            });
+          }
+          break;
         }
-        break;
-      }
 
-      case 'tool_permission_response': {
-        if (messageIdRef.current) {
-          const conv = store.activeConversation;
-          if (conv) {
-            const msg = conv.messages.find((m) => m.id === messageIdRef.current);
-            if (msg) {
-              const approvalIndex = msg.parts.findIndex(
+        case 'tool_permission_response': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            const parts = store.getMessageParts(messageId);
+            if (parts) {
+              const approvalIndex = parts.findIndex(
                 (p) =>
                   p.type === 'tool_approval' &&
                   p.stepId === event.step.id &&
                   p.status === 'pending',
               );
               if (approvalIndex >= 0) {
-                store.updatePart(messageIdRef.current, approvalIndex, {
+                store.updatePart(messageId, approvalIndex, {
                   status: event.decision === 'deny' ? 'denied' : 'approved',
                 });
               }
             }
           }
+          break;
         }
-        break;
-      }
 
-      case 'doom_loop_detected': {
-        if (messageIdRef.current) {
-          store.appendPart(
-            messageIdRef.current,
-            createErrorPart(
-              'DOOM_LOOP',
-              `Detected repetitive loop: tool "${event.tool}" called ${event.count} times with identical arguments. Stopping execution.`,
-              'executing',
-              false,
-            ),
-          );
+        case 'doom_loop_detected': {
+          const messageId = getMessageIdForEvent(event);
+          if (messageId) {
+            store.appendPart(
+              messageId,
+              createErrorPart(
+                'DOOM_LOOP',
+                `Detected repetitive loop: tool "${event.tool}" called ${event.count} times with identical arguments. Stopping execution.`,
+                'executing',
+                false,
+              ),
+            );
+          }
+          break;
         }
-        break;
-      }
 
-      // Ignored events (handled by UI directly)
-      case 'thinking_start':
-      case 'thinking_progress':
-      case 'planning_start':
-      case 'planning_progress':
-      case 'execution_progress':
-      case 'iteration_complete':
-        break;
-    }
-  }, []);
+        // Ignored events (handled by UI directly)
+        case 'thinking_start':
+        case 'thinking_progress':
+        case 'planning_start':
+        case 'planning_progress':
+        case 'execution_progress':
+        case 'iteration_complete':
+          break;
+      }
+    },
+    [forgetMessageIdForEvent, getMessageIdForEvent],
+  );
 
   return { handleEvent, messageIdRef };
 }

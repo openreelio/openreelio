@@ -42,12 +42,12 @@ function seedActiveProjectState(): void {
   const clip1 = createMockClip({
     id: 'clip-1',
     assetId: 'asset-1',
-    place: { timelineInSec: 0, durationSec: 5 },
+    place: { timelineInSec: 0, durationSec: 10 },
   });
   const clip2 = createMockClip({
     id: 'clip-2',
     assetId: 'asset-2',
-    place: { timelineInSec: 5, durationSec: 5 },
+    place: { timelineInSec: 10, durationSec: 5 },
   });
   const track = createMockTrack({
     id: 'track-1',

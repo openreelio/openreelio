@@ -5,6 +5,12 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
+import {
+  commands,
+  type AnalysisProvider,
+  type ProviderCapabilities,
+  type TranscriptSegment,
+} from '@/bindings';
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
 import { executeAgentCommand } from './commandExecutor';
@@ -19,6 +25,9 @@ import type { CaptionColor, CaptionPosition, Sequence } from '@/types';
 
 const logger = createLogger('CaptionTools');
 
+const AUTO_TRANSCRIBE_ALTERNATIVES =
+  'Try analyze_asset with analysisTypes ["transcript"] for provider-based speech analysis, or analysisTypes ["textOcr"] for on-screen text.';
+
 interface TranscriptionSegmentInput {
   startTime: number;
   endTime: number;
@@ -28,6 +37,13 @@ interface TranscriptionSegmentInput {
 interface NormalizedTranscriptionSegments {
   segments: TranscriptionSegmentInput[];
   skippedCount: number;
+}
+
+interface AnalysisTranscriptionResult {
+  provider: AnalysisProvider;
+  segments: TranscriptionSegmentInput[];
+  duration: number;
+  fullText: string;
 }
 
 function getSequence(sequenceId: string): Sequence | undefined {
@@ -106,6 +122,100 @@ function parseAgentCaptionPosition(value: unknown): CaptionPosition | undefined 
   }
 
   return undefined;
+}
+
+function isTranscriptCapableProvider(provider: ProviderCapabilities): boolean {
+  return provider.supportedTypes.includes('transcript');
+}
+
+function parseAnalysisProvider(value: unknown): AnalysisProvider | null {
+  if (value && typeof value === 'object' && 'custom' in value) {
+    const custom = (value as { custom?: unknown }).custom;
+    if (typeof custom === 'string' && custom.trim().length > 0) {
+      return { custom: custom.trim() };
+    }
+  }
+
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return null;
+  }
+
+  const provider = value.trim();
+  if (provider === 'ffmpeg' || provider === 'whisper' || provider === 'google_cloud') {
+    return provider;
+  }
+
+  return { custom: provider };
+}
+
+function formatAnalysisProvider(provider: AnalysisProvider): string {
+  return typeof provider === 'string' ? provider : provider.custom;
+}
+
+function convertTranscriptSegments(segments: TranscriptSegment[]): TranscriptionSegmentInput[] {
+  return segments.map((segment) => ({
+    startTime: segment.startSec,
+    endTime: segment.endSec,
+    text: segment.text,
+  }));
+}
+
+async function resolveTranscriptAnalysisProvider(
+  explicitProvider: unknown,
+): Promise<AnalysisProvider | null> {
+  const parsedProvider = parseAnalysisProvider(explicitProvider);
+  if (parsedProvider) {
+    return parsedProvider;
+  }
+
+  const providersResponse = await commands.getAvailableProviders();
+  if (providersResponse.status === 'error') {
+    throw new Error(providersResponse.error);
+  }
+
+  const providers = Array.isArray(providersResponse.data) ? providersResponse.data : [];
+  return providers.find(isTranscriptCapableProvider)?.provider ?? null;
+}
+
+async function transcribeWithAnalysisProvider(
+  assetId: string,
+  explicitProvider: unknown,
+): Promise<AnalysisTranscriptionResult> {
+  const provider = await resolveTranscriptAnalysisProvider(explicitProvider);
+  if (!provider) {
+    throw new Error(
+      'No transcript-capable analysis provider is configured. Configure a provider that supports transcript analysis or enable the whisper build feature.',
+    );
+  }
+
+  const response = await commands.analyzeAsset({
+    assetId,
+    provider,
+    analysisTypes: ['transcript'],
+  });
+
+  if (response.status === 'error') {
+    throw new Error(response.error);
+  }
+
+  const transcriptSegments = response.data.response.transcript?.results ?? [];
+  const segments = convertTranscriptSegments(transcriptSegments);
+  const normalized = normalizeTranscriptionSegments(segments);
+  if (normalized.segments.length === 0) {
+    throw new Error(
+      `Transcript provider '${formatAnalysisProvider(provider)}' returned no valid transcript segments.`,
+    );
+  }
+
+  return {
+    provider,
+    segments: normalized.segments,
+    duration: normalized.segments.reduce(
+      (maxEnd, segment) => Math.max(maxEnd, segment.endTime),
+      0,
+    ),
+    fullText: normalized.segments.map((segment) => segment.text).join(' '),
+  };
 }
 
 async function ensureCaptionTrack(
@@ -644,8 +754,7 @@ const CAPTION_TOOLS: ToolDefinition[] = [
   {
     name: 'auto_transcribe',
     description:
-      'Transcribe an asset using local speech-to-text (Whisper). Requires the whisper feature to be enabled at build time. ' +
-      'If unavailable, use the query meta-tool with action "analyze_asset" and analysisTypes ["transcript"] with an external provider instead. ' +
+      'Transcribe an asset into timed text segments. Uses local Whisper when available, otherwise falls back to a configured transcript analysis provider. ' +
       'For on-screen text/lyrics, use action "analyze_asset" with analysisTypes ["textOcr"].',
     category: 'utility',
     parameters: {
@@ -663,6 +772,11 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           type: 'string',
           enum: ['tiny', 'base', 'small', 'medium', 'large'],
           description: 'Whisper model size (default: base)',
+        },
+        provider: {
+          type: 'string',
+          description:
+            'Optional transcript analysis provider fallback when local Whisper is unavailable',
         },
         async: {
           type: 'boolean',
@@ -685,18 +799,40 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         }
 
         if (!whisperAvailable) {
-          logger.warn('auto_transcribe: whisper not available, returning alternatives', {
+          logger.warn('auto_transcribe: local whisper unavailable, trying analysis fallback', {
             assetId,
           });
-          return {
-            success: false,
-            error:
-              'Local transcription (Whisper) is not available in this build. ' +
-              'Use these alternatives instead: ' +
-              '(1) Use the query meta-tool with action "analyze_asset", assetId, and analysisTypes ["transcript"] with an external provider (e.g., provider: "google_cloud") for speech-to-text. ' +
-              '(2) For on-screen text or lyrics, use the query meta-tool with action "analyze_asset", assetId, and analysisTypes ["textOcr"]. ' +
-              '(3) To enable local transcription, rebuild with --features whisper.',
-          };
+          try {
+            const fallbackResult = await transcribeWithAnalysisProvider(assetId, args.provider);
+            logger.info('Transcription completed through analysis provider fallback', {
+              assetId,
+              provider: formatAnalysisProvider(fallbackResult.provider),
+              segmentCount: fallbackResult.segments.length,
+            });
+
+            return {
+              success: true,
+              result: {
+                mode: 'analysis',
+                provider: fallbackResult.provider,
+                language: args.language ?? 'unknown',
+                segments: fallbackResult.segments,
+                segmentCount: fallbackResult.segments.length,
+                duration: fallbackResult.duration,
+                fullText: fallbackResult.fullText,
+              },
+            };
+          } catch (fallbackError) {
+            const fallbackMessage =
+              fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+            const normalizedFallbackMessage = fallbackMessage.replace(/[.!?]\s*$/, '');
+            return {
+              success: false,
+              error:
+                'Local transcription (Whisper) is not available in this build, and provider fallback failed: ' +
+                `${normalizedFallbackMessage}. ${AUTO_TRANSCRIBE_ALTERNATIVES}`,
+            };
+          }
         }
 
         const options: Record<string, unknown> = {};

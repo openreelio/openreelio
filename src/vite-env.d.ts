@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
 
+declare const __APP_VERSION__: string | undefined;
+
 interface ImportMetaEnv {
   readonly DEV: boolean;
   readonly PROD: boolean;

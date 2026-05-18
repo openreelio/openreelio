@@ -337,28 +337,33 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
         )}
         <AgentArtifactDetailPanel messages={messages} focus={artifactFocus} className="shrink-0" />
 
-        <ChatMessageList
-          messages={messages}
-          conversationId={activeConversationId}
-          error={error}
-          onApprove={onApprove}
-          onReject={onReject}
-          onRetry={onRetry}
-          onToolAllow={onToolAllow}
-          onToolAllowAlways={onToolAllowAlways}
-          onToolDeny={onToolDeny}
-          artifactFocus={artifactFocus}
-        />
+        <div
+          className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
+          data-testid={`${chatTestId}-message-area`}
+        >
+          <ChatMessageList
+            messages={messages}
+            conversationId={activeConversationId}
+            error={error}
+            onApprove={onApprove}
+            onReject={onReject}
+            onRetry={onRetry}
+            onToolAllow={onToolAllow}
+            onToolAllowAlways={onToolAllowAlways}
+            onToolDeny={onToolDeny}
+            artifactFocus={artifactFocus}
+          />
 
-        <AgentRuntimeApprovalOverlay
-          pendingPlan={phase === 'awaiting_approval' ? plan : null}
-          pendingToolPermissionRequest={pendingToolPermissionRequest}
-          onApprove={onApprove}
-          onReject={onReject}
-          onToolAllow={onToolAllow}
-          onToolAllowAlways={onToolAllowAlways}
-          onToolDeny={onToolDeny}
-        />
+          <AgentRuntimeApprovalOverlay
+            pendingPlan={phase === 'awaiting_approval' ? plan : null}
+            pendingToolPermissionRequest={pendingToolPermissionRequest}
+            onApprove={onApprove}
+            onReject={onReject}
+            onToolAllow={onToolAllow}
+            onToolAllowAlways={onToolAllowAlways}
+            onToolDeny={onToolDeny}
+          />
+        </div>
 
         <ChatInputArea
           input={input}

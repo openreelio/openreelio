@@ -1,12 +1,20 @@
 /// <reference types="vitest" />
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { visualizer } from 'rollup-plugin-visualizer';
 
 // https://vitejs.dev/config/
 const rootDir = fileURLToPath(new URL('.', import.meta.url));
+const packageManifest = JSON.parse(readFileSync(resolve(rootDir, 'package.json'), 'utf-8')) as {
+  version?: string;
+};
+const appVersion =
+  typeof packageManifest.version === 'string' && packageManifest.version.length > 0
+    ? packageManifest.version
+    : '0.0.0';
 
 export default defineConfig(({ mode }) => {
   const isStressRun = process.env.VITEST_STRESS === '1';
@@ -34,6 +42,9 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react(), ...analyzePlugins],
+    define: {
+      __APP_VERSION__: JSON.stringify(appVersion),
+    },
     resolve: {
       alias: {
         '@': resolve(rootDir, 'src'),

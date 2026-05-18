@@ -247,7 +247,7 @@ describe('ConversationMessageItem', () => {
       expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();
     });
 
-    it('should reveal running and failed artifacts by default', () => {
+    it('should keep running and failed artifacts collapsed by default', () => {
       const runningMessage: ConversationMessage = {
         id: 'msg-7c',
         role: 'assistant',
@@ -266,7 +266,8 @@ describe('ConversationMessageItem', () => {
       };
       const { rerender } = render(<ConversationMessageItem message={runningMessage} />);
 
-      expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
+      expect(screen.getByText('Running')).toBeInTheDocument();
+      expect(screen.queryByTestId('tool-call-part')).not.toBeInTheDocument();
 
       const failedMessage: ConversationMessage = {
         id: 'msg-7d',
@@ -285,7 +286,8 @@ describe('ConversationMessageItem', () => {
       };
       rerender(<ConversationMessageItem message={failedMessage} />);
 
-      expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();
+      expect(screen.getByText('Attention')).toBeInTheDocument();
+      expect(screen.queryByTestId('tool-result-part')).not.toBeInTheDocument();
     });
   });
 

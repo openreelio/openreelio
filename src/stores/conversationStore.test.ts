@@ -68,6 +68,8 @@ beforeEach(() => {
   // Reset store state
   useConversationStore.setState({
     activeConversation: null,
+    conversationsBySessionId: {},
+    sessionGenerationBySessionId: {},
     isGenerating: false,
     streamingMessageId: null,
     activeProjectId: null,
@@ -475,6 +477,69 @@ describe('ConversationStore', () => {
       expect(state.activeConversation?.id).toBe('session-2');
     });
 
+    it('should restore live generation state when switching back to a cached session', async () => {
+      const now = Date.now();
+      const sessions = ['session-1', 'session-2'].map((id, index) => ({
+        id,
+        projectId: 'project-1',
+        title: id,
+        agent: 'editor',
+        modelProvider: null,
+        modelId: null,
+        createdAt: now + index,
+        updatedAt: now + index,
+        archived: false,
+        messageCount: 0,
+        lastMessagePreview: null,
+      }));
+
+      mockInvoke.mockImplementation(async (command: string, payload?: { sessionId?: string }) => {
+        if (command === 'list_ai_sessions') {
+          return [];
+        }
+
+        if (command === 'get_ai_session') {
+          const session = sessions.find((candidate) => candidate.id === payload?.sessionId);
+          return { session, messages: [] };
+        }
+
+        return undefined;
+      });
+
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+      useConversationStore.setState((state) => ({
+        ...state,
+        activeSessionId: 'session-1',
+        activeConversation: {
+          id: 'session-1',
+          projectId: 'project-1',
+          messages: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+        sessions,
+      }));
+
+      const msgId = store.startAssistantMessage('session-1');
+      await store.switchSession('session-2');
+
+      expect(useConversationStore.getState().isGenerating).toBe(false);
+      expect(useConversationStore.getState().streamingMessageId).toBeNull();
+
+      await store.switchSession('session-1');
+
+      expect(useConversationStore.getState().isGenerating).toBe(true);
+      expect(useConversationStore.getState().streamingMessageId).toBe(msgId);
+
+      await store.switchSession('session-2');
+      store.finalizeMessage(msgId);
+      await store.switchSession('session-1');
+
+      expect(useConversationStore.getState().isGenerating).toBe(false);
+      expect(useConversationStore.getState().streamingMessageId).toBeNull();
+    });
+
     it('should reset stale permission rules and hydrate the activated session rules', async () => {
       mockInvoke.mockImplementation(async (command: string) => {
         if (command === 'list_ai_sessions') {
@@ -651,6 +716,52 @@ describe('ConversationStore', () => {
       expect(msg.role).toBe('assistant');
       expect(msg.parts).toEqual([]);
       expect(msg.sessionId).toBe('session-1');
+    });
+
+    it('should keep assistant output for an inactive session in the session transcript cache', () => {
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+
+      useConversationStore.setState((state) => ({
+        ...state,
+        activeSessionId: 'session-1',
+        activeConversation: {
+          id: 'session-1',
+          projectId: 'project-1',
+          messages: [],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        sessions: [
+          {
+            id: 'session-2',
+            projectId: 'project-1',
+            title: 'Background Session',
+            agent: 'codex',
+            modelProvider: null,
+            modelId: null,
+            createdAt: 2,
+            updatedAt: 2,
+            archived: false,
+            messageCount: 0,
+            lastMessagePreview: null,
+          },
+        ],
+      }));
+
+      const msgId = store.startAssistantMessage('session-2');
+      store.appendPart(msgId, createTextPart('finished in the background'));
+
+      const state = useConversationStore.getState();
+      expect(state.activeConversation?.messages).toHaveLength(0);
+      expect(state.conversationsBySessionId['session-2'].messages[0]).toMatchObject({
+        id: msgId,
+        sessionId: 'session-2',
+        parts: [{ type: 'text', content: 'finished in the background' }],
+      });
+      expect(state.getMessageParts(msgId)).toEqual([
+        { type: 'text', content: 'finished in the background' },
+      ]);
     });
   });
 

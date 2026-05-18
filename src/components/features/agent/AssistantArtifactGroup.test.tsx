@@ -158,4 +158,31 @@ describe('AssistantArtifactGroup', () => {
 
     expect(screen.queryByTestId('artifact-child')).not.toBeInTheDocument();
   });
+
+  it('constrains expanded details so large action logs do not take over the chat', async () => {
+    const user = userEvent.setup();
+    render(
+      <AssistantArtifactGroup
+        toolCallCount={40}
+        toolResultCount={40}
+        patchPartCount={0}
+        patchFileCount={0}
+        hasCompaction={false}
+        hasRunningArtifacts
+        hasFailedArtifacts
+        defaultOpen={false}
+      >
+        {Array.from({ length: 80 }, (_, index) => (
+          <div key={index}>artifact {index}</div>
+        ))}
+      </AssistantArtifactGroup>,
+    );
+
+    await user.click(screen.getByTestId('assistant-artifact-toggle'));
+
+    expect(screen.getByTestId('assistant-artifact-group-body')).toHaveClass(
+      'max-h-72',
+      'overflow-y-auto',
+    );
+  });
 });

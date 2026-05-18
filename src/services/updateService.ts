@@ -7,6 +7,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { createLogger } from './logger';
+import { APP_VERSION, normalizeAppVersion } from '@/config/appVersion';
 
 const logger = createLogger('UpdateService');
 
@@ -61,14 +62,15 @@ export interface UpdateInfo {
  */
 export async function getCurrentVersion(): Promise<string> {
   if (!isTauriRuntime()) {
-    return 'web';
+    return APP_VERSION;
   }
 
   try {
-    return await invoke<string>('get_current_version');
+    const version = await invoke<string | null>('get_current_version');
+    return normalizeAppVersion(version);
   } catch (error) {
     logger.error('Failed to get current version', { error });
-    return 'unknown';
+    return APP_VERSION;
   }
 }
 
@@ -103,7 +105,9 @@ export async function checkForUpdates(): Promise<UpdateInfo> {
       logger.info('Application is up to date', { version: result.version });
       return {
         available: false,
-        currentVersion: result.version ?? (await getCurrentVersion()),
+        currentVersion: result.version
+          ? normalizeAppVersion(result.version)
+          : await getCurrentVersion(),
       };
     } else {
       // Error case

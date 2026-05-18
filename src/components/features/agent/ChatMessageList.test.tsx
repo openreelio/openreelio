@@ -5,13 +5,20 @@ import { ChatMessageList } from './ChatMessageList';
 
 describe('ChatMessageList', () => {
   const scrollIntoView = vi.fn();
+  const scrollTo = vi.fn();
   const originalScrollIntoView = Element.prototype.scrollIntoView;
+  const originalScrollTo = HTMLElement.prototype.scrollTo;
 
   beforeEach(() => {
     scrollIntoView.mockReset();
+    scrollTo.mockReset();
     Object.defineProperty(Element.prototype, 'scrollIntoView', {
       configurable: true,
       value: scrollIntoView,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
     });
   });
 
@@ -20,6 +27,63 @@ describe('ChatMessageList', () => {
       configurable: true,
       value: originalScrollIntoView,
     });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: originalScrollTo,
+    });
+  });
+
+  it('keeps automatic scrolling inside the message list container', async () => {
+    const { rerender } = render(
+      <ChatMessageList
+        messages={[
+          {
+            id: 'msg-1',
+            role: 'assistant',
+            parts: [{ type: 'text', content: 'Starting work' }],
+            timestamp: 1,
+          },
+        ]}
+        error={null}
+        onApprove={() => {}}
+        onReject={() => {}}
+        onRetry={() => {}}
+        onToolAllow={() => {}}
+        onToolAllowAlways={() => {}}
+        onToolDeny={() => {}}
+      />,
+    );
+
+    rerender(
+      <ChatMessageList
+        messages={[
+          {
+            id: 'msg-1',
+            role: 'assistant',
+            parts: [{ type: 'text', content: 'Starting work' }],
+            timestamp: 1,
+          },
+          {
+            id: 'msg-2',
+            role: 'assistant',
+            parts: [{ type: 'text', content: 'Streaming next token' }],
+            timestamp: 2,
+          },
+        ]}
+        error={null}
+        onApprove={() => {}}
+        onReject={() => {}}
+        onRetry={() => {}}
+        onToolAllow={() => {}}
+        onToolAllowAlways={() => {}}
+        onToolDeny={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(scrollTo).toHaveBeenCalled();
+    });
+    expect(scrollIntoView).not.toHaveBeenCalled();
   });
 
   it('scrolls to the latest matching artifact message without expanding inline details', async () => {
@@ -71,9 +135,10 @@ describe('ChatMessageList', () => {
     );
 
     await waitFor(() => {
-      expect(scrollIntoView).toHaveBeenCalled();
+      expect(scrollTo).toHaveBeenCalled();
     });
 
+    expect(scrollIntoView).not.toHaveBeenCalled();
     expect(screen.getByTestId('assistant-artifact-group')).toBeInTheDocument();
     expect(screen.queryByTestId('tool-call-part')).not.toBeInTheDocument();
   });

@@ -6,7 +6,8 @@
  */
 
 import { useCallback, useMemo } from 'react';
-import { FolderOpen, Clock, Film, Trash2 } from 'lucide-react';
+import { ChevronRight, Clock, Film, FolderOpen, Loader2, Trash2 } from 'lucide-react';
+import { APP_VERSION, formatAppVersion } from '@/config/appVersion';
 
 // =============================================================================
 // Types
@@ -37,10 +38,6 @@ export interface WelcomeScreenProps {
   isLoading?: boolean;
   /** App version to display */
   version?: string;
-  /** Whether to show "Don't show again" checkbox */
-  showDontShowOption?: boolean;
-  /** Callback when user toggles "Don't show again" */
-  onDontShowAgain?: (dontShow: boolean) => void;
   /** Callback when user wants to clear all recent projects */
   onClearRecentProjects?: () => void;
 }
@@ -53,9 +50,7 @@ export function WelcomeScreen({
   onOpenFolder,
   recentProjects = [],
   isLoading = false,
-  version = '0.1.0',
-  showDontShowOption = false,
-  onDontShowAgain,
+  version = APP_VERSION,
   onClearRecentProjects,
 }: WelcomeScreenProps): JSX.Element {
   // ===========================================================================
@@ -65,10 +60,11 @@ export function WelcomeScreen({
   // Limit displayed projects to prevent UI overflow
   const displayedProjects = useMemo(
     () => recentProjects.slice(0, MAX_DISPLAY_PROJECTS),
-    [recentProjects]
+    [recentProjects],
   );
 
   const hasMoreProjects = recentProjects.length > MAX_DISPLAY_PROJECTS;
+  const versionLabel = formatAppVersion(version);
 
   // ===========================================================================
   // Handlers
@@ -82,7 +78,7 @@ export function WelcomeScreen({
     (path: string) => {
       onOpenFolder(path);
     },
-    [onOpenFolder]
+    [onOpenFolder],
   );
 
   const handleClearRecentProjects = useCallback(() => {
@@ -95,6 +91,8 @@ export function WelcomeScreen({
 
   const formatLastOpened = (isoDate: string): string => {
     const date = new Date(isoDate);
+    if (Number.isNaN(date.getTime())) return 'Unknown';
+
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
     const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
@@ -114,114 +112,140 @@ export function WelcomeScreen({
     <div
       data-testid="welcome-screen"
       role="main"
-      className="flex flex-col items-center justify-center min-h-full bg-editor-bg text-editor-text p-4 sm:p-8"
+      className="min-h-full bg-editor-bg text-editor-text"
     >
-      {/* Logo and Title */}
-      <div className="text-center mb-8 sm:mb-12">
-        <div className="w-20 h-20 sm:w-24 sm:h-24 mx-auto mb-4 sm:mb-6 bg-primary-600 rounded-2xl flex items-center justify-center shadow-lg">
-          <Film className="w-10 h-10 sm:w-12 sm:h-12 text-white" />
-        </div>
-        <h1 className="text-3xl sm:text-4xl font-bold text-editor-text mb-2">OpenReelio</h1>
-        <p className="text-editor-text-muted text-base sm:text-lg">
-          AI-powered video editing IDE
-        </p>
-      </div>
-
-      {/* Action Button */}
-      <div className="flex mb-8 sm:mb-12 w-full sm:w-auto px-4 sm:px-0">
-        <button
-          data-testid="open-folder-button"
-          aria-label="Open a folder as project"
-          disabled={isLoading}
-          onClick={handleOpenFolder}
-          className="flex items-center justify-center gap-3 px-8 py-4 bg-primary-600 hover:bg-primary-700 disabled:bg-primary-800 disabled:cursor-not-allowed text-white rounded-lg transition-colors shadow-md w-full sm:w-auto"
-        >
-          <FolderOpen className="w-5 h-5" />
-          <span className="font-medium">Open Folder</span>
-        </button>
-      </div>
-
-      {/* Recent Projects */}
-      {recentProjects.length > 0 && (
-        <div
-          data-testid="recent-projects-section"
-          className="w-full max-w-md px-4 sm:px-0"
-        >
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2 text-editor-text-muted">
-              <Clock className="w-4 h-4 flex-shrink-0" />
-              <h2 className="text-sm font-medium uppercase tracking-wide">
-                Recent Projects
-              </h2>
+      <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-5 py-5 sm:px-8 sm:py-7">
+        <header className="flex items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-primary-600 text-white shadow-md shadow-black/30">
+              <Film className="h-5 w-5" aria-hidden="true" />
             </div>
-            {onClearRecentProjects && (
-              <button
-                data-testid="clear-recent-projects-button"
-                onClick={handleClearRecentProjects}
-                disabled={isLoading}
-                className="flex items-center gap-1.5 px-2 py-1 text-xs text-editor-text-muted hover:text-red-400 transition-colors disabled:opacity-50"
-                title="Clear all recent projects"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>Clear</span>
-              </button>
-            )}
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-editor-text">OpenReelio</p>
+              <p className="text-xs text-editor-text-muted">Project Launcher</p>
+            </div>
           </div>
+          <p className="shrink-0 rounded border border-editor-border bg-editor-panel px-2.5 py-1 text-xs font-medium text-editor-text-muted">
+            {versionLabel}
+          </p>
+        </header>
 
-          <ul className="space-y-2">
-            {displayedProjects.map((project) => (
-              <li key={project.id}>
-                <button
-                  data-testid={`recent-project-${project.id}`}
-                  onClick={() => handleRecentProjectClick(project.path)}
-                  disabled={isLoading}
-                  className="w-full flex items-center gap-3 p-3 bg-editor-panel hover:bg-editor-sidebar border border-editor-border rounded-lg transition-colors text-left disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <div className="w-10 h-10 bg-editor-bg rounded flex items-center justify-center flex-shrink-0">
-                    <Film className="w-5 h-5 text-primary-500" />
-                  </div>
-                  <div className="flex-1 min-w-0 overflow-hidden">
-                    <p className="font-medium text-editor-text truncate" title={project.name}>
-                      {project.name}
-                    </p>
-                    <p className="text-xs text-editor-text-muted truncate" title={project.path}>
-                      {project.path}
-                    </p>
-                  </div>
-                  <span className="text-xs text-editor-text-muted flex-shrink-0 whitespace-nowrap">
-                    {formatLastOpened(project.lastOpened)}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-
-          {hasMoreProjects && (
-            <p className="mt-3 text-xs text-editor-text-muted text-center">
-              +{recentProjects.length - MAX_DISPLAY_PROJECTS} more project{recentProjects.length - MAX_DISPLAY_PROJECTS > 1 ? 's' : ''} (oldest auto-removed)
+        <main className="grid flex-1 items-center gap-8 py-8 lg:grid-cols-[minmax(0,0.9fr)_minmax(380px,1fr)]">
+          <section className="min-w-0">
+            <p className="mb-3 text-sm font-medium uppercase text-primary-400">Workspace</p>
+            <h1 className="max-w-xl text-3xl font-semibold leading-tight text-editor-text sm:text-4xl">
+              Select a project folder
+            </h1>
+            <p className="mt-4 max-w-lg text-sm leading-6 text-editor-text-muted sm:text-base">
+              Open an existing OpenReelio workspace or choose a folder to initialize a new project.
             </p>
-          )}
-        </div>
-      )}
 
-      {/* Don't Show Again Option */}
-      {showDontShowOption && (
-        <label className="mt-8 flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            onChange={(e) => onDontShowAgain?.(e.target.checked)}
-            className="w-4 h-4 rounded border-editor-border bg-editor-bg text-primary-500 focus:ring-primary-500/50 focus:ring-offset-0"
-          />
-          <span className="text-sm text-editor-text-muted">
-            Don&apos;t show this on startup
-          </span>
-        </label>
-      )}
+            <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+              <button
+                data-testid="open-folder-button"
+                aria-label="Open a folder as project"
+                disabled={isLoading}
+                onClick={handleOpenFolder}
+                className="inline-flex min-h-[3rem] w-full items-center justify-center gap-2 rounded-md bg-primary-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-black/25 transition-colors hover:bg-primary-500 disabled:cursor-not-allowed disabled:bg-primary-800 disabled:text-white/60 sm:w-auto"
+              >
+                {isLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <FolderOpen className="h-4 w-4" aria-hidden="true" />
+                )}
+                <span>{isLoading ? 'Opening...' : 'Open Folder'}</span>
+              </button>
+            </div>
+          </section>
 
-      {/* Version Info */}
-      <p className="mt-8 text-xs text-editor-text-muted">
-        Version {version} (MVP)
-      </p>
+          <section
+            data-testid="recent-projects-section"
+            className="min-w-0 rounded-md border border-editor-border bg-editor-panel/80 shadow-2xl shadow-black/20"
+            aria-label="Recent projects"
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-editor-border px-4 py-3">
+              <div className="flex min-w-0 items-center gap-2 text-editor-text-muted">
+                <Clock className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <h2 className="truncate text-xs font-semibold uppercase">Recent Projects</h2>
+              </div>
+              {recentProjects.length > 0 && onClearRecentProjects && (
+                <button
+                  data-testid="clear-recent-projects-button"
+                  type="button"
+                  onClick={handleClearRecentProjects}
+                  disabled={isLoading}
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-editor-text-muted transition-colors hover:bg-editor-hover hover:text-status-error disabled:cursor-not-allowed disabled:opacity-50"
+                  title="Clear recent projects"
+                  aria-label="Clear recent projects"
+                >
+                  <Trash2 className="h-4 w-4" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+
+            {recentProjects.length > 0 ? (
+              <>
+                <ul className="max-h-[22rem] overflow-y-auto p-2">
+                  {displayedProjects.map((project) => (
+                    <li key={project.id}>
+                      <button
+                        data-testid={`recent-project-${project.id}`}
+                        type="button"
+                        onClick={() => handleRecentProjectClick(project.path)}
+                        disabled={isLoading}
+                        className="group flex w-full items-center gap-3 rounded-md border border-transparent p-3 text-left transition-colors hover:border-editor-border hover:bg-editor-hover disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded bg-editor-bg text-primary-400">
+                          <FolderOpen className="h-5 w-5" aria-hidden="true" />
+                        </div>
+                        <div className="min-w-0 flex-1 overflow-hidden">
+                          <p
+                            className="truncate text-sm font-medium text-editor-text"
+                            title={project.name}
+                          >
+                            {project.name}
+                          </p>
+                          <p
+                            className="truncate text-xs text-editor-text-muted"
+                            title={project.path}
+                          >
+                            {project.path}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <span className="hidden text-xs text-editor-text-muted sm:inline">
+                            {formatLastOpened(project.lastOpened)}
+                          </span>
+                          <ChevronRight
+                            className="h-4 w-4 text-editor-text-muted opacity-0 transition-opacity group-hover:opacity-100"
+                            aria-hidden="true"
+                          />
+                        </div>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+
+                {hasMoreProjects && (
+                  <p className="border-t border-editor-border px-4 py-3 text-center text-xs text-editor-text-muted">
+                    Showing {MAX_DISPLAY_PROJECTS} of {recentProjects.length} projects
+                  </p>
+                )}
+              </>
+            ) : (
+              <div className="flex min-h-[14rem] flex-col items-center justify-center px-6 py-10 text-center">
+                <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-md bg-editor-bg text-editor-text-muted">
+                  <FolderOpen className="h-6 w-6" aria-hidden="true" />
+                </div>
+                <p className="text-sm font-medium text-editor-text">No recent projects</p>
+                <p className="mt-1 max-w-xs text-xs leading-5 text-editor-text-muted">
+                  Open a folder to add it to this list.
+                </p>
+              </div>
+            )}
+          </section>
+        </main>
+      </div>
     </div>
   );
 }

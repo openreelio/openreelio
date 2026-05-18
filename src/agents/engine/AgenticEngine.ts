@@ -1983,10 +1983,21 @@ export class AgenticEngine {
   private emitEvent(onEvent: ((event: AgentEvent) => void) | undefined, event: AgentEvent): void {
     if (!onEvent) return;
     try {
-      onEvent(event);
+      onEvent(this.withActiveSessionId(event));
     } catch (error) {
       logger.error('Error in agent event handler', { error });
     }
+  }
+
+  private withActiveSessionId(event: AgentEvent): AgentEvent {
+    if (event.sessionId) {
+      return event;
+    }
+
+    const sessionId =
+      event.type === 'session_complete' ? event.summary.sessionId : this.activeSessionId;
+
+    return sessionId ? { ...event, sessionId } : event;
   }
 
   private async hydrateContextWithMemory(agentContext: AgentContext): Promise<AgentContext> {

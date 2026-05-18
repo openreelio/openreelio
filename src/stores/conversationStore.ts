@@ -71,6 +71,10 @@ export interface SessionSummary {
 export interface ConversationState {
   /** The active conversation (loaded per project or session) */
   activeConversation: Conversation | null;
+  /** In-memory transcripts keyed by session so background runs survive session switches. */
+  conversationsBySessionId: Record<string, Conversation>;
+  /** Streaming status keyed by session so live background runs survive session switches. */
+  sessionGenerationBySessionId: Record<string, ConversationSessionGenerationState>;
   /** Whether the AI is currently generating a response */
   isGenerating: boolean;
   /** The message ID currently being streamed */
@@ -81,6 +85,11 @@ export interface ConversationState {
   activeSessionId: string | null;
   /** Available sessions for the active project */
   sessions: SessionSummary[];
+}
+
+export interface ConversationSessionGenerationState {
+  isGenerating: boolean;
+  streamingMessageId: string | null;
 }
 
 export interface ConversationActions {
@@ -111,6 +120,8 @@ export interface ConversationActions {
   updatePart: (messageId: string, partIndex: number, update: Partial<MessagePart>) => void;
   /** Finalize a streaming message (mark generation as complete) */
   finalizeMessage: (messageId: string, usage?: TokenUsage) => void;
+  /** Return message parts by message ID, including inactive cached sessions. */
+  getMessageParts: (messageId: string) => MessagePart[] | null;
   /** Add a system message */
   addSystemMessage: (content: string) => string;
   /** Add a system message to a specific session */
@@ -142,6 +153,96 @@ interface PendingMessageSave {
 const pendingMessageSaves = new Map<string, PendingMessageSave>();
 const pendingSessionCreationByProject = new Map<string, Promise<string | null>>();
 let latestSwitchSessionRequestToken = 0;
+
+function createConversationForSession(state: ConversationState, sessionId: string): Conversation {
+  const session = state.sessions.find((candidate) => candidate.id === sessionId);
+  const conversation = createConversation(
+    session?.projectId ?? state.activeProjectId ?? state.activeConversation?.projectId ?? 'unknown',
+  );
+  conversation.id = sessionId;
+  if (session) {
+    conversation.createdAt = session.createdAt;
+    conversation.updatedAt = session.updatedAt;
+  }
+  return conversation;
+}
+
+function getOrCreateConversationForSession(
+  state: ConversationState,
+  sessionId: string,
+): Conversation {
+  if (state.activeSessionId === sessionId && state.activeConversation) {
+    return state.activeConversation;
+  }
+
+  const existing = state.conversationsBySessionId[sessionId];
+  if (existing) {
+    return existing;
+  }
+
+  const created = createConversationForSession(state, sessionId);
+  state.conversationsBySessionId[sessionId] = created;
+  return created;
+}
+
+function rememberActiveSessionGeneration(state: ConversationState): void {
+  if (!state.activeSessionId) {
+    return;
+  }
+
+  state.sessionGenerationBySessionId[state.activeSessionId] = {
+    isGenerating: state.isGenerating,
+    streamingMessageId: state.streamingMessageId,
+  };
+}
+
+function restoreSessionGeneration(state: ConversationState, sessionId: string): void {
+  const generation = state.sessionGenerationBySessionId[sessionId];
+  state.isGenerating = generation?.isGenerating ?? false;
+  state.streamingMessageId = generation?.streamingMessageId ?? null;
+}
+
+function clearSessionGeneration(state: ConversationState, sessionId: string): void {
+  state.sessionGenerationBySessionId[sessionId] = {
+    isGenerating: false,
+    streamingMessageId: null,
+  };
+}
+
+function findMessageInConversations(
+  state: ConversationState,
+  messageId: string,
+): { sessionId: string | null; conversation: Conversation; message: ConversationMessage } | null {
+  const activeMessage = state.activeConversation?.messages.find(
+    (message) => message.id === messageId,
+  );
+  if (state.activeConversation && activeMessage) {
+    return {
+      sessionId: activeMessage.sessionId ?? state.activeSessionId,
+      conversation: state.activeConversation,
+      message: activeMessage,
+    };
+  }
+
+  for (const [sessionId, conversation] of Object.entries(state.conversationsBySessionId)) {
+    if (conversation === state.activeConversation) {
+      continue;
+    }
+    const message = conversation.messages.find((candidate) => candidate.id === messageId);
+    if (message) {
+      return { sessionId: message.sessionId ?? sessionId, conversation, message };
+    }
+  }
+
+  return null;
+}
+
+function snapshotMessage(message: ConversationMessage): ConversationMessage {
+  return {
+    ...message,
+    parts: message.parts.map((part) => ({ ...part }) as MessagePart),
+  };
+}
 
 function logPendingSaveError(sessionId: string, messageId: string, err: unknown): void {
   logger.error('Failed to persist pending message to SQLite', {
@@ -296,6 +397,8 @@ export const useConversationStore = create<ConversationStore>()(
     // State
     // =========================================================================
     activeConversation: null,
+    conversationsBySessionId: {},
+    sessionGenerationBySessionId: {},
     isGenerating: false,
     streamingMessageId: null,
     activeProjectId: null,
@@ -314,6 +417,8 @@ export const useConversationStore = create<ConversationStore>()(
       set((state) => {
         state.activeProjectId = projectId;
         state.activeConversation = createConversation(projectId);
+        state.conversationsBySessionId = {};
+        state.sessionGenerationBySessionId = {};
         state.isGenerating = false;
         state.streamingMessageId = null;
         state.activeSessionId = null;
@@ -388,6 +493,11 @@ export const useConversationStore = create<ConversationStore>()(
 
         usePermissionStore.getState().resetSessionRules();
         set((state) => {
+          if (state.activeSessionId && state.activeConversation) {
+            state.conversationsBySessionId[state.activeSessionId] = state.activeConversation;
+            rememberActiveSessionGeneration(state);
+          }
+
           const hadNoActiveSession = !state.activeSessionId;
           const shouldPreserveDraftConversation =
             options?.preserveDraftConversation === true &&
@@ -406,6 +516,8 @@ export const useConversationStore = create<ConversationStore>()(
             state.activeConversation.id = session.id;
           }
 
+          state.conversationsBySessionId[session.id] = state.activeConversation;
+          clearSessionGeneration(state, session.id);
           state.isGenerating = false;
           state.streamingMessageId = null;
         });
@@ -420,6 +532,12 @@ export const useConversationStore = create<ConversationStore>()(
 
     switchSession: async (sessionId: string) => {
       const requestToken = ++latestSwitchSessionRequestToken;
+      set((state) => {
+        if (state.activeSessionId && state.activeConversation) {
+          state.conversationsBySessionId[state.activeSessionId] = state.activeConversation;
+          rememberActiveSessionGeneration(state);
+        }
+      });
 
       try {
         const data = await invoke<{
@@ -476,17 +594,18 @@ export const useConversationStore = create<ConversationStore>()(
         }));
 
         usePermissionStore.getState().resetSessionRules();
+        const cachedConversation = get().conversationsBySessionId[sessionId] ?? null;
         set((state) => {
           state.activeSessionId = sessionId;
-          state.activeConversation = {
+          state.activeConversation = cachedConversation ?? {
             id: sessionId,
             projectId,
             messages,
             createdAt: data.session.createdAt,
             updatedAt: data.session.updatedAt,
           };
-          state.isGenerating = false;
-          state.streamingMessageId = null;
+          state.conversationsBySessionId[sessionId] = state.activeConversation;
+          restoreSessionGeneration(state, sessionId);
         });
 
         await hydratePersistedPermissionRules(sessionId, {
@@ -506,6 +625,8 @@ export const useConversationStore = create<ConversationStore>()(
         const wasActive = get().activeSessionId === sessionId;
         set((state) => {
           state.sessions = state.sessions.filter((s) => s.id !== sessionId);
+          delete state.conversationsBySessionId[sessionId];
+          delete state.sessionGenerationBySessionId[sessionId];
           if (state.activeSessionId === sessionId) {
             state.activeSessionId = null;
             const pid = state.activeProjectId;
@@ -531,6 +652,8 @@ export const useConversationStore = create<ConversationStore>()(
         const wasActive = get().activeSessionId === sessionId;
         set((state) => {
           state.sessions = state.sessions.filter((s) => s.id !== sessionId);
+          delete state.conversationsBySessionId[sessionId];
+          delete state.sessionGenerationBySessionId[sessionId];
           if (state.activeSessionId === sessionId) {
             state.activeSessionId = null;
             const pid = state.activeProjectId;
@@ -561,6 +684,9 @@ export const useConversationStore = create<ConversationStore>()(
         if (!state.activeConversation) return;
         state.activeConversation.messages.push(msg);
         state.activeConversation.updatedAt = Date.now();
+        if (state.activeSessionId) {
+          state.conversationsBySessionId[state.activeSessionId] = state.activeConversation;
+        }
       });
 
       // Persist to SQLite if we have an active session
@@ -584,6 +710,7 @@ export const useConversationStore = create<ConversationStore>()(
               if (target) {
                 target.sessionId = newSid;
               }
+              state.conversationsBySessionId[newSid] = state.activeConversation;
             });
 
             const boundMessage = get().activeConversation?.messages.find(
@@ -611,6 +738,9 @@ export const useConversationStore = create<ConversationStore>()(
 
         message.sessionId = resolvedSessionId;
         message.persistenceStatus = 'pending';
+        if (state.activeConversation) {
+          state.conversationsBySessionId[resolvedSessionId] = state.activeConversation;
+        }
       });
 
       const queuedMessage = get().activeConversation?.messages.find((m) => m.id === messageId);
@@ -629,65 +759,106 @@ export const useConversationStore = create<ConversationStore>()(
       const resolvedSessionId = sessionId ?? get().activeSessionId ?? undefined;
       const msg = createAssistantMessage(resolvedSessionId);
       set((state) => {
-        if (!state.activeConversation) return;
-        state.activeConversation.messages.push(msg);
-        state.activeConversation.updatedAt = Date.now();
-        state.isGenerating = true;
-        state.streamingMessageId = msg.id;
+        const isActiveTarget =
+          !resolvedSessionId ||
+          !state.activeSessionId ||
+          state.activeSessionId === resolvedSessionId;
+        const conversation =
+          resolvedSessionId && !isActiveTarget
+            ? getOrCreateConversationForSession(state, resolvedSessionId)
+            : state.activeConversation;
+
+        if (!conversation) return;
+
+        conversation.messages.push(msg);
+        conversation.updatedAt = Date.now();
+
+        if (resolvedSessionId) {
+          state.conversationsBySessionId[resolvedSessionId] = conversation;
+          state.sessionGenerationBySessionId[resolvedSessionId] = {
+            isGenerating: true,
+            streamingMessageId: msg.id,
+          };
+        }
+
+        if (isActiveTarget) {
+          state.isGenerating = true;
+          state.streamingMessageId = msg.id;
+        }
       });
       return msg.id;
     },
 
     appendPart: (messageId: string, part: MessagePart) => {
       set((state) => {
-        if (!state.activeConversation) return;
-        const message = state.activeConversation.messages.find((m) => m.id === messageId);
-        if (message) {
-          message.parts.push(part);
-          state.activeConversation.updatedAt = Date.now();
+        const target = findMessageInConversations(state, messageId);
+        if (!target) return;
+
+        target.message.parts.push(part);
+        target.conversation.updatedAt = Date.now();
+        if (target.sessionId) {
+          state.conversationsBySessionId[target.sessionId] = target.conversation;
         }
       });
     },
 
     updatePart: (messageId: string, partIndex: number, update: Partial<MessagePart>) => {
       set((state) => {
-        if (!state.activeConversation) return;
-        const message = state.activeConversation.messages.find((m) => m.id === messageId);
-        if (message && message.parts[partIndex]) {
-          Object.assign(message.parts[partIndex], update);
-          state.activeConversation.updatedAt = Date.now();
+        const target = findMessageInConversations(state, messageId);
+        if (!target?.message.parts[partIndex]) return;
+
+        Object.assign(target.message.parts[partIndex], update);
+        target.conversation.updatedAt = Date.now();
+        if (target.sessionId) {
+          state.conversationsBySessionId[target.sessionId] = target.conversation;
         }
       });
     },
 
     finalizeMessage: (messageId: string, usage?: TokenUsage) => {
+      let finalizedMessage: ConversationMessage | null = null;
+      let finalizedSessionId: string | null = null;
+
       set((state) => {
-        if (!state.activeConversation) return;
-        const message = state.activeConversation.messages.find((m) => m.id === messageId);
-        if (message && usage) {
-          message.usage = usage;
+        const target = findMessageInConversations(state, messageId);
+        if (!target) return;
+
+        if (usage) {
+          target.message.usage = usage;
         }
-        state.isGenerating = false;
-        state.streamingMessageId = null;
-        state.activeConversation.updatedAt = Date.now();
+
+        target.conversation.updatedAt = Date.now();
+        finalizedSessionId = target.sessionId;
+        finalizedMessage = snapshotMessage(target.message);
+
+        if (target.sessionId) {
+          state.conversationsBySessionId[target.sessionId] = target.conversation;
+          clearSessionGeneration(state, target.sessionId);
+        }
+
+        if (
+          state.activeConversation === target.conversation ||
+          state.streamingMessageId === messageId
+        ) {
+          state.isGenerating = false;
+          state.streamingMessageId = null;
+        }
       });
 
-      // Persist finalized message to SQLite immediately (no debounce)
-      const conv = get().activeConversation;
-      if (conv) {
-        const message = conv.messages.find((m) => m.id === messageId);
-        const sid = message?.sessionId ?? get().activeSessionId;
-        if (sid && message) {
-          updatePersistenceStatus(messageId, 'pending');
-          persistMessage(sid, message).catch((err) => {
-            logger.error('Failed to persist finalized message', {
-              sessionId: sid,
-              messageId,
-              err,
-            });
+      if (finalizedSessionId && finalizedMessage) {
+        updatePersistenceStatus(messageId, 'pending');
+        persistMessage(finalizedSessionId, finalizedMessage).catch((err) => {
+          logger.error('Failed to persist finalized message', {
+            sessionId: finalizedSessionId,
+            messageId,
+            err,
           });
-        }
+        });
       }
+    },
+
+    getMessageParts: (messageId: string) => {
+      return findMessageInConversations(get(), messageId)?.message.parts ?? null;
     },
 
     addSystemMessage: (content: string) => {
@@ -714,6 +885,14 @@ export const useConversationStore = create<ConversationStore>()(
         if (state.activeSessionId === sessionId && state.activeConversation) {
           state.activeConversation.messages.push(msg);
           state.activeConversation.updatedAt = Date.now();
+          state.conversationsBySessionId[sessionId] = state.activeConversation;
+          return;
+        }
+
+        const conversation = state.conversationsBySessionId[sessionId];
+        if (conversation) {
+          conversation.messages.push(msg);
+          conversation.updatedAt = Date.now();
         }
       });
 
@@ -756,9 +935,13 @@ export const useConversationStore = create<ConversationStore>()(
     clearConversation: () => {
       clearAllPendingSaves();
       const projectId = get().activeProjectId;
+      const activeSessionId = get().activeSessionId;
       usePermissionStore.getState().resetSessionRules();
 
       set((state) => {
+        if (activeSessionId) {
+          clearSessionGeneration(state, activeSessionId);
+        }
         if (projectId) {
           state.activeConversation = createConversation(projectId);
         } else {
@@ -776,6 +959,12 @@ export const useConversationStore = create<ConversationStore>()(
         state.isGenerating = isGenerating;
         if (!isGenerating) {
           state.streamingMessageId = null;
+        }
+        if (state.activeSessionId) {
+          state.sessionGenerationBySessionId[state.activeSessionId] = {
+            isGenerating,
+            streamingMessageId: state.streamingMessageId,
+          };
         }
       });
     },

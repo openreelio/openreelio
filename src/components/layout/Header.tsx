@@ -5,7 +5,19 @@
  * and optional utility actions.
  */
 
-import { X, Save, FolderOpen, Download, Search, Settings, Loader2, FileText, FileCode, Camera, Music } from 'lucide-react';
+import {
+  X,
+  Save,
+  FolderOpen,
+  Download,
+  Search,
+  Settings,
+  Loader2,
+  FileText,
+  FileCode,
+  Camera,
+  Music,
+} from 'lucide-react';
 import { UndoRedoButtons } from '@/components/ui';
 import { SearchPanel } from '@/components/features/search';
 import { SettingsDialog } from '@/components/features/settings';
@@ -13,6 +25,7 @@ import { ShortcutsDialog } from '@/components/features/help';
 import { useProjectStore, useUIStore } from '@/stores';
 import { useCallback, useState, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { createLogger } from '@/services/logger';
+import { isTauriRuntime } from '@/services/framePaths';
 import { SaveStatusBadge, type SaveStatus } from './SaveStatusBadge';
 import { UnsavedChangesDialog } from './UnsavedChangesDialog';
 import type { AssetSearchResultItem } from '@/hooks/useSearch';
@@ -77,6 +90,7 @@ export function Header({
     () => typeof navigator !== 'undefined' && /(Mac|iPhone|iPad|iPod)/i.test(navigator.platform),
     [],
   );
+  const isNativeRuntime = useMemo(() => isTauriRuntime(), []);
   const searchShortcutLabel = isMacLikePlatform ? '⌘K' : 'Ctrl+K';
   const settingsShortcutLabel = isMacLikePlatform ? '⌘,' : 'Ctrl+,';
   const saveShortcutLabel = isMacLikePlatform ? '⌘S' : 'Ctrl+S';
@@ -163,14 +177,34 @@ export function Header({
     };
   }, []);
 
-  // Handle close button click - show confirmation if unsaved changes
-  const handleCloseClick = useCallback(() => {
+  const requestNativeAppClose = useCallback(async (): Promise<boolean> => {
+    if (!isNativeRuntime) {
+      return false;
+    }
+
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      await getCurrentWindow().close();
+      return true;
+    } catch (error) {
+      logger.error('Failed to request native app close', { error });
+      return false;
+    }
+  }, [isNativeRuntime]);
+
+  // Handle close button click. In the desktop app this exits through the same
+  // native close flow as the OS titlebar close button.
+  const handleCloseClick = useCallback(async () => {
+    if (await requestNativeAppClose()) {
+      return;
+    }
+
     if (isDirty) {
       setShowCloseConfirm(true);
     } else {
       void closeProject();
     }
-  }, [isDirty, closeProject]);
+  }, [closeProject, isDirty, requestNativeAppClose]);
 
   // Save and close project
   const handleSaveAndClose = useCallback(async () => {
@@ -308,9 +342,10 @@ export function Header({
                         Export as FCPXML...
                       </button>
                     )}
-                    {(onExportFrame || onExportAudio) && (onExport || onExportEdl || onExportFcpxml) && (
-                      <div className="my-0.5 h-px bg-editor-border" />
-                    )}
+                    {(onExportFrame || onExportAudio) &&
+                      (onExport || onExportEdl || onExportFcpxml) && (
+                        <div className="my-0.5 h-px bg-editor-border" />
+                      )}
                     {onExportFrame && (
                       <button
                         onClick={onExportFrame}
@@ -346,9 +381,9 @@ export function Header({
 
               {/* Close Project Button */}
               <button
-                onClick={handleCloseClick}
+                onClick={() => void handleCloseClick()}
                 className="rounded p-1.5 text-editor-text-muted transition-colors hover:bg-editor-bg hover:text-red-400"
-                title="Close project"
+                title={isNativeRuntime ? 'Exit application' : 'Close project'}
               >
                 <X className="h-4 w-4" />
               </button>

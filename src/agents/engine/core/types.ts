@@ -281,125 +281,129 @@ export interface SessionStartEvent {
   timestamp: number;
 }
 
-export interface ThinkingStartEvent {
+export interface SessionScopedAgentEvent {
+  sessionId?: string;
+}
+
+export interface ThinkingStartEvent extends SessionScopedAgentEvent {
   type: 'thinking_start';
   timestamp: number;
 }
 
-export interface ThinkingProgressEvent {
+export interface ThinkingProgressEvent extends SessionScopedAgentEvent {
   type: 'thinking_progress';
   partial: string;
   timestamp: number;
 }
 
-export interface ThinkingCompleteEvent {
+export interface ThinkingCompleteEvent extends SessionScopedAgentEvent {
   type: 'thinking_complete';
   thought: Thought;
   timestamp: number;
 }
 
-export interface ClarificationRequiredEvent {
+export interface ClarificationRequiredEvent extends SessionScopedAgentEvent {
   type: 'clarification_required';
   question: string;
   thought: Thought;
   timestamp: number;
 }
 
-export interface PlanningStartEvent {
+export interface PlanningStartEvent extends SessionScopedAgentEvent {
   type: 'planning_start';
   timestamp: number;
 }
 
-export interface PlanningProgressEvent {
+export interface PlanningProgressEvent extends SessionScopedAgentEvent {
   type: 'planning_progress';
   partial: string;
   timestamp: number;
 }
 
-export interface PlanningCompleteEvent {
+export interface PlanningCompleteEvent extends SessionScopedAgentEvent {
   type: 'planning_complete';
   plan: Plan;
   timestamp: number;
 }
 
-export interface ApprovalRequiredEvent {
+export interface ApprovalRequiredEvent extends SessionScopedAgentEvent {
   type: 'approval_required';
   plan: Plan;
   timestamp: number;
 }
 
-export interface ApprovalResponseEvent {
+export interface ApprovalResponseEvent extends SessionScopedAgentEvent {
   type: 'approval_response';
   approved: boolean;
   reason?: string;
   timestamp: number;
 }
 
-export interface ExecutionStartEvent {
+export interface ExecutionStartEvent extends SessionScopedAgentEvent {
   type: 'execution_start';
   step: PlanStep;
   timestamp: number;
 }
 
-export interface ExecutionProgressEvent {
+export interface ExecutionProgressEvent extends SessionScopedAgentEvent {
   type: 'execution_progress';
   step: PlanStep;
   progress: number;
   timestamp: number;
 }
 
-export interface ExecutionCompleteEvent {
+export interface ExecutionCompleteEvent extends SessionScopedAgentEvent {
   type: 'execution_complete';
   step: PlanStep;
   result: ToolResult;
   timestamp: number;
 }
 
-export interface ToolPermissionRequestEvent {
+export interface ToolPermissionRequestEvent extends SessionScopedAgentEvent {
   type: 'tool_permission_request';
   step: PlanStep;
   timestamp: number;
 }
 
-export interface ToolPermissionResponseEvent {
+export interface ToolPermissionResponseEvent extends SessionScopedAgentEvent {
   type: 'tool_permission_response';
   step: PlanStep;
   decision: 'allow' | 'deny' | 'allow_always';
   timestamp: number;
 }
 
-export interface DoomLoopDetectedEvent {
+export interface DoomLoopDetectedEvent extends SessionScopedAgentEvent {
   type: 'doom_loop_detected';
   tool: string;
   count: number;
   timestamp: number;
 }
 
-export interface ObservationCompleteEvent {
+export interface ObservationCompleteEvent extends SessionScopedAgentEvent {
   type: 'observation_complete';
   observation: Observation;
   timestamp: number;
 }
 
-export interface IterationCompleteEvent {
+export interface IterationCompleteEvent extends SessionScopedAgentEvent {
   type: 'iteration_complete';
   iteration: number;
   timestamp: number;
 }
 
-export interface SessionCompleteEvent {
+export interface SessionCompleteEvent extends SessionScopedAgentEvent {
   type: 'session_complete';
   summary: SessionSummary;
   timestamp: number;
 }
 
-export interface SessionFailedEvent {
+export interface SessionFailedEvent extends SessionScopedAgentEvent {
   type: 'session_failed';
   error: Error;
   timestamp: number;
 }
 
-export interface SessionAbortedEvent {
+export interface SessionAbortedEvent extends SessionScopedAgentEvent {
   type: 'session_aborted';
   reason: string;
   timestamp: number;

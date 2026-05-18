@@ -277,23 +277,31 @@ export function AgenticSidebarContent({
 
   const createNewSession = useCallback(
     (agentProfileId: string = DEFAULT_AGENT_PROFILE_ID) => {
-      abortCurrentSession();
+      if (chatHandleRef.current?.isRunning) {
+        void createSession(agentProfileId, { preserveDraftConversation: false });
+        return;
+      }
+
       void runSessionTransition('new', async () => {
         await createSession(agentProfileId, { preserveDraftConversation: false });
       });
     },
-    [abortCurrentSession, createSession, runSessionTransition],
+    [createSession, runSessionTransition],
   );
   const createNewExternalSession = useCallback(() => {
     if (!codexRuntimeReady) {
       return;
     }
 
-    abortCurrentSession();
+    if (chatHandleRef.current?.isRunning) {
+      void createSession('codex', { preserveDraftConversation: false });
+      return;
+    }
+
     void runSessionTransition('new', async () => {
       await createSession('codex', { preserveDraftConversation: false });
     });
-  }, [abortCurrentSession, codexRuntimeReady, createSession, runSessionTransition]);
+  }, [codexRuntimeReady, createSession, runSessionTransition]);
   const canCreateNew =
     Boolean(currentProjectId) &&
     !isSessionTransitionPending &&
@@ -305,21 +313,9 @@ export function AgenticSidebarContent({
         return;
       }
 
-      if (chatHandleRef.current?.isRunning) {
-        abortCurrentSession();
-      }
-
-      void runSessionTransition('switch', async () => {
-        await switchSession(sessionId);
-      });
+      void switchSession(sessionId);
     },
-    [
-      abortCurrentSession,
-      activeSessionId,
-      isSessionTransitionPending,
-      runSessionTransition,
-      switchSession,
-    ],
+    [activeSessionId, isSessionTransitionPending, switchSession],
   );
 
   const handleDelegateToSpecialist = useCallback(
@@ -365,8 +361,7 @@ export function AgenticSidebarContent({
 
       addSystemMessage(`Delegated to ${specialist.name}: ${delegatedGoal}`);
 
-      abortCurrentSession();
-      void runSessionTransition('delegate', async () => {
+      const transitionAction = async () => {
         const { childSession, delegationRecord, delegationErrorMessage } =
           await createDelegatedSession({
             parentSessionId: activeSessionId,
@@ -407,7 +402,14 @@ export function AgenticSidebarContent({
               `Delegated session '${childSession.title}' was created, but the workspace could not switch into it automatically. Open it from Sessions to continue.`,
             );
         }
-      });
+      };
+
+      if (chatHandleRef.current?.isRunning) {
+        void transitionAction();
+        return;
+      }
+
+      void runSessionTransition('delegate', transitionAction);
     },
     [
       activeAgentDefinition?.name,
@@ -416,7 +418,6 @@ export function AgenticSidebarContent({
       activeSessionId,
       addSystemMessage,
       addSystemMessageToSession,
-      abortCurrentSession,
       createDelegatedSession,
       createNewSession,
       currentProjectId,

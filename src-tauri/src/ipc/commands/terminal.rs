@@ -499,7 +499,9 @@ fn detect_windows_profiles(
     }
 
     if command_exists("wsl.exe") {
-        if let Ok(output) = Command::new("wsl.exe").args(["-l", "-q"]).output() {
+        let mut command = Command::new("wsl.exe");
+        crate::core::process::configure_std_command(&mut command);
+        if let Ok(output) = command.args(["-l", "-q"]).output() {
             let text = decode_command_output(&output.stdout);
             for distro in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
                 push_profile(
