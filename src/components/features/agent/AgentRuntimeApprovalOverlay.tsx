@@ -28,12 +28,12 @@ export function AgentRuntimeApprovalOverlay({
 
   return (
     <div
-      className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-surface-base/35 p-3"
+      className="pointer-events-none absolute inset-x-2 bottom-2 z-40 flex justify-center"
       data-testid="agent-runtime-approval-overlay"
       aria-live="assertive"
     >
       <div
-        className="pointer-events-auto w-full max-w-md overflow-hidden rounded-xl border border-border-subtle bg-surface-elevated shadow-2xl"
+        className="pointer-events-auto max-h-[min(18rem,calc(100%_-_1rem))] w-full max-w-md overflow-hidden rounded-xl border border-border-subtle bg-surface-elevated shadow-2xl"
         role="dialog"
         aria-modal="false"
         aria-label="Agent approval request"
@@ -44,7 +44,7 @@ export function AgentRuntimeApprovalOverlay({
             Review the request before the agent changes the project.
           </p>
         </div>
-        <div className="max-h-[min(70vh,32rem)] space-y-2 overflow-y-auto p-3">
+        <div className="max-h-[calc(18rem_-_3.5rem)] space-y-2 overflow-y-auto p-3">
           {pendingPlan && (
             <ApprovalPartRenderer
               part={{

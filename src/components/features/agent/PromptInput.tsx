@@ -77,7 +77,7 @@ export function PromptInput({
   // Focus on mount
   useEffect(() => {
     if (!disabled) {
-      textareaRef.current?.focus();
+      textareaRef.current?.focus({ preventScroll: true });
     }
   }, [disabled]);
 

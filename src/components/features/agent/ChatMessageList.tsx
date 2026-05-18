@@ -28,6 +28,49 @@ export interface ChatMessageListProps {
   className?: string;
 }
 
+function scrollContainerTo(
+  container: HTMLDivElement,
+  top: number,
+  behavior: ScrollBehavior,
+): void {
+  const nextTop = Math.max(0, top);
+
+  if (typeof container.scrollTo === 'function') {
+    container.scrollTo({ top: nextTop, behavior });
+    return;
+  }
+
+  container.scrollTop = nextTop;
+}
+
+function resolveOffsetWithinContainer(target: HTMLElement, container: HTMLElement): number {
+  let offset = 0;
+  let node: HTMLElement | null = target;
+
+  while (node && node !== container) {
+    offset += node.offsetTop;
+    node = node.offsetParent instanceof HTMLElement ? node.offsetParent : null;
+  }
+
+  if (node === container) {
+    return offset;
+  }
+
+  const targetRect = target.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+  return container.scrollTop + targetRect.top - containerRect.top;
+}
+
+function scrollElementWithinContainer(
+  container: HTMLDivElement,
+  target: HTMLDivElement,
+  behavior: ScrollBehavior,
+): void {
+  const targetTop = resolveOffsetWithinContainer(target, container);
+  const centerOffset = Math.max(0, (container.clientHeight - target.clientHeight) / 2);
+  scrollContainerTo(container, targetTop - centerOffset, behavior);
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -45,7 +88,6 @@ export function ChatMessageList({
   artifactFocus = null,
   className = '',
 }: ChatMessageListProps) {
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isUserScrolledUpRef = useRef(false);
   const messageItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -65,20 +107,18 @@ export function ChatMessageList({
     return null;
   }, [artifactFocus, messages]);
 
-  const scrollToBottom = useCallback(() => {
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     if (isUserScrolledUpRef.current) return;
-    if (messagesEndRef.current && typeof messagesEndRef.current.scrollIntoView === 'function') {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    scrollContainerTo(container, container.scrollHeight, behavior);
   }, []);
 
   useEffect(() => {
     isUserScrolledUpRef.current = false;
     messageItemRefs.current = {};
-    if (messagesEndRef.current && typeof messagesEndRef.current.scrollIntoView === 'function') {
-      messagesEndRef.current.scrollIntoView({ behavior: 'auto' });
-    }
-  }, [conversationId]);
+    scrollToBottom('auto');
+  }, [conversationId, scrollToBottom]);
 
   const handleScroll = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -94,7 +134,7 @@ export function ChatMessageList({
     if (artifactFocus) {
       return;
     }
-    scrollToBottom();
+    scrollToBottom('auto');
   }, [artifactFocus, messages, scrollToBottom]);
 
   useEffect(() => {
@@ -103,8 +143,9 @@ export function ChatMessageList({
     }
 
     const target = messageItemRefs.current[focusedMessageId];
-    if (target && typeof target.scrollIntoView === 'function') {
-      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const container = scrollContainerRef.current;
+    if (target && container) {
+      scrollElementWithinContainer(container, target, 'smooth');
     }
   }, [focusedMessageId]);
 
@@ -141,8 +182,6 @@ export function ChatMessageList({
           <p className="text-sm text-red-400">{error.message}</p>
         </div>
       )}
-
-      <div ref={messagesEndRef} />
     </div>
   );
 }

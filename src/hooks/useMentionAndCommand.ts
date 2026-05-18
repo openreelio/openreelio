@@ -103,7 +103,7 @@ export function useMentionAndCommand(
       // Restore focus and cursor position
       requestAnimationFrame(() => {
         const newCursorPos = start + item.value.length + 1;
-        textarea.focus();
+        textarea.focus({ preventScroll: true });
         textarea.setSelectionRange(newCursorPos, newCursorPos);
       });
     },
@@ -124,7 +124,7 @@ export function useMentionAndCommand(
       triggerStartRef.current = -1;
 
       requestAnimationFrame(() => {
-        textarea.focus();
+        textarea.focus({ preventScroll: true });
         textarea.setSelectionRange(newValue.length, newValue.length);
       });
     },
