@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
 import { globalToolRegistry, type AgentContext } from '@/agents';
 import { registerCaptionTools, unregisterCaptionTools } from './captionTools';
 import { useProjectStore } from '@/stores/projectStore';
 import { readWorkspaceDocumentFromBackend } from '@/services/workspaceGateway';
+import { commands, type AssetAnnotation } from '@/bindings';
 import type { Clip, Sequence, Track } from '@/types';
 
 vi.mock('@/stores/projectStore', () => ({
@@ -13,6 +15,13 @@ vi.mock('@/stores/projectStore', () => ({
 
 vi.mock('@/services/workspaceGateway', () => ({
   readWorkspaceDocumentFromBackend: vi.fn(),
+}));
+
+vi.mock('@/bindings', () => ({
+  commands: {
+    analyzeAsset: vi.fn(),
+    getAvailableProviders: vi.fn(),
+  },
 }));
 
 const CTX: AgentContext = {
@@ -106,6 +115,10 @@ describe('captionTools', () => {
       createdIds: ['cap-created'],
       deletedIds: [],
       changes: [],
+    });
+    vi.mocked(commands.getAvailableProviders).mockResolvedValue({
+      status: 'ok',
+      data: [],
     });
 
     const sequence = createSequence({
@@ -439,5 +452,90 @@ describe('captionTools', () => {
         trackId: 'track-caption-created',
       },
     });
+  });
+
+  it('should fall back to a configured transcript analysis provider when local transcription is unavailable', async () => {
+    const tool = globalToolRegistry.get('auto_transcribe');
+    expect(tool).toBeDefined();
+
+    vi.mocked(invoke).mockResolvedValueOnce(false);
+    vi.mocked(commands.getAvailableProviders).mockResolvedValueOnce({
+      status: 'ok',
+      data: [
+        {
+          provider: 'google_cloud',
+          supportedTypes: ['transcript'],
+          requiresNetwork: true,
+          hasCost: true,
+          description: 'Google Cloud transcript analysis',
+        },
+      ],
+    });
+    vi.mocked(commands.analyzeAsset).mockResolvedValueOnce({
+      status: 'ok',
+      data: {
+        annotation: {} as AssetAnnotation,
+        response: {
+          totalCostCents: 12,
+          transcript: {
+            provider: 'google_cloud',
+            analyzedAt: '2026-05-19T00:00:00.000Z',
+            config: null,
+            costCents: 12,
+            results: [
+              {
+                startSec: 0,
+                endSec: 1.5,
+                text: 'Hello from provider',
+                confidence: 0.94,
+                language: 'en',
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const result = await tool!.handler({ assetId: 'asset-video-1' }, CTX);
+
+    expect(result.success).toBe(true);
+    expect(commands.analyzeAsset).toHaveBeenCalledWith({
+      assetId: 'asset-video-1',
+      provider: 'google_cloud',
+      analysisTypes: ['transcript'],
+    });
+    expect(result.result).toMatchObject({
+      mode: 'analysis',
+      provider: 'google_cloud',
+      segmentCount: 1,
+      segments: [{ startTime: 0, endTime: 1.5, text: 'Hello from provider' }],
+      fullText: 'Hello from provider',
+    });
+  });
+
+  it('should explain unavailable auto transcription when no transcript provider is configured', async () => {
+    const tool = globalToolRegistry.get('auto_transcribe');
+    expect(tool).toBeDefined();
+
+    vi.mocked(invoke).mockResolvedValueOnce(false);
+    vi.mocked(commands.getAvailableProviders).mockResolvedValueOnce({
+      status: 'ok',
+      data: [
+        {
+          provider: 'ffmpeg',
+          supportedTypes: ['shots'],
+          requiresNetwork: false,
+          hasCost: false,
+          description: 'Local shot analysis',
+        },
+      ],
+    });
+
+    const result = await tool!.handler({ assetId: 'asset-video-1' }, CTX);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Local transcription (Whisper) is not available');
+    expect(result.error).toContain('No transcript-capable analysis provider is configured');
+    expect(commands.analyzeAsset).not.toHaveBeenCalled();
   });
 });

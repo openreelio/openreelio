@@ -113,7 +113,7 @@ const TEXT_ACTIONS = `## Text Actions (meta-tool: text, require sequenceId)
 - update_caption(captionId, text?, startTime?, endTime?) → edit caption
 - delete_caption(captionId) → remove caption
 - style_caption(captionId, fontSize?, fontFamily?, color?, backgroundColor?, position?) → style caption
-- auto_transcribe(assetId, language?, model?, async?) → transcribe audio/video into timed text segments
+- auto_transcribe(assetId, language?, model?, provider?, async?) → transcribe audio/video into timed text segments; uses local Whisper when available, otherwise a configured transcript analysis provider
 - add_captions_from_transcription(segments, trackId?) → create captions from timed transcript segments
 - import_captions_from_file(relativePath, format?, trackId?) → import SRT/VTT subtitle files from the workspace`;
 
