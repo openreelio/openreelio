@@ -234,13 +234,13 @@ function seedActiveProjectState(
     options.activeSequenceId === undefined ? sequenceId : options.activeSequenceId;
   const clipIds = options.clipIds ?? ['clip-1', 'clip-2', 'clip-3', 'clip-5', 'c1', 'c2'];
 
-  const clips = clipIds.map((clipId, index) =>
+  const clips = clipIds.map((clipId) =>
     createMockClip({
       id: clipId,
       assetId: `asset-${clipId}`,
       place: {
-        timelineInSec: index * 5,
-        durationSec: 5,
+        timelineInSec: 0,
+        durationSec: 10,
       },
     }),
   );

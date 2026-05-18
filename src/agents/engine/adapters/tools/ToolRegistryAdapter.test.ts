@@ -381,6 +381,121 @@ describe('ToolRegistryAdapter', () => {
       expect(result.error).toContain('placeholder');
       expect(insertTool.handler).not.toHaveBeenCalled();
     });
+
+    it('should reject clip and track mismatches before tool execution', async () => {
+      const clip = createMockClip({
+        id: 'clip-1',
+        assetId: 'asset-1',
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
+      const sourceTrack = createMockTrack({
+        id: 'track-1',
+        kind: 'video',
+        name: 'Video 1',
+        clips: [clip],
+      });
+      const unrelatedTrack = createMockTrack({
+        id: 'track-2',
+        kind: 'video',
+        name: 'Video 2',
+        clips: [],
+      });
+      const sequence = createMockSequence({
+        id: 'sequence-1',
+        name: 'Main Sequence',
+        tracks: [sourceTrack, unrelatedTrack],
+      });
+      const asset = createMockAsset({
+        id: 'asset-1',
+        name: 'clip-1.mp4',
+        kind: 'video',
+      });
+
+      useProjectStore.setState({
+        isLoaded: true,
+        meta: {
+          id: 'project-1',
+          name: 'Test',
+          path: '/tmp/test.orio',
+          createdAt: new Date().toISOString(),
+          modifiedAt: new Date().toISOString(),
+        },
+        stateVersion: 8,
+        activeSequenceId: 'sequence-1',
+        sequences: new Map([['sequence-1', sequence]]),
+        assets: new Map([['asset-1', asset]]),
+      });
+
+      const result = await adapter.execute(
+        'split_clip',
+        { clipId: 'clip-1', trackId: 'track-2', atTimelineSec: 5 },
+        executionContext,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('PRECONDITION_FAILED');
+      expect(result.error).toContain(
+        "clipId 'clip-1' is on track 'track-1', not trackId 'track-2'",
+      );
+      expect(splitClipTool.handler).not.toHaveBeenCalled();
+    });
+
+    it('should reject split points outside the target clip range', async () => {
+      const result = await adapter.execute(
+        'split_clip',
+        { clipId: 'clip-1', atTimelineSec: 10 },
+        executionContext,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('PRECONDITION_FAILED');
+      expect(result.error).toContain("atTimelineSec 10 must be inside clip 'clip-1'");
+      expect(splitClipTool.handler).not.toHaveBeenCalled();
+    });
+
+    it('should reject non-finite timeline numbers before tool execution', async () => {
+      const result = await adapter.execute(
+        'split_clip',
+        { clipId: 'clip-1', atTimelineSec: Number.NaN },
+        executionContext,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('PRECONDITION_FAILED');
+      expect(result.error).toContain('atTimelineSec must be a finite number');
+      expect(splitClipTool.handler).not.toHaveBeenCalled();
+    });
+
+    it('should reject inverted trim source ranges before tool execution', async () => {
+      const trimClipTool: ToolDefinition = {
+        name: 'trim_clip',
+        description: 'Trim a clip by adjusting source in/out points',
+        category: 'clip',
+        parameters: {
+          type: 'object',
+          properties: {
+            clipId: { type: 'string', description: 'The clip ID' },
+            trackId: { type: 'string', description: 'The track ID' },
+            newSourceIn: { type: 'number', description: 'New source in point' },
+            newSourceOut: { type: 'number', description: 'New source out point' },
+          },
+          required: ['clipId', 'trackId'],
+        },
+        handler: vi.fn().mockResolvedValue({ success: true, result: { ok: true } }),
+      };
+      registry.register(trimClipTool);
+
+      const result = await adapter.execute(
+        'trim_clip',
+        { clipId: 'clip-1', trackId: 'track-1', newSourceIn: 8, newSourceOut: 2 },
+        executionContext,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('PRECONDITION_FAILED');
+      expect(result.error).toContain('newSourceOut 2 must be greater than newSourceIn 8');
+      expect(trimClipTool.handler).not.toHaveBeenCalled();
+    });
   });
 
   describe('executeBatch', () => {
