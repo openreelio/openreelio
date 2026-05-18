@@ -117,7 +117,7 @@ futures = { version = "0.3", optional = true }
 
 # WASM Plugin System
 wasmtime = "36.0.7"
-wasmtime-wasi = "36.0.7"
+wasmtime-wasi = "44.0.1"
 
 # Workspace filesystem scanning and watching
 notify = { version = "7", features = ["macos_fsevent"] }
