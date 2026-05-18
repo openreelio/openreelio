@@ -1,6 +1,6 @@
 [package]
 name = "openreelio-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "CLI for OpenReelio — headless AI agent-driven video editing"
 authors = ["OpenReelio Team"]
 license = "MIT"
