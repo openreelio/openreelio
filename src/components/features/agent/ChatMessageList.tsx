@@ -116,7 +116,6 @@ export function ChatMessageList({
 
   useEffect(() => {
     isUserScrolledUpRef.current = false;
-    messageItemRefs.current = {};
     scrollToBottom('auto');
   }, [conversationId, scrollToBottom]);
 

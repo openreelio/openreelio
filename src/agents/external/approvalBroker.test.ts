@@ -81,6 +81,21 @@ describe('ExternalAgentApprovalBroker', () => {
     expect(decisions).toEqual([{ id: 'codex-1', decision: 'accept' }]);
   });
 
+  it('should fall back to pending user approval when policy resolution fails', async () => {
+    const policyResolver = vi.fn().mockRejectedValue(new Error('policy unavailable'));
+    const broker = new ExternalAgentApprovalBroker({ timeoutMs: 0, policyResolver });
+    const snapshots: Array<string | null> = [];
+    broker.subscribe((snapshot) => snapshots.push(snapshot.pending?.id ?? null));
+
+    const decisionPromise = broker.requestDecision(request());
+    await Promise.resolve();
+
+    expect(policyResolver).toHaveBeenCalledWith(expect.objectContaining({ id: 'codex-1' }));
+    expect(snapshots).toEqual([null, 'codex-1']);
+    expect(broker.resolveLatest('accept')).toBe(true);
+    await expect(decisionPromise).resolves.toBe('accept');
+  });
+
   it('should preserve epoch timestamps when ordering pending approvals', () => {
     const broker = new ExternalAgentApprovalBroker({ timeoutMs: 0, now: () => 2_000 });
 

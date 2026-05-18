@@ -66,6 +66,7 @@ beforeEach(() => {
       updatedAt: Date.now(),
     },
     conversationsBySessionId: {},
+    sessionGenerationBySessionId: {},
     isGenerating: false,
     streamingMessageId: null,
     activeProjectId: 'project-1',
@@ -465,7 +466,9 @@ describe('useAgentEventHandler', () => {
 
     const state = useConversationStore.getState();
     expect(state.activeConversation!.messages).toHaveLength(0);
-    expect(state.conversationsBySessionId['session-1'].messages[0].parts).toHaveLength(1);
+    const cachedConversation = state.conversationsBySessionId['session-1'];
+    expect(cachedConversation).toBeDefined();
+    expect(cachedConversation!.messages[0].parts).toHaveLength(1);
   });
 
   it('should create a cached transcript for a session_start on an inactive session', () => {
@@ -502,7 +505,59 @@ describe('useAgentEventHandler', () => {
     const state = useConversationStore.getState();
     expect(state.activeSessionId).toBe('session-2');
     expect(state.activeConversation!.messages).toHaveLength(0);
-    expect(state.conversationsBySessionId['session-1'].messages[0].parts).toHaveLength(1);
+    const cachedConversation = state.conversationsBySessionId['session-1'];
+    expect(cachedConversation).toBeDefined();
+    expect(cachedConversation!.messages[0].parts).toHaveLength(1);
+  });
+
+  it('should route interleaved events by session ID', () => {
+    const { result } = renderHook(() => useAgentEventHandler());
+
+    act(() => {
+      result.current.handleEvent({
+        type: 'session_start',
+        sessionId: 'session-1',
+        input: 'first session',
+        timestamp: Date.now(),
+      });
+    });
+
+    useConversationStore.setState((state) => ({
+      ...state,
+      activeConversation: {
+        id: 'session-2',
+        projectId: 'project-1',
+        messages: [],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      },
+      activeSessionId: 'session-2',
+    }));
+
+    act(() => {
+      result.current.handleEvent({
+        type: 'session_start',
+        sessionId: 'session-2',
+        input: 'second session',
+        timestamp: Date.now(),
+      });
+    });
+
+    act(() => {
+      result.current.handleEvent({
+        type: 'thinking_complete',
+        sessionId: 'session-1',
+        thought: createTestThought(),
+        timestamp: Date.now(),
+      });
+    });
+
+    const state = useConversationStore.getState();
+    const sessionOneConversation = state.conversationsBySessionId['session-1'];
+    expect(sessionOneConversation).toBeDefined();
+    expect(sessionOneConversation!.messages[0].parts).toHaveLength(1);
+    expect(state.activeSessionId).toBe('session-2');
+    expect(state.activeConversation!.messages[0].parts).toHaveLength(0);
   });
 
   it('should handle full session lifecycle', () => {

@@ -58,10 +58,14 @@ export class ExternalAgentApprovalBroker {
 
     const policyResolver = this.options.policyResolver;
     if (policyResolver) {
-      const policyDecision = await policyResolver(normalizedRequest);
-      if (policyDecision) {
-        this.notifyDecision(normalizedRequest, policyDecision);
-        return policyDecision;
+      try {
+        const policyDecision = await policyResolver(normalizedRequest);
+        if (policyDecision) {
+          this.notifyDecision(normalizedRequest, policyDecision);
+          return policyDecision;
+        }
+      } catch {
+        // Policy lookup failures should fall back to explicit user approval.
       }
     }
 

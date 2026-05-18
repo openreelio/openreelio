@@ -69,6 +69,7 @@ beforeEach(() => {
   useConversationStore.setState({
     activeConversation: null,
     conversationsBySessionId: {},
+    sessionGenerationBySessionId: {},
     isGenerating: false,
     streamingMessageId: null,
     activeProjectId: null,
@@ -474,6 +475,69 @@ describe('ConversationStore', () => {
       const state = useConversationStore.getState();
       expect(state.activeSessionId).toBe('session-2');
       expect(state.activeConversation?.id).toBe('session-2');
+    });
+
+    it('should restore live generation state when switching back to a cached session', async () => {
+      const now = Date.now();
+      const sessions = ['session-1', 'session-2'].map((id, index) => ({
+        id,
+        projectId: 'project-1',
+        title: id,
+        agent: 'editor',
+        modelProvider: null,
+        modelId: null,
+        createdAt: now + index,
+        updatedAt: now + index,
+        archived: false,
+        messageCount: 0,
+        lastMessagePreview: null,
+      }));
+
+      mockInvoke.mockImplementation(async (command: string, payload?: { sessionId?: string }) => {
+        if (command === 'list_ai_sessions') {
+          return [];
+        }
+
+        if (command === 'get_ai_session') {
+          const session = sessions.find((candidate) => candidate.id === payload?.sessionId);
+          return { session, messages: [] };
+        }
+
+        return undefined;
+      });
+
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+      useConversationStore.setState((state) => ({
+        ...state,
+        activeSessionId: 'session-1',
+        activeConversation: {
+          id: 'session-1',
+          projectId: 'project-1',
+          messages: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+        sessions,
+      }));
+
+      const msgId = store.startAssistantMessage('session-1');
+      await store.switchSession('session-2');
+
+      expect(useConversationStore.getState().isGenerating).toBe(false);
+      expect(useConversationStore.getState().streamingMessageId).toBeNull();
+
+      await store.switchSession('session-1');
+
+      expect(useConversationStore.getState().isGenerating).toBe(true);
+      expect(useConversationStore.getState().streamingMessageId).toBe(msgId);
+
+      await store.switchSession('session-2');
+      store.finalizeMessage(msgId);
+      await store.switchSession('session-1');
+
+      expect(useConversationStore.getState().isGenerating).toBe(false);
+      expect(useConversationStore.getState().streamingMessageId).toBeNull();
     });
 
     it('should reset stale permission rules and hydrate the activated session rules', async () => {

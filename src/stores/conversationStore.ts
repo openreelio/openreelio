@@ -73,6 +73,8 @@ export interface ConversationState {
   activeConversation: Conversation | null;
   /** In-memory transcripts keyed by session so background runs survive session switches. */
   conversationsBySessionId: Record<string, Conversation>;
+  /** Streaming status keyed by session so live background runs survive session switches. */
+  sessionGenerationBySessionId: Record<string, ConversationSessionGenerationState>;
   /** Whether the AI is currently generating a response */
   isGenerating: boolean;
   /** The message ID currently being streamed */
@@ -83,6 +85,11 @@ export interface ConversationState {
   activeSessionId: string | null;
   /** Available sessions for the active project */
   sessions: SessionSummary[];
+}
+
+export interface ConversationSessionGenerationState {
+  isGenerating: boolean;
+  streamingMessageId: string | null;
 }
 
 export interface ConversationActions {
@@ -176,6 +183,30 @@ function getOrCreateConversationForSession(
   const created = createConversationForSession(state, sessionId);
   state.conversationsBySessionId[sessionId] = created;
   return created;
+}
+
+function rememberActiveSessionGeneration(state: ConversationState): void {
+  if (!state.activeSessionId) {
+    return;
+  }
+
+  state.sessionGenerationBySessionId[state.activeSessionId] = {
+    isGenerating: state.isGenerating,
+    streamingMessageId: state.streamingMessageId,
+  };
+}
+
+function restoreSessionGeneration(state: ConversationState, sessionId: string): void {
+  const generation = state.sessionGenerationBySessionId[sessionId];
+  state.isGenerating = generation?.isGenerating ?? false;
+  state.streamingMessageId = generation?.streamingMessageId ?? null;
+}
+
+function clearSessionGeneration(state: ConversationState, sessionId: string): void {
+  state.sessionGenerationBySessionId[sessionId] = {
+    isGenerating: false,
+    streamingMessageId: null,
+  };
 }
 
 function findMessageInConversations(
@@ -367,6 +398,7 @@ export const useConversationStore = create<ConversationStore>()(
     // =========================================================================
     activeConversation: null,
     conversationsBySessionId: {},
+    sessionGenerationBySessionId: {},
     isGenerating: false,
     streamingMessageId: null,
     activeProjectId: null,
@@ -386,6 +418,7 @@ export const useConversationStore = create<ConversationStore>()(
         state.activeProjectId = projectId;
         state.activeConversation = createConversation(projectId);
         state.conversationsBySessionId = {};
+        state.sessionGenerationBySessionId = {};
         state.isGenerating = false;
         state.streamingMessageId = null;
         state.activeSessionId = null;
@@ -460,6 +493,11 @@ export const useConversationStore = create<ConversationStore>()(
 
         usePermissionStore.getState().resetSessionRules();
         set((state) => {
+          if (state.activeSessionId && state.activeConversation) {
+            state.conversationsBySessionId[state.activeSessionId] = state.activeConversation;
+            rememberActiveSessionGeneration(state);
+          }
+
           const hadNoActiveSession = !state.activeSessionId;
           const shouldPreserveDraftConversation =
             options?.preserveDraftConversation === true &&
@@ -479,6 +517,7 @@ export const useConversationStore = create<ConversationStore>()(
           }
 
           state.conversationsBySessionId[session.id] = state.activeConversation;
+          clearSessionGeneration(state, session.id);
           state.isGenerating = false;
           state.streamingMessageId = null;
         });
@@ -496,6 +535,7 @@ export const useConversationStore = create<ConversationStore>()(
       set((state) => {
         if (state.activeSessionId && state.activeConversation) {
           state.conversationsBySessionId[state.activeSessionId] = state.activeConversation;
+          rememberActiveSessionGeneration(state);
         }
       });
 
@@ -565,8 +605,7 @@ export const useConversationStore = create<ConversationStore>()(
             updatedAt: data.session.updatedAt,
           };
           state.conversationsBySessionId[sessionId] = state.activeConversation;
-          state.isGenerating = false;
-          state.streamingMessageId = null;
+          restoreSessionGeneration(state, sessionId);
         });
 
         await hydratePersistedPermissionRules(sessionId, {
@@ -587,6 +626,7 @@ export const useConversationStore = create<ConversationStore>()(
         set((state) => {
           state.sessions = state.sessions.filter((s) => s.id !== sessionId);
           delete state.conversationsBySessionId[sessionId];
+          delete state.sessionGenerationBySessionId[sessionId];
           if (state.activeSessionId === sessionId) {
             state.activeSessionId = null;
             const pid = state.activeProjectId;
@@ -613,6 +653,7 @@ export const useConversationStore = create<ConversationStore>()(
         set((state) => {
           state.sessions = state.sessions.filter((s) => s.id !== sessionId);
           delete state.conversationsBySessionId[sessionId];
+          delete state.sessionGenerationBySessionId[sessionId];
           if (state.activeSessionId === sessionId) {
             state.activeSessionId = null;
             const pid = state.activeProjectId;
@@ -734,6 +775,10 @@ export const useConversationStore = create<ConversationStore>()(
 
         if (resolvedSessionId) {
           state.conversationsBySessionId[resolvedSessionId] = conversation;
+          state.sessionGenerationBySessionId[resolvedSessionId] = {
+            isGenerating: true,
+            streamingMessageId: msg.id,
+          };
         }
 
         if (isActiveTarget) {
@@ -788,6 +833,7 @@ export const useConversationStore = create<ConversationStore>()(
 
         if (target.sessionId) {
           state.conversationsBySessionId[target.sessionId] = target.conversation;
+          clearSessionGeneration(state, target.sessionId);
         }
 
         if (
@@ -889,9 +935,13 @@ export const useConversationStore = create<ConversationStore>()(
     clearConversation: () => {
       clearAllPendingSaves();
       const projectId = get().activeProjectId;
+      const activeSessionId = get().activeSessionId;
       usePermissionStore.getState().resetSessionRules();
 
       set((state) => {
+        if (activeSessionId) {
+          clearSessionGeneration(state, activeSessionId);
+        }
         if (projectId) {
           state.activeConversation = createConversation(projectId);
         } else {
@@ -909,6 +959,12 @@ export const useConversationStore = create<ConversationStore>()(
         state.isGenerating = isGenerating;
         if (!isGenerating) {
           state.streamingMessageId = null;
+        }
+        if (state.activeSessionId) {
+          state.sessionGenerationBySessionId[state.activeSessionId] = {
+            isGenerating,
+            streamingMessageId: state.streamingMessageId,
+          };
         }
       });
     },
