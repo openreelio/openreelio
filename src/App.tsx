@@ -22,6 +22,7 @@ import { createLogger, initializeLogger } from './services/logger';
 import { loadRecentProjects, clearRecentProjects, type RecentProject } from './utils';
 import { updateService } from './services/updateService';
 import { isTauriRuntime } from './services/framePaths';
+import { APP_VERSION, normalizeAppVersion } from './config/appVersion';
 
 // Initialize logger on module load
 initializeLogger();
@@ -64,7 +65,7 @@ function App(): JSX.Element {
   const isTauri = useMemo(() => isTauriRuntime(), []);
 
   // Settings for welcome screen behavior
-  const { general, updateGeneral, isLoaded: settingsLoaded } = useSettings();
+  const { general, isLoaded: settingsLoaded } = useSettings();
 
   // FFmpeg status check
   const { isAvailable: isFFmpegAvailable, isLoading: isFFmpegLoading } = useFFmpegStatus();
@@ -84,7 +85,7 @@ function App(): JSX.Element {
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
 
   // App version (fetched from backend)
-  const [appVersion, setAppVersion] = useState('0.1.0');
+  const [appVersion, setAppVersion] = useState(APP_VERSION);
 
   // Project handlers (folder-based workflow)
   const { handleOpenFolder } = useProjectHandlers({
@@ -107,14 +108,9 @@ function App(): JSX.Element {
     const projects = loadRecentProjects();
     setRecentProjects(projects);
 
-    // Fetch actual version from backend
     updateService
       .getCurrentVersion()
-      .then((version) => {
-        if (version && version !== 'unknown') {
-          setAppVersion(version);
-        }
-      })
+      .then((version) => setAppVersion(normalizeAppVersion(version)))
       .catch((error) => {
         logger.warn('Failed to fetch app version', { error });
       });
@@ -150,14 +146,6 @@ function App(): JSX.Element {
     setShowFFmpegWarning(false);
     setFFmpegWarningDismissed(true);
   }, []);
-
-  // Handle "Don't show again" toggle on welcome screen
-  const handleDontShowWelcome = useCallback(
-    (dontShow: boolean) => {
-      void updateGeneral({ showWelcomeOnStartup: !dontShow });
-    },
-    [updateGeneral],
-  );
 
   // Handle clearing all recent projects
   const handleClearRecentProjects = useCallback(() => {
@@ -214,8 +202,6 @@ function App(): JSX.Element {
             recentProjects={recentProjects}
             isLoading={isLoading}
             version={appVersion}
-            showDontShowOption={settingsLoaded}
-            onDontShowAgain={handleDontShowWelcome}
             onClearRecentProjects={handleClearRecentProjects}
           />
         </Suspense>
