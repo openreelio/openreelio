@@ -25,6 +25,9 @@ import type { CaptionColor, CaptionPosition, Sequence } from '@/types';
 
 const logger = createLogger('CaptionTools');
 
+const AUTO_TRANSCRIBE_ALTERNATIVES =
+  'Try analyze_asset with analysisTypes ["transcript"] for provider-based speech analysis, or analysisTypes ["textOcr"] for on-screen text.';
+
 interface TranscriptionSegmentInput {
   startTime: number;
   endTime: number;
@@ -170,7 +173,8 @@ async function resolveTranscriptAnalysisProvider(
     throw new Error(providersResponse.error);
   }
 
-  return providersResponse.data.find(isTranscriptCapableProvider)?.provider ?? null;
+  const providers = Array.isArray(providersResponse.data) ? providersResponse.data : [];
+  return providers.find(isTranscriptCapableProvider)?.provider ?? null;
 }
 
 async function transcribeWithAnalysisProvider(
@@ -821,11 +825,12 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           } catch (fallbackError) {
             const fallbackMessage =
               fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+            const normalizedFallbackMessage = fallbackMessage.replace(/[.!?]\s*$/, '');
             return {
               success: false,
               error:
                 'Local transcription (Whisper) is not available in this build, and provider fallback failed: ' +
-                fallbackMessage,
+                `${normalizedFallbackMessage}. ${AUTO_TRANSCRIBE_ALTERNATIVES}`,
             };
           }
         }

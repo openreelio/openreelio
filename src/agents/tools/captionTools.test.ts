@@ -536,6 +536,9 @@ describe('captionTools', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('Local transcription (Whisper) is not available');
     expect(result.error).toContain('No transcript-capable analysis provider is configured');
+    expect(result.error).toContain('analyze_asset');
+    expect(result.error).toContain('transcript');
+    expect(result.error).toContain('textOcr');
     expect(commands.analyzeAsset).not.toHaveBeenCalled();
   });
 });
