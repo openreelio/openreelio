@@ -24,41 +24,17 @@ import { isAgentError } from '@/agents/engine';
  * Hook that returns an event handler translating AgentEvents
  * into conversationStore actions.
  *
- * Tracks the target sessionId so that events arriving after a
- * session switch are silently dropped instead of mutating the
- * wrong conversation.
+ * Tracks the target sessionId so events continue to update the
+ * original transcript even after the user opens another session.
  */
 export function useAgentEventHandler() {
   const messageIdRef = useRef<string | null>(null);
-  /** The session this handler is bound to. Set on session_start. */
-  const boundSessionIdRef = useRef<string | null>(null);
 
   const handleEvent = useCallback((event: AgentEvent) => {
     const store = useConversationStore.getState();
 
-    // Guard: once bound, only accept events for the same active session.
-    // This blocks late events after explicit session switch or clear.
-    if (
-      boundSessionIdRef.current &&
-      event.type !== 'session_start' &&
-      store.activeSessionId !== boundSessionIdRef.current
-    ) {
-      // Active session was explicitly switched to a different session — discard stale events
-      return;
-    }
-
     switch (event.type) {
       case 'session_start': {
-        if (
-          store.activeSessionId !== event.sessionId ||
-          store.activeConversation?.id !== event.sessionId
-        ) {
-          return;
-        }
-
-        // Bind this handler to the engine's session
-        boundSessionIdRef.current = event.sessionId;
-        // Start a new assistant message for this session
         const msgId = store.startAssistantMessage(event.sessionId);
         messageIdRef.current = msgId;
         break;
@@ -95,27 +71,24 @@ export function useAgentEventHandler() {
       case 'approval_response': {
         if (messageIdRef.current) {
           // Update approval/plan status parts so UI reflects the user decision.
-          const conv = store.activeConversation;
-          if (conv) {
-            const msg = conv.messages.find((m) => m.id === messageIdRef.current);
-            if (msg) {
-              const approvalPartIndex = msg.parts.findIndex(
-                (p) => p.type === 'approval' && p.status === 'pending',
-              );
-              if (approvalPartIndex >= 0) {
-                store.updatePart(messageIdRef.current, approvalPartIndex, {
-                  status: event.approved ? 'approved' : 'rejected',
-                });
-              }
+          const parts = store.getMessageParts(messageIdRef.current);
+          if (parts) {
+            const approvalPartIndex = parts.findIndex(
+              (p) => p.type === 'approval' && p.status === 'pending',
+            );
+            if (approvalPartIndex >= 0) {
+              store.updatePart(messageIdRef.current, approvalPartIndex, {
+                status: event.approved ? 'approved' : 'rejected',
+              });
+            }
 
-              const planPartIndex = msg.parts.findIndex(
-                (p) => p.type === 'plan' && p.status === 'proposed',
-              );
-              if (planPartIndex >= 0) {
-                store.updatePart(messageIdRef.current, planPartIndex, {
-                  status: event.approved ? 'approved' : 'rejected',
-                });
-              }
+            const planPartIndex = parts.findIndex(
+              (p) => p.type === 'plan' && p.status === 'proposed',
+            );
+            if (planPartIndex >= 0) {
+              store.updatePart(messageIdRef.current, planPartIndex, {
+                status: event.approved ? 'approved' : 'rejected',
+              });
             }
           }
         }
@@ -141,19 +114,15 @@ export function useAgentEventHandler() {
       case 'execution_complete': {
         if (messageIdRef.current) {
           // Update the tool_call status to completed
-          const conv = store.activeConversation;
-          if (conv) {
-            const msg = conv.messages.find((m) => m.id === messageIdRef.current);
-            if (msg) {
-              const callIndex = msg.parts.findIndex(
-                (p) =>
-                  p.type === 'tool_call' && p.stepId === event.step.id && p.status === 'running',
-              );
-              if (callIndex >= 0) {
-                store.updatePart(messageIdRef.current, callIndex, {
-                  status: event.result.success ? 'completed' : 'failed',
-                });
-              }
+          const parts = store.getMessageParts(messageIdRef.current);
+          if (parts) {
+            const callIndex = parts.findIndex(
+              (p) => p.type === 'tool_call' && p.stepId === event.step.id && p.status === 'running',
+            );
+            if (callIndex >= 0) {
+              store.updatePart(messageIdRef.current, callIndex, {
+                status: event.result.success ? 'completed' : 'failed',
+              });
             }
           }
 
@@ -185,7 +154,6 @@ export function useAgentEventHandler() {
           store.finalizeMessage(messageIdRef.current);
           messageIdRef.current = null;
         }
-        boundSessionIdRef.current = null;
         break;
       }
 
@@ -204,7 +172,6 @@ export function useAgentEventHandler() {
           store.finalizeMessage(messageIdRef.current);
           messageIdRef.current = null;
         }
-        boundSessionIdRef.current = null;
         break;
       }
 
@@ -217,7 +184,6 @@ export function useAgentEventHandler() {
           store.finalizeMessage(messageIdRef.current);
           messageIdRef.current = null;
         }
-        boundSessionIdRef.current = null;
         break;
       }
 
@@ -238,21 +204,16 @@ export function useAgentEventHandler() {
 
       case 'tool_permission_response': {
         if (messageIdRef.current) {
-          const conv = store.activeConversation;
-          if (conv) {
-            const msg = conv.messages.find((m) => m.id === messageIdRef.current);
-            if (msg) {
-              const approvalIndex = msg.parts.findIndex(
-                (p) =>
-                  p.type === 'tool_approval' &&
-                  p.stepId === event.step.id &&
-                  p.status === 'pending',
-              );
-              if (approvalIndex >= 0) {
-                store.updatePart(messageIdRef.current, approvalIndex, {
-                  status: event.decision === 'deny' ? 'denied' : 'approved',
-                });
-              }
+          const parts = store.getMessageParts(messageIdRef.current);
+          if (parts) {
+            const approvalIndex = parts.findIndex(
+              (p) =>
+                p.type === 'tool_approval' && p.stepId === event.step.id && p.status === 'pending',
+            );
+            if (approvalIndex >= 0) {
+              store.updatePart(messageIdRef.current, approvalIndex, {
+                status: event.decision === 'deny' ? 'denied' : 'approved',
+              });
             }
           }
         }

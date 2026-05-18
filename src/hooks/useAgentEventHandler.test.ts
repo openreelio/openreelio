@@ -65,6 +65,7 @@ beforeEach(() => {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     },
+    conversationsBySessionId: {},
     isGenerating: false,
     streamingMessageId: null,
     activeProjectId: 'project-1',
@@ -427,7 +428,7 @@ describe('useAgentEventHandler', () => {
     expect(useConversationStore.getState().isGenerating).toBe(false);
   });
 
-  it('should drop stale events after session is cleared', () => {
+  it('should keep writing to the original transcript after the active session changes', () => {
     const { result } = renderHook(() => useAgentEventHandler());
 
     act(() => {
@@ -442,8 +443,17 @@ describe('useAgentEventHandler', () => {
     const started = useConversationStore.getState();
     expect(started.activeSessionId).toBe('session-1');
 
-    // Simulate explicit clear/new-chat while old run still emitting events.
-    useConversationStore.setState({ activeSessionId: null });
+    useConversationStore.setState((state) => ({
+      ...state,
+      activeConversation: {
+        id: 'session-2',
+        projectId: 'project-1',
+        messages: [],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      },
+      activeSessionId: 'session-2',
+    }));
 
     act(() => {
       result.current.handleEvent({
@@ -453,11 +463,12 @@ describe('useAgentEventHandler', () => {
       });
     });
 
-    const msg = useConversationStore.getState().activeConversation!.messages[0];
-    expect(msg.parts).toHaveLength(0);
+    const state = useConversationStore.getState();
+    expect(state.activeConversation!.messages).toHaveLength(0);
+    expect(state.conversationsBySessionId['session-1'].messages[0].parts).toHaveLength(1);
   });
 
-  it('should drop session_start for an inactive session', () => {
+  it('should create a cached transcript for a session_start on an inactive session', () => {
     const { result } = renderHook(() => useAgentEventHandler());
 
     useConversationStore.setState({
@@ -491,6 +502,7 @@ describe('useAgentEventHandler', () => {
     const state = useConversationStore.getState();
     expect(state.activeSessionId).toBe('session-2');
     expect(state.activeConversation!.messages).toHaveLength(0);
+    expect(state.conversationsBySessionId['session-1'].messages[0].parts).toHaveLength(1);
   });
 
   it('should handle full session lifecycle', () => {
