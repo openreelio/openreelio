@@ -8,6 +8,7 @@ import {
 import type { ExternalAgentApprovalDecision, ExternalAgentRuntimeAdapter } from './types';
 import type { ExternalAgentApprovalBroker } from './approvalBroker';
 import type { ExternalAgentSessionPersistence } from './sessionPersistence';
+import { useConversationStore } from '@/stores/conversationStore';
 
 export interface UseExternalAgentChatRuntimeOptions {
   adapter: ExternalAgentRuntimeAdapter;
@@ -43,6 +44,7 @@ export function useExternalAgentChatRuntime(
   const [state, setState] = useState<ExternalAgentChatRuntimeState>(INITIAL_STATE);
   const conversation = useMemo(() => createConversationStoreExternalAgentGateway(), []);
   const controllerRef = useRef<ExternalAgentChatRuntimeController | null>(null);
+  const activeSessionId = useConversationStore((store) => store.activeSessionId);
 
   if (!controllerRef.current) {
     controllerRef.current = new ExternalAgentChatRuntimeController({
@@ -86,6 +88,10 @@ export function useExternalAgentChatRuntime(
       controllerRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    controllerRef.current?.refreshState();
+  }, [activeSessionId]);
 
   const executeMessage = useCallback(async (message: string) => {
     await controllerRef.current?.sendMessage(message);

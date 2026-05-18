@@ -63,6 +63,24 @@ describe('ExternalAgentApprovalBroker', () => {
     expect(broker.getSnapshot().pending).toBeNull();
   });
 
+  it('should auto-resolve approvals from policy without showing a pending request', async () => {
+    const policyResolver = vi.fn(() => 'accept' as const);
+    const broker = new ExternalAgentApprovalBroker({ timeoutMs: 0, policyResolver });
+    const snapshots: Array<string | null> = [];
+    const decisions: Array<{ id: string; decision: string }> = [];
+    broker.subscribe((snapshot) => snapshots.push(snapshot.pending?.id ?? null));
+    broker.subscribeDecision((resolvedRequest, decision) => {
+      decisions.push({ id: resolvedRequest.id, decision });
+    });
+
+    await expect(broker.requestDecision(request())).resolves.toBe('accept');
+
+    expect(policyResolver).toHaveBeenCalledWith(expect.objectContaining({ id: 'codex-1' }));
+    expect(snapshots).toEqual([null]);
+    expect(broker.getSnapshot().pending).toBeNull();
+    expect(decisions).toEqual([{ id: 'codex-1', decision: 'accept' }]);
+  });
+
   it('should preserve epoch timestamps when ordering pending approvals', () => {
     const broker = new ExternalAgentApprovalBroker({ timeoutMs: 0, now: () => 2_000 });
 

@@ -8,6 +8,13 @@ export interface ExternalAgentApprovalBrokerOptions {
   fallbackDecision?: ExternalAgentApprovalDecision;
   timeoutMs?: number;
   now?: () => number;
+  policyResolver?: (
+    request: ExternalAgentApprovalRequest,
+  ) =>
+    | ExternalAgentApprovalDecision
+    | null
+    | undefined
+    | Promise<ExternalAgentApprovalDecision | null | undefined>;
 }
 
 export interface ExternalAgentApprovalBrokerSnapshot {
@@ -40,21 +47,35 @@ export class ExternalAgentApprovalBroker {
   }
 
   requestDecision: ExternalAgentApprovalDecisionProvider = async (request) => {
+    const normalizedRequest: ExternalAgentApprovalRequest = {
+      ...request,
+      requestedAt: request.requestedAt ?? this.options.now?.() ?? Date.now(),
+    };
+
     if (this.pending.has(request.id)) {
       this.resolve(request.id, this.fallbackDecision);
+    }
+
+    const policyResolver = this.options.policyResolver;
+    if (policyResolver) {
+      const policyDecision = await policyResolver(normalizedRequest);
+      if (policyDecision) {
+        this.notifyDecision(normalizedRequest, policyDecision);
+        return policyDecision;
+      }
     }
 
     return new Promise<ExternalAgentApprovalDecision>((resolve) => {
       const timeoutId =
         this.timeoutMs > 0
-          ? setTimeout(() => this.resolve(request.id, this.fallbackDecision), this.timeoutMs)
+          ? setTimeout(
+              () => this.resolve(normalizedRequest.id, this.fallbackDecision),
+              this.timeoutMs,
+            )
           : null;
 
-      this.pending.set(request.id, {
-        request: {
-          ...request,
-          requestedAt: request.requestedAt ?? this.options.now?.() ?? Date.now(),
-        },
+      this.pending.set(normalizedRequest.id, {
+        request: normalizedRequest,
         resolve,
         timeoutId,
       });
@@ -131,4 +152,21 @@ export class ExternalAgentApprovalBroker {
       listener(request, decision);
     }
   }
+}
+
+export function getExternalAgentApprovalPermissionToolName(
+  request: ExternalAgentApprovalRequest,
+): string {
+  return `external_agent_${request.approvalType}`;
+}
+
+export function getExternalAgentApprovalPermissionArgs(
+  request: ExternalAgentApprovalRequest,
+): Record<string, unknown> {
+  return {
+    ...request.args,
+    approvalType: request.approvalType,
+    runtimeId: request.runtimeId,
+    externalTool: request.tool,
+  };
 }

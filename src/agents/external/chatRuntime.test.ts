@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { persistPermissionAudit } from '@/agents/engine/core/permissionAudit';
 import type { MessagePart } from '@/agents/engine/core/conversation';
+import { usePermissionStore } from '@/stores/permissionStore';
 
 import { ExternalAgentApprovalBroker } from './approvalBroker';
 import {
@@ -125,6 +126,7 @@ class FakeExternalAgentSessionPersistence implements ExternalAgentSessionPersist
 describe('ExternalAgentChatRuntimeController', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    usePermissionStore.getState().loadDefaults();
   });
 
   afterEach(() => {
@@ -224,6 +226,55 @@ describe('ExternalAgentChatRuntimeController', () => {
     ]);
     expect(conversation.finalizeMessage).toHaveBeenCalledWith('assistant-1');
     expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('should keep external runtime state isolated per conversation session', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    adapter.startSession
+      .mockResolvedValueOnce({ sessionId: 'thr_session_1', runtimeId: 'codex' })
+      .mockResolvedValueOnce({ sessionId: 'thr_session_2', runtimeId: 'codex' });
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+    });
+
+    await controller.sendMessage('Long task in session 1');
+    expect(controller.getState('session-1')).toMatchObject({
+      phase: 'running',
+      isRunning: true,
+    });
+
+    conversation.activeSessionId = 'session-2';
+    controller.refreshState();
+    expect(controller.getState()).toMatchObject({
+      phase: 'idle',
+      isRunning: false,
+    });
+
+    await controller.sendMessage('Independent task in session 2');
+    expect(controller.getState('session-2')).toMatchObject({
+      phase: 'running',
+      isRunning: true,
+    });
+
+    adapter.emit({
+      type: 'turn_completed',
+      runtimeId: 'codex',
+      sessionId: 'thr_session_1',
+      turnId: 'turn_1',
+      status: 'completed',
+    });
+
+    expect(controller.getState('session-1')).toMatchObject({
+      phase: 'completed',
+      isRunning: false,
+    });
+    expect(controller.getState('session-2')).toMatchObject({
+      phase: 'running',
+      isRunning: true,
+    });
   });
 
   it('should ignore runtime events for untracked external sessions', async () => {
@@ -627,6 +678,14 @@ describe('ExternalAgentChatRuntimeController', () => {
       'allow_always',
       'interactive_approval',
     );
+    expect(
+      usePermissionStore.getState().resolvePermission('external_agent_file_change', {
+        grantRoot: '/project',
+        approvalType: 'file_change',
+        runtimeId: 'codex',
+        externalTool: 'Codex file change',
+      }),
+    ).toBe('allow');
   });
 
   it('should surface broker-only OpenReelio approval requests as chat cards', async () => {

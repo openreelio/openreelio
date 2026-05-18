@@ -71,6 +71,16 @@ describe('permissionStore', () => {
     expect(usePermissionStore.getState().resolvePermission('delete_clip')).toBe('deny');
   });
 
+  it('should let a later wildcard allow rule override the default wildcard ask rule', () => {
+    const store = usePermissionStore.getState();
+    store.addRule('*', 'allow', 'global');
+
+    const resolution = usePermissionStore.getState().resolvePermissionDetails('custom_tool');
+
+    expect(resolution.permission).toBe('allow');
+    expect(resolution.matchedPattern).toBe('*');
+  });
+
   it('should add session rules that override global', () => {
     const store = usePermissionStore.getState();
     store.addRule('delete_*', 'deny', 'global');

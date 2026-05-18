@@ -8,8 +8,13 @@ import {
 import { persistPermissionAudit } from '@/agents/engine/core/permissionAudit';
 import type { RiskLevel } from '@/agents/engine/core/types';
 import { useConversationStore } from '@/stores/conversationStore';
+import { usePermissionStore } from '@/stores/permissionStore';
 
-import type { ExternalAgentApprovalBroker } from './approvalBroker';
+import {
+  getExternalAgentApprovalPermissionArgs,
+  getExternalAgentApprovalPermissionToolName,
+  type ExternalAgentApprovalBroker,
+} from './approvalBroker';
 import type { ExternalAgentSessionPersistence } from './sessionPersistence';
 import type {
   ExternalAgentApprovalDecision,
@@ -79,12 +84,21 @@ const INITIAL_STATE: ExternalAgentChatRuntimeState = {
 
 const CODEX_OPENREELIO_TOOL_PROTOCOL_VERSION = 3;
 
+function createInitialRuntimeState(): ExternalAgentChatRuntimeState {
+  return {
+    ...INITIAL_STATE,
+    pendingToolPermissionRequest: null,
+  };
+}
+
 export class ExternalAgentChatRuntimeController {
   private projectId: string | null;
   private cwd: string | null;
   private enabled: boolean;
-  private state = INITIAL_STATE;
+  private fallbackState = createInitialRuntimeState();
+  private readonly stateByConversationSessionId = new Map<string, ExternalAgentChatRuntimeState>();
   private readonly sessionByConversationSessionId = new Map<string, ExternalAgentSessionHandle>();
+  private readonly conversationSessionIdByExternalSessionId = new Map<string, string>();
   private readonly messageIdByExternalSessionId = new Map<string, string>();
   private readonly textDeltaMessages = new Set<string>();
   private readonly itemPartIndex = new Map<string, number>();
@@ -113,14 +127,21 @@ export class ExternalAgentChatRuntimeController {
     this.unsubscribe = options.adapter.subscribe?.((event) => this.handleEvent(event)) ?? null;
     this.unsubscribeApprovalBroker =
       options.approvalBroker?.subscribe((snapshot) => {
-        if (snapshot.pending) {
-          this.handleBrokerApprovalRequest(snapshot.pending);
+        if (!snapshot.pending) {
+          this.clearPendingApprovalState();
+          return;
         }
-        this.setState({
-          pendingToolPermissionRequest: snapshot.pending
-            ? mapApprovalRequestToPermissionRequest(snapshot.pending)
-            : null,
-        });
+
+        this.handleBrokerApprovalRequest(snapshot.pending);
+        const conversationSessionId = this.getConversationSessionIdForExternalSession(
+          snapshot.pending.sessionId,
+        );
+        this.setState(
+          {
+            pendingToolPermissionRequest: mapApprovalRequestToPermissionRequest(snapshot.pending),
+          },
+          conversationSessionId,
+        );
       }) ?? null;
     this.unsubscribeApprovalDecisions =
       options.approvalBroker?.subscribeDecision((request, decision) => {
@@ -158,8 +179,19 @@ export class ExternalAgentChatRuntimeController {
     };
   }
 
-  getState(): ExternalAgentChatRuntimeState {
-    return this.state;
+  getState(
+    conversationSessionId: string | null = this.options.conversation.getActiveSessionId(),
+  ): ExternalAgentChatRuntimeState {
+    if (!conversationSessionId) {
+      return this.fallbackState;
+    }
+    return (
+      this.stateByConversationSessionId.get(conversationSessionId) ?? createInitialRuntimeState()
+    );
+  }
+
+  refreshState(): void {
+    this.callbacks.onStateChange?.(this.getState());
   }
 
   async sendMessage(content: string): Promise<void> {
@@ -173,11 +205,14 @@ export class ExternalAgentChatRuntimeController {
       return;
     }
 
-    this.setState({
-      phase: 'starting',
-      isRunning: true,
-      error: null,
-    });
+    this.setState(
+      {
+        phase: 'starting',
+        isRunning: true,
+        error: null,
+      },
+      this.options.conversation.getActiveSessionId(),
+    );
 
     const conversationSessionId = await this.options.conversation.ensureSession(
       this.options.adapter.id,
@@ -190,11 +225,15 @@ export class ExternalAgentChatRuntimeController {
     try {
       const externalSession = await this.ensureExternalSession(conversationSessionId);
       this.activeConversationSessionId = conversationSessionId;
+      this.conversationSessionIdByExternalSessionId.set(
+        externalSession.sessionId,
+        conversationSessionId,
+      );
       this.messageIdByExternalSessionId.set(
         externalSession.sessionId,
         this.options.conversation.startAssistantMessage(conversationSessionId),
       );
-      this.setState({ phase: 'running', isRunning: true, error: null });
+      this.setState({ phase: 'running', isRunning: true, error: null }, conversationSessionId);
       await this.options.adapter.sendMessage(externalSession.sessionId, {
         content,
         cwd: this.cwd,
@@ -206,7 +245,8 @@ export class ExternalAgentChatRuntimeController {
   }
 
   async interrupt(): Promise<void> {
-    const activeSessionId = this.activeConversationSessionId;
+    const activeSessionId =
+      this.options.conversation.getActiveSessionId() ?? this.activeConversationSessionId;
     const externalSession = activeSessionId
       ? this.sessionByConversationSessionId.get(activeSessionId)
       : null;
@@ -265,6 +305,7 @@ export class ExternalAgentChatRuntimeController {
           cwd: this.cwd,
         });
         this.sessionByConversationSessionId.set(conversationSessionId, resumed);
+        this.conversationSessionIdByExternalSessionId.set(resumed.sessionId, conversationSessionId);
         return resumed;
       } catch {
         // Fall through to starting a fresh runtime session and replacing the stale link.
@@ -276,6 +317,7 @@ export class ExternalAgentChatRuntimeController {
       cwd: this.cwd,
     });
     this.sessionByConversationSessionId.set(conversationSessionId, session);
+    this.conversationSessionIdByExternalSessionId.set(session.sessionId, conversationSessionId);
     this.conversationSessionsPendingPersistence.add(conversationSessionId);
     return session;
   }
@@ -378,7 +420,11 @@ export class ExternalAgentChatRuntimeController {
         break;
 
       case 'turn_started':
-        this.setState({ phase: 'running', isRunning: true, error: null });
+        this.setStateForExternalSession(event.sessionId, {
+          phase: 'running',
+          isRunning: true,
+          error: null,
+        });
         break;
 
       case 'turn_completed':
@@ -422,10 +468,14 @@ export class ExternalAgentChatRuntimeController {
       startedAt: Date.now(),
     });
     this.itemPartIndex.set(this.itemKey(event.sessionId, event.itemId), partIndex);
-    this.setState({
-      startedTools: this.state.startedTools + 1,
-      latestIteration: this.state.latestIteration + 1,
-    });
+    const sessionState = this.getStateForExternalSession(event.sessionId);
+    this.setState(
+      {
+        startedTools: sessionState.startedTools + 1,
+        latestIteration: sessionState.latestIteration + 1,
+      },
+      this.getConversationSessionIdForExternalSession(event.sessionId),
+    );
   }
 
   private handleToolCompleted(
@@ -450,7 +500,12 @@ export class ExternalAgentChatRuntimeController {
         event.error ?? undefined,
       ),
     );
-    this.setState({ completedTools: this.state.completedTools + 1 });
+    this.setState(
+      {
+        completedTools: this.getStateForExternalSession(event.sessionId).completedTools + 1,
+      },
+      this.getConversationSessionIdForExternalSession(event.sessionId),
+    );
   }
 
   private handleFileChange(
@@ -608,7 +663,12 @@ export class ExternalAgentChatRuntimeController {
       this.options.conversation.finalizeMessage(messageId);
     }
 
-    this.setState({ phase: 'failed', isRunning: false, error });
+    this.setState(
+      { phase: 'failed', isRunning: false, error },
+      externalSessionId
+        ? this.getConversationSessionIdForExternalSession(externalSessionId)
+        : this.activeConversationSessionId,
+    );
     this.callbacks.onError?.(error);
   }
 
@@ -624,7 +684,12 @@ export class ExternalAgentChatRuntimeController {
       this.options.conversation.finalizeMessage(messageId);
     }
 
-    this.setState({ phase, isRunning: false, error: null });
+    this.setState(
+      { phase, isRunning: false, error: null },
+      externalSessionId
+        ? this.getConversationSessionIdForExternalSession(externalSessionId)
+        : this.activeConversationSessionId,
+    );
     if (phase === 'aborted') {
       this.callbacks.onAbort?.();
     } else {
@@ -642,12 +707,55 @@ export class ExternalAgentChatRuntimeController {
     return null;
   }
 
-  private setState(update: Partial<ExternalAgentChatRuntimeState>): void {
-    this.state = {
-      ...this.state,
+  private getConversationSessionIdForExternalSession(externalSessionId: string): string | null {
+    return this.conversationSessionIdByExternalSessionId.get(externalSessionId) ?? null;
+  }
+
+  private getStateForExternalSession(externalSessionId: string): ExternalAgentChatRuntimeState {
+    return this.getState(this.getConversationSessionIdForExternalSession(externalSessionId));
+  }
+
+  private setStateForExternalSession(
+    externalSessionId: string,
+    update: Partial<ExternalAgentChatRuntimeState>,
+  ): void {
+    this.setState(update, this.getConversationSessionIdForExternalSession(externalSessionId));
+  }
+
+  private setState(
+    update: Partial<ExternalAgentChatRuntimeState>,
+    conversationSessionId: string | null = this.activeConversationSessionId,
+  ): void {
+    if (!conversationSessionId) {
+      this.fallbackState = {
+        ...this.fallbackState,
+        ...update,
+      };
+      this.callbacks.onStateChange?.(this.getState());
+      return;
+    }
+
+    const previous =
+      this.stateByConversationSessionId.get(conversationSessionId) ?? createInitialRuntimeState();
+    this.stateByConversationSessionId.set(conversationSessionId, {
+      ...previous,
       ...update,
+    });
+    this.callbacks.onStateChange?.(this.getState());
+  }
+
+  private clearPendingApprovalState(): void {
+    this.fallbackState = {
+      ...this.fallbackState,
+      pendingToolPermissionRequest: null,
     };
-    this.callbacks.onStateChange?.(this.state);
+    for (const [sessionId, state] of this.stateByConversationSessionId.entries()) {
+      this.stateByConversationSessionId.set(sessionId, {
+        ...state,
+        pendingToolPermissionRequest: null,
+      });
+    }
+    this.callbacks.onStateChange?.(this.getState());
   }
 
   private itemKey(sessionId: string, itemId: string): string {
@@ -665,12 +773,15 @@ export class ExternalAgentChatRuntimeController {
 
   private clearExternalSessionState(): void {
     this.sessionByConversationSessionId.clear();
+    this.conversationSessionIdByExternalSessionId.clear();
     this.messageIdByExternalSessionId.clear();
     this.textDeltaMessages.clear();
     this.itemPartIndex.clear();
     this.patchPartIndex.clear();
     this.approvalPartIndex.clear();
     this.conversationSessionsPendingPersistence.clear();
+    this.stateByConversationSessionId.clear();
+    this.fallbackState = createInitialRuntimeState();
     this.activeConversationSessionId = null;
   }
 
@@ -703,8 +814,18 @@ export class ExternalAgentChatRuntimeController {
     decision: ExternalAgentApprovalDecision,
   ): void {
     const sessionId =
-      this.activeConversationSessionId ?? this.options.conversation.getActiveSessionId();
+      this.getConversationSessionIdForExternalSession(request.sessionId) ??
+      this.activeConversationSessionId ??
+      this.options.conversation.getActiveSessionId();
     const action = mapApprovalDecisionToAuditAction(decision);
+    if (action === 'allow_always') {
+      usePermissionStore
+        .getState()
+        .allowAlways(
+          getExternalAgentApprovalPermissionToolName(request),
+          getExternalAgentApprovalPermissionArgs(request),
+        );
+    }
     persistPermissionAudit(
       sessionId,
       null,
@@ -735,9 +856,7 @@ export function createConversationStoreExternalAgentGateway(): ExternalAgentConv
     finalizeMessage: (messageId: string) =>
       useConversationStore.getState().finalizeMessage(messageId),
     getMessageParts: (messageId: string) =>
-      useConversationStore
-        .getState()
-        .activeConversation?.messages.find((message) => message.id === messageId)?.parts ?? null,
+      useConversationStore.getState().getMessageParts(messageId),
   };
 }
 
