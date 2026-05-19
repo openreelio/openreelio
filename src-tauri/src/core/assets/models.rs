@@ -28,11 +28,16 @@ pub enum AssetKind {
 /// context-specific fallback.
 pub fn media_kind_from_extension(ext: &str) -> Option<AssetKind> {
     match ext.to_lowercase().as_str() {
-        "mp4" | "mov" | "avi" | "mkv" | "webm" | "m4v" | "wmv" | "flv" => Some(AssetKind::Video),
-        "mp3" | "wav" | "aac" | "ogg" | "flac" | "m4a" | "wma" | "oga" | "opus" | "weba" => {
-            Some(AssetKind::Audio)
-        }
-        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tiff" | "svg" => Some(AssetKind::Image),
+        "3g2" | "3gp" | "asf" | "avi" | "divx" | "dv" | "flv" | "m2t" | "m2ts" | "m2v" | "m4v"
+        | "mkv" | "mov" | "mp4" | "mpe" | "mpeg" | "mpg" | "mpv" | "mts" | "mxf" | "ogv" | "qt"
+        | "ts" | "vob" | "webm" | "wmv" => Some(AssetKind::Video),
+        "aac" | "ac3" | "adts" | "aif" | "aifc" | "aiff" | "alac" | "amr" | "ape" | "au"
+        | "awb" | "caf" | "dts" | "eac3" | "ec3" | "flac" | "m4a" | "mka" | "mp3" | "mp4a"
+        | "oga" | "ogg" | "opus" | "ra" | "snd" | "tta" | "wav" | "wave" | "weba" | "wma"
+        | "wv" => Some(AssetKind::Audio),
+        "avif" | "bmp" | "dds" | "dib" | "exr" | "gif" | "hdr" | "heic" | "heif" | "ico"
+        | "jpe" | "jpeg" | "jpg" | "jxl" | "png" | "psd" | "svg" | "tga" | "tif" | "tiff"
+        | "webp" => Some(AssetKind::Image),
         "srt" | "vtt" | "ass" | "ssa" | "sub" => Some(AssetKind::Subtitle),
         "ttf" | "otf" | "woff" | "woff2" => Some(AssetKind::Font),
         _ => None,
@@ -781,10 +786,16 @@ mod tests {
     #[test]
     fn test_media_kind_from_extension_recognizes_known_media_types() {
         assert_eq!(media_kind_from_extension("mp4"), Some(AssetKind::Video));
+        assert_eq!(media_kind_from_extension("mxf"), Some(AssetKind::Video));
+        assert_eq!(media_kind_from_extension("m2ts"), Some(AssetKind::Video));
         assert_eq!(media_kind_from_extension("opus"), Some(AssetKind::Audio));
+        assert_eq!(media_kind_from_extension("aiff"), Some(AssetKind::Audio));
+        assert_eq!(media_kind_from_extension("caf"), Some(AssetKind::Audio));
         assert_eq!(media_kind_from_extension("oga"), Some(AssetKind::Audio));
         assert_eq!(media_kind_from_extension("weba"), Some(AssetKind::Audio));
         assert_eq!(media_kind_from_extension("png"), Some(AssetKind::Image));
+        assert_eq!(media_kind_from_extension("tif"), Some(AssetKind::Image));
+        assert_eq!(media_kind_from_extension("heic"), Some(AssetKind::Image));
         assert_eq!(media_kind_from_extension("srt"), Some(AssetKind::Subtitle));
         assert_eq!(media_kind_from_extension("ttf"), Some(AssetKind::Font));
         assert_eq!(media_kind_from_extension("txt"), None);

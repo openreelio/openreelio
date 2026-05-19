@@ -242,13 +242,17 @@ mod tests {
         assert_eq!(asset_kind_from_extension("mp4"), AssetKind::Video);
         assert_eq!(asset_kind_from_extension("MP4"), AssetKind::Video);
         assert_eq!(asset_kind_from_extension("mov"), AssetKind::Video);
+        assert_eq!(asset_kind_from_extension("mxf"), AssetKind::Video);
         assert_eq!(asset_kind_from_extension("mp3"), AssetKind::Audio);
         assert_eq!(asset_kind_from_extension("wav"), AssetKind::Audio);
+        assert_eq!(asset_kind_from_extension("aiff"), AssetKind::Audio);
         assert_eq!(asset_kind_from_extension("opus"), AssetKind::Audio);
         assert_eq!(asset_kind_from_extension("oga"), AssetKind::Audio);
         assert_eq!(asset_kind_from_extension("weba"), AssetKind::Audio);
         assert_eq!(asset_kind_from_extension("png"), AssetKind::Image);
         assert_eq!(asset_kind_from_extension("jpg"), AssetKind::Image);
+        assert_eq!(asset_kind_from_extension("heic"), AssetKind::Image);
+        assert_eq!(asset_kind_from_extension("tif"), AssetKind::Image);
         assert_eq!(asset_kind_from_extension("srt"), AssetKind::Subtitle);
         assert_eq!(asset_kind_from_extension("ttf"), AssetKind::Font);
     }

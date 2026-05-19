@@ -187,10 +187,13 @@ mod tests {
         std::fs::write(root.join("footage/interview.mp4"), "video").unwrap();
         std::fs::write(root.join("footage/broll/city.mp4"), "video").unwrap();
         std::fs::write(root.join("footage/broll/sunrise.mov"), "video").unwrap();
+        std::fs::write(root.join("footage/broll/broadcast.mxf"), "video").unwrap();
         std::fs::write(root.join("audio/bgm.wav"), "audio").unwrap();
         std::fs::write(root.join("audio/narration.mp3"), "audio").unwrap();
+        std::fs::write(root.join("audio/mix.aiff"), "audio").unwrap();
         std::fs::write(root.join("images/poster.jpg"), "image").unwrap();
         std::fs::write(root.join("images/logo.png"), "image").unwrap();
+        std::fs::write(root.join("images/photo.heic"), "image").unwrap();
 
         // Non-media files (should be ignored)
         std::fs::write(root.join("notes.txt"), "text").unwrap();
@@ -218,10 +221,13 @@ mod tests {
         assert!(paths.contains(&"footage/interview.mp4"));
         assert!(paths.contains(&"footage/broll/city.mp4"));
         assert!(paths.contains(&"footage/broll/sunrise.mov"));
+        assert!(paths.contains(&"footage/broll/broadcast.mxf"));
         assert!(paths.contains(&"audio/bgm.wav"));
         assert!(paths.contains(&"audio/narration.mp3"));
+        assert!(paths.contains(&"audio/mix.aiff"));
         assert!(paths.contains(&"images/poster.jpg"));
         assert!(paths.contains(&"images/logo.png"));
+        assert!(paths.contains(&"images/photo.heic"));
     }
 
     #[test]
@@ -395,10 +401,14 @@ mod tests {
         assert_eq!(media_kind_from_extension("mp4"), Some(AssetKind::Video));
         assert_eq!(media_kind_from_extension("MP4"), Some(AssetKind::Video));
         assert_eq!(media_kind_from_extension("wav"), Some(AssetKind::Audio));
+        assert_eq!(media_kind_from_extension("aiff"), Some(AssetKind::Audio));
+        assert_eq!(media_kind_from_extension("caf"), Some(AssetKind::Audio));
         assert_eq!(media_kind_from_extension("opus"), Some(AssetKind::Audio));
         assert_eq!(media_kind_from_extension("oga"), Some(AssetKind::Audio));
         assert_eq!(media_kind_from_extension("weba"), Some(AssetKind::Audio));
         assert_eq!(media_kind_from_extension("jpg"), Some(AssetKind::Image));
+        assert_eq!(media_kind_from_extension("tif"), Some(AssetKind::Image));
+        assert_eq!(media_kind_from_extension("heic"), Some(AssetKind::Image));
         assert_eq!(media_kind_from_extension("srt"), Some(AssetKind::Subtitle));
         assert_eq!(media_kind_from_extension("ttf"), Some(AssetKind::Font));
         assert_eq!(media_kind_from_extension("txt"), None);
