@@ -519,9 +519,17 @@ Creates a new sequence.
 ```typescript
 interface CreateSequencePayload {
   name: string;
-  format: SequenceFormat;
+  /**
+   * Optional preset alias. Use "youtube_shorts", "shorts", "vertical_1080",
+   * "1080x1920", or "9:16" for a 1080x1920 vertical Shorts canvas.
+   * Landscape aliases include "youtube_1080", "1080p", and "1920x1080".
+   */
+  format?: string;
 }
 ```
+
+Newly created sequences become the active timeline so subsequent edits and the UI
+operate on the visible sequence.
 
 ### DeleteSequence
 

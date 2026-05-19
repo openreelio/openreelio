@@ -1522,6 +1522,23 @@ function buildCommandSchema(): CodexJsonObject {
   return {
     commands: OPENREELIO_COMMAND_TYPES,
     count: OPENREELIO_COMMAND_TYPES.length,
+    payloadHints: {
+      CreateSequence: {
+        required: ['name'],
+        optional: ['format'],
+        formatAliases: [
+          'youtube_shorts',
+          'shorts',
+          'vertical_1080',
+          '1080x1920',
+          '9:16',
+          'youtube_1080',
+          '1920x1080',
+          'youtube_4k',
+        ],
+        note: 'Use youtube_shorts or 1080x1920 for Shorts/vertical edits. A newly created sequence becomes the active timeline.',
+      },
+    },
     payloadFormat: {
       commandType: 'PascalCase OpenReelio backend command type',
       payload: 'CamelCase JSON object matching the selected command type',

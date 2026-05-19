@@ -563,6 +563,8 @@ describe('CodexReferenceAdapter', () => {
     expect(getFirstTextContent(projectStateResponse)).toContain('"projectState"');
     expect(commandSchemaResponse.success).toBe(true);
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"mutationTool"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"vertical_1080"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"1080x1920"');
   });
 
   it('should issue context tokens from crypto random values when randomUUID is unavailable', async () => {

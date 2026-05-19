@@ -470,9 +470,10 @@ describe('projectStore', () => {
       expect(useProjectStore.getState().isDirty).toBe(true);
     });
 
-    it('should set as active sequence if none active', async () => {
+    it('should set created sequence as active sequence', async () => {
       mockTauriCommand('create_sequence', { id: 'seq_001' });
 
+      useProjectStore.setState({ activeSequenceId: 'seq_existing' });
       await useProjectStore.getState().createSequence('Main', 'youtube_1080');
 
       expect(useProjectStore.getState().activeSequenceId).toBe('seq_001');
@@ -615,7 +616,7 @@ describe('projectStore', () => {
 
       const parentSequence = createMockSequence({ id: 'seq_parent', name: 'Parent Sequence' });
       const childSequence = createMockSequence({ id: 'seq_child', name: 'Nested Sequence' });
-       
+
       const sequences = new Map([
         [parentSequence.id, { ...parentSequence, markers: [], masterVolumeDb: 0 }],
         [childSequence.id, { ...childSequence, markers: [], masterVolumeDb: 0 }],
@@ -939,7 +940,6 @@ describe('projectStore', () => {
       const sequences = new Map([
         [parentSeq.id, { ...parentSeq, markers: [], masterVolumeDb: 0 }],
         [childSeq.id, { ...childSeq, markers: [], masterVolumeDb: 0 }],
-         
       ]) as any;
 
       setState({
@@ -970,7 +970,7 @@ describe('projectStore', () => {
       const { getState, setState } = useProjectStore;
 
       const seq = createMockSequence({ id: 'seq_main', name: 'Main' });
-       
+
       const sequences = new Map([[seq.id, { ...seq, markers: [], masterVolumeDb: 0 }]]) as any;
       setState({
         isLoaded: true,
@@ -991,7 +991,7 @@ describe('projectStore', () => {
       const { getState, setState } = useProjectStore;
 
       const seq = createMockSequence({ id: 'seq_main', name: 'Main' });
-       
+
       const sequences = new Map([[seq.id, { ...seq, markers: [], masterVolumeDb: 0 }]]) as any;
       setState({
         isLoaded: true,
@@ -1010,7 +1010,7 @@ describe('projectStore', () => {
       const { getState, setState } = useProjectStore;
 
       const seq = createMockSequence({ id: 'seq_main', name: 'Main' });
-       
+
       const sequences = new Map([[seq.id, { ...seq, markers: [], masterVolumeDb: 0 }]]) as any;
       setState({
         isLoaded: true,
@@ -1031,7 +1031,7 @@ describe('projectStore', () => {
 
       const mainSeq = createMockSequence({ id: 'seq_main', name: 'Main' });
       const altSeq = createMockSequence({ id: 'seq_alt', name: 'Alt' });
-       
+
       const sequences = new Map([
         [mainSeq.id, { ...mainSeq, markers: [], masterVolumeDb: 0 }],
         [altSeq.id, { ...altSeq, markers: [], masterVolumeDb: 0 }],
@@ -1092,7 +1092,6 @@ describe('projectStore', () => {
         },
       ];
 
-       
       const sequences = new Map([[seq.id, { ...seq, markers: [], masterVolumeDb: 0 }]]) as any;
       setState({
         sequences,
@@ -1158,7 +1157,6 @@ describe('projectStore', () => {
         },
       ];
 
-       
       const sequences = new Map([[seq.id, { ...seq, markers: [], masterVolumeDb: 0 }]]) as any;
       setState({
         sequences,

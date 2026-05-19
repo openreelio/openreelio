@@ -28,6 +28,9 @@ pub struct CreateSequenceCommand {
     /// Created sequence ID (stored after execution for undo)
     #[serde(skip)]
     created_sequence_id: Option<SequenceId>,
+    /// Previously active sequence ID, restored on undo when possible.
+    #[serde(skip)]
+    previous_active_sequence_id: Option<SequenceId>,
 }
 
 impl CreateSequenceCommand {
@@ -38,6 +41,7 @@ impl CreateSequenceCommand {
             format: format.to_string(),
             add_default_tracks: true,
             created_sequence_id: None,
+            previous_active_sequence_id: None,
         }
     }
 
@@ -46,17 +50,25 @@ impl CreateSequenceCommand {
         self.add_default_tracks = add;
         self
     }
+
+    fn resolve_sequence_format(format: &str) -> SequenceFormat {
+        match format.trim().to_ascii_lowercase().as_str() {
+            "1080p" | "youtube_1080" | "youtube_1080p" | "landscape_1080" | "1920x1080" => {
+                SequenceFormat::youtube_1080()
+            }
+            "4k" | "uhd_4k" | "youtube_4k" | "3840x2160" => SequenceFormat::youtube_4k(),
+            "shorts" | "youtube_shorts" | "shorts_1080" | "vertical" | "vertical_1080"
+            | "vertical_1080p" | "portrait_1080" | "1080x1920" | "9:16" => {
+                SequenceFormat::youtube_shorts()
+            }
+            _ => SequenceFormat::youtube_1080(),
+        }
+    }
 }
 
 impl Command for CreateSequenceCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
-        // Parse format
-        let seq_format = match self.format.as_str() {
-            "1080p" | "youtube_1080" => SequenceFormat::youtube_1080(),
-            "4k" | "youtube_4k" => SequenceFormat::youtube_4k(),
-            "shorts" | "youtube_shorts" => SequenceFormat::youtube_shorts(),
-            _ => SequenceFormat::youtube_1080(),
-        };
+        let seq_format = Self::resolve_sequence_format(&self.format);
 
         // Create sequence
         let mut sequence = Sequence::new(&self.name, seq_format);
@@ -71,14 +83,13 @@ impl Command for CreateSequenceCommand {
 
         let seq_id = sequence.id.clone();
         self.created_sequence_id = Some(seq_id.clone());
+        self.previous_active_sequence_id = state.active_sequence_id.clone();
 
         // Insert into state
         state.sequences.insert(seq_id.clone(), sequence);
 
-        // Set as active if first sequence
-        if state.active_sequence_id.is_none() {
-            state.active_sequence_id = Some(seq_id.clone());
-        }
+        // Newly created sequences should be visible immediately in the editor.
+        state.active_sequence_id = Some(seq_id.clone());
 
         state.is_dirty = true;
 
@@ -95,9 +106,14 @@ impl Command for CreateSequenceCommand {
         if let Some(ref seq_id) = self.created_sequence_id {
             state.sequences.remove(seq_id);
 
-            // Clear active sequence if it was this one
+            // Restore the previous active sequence when possible.
             if state.active_sequence_id.as_ref() == Some(seq_id) {
-                state.active_sequence_id = state.sequences.keys().next().cloned();
+                state.active_sequence_id = self
+                    .previous_active_sequence_id
+                    .as_ref()
+                    .filter(|previous_id| state.sequences.contains_key(*previous_id))
+                    .cloned()
+                    .or_else(|| state.sequences.keys().next().cloned());
             }
 
             state.is_dirty = true;
@@ -315,6 +331,40 @@ mod tests {
         cmd.execute(&mut state).unwrap();
 
         assert!(state.active_sequence_id.is_some());
+    }
+
+    #[test]
+    fn test_create_sequence_replaces_active_sequence() {
+        let mut state = create_test_state();
+
+        let mut first_cmd = CreateSequenceCommand::new("First", "1080p");
+        first_cmd.execute(&mut state).unwrap();
+        let first_id = state.active_sequence_id.clone().unwrap();
+
+        let mut second_cmd = CreateSequenceCommand::new("Second", "1080p");
+        second_cmd.execute(&mut state).unwrap();
+        let second_id = state.active_sequence_id.clone().unwrap();
+
+        assert_ne!(first_id, second_id);
+        assert_eq!(state.sequences.get(&second_id).unwrap().name, "Second");
+
+        second_cmd.undo(&mut state).unwrap();
+        assert_eq!(state.active_sequence_id, Some(first_id));
+    }
+
+    #[test]
+    fn test_create_sequence_accepts_vertical_format_aliases() {
+        for alias in [
+            "shorts",
+            "youtube_shorts",
+            "vertical_1080",
+            "1080x1920",
+            "9:16",
+        ] {
+            let format = CreateSequenceCommand::resolve_sequence_format(alias);
+            assert_eq!(format.canvas.width, 1080, "alias: {alias}");
+            assert_eq!(format.canvas.height, 1920, "alias: {alias}");
+        }
     }
 
     #[test]
