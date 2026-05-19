@@ -513,6 +513,38 @@ describe('useAssetDrop', () => {
       expect(onAssetDrop).not.toHaveBeenCalled();
     });
 
+    it('should not call onAssetDrop when audio is dropped on a video track', () => {
+      const sequence: Sequence = {
+        ...createMockSequence(2),
+        tracks: [
+          createMockTrack('track-0', false, 'video'),
+          createMockTrack('track-1', false, 'audio'),
+        ],
+      };
+
+      const onAssetDrop = vi.fn();
+      const { result } = renderHook(() =>
+        useAssetDrop({
+          ...defaultOptions,
+          sequence,
+          onAssetDrop,
+        }),
+      );
+
+      const event = createMockDragEvent('drop', {
+        clientY: 30, // track-0 (video)
+        dataTransferData: {
+          'application/json': JSON.stringify({ id: 'asset-1', kind: 'audio' }),
+        },
+      });
+
+      act(() => {
+        result.current.handleDrop(event);
+      });
+
+      expect(onAssetDrop).not.toHaveBeenCalled();
+    });
+
     it('should not call onAssetDrop when sequence is null', () => {
       const onAssetDrop = vi.fn();
       const { result } = renderHook(() =>

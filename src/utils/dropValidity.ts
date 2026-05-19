@@ -59,7 +59,7 @@ export interface DropValidationContext {
 const VIDEO_COMPATIBLE_TRACKS: TrackKind[] = ['video', 'overlay', 'audio'];
 
 /** Track kinds that accept audio assets */
-const AUDIO_COMPATIBLE_TRACKS: TrackKind[] = ['audio', 'video'];
+const AUDIO_COMPATIBLE_TRACKS: TrackKind[] = ['audio'];
 
 /** Track kinds that accept image assets */
 const IMAGE_COMPATIBLE_TRACKS: TrackKind[] = ['video', 'overlay'];
