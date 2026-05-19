@@ -3,10 +3,12 @@
 //! Handles all asset-related operations including import, metadata extraction,
 //! thumbnail generation, proxy generation, and asset lifecycle management.
 
+mod license_policy;
 mod metadata;
 mod models;
 pub mod thumbnail;
 
+pub use license_policy::*;
 pub use metadata::*;
 pub use models::*;
 pub use thumbnail::*;
