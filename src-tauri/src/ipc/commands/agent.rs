@@ -16,12 +16,15 @@ use tauri::Emitter;
 use crate::core::ai::agent_plan::{AgentPlan, AgentPlanResult, StepResult};
 use crate::core::ai::memory::{AgentMemoryDb, MemoryEntry};
 use crate::core::ai::plan_executor::{resolve_step_references, PlanExecutor};
+use crate::core::assets::{
+    evaluate_license_policy, LicenseInfo, LicensePolicyContext, LicensePolicyDecision,
+};
 use crate::core::credentials::{CredentialType, CredentialVault};
 use crate::core::plugin::api::{
     AssetProviderPlugin, PluginAssetRef, PluginAssetType, PluginSearchQuery,
 };
 use crate::core::plugin::providers::freesound::{FreesoundConfig, FreesoundProvider};
-use crate::core::plugin::providers::stock::{StockMediaConfig, StockMediaProvider};
+use crate::core::plugin::providers::stock::{StockMediaConfig, StockMediaProvider, StockSource};
 use crate::core::{fs::write_bytes_atomic_no_symlink, CoreError};
 use crate::ipc::payloads::CommandPayload;
 use crate::AppState;
@@ -856,19 +859,28 @@ pub struct StockMediaSearchResult {
     pub tags: Vec<String>,
     /// Provider that returned the asset.
     pub provider: String,
+    /// Normalized license information.
+    pub license: LicenseInfo,
+    /// Policy decision for the current default asset discovery context.
+    pub license_policy: LicensePolicyDecision,
     /// Additional provider-specific metadata such as preview URLs and license.
     pub metadata: serde_json::Value,
 }
 
-async fn get_freesound_api_key(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+async fn get_stock_provider_api_key(
+    app: &tauri::AppHandle,
+    credential_type: CredentialType,
+    provider_label: &str,
+    env_names: &[&str],
+) -> Result<Option<String>, String> {
     let app_data_dir = super::system::get_app_data_dir(app)?;
     let vault_path = app_data_dir.join("credentials.vault");
 
     if vault_path.exists() {
         match CredentialVault::new(vault_path) {
             Ok(vault) => {
-                if vault.exists(CredentialType::FreesoundApiKey).await {
-                    if let Ok(key) = vault.retrieve(CredentialType::FreesoundApiKey).await {
+                if vault.exists(credential_type).await {
+                    if let Ok(key) = vault.retrieve(credential_type).await {
                         let trimmed = key.trim();
                         if !trimmed.is_empty() {
                             return Ok(Some(trimmed.to_string()));
@@ -877,23 +889,149 @@ async fn get_freesound_api_key(app: &tauri::AppHandle) -> Result<Option<String>,
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to open credential vault for Freesound: {}", e);
+                tracing::warn!(
+                    "Failed to open credential vault for {}: {}",
+                    provider_label,
+                    e
+                );
             }
         }
     }
 
-    Ok(std::env::var("OPENREELIO_FREESOUND_API_KEY")
-        .ok()
-        .or_else(|| std::env::var("FREESOUND_API_KEY").ok())
+    Ok(env_names
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty()))
 }
 
+async fn get_freesound_api_key(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    get_stock_provider_api_key(
+        app,
+        CredentialType::FreesoundApiKey,
+        "Freesound",
+        &["OPENREELIO_FREESOUND_API_KEY", "FREESOUND_API_KEY"],
+    )
+    .await
+}
+
+async fn get_pexels_api_key(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    get_stock_provider_api_key(
+        app,
+        CredentialType::PexelsApiKey,
+        "Pexels",
+        &["OPENREELIO_PEXELS_API_KEY", "PEXELS_API_KEY"],
+    )
+    .await
+}
+
+async fn get_pixabay_api_key(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    get_stock_provider_api_key(
+        app,
+        CredentialType::PixabayApiKey,
+        "Pixabay",
+        &["OPENREELIO_PIXABAY_API_KEY", "PIXABAY_API_KEY"],
+    )
+    .await
+}
+
+fn license_info_from_asset_ref(asset_ref: &PluginAssetRef) -> LicenseInfo {
+    asset_ref
+        .metadata
+        .get("license")
+        .and_then(|license| license.get("licenseInfo"))
+        .and_then(|value| serde_json::from_value::<LicenseInfo>(value.clone()).ok())
+        .unwrap_or_else(|| {
+            match asset_ref
+                .metadata
+                .get("provider")
+                .and_then(|value| value.as_str())
+            {
+                Some("pexels") => StockMediaProvider::pexels_license(),
+                Some("pixabay") => StockMediaProvider::pixabay_license(),
+                Some("freesound") => FreesoundProvider::license_for_raw(
+                    asset_ref
+                        .metadata
+                        .get("license")
+                        .and_then(|license| license.get("licenseName"))
+                        .and_then(|value| value.as_str()),
+                ),
+                _ => LicenseInfo::default(),
+            }
+        })
+}
+
+async fn search_visual_stock_media(
+    app: &tauri::AppHandle,
+    search_query: &PluginSearchQuery,
+) -> Result<Vec<PluginAssetRef>, String> {
+    let pexels_key = get_pexels_api_key(app).await?;
+    let pixabay_key = get_pixabay_api_key(app).await?;
+
+    let mut providers = Vec::new();
+    if let Some(api_key) = pexels_key {
+        providers.push((
+            "Pexels",
+            StockMediaProvider::new(
+                "pexels",
+                StockMediaConfig {
+                    api_key: Some(api_key),
+                    source: StockSource::Pexels,
+                    ..Default::default()
+                },
+            ),
+        ));
+    }
+    if let Some(api_key) = pixabay_key {
+        providers.push((
+            "Pixabay",
+            StockMediaProvider::new(
+                "pixabay",
+                StockMediaConfig {
+                    api_key: Some(api_key),
+                    source: StockSource::Pixabay,
+                    ..Default::default()
+                },
+            ),
+        ));
+    }
+
+    if providers.is_empty() {
+        return Err(
+            "Image/video stock search requires a Pexels or Pixabay API key. Store credentials with provider 'pexels' or 'pixabay', or set OPENREELIO_PEXELS_API_KEY / OPENREELIO_PIXABAY_API_KEY."
+                .to_string(),
+        );
+    }
+
+    let mut refs = Vec::new();
+    let mut errors = Vec::new();
+
+    for (provider_label, provider) in providers {
+        match provider.search(search_query).await {
+            Ok(mut results) => refs.append(&mut results),
+            Err(error) => errors.push(format!("{provider_label}: {error}")),
+        }
+    }
+
+    if refs.is_empty() && !errors.is_empty() {
+        return Err(format!("Stock media search failed: {}", errors.join("; ")));
+    }
+
+    if !errors.is_empty() {
+        tracing::warn!(
+            "Some stock media providers failed while others returned results: {}",
+            errors.join("; ")
+        );
+    }
+
+    refs.truncate(search_query.limit);
+    Ok(refs)
+}
+
 /// Search stock media providers for assets matching a query.
 ///
-/// Uses the built-in StockMediaProvider (Pexels/Pixabay) to search for
-/// royalty-free images and videos. Returns mock data when no API key
-/// is configured.
+/// Uses configured built-in providers. Image/video search requires Pexels
+/// and/or Pixabay credentials. Audio search requires Freesound credentials.
 #[tauri::command]
 #[specta::specta]
 #[tracing::instrument(fields(query = %query, asset_type = ?asset_type, limit = ?limit))]
@@ -903,17 +1041,18 @@ pub async fn search_stock_media(
     asset_type: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<StockMediaSearchResult>, String> {
-    let plugin_asset_type = asset_type.as_deref().and_then(|t| match t {
+    let requested_asset_type = asset_type.as_deref().unwrap_or("video");
+    let plugin_asset_type = match requested_asset_type {
         "video" => Some(PluginAssetType::Video),
         "image" => Some(PluginAssetType::Image),
         "audio" => Some(PluginAssetType::Audio),
-        _ => None,
-    });
+        other => return Err(format!("Unsupported stock media asset type: {other}")),
+    };
 
     let search_query = PluginSearchQuery {
         text: Some(query),
         asset_type: plugin_asset_type,
-        limit: limit.unwrap_or(10),
+        limit: limit.unwrap_or(10).clamp(1, 50),
         ..Default::default()
     };
 
@@ -932,31 +1071,16 @@ pub async fn search_stock_media(
             )
         })?
     } else {
-        let config = StockMediaConfig {
-            // Use a placeholder key so the provider doesn't reject the request.
-            // In production, this would be fetched from credential storage.
-            api_key: Some("stock-media-key".to_string()),
-            ..Default::default()
-        };
-        let provider = StockMediaProvider::new("stock-media", config);
-
-        provider
-            .search(&search_query)
-            .await
-            .map_err(|e| format!("Stock media search failed: {e}"))?
+        search_visual_stock_media(&app, &search_query).await?
     };
 
     let results: Vec<StockMediaSearchResult> = refs
         .into_iter()
-        .map(|r| StockMediaSearchResult {
-            id: r.id,
-            name: r.name,
-            asset_type: format!("{:?}", r.asset_type).to_lowercase(),
-            thumbnail: r.thumbnail,
-            duration_sec: r.duration_sec,
-            size_bytes: r.size_bytes,
-            tags: r.tags,
-            provider: r
+        .map(|r| {
+            let license = license_info_from_asset_ref(&r);
+            let license_policy =
+                evaluate_license_policy(&license, &LicensePolicyContext::default());
+            let provider = r
                 .metadata
                 .get("provider")
                 .and_then(|value| value.as_str())
@@ -964,8 +1088,21 @@ pub async fn search_stock_media(
                     PluginAssetType::Audio => "freesound",
                     _ => "stock-media",
                 })
-                .to_string(),
-            metadata: r.metadata,
+                .to_string();
+
+            StockMediaSearchResult {
+                id: r.id,
+                name: r.name,
+                asset_type: format!("{:?}", r.asset_type).to_lowercase(),
+                thumbnail: r.thumbnail,
+                duration_sec: r.duration_sec,
+                size_bytes: r.size_bytes,
+                tags: r.tags,
+                provider,
+                license,
+                license_policy,
+                metadata: r.metadata,
+            }
         })
         .collect();
 

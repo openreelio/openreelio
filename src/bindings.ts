@@ -2169,9 +2169,8 @@ async executeAgentPlan(plan: AgentPlan) : Promise<Result<AgentPlanResult, string
 /**
  * Search stock media providers for assets matching a query.
  * 
- * Uses the built-in StockMediaProvider (Pexels/Pixabay) to search for
- * royalty-free images and videos. Returns mock data when no API key
- * is configured.
+ * Uses configured built-in providers. Image/video search requires Pexels
+ * and/or Pixabay credentials. Audio search requires Freesound credentials.
  */
 async searchStockMedia(query: string, assetType: string | null, limit: number | null) : Promise<Result<StockMediaSearchResult[], string>> {
     try {
@@ -2995,7 +2994,7 @@ audio?: AudioInfo | null;
 /**
  * License information
  */
-license: LicenseInfo; 
+license: LicenseInfo;
 /**
  * User-defined tags
  */
@@ -3940,7 +3939,7 @@ export type CreateResumeCheckpointInput = { id: string | null; sessionId: string
 /**
  * Status of credentials for each provider
  */
-export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google: boolean; seedance: boolean; freesound: boolean }
+export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google: boolean; seedance: boolean; pexels: boolean; pixabay: boolean; freesound: boolean }
 /**
  * Persisted delegation DTO aligned with the frontend session kernel vocabulary.
  */
@@ -4846,6 +4845,18 @@ allowedUse: string[];
  * License expiration date (ISO 8601)
  */
 expiresAt?: string | null }
+/**
+ * Enforceable policy decision for a candidate asset license.
+ */
+export type LicensePolicyDecision = { status: LicensePolicyStatus; requiredActions: LicensePolicyRequiredAction[]; reasons: string[] }
+/**
+ * Follow-up action a caller must enforce before import, placement, or export.
+ */
+export type LicensePolicyRequiredAction = "license_snapshot_required" | "attribution_required" | "manual_review_required" | "provider_terms_required"
+/**
+ * Result category for a license policy check.
+ */
+export type LicensePolicyStatus = "allowed" | "warning" | "blocked"
 /**
  * License source type
  */
@@ -6363,6 +6374,14 @@ tags: string[];
  * Provider that returned the asset.
  */
 provider: string; 
+/**
+ * Normalized license information.
+ */
+license: LicenseInfo;
+/**
+ * Policy decision for the current default asset discovery context.
+ */
+licensePolicy: LicensePolicyDecision;
 /**
  * Additional provider-specific metadata such as preview URLs and license.
  */

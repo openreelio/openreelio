@@ -98,7 +98,7 @@ impl FreesoundProvider {
     }
 
     #[allow(dead_code)]
-    fn freesound_license(raw_license: Option<&str>) -> LicenseInfo {
+    pub fn license_for_raw(raw_license: Option<&str>) -> LicenseInfo {
         let normalized = raw_license.unwrap_or_default().to_lowercase();
         let license_type = if normalized.contains("cc0") {
             LicenseType::Cc0
@@ -144,6 +144,8 @@ impl FreesoundProvider {
 
     #[allow(dead_code)]
     fn sound_to_asset(sound: &FreesoundSound) -> PluginAssetRef {
+        let license = Self::license_for_raw(sound.license.as_deref());
+
         PluginAssetRef {
             id: format!("freesound-{}", sound.id),
             name: sound.name.clone(),
@@ -154,7 +156,11 @@ impl FreesoundProvider {
             tags: sound.tags.clone(),
             metadata: serde_json::json!({
                 "provider": "freesound",
-                "license": sound.license,
+                "license": {
+                    "licenseInfo": license,
+                    "licenseName": sound.license,
+                    "licenseUrl": sound.license,
+                },
                 "creator": sound.username,
                 "sourceUrl": sound.url,
                 "previewUrl": Self::preview_url(sound.previews.as_ref()),
@@ -440,7 +446,7 @@ impl AssetProviderPlugin for FreesoundProvider {
             Ok(PluginFetchedAsset {
                 data: data.to_vec(),
                 mime_type: mime_type.to_string(),
-                license: Self::freesound_license(sound.license.as_deref()),
+                license: Self::license_for_raw(sound.license.as_deref()),
                 filename: Some(format!(
                     "{}.{}",
                     sound.name,
