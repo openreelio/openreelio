@@ -14,7 +14,7 @@ import {
   PreviewErrorBoundary,
 } from '@/components/shared';
 import { type Logger } from '@/services/logger';
-import type { Sequence } from '@/types';
+import type { FileTreeEntry, Sequence } from '@/types';
 import type { PanelId } from '@/stores/workspaceLayoutStore';
 import { EditorTimelineDockPanel } from './EditorTimelineDockPanel';
 
@@ -80,6 +80,7 @@ export interface EditorPanelContentOptions {
   audioMixerProps: AudioMixerPanelProps;
   aiSidebarProps: AISidebarProps;
   videoGenerationEnabled: boolean;
+  onExplorerAssetAddToTimeline?: (entry: FileTreeEntry) => void | Promise<void>;
 }
 
 export function createEditorPanelContent({
@@ -98,12 +99,13 @@ export function createEditorPanelContent({
   audioMixerProps,
   aiSidebarProps,
   videoGenerationEnabled,
+  onExplorerAssetAddToTimeline,
 }: EditorPanelContentOptions): Partial<Record<PanelId, ReactNode>> {
   return {
     explorer: (
       <ExplorerErrorBoundary onError={(error) => logger.error('ProjectExplorer error', { error })}>
         <div className="h-full overflow-auto p-4">
-          <ProjectExplorer />
+          <ProjectExplorer onAddToTimeline={onExplorerAssetAddToTimeline} />
         </div>
       </ExplorerErrorBoundary>
     ),

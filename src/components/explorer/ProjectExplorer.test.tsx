@@ -196,4 +196,23 @@ describe('ProjectExplorer', () => {
     expect(mockState.selectAsset).toHaveBeenCalledWith('image-1');
     expect(mockState.setSourceAsset).not.toHaveBeenCalled();
   });
+
+  it('should add an asset to the timeline on double click when a handler is provided', () => {
+    const onAddToTimeline = vi.fn();
+    const entry = createFileEntry({
+      relativePath: 'audio/voice.wav',
+      name: 'voice.wav',
+      kind: 'audio',
+      assetId: 'audio-1',
+    });
+    mockState.fileTree = [entry];
+    mockState.assets = new Map([['audio-1', createAsset('audio-1', 'audio')]]);
+
+    render(<ProjectExplorer onAddToTimeline={onAddToTimeline} />);
+
+    fireEvent.doubleClick(screen.getByRole('button', { name: 'voice.wav' }));
+
+    expect(mockState.selectAsset).toHaveBeenCalledWith('audio-1');
+    expect(onAddToTimeline).toHaveBeenCalledWith(entry);
+  });
 });
