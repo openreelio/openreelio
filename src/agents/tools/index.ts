@@ -15,6 +15,7 @@ import { registerCaptionTools, unregisterCaptionTools } from './captionTools';
 import { registerEffectTools, unregisterEffectTools } from './effectTools';
 import { registerTransitionTools, unregisterTransitionTools } from './transitionTools';
 import { registerGenerationTools, unregisterGenerationTools } from './generationTools';
+import { registerAssetDiscoveryTools, unregisterAssetDiscoveryTools } from './assetDiscoveryTools';
 import { registerWorkspaceTools, unregisterWorkspaceTools } from './workspaceTools';
 import { registerMediaAnalysisTools, unregisterMediaAnalysisTools } from './mediaAnalysisTools';
 import { registerMetaTools, unregisterMetaTools } from './metaTools';
@@ -49,6 +50,12 @@ export {
   unregisterGenerationTools,
   getGenerationToolNames,
 } from './generationTools';
+
+export {
+  registerAssetDiscoveryTools,
+  unregisterAssetDiscoveryTools,
+  getAssetDiscoveryToolNames,
+} from './assetDiscoveryTools';
 
 export {
   registerWorkspaceTools,
@@ -89,6 +96,7 @@ export function registerAllTools(): void {
     ['caption', registerCaptionTools],
     ['effect', registerEffectTools],
     ['transition', registerTransitionTools],
+    ['assetDiscovery', registerAssetDiscoveryTools],
     ['workspace', registerWorkspaceTools],
     ['mediaAnalysis', registerMediaAnalysisTools],
   ];
@@ -151,6 +159,7 @@ export function unregisterAllTools(): void {
     ['caption', unregisterCaptionTools],
     ['effect', unregisterEffectTools],
     ['transition', unregisterTransitionTools],
+    ['assetDiscovery', unregisterAssetDiscoveryTools],
     ['workspace', unregisterWorkspaceTools],
     ['mediaAnalysis', unregisterMediaAnalysisTools],
   ];

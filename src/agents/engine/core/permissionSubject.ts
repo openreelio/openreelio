@@ -93,6 +93,10 @@ const EXACT_SUBJECTS: Record<string, { subjectType: PermissionSubjectType; subje
     subjectType: 'external_provider',
     subject: 'external_provider.search',
   },
+  find_assets_for_script: {
+    subjectType: 'external_provider',
+    subject: 'external_provider.search',
+  },
   generate_video: {
     subjectType: 'external_provider',
     subject: 'external_provider.generate',

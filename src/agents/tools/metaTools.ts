@@ -21,6 +21,7 @@ import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
 import { getAnalysisToolNames } from './analysisTools';
 import { getMediaAnalysisToolNames } from './mediaAnalysisTools';
+import { getAssetDiscoveryToolNames } from './assetDiscoveryTools';
 import { getEditingToolNames } from './editingTools';
 import { getAudioToolNames } from './audioTools';
 import { getEffectToolNames } from './effectTools';
@@ -115,6 +116,24 @@ function normalizeMetaToolArgs(
     }
   }
 
+  if (metaToolName === 'query') {
+    if (
+      action === 'find_assets_for_script' &&
+      normalized.scriptText === undefined &&
+      typeof normalized.query === 'string'
+    ) {
+      normalized.scriptText = normalized.query;
+    }
+
+    if (
+      action === 'search_stock_media' &&
+      normalized.type === undefined &&
+      typeof normalized.assetType === 'string'
+    ) {
+      normalized.type = normalized.assetType;
+    }
+  }
+
   if (
     metaToolName === 'audio' &&
     action === 'normalize_audio' &&
@@ -150,7 +169,11 @@ export function normalizeMetaToolArgsForValidation(
 
 // Derive action lists from the individual tool modules (single source of truth).
 // These are computed once at module load time; the arrays never change after init.
-const QUERY_ACTIONS = [...getAnalysisToolNames(), ...getMediaAnalysisToolNames()];
+const QUERY_ACTIONS = [
+  ...getAnalysisToolNames(),
+  ...getMediaAnalysisToolNames(),
+  ...getAssetDiscoveryToolNames(),
+];
 const EDIT_ACTIONS = getEditingToolNames();
 const AUDIO_ACTIONS = getAudioToolNames();
 const EFFECTS_ACTIONS = [...getEffectToolNames(), ...getTransitionToolNames()];
@@ -255,6 +278,22 @@ const META_TOOLS: ToolDefinition[] = [
         },
         kind: { type: 'string', description: 'Asset kind filter or media kind selector' },
         query: { type: 'string', description: 'Search query or filename substring' },
+        scriptText: {
+          type: 'string',
+          description: 'Script or scene text for asset discovery actions',
+        },
+        assetType: {
+          type: 'string',
+          description: 'Asset discovery media type: video, image, or audio',
+        },
+        type: {
+          type: 'string',
+          description: 'Legacy asset discovery media type alias: video, image, or audio',
+        },
+        count: {
+          type: 'number',
+          description: 'Maximum asset discovery results to return',
+        },
         provider: { type: 'string', description: 'Preferred analysis provider when supported' },
         analysisTypes: {
           type: 'array',
