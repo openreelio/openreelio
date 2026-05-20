@@ -14,9 +14,11 @@ function readDefaultCapabilityPermissions(): string[] {
     throw new Error('Default Tauri capability permissions must be an array');
   }
 
-  return capability.permissions.filter((permission): permission is string => {
-    return typeof permission === 'string';
-  });
+  if (!capability.permissions.every((permission) => typeof permission === 'string')) {
+    throw new Error('Default Tauri capability permissions must contain only strings');
+  }
+
+  return capability.permissions as string[];
 }
 
 describe('Tauri default capabilities', () => {

@@ -117,6 +117,9 @@ function normalizeMetaToolArgs(
   }
 
   if (metaToolName === 'query') {
+    const isAssetDiscoveryAction =
+      action === 'search_stock_media' || action === 'find_assets_for_script';
+
     if (
       action === 'find_assets_for_script' &&
       normalized.scriptText === undefined &&
@@ -126,11 +129,32 @@ function normalizeMetaToolArgs(
     }
 
     if (
+      action === 'find_assets_for_script' &&
+      normalized.assetType === undefined &&
+      typeof normalized.type === 'string'
+    ) {
+      normalized.assetType = normalized.type;
+    }
+
+    if (
       action === 'search_stock_media' &&
       normalized.type === undefined &&
       typeof normalized.assetType === 'string'
     ) {
       normalized.type = normalized.assetType;
+    }
+
+    if (
+      isAssetDiscoveryAction &&
+      normalized.count === undefined &&
+      typeof normalized.limit === 'number' &&
+      Number.isFinite(normalized.limit)
+    ) {
+      normalized.count = normalized.limit;
+    }
+
+    if (isAssetDiscoveryAction && 'limit' in normalized) {
+      delete normalized.limit;
     }
   }
 

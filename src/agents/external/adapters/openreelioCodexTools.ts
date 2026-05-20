@@ -1346,10 +1346,8 @@ function normalizeStockMediaAssetType(value: unknown): 'video' | 'image' | 'audi
 }
 
 function normalizeStockMediaLimit(value: unknown): number {
-  return Math.min(
-    Math.max(typeof value === 'number' && Number.isFinite(value) ? value : 10, 1),
-    50,
-  );
+  const numeric = typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : 10;
+  return Math.min(Math.max(numeric, 1), 50);
 }
 
 async function searchStockMediaToolCall(args: CodexJsonObject | null): Promise<CodexJsonObject> {

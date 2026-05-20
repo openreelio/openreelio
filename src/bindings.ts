@@ -2994,7 +2994,7 @@ audio?: AudioInfo | null;
 /**
  * License information
  */
-license: LicenseInfo;
+license: LicenseInfo; 
 /**
  * User-defined tags
  */
@@ -6377,11 +6377,11 @@ provider: string;
 /**
  * Normalized license information.
  */
-license: LicenseInfo;
+license: LicenseInfo; 
 /**
  * Policy decision for the current default asset discovery context.
  */
-licensePolicy: LicensePolicyDecision;
+licensePolicy: LicensePolicyDecision; 
 /**
  * Additional provider-specific metadata such as preview URLs and license.
  */

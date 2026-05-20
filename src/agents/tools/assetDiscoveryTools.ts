@@ -37,7 +37,8 @@ function normalizeAssetType(value: unknown): StockAssetType {
 }
 
 function normalizeLimit(value: unknown): number {
-  return Math.min(Math.max(typeof value === 'number' ? value : 10, 1), 50);
+  const numeric = typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : 10;
+  return Math.min(Math.max(numeric, 1), 50);
 }
 
 async function searchStockMedia(args: {

@@ -150,7 +150,7 @@ function resolveExplorerInsertTrackId(
       : (tracks.find((track) => track.kind === 'video') ??
         tracks.find((track) => track.kind === 'overlay'));
 
-  return preferredTrack?.id ?? tracks[0]?.id ?? AUTO_TIMELINE_INSERT_TRACK_ID;
+  return preferredTrack?.id ?? AUTO_TIMELINE_INSERT_TRACK_ID;
 }
 
 export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps): JSX.Element {
