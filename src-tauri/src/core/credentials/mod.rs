@@ -48,6 +48,10 @@ pub enum CredentialType {
     GoogleApiKey,
     /// Seedance / BytePlus video generation API key
     SeedanceApiKey,
+    /// Pexels stock media API key
+    PexelsApiKey,
+    /// Pixabay stock media API key
+    PixabayApiKey,
     /// Freesound API key
     FreesoundApiKey,
     /// Custom provider API key
@@ -62,6 +66,8 @@ impl CredentialType {
             Self::AnthropicApiKey => "anthropic_api_key",
             Self::GoogleApiKey => "google_api_key",
             Self::SeedanceApiKey => "seedance_api_key",
+            Self::PexelsApiKey => "pexels_api_key",
+            Self::PixabayApiKey => "pixabay_api_key",
             Self::FreesoundApiKey => "freesound_api_key",
             Self::CustomApiKey => "custom_api_key",
         }
@@ -101,6 +107,9 @@ impl CredentialType {
             Self::SeedanceApiKey => {
                 // Seedance key format not yet standardized — basic non-empty check is sufficient
             }
+            Self::PexelsApiKey | Self::PixabayApiKey => {
+                // Stock provider key formats vary by account and app settings.
+            }
             Self::FreesoundApiKey => {
                 // Freesound token formats vary by account/app; non-empty validation is sufficient.
             }
@@ -137,6 +146,8 @@ impl std::str::FromStr for CredentialType {
             "anthropic_api_key" | "anthropic" => Ok(Self::AnthropicApiKey),
             "google_api_key" | "google" | "gemini" => Ok(Self::GoogleApiKey),
             "seedance_api_key" | "seedance" => Ok(Self::SeedanceApiKey),
+            "pexels_api_key" | "pexels" => Ok(Self::PexelsApiKey),
+            "pixabay_api_key" | "pixabay" => Ok(Self::PixabayApiKey),
             "freesound_api_key" | "freesound" => Ok(Self::FreesoundApiKey),
             "custom_api_key" | "custom" => Ok(Self::CustomApiKey),
             _ => Err(CredentialError::InvalidCredentialType(s.to_string())),

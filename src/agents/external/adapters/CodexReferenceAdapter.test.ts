@@ -155,6 +155,7 @@ describe('CodexReferenceAdapter', () => {
         developerInstructions: expect.stringContaining('OpenReelio'),
         dynamicTools: expect.arrayContaining([
           expect.objectContaining({ namespace: 'openreelio', name: 'host_context' }),
+          expect.objectContaining({ namespace: 'openreelio', name: 'stock_media_search' }),
           expect.objectContaining({ namespace: 'openreelio', name: 'command_execute' }),
         ]),
       }),
@@ -165,6 +166,14 @@ describe('CodexReferenceAdapter', () => {
     );
     expect(commandExecuteTool.inputSchema.properties.commandType.enum).toContain('CreateTrack');
     expect(commandExecuteTool.inputSchema.properties.commandType.enum).not.toContain('DeleteFile');
+    const stockSearchTool = startThreadInput.dynamicTools.find(
+      (tool: any) => tool.name === 'stock_media_search',
+    );
+    expect(stockSearchTool.inputSchema.properties.assetType.enum).toEqual([
+      'video',
+      'image',
+      'audio',
+    ]);
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_123', 'Inspect this timeline', {
       cwd: '/project',
       model: 'gpt-5.5',
@@ -563,6 +572,168 @@ describe('CodexReferenceAdapter', () => {
     expect(getFirstTextContent(projectStateResponse)).toContain('"projectState"');
     expect(commandSchemaResponse.success).toBe(true);
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"mutationTool"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"vertical_1080"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"1080x1920"');
+  });
+
+  it('should expose stock media search through the Codex bridge', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'search_stock_media') {
+        expect(args).toEqual({
+          query: 'funny whoosh',
+          assetType: 'audio',
+          limit: 3,
+        });
+        return [
+          {
+            id: 'freesound-1',
+            name: 'Funny Whoosh',
+            assetType: 'audio',
+            thumbnail: null,
+            durationSec: 1.2,
+            sizeBytes: null,
+            tags: ['whoosh'],
+            provider: 'freesound',
+            license: { licenseType: 'cc_0' },
+            licensePolicy: {
+              status: 'allowed',
+              requiredActions: ['license_snapshot_required'],
+              reasons: ['License is allowed under the current policy context.'],
+            },
+            metadata: {},
+          },
+        ];
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const response = (await respondToRequest({
+      id: 16,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_stock_search',
+        namespace: 'openreelio',
+        tool: 'stock_media_search',
+        arguments: {
+          query: 'funny whoosh',
+          assetType: 'audio',
+          limit: 3,
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(true);
+    expect(getFirstTextContent(response)).toContain('"requiresImport": true');
+    expect(getFirstTextContent(response)).toContain('"freesound-1"');
+    expect(getFirstTextContent(response)).toContain('"allowed"');
+  });
+
+  it('should reject stock media search without a query before invoking Tauri', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const response = (await respondToRequest({
+      id: 17,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_stock_search_missing_query',
+        namespace: 'openreelio',
+        tool: 'stock_media_search',
+        arguments: {
+          query: '   ',
+          assetType: 'video',
+          limit: 5,
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(false);
+    expect(getFirstTextContent(response)).toContain('OpenReelio stock_media_search requires query');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('should normalize fractional stock media limits before invoking Tauri', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockResolvedValue([]);
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const response = (await respondToRequest({
+      id: 18,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_stock_search_fractional_limit',
+        namespace: 'openreelio',
+        tool: 'stock_media_search',
+        arguments: {
+          query: 'city rain',
+          assetType: 'video',
+          limit: 3.9,
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('search_stock_media', {
+      query: 'city rain',
+      assetType: 'video',
+      limit: 3,
+    });
   });
 
   it('should issue context tokens from crypto random values when randomUUID is unavailable', async () => {

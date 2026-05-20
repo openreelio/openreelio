@@ -449,6 +449,75 @@ describe('useTimelineActions', () => {
       });
     });
 
+    it('should route audio-only assets to an audio track', async () => {
+      const videoTrack = createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' });
+      const audioTrack = createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1' });
+      const audioAsset = createMockAsset({
+        id: 'audio_001',
+        kind: 'audio',
+        name: 'voice.wav',
+        uri: '/path/to/voice.wav',
+        durationSec: 9,
+        audio: {
+          sampleRate: 48000,
+          channels: 2,
+          codec: 'pcm_s16le',
+        },
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [videoTrack, audioTrack],
+      });
+
+      useProjectStore.setState({
+        assets: new Map([[audioAsset.id, audioAsset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const call = args as { commandType: string; payload: Record<string, unknown> };
+          executeCalls.push(call);
+          return Promise.resolve({
+            opId: 'op_001',
+            createdIds: ['clip_audio_001'],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [audioAsset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          assetId: 'audio_001',
+          trackId: 'track_v1',
+          timelinePosition: 4,
+        });
+      });
+
+      expect(executeCalls).toEqual([
+        {
+          commandType: 'InsertClip',
+          payload: {
+            sequenceId: 'seq_001',
+            trackId: 'track_a1',
+            assetId: 'audio_001',
+            timelineIn: 4,
+          },
+        },
+      ]);
+    });
+
     it('should execute InsertEdit when the drop explicitly requests insert mode', async () => {
       const track = createMockTrack({ id: 'track_001' });
       const asset = createMockAsset({ id: 'asset_001', durationSec: 30 });
@@ -3703,10 +3772,7 @@ describe('useTimelineActions', () => {
         await result.current.handleInsertEditFromSource();
       });
 
-      expect(mockedInvoke).not.toHaveBeenCalledWith(
-        'three_point_insert',
-        expect.any(Object),
-      );
+      expect(mockedInvoke).not.toHaveBeenCalledWith('three_point_insert', expect.any(Object));
     });
   });
 
@@ -3798,7 +3864,16 @@ describe('useTimelineActions', () => {
       useEditorToolStore.setState({
         effectsClipboard: {
           sourceClipId: 'clip_source',
-          effects: [{ id: 'eff-1', effectType: 'brightness', enabled: true, params: {}, keyframes: {}, order: 0 }],
+          effects: [
+            {
+              id: 'eff-1',
+              effectType: 'brightness',
+              enabled: true,
+              params: {},
+              keyframes: {},
+              order: 0,
+            },
+          ],
           transform: {
             position: { x: 0, y: 0 },
             scale: { x: 1, y: 1 },

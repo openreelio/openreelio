@@ -34,6 +34,11 @@ import {
 const logger = createLogger('ProjectExplorer');
 const SOURCE_MONITOR_SUPPORTED_KINDS = new Set<AssetKind>(['video', 'audio']);
 
+export interface ProjectExplorerProps {
+  /** Insert the selected workspace asset into the active sequence. */
+  onAddToTimeline?: (entry: FileTreeEntry) => void | Promise<void>;
+}
+
 function canLoadIntoSourceMonitor(kind: AssetKind | undefined): boolean {
   return kind !== undefined && SOURCE_MONITOR_SUPPORTED_KINDS.has(kind);
 }
@@ -71,7 +76,7 @@ function buildCaptionSegmentPayloads(
   return payloads;
 }
 
-export function ProjectExplorer() {
+export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
 
@@ -159,9 +164,17 @@ export function ProjectExplorer() {
     (entry: FileTreeEntry) => {
       if (!entry.isDirectory && entry.assetId) {
         selectAsset(entry.assetId);
+        if (onAddToTimeline) {
+          void Promise.resolve(onAddToTimeline(entry)).catch((error) => {
+            logger.error('Failed to add file to timeline from double click', {
+              error,
+              relativePath: entry.relativePath,
+            });
+          });
+        }
       }
     },
-    [selectAsset],
+    [onAddToTimeline, selectAsset],
   );
 
   // ===========================================================================
@@ -278,9 +291,17 @@ export function ProjectExplorer() {
     (entry: FileTreeEntry) => {
       if (entry.assetId) {
         selectAsset(entry.assetId);
+        if (onAddToTimeline) {
+          void Promise.resolve(onAddToTimeline(entry)).catch((error) => {
+            logger.error('Failed to add file to timeline from context menu', {
+              error,
+              relativePath: entry.relativePath,
+            });
+          });
+        }
       }
     },
-    [selectAsset],
+    [onAddToTimeline, selectAsset],
   );
 
   // ===========================================================================

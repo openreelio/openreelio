@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { globalToolRegistry } from '@/agents';
 import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
 import { registerCaptionTools, unregisterCaptionTools } from './captionTools';
-import { registerMetaTools, unregisterMetaTools } from './metaTools';
+import {
+  normalizeMetaToolArgsForValidation,
+  registerMetaTools,
+  unregisterMetaTools,
+} from './metaTools';
 
 describe('metaTools', () => {
   beforeEach(() => {
@@ -48,5 +52,36 @@ describe('metaTools', () => {
 
     expect(aliased.valid).toBe(false);
     expect(aliased.errors.some((error) => error.includes('sequenceId'))).toBe(true);
+  });
+
+  it('normalizes asset discovery query aliases for validation', () => {
+    const normalized = normalizeMetaToolArgsForValidation('query', 'find_assets_for_script', {
+      query: 'city rain scene',
+      type: 'video',
+      limit: 7,
+    });
+
+    expect(normalized).toEqual({
+      query: 'city rain scene',
+      type: 'video',
+      scriptText: 'city rain scene',
+      assetType: 'video',
+      count: 7,
+    });
+  });
+
+  it('normalizes stock media query aliases for validation', () => {
+    const normalized = normalizeMetaToolArgsForValidation('query', 'search_stock_media', {
+      query: 'funny whoosh',
+      assetType: 'audio',
+      limit: 4,
+    });
+
+    expect(normalized).toEqual({
+      query: 'funny whoosh',
+      assetType: 'audio',
+      type: 'audio',
+      count: 4,
+    });
   });
 });

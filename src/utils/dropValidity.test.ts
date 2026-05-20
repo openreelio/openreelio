@@ -88,8 +88,8 @@ describe('isAssetCompatibleWithTrack', () => {
       expect(isAssetCompatibleWithTrack('audio', 'audio')).toBe(true);
     });
 
-    it('should be compatible with video tracks (for video with audio)', () => {
-      expect(isAssetCompatibleWithTrack('audio', 'video')).toBe(true);
+    it('should not be compatible with video tracks', () => {
+      expect(isAssetCompatibleWithTrack('audio', 'video')).toBe(false);
     });
 
     it('should not be compatible with overlay tracks', () => {

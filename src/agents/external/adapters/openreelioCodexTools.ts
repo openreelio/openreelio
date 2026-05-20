@@ -9,6 +9,7 @@ import type {
   PlanRiskLevel,
   ProjectInfo,
   ProjectStateDto,
+  StockMediaSearchResult,
 } from '@/bindings';
 
 import type { ExternalAgentApprovalDecisionProvider, ExternalAgentApprovalRequest } from '../types';
@@ -216,6 +217,27 @@ const PLAN_APPLY_SCHEMA: CodexJsonObject = {
   additionalProperties: false,
 };
 
+const STOCK_MEDIA_SEARCH_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  required: ['query'],
+  properties: {
+    query: {
+      type: 'string',
+      description: 'Concise English-first visual or audio search query.',
+    },
+    assetType: {
+      type: 'string',
+      enum: ['video', 'image', 'audio'],
+      description: 'Candidate asset type. Defaults to video.',
+    },
+    limit: {
+      type: 'number',
+      description: 'Maximum results to return, from 1 to 50. Defaults to 10.',
+    },
+  },
+  additionalProperties: false,
+};
+
 export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
   {
     namespace: 'openreelio',
@@ -243,6 +265,13 @@ export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
     name: 'assets_list',
     description: 'Read OpenReelio asset metadata and offline/missing status.',
     inputSchema: EMPTY_OBJECT_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'stock_media_search',
+    description:
+      'Search configured stock providers for video, image, or audio candidates. Returns provider references, previews, license info, and license policy decisions. Does not import or place media.',
+    inputSchema: STOCK_MEDIA_SEARCH_SCHEMA,
   },
   {
     namespace: 'openreelio',
@@ -337,6 +366,7 @@ export function buildOpenReelioCodexDeveloperInstructions(
     '- Use OpenReelio dynamic tools before claiming project, timeline, asset, or selection facts.',
     '- Use openreelio.host_context first when the user asks where you are, what you can use, or what environment this is.',
     '- Use openreelio.timeline_snapshot, openreelio.assets_list, openreelio.selection_read, and openreelio.command_schema before proposing concrete edits.',
+    '- Use openreelio.stock_media_search for stock video, image, BGM, or SFX candidates before falling back to generic web links.',
     '- Prefer openreelio.plan_validate and openreelio.plan_apply for multi-step edits. Use openreelio.command_execute only for a narrow single-command edit.',
     '- Apply edits with the fresh contextToken returned by openreelio.project_state, openreelio.timeline_snapshot, openreelio.assets_list, or openreelio.selection_read so the app can validate, approve, persist, undo, and refresh the UI.',
     '- Do not manually edit .openreelio state files or invent command payloads without checking the schema and current IDs.',
@@ -378,6 +408,10 @@ export async function handleOpenReelioCodexDynamicToolCall(
         return toolResponse(buildTimelineSnapshot(await readProjectState(), context));
       case 'assets_list':
         return toolResponse(buildAssetsList(await readProjectState(), context));
+      case 'stock_media_search': {
+        const result = await searchStockMediaToolCall(toolCall.arguments);
+        return toolResponse(result, result.status === 'ok');
+      }
       case 'selection_read':
         return toolResponse(await buildSelectionResponse(context));
       case 'diagnostics_read':
@@ -1307,6 +1341,59 @@ async function readOptionalProjectInfo(): Promise<ProjectInfo | null> {
   }
 }
 
+function normalizeStockMediaAssetType(value: unknown): 'video' | 'image' | 'audio' {
+  return value === 'image' || value === 'audio' || value === 'video' ? value : 'video';
+}
+
+function normalizeStockMediaLimit(value: unknown): number {
+  const numeric = typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : 10;
+  return Math.min(Math.max(numeric, 1), 50);
+}
+
+async function searchStockMediaToolCall(args: CodexJsonObject | null): Promise<CodexJsonObject> {
+  if (!args) {
+    throw new Error('OpenReelio stock_media_search requires object arguments.');
+  }
+
+  const query = getString(args, 'query')?.trim();
+  if (!query) {
+    throw new Error('OpenReelio stock_media_search requires query.');
+  }
+
+  const assetType = normalizeStockMediaAssetType(args.assetType);
+  const limit = normalizeStockMediaLimit(args.limit);
+
+  try {
+    const assets = await invoke<StockMediaSearchResult[]>('search_stock_media', {
+      query,
+      assetType,
+      limit,
+    });
+    const policySummary = assets.reduce<Record<string, number>>((summary, asset) => {
+      const status = asset.licensePolicy?.status ?? 'unknown';
+      summary[status] = (summary[status] ?? 0) + 1;
+      return summary;
+    }, {});
+
+    return {
+      status: 'ok',
+      query,
+      assetType,
+      count: assets.length,
+      requiresImport: true,
+      policySummary,
+      assets: assets as unknown as CodexJsonObject[],
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      query,
+      assetType,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 function buildTimelineSnapshot(
   state: ProjectStateDto,
   context: OpenReelioCodexToolContext,
@@ -1522,6 +1609,23 @@ function buildCommandSchema(): CodexJsonObject {
   return {
     commands: OPENREELIO_COMMAND_TYPES,
     count: OPENREELIO_COMMAND_TYPES.length,
+    payloadHints: {
+      CreateSequence: {
+        required: ['name'],
+        optional: ['format'],
+        formatAliases: [
+          'youtube_shorts',
+          'shorts',
+          'vertical_1080',
+          '1080x1920',
+          '9:16',
+          'youtube_1080',
+          '1920x1080',
+          'youtube_4k',
+        ],
+        note: 'Use youtube_shorts or 1080x1920 for Shorts/vertical edits. A newly created sequence becomes the active timeline.',
+      },
+    },
     payloadFormat: {
       commandType: 'PascalCase OpenReelio backend command type',
       payload: 'CamelCase JSON object matching the selected command type',

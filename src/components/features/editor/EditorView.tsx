@@ -49,9 +49,11 @@ import type {
   ClipId,
   Effect,
   EffectId,
+  FileTreeEntry,
   Sequence,
   SimpleParamValue,
   TextClipData,
+  Track,
 } from '@/types';
 import type { AddTextPayload } from '@/components/features/text';
 import type { AudioMixerPanelProps, ChannelLevels } from '@/components/features/mixer';
@@ -64,6 +66,7 @@ const logger = createLogger('EditorView');
 const AI_AUTO_COLLAPSE_BREAKPOINT = 1440;
 /** FFmpeg JPEG quality (1=best, 31=worst). Default: 2 for high quality frame export. */
 const JPEG_EXPORT_QUALITY = 2;
+const AUTO_TIMELINE_INSERT_TRACK_ID = '__openreelio_auto_timeline_track__';
 
 const ExportDialog = lazy(async () => {
   const module = await import('@/components/features/export');
@@ -124,6 +127,30 @@ function normalizeCaptionPositionValue(value: unknown): CaptionPosition | null {
   }
 
   return null;
+}
+
+function isTimelineInsertableAssetKind(
+  kind: FileTreeEntry['kind'],
+): kind is 'video' | 'audio' | 'image' {
+  return kind === 'video' || kind === 'audio' || kind === 'image';
+}
+
+function isUnlockedTrack(track: Track): boolean {
+  return !track.locked;
+}
+
+function resolveExplorerInsertTrackId(
+  sequence: Sequence,
+  assetKind: 'video' | 'audio' | 'image',
+): string {
+  const tracks = sequence.tracks.filter(isUnlockedTrack);
+  const preferredTrack =
+    assetKind === 'audio'
+      ? tracks.find((track) => track.kind === 'audio')
+      : (tracks.find((track) => track.kind === 'video') ??
+        tracks.find((track) => track.kind === 'overlay'));
+
+  return preferredTrack?.id ?? AUTO_TIMELINE_INSERT_TRACK_ID;
 }
 
 export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps): JSX.Element {
@@ -1030,6 +1057,33 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     toggleMasterMute();
   }, [toggleMasterMute]);
 
+  const handleExplorerAssetAddToTimeline = useCallback(
+    async (entry: FileTreeEntry): Promise<void> => {
+      if (entry.isDirectory || !sequence) {
+        return;
+      }
+
+      const asset = entry.assetId ? assets.get(entry.assetId) : undefined;
+      const assetKind = asset?.kind ?? entry.kind;
+      if (!isTimelineInsertableAssetKind(assetKind)) {
+        useToastStore.getState().addToast({
+          message: 'Only video, audio, and image assets can be added to the timeline.',
+          variant: 'warning',
+        });
+        return;
+      }
+
+      await handleAssetDrop({
+        ...(entry.assetId ? { assetId: entry.assetId } : {}),
+        workspaceRelativePath: entry.relativePath,
+        trackId: resolveExplorerInsertTrackId(sequence, assetKind),
+        timelinePosition: currentTime,
+        assetKind,
+      });
+    },
+    [assets, currentTime, handleAssetDrop, sequence],
+  );
+
   // Bottom panel tabs (kept for backward compat — used in panelContent)
   const videoGenEnabled = isVideoGenerationEnabled();
 
@@ -1223,6 +1277,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
         audioMixerProps: audioMixerPanelProps,
         aiSidebarProps,
         videoGenerationEnabled: videoGenEnabled,
+        onExplorerAssetAddToTimeline: handleExplorerAssetAddToTimeline,
       }),
     [
       sequence,
@@ -1238,6 +1293,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       audioMixerPanelProps,
       aiSidebarProps,
       videoGenEnabled,
+      handleExplorerAssetAddToTimeline,
     ],
   );
 

@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::core::{
+    assets::AssetKind,
     commands::{Command, CommandResult, StateChange},
     project::ProjectState,
     timeline::{
         AudioKeyframe, AudioSettings, BlendMode, Clip, ClipPlace, ClipRange, FadeType,
-        KeyframeInterpolation, TimeRemapCurve, TimeRemapKeyframe, Track, Transform,
+        KeyframeInterpolation, TimeRemapCurve, TimeRemapKeyframe, Track, TrackKind, Transform,
     },
     AssetId, ClipId, CoreError, CoreResult, SequenceId, TimeSec, TrackId,
 };
@@ -60,6 +61,54 @@ fn validate_no_overlap(
         });
     }
     Ok(())
+}
+
+fn asset_kind_label(kind: &AssetKind) -> &'static str {
+    match kind {
+        AssetKind::Video => "video",
+        AssetKind::Audio => "audio",
+        AssetKind::Image => "image",
+        AssetKind::Subtitle => "subtitle",
+        AssetKind::Font => "font",
+        AssetKind::EffectPreset => "effect preset",
+        AssetKind::MemePack => "meme pack",
+    }
+}
+
+fn track_kind_label(kind: &TrackKind) -> &'static str {
+    match kind {
+        TrackKind::Video => "video",
+        TrackKind::Audio => "audio",
+        TrackKind::Caption => "caption",
+        TrackKind::Overlay => "overlay",
+    }
+}
+
+fn is_asset_compatible_with_track(asset_kind: &AssetKind, track_kind: &TrackKind) -> bool {
+    match asset_kind {
+        AssetKind::Video => {
+            matches!(
+                track_kind,
+                TrackKind::Video | TrackKind::Overlay | TrackKind::Audio
+            )
+        }
+        AssetKind::Audio => matches!(track_kind, TrackKind::Audio),
+        AssetKind::Image => matches!(track_kind, TrackKind::Video | TrackKind::Overlay),
+        AssetKind::Subtitle => matches!(track_kind, TrackKind::Caption),
+        AssetKind::Font | AssetKind::EffectPreset | AssetKind::MemePack => false,
+    }
+}
+
+fn validate_asset_track_compatibility(asset_kind: &AssetKind, track: &Track) -> CoreResult<()> {
+    if is_asset_compatible_with_track(asset_kind, &track.kind) {
+        return Ok(());
+    }
+
+    Err(CoreError::ValidationError(format!(
+        "Cannot place {} asset on {} track",
+        asset_kind_label(asset_kind),
+        track_kind_label(&track.kind)
+    )))
 }
 
 fn insert_clip_sorted(track: &mut Track, clip: Clip) {
@@ -649,6 +698,7 @@ impl Command for InsertClipCommand {
             .iter_mut()
             .find(|t| t.id == self.track_id)
             .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+        validate_asset_track_compatibility(&asset.kind, track)?;
 
         // Create the clip
         let duration = source_end - source_start;
@@ -846,6 +896,7 @@ impl Command for InsertEditCommand {
             .find(|t| t.id == self.track_id)
             .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
 
+        validate_asset_track_compatibility(&asset.kind, target_track)?;
         validate_track_unlocked(target_track)?;
 
         // --- Collect split + shift records before mutation ---
@@ -1205,6 +1256,7 @@ impl Command for OverwriteEditCommand {
             .find(|t| t.id == self.track_id)
             .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
 
+        validate_asset_track_compatibility(&asset.kind, track)?;
         if track.locked {
             return Err(CoreError::ValidationError(format!(
                 "Track '{}' is locked",
@@ -6979,7 +7031,7 @@ impl Command for UngroupClipsCommand {
 mod tests {
     use super::*;
     use crate::core::{
-        assets::{Asset, VideoInfo},
+        assets::{Asset, AudioInfo, VideoInfo},
         timeline::{
             BlendMode, KeyframeInterpolation, Sequence, SequenceFormat, TimeRemapCurve,
             TimeRemapKeyframe, Track, TrackKind,
@@ -7045,6 +7097,55 @@ mod tests {
         let result = cmd.execute(&mut state);
 
         assert!(matches!(result, Err(CoreError::AssetNotFound(_))));
+    }
+
+    #[test]
+    fn test_insert_clip_allows_audio_asset_on_audio_track() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let audio_asset =
+            Asset::new_audio("voice.wav", "/voice.wav", AudioInfo::default()).with_duration(12.0);
+        let audio_asset_id = audio_asset.id.clone();
+        state.assets.insert(audio_asset_id.clone(), audio_asset);
+
+        let audio_track = Track::new_audio("Audio 1");
+        let audio_track_id = audio_track.id.clone();
+        state
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .tracks
+            .push(audio_track);
+
+        let mut cmd = InsertClipCommand::new(&seq_id, &audio_track_id, &audio_asset_id, 0.0);
+        let result = cmd.execute(&mut state);
+
+        assert!(result.is_ok());
+        let audio_track = state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|track| track.id == audio_track_id)
+            .unwrap();
+        assert_eq!(audio_track.clips.len(), 1);
+        assert_eq!(audio_track.clips[0].asset_id, audio_asset_id);
+    }
+
+    #[test]
+    fn test_insert_clip_rejects_audio_asset_on_video_track() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let video_track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let audio_asset =
+            Asset::new_audio("voice.wav", "/voice.wav", AudioInfo::default()).with_duration(12.0);
+        let audio_asset_id = audio_asset.id.clone();
+        state.assets.insert(audio_asset_id.clone(), audio_asset);
+
+        let mut cmd = InsertClipCommand::new(&seq_id, &video_track_id, &audio_asset_id, 0.0);
+        let result = cmd.execute(&mut state);
+
+        assert!(
+            matches!(result, Err(CoreError::ValidationError(message)) if message.contains("audio asset on video track"))
+        );
     }
 
     #[test]

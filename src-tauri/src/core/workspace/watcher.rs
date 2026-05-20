@@ -178,11 +178,17 @@ mod tests {
     fn test_is_media_extension() {
         assert!(is_media_extension("mp4"));
         assert!(is_media_extension("MP4"));
+        assert!(is_media_extension("mxf"));
+        assert!(is_media_extension("m2ts"));
         assert!(is_media_extension("wav"));
+        assert!(is_media_extension("aiff"));
+        assert!(is_media_extension("caf"));
         assert!(is_media_extension("opus"));
         assert!(is_media_extension("oga"));
         assert!(is_media_extension("weba"));
         assert!(is_media_extension("jpg"));
+        assert!(is_media_extension("tif"));
+        assert!(is_media_extension("heic"));
         assert!(is_media_extension("srt"));
         assert!(is_media_extension("ttf"));
         assert!(!is_media_extension("txt"));

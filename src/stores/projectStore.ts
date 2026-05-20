@@ -543,9 +543,8 @@ export const useProjectStore = create<ProjectState>()(
         set((state) => {
           state.sequences.set(result.id, result);
           state.isDirty = true;
-          if (!state.activeSequenceId) {
-            state.activeSequenceId = result.id;
-          }
+          state.sequenceNavigationStack = [];
+          state.activeSequenceId = result.id;
         });
 
         return result.id;
