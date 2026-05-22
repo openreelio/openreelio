@@ -996,12 +996,24 @@ async fn search_visual_stock_media(
         ));
     }
 
-    if providers.is_empty() {
+    if matches!(search_query.asset_type, Some(PluginAssetType::Video)) && providers.is_empty() {
         return Err(
-            "Image/video stock search requires a Pexels or Pixabay API key. Store credentials with provider 'pexels' or 'pixabay', or set OPENREELIO_PEXELS_API_KEY / OPENREELIO_PIXABAY_API_KEY."
+            "Video stock search requires a Pexels or Pixabay API key because the built-in no-key provider only supports image and audio search. Store credentials with provider 'pexels' or 'pixabay', set OPENREELIO_PEXELS_API_KEY / OPENREELIO_PIXABAY_API_KEY, or configure a hosted/provider plugin."
                 .to_string(),
         );
     }
+
+    providers.push((
+        "Openverse",
+        StockMediaProvider::new(
+            "openverse",
+            StockMediaConfig {
+                api_key: None,
+                source: StockSource::Openverse,
+                ..Default::default()
+            },
+        ),
+    ));
 
     let mut refs = Vec::new();
     let mut errors = Vec::new();
@@ -1030,8 +1042,8 @@ async fn search_visual_stock_media(
 
 /// Search stock media providers for assets matching a query.
 ///
-/// Uses configured built-in providers. Image/video search requires Pexels
-/// and/or Pixabay credentials. Audio search requires Freesound credentials.
+/// Uses configured built-in providers. Image/audio search has an Openverse
+/// fallback. Video search still requires Pexels and/or Pixabay credentials.
 #[tauri::command]
 #[specta::specta]
 #[tracing::instrument(fields(query = %query, asset_type = ?asset_type, limit = ?limit))]
@@ -1057,19 +1069,42 @@ pub async fn search_stock_media(
     };
 
     let refs: Vec<PluginAssetRef> = if plugin_asset_type == Some(PluginAssetType::Audio) {
+        let mut refs = Vec::new();
+        let mut errors = Vec::new();
+
         let api_key = get_freesound_api_key(&app).await?;
-        let provider = FreesoundProvider::new(
-            "freesound",
-            FreesoundConfig {
-                api_key,
+        if api_key.is_some() {
+            let provider = FreesoundProvider::new(
+                "freesound",
+                FreesoundConfig {
+                    api_key,
+                    ..Default::default()
+                },
+            );
+            match provider.search(&search_query).await {
+                Ok(mut results) => refs.append(&mut results),
+                Err(error) => errors.push(format!("Freesound: {error}")),
+            }
+        }
+
+        let openverse_provider = StockMediaProvider::new(
+            "openverse",
+            StockMediaConfig {
+                api_key: None,
+                source: StockSource::Openverse,
                 ..Default::default()
             },
         );
-        provider.search(&search_query).await.map_err(|e| {
-            format!(
-                "Audio stock search failed: {e}. Configure a Freesound API key via credential storage (provider: 'freesound') or OPENREELIO_FREESOUND_API_KEY."
-            )
-        })?
+        match openverse_provider.search(&search_query).await {
+            Ok(mut results) => refs.append(&mut results),
+            Err(error) => errors.push(format!("Openverse: {error}")),
+        }
+
+        if refs.is_empty() && !errors.is_empty() {
+            return Err(format!("Audio stock search failed: {}", errors.join("; ")));
+        }
+        refs.truncate(search_query.limit);
+        refs
     } else {
         search_visual_stock_media(&app, &search_query).await?
     };

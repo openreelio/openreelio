@@ -6,6 +6,7 @@ OpenReelio uses an English-first asset discovery surface for agent workflows. Ex
 
 - `search_stock_media` searches configured stock providers through backend adapters.
 - `find_assets_for_script` is the agent-facing high-level wrapper for scene/script-based discovery.
+- Openverse image/audio search works without a user API key and is the built-in zero-config fallback.
 - Pexels and Pixabay visual search require configured API keys.
 - Freesound audio search requires a configured API key.
 - Each candidate includes normalized `LicenseInfo` plus a `LicensePolicyDecision`.
@@ -61,3 +62,4 @@ Until those pieces exist, local discovery should be described as lexical/FTS and
 - Add TTL metadata cache for provider results.
 - Add local candidate search over shot/transcript/OCR segments.
 - Add embedding rerank only after the retrieval contract above is implemented.
+- Add no-key video providers or a hosted broker/plugin path for turnkey stock video search.
