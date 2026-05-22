@@ -1009,8 +1009,11 @@ fn sanitize_stock_filename_component(value: &str, fallback: &str) -> String {
 }
 
 #[cfg(feature = "ai-providers")]
-fn stock_extension_from_url(source_url: &str, asset_type: &str) -> String {
-    let parsed_ext = reqwest::Url::parse(source_url)
+const STOCK_DOWNLOAD_MAX_REDIRECTS: usize = 5;
+
+#[cfg(feature = "ai-providers")]
+fn stock_extension_from_url(source_url: &str, asset_type: &str) -> Option<String> {
+    reqwest::Url::parse(source_url)
         .ok()
         .and_then(|url| {
             std::path::Path::new(url.path())
@@ -1018,14 +1021,16 @@ fn stock_extension_from_url(source_url: &str, asset_type: &str) -> String {
                 .and_then(|ext| ext.to_str())
                 .map(|ext| ext.to_ascii_lowercase())
         })
-        .filter(|ext| is_allowed_stock_extension(asset_type, ext));
+        .filter(|ext| is_allowed_stock_extension(asset_type, ext))
+}
 
-    parsed_ext.unwrap_or_else(|| match asset_type {
+fn stock_default_extension(asset_type: &str) -> String {
+    match asset_type {
         "audio" => "mp3".to_string(),
         "image" => "jpg".to_string(),
         "video" => "mp4".to_string(),
         _ => "bin".to_string(),
-    })
+    }
 }
 
 fn stock_extension_from_content_type(
@@ -1088,8 +1093,34 @@ fn validate_stock_download_url(source_url: &str) -> Result<reqwest::Url, String>
     let host = parsed
         .host_str()
         .ok_or_else(|| "Stock media download URL must include a host.".to_string())?
+        .trim_matches(|ch| ch == '[' || ch == ']')
         .to_ascii_lowercase();
-    if host == "localhost"
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let private_host = match ip {
+            std::net::IpAddr::V4(ip) => {
+                let octets = ip.octets();
+                ip.is_private()
+                    || ip.is_loopback()
+                    || ip.is_link_local()
+                    || ip.is_unspecified()
+                    || ip.is_broadcast()
+                    || octets[0] == 0
+                    || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+            }
+            std::net::IpAddr::V6(ip) => {
+                ip.is_loopback()
+                    || ip.is_unspecified()
+                    || ip.is_unique_local()
+                    || ip.is_unicast_link_local()
+            }
+        };
+        if private_host {
+            return Err(
+                "Stock media download URL must not target local/private hosts.".to_string(),
+            );
+        }
+    } else if host == "localhost"
         || host.ends_with(".localhost")
         || host.ends_with(".local")
         || host == "0.0.0.0"
@@ -1117,6 +1148,59 @@ fn validate_stock_download_url(source_url: &str) -> Result<reqwest::Url, String>
     }
 
     Ok(parsed)
+}
+
+#[cfg(feature = "ai-providers")]
+async fn send_validated_stock_download_request(
+    client: &reqwest::Client,
+    initial_url: reqwest::Url,
+) -> Result<(reqwest::Response, reqwest::Url), String> {
+    let mut current_url = initial_url;
+
+    for redirect_count in 0..=STOCK_DOWNLOAD_MAX_REDIRECTS {
+        let response = client
+            .get(current_url.clone())
+            .send()
+            .await
+            .map_err(|e| format!("Stock media download failed: {e}"))?;
+
+        if !response.status().is_redirection() {
+            return Ok((response, current_url));
+        }
+        if redirect_count >= STOCK_DOWNLOAD_MAX_REDIRECTS {
+            return Err("Stock media download redirected too many times.".to_string());
+        }
+
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .ok_or_else(|| "Stock media redirect response did not include Location.".to_string())?
+            .to_str()
+            .map_err(|_| "Stock media redirect Location was not valid UTF-8.".to_string())?;
+        let next_url = current_url
+            .join(location)
+            .map_err(|e| format!("Invalid stock media redirect URL: {e}"))?;
+        current_url = validate_stock_download_url(next_url.as_str())?;
+    }
+
+    Err("Stock media download redirected too many times.".to_string())
+}
+
+#[cfg(feature = "ai-providers")]
+fn cleanup_stock_import_files(paths: &[&Path]) {
+    for path in paths {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "Failed to remove staged stock media import file"
+                );
+            }
+        }
+    }
 }
 
 fn normalize_stock_asset_type(asset_type: &str) -> Result<String, String> {
@@ -1319,6 +1403,7 @@ pub async fn search_stock_media(
 #[cfg(feature = "ai-providers")]
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip(state, license), fields(provider = %provider, asset_type = %asset_type))]
 pub async fn import_stock_media_asset(
     source_url: String,
@@ -1359,6 +1444,9 @@ pub async fn import_stock_media_asset(
             .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
         project.path.clone()
     };
+    let canonical_project_root = project_root
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve active project path: {e}"))?;
 
     let imports_dir = project_root
         .join(".openreelio")
@@ -1376,14 +1464,11 @@ pub async fn import_stock_media_asset(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(90))
         .user_agent("OpenReelio/asset-import")
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("Failed to build stock media HTTP client: {e}"))?;
 
-    let response = client
-        .get(parsed_url)
-        .send()
-        .await
-        .map_err(|e| format!("Stock media download failed: {e}"))?;
+    let (response, final_url) = send_validated_stock_download_request(&client, parsed_url).await?;
     if !response.status().is_success() {
         return Err(format!(
             "Stock media download failed with status {}",
@@ -1406,14 +1491,12 @@ pub async fn import_stock_media_asset(
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let mut extension = stock_extension_from_url(source_url, &normalized_asset_type);
-    if extension == "bin" {
-        if let Some(content_type_extension) =
+    let extension = stock_extension_from_url(final_url.as_str(), &normalized_asset_type)
+        .or_else(|| {
             stock_extension_from_content_type(content_type.as_deref(), &normalized_asset_type)
-        {
-            extension = content_type_extension;
-        }
-    }
+        })
+        .or_else(|| stock_extension_from_url(source_url, &normalized_asset_type))
+        .unwrap_or_else(|| stock_default_extension(&normalized_asset_type));
 
     let bytes = response
         .bytes()
@@ -1484,9 +1567,24 @@ pub async fn import_stock_media_asset(
     let asset_id = command.asset_id().to_string();
     let op_id = {
         let mut guard = state.project.lock().await;
-        let project = guard
-            .as_mut()
-            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        let Some(project) = guard.as_mut() else {
+            cleanup_stock_import_files(&[&output_path, &license_snapshot_path]);
+            return Err(CoreError::NoProjectOpen.to_ipc_error());
+        };
+        let active_project_root = match project.path.canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                cleanup_stock_import_files(&[&output_path, &license_snapshot_path]);
+                return Err(format!("Failed to resolve active project path: {error}"));
+            }
+        };
+        if active_project_root != canonical_project_root {
+            cleanup_stock_import_files(&[&output_path, &license_snapshot_path]);
+            return Err(
+                "Active project changed during stock media import; staged files were discarded."
+                    .to_string(),
+            );
+        }
         let result = project
             .executor
             .execute(Box::new(command), &mut project.state)
@@ -1509,6 +1607,7 @@ pub async fn import_stock_media_asset(
 #[cfg(not(feature = "ai-providers"))]
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)]
 pub async fn import_stock_media_asset(
     _source_url: String,
     _name: String,

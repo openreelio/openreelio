@@ -809,6 +809,50 @@ describe('CodexReferenceAdapter', () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
+  it('should reject unsupported stock media asset types before invoking Tauri', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const response = (await respondToRequest({
+      id: 18,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_stock_search_invalid_type',
+        namespace: 'openreelio',
+        tool: 'stock_media_search',
+        arguments: {
+          query: 'city rain',
+          assetType: 'document',
+          limit: 5,
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(false);
+    expect(getFirstTextContent(response)).toContain(
+      'OpenReelio stock media assetType must be one of video, image, or audio',
+    );
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it('should normalize fractional stock media limits before invoking Tauri', async () => {
     const requestHandlers: Array<(request: any) => unknown> = [];
     const appServerClient = {

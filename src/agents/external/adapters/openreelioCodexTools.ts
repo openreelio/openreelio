@@ -1422,8 +1422,17 @@ async function readOptionalProjectInfo(): Promise<ProjectInfo | null> {
   }
 }
 
-function normalizeStockMediaAssetType(value: unknown): 'video' | 'image' | 'audio' {
-  return value === 'image' || value === 'audio' || value === 'video' ? value : 'video';
+function normalizeStockMediaAssetType(
+  value: unknown,
+  fallback?: 'video' | 'image' | 'audio',
+): 'video' | 'image' | 'audio' {
+  if (value === 'image' || value === 'audio' || value === 'video') {
+    return value;
+  }
+  if ((value === undefined || value === null) && fallback) {
+    return fallback;
+  }
+  throw new Error('OpenReelio stock media assetType must be one of video, image, or audio.');
 }
 
 function normalizeStockMediaLimit(value: unknown): number {
@@ -1441,7 +1450,7 @@ async function searchStockMediaToolCall(args: CodexJsonObject | null): Promise<C
     throw new Error('OpenReelio stock_media_search requires query.');
   }
 
-  const assetType = normalizeStockMediaAssetType(args.assetType);
+  const assetType = normalizeStockMediaAssetType(args.assetType, 'video');
   const limit = normalizeStockMediaLimit(args.limit);
 
   try {

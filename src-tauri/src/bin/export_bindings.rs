@@ -37,6 +37,8 @@ fn normalize_bindings(path: &std::path::Path) {
 
 fn normalize_unstable_type_line_spacing(input: &str) -> String {
     let mut in_batch_render_item = false;
+    let mut in_import_stock_media_doc = false;
+    let mut in_stock_media_import_result = false;
     let mut normalized = input
         .lines()
         .map(|line| {
@@ -45,15 +47,33 @@ fn normalize_unstable_type_line_spacing(input: &str) -> String {
             if line.starts_with("export type BatchRenderItemDto =") {
                 in_batch_render_item = true;
             }
+            if line
+                == " * Download a stock media candidate into the project and import it as an asset."
+            {
+                in_import_stock_media_doc = true;
+            }
+            if line.starts_with("export type StockMediaImportResult =") {
+                in_stock_media_import_result = true;
+            }
 
             let normalized_line = if in_batch_render_item && line == "outPoint: number | null; " {
                 "outPoint: number | null;"
+            } else if in_import_stock_media_doc && line == " * " {
+                " *"
+            } else if in_stock_media_import_result {
+                line.trim_end()
             } else {
                 line
             };
 
             if in_batch_render_item && line.starts_with("settings?: VideoExportRequest") {
                 in_batch_render_item = false;
+            }
+            if in_import_stock_media_doc && line.starts_with("async importStockMediaAsset") {
+                in_import_stock_media_doc = false;
+            }
+            if in_stock_media_import_result && line.starts_with("licenseSnapshotPath:") {
+                in_stock_media_import_result = false;
             }
 
             match line {

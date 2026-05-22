@@ -2169,8 +2169,8 @@ async executeAgentPlan(plan: AgentPlan) : Promise<Result<AgentPlanResult, string
 /**
  * Search stock media providers for assets matching a query.
  * 
- * Uses configured built-in providers. Image/video search requires Pexels
- * and/or Pixabay credentials. Audio search requires Freesound credentials.
+ * Uses configured built-in providers. Image/audio search has an Openverse
+ * fallback. Video search still requires Pexels and/or Pixabay credentials.
  */
 async searchStockMedia(query: string, assetType: string | null, limit: number | null) : Promise<Result<StockMediaSearchResult[], string>> {
     try {
