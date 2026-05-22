@@ -4,6 +4,8 @@ These templates connect MCP-capable agents to OpenReelio's local MCP server.
 
 Set `OPENREELIO_PROJECT_PATH` to an OpenReelio project directory before launching the agent, or replace the placeholder in each template with an absolute project path.
 
+These files are templates, not runtime state. Do not copy this directory wholesale into `~/.codex` or another agent's user config; install only the specific MCP entry you intend to use for the current project.
+
 ```bash
 export OPENREELIO_PROJECT_PATH=/absolute/path/to/project
 ```

@@ -3665,7 +3665,7 @@ sourceInSec: number;
 sourceOutSec: number }
 export type CodexAgentLoginResult = { success: boolean; authStatus: string; message: string | null }
 export type CodexAppServerSessionInput = { serverId: string }
-export type CodexAppServerStartResult = { serverId: string; eventName: string; command: string; args: string[]; cwd: string }
+export type CodexAppServerStartResult = { serverId: string; eventName: string; command: string; args: string[]; bridgeCwd: string }
 export type CodexAppServerWriteInput = { serverId: string; message: JsonValue }
 export type CodexCliInstallResult = { success: boolean; version: string | null; attemptedCommand: string | null; message: string | null }
 export type CodexCliUpdateResult = { success: boolean; beforeVersion: string | null; afterVersion: string | null; attemptedCommand: string | null; message: string | null }
@@ -6204,7 +6204,7 @@ transformsPath: string }
  * Input payload for starting a new agent run.
  */
 export type StartAgentRunInput = { sessionId: string; runtimeKind: string | null; trigger: string | null; maxIterations: number | null; maxToolCalls: number | null; plannedStepCount: number | null; inputMessageId: string | null; traceId: string | null; id: string | null }
-export type StartCodexAppServerInput = { serverId: string | null; cwd: string | null; model: string | null; reasoningEffort: string | null }
+export type StartCodexAppServerInput = { serverId: string | null; projectPath: string | null; model: string | null; reasoningEffort: string | null }
 export type StartTerminalSessionInput = { sessionId: string; cwd: string | null; cols: number | null; rows: number | null; profileId?: string | null; shell?: string | null; shellArgs?: string[] | null }
 /**
  * State change types for event broadcasting.

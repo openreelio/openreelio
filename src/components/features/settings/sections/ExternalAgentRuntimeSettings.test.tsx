@@ -63,7 +63,7 @@ describe('ExternalAgentRuntimeSettings', () => {
           requiresLogin: false,
           pluginMarketplaceConfigured: true,
           mcpConfigured: true,
-          message: 'Codex is connected with OpenReelio tools.',
+          message: 'Codex is ready through app-server dynamic tools. No global Codex config was changed.',
         });
       }
       if (command === 'get_codex_model_catalog') {
@@ -142,7 +142,7 @@ describe('ExternalAgentRuntimeSettings', () => {
     expect(onUpdate).toHaveBeenCalledWith({ assistantRuntime: 'codex' });
   });
 
-  it('should automatically configure Codex tools when Codex account agent is selected', async () => {
+  it('should check Codex app-server readiness when Codex account agent is selected', async () => {
     render(
       <ExternalAgentRuntimeSettings
         settings={{ ...defaultSettings, assistantRuntime: 'codex' }}
@@ -201,7 +201,7 @@ describe('ExternalAgentRuntimeSettings', () => {
     );
 
     await waitFor(() =>
-      expect(screen.getByText(/Codex is ready with OpenReelio app tools/i)).toBeInTheDocument(),
+      expect(screen.getByText(/Codex is ready with OpenReelio app-server tools/i)).toBeInTheDocument(),
     );
     expect(screen.queryByText('Codex MCP setup failed.')).not.toBeInTheDocument();
   });
@@ -336,7 +336,7 @@ describe('ExternalAgentRuntimeSettings', () => {
           requiresLogin: false,
           pluginMarketplaceConfigured: true,
           mcpConfigured: true,
-          message: 'Codex is connected with OpenReelio tools.',
+          message: 'Codex is ready through app-server dynamic tools. No global Codex config was changed.',
         });
       }
       if (command === 'get_codex_model_catalog') {
@@ -485,7 +485,7 @@ describe('ExternalAgentRuntimeSettings', () => {
           requiresLogin: false,
           pluginMarketplaceConfigured: true,
           mcpConfigured: true,
-          message: 'Codex is connected with OpenReelio tools.',
+          message: 'Codex is ready through app-server dynamic tools. No global Codex config was changed.',
         });
       }
       if (command === 'get_codex_model_catalog') {

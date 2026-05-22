@@ -84,7 +84,8 @@ pub async fn start_codex_app_server(
 ) -> Result<CodexAppServerStartResult, String> {
     let server_id = normalize_codex_app_server_id(input.server_id)?;
     let event_name = codex_app_server_event_name(&server_id);
-    let cwd = resolve_codex_app_server_cwd(input.cwd, &state).await?;
+    let project_path = resolve_codex_app_server_project_path(input.project_path, &state).await?;
+    let bridge_cwd = resolve_codex_app_server_bridge_cwd(&app)?;
 
     let mut sessions = state.codex_app_server_sessions.lock().await;
     if sessions.contains_key(&server_id) {
@@ -97,6 +98,17 @@ pub async fn start_codex_app_server(
     )
     .await;
     let codex_reasoning_effort = resolve_codex_app_server_reasoning_effort(input.reasoning_effort);
+    let codex_log_dir = resolve_codex_app_server_log_dir(&app)?;
+    let history_persistence_arg = "history.persistence=\"none\"".to_string();
+    let log_dir_arg = format!(
+        "log_dir={}",
+        quote_toml_string(&codex_log_dir.display().to_string())
+    );
+    let mcp_servers_arg = "mcp_servers={}".to_string();
+    let hooks_feature_arg = "features.hooks=false".to_string();
+    let notify_arg = "notify=[]".to_string();
+    let sandbox_mode_arg = "sandbox_mode=\"read-only\"".to_string();
+    let approval_policy_arg = "approval_policy=\"on-request\"".to_string();
     let mut command = crate::core::codex::create_codex_command()?;
     command
         .arg("app-server")
@@ -107,8 +119,25 @@ pub async fn start_codex_app_server(
             "model_reasoning_effort={}",
             quote_toml_string(&codex_reasoning_effort)
         ))
-        .current_dir(&cwd)
-        .env("OPENREELIO_PROJECT_PATH", cwd.display().to_string())
+        .arg("-c")
+        .arg(&history_persistence_arg)
+        .arg("-c")
+        .arg(&log_dir_arg)
+        .arg("-c")
+        .arg(&mcp_servers_arg)
+        .arg("-c")
+        .arg(&hooks_feature_arg)
+        .arg("-c")
+        .arg(&notify_arg)
+        .arg("-c")
+        .arg(&sandbox_mode_arg)
+        .arg("-c")
+        .arg(&approval_policy_arg)
+        .current_dir(&bridge_cwd)
+        .env(
+            "OPENREELIO_PROJECT_PATH",
+            project_path.display().to_string(),
+        )
         .env("OPENREELIO_APP_SURFACE", "tauri-desktop")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -158,8 +187,22 @@ pub async fn start_codex_app_server(
                 "model_reasoning_effort={}",
                 quote_toml_string(&codex_reasoning_effort)
             ),
+            "-c".to_string(),
+            history_persistence_arg,
+            "-c".to_string(),
+            log_dir_arg,
+            "-c".to_string(),
+            mcp_servers_arg,
+            "-c".to_string(),
+            hooks_feature_arg,
+            "-c".to_string(),
+            notify_arg,
+            "-c".to_string(),
+            sandbox_mode_arg,
+            "-c".to_string(),
+            approval_policy_arg,
         ],
-        cwd: cwd.display().to_string(),
+        bridge_cwd: bridge_cwd.display().to_string(),
     })
 }
 
@@ -211,11 +254,11 @@ pub async fn shutdown_all_codex_app_servers(state: &AppState) {
     }
 }
 
-async fn resolve_codex_app_server_cwd(
-    requested_cwd: Option<String>,
+async fn resolve_codex_app_server_project_path(
+    requested_project_path: Option<String>,
     state: &State<'_, AppState>,
 ) -> Result<PathBuf, String> {
-    let cwd = match requested_cwd {
+    let requested_path = match requested_project_path {
         Some(path) => {
             let path = PathBuf::from(path);
             if path.is_absolute() {
@@ -224,7 +267,7 @@ async fn resolve_codex_app_server_cwd(
                 let guard = state.project.lock().await;
                 let project = guard
                     .as_ref()
-                    .ok_or_else(|| "Relative cwd requires an open project".to_string())?;
+                    .ok_or_else(|| "Relative project path requires an open project".to_string())?;
                 project.path.join(path)
             }
         }
@@ -239,22 +282,22 @@ async fn resolve_codex_app_server_cwd(
         }
     };
 
-    if !cwd.exists() {
+    if !requested_path.exists() {
         return Err(format!(
-            "Codex app-server cwd does not exist: {}",
-            cwd.display()
+            "Codex app-server project path does not exist: {}",
+            requested_path.display()
         ));
     }
-    if !cwd.is_dir() {
+    if !requested_path.is_dir() {
         return Err(format!(
-            "Codex app-server cwd is not a directory: {}",
-            cwd.display()
+            "Codex app-server project path is not a directory: {}",
+            requested_path.display()
         ));
     }
 
-    let canonical_cwd = cwd
-        .canonicalize()
-        .map_err(|error| format!("Failed to canonicalize Codex app-server cwd: {error}"))?;
+    let canonical_requested_path = requested_path.canonicalize().map_err(|error| {
+        format!("Failed to canonicalize Codex app-server project path: {error}")
+    })?;
 
     let project_path = {
         let guard = state.project.lock().await;
@@ -265,15 +308,27 @@ async fn resolve_codex_app_server_cwd(
         let canonical_project = project_path
             .canonicalize()
             .map_err(|error| format!("Failed to canonicalize project directory: {error}"))?;
-        if !canonical_cwd.starts_with(&canonical_project) {
+        if !canonical_requested_path.starts_with(&canonical_project) {
             return Err(format!(
-                "Codex app-server cwd must stay inside the active project: {}",
-                canonical_cwd.display()
+                "Codex app-server project path must stay inside the active project: {}",
+                canonical_requested_path.display()
             ));
         }
     }
 
-    Ok(canonical_cwd)
+    Ok(canonical_requested_path)
+}
+
+fn resolve_codex_app_server_bridge_cwd(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let bridge_cwd = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve OpenReelio app data directory: {error}"))?
+        .join("codex")
+        .join("bridge");
+    std::fs::create_dir_all(&bridge_cwd)
+        .map_err(|error| format!("Failed to create Codex app-server bridge directory: {error}"))?;
+    Ok(bridge_cwd)
 }
 
 fn spawn_stdout_reader(
@@ -372,6 +427,18 @@ fn build_codex_app_server_path() -> Option<std::ffi::OsString> {
             .chain(std::env::split_paths(&current_path)),
     )
     .ok()
+}
+
+fn resolve_codex_app_server_log_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let log_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve OpenReelio app data directory: {error}"))?
+        .join("codex")
+        .join("logs");
+    std::fs::create_dir_all(&log_dir)
+        .map_err(|error| format!("Failed to create Codex app-server log directory: {error}"))?;
+    Ok(log_dir)
 }
 
 fn resolve_codex_app_server_model(requested_model: Option<String>) -> String {

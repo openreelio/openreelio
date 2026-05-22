@@ -147,7 +147,6 @@ describe('CodexReferenceAdapter', () => {
     expect(appServerClient.startThread).toHaveBeenCalledWith(
       expect.objectContaining({
         serviceName: 'openreelio',
-        cwd: '/project',
         model: 'gpt-5.5',
         approvalPolicy: 'on-request',
         approvalsReviewer: 'user',
@@ -175,7 +174,6 @@ describe('CodexReferenceAdapter', () => {
       'audio',
     ]);
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_123', 'Inspect this timeline', {
-      cwd: '/project',
       model: 'gpt-5.5',
       effort: 'medium',
       approvalPolicy: 'on-request',
@@ -198,7 +196,6 @@ describe('CodexReferenceAdapter', () => {
     await adapter.shutdown(session.sessionId);
 
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_123', 'Add captions', {
-      cwd: '/project',
       model: 'gpt-5.5',
       effort: 'medium',
       approvalPolicy: 'on-request',
@@ -230,7 +227,6 @@ describe('CodexReferenceAdapter', () => {
     expect(appServerClient.resumeThread).toHaveBeenCalledWith(
       expect.objectContaining({
         threadId: 'thr_existing',
-        cwd: '/project',
         model: 'gpt-5.5',
         approvalPolicy: 'on-request',
         approvalsReviewer: 'user',
@@ -240,7 +236,6 @@ describe('CodexReferenceAdapter', () => {
     );
     expect(appServerClient.startThread).not.toHaveBeenCalled();
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_existing', 'Continue', {
-      cwd: '/project',
       model: 'gpt-5.5',
       effort: 'medium',
       approvalPolicy: 'on-request',
@@ -282,7 +277,6 @@ describe('CodexReferenceAdapter', () => {
     expect(appServerClient.startThread).toHaveBeenCalledWith(
       expect.objectContaining({
         serviceName: 'openreelio',
-        cwd: '/project',
         model: 'gpt-5.5',
         developerInstructions: expect.stringContaining('OpenReelio'),
       }),

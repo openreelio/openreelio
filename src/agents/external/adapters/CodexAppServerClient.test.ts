@@ -62,7 +62,7 @@ describe('CodexAppServerClient', () => {
       clientInfo: { name: 'openreelio', title: 'OpenReelio', version: '0.1.0' },
     });
 
-    const threadPromise = client.startThread({ cwd: '/project', model: 'gpt-5.4' });
+    const threadPromise = client.startThread({ model: 'gpt-5.4' });
 
     expect(transport.sent[0]).toEqual({
       method: 'initialize',
@@ -81,7 +81,6 @@ describe('CodexAppServerClient', () => {
       method: 'thread/start',
       id: 2,
       params: {
-        cwd: '/project',
         model: 'gpt-5.4',
         serviceName: 'openreelio',
       },
@@ -155,7 +154,6 @@ describe('CodexAppServerClient', () => {
 
     const resumePromise = client.resumeThread({
       threadId: 'thr_123',
-      cwd: '/project',
     });
     await waitForSent(transport, 3);
 
@@ -164,7 +162,6 @@ describe('CodexAppServerClient', () => {
       id: 2,
       params: {
         threadId: 'thr_123',
-        cwd: '/project',
       },
     });
 
