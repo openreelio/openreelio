@@ -17,7 +17,6 @@ export interface CodexAppServerClientOptions {
 }
 
 export interface CodexStartThreadInput {
-  cwd?: string;
   model?: string;
   approvalPolicy?: string;
   approvalsReviewer?: string;
@@ -37,7 +36,6 @@ export interface CodexResumeThreadInput extends CodexStartThreadInput {
 }
 
 export interface CodexStartTurnInput {
-  cwd?: string;
   model?: string;
   effort?: string;
   approvalPolicy?: string;
@@ -221,7 +219,6 @@ export class CodexAppServerClient {
     const result = await this.request<CodexThreadStartResult>(
       'thread/start',
       compactObject({
-        cwd: input.cwd,
         model: input.model,
         approvalPolicy: input.approvalPolicy,
         approvalsReviewer: input.approvalsReviewer,
@@ -245,7 +242,6 @@ export class CodexAppServerClient {
       'thread/resume',
       compactObject({
         threadId: input.threadId,
-        cwd: input.cwd,
         model: input.model,
         approvalPolicy: input.approvalPolicy,
         approvalsReviewer: input.approvalsReviewer,
@@ -272,7 +268,6 @@ export class CodexAppServerClient {
       compactObject({
         threadId,
         input: [{ type: 'text', text }],
-        cwd: input.cwd,
         model: input.model,
         effort: input.effort,
         approvalPolicy: input.approvalPolicy,

@@ -13,18 +13,23 @@ describe('CodexTauriAppServerTransport', () => {
       eventName: 'codex:app-server:server-1',
       command: 'codex',
       args: ['app-server'],
-      cwd: '/project',
+      bridgeCwd: '/openreelio-app-data/codex/bridge',
     });
     const listenEvent = vi.fn().mockResolvedValue(vi.fn());
 
     const transport = await CodexTauriAppServerTransport.start(
-      { serverId: 'server-1', cwd: '/project' },
+      { serverId: 'server-1', projectPath: '/project' },
       { invoke: invokeCommand, listen: listenEvent },
     );
 
     expect(transport.startResult.serverId).toBe('server-1');
     expect(invokeCommand).toHaveBeenCalledWith('start_codex_app_server', {
-      input: { serverId: 'server-1', cwd: '/project', model: null, reasoningEffort: null },
+      input: {
+        serverId: 'server-1',
+        projectPath: '/project',
+        model: null,
+        reasoningEffort: null,
+      },
     });
     expect(listenEvent).toHaveBeenCalledWith('codex:app-server:server-1', expect.any(Function));
   });
@@ -37,7 +42,7 @@ describe('CodexTauriAppServerTransport', () => {
         eventName: 'codex:app-server:server-1',
         command: 'codex',
         args: ['app-server'],
-        cwd: '/project',
+        bridgeCwd: '/openreelio-app-data/codex/bridge',
       })
       .mockResolvedValueOnce(undefined);
     const listenEvent = vi.fn().mockResolvedValue(vi.fn());
@@ -63,7 +68,7 @@ describe('CodexTauriAppServerTransport', () => {
       eventName: 'codex:app-server:server-1',
       command: 'codex',
       args: ['app-server'],
-      cwd: '/project',
+      bridgeCwd: '/openreelio-app-data/codex/bridge',
     });
     const listenEvent = vi.fn().mockImplementation(async (_eventName, handler) => {
       listener = handler;
@@ -94,7 +99,7 @@ describe('CodexTauriAppServerTransport', () => {
       eventName: 'codex:app-server:server-1',
       command: 'codex',
       args: ['app-server'],
-      cwd: '/project',
+      bridgeCwd: '/openreelio-app-data/codex/bridge',
     });
     const listenEvent = vi.fn().mockImplementation(async (_eventName, handler) => {
       listener = handler;
@@ -128,7 +133,7 @@ describe('CodexTauriAppServerTransport', () => {
       eventName: 'codex:app-server:server-1',
       command: 'codex',
       args: ['app-server'],
-      cwd: '/project',
+      bridgeCwd: '/openreelio-app-data/codex/bridge',
     });
     const listenEvent = vi.fn().mockImplementation(async (_eventName, handler) => {
       listener = handler;
@@ -159,7 +164,7 @@ describe('CodexTauriAppServerTransport', () => {
         eventName: 'codex:app-server:server-1',
         command: 'codex',
         args: ['app-server'],
-        cwd: '/project',
+        bridgeCwd: '/openreelio-app-data/codex/bridge',
       })
       .mockResolvedValueOnce(undefined);
     const listenEvent = vi.fn().mockResolvedValue(unlisten);
@@ -182,18 +187,18 @@ describe('CodexTauriAppServerTransport', () => {
       eventName: 'codex:app-server:server-1',
       command: 'codex',
       args: ['app-server'],
-      cwd: '/project',
+      bridgeCwd: '/openreelio-app-data/codex/bridge',
     });
     const listenEvent = vi.fn().mockResolvedValue(vi.fn());
 
     const client = await createCodexTauriAppServerClient(
-      { cwd: '/project' },
+      { projectPath: '/project' },
       { invoke: invokeCommand, listen: listenEvent },
     );
 
     expect(client).toBeDefined();
     expect(invokeCommand).toHaveBeenCalledWith('start_codex_app_server', {
-      input: { serverId: null, cwd: '/project', model: null, reasoningEffort: null },
+      input: { serverId: null, projectPath: '/project', model: null, reasoningEffort: null },
     });
   });
 
@@ -203,17 +208,22 @@ describe('CodexTauriAppServerTransport', () => {
       eventName: 'codex:app-server:server-1',
       command: 'codex',
       args: ['app-server', '-c', 'model="gpt-5.4"'],
-      cwd: '/project',
+      bridgeCwd: '/openreelio-app-data/codex/bridge',
     });
     const listenEvent = vi.fn().mockResolvedValue(vi.fn());
 
     await CodexTauriAppServerTransport.start(
-      { cwd: '/project', model: 'gpt-5.4', reasoningEffort: 'high' },
+      { projectPath: '/project', model: 'gpt-5.4', reasoningEffort: 'high' },
       { invoke: invokeCommand, listen: listenEvent },
     );
 
     expect(invokeCommand).toHaveBeenCalledWith('start_codex_app_server', {
-      input: { serverId: null, cwd: '/project', model: 'gpt-5.4', reasoningEffort: 'high' },
+      input: {
+        serverId: null,
+        projectPath: '/project',
+        model: 'gpt-5.4',
+        reasoningEffort: 'high',
+      },
     });
   });
 });

@@ -10,7 +10,7 @@ import {
 
 export interface StartCodexAppServerInput {
   serverId?: string | null;
-  cwd?: string | null;
+  projectPath?: string | null;
   model?: string | null;
   reasoningEffort?: string | null;
 }
@@ -20,7 +20,7 @@ export interface CodexAppServerStartResult {
   eventName: string;
   command: string;
   args: string[];
-  cwd: string;
+  bridgeCwd: string;
 }
 
 export type CodexAppServerStreamEvent =
@@ -72,7 +72,7 @@ export class CodexTauriAppServerTransport implements CodexAppServerTransport {
     const startResult = (await invokeCommand('start_codex_app_server', {
       input: {
         serverId: input.serverId ?? null,
-        cwd: input.cwd ?? null,
+        projectPath: input.projectPath ?? null,
         model: input.model ?? null,
         reasoningEffort: input.reasoningEffort ?? null,
       },

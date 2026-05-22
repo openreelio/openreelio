@@ -124,7 +124,6 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const client = await this.getAppServerClient(input);
     const thread = await client.startThread({
       serviceName: 'openreelio',
-      cwd: input.cwd ?? undefined,
       model: this.resolveModel(),
       approvalPolicy: 'on-request',
       approvalsReviewer: 'user',
@@ -142,7 +141,6 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
 
     if (input.prompt?.trim()) {
       const turn = await client.startTurn(thread.id, input.prompt, {
-        cwd: input.cwd ?? undefined,
         model: this.resolveModel(),
         effort: this.resolveReasoningEffort(),
         approvalPolicy: 'on-request',
@@ -165,7 +163,6 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
 
     const thread = await client.resumeThread({
       threadId: input.externalSessionId,
-      cwd: input.cwd ?? undefined,
       model: this.resolveModel(),
       approvalPolicy: 'on-request',
       approvalsReviewer: 'user',
@@ -187,7 +184,6 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const session = this.requireSession(sessionId);
     session.cwd = message.cwd ?? session.cwd;
     const turn = await client.startTurn(session.threadId, message.content, {
-      cwd: message.cwd ?? undefined,
       model: this.resolveModel(),
       effort: this.resolveReasoningEffort(),
       approvalPolicy: 'on-request',
@@ -250,7 +246,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
         this.options.appServerClientFactory ??
         ((factoryInput?: StartAgentSessionInput) =>
           createCodexTauriAppServerClient({
-            cwd: factoryInput?.cwd ?? null,
+            projectPath: factoryInput?.cwd ?? null,
             model: this.resolveModel(),
             reasoningEffort: this.resolveReasoningEffort(),
           }));

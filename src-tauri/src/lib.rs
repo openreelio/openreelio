@@ -1461,6 +1461,7 @@ mod tauri_app {
                 $crate::ipc::read_agent_trace,
                 $crate::ipc::execute_agent_plan,
                 $crate::ipc::search_stock_media,
+                $crate::ipc::import_stock_media_asset,
                 // Integrated terminal commands
                 $crate::ipc::list_terminal_profiles,
                 $crate::ipc::start_terminal_session,
@@ -1939,6 +1940,7 @@ mod tauri_app {
             ipc::read_agent_trace,
             ipc::execute_agent_plan,
             ipc::search_stock_media,
+            ipc::import_stock_media_asset,
             // Integrated terminal commands
             ipc::list_terminal_profiles,
             ipc::start_terminal_session,

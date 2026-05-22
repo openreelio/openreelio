@@ -6,8 +6,10 @@ OpenReelio uses an English-first asset discovery surface for agent workflows. Ex
 
 - `search_stock_media` searches configured stock providers through backend adapters.
 - `find_assets_for_script` is the agent-facing high-level wrapper for scene/script-based discovery.
+- Openverse image/audio search works without a user API key and is the built-in zero-config fallback.
 - Pexels and Pixabay visual search require configured API keys.
 - Freesound audio search requires a configured API key.
+- `import_stock_media_asset` downloads a selected HTTPS candidate into `.openreelio/imports/stock`, writes a license snapshot under `.openreelio/licenses`, and imports the local file through the command log.
 - Each candidate includes normalized `LicenseInfo` plus a `LicensePolicyDecision`.
 - Pixabay content is treated as provider-restricted royalty-free stock content, not CC0.
 
@@ -39,6 +41,7 @@ provider result
 ```
 
 The current implementation covers the first three steps. Future import and placement tools must reject blocked candidates and must require a license snapshot before downloading external media.
+`import_stock_media_asset` now enforces the download/import preflight for selected candidates by requiring `licenseAck`, rejecting blocked policies, and persisting the license snapshot before the asset is registered.
 
 ## Local Search Status
 
@@ -55,9 +58,10 @@ Until those pieces exist, local discovery should be described as lexical/FTS and
 
 ## Deferred Work
 
-- Add `import_asset_candidate(candidateId, licenseAck)` with license snapshot persistence.
+- Add a candidate-id based import flow so callers do not need to pass candidate metadata back manually.
 - Add timeline placement preflight that blocks unsafe external candidates.
 - Add export/QC manifest checks for attribution and provider terms.
 - Add TTL metadata cache for provider results.
 - Add local candidate search over shot/transcript/OCR segments.
 - Add embedding rerank only after the retrieval contract above is implemented.
+- Add no-key video providers or a hosted broker/plugin path for turnkey stock video search.

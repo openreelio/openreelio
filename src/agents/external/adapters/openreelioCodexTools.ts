@@ -9,6 +9,7 @@ import type {
   PlanRiskLevel,
   ProjectInfo,
   ProjectStateDto,
+  StockMediaImportResult,
   StockMediaSearchResult,
 } from '@/bindings';
 
@@ -238,6 +239,72 @@ const STOCK_MEDIA_SEARCH_SCHEMA: CodexJsonObject = {
   additionalProperties: false,
 };
 
+const STOCK_MEDIA_IMPORT_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  required: [
+    'sourceUrl',
+    'name',
+    'assetType',
+    'provider',
+    'license',
+    'licenseAck',
+    'reason',
+    'contextToken',
+  ],
+  properties: {
+    sourceUrl: {
+      type: 'string',
+      description:
+        'HTTPS download URL from a stock_media_search result metadata.downloadUrl or metadata.previewUrl.',
+    },
+    name: {
+      type: 'string',
+      description: 'Readable asset name to use in the OpenReelio project.',
+    },
+    assetType: {
+      type: 'string',
+      enum: ['video', 'image', 'audio'],
+      description: 'Asset type matching the selected candidate.',
+    },
+    provider: {
+      type: 'string',
+      description: 'Provider name from the selected candidate, such as openverse or pexels.',
+    },
+    license: {
+      type: 'object',
+      description: 'LicenseInfo object from the selected stock_media_search candidate.',
+    },
+    licenseAck: {
+      type: 'boolean',
+      description:
+        'Must be true after the agent has presented the provider/license terms in the approval reason.',
+    },
+    durationSec: {
+      type: 'number',
+      description: 'Optional candidate duration in seconds.',
+    },
+    tags: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Optional candidate tags to persist on the imported asset.',
+    },
+    providerUrl: {
+      type: 'string',
+      description: 'Optional provider landing page URL for attribution and review.',
+    },
+    reason: {
+      type: 'string',
+      description: 'Short user-facing reason for downloading and importing this stock asset.',
+    },
+    contextToken: {
+      type: 'string',
+      description:
+        'Fresh mutation context token returned by openreelio.project_state, timeline_snapshot, assets_list, or selection_read in this session.',
+    },
+  },
+  additionalProperties: false,
+};
+
 export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
   {
     namespace: 'openreelio',
@@ -272,6 +339,13 @@ export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
     description:
       'Search configured stock providers for video, image, or audio candidates. Returns provider references, previews, license info, and license policy decisions. Does not import or place media.',
     inputSchema: STOCK_MEDIA_SEARCH_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'stock_media_import',
+    description:
+      'Download a selected stock_media_search candidate into the project and import it as an OpenReelio asset after explicit approval and license acknowledgement.',
+    inputSchema: STOCK_MEDIA_IMPORT_SCHEMA,
   },
   {
     namespace: 'openreelio',
@@ -367,6 +441,7 @@ export function buildOpenReelioCodexDeveloperInstructions(
     '- Use openreelio.host_context first when the user asks where you are, what you can use, or what environment this is.',
     '- Use openreelio.timeline_snapshot, openreelio.assets_list, openreelio.selection_read, and openreelio.command_schema before proposing concrete edits.',
     '- Use openreelio.stock_media_search for stock video, image, BGM, or SFX candidates before falling back to generic web links.',
+    '- Use openreelio.stock_media_import to bring a selected stock candidate into the project before placing it on the timeline. Do not pass stock URLs directly to ImportAsset.',
     '- Prefer openreelio.plan_validate and openreelio.plan_apply for multi-step edits. Use openreelio.command_execute only for a narrow single-command edit.',
     '- Apply edits with the fresh contextToken returned by openreelio.project_state, openreelio.timeline_snapshot, openreelio.assets_list, or openreelio.selection_read so the app can validate, approve, persist, undo, and refresh the UI.',
     '- Do not manually edit .openreelio state files or invent command payloads without checking the schema and current IDs.',
@@ -410,6 +485,10 @@ export async function handleOpenReelioCodexDynamicToolCall(
         return toolResponse(buildAssetsList(await readProjectState(), context));
       case 'stock_media_search': {
         const result = await searchStockMediaToolCall(toolCall.arguments);
+        return toolResponse(result, result.status === 'ok');
+      }
+      case 'stock_media_import': {
+        const result = await importStockMediaToolCall(toolCall.arguments, request, context);
         return toolResponse(result, result.status === 'ok');
       }
       case 'selection_read':
@@ -585,6 +664,8 @@ async function buildHostContext(context: OpenReelioCodexToolContext): Promise<Co
       assetRead: true,
       commandSchemaRead: true,
       commandValidate: true,
+      stockMediaSearch: true,
+      stockMediaImport: true,
       planValidate: true,
       planApplyWithApproval: true,
       diffPreview: true,
@@ -1392,6 +1473,114 @@ async function searchStockMediaToolCall(args: CodexJsonObject | null): Promise<C
       message: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+async function importStockMediaToolCall(
+  args: CodexJsonObject | null,
+  request: CodexAppServerRequest,
+  context: OpenReelioCodexToolContext,
+): Promise<CodexJsonObject> {
+  if (!args) {
+    throw new Error('OpenReelio stock_media_import requires object arguments.');
+  }
+
+  const sourceUrl = getString(args, 'sourceUrl')?.trim();
+  if (!sourceUrl) {
+    throw new Error('OpenReelio stock_media_import requires sourceUrl.');
+  }
+
+  const name = getString(args, 'name')?.trim();
+  if (!name) {
+    throw new Error('OpenReelio stock_media_import requires name.');
+  }
+
+  const assetType = normalizeStockMediaAssetType(args.assetType);
+  const provider = getString(args, 'provider')?.trim();
+  if (!provider) {
+    throw new Error('OpenReelio stock_media_import requires provider.');
+  }
+
+  const license = asObject(args.license);
+  if (!license) {
+    throw new Error('OpenReelio stock_media_import requires a LicenseInfo object.');
+  }
+
+  const licenseAck = args.licenseAck === true;
+  if (!licenseAck) {
+    return {
+      status: 'error',
+      message:
+        'OpenReelio stock_media_import requires licenseAck=true after presenting provider/license terms in the approval reason.',
+    };
+  }
+
+  const contextToken = getString(args, 'contextToken')?.trim() ?? null;
+  const tokenValidation = validateContextToken(context, contextToken);
+  if (!tokenValidation.valid) {
+    return {
+      status: 'error',
+      message: tokenValidation.message.replace(/command_execute/g, 'stock_media_import'),
+    };
+  }
+
+  const reason =
+    getString(args, 'reason')?.trim() ||
+    `Download and import stock ${assetType} asset from ${provider}`;
+  const durationSec =
+    typeof args.durationSec === 'number' && Number.isFinite(args.durationSec)
+      ? args.durationSec
+      : null;
+  const tags = Array.isArray(args.tags)
+    ? args.tags.filter((tag): tag is string => typeof tag === 'string')
+    : null;
+  const providerUrl = getString(args, 'providerUrl')?.trim() || null;
+
+  const decision = context.approvalDecisionProvider
+    ? await context.approvalDecisionProvider(
+        buildCommandApprovalRequest({
+          request,
+          context,
+          commandType: 'ImportAsset',
+          payload: {
+            uri: sourceUrl,
+            name,
+            provider,
+            assetType,
+            providerUrl,
+            license,
+          },
+          reason,
+        }),
+      )
+    : 'decline';
+
+  if (decision !== 'accept' && decision !== 'acceptForSession') {
+    return {
+      status: 'denied',
+      message:
+        'The stock media import was not approved. Approve it with the chat approval card; plain chat replies do not grant tool execution.',
+    };
+  }
+
+  const result = await invoke<StockMediaImportResult>('import_stock_media_asset', {
+    sourceUrl,
+    name,
+    assetType,
+    provider,
+    license,
+    licenseAck,
+    durationSec,
+    tags,
+    providerUrl,
+  });
+  contextTokensBySessionId.delete(context.sessionId);
+  const refresh = await refreshProjectStoreAfterMutation();
+
+  return {
+    status: 'ok',
+    import: result as unknown as CodexJsonObject,
+    refresh,
+  };
 }
 
 function buildTimelineSnapshot(

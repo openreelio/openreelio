@@ -11,7 +11,7 @@ pub const CODEX_APP_SERVER_EVENT_PREFIX: &str = "codex:app-server";
 #[serde(rename_all = "camelCase")]
 pub struct StartCodexAppServerInput {
     pub server_id: Option<String>,
-    pub cwd: Option<String>,
+    pub project_path: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
 }
@@ -23,7 +23,7 @@ pub struct CodexAppServerStartResult {
     pub event_name: String,
     pub command: String,
     pub args: Vec<String>,
-    pub cwd: String,
+    pub bridge_cwd: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
