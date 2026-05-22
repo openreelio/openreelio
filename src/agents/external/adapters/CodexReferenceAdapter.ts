@@ -93,8 +93,8 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const probe = await this.probeStatus();
     const installStatus = probe.installed ? 'installed' : 'missing';
     const authenticated = probe.authStatus === 'signed-in' || probe.authStatus === 'api-key';
-    const appServerReady = probe.appServerReady !== false;
-    const available = probe.installed && authenticated && appServerReady;
+    const appServerFailed = probe.appServerReady === false;
+    const available = probe.installed && authenticated && !appServerFailed;
 
     return {
       runtimeId: this.id,

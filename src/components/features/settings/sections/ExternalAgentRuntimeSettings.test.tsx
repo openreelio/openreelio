@@ -63,7 +63,8 @@ describe('ExternalAgentRuntimeSettings', () => {
           requiresLogin: false,
           pluginMarketplaceConfigured: true,
           mcpConfigured: true,
-          message: 'Codex is ready through app-server dynamic tools. No global Codex config was changed.',
+          message:
+            'Codex is signed in. App-server tools will start when a session begins. No global Codex config was changed.',
         });
       }
       if (command === 'get_codex_model_catalog') {
@@ -151,7 +152,7 @@ describe('ExternalAgentRuntimeSettings', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.getByText(/Codex is ready/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Codex is signed in/i)).toBeInTheDocument());
     expect(screen.getByText('OpenReelio tools')).toBeInTheDocument();
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('configure_codex_agent_runtime', {
       input: { projectPath: '/project' },
@@ -200,9 +201,7 @@ describe('ExternalAgentRuntimeSettings', () => {
       />,
     );
 
-    await waitFor(() =>
-      expect(screen.getByText(/Codex is ready with OpenReelio app-server tools/i)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/Codex is signed in/i)).toBeInTheDocument());
     expect(screen.queryByText('Codex MCP setup failed.')).not.toBeInTheDocument();
   });
 
@@ -336,7 +335,8 @@ describe('ExternalAgentRuntimeSettings', () => {
           requiresLogin: false,
           pluginMarketplaceConfigured: true,
           mcpConfigured: true,
-          message: 'Codex is ready through app-server dynamic tools. No global Codex config was changed.',
+          message:
+            'Codex is signed in. App-server tools will start when a session begins. No global Codex config was changed.',
         });
       }
       if (command === 'get_codex_model_catalog') {
@@ -485,7 +485,8 @@ describe('ExternalAgentRuntimeSettings', () => {
           requiresLogin: false,
           pluginMarketplaceConfigured: true,
           mcpConfigured: true,
-          message: 'Codex is ready through app-server dynamic tools. No global Codex config was changed.',
+          message:
+            'Codex is signed in. App-server tools will start when a session begins. No global Codex config was changed.',
         });
       }
       if (command === 'get_codex_model_catalog') {

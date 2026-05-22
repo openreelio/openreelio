@@ -10,8 +10,9 @@ use tokio::sync::Mutex;
 
 use crate::core::codex_app_server::{
     codex_app_server_event_name, decode_json_rpc_line, encode_json_rpc_line,
-    normalize_codex_app_server_id, CodexAppServerSessionInput, CodexAppServerStartResult,
-    CodexAppServerStreamEvent, CodexAppServerWriteInput, StartCodexAppServerInput,
+    normalize_codex_app_server_id, quote_toml_string, CodexAppServerSessionInput,
+    CodexAppServerStartResult, CodexAppServerStreamEvent, CodexAppServerWriteInput,
+    StartCodexAppServerInput,
 };
 use crate::AppState;
 
@@ -87,9 +88,11 @@ pub async fn start_codex_app_server(
     let project_path = resolve_codex_app_server_project_path(input.project_path, &state).await?;
     let bridge_cwd = resolve_codex_app_server_bridge_cwd(&app)?;
 
-    let mut sessions = state.codex_app_server_sessions.lock().await;
-    if sessions.contains_key(&server_id) {
-        return Err(format!("Codex app-server {server_id} is already running"));
+    {
+        let sessions = state.codex_app_server_sessions.lock().await;
+        if sessions.contains_key(&server_id) {
+            return Err(format!("Codex app-server {server_id} is already running"));
+        }
     }
 
     let codex_command = crate::core::codex::codex_command_label();
@@ -146,22 +149,29 @@ pub async fn start_codex_app_server(
         command.env("PATH", path);
     }
 
-    let mut child = command.spawn().map_err(|error| {
-        crate::core::codex::format_codex_io_error("Failed to start codex app-server", &error)
-    })?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Failed to open Codex app-server stdin".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Failed to open Codex app-server stdout".to_string())?;
-    let stderr = child.stderr.take();
+    let (stdout, stderr, handle) = {
+        let mut sessions = state.codex_app_server_sessions.lock().await;
+        if sessions.contains_key(&server_id) {
+            return Err(format!("Codex app-server {server_id} is already running"));
+        }
 
-    let handle = Arc::new(CodexAppServerProcessHandle::new(stdin, child));
-    sessions.insert(server_id.clone(), handle.clone());
-    drop(sessions);
+        let mut child = command.spawn().map_err(|error| {
+            crate::core::codex::format_codex_io_error("Failed to start codex app-server", &error)
+        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Failed to open Codex app-server stdin".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Failed to open Codex app-server stdout".to_string())?;
+        let stderr = child.stderr.take();
+
+        let handle = Arc::new(CodexAppServerProcessHandle::new(stdin, child));
+        sessions.insert(server_id.clone(), handle.clone());
+        (stdout, stderr, handle)
+    };
 
     spawn_stdout_reader(
         app.clone(),
@@ -455,8 +465,4 @@ fn resolve_codex_app_server_reasoning_effort(requested_effort: Option<String>) -
         .map(|effort| effort.trim().to_string())
         .filter(|effort| !effort.is_empty())
         .unwrap_or_else(|| crate::core::codex::DEFAULT_CODEX_REASONING_EFFORT.to_string())
-}
-
-fn quote_toml_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }

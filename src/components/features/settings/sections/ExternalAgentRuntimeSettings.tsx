@@ -410,12 +410,13 @@ export function ExternalAgentRuntimeSettings({
     if (isSigningIn) return 'Opening the Codex sign-in flow...';
     if (isInstalling) return 'Installing Codex CLI...';
     if (isUpdating) return 'Updating Codex CLI...';
-    if (isConfiguring) return 'Checking Codex app-server access...';
+    if (isConfiguring) return 'Checking Codex account access...';
     if (!hasProject) return 'Open a project to attach OpenReelio tools.';
     if (!codexInstalled) {
       return setupResult?.message ?? codexRuntime?.reason ?? 'Codex CLI was not found.';
     }
-    if (runtimeReady) return 'Codex is ready with OpenReelio app-server tools.';
+    if (runtimeReady)
+      return 'Codex is signed in. OpenReelio tools will start when a session begins.';
     if (requiresLogin) return 'Sign in to Codex to continue.';
     if (effectiveAuthStatus === 'error') {
       return (

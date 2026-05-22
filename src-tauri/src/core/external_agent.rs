@@ -217,13 +217,9 @@ pub async fn configure_codex_agent_runtime(
     }
 
     let authenticated = is_authenticated(&status.auth_status);
-    let app_server_ready = status.app_server_ready != Some(false);
-    let (ready, message) = resolve_codex_configuration_readiness(
-        authenticated,
-        app_server_ready,
-        status.app_server_ready == Some(false),
-        status.reason,
-    );
+    let app_server_failed = status.app_server_ready == Some(false);
+    let (ready, message) =
+        resolve_codex_configuration_readiness(authenticated, app_server_failed, status.reason);
 
     ConfigureCodexAgentRuntimeResult {
         installed: true,
@@ -239,14 +235,13 @@ pub async fn configure_codex_agent_runtime(
 
 fn resolve_codex_configuration_readiness(
     authenticated: bool,
-    app_server_ready: bool,
     app_server_failed: bool,
     status_reason: Option<String>,
 ) -> (bool, Option<String>) {
-    let ready = authenticated && app_server_ready;
+    let ready = authenticated && !app_server_failed;
     let message = if ready {
         Some(
-            "Codex is ready through app-server dynamic tools. No global Codex config was changed."
+            "Codex is signed in. App-server tools will start when a session begins. No global Codex config was changed."
                 .to_string(),
         )
     } else if app_server_failed {
@@ -916,13 +911,13 @@ mod tests {
 
     #[test]
     fn marks_codex_ready_without_mutating_global_mcp_configuration() {
-        let (ready, message) = resolve_codex_configuration_readiness(true, true, false, None);
+        let (ready, message) = resolve_codex_configuration_readiness(true, false, None);
 
         assert!(ready);
         assert_eq!(
             message,
             Some(
-                "Codex is ready through app-server dynamic tools. No global Codex config was changed."
+                "Codex is signed in. App-server tools will start when a session begins. No global Codex config was changed."
                     .to_string()
             )
         );
