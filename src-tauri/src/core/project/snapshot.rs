@@ -157,6 +157,14 @@ impl Snapshot {
             );
         }
 
+        let repaired = state.repair_timeline_overlaps();
+        if repaired > 0 {
+            tracing::warn!(
+                repaired_clips = repaired,
+                "Repaired overlapping clips while restoring project snapshot"
+            );
+        }
+
         Ok(state)
     }
 

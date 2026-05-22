@@ -169,6 +169,13 @@ impl ProjectState {
         for op in result.operations {
             state.apply_operation(&op)?;
         }
+        let repaired = state.repair_timeline_overlaps();
+        if repaired > 0 {
+            tracing::warn!(
+                repaired_clips = repaired,
+                "Repaired overlapping clips while replaying project operations"
+            );
+        }
 
         Ok(state)
     }
@@ -191,6 +198,13 @@ impl ProjectState {
 
         for op in operations {
             state.apply_operation(&op)?;
+        }
+        let repaired = state.repair_timeline_overlaps();
+        if repaired > 0 {
+            tracing::warn!(
+                repaired_clips = repaired,
+                "Repaired overlapping clips while replaying project operations"
+            );
         }
 
         Ok(state)
@@ -394,6 +408,92 @@ impl ProjectState {
             }
         }
         Ok(())
+    }
+
+    fn track_has_overlap(track: &Track) -> bool {
+        let mut sorted = track.clips.clone();
+        sorted.sort_by(|a, b| {
+            a.place
+                .timeline_in_sec
+                .total_cmp(&b.place.timeline_in_sec)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        sorted
+            .windows(2)
+            .any(|pair| pair[0].place.overlaps(&pair[1].place))
+    }
+
+    fn can_place_clip_on_track(track: &Track, candidate: &Clip) -> bool {
+        track
+            .clips
+            .iter()
+            .all(|clip| !clip.place.overlaps(&candidate.place))
+    }
+
+    fn warn_replayed_track_overlap(track: &Track) {
+        if let Err(error) = Self::validate_track_no_overlap(track) {
+            tracing::warn!(
+                track_id = %track.id,
+                error = %error,
+                "Replayed track contains overlapping clips; load recovery will split conflicts into recovered tracks"
+            );
+        }
+    }
+
+    /// Repairs persisted timeline overlap violations after replay/snapshot load.
+    ///
+    /// Runtime commands still reject overlaps. This recovery path exists for
+    /// projects written by older builds or interrupted agent runs, where strict
+    /// replay should not prevent the folder from opening.
+    pub fn repair_timeline_overlaps(&mut self) -> usize {
+        let mut moved_clips = 0;
+
+        for sequence in self.sequences.values_mut() {
+            let mut track_index = 0;
+            while track_index < sequence.tracks.len() {
+                Self::sort_track_clips(&mut sequence.tracks[track_index]);
+                if !Self::track_has_overlap(&sequence.tracks[track_index]) {
+                    track_index += 1;
+                    continue;
+                }
+
+                let template_track = sequence.tracks[track_index].clone();
+                let clips = std::mem::take(&mut sequence.tracks[track_index].clips);
+                let mut lane_indices = vec![track_index];
+
+                for clip in clips {
+                    let target_index = lane_indices
+                        .iter()
+                        .copied()
+                        .find(|index| {
+                            Self::can_place_clip_on_track(&sequence.tracks[*index], &clip)
+                        })
+                        .unwrap_or_else(|| {
+                            let mut recovered_track = template_track.clone();
+                            recovered_track.id = ulid::Ulid::new().to_string();
+                            recovered_track.name =
+                                format!("{} Recovered {}", template_track.name, lane_indices.len());
+                            recovered_track.clips.clear();
+                            recovered_track.is_base_track = Some(false);
+                            sequence.tracks.push(recovered_track);
+                            let index = sequence.tracks.len() - 1;
+                            lane_indices.push(index);
+                            index
+                        });
+
+                    if target_index != track_index {
+                        moved_clips += 1;
+                    }
+                    sequence.tracks[target_index].clips.push(clip);
+                    Self::sort_track_clips(&mut sequence.tracks[target_index]);
+                }
+
+                track_index += 1;
+            }
+        }
+
+        moved_clips
     }
 
     // =========================================================================
@@ -765,7 +865,7 @@ impl ProjectState {
             if let Some(track) = sequence.get_track_mut(track_id) {
                 track.add_clip(clip);
                 Self::sort_track_clips(track);
-                Self::validate_track_no_overlap(track)?;
+                Self::warn_replayed_track_overlap(track);
             }
         }
         Ok(())
@@ -854,40 +954,21 @@ impl ProjectState {
 
                 // Add to destination track.
                 sequence.tracks[dest_idx].clips.push(clip);
-
-                // Validate overlap on destination track. If validation fails, we need
-                // to restore the clip to source track to maintain consistency.
-                if let Err(e) = Self::validate_track_no_overlap(&sequence.tracks[dest_idx]) {
-                    // Restore clip to source track - remove from destination first.
-                    if let Some(clip) = sequence.tracks[dest_idx].clips.pop() {
-                        sequence.tracks[src_track_idx].clips.push(clip);
-                        Self::sort_track_clips(&mut sequence.tracks[src_track_idx]);
-                    }
-                    return Err(e);
-                }
-
                 Self::sort_track_clips(&mut sequence.tracks[dest_idx]);
                 Self::sort_track_clips(&mut sequence.tracks[src_track_idx]);
+                Self::warn_replayed_track_overlap(&sequence.tracks[dest_idx]);
+                Self::warn_replayed_track_overlap(&sequence.tracks[src_track_idx]);
                 return Ok(());
             }
         }
 
         // Same-track move.
         if let Some(clip) = sequence.tracks[src_track_idx].get_clip_mut(clip_id) {
-            let old_timeline_in = clip.place.timeline_in_sec;
             if let Some(timeline_in) = new_timeline_in {
                 clip.place.timeline_in_sec = timeline_in;
             }
             Self::sort_track_clips(&mut sequence.tracks[src_track_idx]);
-
-            // Validate overlap. If fails, restore original position.
-            if let Err(e) = Self::validate_track_no_overlap(&sequence.tracks[src_track_idx]) {
-                if let Some(clip) = sequence.tracks[src_track_idx].get_clip_mut(clip_id) {
-                    clip.place.timeline_in_sec = old_timeline_in;
-                }
-                Self::sort_track_clips(&mut sequence.tracks[src_track_idx]);
-                return Err(e);
-            }
+            Self::warn_replayed_track_overlap(&sequence.tracks[src_track_idx]);
         }
         Ok(())
     }
@@ -917,7 +998,7 @@ impl ProjectState {
                     }
 
                     Self::sort_track_clips(track);
-                    Self::validate_track_no_overlap(track)?;
+                    Self::warn_replayed_track_overlap(track);
                     break;
                 }
             }
@@ -952,7 +1033,7 @@ impl ProjectState {
                 }
 
                 Self::sort_track_clips(track);
-                Self::validate_track_no_overlap(track)?;
+                Self::warn_replayed_track_overlap(track);
             }
         }
         Ok(())
@@ -1490,13 +1571,9 @@ impl ProjectState {
                 .get_track_mut(track_id)
                 .ok_or_else(|| CoreError::NotFound(format!("Track not found: {track_id}")))?;
 
-            let previous_clips = track.clips.clone();
             track.add_clip(clip);
             Self::sort_track_clips(track);
-            if let Err(error) = Self::validate_track_no_overlap(track) {
-                track.clips = previous_clips;
-                return Err(error);
-            }
+            Self::warn_replayed_track_overlap(track);
         }
 
         self.effects.insert(effect.id.clone(), effect);
@@ -1526,17 +1603,13 @@ impl ProjectState {
             let track = sequence
                 .get_track_mut(track_id)
                 .ok_or_else(|| CoreError::NotFound(format!("Track not found: {track_id}")))?;
-            let previous_clips = track.clips.clone();
             let existing_clip = track
                 .get_clip_mut(clip_id)
                 .ok_or_else(|| CoreError::NotFound(format!("Clip not found: {clip_id}")))?;
 
             *existing_clip = clip;
             Self::sort_track_clips(track);
-            if let Err(error) = Self::validate_track_no_overlap(track) {
-                track.clips = previous_clips;
-                return Err(error);
-            }
+            Self::warn_replayed_track_overlap(track);
         }
 
         self.effects.insert(effect.id.clone(), effect);
@@ -2339,6 +2412,68 @@ mod tests {
         let seq = state.get_sequence(&seq_id).unwrap();
         assert_eq!(seq.tracks[0].clips.len(), 1);
         assert_eq!(seq.tracks[0].clips[0].id, clip_id);
+    }
+
+    #[test]
+    fn replay_repairs_overlapping_clips_without_failing_project_load() {
+        let mut sequence = Sequence::new("Recovered Sequence", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        let track = Track::new("Video 1", TrackKind::Video);
+        let track_id = track.id.clone();
+        sequence.add_track(track);
+
+        let first_clip = Clip::new("asset_a")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        let second_clip = Clip::new("asset_b")
+            .with_source_range(0.0, 1.0)
+            .place_at(1.0);
+
+        let operations = vec![
+            Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ),
+            Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": first_clip,
+                }),
+            ),
+            Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": second_clip,
+                }),
+            ),
+        ];
+
+        let state = ProjectState::from_operations(operations, ProjectMeta::new("Recovered"))
+            .expect("overlapping replay should repair instead of failing project load");
+
+        let sequence = state.get_sequence(&seq_id).unwrap();
+        let clip_count: usize = sequence.tracks.iter().map(|track| track.clips.len()).sum();
+        assert_eq!(clip_count, 2);
+        assert_eq!(
+            sequence
+                .tracks
+                .iter()
+                .filter(|track| !track.clips.is_empty())
+                .count(),
+            2
+        );
+        assert!(sequence
+            .tracks
+            .iter()
+            .all(|track| ProjectState::validate_track_no_overlap(track).is_ok()));
+        assert!(sequence
+            .tracks
+            .iter()
+            .any(|track| track.name.contains("Recovered")));
     }
 
     #[test]
