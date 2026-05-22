@@ -35,7 +35,6 @@ export interface CodexStatusProbeResult {
   installed: boolean;
   version?: string | null;
   authStatus: ExternalAgentAuthStatus;
-  appServerReady?: boolean | null;
   reason?: string | null;
 }
 
@@ -93,8 +92,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const probe = await this.probeStatus();
     const installStatus = probe.installed ? 'installed' : 'missing';
     const authenticated = probe.authStatus === 'signed-in' || probe.authStatus === 'api-key';
-    const appServerReady = probe.appServerReady !== false;
-    const available = probe.installed && authenticated && appServerReady;
+    const available = probe.installed && authenticated;
 
     return {
       runtimeId: this.id,
@@ -124,7 +122,6 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const client = await this.getAppServerClient(input);
     const thread = await client.startThread({
       serviceName: 'openreelio',
-      cwd: input.cwd ?? undefined,
       model: this.resolveModel(),
       approvalPolicy: 'on-request',
       approvalsReviewer: 'user',
@@ -142,7 +139,6 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
 
     if (input.prompt?.trim()) {
       const turn = await client.startTurn(thread.id, input.prompt, {
-        cwd: input.cwd ?? undefined,
         model: this.resolveModel(),
         effort: this.resolveReasoningEffort(),
         approvalPolicy: 'on-request',
@@ -165,7 +161,6 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
 
     const thread = await client.resumeThread({
       threadId: input.externalSessionId,
-      cwd: input.cwd ?? undefined,
       model: this.resolveModel(),
       approvalPolicy: 'on-request',
       approvalsReviewer: 'user',
@@ -187,7 +182,6 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const session = this.requireSession(sessionId);
     session.cwd = message.cwd ?? session.cwd;
     const turn = await client.startTurn(session.threadId, message.content, {
-      cwd: message.cwd ?? undefined,
       model: this.resolveModel(),
       effort: this.resolveReasoningEffort(),
       approvalPolicy: 'on-request',
@@ -230,10 +224,6 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
       return 'Codex authentication status could not be read';
     }
 
-    if (probe.appServerReady === false) {
-      return 'Codex app-server could not initialize';
-    }
-
     return 'Codex is unavailable';
   }
 
@@ -250,7 +240,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
         this.options.appServerClientFactory ??
         ((factoryInput?: StartAgentSessionInput) =>
           createCodexTauriAppServerClient({
-            cwd: factoryInput?.cwd ?? null,
+            projectPath: factoryInput?.cwd ?? null,
             model: this.resolveModel(),
             reasoningEffort: this.resolveReasoningEffort(),
           }));

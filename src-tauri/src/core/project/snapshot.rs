@@ -189,6 +189,14 @@ impl Snapshot {
             None => snapshot_last_op_id,
         };
 
+        let repaired = state.repair_timeline_overlaps();
+        if repaired > 0 {
+            tracing::warn!(
+                repaired_clips = repaired,
+                "Repaired overlapping clips after snapshot replay"
+            );
+        }
+
         Ok(state)
     }
 
@@ -217,7 +225,7 @@ mod tests {
         assets::{Asset, VideoInfo},
         project::OpKind,
         project::Operation,
-        timeline::{Sequence, SequenceFormat, Track, TrackKind},
+        timeline::{Clip, Sequence, SequenceFormat, Track, TrackKind},
     };
     use tempfile::TempDir;
 
@@ -236,6 +244,23 @@ mod tests {
         state.active_sequence_id = Some(sequence.id.clone());
         state.sequences.insert(sequence.id.clone(), sequence);
 
+        state
+    }
+
+    fn create_overlapping_timeline_state() -> ProjectState {
+        let mut state = ProjectState::new_empty("Overlap Test");
+        let mut sequence = Sequence::new("Main Sequence", SequenceFormat::youtube_1080());
+        let mut track = Track::new("Video 1", TrackKind::Video);
+
+        track
+            .clips
+            .push(Clip::with_range("asset_001", 0.0, 5.0).place_at(0.0));
+        track
+            .clips
+            .push(Clip::with_range("asset_002", 0.0, 5.0).place_at(1.0));
+        sequence.tracks.push(track);
+        state.active_sequence_id = Some(sequence.id.clone());
+        state.sequences.insert(sequence.id.clone(), sequence);
         state
     }
 
@@ -443,6 +468,46 @@ mod tests {
         assert_eq!(restored_state.assets.len(), 1);
         assert_eq!(restored_state.last_op_id, Some("op_001".to_string()));
         assert_eq!(restored_state.op_count, 1);
+    }
+
+    #[test]
+    fn test_load_preserves_raw_snapshot_overlaps_until_replay() {
+        let temp_dir = TempDir::new().unwrap();
+        let snapshot_path = temp_dir.path().join("snapshot.json");
+
+        let state = create_overlapping_timeline_state();
+        Snapshot::save(&snapshot_path, &state, Some("op_001")).unwrap();
+
+        let (loaded_state, _) = Snapshot::load(&snapshot_path).unwrap();
+        let sequence = loaded_state.sequences.values().next().unwrap();
+
+        assert_eq!(sequence.tracks.len(), 1);
+        assert_eq!(sequence.tracks[0].clips.len(), 2);
+    }
+
+    #[test]
+    fn test_load_with_replay_repairs_snapshot_overlaps_after_replay() {
+        use crate::core::project::OpsLog;
+
+        let temp_dir = TempDir::new().unwrap();
+        let snapshot_path = temp_dir.path().join("snapshot.json");
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let state = create_overlapping_timeline_state();
+        Snapshot::save(&snapshot_path, &state, Some("op_001")).unwrap();
+
+        let ops_log = OpsLog::new(&ops_path);
+        let op = Operation::with_id("op_001", OpKind::AssetImport, serde_json::json!({}));
+        ops_log.append(&op).unwrap();
+
+        let restored_state = Snapshot::load_with_replay(&snapshot_path, &ops_log).unwrap();
+        let sequence = restored_state.sequences.values().next().unwrap();
+
+        assert_eq!(sequence.tracks.len(), 2);
+        assert!(sequence
+            .tracks
+            .iter()
+            .any(|track| track.name.contains("Recovered")));
     }
 
     #[test]

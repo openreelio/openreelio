@@ -5,11 +5,8 @@ use specta::Type;
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
-use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{timeout, Duration};
 
 pub const CODEX_CLI_ENV_VAR: &str = "OPENREELIO_CODEX_CLI";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
@@ -37,7 +34,6 @@ pub struct CodexStatusProbeResult {
     pub installed: bool,
     pub version: Option<String>,
     pub auth_status: String,
-    pub app_server_ready: Option<bool>,
     pub reason: Option<String>,
 }
 
@@ -193,7 +189,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                 installed: false,
                 version: None,
                 auth_status: "unknown".to_string(),
-                app_server_ready: None,
                 reason: Some(reason),
             };
         }
@@ -211,7 +206,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                 installed: false,
                 version: None,
                 auth_status: "unknown".to_string(),
-                app_server_ready: None,
                 reason: Some("codex --version timed out".to_string()),
             };
         }
@@ -229,7 +223,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                         installed: true,
                         version,
                         auth_status: "error".to_string(),
-                        app_server_ready: None,
                         reason: Some(reason),
                     };
                 }
@@ -246,7 +239,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                         installed: true,
                         version,
                         auth_status: "error".to_string(),
-                        app_server_ready: None,
                         reason: Some("codex login status timed out".to_string()),
                     };
                 }
@@ -258,35 +250,17 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     let (auth_status, auth_reason) =
                         parse_codex_auth_status(&stdout, &stderr, output.status.success());
-                    let authenticated = auth_status == "signed-in" || auth_status == "api-key";
-                    let app_server_probe = if authenticated {
-                        let app_server_model = default_codex_model_for_version(version.as_deref());
-                        match probe_codex_app_server_initialization(
-                            app_server_model,
-                            DEFAULT_CODEX_REASONING_EFFORT,
-                        )
-                        .await
-                        {
-                            Ok(()) => (Some(true), None),
-                            Err(reason) => (Some(false), Some(reason)),
-                        }
-                    } else {
-                        (None, None)
-                    };
-
                     CodexStatusProbeResult {
                         installed: true,
                         version,
                         auth_status,
-                        app_server_ready: app_server_probe.0,
-                        reason: app_server_probe.1.or(auth_reason),
+                        reason: auth_reason,
                     }
                 }
                 Err(error) => CodexStatusProbeResult {
                     installed: true,
                     version,
                     auth_status: "error".to_string(),
-                    app_server_ready: None,
                     reason: Some(format_codex_io_error(
                         "Failed to run codex login status",
                         &error,
@@ -298,7 +272,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
             installed: false,
             version: None,
             auth_status: "unknown".to_string(),
-            app_server_ready: None,
             reason: Some(format!(
                 "codex --version failed with status {}",
                 output.status
@@ -308,7 +281,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
             installed: false,
             version: None,
             auth_status: "unknown".to_string(),
-            app_server_ready: None,
             reason: Some(
                 "Codex executable was not found in PATH or common install locations.".to_string(),
             ),
@@ -317,89 +289,12 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
             installed: false,
             version: None,
             auth_status: "unknown".to_string(),
-            app_server_ready: None,
             reason: Some(format_codex_io_error(
                 "Failed to run codex --version",
                 &error,
             )),
         },
     }
-}
-
-async fn probe_codex_app_server_initialization(model: &str, effort: &str) -> Result<(), String> {
-    let mut command = create_codex_command()?;
-    command
-        .arg("app-server")
-        .arg("-c")
-        .arg(format!("model={}", quote_toml_string(model)))
-        .arg("-c")
-        .arg(format!(
-            "model_reasoning_effort={}",
-            quote_toml_string(effort)
-        ))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = command
-        .spawn()
-        .map_err(|error| format_codex_io_error("Failed to start codex app-server", &error))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Failed to open Codex app-server stdout".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "Failed to open Codex app-server stderr".to_string())?;
-    let stdout_task = tokio::spawn(read_process_stream(stdout));
-    let stderr_task = tokio::spawn(read_process_stream(stderr));
-
-    // The app-server is not an MCP server; requiring an `initialize` response here
-    // incorrectly marks older but usable Codex builds as unavailable. A successful
-    // smoke test means the process starts and stays alive for the readiness window.
-    sleep(Duration::from_millis(1_200)).await;
-
-    match child.try_wait() {
-        Ok(Some(status)) => {
-            let stdout = await_process_output(stdout_task).await;
-            let stderr = await_process_output(stderr_task).await;
-            Err(format!(
-                "codex app-server exited during startup with status {status}: {}",
-                collect_command_output(&stdout, &stderr)
-            ))
-        }
-        Ok(None) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Ok(())
-        }
-        Err(error) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Err(format_codex_io_error(
-                "Failed to inspect codex app-server startup",
-                &error,
-            ))
-        }
-    }
-}
-
-async fn read_process_stream<R>(mut stream: R) -> Vec<u8>
-where
-    R: AsyncRead + Unpin + Send + 'static,
-{
-    let mut output = Vec::new();
-    let _ = stream.read_to_end(&mut output).await;
-    output
-}
-
-async fn await_process_output(task: JoinHandle<Vec<u8>>) -> Vec<u8> {
-    timeout(Duration::from_millis(500), task)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default()
 }
 
 pub async fn get_codex_model_catalog() -> CodexModelCatalogResult {
@@ -654,10 +549,6 @@ fn collect_command_output(stdout: &[u8], stderr: &[u8]) -> String {
     } else {
         combined
     }
-}
-
-fn quote_toml_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 pub fn format_codex_io_error(action: &str, error: &std::io::Error) -> String {

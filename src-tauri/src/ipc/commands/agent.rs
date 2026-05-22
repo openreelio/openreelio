@@ -18,14 +18,19 @@ use crate::core::ai::memory::{AgentMemoryDb, MemoryEntry};
 use crate::core::ai::plan_executor::{resolve_step_references, PlanExecutor};
 use crate::core::assets::{
     evaluate_license_policy, LicenseInfo, LicensePolicyContext, LicensePolicyDecision,
+    LicensePolicyStatus,
 };
+use crate::core::commands::ImportAssetCommand;
 use crate::core::credentials::{CredentialType, CredentialVault};
 use crate::core::plugin::api::{
     AssetProviderPlugin, PluginAssetRef, PluginAssetType, PluginSearchQuery,
 };
 use crate::core::plugin::providers::freesound::{FreesoundConfig, FreesoundProvider};
 use crate::core::plugin::providers::stock::{StockMediaConfig, StockMediaProvider, StockSource};
-use crate::core::{fs::write_bytes_atomic_no_symlink, CoreError};
+use crate::core::{
+    fs::{validate_path_id_component, write_bytes_atomic_no_symlink},
+    CoreError,
+};
 use crate::ipc::payloads::CommandPayload;
 use crate::AppState;
 
@@ -867,6 +872,22 @@ pub struct StockMediaSearchResult {
     pub metadata: serde_json::Value,
 }
 
+/// Result of downloading and importing a stock media candidate.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct StockMediaImportResult {
+    /// Generated OpenReelio asset ID.
+    pub asset_id: String,
+    /// Imported asset display name.
+    pub name: String,
+    /// Local project file path that was downloaded.
+    pub local_path: String,
+    /// Operation ID for the import command.
+    pub op_id: String,
+    /// License snapshot path persisted with the import.
+    pub license_snapshot_path: String,
+}
+
 async fn get_stock_provider_api_key(
     app: &tauri::AppHandle,
     credential_type: CredentialType,
@@ -961,6 +982,236 @@ fn license_info_from_asset_ref(asset_ref: &PluginAssetRef) -> LicenseInfo {
         })
 }
 
+fn sanitize_stock_filename_component(value: &str, fallback: &str) -> String {
+    let normalized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else if ch.is_whitespace() {
+                '-'
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let trimmed = normalized
+        .trim_matches(|ch| ch == '-' || ch == '_' || ch == '.')
+        .chars()
+        .take(80)
+        .collect::<String>();
+
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed
+    }
+}
+
+#[cfg(feature = "ai-providers")]
+const STOCK_DOWNLOAD_MAX_REDIRECTS: usize = 5;
+
+#[cfg(feature = "ai-providers")]
+fn stock_extension_from_url(source_url: &str, asset_type: &str) -> Option<String> {
+    reqwest::Url::parse(source_url)
+        .ok()
+        .and_then(|url| {
+            std::path::Path::new(url.path())
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase())
+        })
+        .filter(|ext| is_allowed_stock_extension(asset_type, ext))
+}
+
+fn stock_default_extension(asset_type: &str) -> String {
+    match asset_type {
+        "audio" => "mp3".to_string(),
+        "image" => "jpg".to_string(),
+        "video" => "mp4".to_string(),
+        _ => "bin".to_string(),
+    }
+}
+
+fn stock_extension_from_content_type(
+    content_type: Option<&str>,
+    asset_type: &str,
+) -> Option<String> {
+    let content_type = content_type?.split(';').next()?.trim().to_ascii_lowercase();
+    let ext = match content_type.as_str() {
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/ogg" => "ogg",
+        "audio/aac" => "aac",
+        "audio/flac" => "flac",
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "video/mp4" => "mp4",
+        "video/quicktime" => "mov",
+        "video/webm" => "webm",
+        _ => return None,
+    };
+
+    if is_allowed_stock_extension(asset_type, ext) {
+        Some(ext.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_allowed_stock_extension(asset_type: &str, extension: &str) -> bool {
+    match asset_type {
+        "audio" => matches!(
+            extension,
+            "mp3" | "wav" | "ogg" | "m4a" | "aac" | "flac" | "opus" | "webm"
+        ),
+        "image" => matches!(extension, "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp"),
+        "video" => matches!(extension, "mp4" | "mov" | "webm" | "mkv"),
+        _ => false,
+    }
+}
+
+fn stock_download_size_limit(asset_type: &str) -> u64 {
+    match asset_type {
+        "audio" => 50 * 1024 * 1024,
+        "image" => 50 * 1024 * 1024,
+        "video" => 500 * 1024 * 1024,
+        _ => 25 * 1024 * 1024,
+    }
+}
+
+#[cfg(feature = "ai-providers")]
+fn validate_stock_download_url(source_url: &str) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(source_url)
+        .map_err(|e| format!("Invalid stock media download URL: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("Stock media downloads must use HTTPS URLs.".to_string());
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Stock media download URL must include a host.".to_string())?
+        .trim_matches(|ch| ch == '[' || ch == ']')
+        .to_ascii_lowercase();
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let private_host = match ip {
+            std::net::IpAddr::V4(ip) => {
+                let octets = ip.octets();
+                ip.is_private()
+                    || ip.is_loopback()
+                    || ip.is_link_local()
+                    || ip.is_unspecified()
+                    || ip.is_broadcast()
+                    || octets[0] == 0
+                    || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+            }
+            std::net::IpAddr::V6(ip) => {
+                ip.is_loopback()
+                    || ip.is_unspecified()
+                    || ip.is_unique_local()
+                    || ip.is_unicast_link_local()
+            }
+        };
+        if private_host {
+            return Err(
+                "Stock media download URL must not target local/private hosts.".to_string(),
+            );
+        }
+    } else if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host == "0.0.0.0"
+        || host.starts_with("0.")
+        || host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("100.64.")
+        || host.starts_with("169.254.")
+        || host.starts_with("192.168.")
+        || host == "::1"
+    {
+        return Err("Stock media download URL must not target local/private hosts.".to_string());
+    }
+
+    if let Some(second_octet) = host
+        .strip_prefix("172.")
+        .and_then(|rest| rest.split('.').next())
+        .and_then(|octet| octet.parse::<u8>().ok())
+    {
+        if (16..=31).contains(&second_octet) {
+            return Err(
+                "Stock media download URL must not target local/private hosts.".to_string(),
+            );
+        }
+    }
+
+    Ok(parsed)
+}
+
+#[cfg(feature = "ai-providers")]
+async fn send_validated_stock_download_request(
+    client: &reqwest::Client,
+    initial_url: reqwest::Url,
+) -> Result<(reqwest::Response, reqwest::Url), String> {
+    let mut current_url = initial_url;
+
+    for redirect_count in 0..=STOCK_DOWNLOAD_MAX_REDIRECTS {
+        let response = client
+            .get(current_url.clone())
+            .send()
+            .await
+            .map_err(|e| format!("Stock media download failed: {e}"))?;
+
+        if !response.status().is_redirection() {
+            return Ok((response, current_url));
+        }
+        if redirect_count >= STOCK_DOWNLOAD_MAX_REDIRECTS {
+            return Err("Stock media download redirected too many times.".to_string());
+        }
+
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .ok_or_else(|| "Stock media redirect response did not include Location.".to_string())?
+            .to_str()
+            .map_err(|_| "Stock media redirect Location was not valid UTF-8.".to_string())?;
+        let next_url = current_url
+            .join(location)
+            .map_err(|e| format!("Invalid stock media redirect URL: {e}"))?;
+        current_url = validate_stock_download_url(next_url.as_str())?;
+    }
+
+    Err("Stock media download redirected too many times.".to_string())
+}
+
+#[cfg(feature = "ai-providers")]
+fn cleanup_stock_import_files(paths: &[&Path]) {
+    for path in paths {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "Failed to remove staged stock media import file"
+                );
+            }
+        }
+    }
+}
+
+fn normalize_stock_asset_type(asset_type: &str) -> Result<String, String> {
+    match asset_type {
+        "audio" | "image" | "video" => Ok(asset_type.to_string()),
+        other => Err(format!(
+            "Unsupported stock media import asset type: {other}"
+        )),
+    }
+}
+
 async fn search_visual_stock_media(
     app: &tauri::AppHandle,
     search_query: &PluginSearchQuery,
@@ -996,12 +1247,24 @@ async fn search_visual_stock_media(
         ));
     }
 
-    if providers.is_empty() {
+    if matches!(search_query.asset_type, Some(PluginAssetType::Video)) && providers.is_empty() {
         return Err(
-            "Image/video stock search requires a Pexels or Pixabay API key. Store credentials with provider 'pexels' or 'pixabay', or set OPENREELIO_PEXELS_API_KEY / OPENREELIO_PIXABAY_API_KEY."
+            "Video stock search requires a Pexels or Pixabay API key because the built-in no-key provider only supports image and audio search. Store credentials with provider 'pexels' or 'pixabay', set OPENREELIO_PEXELS_API_KEY / OPENREELIO_PIXABAY_API_KEY, or configure a hosted/provider plugin."
                 .to_string(),
         );
     }
+
+    providers.push((
+        "Openverse",
+        StockMediaProvider::new(
+            "openverse",
+            StockMediaConfig {
+                api_key: None,
+                source: StockSource::Openverse,
+                ..Default::default()
+            },
+        ),
+    ));
 
     let mut refs = Vec::new();
     let mut errors = Vec::new();
@@ -1030,8 +1293,8 @@ async fn search_visual_stock_media(
 
 /// Search stock media providers for assets matching a query.
 ///
-/// Uses configured built-in providers. Image/video search requires Pexels
-/// and/or Pixabay credentials. Audio search requires Freesound credentials.
+/// Uses configured built-in providers. Image/audio search has an Openverse
+/// fallback. Video search still requires Pexels and/or Pixabay credentials.
 #[tauri::command]
 #[specta::specta]
 #[tracing::instrument(fields(query = %query, asset_type = ?asset_type, limit = ?limit))]
@@ -1057,19 +1320,42 @@ pub async fn search_stock_media(
     };
 
     let refs: Vec<PluginAssetRef> = if plugin_asset_type == Some(PluginAssetType::Audio) {
+        let mut refs = Vec::new();
+        let mut errors = Vec::new();
+
         let api_key = get_freesound_api_key(&app).await?;
-        let provider = FreesoundProvider::new(
-            "freesound",
-            FreesoundConfig {
-                api_key,
+        if api_key.is_some() {
+            let provider = FreesoundProvider::new(
+                "freesound",
+                FreesoundConfig {
+                    api_key,
+                    ..Default::default()
+                },
+            );
+            match provider.search(&search_query).await {
+                Ok(mut results) => refs.append(&mut results),
+                Err(error) => errors.push(format!("Freesound: {error}")),
+            }
+        }
+
+        let openverse_provider = StockMediaProvider::new(
+            "openverse",
+            StockMediaConfig {
+                api_key: None,
+                source: StockSource::Openverse,
                 ..Default::default()
             },
         );
-        provider.search(&search_query).await.map_err(|e| {
-            format!(
-                "Audio stock search failed: {e}. Configure a Freesound API key via credential storage (provider: 'freesound') or OPENREELIO_FREESOUND_API_KEY."
-            )
-        })?
+        match openverse_provider.search(&search_query).await {
+            Ok(mut results) => refs.append(&mut results),
+            Err(error) => errors.push(format!("Openverse: {error}")),
+        }
+
+        if refs.is_empty() && !errors.is_empty() {
+            return Err(format!("Audio stock search failed: {}", errors.join("; ")));
+        }
+        refs.truncate(search_query.limit);
+        refs
     } else {
         search_visual_stock_media(&app, &search_query).await?
     };
@@ -1108,4 +1394,231 @@ pub async fn search_stock_media(
 
     tracing::info!("Stock media search returned {} results", results.len());
     Ok(results)
+}
+
+/// Download a stock media candidate into the project and import it as an asset.
+///
+/// This command is intentionally separate from search. Callers must pass a
+/// license snapshot acknowledgement so external assets do not bypass policy.
+#[cfg(feature = "ai-providers")]
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip(state, license), fields(provider = %provider, asset_type = %asset_type))]
+pub async fn import_stock_media_asset(
+    source_url: String,
+    name: String,
+    asset_type: String,
+    provider: String,
+    license: LicenseInfo,
+    license_ack: bool,
+    duration_sec: Option<f64>,
+    tags: Option<Vec<String>>,
+    provider_url: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<StockMediaImportResult, String> {
+    let normalized_asset_type = normalize_stock_asset_type(asset_type.trim())?;
+    let source_url = source_url.trim();
+    let parsed_url = validate_stock_download_url(source_url)?;
+    let provider = provider.trim();
+    validate_path_id_component(provider, "provider")?;
+
+    let decision = evaluate_license_policy(&license, &LicensePolicyContext::default());
+    if decision.status == LicensePolicyStatus::Blocked {
+        return Err(format!(
+            "Stock media import blocked by license policy: {}",
+            decision.reasons.join("; ")
+        ));
+    }
+    if !license_ack && !decision.required_actions.is_empty() {
+        return Err(
+            "Stock media import requires licenseAck=true because provider terms and license snapshot actions are required."
+                .to_string(),
+        );
+    }
+
+    let project_root = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        project.path.clone()
+    };
+    let canonical_project_root = project_root
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve active project path: {e}"))?;
+
+    let imports_dir = project_root
+        .join(".openreelio")
+        .join("imports")
+        .join("stock");
+    let licenses_dir = project_root.join(".openreelio").join("licenses");
+    ensure_plain_directory(&project_root.join(".openreelio"), ".openreelio directory")?;
+    ensure_plain_directory(
+        &project_root.join(".openreelio").join("imports"),
+        "imports directory",
+    )?;
+    ensure_plain_directory(&imports_dir, "stock imports directory")?;
+    ensure_plain_directory(&licenses_dir, "licenses directory")?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .user_agent("OpenReelio/asset-import")
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("Failed to build stock media HTTP client: {e}"))?;
+
+    let (response, final_url) = send_validated_stock_download_request(&client, parsed_url).await?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Stock media download failed with status {}",
+            response.status()
+        ));
+    }
+
+    let size_limit = stock_download_size_limit(&normalized_asset_type);
+    if let Some(content_length) = response.content_length() {
+        if content_length > size_limit {
+            return Err(format!(
+                "Stock media download is too large: {} bytes exceeds {} bytes",
+                content_length, size_limit
+            ));
+        }
+    }
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let extension = stock_extension_from_url(final_url.as_str(), &normalized_asset_type)
+        .or_else(|| {
+            stock_extension_from_content_type(content_type.as_deref(), &normalized_asset_type)
+        })
+        .or_else(|| stock_extension_from_url(source_url, &normalized_asset_type))
+        .unwrap_or_else(|| stock_default_extension(&normalized_asset_type));
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read stock media download: {e}"))?;
+    if bytes.len() as u64 > size_limit {
+        return Err(format!(
+            "Stock media download is too large: {} bytes exceeds {} bytes",
+            bytes.len(),
+            size_limit
+        ));
+    }
+
+    let safe_name = sanitize_stock_filename_component(&name, "stock-media");
+    let unique_id = ulid::Ulid::new().to_string().to_ascii_lowercase();
+    let filename = format!("{safe_name}-{unique_id}.{extension}");
+    validate_path_id_component(&filename, "download filename")?;
+    let output_path = imports_dir.join(filename);
+    write_bytes_atomic_no_symlink(&output_path, &bytes, "stock media download")?;
+
+    let mut imported_license = license.clone();
+    let license_filename = format!("{safe_name}-{unique_id}.license.json");
+    validate_path_id_component(&license_filename, "license snapshot filename")?;
+    let license_snapshot_path = licenses_dir.join(license_filename);
+    let snapshot = serde_json::json!({
+        "provider": provider,
+        "sourceUrl": source_url,
+        "providerUrl": provider_url,
+        "license": license,
+        "policy": decision,
+        "importedAt": chrono::Utc::now().to_rfc3339(),
+    });
+    write_bytes_atomic_no_symlink(
+        &license_snapshot_path,
+        serde_json::to_string_pretty(&snapshot)
+            .map_err(|e| format!("Failed to serialize license snapshot: {e}"))?
+            .as_bytes(),
+        "stock media license snapshot",
+    )?;
+    imported_license.proof_path = Some(license_snapshot_path.to_string_lossy().to_string());
+
+    let output_path_string = output_path.to_string_lossy().to_string();
+    let mut command =
+        ImportAssetCommand::new(&safe_name, &output_path_string).with_license(imported_license);
+    command = command.with_project_root(project_root.clone());
+    if let Some(relative_path) =
+        crate::core::workspace::path_resolver::to_relative(&project_root, &output_path)
+    {
+        command.asset.relative_path = Some(relative_path);
+        command.asset.workspace_managed = true;
+    }
+    if let Some(duration) = duration_sec.filter(|value| value.is_finite() && *value > 0.0) {
+        command = command.with_duration(duration);
+    }
+    if let Some(tags) = tags {
+        for tag in tags
+            .into_iter()
+            .map(|tag| tag.trim().to_string())
+            .filter(|tag| !tag.is_empty())
+            .take(12)
+        {
+            command = command.with_tag(&tag);
+        }
+    }
+    command = command.with_tag("stock");
+    command = command.with_tag(provider);
+
+    let asset_id = command.asset_id().to_string();
+    let op_id = {
+        let mut guard = state.project.lock().await;
+        let Some(project) = guard.as_mut() else {
+            cleanup_stock_import_files(&[&output_path, &license_snapshot_path]);
+            return Err(CoreError::NoProjectOpen.to_ipc_error());
+        };
+        let active_project_root = match project.path.canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                cleanup_stock_import_files(&[&output_path, &license_snapshot_path]);
+                return Err(format!("Failed to resolve active project path: {error}"));
+            }
+        };
+        if active_project_root != canonical_project_root {
+            cleanup_stock_import_files(&[&output_path, &license_snapshot_path]);
+            return Err(
+                "Active project changed during stock media import; staged files were discarded."
+                    .to_string(),
+            );
+        }
+        let result = project
+            .executor
+            .execute(Box::new(command), &mut project.state)
+            .map_err(|e| e.to_ipc_error())?;
+        result.op_id
+    };
+
+    state.allow_asset_protocol_file(&output_path);
+
+    Ok(StockMediaImportResult {
+        asset_id,
+        name: safe_name,
+        local_path: output_path_string,
+        op_id,
+        license_snapshot_path: license_snapshot_path.to_string_lossy().to_string(),
+    })
+}
+
+/// No-op stock import command for builds without network provider support.
+#[cfg(not(feature = "ai-providers"))]
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)]
+pub async fn import_stock_media_asset(
+    _source_url: String,
+    _name: String,
+    _asset_type: String,
+    _provider: String,
+    _license: LicenseInfo,
+    _license_ack: bool,
+    _duration_sec: Option<f64>,
+    _tags: Option<Vec<String>>,
+    _provider_url: Option<String>,
+    _state: State<'_, AppState>,
+) -> Result<StockMediaImportResult, String> {
+    Err("Stock media import requires the ai-providers feature.".to_string())
 }

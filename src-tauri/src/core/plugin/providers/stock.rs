@@ -22,6 +22,7 @@ use crate::core::{CoreError, CoreResult};
 pub enum StockSource {
     Pexels,
     Pixabay,
+    Openverse,
 }
 
 /// Configuration for a stock media provider instance.
@@ -171,6 +172,46 @@ mod pixabay {
     }
 }
 
+#[allow(dead_code)]
+mod openverse {
+    use super::*;
+
+    #[derive(Debug, Deserialize)]
+    pub struct SearchResponse {
+        pub results: Vec<Media>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct Media {
+        pub id: String,
+        pub title: Option<String>,
+        pub foreign_landing_url: Option<String>,
+        pub url: Option<String>,
+        pub creator: Option<String>,
+        pub creator_url: Option<String>,
+        pub license: Option<String>,
+        pub license_version: Option<String>,
+        pub license_url: Option<String>,
+        pub provider: Option<String>,
+        pub source: Option<String>,
+        pub filesize: Option<u64>,
+        pub filetype: Option<String>,
+        pub tags: Option<Vec<Tag>>,
+        pub attribution: Option<String>,
+        pub thumbnail: Option<String>,
+        pub height: Option<u32>,
+        pub width: Option<u32>,
+        pub duration: Option<f64>,
+        pub bit_rate: Option<u64>,
+        pub sample_rate: Option<u32>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct Tag {
+        pub name: String,
+    }
+}
+
 /// Built-in stock media provider.
 #[derive(Debug)]
 pub struct StockMediaProvider {
@@ -183,11 +224,12 @@ pub struct StockMediaProvider {
 impl StockMediaProvider {
     /// Creates a new stock media provider.
     pub fn new(name: &str, config: StockMediaConfig) -> Self {
-        let is_available = config
-            .api_key
-            .as_ref()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
+        let is_available = config.source == StockSource::Openverse
+            || config
+                .api_key
+                .as_ref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
 
         Self {
             name: name.to_string(),
@@ -206,14 +248,17 @@ impl StockMediaProvider {
         } else {
             Some(trimmed.to_string())
         };
-        self.available
-            .store(config.api_key.is_some(), Ordering::Relaxed);
+        self.available.store(
+            config.source == StockSource::Openverse || config.api_key.is_some(),
+            Ordering::Relaxed,
+        );
     }
 
     fn get_api_base(source: StockSource) -> &'static str {
         match source {
             StockSource::Pexels => "https://api.pexels.com/v1",
             StockSource::Pixabay => "https://pixabay.com/api",
+            StockSource::Openverse => "https://api.openverse.org/v1",
         }
     }
 
@@ -518,6 +563,134 @@ impl StockMediaProvider {
         }
     }
 
+    fn openverse_license(
+        provider: Option<&str>,
+        raw_license: Option<&str>,
+        license_url: Option<&str>,
+    ) -> LicenseInfo {
+        let license_type = match raw_license
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "cc0" | "pdm" => LicenseType::Cc0,
+            "by" => LicenseType::CcBy,
+            "by-sa" => LicenseType::CcBySa,
+            "by-nc" | "by-nc-sa" | "by-nc-nd" | "by-nd" => LicenseType::Custom,
+            _ => LicenseType::Unknown,
+        };
+
+        let mut allowed_use = vec!["personal".to_string(), "modification".to_string()];
+        if matches!(
+            license_type,
+            LicenseType::Cc0 | LicenseType::CcBy | LicenseType::CcBySa
+        ) {
+            allowed_use.push("commercial".to_string());
+        }
+
+        LicenseInfo {
+            source: LicenseSource::StockProvider,
+            provider: Some(format!(
+                "Openverse{}",
+                provider
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| format!(" ({value})"))
+                    .unwrap_or_default()
+            )),
+            license_type,
+            proof_path: license_url.map(str::to_string),
+            allowed_use,
+            expires_at: None,
+        }
+    }
+
+    fn build_openverse_url(&self, query: &PluginSearchQuery, asset_type: &str) -> String {
+        let base = Self::get_api_base(StockSource::Openverse);
+        let encoded_text = Self::url_encode(&Self::search_text(query, "nature"));
+        let page_size = query.limit.clamp(1, 20);
+        let page = (query.offset / query.limit.max(1)) + 1;
+        let media_path = match asset_type {
+            "audio" => "audio",
+            _ => "images",
+        };
+
+        format!(
+            "{}/{}/?q={}&page_size={}&page={}&license=cc0,by,by-sa",
+            base, media_path, encoded_text, page_size, page
+        )
+    }
+
+    fn openverse_tags(tags: Option<&Vec<openverse::Tag>>) -> Vec<String> {
+        tags.map(|items| {
+            items
+                .iter()
+                .map(|tag| tag.name.trim())
+                .filter(|tag| !tag.is_empty())
+                .take(12)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    fn openverse_media_to_asset(
+        &self,
+        media: &openverse::Media,
+        asset_type: PluginAssetType,
+    ) -> PluginAssetRef {
+        let provider = media
+            .provider
+            .as_deref()
+            .or(media.source.as_deref())
+            .unwrap_or("openverse");
+        let license = Self::openverse_license(
+            Some(provider),
+            media.license.as_deref(),
+            media.license_url.as_deref(),
+        );
+        let title = media
+            .title
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| format!("Openverse asset {}", media.id));
+        let normalized_provider_asset_id = media.id.replace('/', "_");
+
+        PluginAssetRef {
+            id: format!(
+                "openverse-{}-{}",
+                asset_type_name(asset_type),
+                normalized_provider_asset_id
+            ),
+            name: title,
+            asset_type,
+            thumbnail: media.thumbnail.clone(),
+            duration_sec: media.duration.map(|duration_ms| duration_ms / 1000.0),
+            size_bytes: media.filesize,
+            tags: Self::openverse_tags(media.tags.as_ref()),
+            metadata: serde_json::json!({
+                "provider": "openverse",
+                "sourceProvider": provider,
+                "providerAssetId": media.id,
+                "providerUrl": media.foreign_landing_url,
+                "creator": media.creator,
+                "creatorUrl": media.creator_url,
+                "width": media.width,
+                "height": media.height,
+                "previewUrl": media.url,
+                "downloadUrl": media.url,
+                "downloadMimeType": media.filetype,
+                "bitRate": media.bit_rate,
+                "sampleRate": media.sample_rate,
+                "attribution": media.attribution,
+                "license": Self::license_metadata(
+                    license,
+                    media.license.as_deref().unwrap_or("Open license"),
+                    media.license_url.as_deref().unwrap_or("https://openverse.org/")
+                ),
+            }),
+        }
+    }
+
     #[cfg(feature = "ai-providers")]
     async fn search_pexels(
         &self,
@@ -639,6 +812,74 @@ impl StockMediaProvider {
                 .collect())
         }
     }
+
+    #[cfg(feature = "ai-providers")]
+    async fn search_openverse(
+        &self,
+        config: &StockMediaConfig,
+        query: &PluginSearchQuery,
+    ) -> CoreResult<Vec<PluginAssetRef>> {
+        let asset_type = match query.asset_type.unwrap_or(PluginAssetType::Image) {
+            PluginAssetType::Audio => "audio",
+            PluginAssetType::Image => "image",
+            _ => return Ok(Vec::new()),
+        };
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(config.timeout_sec.max(1)))
+            .user_agent("OpenReelio/asset-discovery")
+            .build()
+            .map_err(|e| CoreError::PluginError(format!("Failed to build HTTP client: {e}")))?;
+
+        let response = client
+            .get(self.build_openverse_url(query, asset_type))
+            .send()
+            .await
+            .map_err(|e| CoreError::PluginError(format!("Openverse search request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(CoreError::PluginError(format!(
+                "Openverse search failed with status {}: {}",
+                status, body
+            )));
+        }
+
+        let payload = response
+            .json::<openverse::SearchResponse>()
+            .await
+            .map_err(|e| {
+                CoreError::PluginError(format!("Failed to parse Openverse response: {e}"))
+            })?;
+        let plugin_asset_type = if asset_type == "audio" {
+            PluginAssetType::Audio
+        } else {
+            PluginAssetType::Image
+        };
+
+        Ok(payload
+            .results
+            .into_iter()
+            .filter(|media| {
+                media
+                    .url
+                    .as_deref()
+                    .is_some_and(|url| !url.trim().is_empty())
+            })
+            .map(|media| self.openverse_media_to_asset(&media, plugin_asset_type))
+            .collect())
+    }
+}
+
+fn asset_type_name(asset_type: PluginAssetType) -> &'static str {
+    match asset_type {
+        PluginAssetType::Image => "image",
+        PluginAssetType::Video => "video",
+        PluginAssetType::Audio => "audio",
+        PluginAssetType::Font => "font",
+        PluginAssetType::Other => "other",
+    }
 }
 
 #[async_trait]
@@ -656,7 +897,7 @@ impl AssetProviderPlugin for StockMediaProvider {
             return Ok(Vec::new());
         }
 
-        if matches!(query.asset_type, Some(asset_type) if !matches!(asset_type, PluginAssetType::Image | PluginAssetType::Video))
+        if matches!(query.asset_type, Some(asset_type) if !matches!(asset_type, PluginAssetType::Image | PluginAssetType::Video | PluginAssetType::Audio))
         {
             return Ok(Vec::new());
         }
@@ -667,17 +908,19 @@ impl AssetProviderPlugin for StockMediaProvider {
             return Ok(cached);
         }
 
-        if !config
-            .api_key
-            .as_deref()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
+        if config.source != StockSource::Openverse
+            && !config
+                .api_key
+                .as_deref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
         {
             return Err(CoreError::PluginError(format!(
                 "{} provider requires an API key",
                 match config.source {
                     StockSource::Pexels => "Pexels",
                     StockSource::Pixabay => "Pixabay",
+                    StockSource::Openverse => "Openverse",
                 }
             )));
         }
@@ -695,6 +938,7 @@ impl AssetProviderPlugin for StockMediaProvider {
             let mut results = match config.source {
                 StockSource::Pexels => self.search_pexels(&config, query).await?,
                 StockSource::Pixabay => self.search_pixabay(&config, query).await?,
+                StockSource::Openverse => self.search_openverse(&config, query).await?,
             };
 
             results.truncate(query.limit);
@@ -746,9 +990,17 @@ mod tests {
     fn create_provider_reports_availability_from_api_key() {
         let available = create_test_provider(StockSource::Pexels);
         let unavailable = StockMediaProvider::new("test", StockMediaConfig::default());
+        let no_key_openverse = StockMediaProvider::new(
+            "openverse",
+            StockMediaConfig {
+                source: StockSource::Openverse,
+                ..Default::default()
+            },
+        );
 
         assert!(available.is_available());
         assert!(!unavailable.is_available());
+        assert!(no_key_openverse.is_available());
     }
 
     #[tokio::test]
@@ -800,6 +1052,44 @@ mod tests {
         assert_eq!(license.provider, Some("Pixabay".to_string()));
         assert_eq!(license.license_type, LicenseType::RoyaltyFree);
         assert_ne!(license.license_type, LicenseType::Cc0);
+    }
+
+    #[test]
+    fn openverse_url_uses_no_key_endpoint_and_license_filter() {
+        let provider = StockMediaProvider::new(
+            "openverse",
+            StockMediaConfig {
+                source: StockSource::Openverse,
+                ..Default::default()
+            },
+        );
+        let query = PluginSearchQuery {
+            text: Some("funny whoosh".to_string()),
+            asset_type: Some(PluginAssetType::Audio),
+            limit: 4,
+            ..Default::default()
+        };
+
+        let url = provider.build_openverse_url(&query, "audio");
+        assert!(url.starts_with("https://api.openverse.org/v1/audio/"));
+        assert!(url.contains("q=funny+whoosh"));
+        assert!(url.contains("license=cc0,by,by-sa"));
+        assert!(!url.contains("key="));
+    }
+
+    #[test]
+    fn openverse_noncommercial_license_does_not_claim_commercial_use() {
+        let license = StockMediaProvider::openverse_license(
+            Some("freesound"),
+            Some("by-nc"),
+            Some("https://creativecommons.org/licenses/by-nc/4.0/"),
+        );
+
+        assert_eq!(license.license_type, LicenseType::Custom);
+        assert!(!license
+            .allowed_use
+            .iter()
+            .any(|usage| usage == "commercial"));
     }
 
     #[test]

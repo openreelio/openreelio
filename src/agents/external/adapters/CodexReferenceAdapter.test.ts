@@ -87,38 +87,27 @@ describe('CodexReferenceAdapter', () => {
     expect(appServerClientFactory).not.toHaveBeenCalled();
   });
 
-  it('should not mark signed-in Codex as available when app-server initialization fails', async () => {
-    const adapter = new CodexReferenceAdapter(async () => ({
-      installed: true,
-      version: '0.130.0-alpha.5',
-      authStatus: 'signed-in',
-      appServerReady: false,
-      reason: 'codex app-server exited before initialization: migration failed',
-    }));
+  it('should mark signed-in Codex available without starting the app-server probe', async () => {
+    const appServerClientFactory = vi.fn();
+    const adapter = new CodexReferenceAdapter(
+      async () => ({
+        installed: true,
+        version: '0.130.0-alpha.5',
+        authStatus: 'signed-in',
+      }),
+      { appServerClientFactory },
+    );
 
     await expect(adapter.detect()).resolves.toEqual({
       runtimeId: 'codex',
       displayName: 'Codex',
       installStatus: 'installed',
       authStatus: 'signed-in',
-      available: false,
+      available: true,
       version: '0.130.0-alpha.5',
-      reason: 'codex app-server exited before initialization: migration failed',
+      reason: null,
     });
-  });
-
-  it('should use a fallback app-server unavailable reason when the probe omits details', async () => {
-    const adapter = new CodexReferenceAdapter(async () => ({
-      installed: true,
-      version: '0.130.0-alpha.5',
-      authStatus: 'signed-in',
-      appServerReady: false,
-    }));
-
-    const status = await adapter.detect();
-
-    expect(status.available).toBe(false);
-    expect(status.reason).toBe('Codex app-server could not initialize');
+    expect(appServerClientFactory).not.toHaveBeenCalled();
   });
 
   it('should start an app-server thread and optional first turn when connected', async () => {
@@ -147,7 +136,6 @@ describe('CodexReferenceAdapter', () => {
     expect(appServerClient.startThread).toHaveBeenCalledWith(
       expect.objectContaining({
         serviceName: 'openreelio',
-        cwd: '/project',
         model: 'gpt-5.5',
         approvalPolicy: 'on-request',
         approvalsReviewer: 'user',
@@ -156,6 +144,7 @@ describe('CodexReferenceAdapter', () => {
         dynamicTools: expect.arrayContaining([
           expect.objectContaining({ namespace: 'openreelio', name: 'host_context' }),
           expect.objectContaining({ namespace: 'openreelio', name: 'stock_media_search' }),
+          expect.objectContaining({ namespace: 'openreelio', name: 'stock_media_import' }),
           expect.objectContaining({ namespace: 'openreelio', name: 'command_execute' }),
         ]),
       }),
@@ -175,7 +164,6 @@ describe('CodexReferenceAdapter', () => {
       'audio',
     ]);
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_123', 'Inspect this timeline', {
-      cwd: '/project',
       model: 'gpt-5.5',
       effort: 'medium',
       approvalPolicy: 'on-request',
@@ -198,7 +186,6 @@ describe('CodexReferenceAdapter', () => {
     await adapter.shutdown(session.sessionId);
 
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_123', 'Add captions', {
-      cwd: '/project',
       model: 'gpt-5.5',
       effort: 'medium',
       approvalPolicy: 'on-request',
@@ -230,7 +217,6 @@ describe('CodexReferenceAdapter', () => {
     expect(appServerClient.resumeThread).toHaveBeenCalledWith(
       expect.objectContaining({
         threadId: 'thr_existing',
-        cwd: '/project',
         model: 'gpt-5.5',
         approvalPolicy: 'on-request',
         approvalsReviewer: 'user',
@@ -240,7 +226,6 @@ describe('CodexReferenceAdapter', () => {
     );
     expect(appServerClient.startThread).not.toHaveBeenCalled();
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_existing', 'Continue', {
-      cwd: '/project',
       model: 'gpt-5.5',
       effort: 'medium',
       approvalPolicy: 'on-request',
@@ -282,7 +267,6 @@ describe('CodexReferenceAdapter', () => {
     expect(appServerClient.startThread).toHaveBeenCalledWith(
       expect.objectContaining({
         serviceName: 'openreelio',
-        cwd: '/project',
         model: 'gpt-5.5',
         developerInstructions: expect.stringContaining('OpenReelio'),
       }),
@@ -648,6 +632,130 @@ describe('CodexReferenceAdapter', () => {
     expect(getFirstTextContent(response)).toContain('"allowed"');
   });
 
+  it('should import a selected stock media candidate through the Codex bridge after approval', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const approvalDecisionProvider = vi.fn().mockResolvedValue('accept');
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'get_project_state') {
+        return {
+          meta: { name: 'Project' },
+          activeSequenceId: null,
+          assets: [],
+          sequences: [],
+          isDirty: false,
+        };
+      }
+      if (command === 'import_stock_media_asset') {
+        expect(args).toEqual({
+          sourceUrl: 'https://cdn.freesound.org/previews/351/351256_2247456-hq.mp3',
+          name: 'Deep Whoosh #1',
+          assetType: 'audio',
+          provider: 'openverse',
+          license: {
+            source: 'stockProvider',
+            provider: 'Openverse (freesound)',
+            licenseType: 'cc0',
+            allowedUse: ['personal', 'commercial', 'modification'],
+          },
+          licenseAck: true,
+          durationSec: 3.155,
+          tags: ['whoosh', 'sfx'],
+          providerUrl: 'https://freesound.org/people/Kinoton/sounds/351256',
+        });
+        return {
+          assetId: 'asset_sfx',
+          name: 'Deep-Whoosh-1',
+          localPath: '/project/.openreelio/imports/stock/deep-whoosh.mp3',
+          opId: 'op_import',
+          licenseSnapshotPath: '/project/.openreelio/licenses/deep-whoosh.license.json',
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const adapter = new CodexReferenceAdapter(undefined, {
+      appServerClient,
+      approvalDecisionProvider,
+    });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const assetsResponse = (await respondToRequest({
+      id: 17,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_assets',
+        namespace: 'openreelio',
+        tool: 'assets_list',
+        arguments: {},
+      },
+    })) as any;
+    const contextToken = JSON.parse(getFirstTextContent(assetsResponse)).contextToken;
+
+    const response = (await respondToRequest({
+      id: 18,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_stock_import',
+        namespace: 'openreelio',
+        tool: 'stock_media_import',
+        arguments: {
+          sourceUrl: 'https://cdn.freesound.org/previews/351/351256_2247456-hq.mp3',
+          name: 'Deep Whoosh #1',
+          assetType: 'audio',
+          provider: 'openverse',
+          license: {
+            source: 'stockProvider',
+            provider: 'Openverse (freesound)',
+            licenseType: 'cc0',
+            allowedUse: ['personal', 'commercial', 'modification'],
+          },
+          licenseAck: true,
+          durationSec: 3.155,
+          tags: ['whoosh', 'sfx'],
+          providerUrl: 'https://freesound.org/people/Kinoton/sounds/351256',
+          reason: 'Import a CC0 whoosh SFX from Openverse for cut transitions.',
+          contextToken,
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(true);
+    expect(getFirstTextContent(response)).toContain('"asset_sfx"');
+    expect(approvalDecisionProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalType: 'openreelio_edit_command',
+        tool: 'OpenReelio edit',
+        args: expect.objectContaining({
+          commandType: 'ImportAsset',
+          payload: expect.objectContaining({
+            uri: 'https://cdn.freesound.org/previews/351/351256_2247456-hq.mp3',
+            provider: 'openverse',
+            assetType: 'audio',
+          }),
+        }),
+      }),
+    );
+    expect(projectStoreMocks.refreshFromBackendMutation).toHaveBeenCalled();
+  });
+
   it('should reject stock media search without a query before invoking Tauri', async () => {
     const requestHandlers: Array<(request: any) => unknown> = [];
     const appServerClient = {
@@ -687,6 +795,50 @@ describe('CodexReferenceAdapter', () => {
 
     expect(response.success).toBe(false);
     expect(getFirstTextContent(response)).toContain('OpenReelio stock_media_search requires query');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('should reject unsupported stock media asset types before invoking Tauri', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const response = (await respondToRequest({
+      id: 18,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_stock_search_invalid_type',
+        namespace: 'openreelio',
+        tool: 'stock_media_search',
+        arguments: {
+          query: 'city rain',
+          assetType: 'document',
+          limit: 5,
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(false);
+    expect(getFirstTextContent(response)).toContain(
+      'OpenReelio stock media assetType must be one of video, image, or audio',
+    );
     expect(invoke).not.toHaveBeenCalled();
   });
 

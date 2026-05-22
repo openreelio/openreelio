@@ -198,7 +198,7 @@ pub fn build_external_agent_setup_info(
 }
 
 pub async fn configure_codex_agent_runtime(
-    input: ConfigureCodexAgentRuntimeInput,
+    _input: ConfigureCodexAgentRuntimeInput,
 ) -> ConfigureCodexAgentRuntimeResult {
     let status = crate::core::codex::probe_codex_status().await;
     if !status.installed {
@@ -217,35 +217,7 @@ pub async fn configure_codex_agent_runtime(
     }
 
     let authenticated = is_authenticated(&status.auth_status);
-    let (plugin_result, mcp_result) = if authenticated {
-        let plugin_result = configure_codex_plugin_marketplace().await;
-        let mcp_result = match input
-            .project_path
-            .map(|path| path.trim().to_string())
-            .filter(|path| !path.is_empty())
-        {
-            Some(project_path) => configure_codex_mcp(&project_path).await,
-            None => Err("Open a project before enabling OpenReelio tools for Codex.".to_string()),
-        };
-        (plugin_result, mcp_result)
-    } else {
-        (
-            Err("Codex needs sign-in.".to_string()),
-            Err("Codex needs sign-in.".to_string()),
-        )
-    };
-
-    let plugin_marketplace_configured = plugin_result.is_ok();
-    let mcp_configured = mcp_result.is_ok();
-    let app_server_ready = status.app_server_ready != Some(false);
-    let (ready, message) = resolve_codex_configuration_readiness(
-        authenticated,
-        app_server_ready,
-        status.app_server_ready == Some(false),
-        status.reason,
-        plugin_result.err(),
-        mcp_result.err(),
-    );
+    let (ready, message) = resolve_codex_configuration_readiness(authenticated, status.reason);
 
     ConfigureCodexAgentRuntimeResult {
         installed: true,
@@ -253,31 +225,26 @@ pub async fn configure_codex_agent_runtime(
         auth_status: status.auth_status,
         ready,
         requires_login: !authenticated,
-        plugin_marketplace_configured,
-        mcp_configured,
+        plugin_marketplace_configured: false,
+        mcp_configured: false,
         message,
     }
 }
 
 fn resolve_codex_configuration_readiness(
     authenticated: bool,
-    app_server_ready: bool,
-    app_server_failed: bool,
     status_reason: Option<String>,
-    plugin_error: Option<String>,
-    mcp_error: Option<String>,
 ) -> (bool, Option<String>) {
-    let ready = authenticated && app_server_ready && mcp_error.is_none();
+    let ready = authenticated;
     let message = if ready {
-        Some("Codex is connected with OpenReelio tools.".to_string())
-    } else if app_server_failed {
-        status_reason.or_else(|| Some("Codex app-server could not start.".to_string()))
+        Some(
+            "Codex is signed in. App-server tools will start when a session begins. No global Codex config was changed."
+                .to_string(),
+        )
     } else if !authenticated {
         status_reason.or_else(|| Some("Codex needs sign-in.".to_string()))
-    } else if let Some(error) = mcp_error {
-        Some(error)
     } else {
-        plugin_error
+        status_reason
     };
 
     (ready, message)
@@ -596,33 +563,6 @@ fn is_authenticated(auth_status: &str) -> bool {
     matches!(auth_status, "signed-in" | "api-key")
 }
 
-async fn configure_codex_plugin_marketplace() -> Result<(), String> {
-    let Some(marketplace_root) = find_repo_agents_root() else {
-        return Ok(());
-    };
-    if !codex_plugin_marketplace_supported().await {
-        return Ok(());
-    }
-
-    let args = vec![
-        "plugin".to_string(),
-        "marketplace".to_string(),
-        "add".to_string(),
-        marketplace_root,
-    ];
-
-    run_codex_command_owned(args, &[], Duration::from_secs(30))
-        .await
-        .map(|_| ())
-        .or_else(|error| {
-            if is_already_configured_error(&error) {
-                Ok(())
-            } else {
-                Err(error)
-            }
-        })
-}
-
 pub async fn install_codex_cli() -> CodexCliInstallResult {
     let before = crate::core::codex::probe_codex_status().await;
     if before.installed {
@@ -781,40 +721,6 @@ fn codex_cli_version_needs_update(version: &Option<String>) -> bool {
     major == 0 && minor < 130
 }
 
-async fn codex_plugin_marketplace_supported() -> bool {
-    run_codex_command(&["plugin", "--help"], &[], Duration::from_secs(10))
-        .await
-        .map(|output| output.to_lowercase().contains("marketplace"))
-        .unwrap_or(false)
-}
-
-async fn configure_codex_mcp(project_path: &str) -> Result<(), String> {
-    let _ = run_codex_command(
-        &["mcp", "remove", "openreelio"],
-        &[],
-        Duration::from_secs(15),
-    )
-    .await;
-
-    let args = vec![
-        "mcp".to_string(),
-        "add".to_string(),
-        "openreelio".to_string(),
-        "--env".to_string(),
-        format!("OPENREELIO_PROJECT_PATH={project_path}"),
-        "--".to_string(),
-        find_openreelio_cli_executable(),
-        "mcp".to_string(),
-        "--stdio".to_string(),
-        "--project".to_string(),
-        project_path.to_string(),
-    ];
-
-    run_codex_command_owned(args, &[], Duration::from_secs(30))
-        .await
-        .map(|_| ())
-}
-
 async fn run_codex_command(
     args: &[&str],
     envs: &[(&str, &str)],
@@ -930,11 +836,6 @@ async fn run_external_command(
     }
 }
 
-fn is_already_configured_error(output: &str) -> bool {
-    let lower = output.to_lowercase();
-    lower.contains("already") || lower.contains("exists")
-}
-
 fn is_unsupported_update_command(output: &str) -> bool {
     let lower = output.to_lowercase();
     lower.contains("unexpected argument")
@@ -1004,20 +905,16 @@ mod tests {
     }
 
     #[test]
-    fn does_not_mark_codex_ready_when_mcp_configuration_fails() {
-        let (ready, message) = resolve_codex_configuration_readiness(
-            true,
-            true,
-            false,
-            None,
-            None,
-            Some("Open a project before enabling OpenReelio tools for Codex.".to_string()),
-        );
+    fn marks_codex_ready_without_mutating_global_mcp_configuration() {
+        let (ready, message) = resolve_codex_configuration_readiness(true, None);
 
-        assert!(!ready);
+        assert!(ready);
         assert_eq!(
             message,
-            Some("Open a project before enabling OpenReelio tools for Codex.".to_string())
+            Some(
+                "Codex is signed in. App-server tools will start when a session begins. No global Codex config was changed."
+                    .to_string()
+            )
         );
     }
 

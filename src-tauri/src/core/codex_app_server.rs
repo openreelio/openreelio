@@ -11,7 +11,7 @@ pub const CODEX_APP_SERVER_EVENT_PREFIX: &str = "codex:app-server";
 #[serde(rename_all = "camelCase")]
 pub struct StartCodexAppServerInput {
     pub server_id: Option<String>,
-    pub cwd: Option<String>,
+    pub project_path: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
 }
@@ -23,7 +23,7 @@ pub struct CodexAppServerStartResult {
     pub event_name: String,
     pub command: String,
     pub args: Vec<String>,
-    pub cwd: String,
+    pub bridge_cwd: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
@@ -92,6 +92,26 @@ pub fn decode_json_rpc_line(line: &str) -> Result<Value, String> {
     Ok(value)
 }
 
+pub(crate) fn quote_toml_string(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\u{08}' => quoted.push_str("\\b"),
+            '\t' => quoted.push_str("\\t"),
+            '\n' => quoted.push_str("\\n"),
+            '\u{0C}' => quoted.push_str("\\f"),
+            '\r' => quoted.push_str("\\r"),
+            ch if ch.is_control() => quoted.push_str(&format!("\\u{:04X}", ch as u32)),
+            ch => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +154,14 @@ mod tests {
         let error = decode_json_rpc_line("not-json").expect_err("decode error");
 
         assert!(error.contains("Failed to decode"));
+    }
+
+    #[test]
+    fn should_quote_toml_strings_with_control_character_escapes() {
+        assert_eq!(
+            quote_toml_string("a\nb\t\u{07}\\\""),
+            "\"a\\nb\\t\\u0007\\\\\\\"\""
+        );
     }
 
     #[test]

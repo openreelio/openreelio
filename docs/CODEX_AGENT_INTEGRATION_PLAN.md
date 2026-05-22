@@ -441,7 +441,7 @@ External agent authentication should be owned by the external agent. Codex authe
 For Codex, OpenReelio must:
 
 - Detect whether `codex` is installed.
-- Start `codex app-server`.
+- Start `codex app-server` only when the user begins an embedded Codex session.
 - Use app-server account endpoints to read auth state and start ChatGPT-managed login when needed.
 - Display status such as signed out, signed in with ChatGPT, API key mode, rate limited, or app-server unavailable.
 - Explain that Codex usage follows the user's Codex/ChatGPT account when Codex is in ChatGPT-managed mode.
@@ -454,6 +454,8 @@ For all external agents, OpenReelio must not:
 - Store third-party agent refresh tokens.
 - Exchange external app OAuth tokens for API usage.
 - Represent external agents as normal `ProviderType` values inside `aiStore` or Rust `ProviderType`.
+- Run `codex mcp add`, `codex plugin marketplace add`, or equivalent Codex user-config mutations automatically from app startup, status checks, or runtime selection.
+- Persist OpenReelio project paths into user-level `~/.codex/config.toml`; in-app Codex must use app-server dynamic tools instead of global Codex MCP config.
 - Promise exact token accounting unless the agent runtime exposes reliable usage/rate limit data for the account.
 
 ## Security Model
@@ -517,7 +519,7 @@ Phase 2: ExternalAgentHost and Codex app-server reference adapter
 - Implement `HostContextEnvelope` creation and update broadcasts for playhead, selection, diagnostics, project dirty state, and preview state.
 - Add status and login UX in settings.
 - Stream Codex events into the sidebar.
-- Start turns with OpenReelio project context and read-only MCP tools.
+- Start turns with OpenReelio project context and in-app dynamic OpenReelio tools.
 - Persist session/run records with `runtime_kind = "external_agent"` and `agent_runtime = "codex"` or the final OpenSpec-approved shape.
 
 Phase 3: Approval-gated plan apply
@@ -537,7 +539,9 @@ Current implementation note:
 - Approved CLI MCP plans execute through the same command payload parsing, command executor, rollback, and project save path used by `openreelio-cli plan execute`.
 - The Codex app-server bridge is owned by the Tauri backend, with frontend transport adapters receiving decoded JSON-RPC events over per-server Tauri event channels.
 - The Codex reference adapter lazily starts the backend app-server process only when a session operation needs it; status detection never launches `codex app-server`.
-- The in-app Codex runtime is available behind `USE_EXTERNAL_AGENT_HOST` and `USE_CODEX_AGENT`, reuses the canonical AI sidebar chat shell, binds messages to OpenReelio AI sessions, passes the project path as Codex `cwd`, and streams Codex notifications into typed conversation parts.
+- The in-app Codex runtime is available behind `USE_EXTERNAL_AGENT_HOST` and `USE_CODEX_AGENT`, reuses the canonical AI sidebar chat shell, binds messages to OpenReelio AI sessions, keeps the OpenReelio project path in host context instead of Codex `cwd`, and streams Codex notifications into typed conversation parts.
+- The app-server process is launched from an OpenReelio app-data bridge directory with `history.persistence="none"`, `mcp_servers={}`, `features.hooks=false`, `notify=[]`, read-only sandbox defaults, and an OpenReelio app-data `log_dir` override so embedded sessions do not write OpenReelio chat history/logs, load user-configured MCP servers, or trigger user-configured Codex hooks/notifications through the user's default Codex data directory.
+- The settings runtime check is non-mutating: it verifies Codex installation/auth readiness but does not install project MCP servers, add plugin marketplaces, or write OpenReelio paths into Codex global config.
 - Codex server-initiated command/file-change approval requests are handled by a scoped in-app decision broker when the Codex sidebar runtime is active. The broker reuses OpenReelio's tool approval UI, maps Allow/Allow Always/Deny to Codex app-server decisions, records interactive permission audit entries, and still falls back to conservative `decline` when no broker is attached.
 
 Phase 4: Additional adapters and product polish
