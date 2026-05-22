@@ -3685,7 +3685,7 @@ export type CodexCliUpdateResult = { success: boolean; beforeVersion: string | n
 export type CodexModelCatalogResult = { installed: boolean; defaultModel: string; defaultReasoningEffort: string; models: CodexModelInfo[]; reason: string | null }
 export type CodexModelInfo = { slug: string; displayName: string; defaultReasoningEffort: string; supportedReasoningEfforts: string[] }
 export type CodexReasoningEffortDto = "low" | "medium" | "high" | "xhigh"
-export type CodexStatusProbeResult = { installed: boolean; version: string | null; authStatus: string; appServerReady: boolean | null; reason: string | null }
+export type CodexStatusProbeResult = { installed: boolean; version: string | null; authStatus: string; reason: string | null }
 /**
  * Color (RGBA)
  */

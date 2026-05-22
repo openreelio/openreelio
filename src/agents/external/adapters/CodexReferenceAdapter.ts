@@ -35,7 +35,6 @@ export interface CodexStatusProbeResult {
   installed: boolean;
   version?: string | null;
   authStatus: ExternalAgentAuthStatus;
-  appServerReady?: boolean | null;
   reason?: string | null;
 }
 
@@ -93,8 +92,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const probe = await this.probeStatus();
     const installStatus = probe.installed ? 'installed' : 'missing';
     const authenticated = probe.authStatus === 'signed-in' || probe.authStatus === 'api-key';
-    const appServerFailed = probe.appServerReady === false;
-    const available = probe.installed && authenticated && !appServerFailed;
+    const available = probe.installed && authenticated;
 
     return {
       runtimeId: this.id,
@@ -224,10 +222,6 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
 
     if (probe.authStatus === 'error') {
       return 'Codex authentication status could not be read';
-    }
-
-    if (probe.appServerReady === false) {
-      return 'Codex app-server could not initialize';
     }
 
     return 'Codex is unavailable';

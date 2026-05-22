@@ -34,7 +34,6 @@ pub struct CodexStatusProbeResult {
     pub installed: bool,
     pub version: Option<String>,
     pub auth_status: String,
-    pub app_server_ready: Option<bool>,
     pub reason: Option<String>,
 }
 
@@ -190,7 +189,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                 installed: false,
                 version: None,
                 auth_status: "unknown".to_string(),
-                app_server_ready: None,
                 reason: Some(reason),
             };
         }
@@ -208,7 +206,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                 installed: false,
                 version: None,
                 auth_status: "unknown".to_string(),
-                app_server_ready: None,
                 reason: Some("codex --version timed out".to_string()),
             };
         }
@@ -226,7 +223,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                         installed: true,
                         version,
                         auth_status: "error".to_string(),
-                        app_server_ready: None,
                         reason: Some(reason),
                     };
                 }
@@ -243,7 +239,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                         installed: true,
                         version,
                         auth_status: "error".to_string(),
-                        app_server_ready: None,
                         reason: Some("codex login status timed out".to_string()),
                     };
                 }
@@ -259,7 +254,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                         installed: true,
                         version,
                         auth_status,
-                        app_server_ready: None,
                         reason: auth_reason,
                     }
                 }
@@ -267,7 +261,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
                     installed: true,
                     version,
                     auth_status: "error".to_string(),
-                    app_server_ready: None,
                     reason: Some(format_codex_io_error(
                         "Failed to run codex login status",
                         &error,
@@ -279,7 +272,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
             installed: false,
             version: None,
             auth_status: "unknown".to_string(),
-            app_server_ready: None,
             reason: Some(format!(
                 "codex --version failed with status {}",
                 output.status
@@ -289,7 +281,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
             installed: false,
             version: None,
             auth_status: "unknown".to_string(),
-            app_server_ready: None,
             reason: Some(
                 "Codex executable was not found in PATH or common install locations.".to_string(),
             ),
@@ -298,7 +289,6 @@ pub async fn probe_codex_status() -> CodexStatusProbeResult {
             installed: false,
             version: None,
             auth_status: "unknown".to_string(),
-            app_server_ready: None,
             reason: Some(format_codex_io_error(
                 "Failed to run codex --version",
                 &error,

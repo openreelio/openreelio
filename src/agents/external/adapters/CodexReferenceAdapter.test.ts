@@ -87,38 +87,27 @@ describe('CodexReferenceAdapter', () => {
     expect(appServerClientFactory).not.toHaveBeenCalled();
   });
 
-  it('should not mark signed-in Codex as available when app-server initialization fails', async () => {
-    const adapter = new CodexReferenceAdapter(async () => ({
-      installed: true,
-      version: '0.130.0-alpha.5',
-      authStatus: 'signed-in',
-      appServerReady: false,
-      reason: 'codex app-server exited before initialization: migration failed',
-    }));
+  it('should mark signed-in Codex available without starting the app-server probe', async () => {
+    const appServerClientFactory = vi.fn();
+    const adapter = new CodexReferenceAdapter(
+      async () => ({
+        installed: true,
+        version: '0.130.0-alpha.5',
+        authStatus: 'signed-in',
+      }),
+      { appServerClientFactory },
+    );
 
     await expect(adapter.detect()).resolves.toEqual({
       runtimeId: 'codex',
       displayName: 'Codex',
       installStatus: 'installed',
       authStatus: 'signed-in',
-      available: false,
+      available: true,
       version: '0.130.0-alpha.5',
-      reason: 'codex app-server exited before initialization: migration failed',
+      reason: null,
     });
-  });
-
-  it('should use a fallback app-server unavailable reason when the probe omits details', async () => {
-    const adapter = new CodexReferenceAdapter(async () => ({
-      installed: true,
-      version: '0.130.0-alpha.5',
-      authStatus: 'signed-in',
-      appServerReady: false,
-    }));
-
-    const status = await adapter.detect();
-
-    expect(status.available).toBe(false);
-    expect(status.reason).toBe('Codex app-server could not initialize');
+    expect(appServerClientFactory).not.toHaveBeenCalled();
   });
 
   it('should start an app-server thread and optional first turn when connected', async () => {
