@@ -441,7 +441,7 @@ impl ProjectState {
         }
     }
 
-    /// Repairs persisted timeline overlap violations after replay/snapshot load.
+    /// Repairs persisted timeline overlap violations after operation replay.
     ///
     /// Runtime commands still reject overlaps. This recovery path exists for
     /// projects written by older builds or interrupted agent runs, where strict
