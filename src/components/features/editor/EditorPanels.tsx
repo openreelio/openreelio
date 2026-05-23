@@ -5,6 +5,7 @@ import type { AudioMixerPanelProps } from '@/components/features/mixer';
 import { Inspector, type InspectorProps } from '@/components/features/inspector';
 import { ProjectExplorer } from '@/components/explorer';
 import { UnifiedPreviewPlayer } from '@/components/preview';
+import type { TextPlacementCommitPayload } from '@/components/preview/TextPlacementOverlay';
 import { SourceMonitor } from '@/components/features/preview/SourceMonitor';
 import type { TimelineProps } from '@/components/timeline';
 import {
@@ -70,6 +71,8 @@ export interface EditorPanelContentOptions {
   previewContainerRef: RefObject<HTMLDivElement>;
   isFullscreen: boolean;
   onCaptureSnapshot: () => void | Promise<void>;
+  textPlacementModeActive?: boolean;
+  onTextPlacementCommit?: (payload: TextPlacementCommitPayload) => void | Promise<void>;
   showMixer: boolean;
   onToggleMixer: () => void;
   sequenceNavigationStack: string[];
@@ -89,6 +92,8 @@ export function createEditorPanelContent({
   previewContainerRef,
   isFullscreen,
   onCaptureSnapshot,
+  textPlacementModeActive = false,
+  onTextPlacementCommit,
   showMixer,
   onToggleMixer,
   sequenceNavigationStack,
@@ -129,6 +134,8 @@ export function createEditorPanelContent({
             showControls
             showTimecode
             showStats={import.meta.env.DEV}
+            textPlacementModeActive={textPlacementModeActive}
+            onTextPlacementCommit={onTextPlacementCommit}
           />
         </PreviewErrorBoundary>
         <button

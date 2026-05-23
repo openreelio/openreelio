@@ -83,6 +83,7 @@ const SEEK_AMOUNT_LARGE = 5;
 /** Tool keyboard mappings */
 const TOOL_KEYS: Record<string, EditorTool> = {
   v: 'select',
+  t: 'text',
   c: 'razor',
   b: 'ripple',
   y: 'slip',

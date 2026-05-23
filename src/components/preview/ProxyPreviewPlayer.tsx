@@ -20,11 +20,21 @@ import { normalizeFileUriToPath } from '@/utils/uri';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
 import {
+  buildCaptionCssTextShadow,
+  captionColorToRgba as captionColorToCssRgba,
+  getCaptionFontWeightNumber,
+  normalizeCaptionPosition as normalizeCaptionPositionValue,
+  normalizeCaptionStyle as normalizeCaptionStyleValue,
+  resolveCaptionAnchor as resolveCaptionAnchorValue,
+} from '@/utils/captionStyle';
+import {
   getClipSourceTimeAtTimelineTime,
   getSafeClipSpeed,
   isClipActiveAtTime,
 } from '@/utils/clipTiming';
 import { isCaptionLikeClip } from '@/utils/captionClip';
+import { TextPlacementOverlay, type TextPlacementCommitPayload } from './TextPlacementOverlay';
+import { TransformOverlay } from './TransformOverlay';
 import {
   isTextClip,
   type Sequence,
@@ -32,7 +42,6 @@ import {
   type Clip,
   type CaptionStyle,
   type CaptionPosition,
-  type CaptionColor,
   type TextClipData,
 } from '@/types';
 
@@ -49,6 +58,10 @@ export interface ProxyPreviewPlayerProps {
   className?: string;
   /** Whether to show controls */
   showControls?: boolean;
+  /** Whether the preview should accept click-to-place text input */
+  textPlacementModeActive?: boolean;
+  /** Commit handler for text entered directly on the preview */
+  onTextPlacementCommit?: (payload: TextPlacementCommitPayload) => void | Promise<void>;
 }
 
 interface ActiveClip {
@@ -119,20 +132,6 @@ function clampTimelineTime(time: number, duration: number): number {
   return Math.max(0, Math.min(duration, time));
 }
 
-const DEFAULT_CAPTION_STYLE: CaptionStyle = {
-  fontFamily: 'Arial',
-  fontSize: 48,
-  fontWeight: 'normal',
-  color: { r: 255, g: 255, b: 255, a: 255 },
-  outlineColor: { r: 0, g: 0, b: 0, a: 255 },
-  outlineWidth: 2,
-  shadowColor: { r: 0, g: 0, b: 0, a: 160 },
-  shadowOffset: 2,
-  alignment: 'center',
-  italic: false,
-  underline: false,
-};
-
 const DEFAULT_CAPTION_POSITION: CaptionPosition = {
   type: 'preset',
   vertical: 'bottom',
@@ -148,62 +147,11 @@ function clampPercent(value: number, fallback: number): number {
 }
 
 function normalizeCaptionStyle(style: CaptionStyle | undefined): CaptionStyle {
-  if (!style) {
-    return DEFAULT_CAPTION_STYLE;
-  }
-
-  return {
-    ...DEFAULT_CAPTION_STYLE,
-    ...style,
-    color: {
-      ...DEFAULT_CAPTION_STYLE.color,
-      ...style.color,
-    },
-    backgroundColor: style.backgroundColor
-      ? {
-          r: style.backgroundColor.r,
-          g: style.backgroundColor.g,
-          b: style.backgroundColor.b,
-          a: style.backgroundColor.a,
-        }
-      : undefined,
-    outlineColor: style.outlineColor
-      ? {
-          r: style.outlineColor.r,
-          g: style.outlineColor.g,
-          b: style.outlineColor.b,
-          a: style.outlineColor.a,
-        }
-      : undefined,
-    shadowColor: style.shadowColor
-      ? {
-          r: style.shadowColor.r,
-          g: style.shadowColor.g,
-          b: style.shadowColor.b,
-          a: style.shadowColor.a,
-        }
-      : undefined,
-  };
+  return normalizeCaptionStyleValue(style);
 }
 
 function normalizeCaptionPosition(position: CaptionPosition | undefined): CaptionPosition {
-  if (!position) {
-    return DEFAULT_CAPTION_POSITION;
-  }
-
-  if (position.type === 'custom') {
-    return {
-      type: 'custom',
-      xPercent: clampPercent(position.xPercent, 50),
-      yPercent: clampPercent(position.yPercent, 90),
-    };
-  }
-
-  return {
-    type: 'preset',
-    vertical: position.vertical,
-    marginPercent: clampPercent(position.marginPercent, 5),
-  };
+  return normalizeCaptionPositionValue(position);
 }
 
 function resolveCaptionAnchor(
@@ -213,59 +161,15 @@ function resolveCaptionAnchor(
   xPercent: number;
   yPercent: number;
 } {
-  let xPercent = 50;
-  if (style.alignment === 'left') {
-    xPercent = 10;
-  } else if (style.alignment === 'right') {
-    xPercent = 90;
-  }
-
-  let yPercent = 90;
-  if (position.type === 'custom') {
-    xPercent = position.xPercent;
-    yPercent = position.yPercent;
-  } else if (position.vertical === 'top') {
-    yPercent = position.marginPercent;
-  } else if (position.vertical === 'center') {
-    yPercent = 50;
-  } else {
-    yPercent = 100 - position.marginPercent;
-  }
-
-  return {
-    xPercent: clampPercent(xPercent, 50),
-    yPercent: clampPercent(yPercent, 90),
-  };
+  return resolveCaptionAnchorValue(style, position);
 }
 
-function toRgba(color: CaptionColor): string {
-  return `rgba(${color.r}, ${color.g}, ${color.b}, ${color.a / 255})`;
+function toRgba(color: CaptionStyle['color']): string {
+  return captionColorToCssRgba(color);
 }
 
 function buildCaptionTextShadow(style: CaptionStyle): string | undefined {
-  const parts: string[] = [];
-
-  if (style.outlineColor && style.outlineWidth > 0) {
-    const width = Math.max(1, Math.round(style.outlineWidth));
-    const outline = toRgba(style.outlineColor);
-    parts.push(
-      `${-width}px 0 ${outline}`,
-      `${width}px 0 ${outline}`,
-      `0 ${-width}px ${outline}`,
-      `0 ${width}px ${outline}`,
-      `${-width}px ${-width}px ${outline}`,
-      `${width}px ${-width}px ${outline}`,
-      `${-width}px ${width}px ${outline}`,
-      `${width}px ${width}px ${outline}`,
-    );
-  }
-
-  if (style.shadowColor && style.shadowOffset > 0) {
-    const offset = style.shadowOffset;
-    parts.push(`${offset}px ${offset}px ${offset}px ${toRgba(style.shadowColor)}`);
-  }
-
-  return parts.length > 0 ? parts.join(', ') : undefined;
+  return buildCaptionCssTextShadow(style);
 }
 
 function resolveCaptionPositionForClip(
@@ -432,6 +336,8 @@ export function ProxyPreviewPlayer({
   assets,
   className = '',
   showControls = true,
+  textPlacementModeActive = false,
+  onTextPlacementCommit,
 }: ProxyPreviewPlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
@@ -467,6 +373,7 @@ export function ProxyPreviewPlayer({
   const [videoErrors, setVideoErrors] = useState<Map<string, string>>(new Map());
   const [captionDragState, setCaptionDragState] = useState<CaptionDragState | null>(null);
   const [captionDraftPosition, setCaptionDraftPosition] = useState<CaptionPosition | null>(null);
+  const [containerSize, setContainerSize] = useState({ width: 1920, height: 1080 });
 
   // NOTE: Playback duration is managed by useTimelineEngine (Timeline component).
   // Do NOT compute or set it here - competing setDuration calls cause the SeekBar
@@ -1271,6 +1178,40 @@ export function ProxyPreviewPlayer({
     };
   }, []);
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const updateSize = (): void => {
+      const rect = container.getBoundingClientRect();
+      setContainerSize((prev) => {
+        const nextWidth = rect.width > 0 ? rect.width : prev.width;
+        const nextHeight = rect.height > 0 ? rect.height : prev.height;
+
+        if (Math.abs(prev.width - nextWidth) < 0.5 && Math.abs(prev.height - nextHeight) < 0.5) {
+          return prev;
+        }
+
+        return { width: nextWidth, height: nextHeight };
+      });
+    };
+
+    updateSize();
+
+    if (typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [sequence?.format?.canvas?.height, sequence?.format?.canvas?.width]);
+
   // Handle playback end
   useEffect(() => {
     if (!syncWithTimeline && isPlaying && currentTime >= duration && duration > 0) {
@@ -1299,16 +1240,31 @@ export function ProxyPreviewPlayer({
     [togglePlayback, handleFullscreenToggle],
   );
 
-  // Calculate aspect ratio from sequence format (guard against zero height)
-  const aspectRatio =
+  const previewCanvasWidth =
+    sequence?.format?.canvas && sequence.format.canvas.width > 0
+      ? sequence.format.canvas.width
+      : 1920;
+  const previewCanvasHeight =
     sequence?.format?.canvas && sequence.format.canvas.height > 0
-      ? sequence.format.canvas.width / sequence.format.canvas.height
-      : 16 / 9;
+      ? sequence.format.canvas.height
+      : 1080;
+
+  // Calculate aspect ratio from sequence format (guard against zero height)
+  const aspectRatio = previewCanvasWidth / previewCanvasHeight;
 
   const controlsZIndex =
     sequence !== null
       ? sequence.tracks.length * TRACK_LAYER_Z_INDEX_STEP + CONTROLS_Z_INDEX_OFFSET
       : CONTROLS_Z_INDEX_OFFSET;
+  const transformOverlayZIndex = Math.max(1, controlsZIndex - 2);
+  const textPlacementOverlayZIndex = Math.max(1, controlsZIndex - 1);
+  const overlayDisplayScale =
+    containerSize.width <= 0 || containerSize.height <= 0
+      ? 1
+      : Math.min(
+          containerSize.width / previewCanvasWidth,
+          containerSize.height / previewCanvasHeight,
+        );
 
   // Empty state
   if (!sequence) {
@@ -1351,7 +1307,7 @@ export function ProxyPreviewPlayer({
       ref={containerRef}
       data-testid="proxy-preview-player"
       className={`relative isolate bg-black overflow-hidden ${className}`}
-      style={{ aspectRatio }}
+      style={{ aspectRatio, cursor: textPlacementModeActive ? 'text' : undefined }}
       tabIndex={0}
       role="region"
       aria-label="Video preview"
@@ -1441,10 +1397,10 @@ export function ProxyPreviewPlayer({
             const isDraggingSelected =
               captionDragState?.captionId === caption.clip.id && captionDragState.pointerId != null;
 
-            const fontWeight =
-              style.fontWeight === 'bold' ? 700 : style.fontWeight === 'light' ? 300 : 400;
+            const fontWeight = getCaptionFontWeightNumber(style);
             const textShadow = buildCaptionTextShadow(style);
             const textDecoration = style.underline ? 'underline' : 'none';
+            const backgroundPadding = Math.max(0, style.backgroundPadding ?? 0);
 
             return (
               <div
@@ -1463,14 +1419,19 @@ export function ProxyPreviewPlayer({
                   textAlign: style.alignment,
                   textDecoration,
                   whiteSpace: 'pre-line',
-                  lineHeight: 1.2,
+                  lineHeight: style.lineHeight ?? 1.2,
+                  letterSpacing: `${style.letterSpacing ?? 0}px`,
+                  opacity: (style.opacity ?? 1) * caption.clip.opacity,
                   backgroundColor: style.backgroundColor
                     ? toRgba(style.backgroundColor)
                     : 'transparent',
                   textShadow,
                   border: isEditableSelected ? '1px dashed rgba(59, 130, 246, 0.9)' : 'none',
                   borderRadius: isEditableSelected ? '4px' : '0',
-                  padding: isEditableSelected || style.backgroundColor ? '2px 6px' : '0',
+                  padding:
+                    isEditableSelected || style.backgroundColor
+                      ? `${Math.max(2, backgroundPadding * 0.2)}px ${Math.max(6, backgroundPadding * 0.6)}px`
+                      : '0',
                   cursor: isEditableSelected
                     ? isDraggingSelected
                       ? 'grabbing'
@@ -1556,6 +1517,26 @@ export function ProxyPreviewPlayer({
           })}
         </div>
       )}
+
+      <TransformOverlay
+        sequence={sequence}
+        assets={assets}
+        canvasWidth={previewCanvasWidth}
+        canvasHeight={previewCanvasHeight}
+        containerWidth={containerSize.width}
+        containerHeight={containerSize.height}
+        displayScale={overlayDisplayScale}
+        panX={0}
+        panY={0}
+        zIndex={transformOverlayZIndex}
+      />
+
+      <TextPlacementOverlay
+        active={textPlacementModeActive}
+        aspectRatio={aspectRatio}
+        onCommit={onTextPlacementCommit}
+        zIndex={textPlacementOverlayZIndex}
+      />
 
       {/* Controls Overlay */}
       {showControls && (

@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ProxyPreviewPlayer } from './ProxyPreviewPlayer';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
@@ -138,5 +138,52 @@ describe('ProxyPreviewPlayer', () => {
 
     expect(screen.queryByTestId('proxy-video-clip-top')).not.toBeInTheDocument();
     expect(screen.getByTestId('proxy-video-clip-bottom')).toBeInTheDocument();
+  });
+
+  it('commits text placement from an inline preview input', async () => {
+    const sequence = createSequence();
+    const onTextPlacementCommit = vi.fn();
+    const assets = new Map<string, Asset>([
+      ['asset-top', createVideoAsset('asset-top', 'https://example.com/top.mp4')],
+      ['asset-bottom', createVideoAsset('asset-bottom', 'https://example.com/bottom.mp4')],
+    ]);
+
+    render(
+      <ProxyPreviewPlayer
+        sequence={sequence}
+        assets={assets}
+        showControls
+        textPlacementModeActive
+        onTextPlacementCommit={onTextPlacementCommit}
+      />,
+    );
+
+    const overlay = screen.getByTestId('text-placement-overlay');
+    Object.defineProperty(overlay, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        left: 0,
+        top: 0,
+        width: 400,
+        height: 300,
+        right: 400,
+        bottom: 300,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+
+    fireEvent.pointerDown(overlay, { clientX: 200, clientY: 150, button: 0 });
+    const input = screen.getByTestId('text-placement-input');
+    fireEvent.change(input, { target: { value: 'Placed title' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => {
+      expect(onTextPlacementCommit).toHaveBeenCalledWith({
+        content: 'Placed title',
+        position: { x: 0.5, y: 0.5 },
+      });
+    });
   });
 });

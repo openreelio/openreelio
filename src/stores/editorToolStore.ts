@@ -33,6 +33,7 @@ export const RAZOR_CURSOR =
  */
 export type EditorTool =
   | 'select' // Default selection tool (V)
+  | 'text' // Place text directly on the program monitor (T)
   | 'razor' // Split/cut clips at click position (C)
   | 'slip' // Slip edit - adjust source range without moving clip
   | 'slide' // Slide edit - move clip while adjusting neighbors
@@ -173,6 +174,13 @@ export const TOOL_CONFIGS: Record<EditorTool, ToolConfig> = {
     shortcut: 'C',
     cursor: RAZOR_CURSOR,
     description: 'Split clips at click position',
+  },
+  text: {
+    id: 'text',
+    label: 'Text Tool',
+    shortcut: 'T',
+    cursor: 'text',
+    description: 'Place text in the program monitor',
   },
   slip: {
     id: 'slip',

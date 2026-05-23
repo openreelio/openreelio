@@ -16,7 +16,13 @@ import {
 } from '@/components/features/inspector';
 import { type AISidebarProps } from '@/components/features/ai';
 import { type TimelineProps } from '@/components/timeline';
-import { useProjectStore, usePlaybackStore, useTimelineStore, useAudioMixerStore } from '@/stores';
+import {
+  useProjectStore,
+  usePlaybackStore,
+  useTimelineStore,
+  useAudioMixerStore,
+  useEditorToolStore,
+} from '@/stores';
 // Direct imports instead of barrel to avoid bundling all 100+ hooks
 import { useTimelineActions } from '@/hooks/useTimelineActions';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
@@ -38,6 +44,11 @@ import { dbToLinear, linearToDb } from '@/utils/audioMeter';
 import { resolveAutoDuckTargets } from '@/utils/audioDucking';
 import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
 import { getClipTimelineDurationSec, getClipTimelineEndSec } from '@/utils/clipTiming';
+import {
+  getDefaultTrackInsertPosition,
+  getNextTrackName,
+  trackHasOverlap,
+} from '@/hooks/timelineActions/helpers';
 import { commands } from '@/bindings';
 import { createLogger } from '@/services/logger';
 import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
@@ -45,7 +56,6 @@ import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { getSplitTargetsAtTime } from '@/utils/clipLinking';
 import type {
   BlendMode,
-  CaptionPosition,
   ClipId,
   Effect,
   EffectId,
@@ -56,17 +66,20 @@ import type {
   Track,
 } from '@/types';
 import type { AddTextPayload } from '@/components/features/text';
+import type { TextPlacementCommitPayload } from '@/components/preview/TextPlacementOverlay';
 import type { AudioMixerPanelProps, ChannelLevels } from '@/components/features/mixer';
 import type { MulticamGroup } from '@/utils/multicam';
-import { isTextClip, hasActiveTimeRemap } from '@/types';
+import { createTextClipData, isTextClip, hasActiveTimeRemap } from '@/types';
 import { createEditorPanelContent } from './EditorPanels';
 import { BottomTerminalControls } from './BottomTerminalControls';
+import { normalizeCaptionStyle, parseCaptionPositionValue } from '@/utils/captionStyle';
 
 const logger = createLogger('EditorView');
 const AI_AUTO_COLLAPSE_BREAKPOINT = 1440;
 /** FFmpeg JPEG quality (1=best, 31=worst). Default: 2 for high quality frame export. */
 const JPEG_EXPORT_QUALITY = 2;
 const AUTO_TIMELINE_INSERT_TRACK_ID = '__openreelio_auto_timeline_track__';
+const DEFAULT_PREVIEW_TEXT_DURATION_SEC = 5;
 
 const ExportDialog = lazy(async () => {
   const module = await import('@/components/features/export');
@@ -87,46 +100,6 @@ export interface EditorViewProps {
   sequence: Sequence | null;
   /** App version string displayed in header */
   appVersion?: string;
-}
-
-function normalizeCaptionPositionValue(value: unknown): CaptionPosition | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-
-  const candidate = value as Partial<CaptionPosition> & Record<string, unknown>;
-  if (candidate.type === 'custom') {
-    const xPercent = Number(candidate.xPercent);
-    const yPercent = Number(candidate.yPercent);
-    if (!Number.isFinite(xPercent) || !Number.isFinite(yPercent)) {
-      return null;
-    }
-
-    return {
-      type: 'custom',
-      xPercent: Math.max(0, Math.min(100, xPercent)),
-      yPercent: Math.max(0, Math.min(100, yPercent)),
-    };
-  }
-
-  if (candidate.type === 'preset') {
-    const vertical =
-      candidate.vertical === 'top' || candidate.vertical === 'center'
-        ? candidate.vertical
-        : 'bottom';
-    const marginPercent = Number(candidate.marginPercent);
-    if (!Number.isFinite(marginPercent)) {
-      return null;
-    }
-
-    return {
-      type: 'preset',
-      vertical,
-      marginPercent: Math.max(0, Math.min(50, marginPercent)),
-    };
-  }
-
-  return null;
 }
 
 function isTimelineInsertableAssetKind(
@@ -153,10 +126,25 @@ function resolveExplorerInsertTrackId(
   return preferredTrack?.id ?? AUTO_TIMELINE_INSERT_TRACK_ID;
 }
 
+function resolveAvailablePreviewTextTrack(
+  sequence: Sequence,
+  timelineInSec: number,
+  durationSec: number,
+): Track | undefined {
+  return sequence.tracks.find(
+    (track) =>
+      track.kind === 'video' &&
+      !track.locked &&
+      !trackHasOverlap(track, timelineInSec, durationSec),
+  );
+}
+
 export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps): JSX.Element {
   const { selectedAssetId, assets, effects, executeCommand } = useProjectStore();
   const currentTime = usePlaybackStore((state) => state.currentTime);
-  const { selectedClipIds, linkedSelectionEnabled } = useTimelineStore();
+  const { selectedClipIds, linkedSelectionEnabled, selectClip } = useTimelineStore();
+  const activeTool = useEditorToolStore((state) => state.activeTool);
+  const setActiveTool = useEditorToolStore((state) => state.setActiveTool);
   const sanitizeSelection = useTimelineStore((state) => state.sanitizeSelection);
   const sequenceNavigationStack = useProjectStore((s) => s.sequenceNavigationStack);
   const sequences = useProjectStore((s) => s.sequences);
@@ -633,7 +621,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     onPasteEffects: handlePasteEffectsToSelection,
     onToggleClipEnabled: handleToggleClipEnabledForPalette,
     onToggleMixer: handleToggleMixer,
-    onAddText: () => setShowAddTextDialog(true),
+    onAddText: () => setActiveTool('text'),
     onAutoDuck: handleAutoDuck,
   });
 
@@ -900,8 +888,15 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
           captionId,
           text: value,
         });
+      } else if (property === 'style' && value && typeof value === 'object') {
+        handleUpdateCaption({
+          sequenceId: sequence.id,
+          trackId,
+          captionId,
+          style: normalizeCaptionStyle(value as Record<string, unknown>),
+        });
       } else if (property === 'position') {
-        const normalizedPosition = normalizeCaptionPositionValue(value);
+        const normalizedPosition = parseCaptionPositionValue(value);
         if (!normalizedPosition) {
           return;
         }
@@ -984,8 +979,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
 
   // Add Text handlers
   const handleOpenAddText = useCallback(() => {
-    setShowAddTextDialog(true);
-  }, []);
+    setActiveTool('text');
+  }, [setActiveTool]);
 
   const handleCloseAddText = useCallback(() => {
     setShowAddTextDialog(false);
@@ -1003,6 +998,77 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       });
     },
     [sequence, addTextClip],
+  );
+
+  const handlePreviewTextPlacementCommit = useCallback(
+    async ({ content, position }: TextPlacementCommitPayload) => {
+      if (!sequence) {
+        return;
+      }
+
+      const trimmedContent = content.trim();
+      if (!trimmedContent) {
+        return;
+      }
+
+      const timelineIn = Math.max(0, currentTime);
+      const duration = DEFAULT_PREVIEW_TEXT_DURATION_SEC;
+      let trackId = resolveAvailablePreviewTextTrack(sequence, timelineIn, duration)?.id;
+
+      try {
+        if (!trackId) {
+          const sequenceSnapshot =
+            useProjectStore.getState().sequences.get(sequence.id) ?? sequence;
+          const createTrackResult = await executeCommand({
+            type: 'CreateTrack',
+            payload: {
+              sequenceId: sequence.id,
+              kind: 'video',
+              name: getNextTrackName(sequenceSnapshot, 'video'),
+              position: getDefaultTrackInsertPosition(sequenceSnapshot, 'video'),
+            },
+          });
+
+          trackId = createTrackResult.createdIds[0];
+        }
+
+        if (!trackId) {
+          throw new Error('Text track could not be created');
+        }
+
+        const textData = createTextClipData(trimmedContent);
+        textData.position = position;
+        textData.style = {
+          ...textData.style,
+          backgroundPadding: 0,
+        };
+        textData.outline = { color: '#000000', width: 2 };
+        textData.shadow = { color: '#000000', offsetX: 2, offsetY: 2, blur: 3 };
+
+        const createdClipId = await addTextClip({
+          trackId,
+          timelineIn,
+          duration,
+          textData,
+        });
+
+        if (createdClipId) {
+          selectClip(createdClipId);
+          setActiveTool('select');
+        }
+      } catch (error) {
+        logger.error('Failed to create preview text clip', {
+          error,
+          sequenceId: sequence.id,
+          timelineIn,
+        });
+        useToastStore.getState().addToast({
+          variant: 'error',
+          message: 'Text clip could not be created.',
+        });
+      }
+    },
+    [addTextClip, currentTime, executeCommand, selectClip, sequence, setActiveTool],
   );
 
   // Audio Mixer handlers - connected to store and Web Audio
@@ -1267,6 +1333,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
         previewContainerRef,
         isFullscreen,
         onCaptureSnapshot: captureSnapshot,
+        textPlacementModeActive: activeTool === 'text',
+        onTextPlacementCommit: handlePreviewTextPlacementCommit,
         showMixer,
         onToggleMixer: handleToggleMixer,
         sequenceNavigationStack,
@@ -1283,6 +1351,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       sequence,
       isFullscreen,
       captureSnapshot,
+      activeTool,
+      handlePreviewTextPlacementCommit,
       showMixer,
       handleToggleMixer,
       sequenceNavigationStack,

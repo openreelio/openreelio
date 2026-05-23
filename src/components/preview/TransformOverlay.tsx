@@ -39,6 +39,8 @@ export interface TransformOverlayProps {
   panY: number;
   /** Additional CSS classes */
   className?: string;
+  /** Optional stacking order override for layered preview modes */
+  zIndex?: number;
 }
 
 type HandlePosition =
@@ -179,6 +181,7 @@ export const TransformOverlay = memo(function TransformOverlay({
   panX,
   panY,
   className = '',
+  zIndex,
 }: TransformOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
@@ -491,6 +494,7 @@ export const TransformOverlay = memo(function TransformOverlay({
       ref={overlayRef}
       className={`absolute inset-0 pointer-events-none ${className}`}
       data-testid="transform-overlay"
+      style={{ zIndex }}
     >
       {/* Bounding box */}
       <div
