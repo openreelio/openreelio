@@ -141,11 +141,15 @@ export class ToolRegistryAdapter implements IToolExecutor {
     const selection = getSelectionContext();
     const isActiveSequence = context.sequenceId === selection.sequenceId;
 
+    const selectedClipIds = isActiveSequence ? selection.selectedClipIds : [];
+    const selectedTrackIds = isActiveSequence ? selection.selectedTrackIds : [];
     const legacyContext = {
       projectId: context.projectId,
       sequenceId: context.sequenceId,
-      selectedClips: isActiveSequence ? selection.selectedClipIds : [],
-      selectedTracks: isActiveSequence ? selection.selectedTrackIds : [],
+      selectedClipIds,
+      selectedTrackIds,
+      selectedClips: selectedClipIds,
+      selectedTracks: selectedTrackIds,
       playheadPosition: isActiveSequence ? selection.playheadPosition : 0,
     };
 
@@ -316,7 +320,7 @@ export class ToolRegistryAdapter implements IToolExecutor {
     const errors = this.collectSchemaErrors(tool.parameters, args);
 
     const action = typeof args.action === 'string' ? args.action.trim() : '';
-    if (action && ['query', 'edit', 'audio', 'effects', 'text'].includes(toolName)) {
+    if (action && ['query', 'edit', 'audio', 'effects', 'text', 'generate'].includes(toolName)) {
       const actionTool = this.registry.get(action);
       if (actionTool) {
         const toolArgs = { ...args };

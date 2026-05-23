@@ -26,7 +26,7 @@ export interface PermissionSubject {
   aliases: string[];
 }
 
-const META_TOOL_NAMES = new Set(['query', 'edit', 'audio', 'effects', 'text']);
+const META_TOOL_NAMES = new Set(['query', 'edit', 'audio', 'effects', 'text', 'generate']);
 
 const EXACT_SUBJECTS: Record<string, { subjectType: PermissionSubjectType; subject: string }> = {
   analyze_asset: {
@@ -97,9 +97,25 @@ const EXACT_SUBJECTS: Record<string, { subjectType: PermissionSubjectType; subje
     subjectType: 'external_provider',
     subject: 'external_provider.search',
   },
+  search_sound_for_scene: {
+    subjectType: 'external_provider',
+    subject: 'external_provider.search',
+  },
+  import_asset_candidate: {
+    subjectType: 'external_provider',
+    subject: 'external_provider.import',
+  },
+  generate_timeline_media: {
+    subjectType: 'external_provider',
+    subject: 'external_provider.generate',
+  },
   generate_video: {
     subjectType: 'external_provider',
     subject: 'external_provider.generate',
+  },
+  resolve_generation_job: {
+    subjectType: 'external_provider',
+    subject: 'external_provider.status.read',
   },
   check_generation_status: {
     subjectType: 'external_provider',

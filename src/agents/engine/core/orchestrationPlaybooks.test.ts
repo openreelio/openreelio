@@ -389,6 +389,24 @@ describe('buildOrchestrationPlaybook', () => {
     expect(match?.plan.rollbackStrategy).toContain('No timeline changes');
   });
 
+  it('creates a sound-effect search playbook for SFX discovery', () => {
+    const thought: Thought = {
+      understanding: 'Find a whoosh sound effect for the transition',
+      requirements: ['sound effect search'],
+      uncertainties: [],
+      approach: 'Search SFX candidates',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor(['search_sound_for_scene']);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match?.id).toBe('sound_effect_search');
+    expect(match?.plan.steps).toHaveLength(1);
+    expect(match?.plan.steps[0].tool).toBe('search_sound_for_scene');
+    expect(match?.plan.rollbackStrategy).toContain('No timeline changes');
+  });
+
   it('should not match stock media playbook when search_stock_media tool is missing', () => {
     const thought: Thought = {
       understanding: 'Find stock footage of nature',
@@ -467,6 +485,30 @@ describe('buildOrchestrationPlaybook', () => {
     const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
 
     expect(match?.id).toBe('generate_and_place');
+  });
+
+  it('prefers provider-neutral timeline generation when orchestration tools are available', () => {
+    const thought: Thought = {
+      understanding: 'Create an AI-generated video clip and place it on the timeline',
+      requirements: ['ai video generation', 'timeline insertion'],
+      uncertainties: [],
+      approach: 'Generate then place',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor(['generate_timeline_media', 'generate_video']);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match?.id).toBe('generate_and_place');
+    expect(match?.plan.steps).toHaveLength(1);
+    expect(match?.plan.steps[0]).toMatchObject({
+      tool: 'generate_timeline_media',
+      args: {
+        mediaType: 'video',
+        placementMode: 'pending',
+        autoPlaceWhenReady: true,
+      },
+    });
   });
 
   it('should match auto-caption playbook for "add captions"', () => {

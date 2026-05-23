@@ -56,6 +56,7 @@ const MUTATING_UTILITY_TOOLS = new Set([
   'audio',
   'effects',
   'text',
+  'generate',
   'execute_plan',
 ]);
 

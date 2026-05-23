@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { globalToolRegistry } from '@/agents';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { globalToolRegistry, type ToolDefinition } from '@/agents';
 import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
 import { registerCaptionTools, unregisterCaptionTools } from './captionTools';
 import {
@@ -83,5 +83,49 @@ describe('metaTools', () => {
       type: 'audio',
       count: 4,
     });
+  });
+
+  it('forwards execution context from generate meta-tool to the underlying action', async () => {
+    const captureContext = vi.fn().mockResolvedValue({
+      success: true,
+      result: { ok: true },
+    });
+    const timelineTool: ToolDefinition = {
+      name: 'generate_timeline_media',
+      description: 'Capture context',
+      category: 'generation',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string', description: 'Prompt' },
+        },
+        required: ['prompt'],
+      },
+      handler: captureContext,
+    };
+    globalToolRegistry.register(timelineTool);
+
+    const result = await globalToolRegistry.execute(
+      'generate',
+      {
+        action: 'generate_timeline_media',
+        prompt: 'Context-sensitive shot',
+      },
+      {
+        sequenceId: 'seq-1',
+        selectedTrackIds: ['track-1'],
+        playheadPosition: 7,
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(captureContext).toHaveBeenCalledWith(
+      { prompt: 'Context-sensitive shot' },
+      expect.objectContaining({
+        sequenceId: 'seq-1',
+        selectedTrackIds: ['track-1'],
+        playheadPosition: 7,
+      }),
+    );
   });
 });

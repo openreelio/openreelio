@@ -675,6 +675,52 @@ describe('ToolRegistryAdapter', () => {
       expect(invalid.valid).toBe(false);
       expect(invalid.errors.some((error) => error.includes('splitTime'))).toBe(true);
     });
+
+    it('should validate generate meta-tool calls against the underlying action schema', () => {
+      const metaRegistry = new ToolRegistry();
+      metaRegistry.registerMany([
+        {
+          name: 'generate',
+          description: 'Generation meta-tool',
+          category: 'generation',
+          parameters: {
+            type: 'object',
+            properties: {
+              action: { type: 'string', description: 'Generate action' },
+            },
+            required: ['action'],
+          },
+          handler: vi.fn().mockResolvedValue({ success: true }),
+        },
+        {
+          name: 'generate_video',
+          description: 'Generate video',
+          category: 'generation',
+          parameters: {
+            type: 'object',
+            properties: {
+              prompt: { type: 'string', description: 'Prompt' },
+            },
+            required: ['prompt'],
+          },
+          handler: vi.fn().mockResolvedValue({ success: true }),
+        },
+      ]);
+
+      const metaAdapter = createToolRegistryAdapter(metaRegistry);
+
+      const valid = metaAdapter.validateArgs('generate', {
+        action: 'generate_video',
+        prompt: 'Generate a skyline shot',
+      });
+      expect(valid.valid).toBe(true);
+
+      const invalid = metaAdapter.validateArgs('generate', {
+        action: 'generate_video',
+      });
+      expect(invalid.valid).toBe(false);
+      expect(invalid.errors.some((error) => error.includes('prompt'))).toBe(true);
+    });
   });
 
   describe('hasTool', () => {
@@ -785,6 +831,7 @@ describe('ToolRegistryAdapter', () => {
       await adapter.execute('context_capture', {}, ctx);
 
       expect(capturedContext).not.toBeNull();
+      expect(capturedContext!.selectedClipIds).toEqual(['C1', 'C2']);
       expect(capturedContext!.selectedClips).toEqual(['C1', 'C2']);
     });
 
@@ -806,6 +853,7 @@ describe('ToolRegistryAdapter', () => {
       await adapter.execute('context_capture_tracks', {}, ctx);
 
       expect(capturedContext).not.toBeNull();
+      expect(capturedContext!.selectedTrackIds).toEqual(['V1']);
       expect(capturedContext!.selectedTracks).toEqual(['V1']);
     });
 
@@ -849,6 +897,8 @@ describe('ToolRegistryAdapter', () => {
       await adapter.execute('context_capture_mismatch', {}, ctx);
 
       expect(capturedContext).not.toBeNull();
+      expect(capturedContext!.selectedClipIds).toEqual([]);
+      expect(capturedContext!.selectedTrackIds).toEqual([]);
       expect(capturedContext!.selectedClips).toEqual([]);
       expect(capturedContext!.selectedTracks).toEqual([]);
       expect(capturedContext!.playheadPosition).toBe(0);
