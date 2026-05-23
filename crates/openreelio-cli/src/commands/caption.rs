@@ -41,6 +41,10 @@ pub enum CaptionAction {
         #[arg(long)]
         position: Option<String>,
 
+        /// Optional caption position JSON object
+        #[arg(long = "position-json")]
+        position_json: Option<String>,
+
         /// Sequence ID (defaults to active)
         #[arg(long)]
         sequence: Option<String>,
@@ -79,6 +83,10 @@ pub enum CaptionAction {
         /// Optional position preset: top, center, bottom
         #[arg(long)]
         position: Option<String>,
+
+        /// Optional caption position JSON object
+        #[arg(long = "position-json")]
+        position_json: Option<String>,
 
         /// Sequence ID (defaults to active)
         #[arg(long)]
@@ -140,6 +148,10 @@ pub enum CaptionAction {
         /// Optional position preset: top, center, bottom
         #[arg(long)]
         position: Option<String>,
+
+        /// Optional caption position JSON object applied to every imported caption
+        #[arg(long = "position-json")]
+        position_json: Option<String>,
 
         /// Sequence ID (defaults to active)
         #[arg(long)]
@@ -205,6 +217,75 @@ fn parse_position_preset(position: Option<String>) -> anyhow::Result<Option<serd
         "vertical": vertical,
         "marginPercent": 5,
     })))
+}
+
+fn parse_position_json(position_json: Option<String>) -> anyhow::Result<Option<serde_json::Value>> {
+    let Some(position_json) = position_json else {
+        return Ok(None);
+    };
+
+    let value: serde_json::Value = serde_json::from_str(&position_json)
+        .map_err(|e| anyhow::anyhow!("Invalid --position-json payload: {}", e))?;
+
+    if !value.is_object() {
+        return Err(anyhow::anyhow!(
+            "--position-json must be a JSON object, for example '{{\"type\":\"custom\",\"xPercent\":50,\"yPercent\":88}}'"
+        ));
+    }
+
+    let object = value.as_object().expect("checked above");
+    let position_type = object
+        .get("type")
+        .and_then(|kind| kind.as_str())
+        .unwrap_or("custom");
+    match position_type {
+        "preset" => {
+            let vertical = object
+                .get("vertical")
+                .and_then(|vertical| vertical.as_str())
+                .ok_or_else(|| anyhow::anyhow!("--position-json preset requires vertical"))?;
+            if !matches!(vertical, "top" | "center" | "bottom") {
+                return Err(anyhow::anyhow!(
+                    "--position-json preset vertical must be top, center, or bottom"
+                ));
+            }
+        }
+        "custom" => {
+            let has_x = object.get("xPercent").or_else(|| object.get("x")).is_some();
+            let has_y = object.get("yPercent").or_else(|| object.get("y")).is_some();
+            if !has_x || !has_y {
+                return Err(anyhow::anyhow!(
+                    "--position-json custom position requires xPercent and yPercent"
+                ));
+            }
+        }
+        other => {
+            return Err(anyhow::anyhow!(
+                "--position-json type '{}' is unsupported. Use preset or custom.",
+                other
+            ));
+        }
+    }
+
+    Ok(Some(value))
+}
+
+fn parse_caption_position(
+    position: Option<String>,
+    position_json: Option<String>,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    if position.is_some() && position_json.is_some() {
+        return Err(anyhow::anyhow!(
+            "Use either --position or --position-json, not both."
+        ));
+    }
+
+    let parsed_json = parse_position_json(position_json)?;
+    if parsed_json.is_some() {
+        return Ok(parsed_json);
+    }
+
+    parse_position_preset(position)
 }
 
 fn get_sequence<'a>(project: &'a ActiveProject, sequence_id: &str) -> anyhow::Result<&'a Sequence> {
@@ -411,13 +492,14 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             end,
             style_json,
             position,
+            position_json,
             sequence,
         } => {
             validate::non_empty(&text, "text")?;
             validate::time_range_ordered(start, end, "start", "end")?;
 
             let style = parse_style_json(style_json)?;
-            let position = parse_position_preset(position)?;
+            let position = parse_caption_position(position, position_json)?;
 
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
@@ -451,6 +533,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             end,
             style_json,
             position,
+            position_json,
             sequence,
         } => {
             validate::non_empty(&id, "id")?;
@@ -463,7 +546,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             }
 
             let style = parse_style_json(style_json)?;
-            let position = parse_position_preset(position)?;
+            let position = parse_caption_position(position, position_json)?;
 
             if text.is_none()
                 && start.is_none()
@@ -472,7 +555,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 && position.is_none()
             {
                 return Err(anyhow::anyhow!(
-                    "No update requested. Provide one of --text, --start, --end, --style-json, or --position."
+                    "No update requested. Provide one of --text, --start, --end, --style-json, --position, or --position-json."
                 ));
             }
 
@@ -548,7 +631,10 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                         "trackId": track.id,
                         "text": clip.label,
                         "startSec": clip.place.timeline_in_sec,
+                        "endSec": clip.place.timeline_in_sec + clip.place.duration_sec,
                         "durationSec": clip.place.duration_sec,
+                        "style": clip.caption_style,
+                        "position": clip.caption_position,
                     }));
                 }
             }
@@ -567,6 +653,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             format,
             style_json,
             position,
+            position_json,
             sequence,
         } => {
             let subtitle_path = std::fs::canonicalize(&file).map_err(|e| {
@@ -575,7 +662,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             let format = detect_caption_file_format(&subtitle_path, format.as_deref())?;
             let captions = load_caption_file(&subtitle_path, format)?;
             let style = parse_style_json(style_json)?;
-            let position = parse_position_preset(position)?;
+            let position = parse_caption_position(position, position_json)?;
 
             if captions.is_empty() {
                 return Err(anyhow::anyhow!(

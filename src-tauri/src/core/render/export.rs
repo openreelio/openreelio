@@ -2776,6 +2776,16 @@ fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
             }
         }
 
+        if let Some(background_padding) =
+            get_json_field(style, &["backgroundPadding", "background_padding"])
+                .and_then(parse_json_number)
+        {
+            effect.set_param(
+                "background_padding",
+                ParamValue::Int(background_padding.clamp(0.0, 500.0).round() as i64),
+            );
+        }
+
         if let Some(shadow_value) = get_json_field(style, &["shadowColor", "shadow_color"]) {
             if let Some((hex, _)) = parse_caption_color(shadow_value) {
                 effect.set_param("shadow_color", ParamValue::String(hex));
@@ -2788,12 +2798,33 @@ fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
             }
         }
 
-        if let Some(shadow_offset) =
-            get_json_field(style, &["shadowOffset", "shadow_offset"]).and_then(parse_json_number)
-        {
-            let clamped = shadow_offset.clamp(-500.0, 500.0).round() as i64;
-            effect.set_param("shadow_x", ParamValue::Int(clamped));
-            effect.set_param("shadow_y", ParamValue::Int(clamped));
+        let shadow_offset =
+            get_json_field(style, &["shadowOffset", "shadow_offset"]).and_then(parse_json_number);
+        let shadow_offset_x = get_json_field(
+            style,
+            &["shadowOffsetX", "shadow_offset_x", "shadowX", "shadow_x"],
+        )
+        .and_then(parse_json_number)
+        .or(shadow_offset);
+        let shadow_offset_y = get_json_field(
+            style,
+            &["shadowOffsetY", "shadow_offset_y", "shadowY", "shadow_y"],
+        )
+        .and_then(parse_json_number)
+        .or(shadow_offset);
+
+        if let Some(shadow_offset_x) = shadow_offset_x {
+            effect.set_param(
+                "shadow_x",
+                ParamValue::Int(shadow_offset_x.clamp(-500.0, 500.0).round() as i64),
+            );
+        }
+
+        if let Some(shadow_offset_y) = shadow_offset_y {
+            effect.set_param(
+                "shadow_y",
+                ParamValue::Int(shadow_offset_y.clamp(-500.0, 500.0).round() as i64),
+            );
         }
 
         if let Some(outline_width) =
@@ -2824,7 +2855,10 @@ fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
                 get_json_field(style, &["fontWeight", "font_weight"]).and_then(|value| {
                     if let Some(raw) = value.as_str() {
                         let normalized = raw.to_ascii_lowercase();
-                        Some(normalized == "bold" || normalized == "700" || normalized == "800")
+                        Some(matches!(
+                            normalized.as_str(),
+                            "bold" | "semibold" | "black" | "heavy" | "700" | "800" | "900"
+                        ))
                     } else {
                         parse_json_number(value).map(|weight| weight >= 600.0)
                     }
@@ -3198,9 +3232,11 @@ impl ExportEngine {
 
         // Add inputs and build filter graph
         for (clip, track) in &all_clips {
-            if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
-                // Caption/overlay tracks are not rendered by the current export pipeline.
-                // Skip them so virtual caption clips are not treated as file inputs.
+            if track.kind == TrackKind::Caption
+                || (track.kind == TrackKind::Overlay && !is_text_clip(clip))
+            {
+                // Caption tracks are burned in later; non-text overlay tracks are not
+                // rendered by the current export pipeline.
                 continue;
             }
 
@@ -4781,9 +4817,11 @@ pub fn build_complex_filter_args_with_audio_info(
 
     // Add inputs and build filter graph
     for (clip, track) in &all_clips {
-        if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
-            // Caption/overlay tracks are not rendered by the current export pipeline.
-            // Skip them so virtual caption clips are not treated as file inputs.
+        if track.kind == TrackKind::Caption
+            || (track.kind == TrackKind::Overlay && !is_text_clip(clip))
+        {
+            // Caption tracks are burned in later; non-text overlay tracks are not
+            // rendered by the current export pipeline.
             continue;
         }
 
@@ -7269,10 +7307,17 @@ mod tests {
         caption_clip.label = Some("Styled caption".to_string());
         caption_clip.caption_style = Some(serde_json::json!({
             "fontSize": 64,
+            "fontWeight": 700,
             "alignment": "left",
             "color": { "r": 255, "g": 0, "b": 0, "a": 128 },
+            "backgroundColor": "#00000080",
+            "backgroundPadding": 18,
             "outlineColor": "#000000",
-            "outlineWidth": 3
+            "outlineWidth": 3,
+            "shadowColor": "#112233",
+            "shadowOffsetX": 4,
+            "shadowOffsetY": 6,
+            "lineHeight": 1.5
         }));
         caption_clip.caption_position = Some(serde_json::json!({
             "type": "preset",
@@ -7324,6 +7369,26 @@ mod tests {
         assert!(
             args_str.contains("x=(w*0.5000)"),
             "Expected left alignment x expression. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("font='Arial\\:style=Bold'") || args_str.contains("style=Bold"),
+            "Expected numeric font weight to request bold font style. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("boxborderw=18"),
+            "Expected caption background padding to map to boxborderw. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("shadowx=4") && args_str.contains("shadowy=6"),
+            "Expected caption shadow offsets to map independently. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("line_spacing=32"),
+            "Expected caption line height to map to drawtext line spacing. Got: {}",
             args_str
         );
     }

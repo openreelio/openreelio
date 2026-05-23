@@ -264,6 +264,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "end": { "type": "number", "required": true, "desc": "End time in seconds" },
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object" },
                     "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
+                    "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
                 "example": "openreelio-cli caption add --path ./project --text \"Hello\" --start 0.0 --end 3.0"
@@ -295,6 +296,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "format": { "type": "string", "required": false, "desc": "Subtitle format: srt or vtt (auto-detected when omitted)" },
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object applied to all cues" },
                     "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
+                    "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object applied to all cues" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
                 "example": "openreelio-cli caption import --path ./project --file captions.srt"
@@ -310,6 +312,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "end": { "type": "number", "required": false, "desc": "New caption end time in seconds" },
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object" },
                     "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
+                    "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
                 "example": "openreelio-cli caption update --path ./project --id cap_001 --text \"Updated text\""
@@ -474,6 +477,7 @@ mod tests {
         assert!(commands.contains_key("caption.import"));
         assert!(commands["caption.update"]["params"]["start"].is_object());
         assert!(commands["caption.update"]["params"]["style-json"].is_object());
+        assert!(commands["caption.update"]["params"]["position-json"].is_object());
         assert!(commands["caption.add"]["params"]["track"]["required"] == false);
         assert!(commands.contains_key("analysis.report"));
         assert!(commands.contains_key("analysis.search"));
