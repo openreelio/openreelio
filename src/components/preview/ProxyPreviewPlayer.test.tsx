@@ -186,4 +186,98 @@ describe('ProxyPreviewPlayer', () => {
       });
     });
   });
+
+  it('keeps the current text placement draft when the overlay is clicked again', () => {
+    const sequence = createSequence();
+    const assets = new Map<string, Asset>([
+      ['asset-top', createVideoAsset('asset-top', 'https://example.com/top.mp4')],
+      ['asset-bottom', createVideoAsset('asset-bottom', 'https://example.com/bottom.mp4')],
+    ]);
+
+    render(
+      <ProxyPreviewPlayer
+        sequence={sequence}
+        assets={assets}
+        showControls
+        textPlacementModeActive
+        onTextPlacementCommit={vi.fn()}
+      />,
+    );
+
+    const overlay = screen.getByTestId('text-placement-overlay');
+    Object.defineProperty(overlay, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        left: 0,
+        top: 0,
+        width: 400,
+        height: 300,
+        right: 400,
+        bottom: 300,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+
+    fireEvent.pointerDown(overlay, { clientX: 200, clientY: 150, button: 0 });
+    const input = screen.getByTestId('text-placement-input');
+    fireEvent.change(input, { target: { value: 'Draft title' } });
+
+    fireEvent.pointerDown(overlay, { clientX: 20, clientY: 20, button: 0 });
+
+    expect(screen.getByTestId('text-placement-input')).toHaveValue('Draft title');
+  });
+
+  it('does not commit text placement while IME composition is active', async () => {
+    const sequence = createSequence();
+    const onTextPlacementCommit = vi.fn();
+    const assets = new Map<string, Asset>([
+      ['asset-top', createVideoAsset('asset-top', 'https://example.com/top.mp4')],
+      ['asset-bottom', createVideoAsset('asset-bottom', 'https://example.com/bottom.mp4')],
+    ]);
+
+    render(
+      <ProxyPreviewPlayer
+        sequence={sequence}
+        assets={assets}
+        showControls
+        textPlacementModeActive
+        onTextPlacementCommit={onTextPlacementCommit}
+      />,
+    );
+
+    const overlay = screen.getByTestId('text-placement-overlay');
+    Object.defineProperty(overlay, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        left: 0,
+        top: 0,
+        width: 400,
+        height: 300,
+        right: 400,
+        bottom: 300,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+
+    fireEvent.pointerDown(overlay, { clientX: 200, clientY: 150, button: 0 });
+    const input = screen.getByTestId('text-placement-input');
+    fireEvent.change(input, { target: { value: 'Composing title' } });
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+
+    expect(onTextPlacementCommit).not.toHaveBeenCalled();
+    expect(screen.getByTestId('text-placement-input')).toHaveValue('Composing title');
+
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => {
+      expect(onTextPlacementCommit).toHaveBeenCalledWith({
+        content: 'Composing title',
+        position: { x: 0.5, y: 0.5 },
+      });
+    });
+  });
 });

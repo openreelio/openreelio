@@ -23,6 +23,16 @@ describe('captionStyle utilities', () => {
     expect(getCaptionFontWeightNumber(style)).toBe(700);
   });
 
+  it('does not preserve unknown style keys during normalization', () => {
+    const style = normalizeCaptionStyle({
+      fontSize: 64,
+      unexpectedKey: 'leak',
+    });
+
+    expect(style.fontSize).toBe(64);
+    expect(style).not.toHaveProperty('unexpectedKey');
+  });
+
   it('parses short and alpha hex colors', () => {
     expect(parseCaptionHexColor('#abc')).toEqual({ r: 170, g: 187, b: 204, a: 255 });
     expect(parseCaptionHexColor('#abcd')).toEqual({ r: 170, g: 187, b: 204, a: 221 });

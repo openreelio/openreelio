@@ -721,6 +721,47 @@ describe('ToolRegistryAdapter', () => {
       expect(invalid.valid).toBe(false);
       expect(invalid.errors.some((error) => error.includes('prompt'))).toBe(true);
     });
+
+    it('should validate canonical meta-tool names resolved from aliases', () => {
+      const metaRegistry = new ToolRegistry();
+      metaRegistry.registerMany([
+        {
+          name: 'generate',
+          description: 'Generation meta-tool',
+          category: 'generation',
+          parameters: {
+            type: 'object',
+            properties: {
+              action: { type: 'string', description: 'Generate action' },
+            },
+            required: ['action'],
+          },
+          handler: vi.fn().mockResolvedValue({ success: true }),
+        },
+        {
+          name: 'generate_video',
+          description: 'Generate video',
+          category: 'generation',
+          parameters: {
+            type: 'object',
+            properties: {
+              prompt: { type: 'string', description: 'Prompt' },
+            },
+            required: ['prompt'],
+          },
+          handler: vi.fn().mockResolvedValue({ success: true }),
+        },
+      ]);
+
+      const metaAdapter = createToolRegistryAdapter(metaRegistry);
+
+      const invalid = metaAdapter.validateArgs('Generate', {
+        action: 'generate_video',
+      });
+
+      expect(invalid.valid).toBe(false);
+      expect(invalid.errors.some((error) => error.includes('prompt'))).toBe(true);
+    });
   });
 
   describe('hasTool', () => {

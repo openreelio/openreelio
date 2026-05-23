@@ -94,8 +94,10 @@ export function useCaption(): UseCaptionResult {
             text: caption.text,
             startSec: caption.startSec,
             endSec: caption.endSec,
-            ...(caption.styleOverride ? { style: caption.styleOverride } : {}),
-            ...(caption.positionOverride ? { position: caption.positionOverride } : {}),
+            ...(caption.styleOverride !== undefined ? { style: caption.styleOverride } : {}),
+            ...(caption.positionOverride !== undefined
+              ? { position: caption.positionOverride }
+              : {}),
           },
         });
 
@@ -141,8 +143,8 @@ export function useCaption(): UseCaptionResult {
             text: params.text,
             startSec: params.startSec,
             endSec: params.endSec,
-            ...(params.style ? { style: params.style } : {}),
-            ...(params.position ? { position: params.position } : {}),
+            ...(params.style !== undefined ? { style: params.style } : {}),
+            ...(params.position !== undefined ? { position: params.position } : {}),
           },
         });
 

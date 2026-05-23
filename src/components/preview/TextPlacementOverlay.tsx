@@ -156,6 +156,10 @@ export function TextPlacementOverlay({
       event.preventDefault();
       event.stopPropagation();
 
+      if (draftRef.current) {
+        return;
+      }
+
       const rect = event.currentTarget.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) {
         return;
@@ -178,6 +182,10 @@ export function TextPlacementOverlay({
       if (event.key === 'Escape') {
         event.preventDefault();
         cancelDraft();
+        return;
+      }
+
+      if (event.nativeEvent.isComposing) {
         return;
       }
 

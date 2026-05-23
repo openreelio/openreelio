@@ -723,6 +723,7 @@ export const ENHANCED_KEYBOARD_SHORTCUTS = [
     category: 'Tools',
     shortcuts: [
       { key: 'V', description: 'Selection Tool' },
+      { key: 'T', description: 'Text Tool' },
       { key: 'C', description: 'Razor/Cut Tool' },
       { key: 'B', description: 'Ripple Edit Tool' },
       { key: 'Y', description: 'Slip Tool' },

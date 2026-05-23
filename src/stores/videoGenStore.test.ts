@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { executeAgentCommand } from '@/agents/tools/commandExecutor';
-import { useVideoGenStore, type VideoGenJob } from './videoGenStore';
+import { useVideoGenStore, type VideoGenJob, type VideoGenPlacementRequest } from './videoGenStore';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -101,6 +101,27 @@ describe('videoGenStore placement sync', () => {
       sequenceId: 'seq-1',
       markerId: 'marker-1',
     });
+  });
+
+  it('ignores malformed placement input during generation submission', async () => {
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'submit_video_generation') {
+        return {
+          jobId: 'backend-job-1',
+          providerJobId: 'provider-job-1',
+          estimatedCostCents: 10,
+        };
+      }
+      throw new Error(`Unhandled invoke: ${command}`);
+    });
+
+    const jobId = await useVideoGenStore.getState().submitGeneration({
+      prompt: 'Generate a shot',
+      placement: 'invalid-placement' as unknown as VideoGenPlacementRequest,
+    });
+
+    const job = useVideoGenStore.getState().getJob(jobId);
+    expect(job?.placement).toBeNull();
   });
 
   it('keeps the imported asset when automatic placement fails', async () => {

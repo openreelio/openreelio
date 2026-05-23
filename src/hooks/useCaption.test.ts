@@ -61,6 +61,46 @@ describe('useCaption', () => {
     });
   });
 
+  it('should preserve explicit null caption override updates', async () => {
+    const executeCommandMock = vi.fn(
+      async (): Promise<CommandResult> => ({
+        opId: 'op_update_caption',
+        changes: [],
+        createdIds: [],
+        deletedIds: [],
+      }),
+    );
+
+    useProjectStore.setState({
+      activeSequenceId: 'seq_001',
+      executeCommand: executeCommandMock,
+    });
+
+    const { result } = renderHook(() => useCaption());
+
+    await act(async () => {
+      await result.current.updateCaption('track_caption_1', {
+        ...sampleCaption,
+        styleOverride: null,
+        positionOverride: null,
+      } as unknown as Caption);
+    });
+
+    expect(executeCommandMock).toHaveBeenCalledWith({
+      type: 'UpdateCaption',
+      payload: {
+        sequenceId: 'seq_001',
+        trackId: 'track_caption_1',
+        captionId: 'cap_001',
+        text: 'Hello world',
+        startSec: 2,
+        endSec: 4,
+        style: null,
+        position: null,
+      },
+    });
+  });
+
   it('should execute CreateCaption and return created caption id', async () => {
     const executeCommandMock = vi.fn(
       async (): Promise<CommandResult> => ({

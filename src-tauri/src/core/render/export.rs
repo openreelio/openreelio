@@ -2722,6 +2722,23 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> (f
     (x, y)
 }
 
+fn font_weight_implies_bold(value: &Value) -> Option<bool> {
+    if let Some(raw) = value.as_str() {
+        let normalized = raw.trim().to_ascii_lowercase();
+        if matches!(normalized.as_str(), "bold" | "semibold" | "black" | "heavy") {
+            return Some(true);
+        }
+
+        return normalized
+            .parse::<f64>()
+            .ok()
+            .map(|weight| weight >= 600.0)
+            .or(Some(false));
+    }
+
+    parse_json_number(value).map(|weight| weight >= 600.0)
+}
+
 fn find_transition_effect<'a>(
     clip: &Clip,
     effects: &'a HashMap<String, Effect>,
@@ -2852,17 +2869,8 @@ fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
         let bold = get_json_field(style, &["bold"])
             .and_then(parse_json_bool)
             .or_else(|| {
-                get_json_field(style, &["fontWeight", "font_weight"]).and_then(|value| {
-                    if let Some(raw) = value.as_str() {
-                        let normalized = raw.to_ascii_lowercase();
-                        Some(matches!(
-                            normalized.as_str(),
-                            "bold" | "semibold" | "black" | "heavy" | "700" | "800" | "900"
-                        ))
-                    } else {
-                        parse_json_number(value).map(|weight| weight >= 600.0)
-                    }
-                })
+                get_json_field(style, &["fontWeight", "font_weight"])
+                    .and_then(font_weight_implies_bold)
             });
         if let Some(bold) = bold {
             effect.set_param("bold", ParamValue::Bool(bold));
@@ -4603,29 +4611,37 @@ pub fn validate_export_settings(
         return validation;
     }
 
-    let has_enabled_overlay_clips = sequence.tracks.iter().any(|track| {
+    let has_enabled_unsupported_overlay_clips = sequence.tracks.iter().any(|track| {
         track.kind == TrackKind::Overlay
             && track_included_in_export(track)
-            && track.clips.iter().any(|clip| clip.enabled)
+            && track
+                .clips
+                .iter()
+                .any(|clip| clip.enabled && !is_text_clip(clip))
     });
-    if has_enabled_overlay_clips {
+    if has_enabled_unsupported_overlay_clips {
         validation.add_error("Overlay tracks are not supported in final render export yet");
     }
 
     let visual_clip_count: usize = sequence
         .tracks
         .iter()
-        .filter(|track| track.kind == TrackKind::Video && track_included_in_export(track))
+        .filter(|track| track_included_in_export(track))
         .map(|track| {
             track
                 .clips
                 .iter()
-                .filter(|clip| clip.enabled && !clip.is_adjustment_layer())
+                .filter(|clip| {
+                    clip.enabled
+                        && !clip.is_adjustment_layer()
+                        && (track.kind == TrackKind::Video
+                            || (track.kind == TrackKind::Overlay && is_text_clip(clip)))
+                })
                 .count()
         })
         .sum();
     if visual_clip_count == 0 {
-        if !has_enabled_overlay_clips {
+        if !has_enabled_unsupported_overlay_clips {
             validation.add_error("Sequence has no visual clips to export");
         }
         return validation;
@@ -4637,14 +4653,17 @@ pub fn validate_export_settings(
             continue;
         }
 
-        if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
-            // Caption/overlay tracks are currently excluded from final render composition.
-            // Skip file-based asset validation for these tracks.
+        if track.kind == TrackKind::Caption {
+            // Caption tracks are burned in separately and do not use file-backed assets.
             continue;
         }
 
         for clip in &track.clips {
             if !clip.enabled {
+                continue;
+            }
+
+            if track.kind == TrackKind::Overlay && !is_text_clip(clip) {
                 continue;
             }
 
@@ -5691,6 +5710,43 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.to_lowercase().contains("overlay tracks")));
+    }
+
+    #[test]
+    fn test_validation_allows_overlay_text_clips() {
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::effects::{Effect, EffectType, ParamValue};
+        use crate::core::timeline::{Clip, SequenceFormat, Track, TrackKind};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut overlay_track = Track::new("Overlay Text", TrackKind::Overlay);
+
+        let effect_id = "overlay_text_effect".to_string();
+        let mut text_clip = Clip::new(&format!("{}overlay", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        text_clip.effects.push(effect_id.clone());
+        overlay_track.add_clip(text_clip);
+        sequence.add_track(overlay_track);
+
+        let mut effect = Effect::new(EffectType::TextOverlay);
+        effect.id = effect_id.clone();
+        effect.set_param("text", ParamValue::String("Overlay title".to_string()));
+
+        let mut effects = HashMap::new();
+        effects.insert(effect_id, effect);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &HashMap::new(),
+            &effects,
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            validation.is_valid,
+            "Expected overlay text clips to pass export validation. Got: {validation:?}"
+        );
     }
 
     #[test]
@@ -7390,6 +7446,26 @@ mod tests {
             args_str.contains("line_spacing=32"),
             "Expected caption line height to map to drawtext line spacing. Got: {}",
             args_str
+        );
+    }
+
+    #[test]
+    fn test_font_weight_implies_bold_accepts_numeric_strings() {
+        assert_eq!(
+            font_weight_implies_bold(&serde_json::json!("600")),
+            Some(true)
+        );
+        assert_eq!(
+            font_weight_implies_bold(&serde_json::json!("700.0")),
+            Some(true)
+        );
+        assert_eq!(
+            font_weight_implies_bold(&serde_json::json!("500")),
+            Some(false)
+        );
+        assert_eq!(
+            font_weight_implies_bold(&serde_json::json!(700)),
+            Some(true)
         );
     }
 

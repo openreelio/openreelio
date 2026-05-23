@@ -79,7 +79,7 @@ export function validateMutationPreconditions(
     }
   }
 
-  if (!requiresProjectMutationPreflight(toolName, category)) {
+  if (!requiresProjectMutationPreflight(toolName, category, args)) {
     return errors;
   }
 
@@ -181,9 +181,7 @@ function validateClipTrackPair(
     return;
   }
 
-  errors.push(
-    `${clipKey} '${clipId}' is on track '${clip.trackId}', not ${trackKey} '${trackId}'`,
-  );
+  errors.push(`${clipKey} '${clipId}' is on track '${clip.trackId}', not ${trackKey} '${trackId}'`);
 }
 
 function validateTimelineNumberArgs(args: Record<string, unknown>, errors: string[]): void {

@@ -267,21 +267,24 @@ async function generateTimelineMedia(args: Record<string, unknown>, context: Age
     };
   }
 
-  const generation = await globalToolRegistry.execute('generate_video', {
+  const shouldAttachPlacement =
+    placementMode !== 'import_only' && args.autoPlaceWhenReady !== false && Boolean(placement);
+  const generationArgs: Record<string, unknown> = {
     prompt,
     mode: 'text_to_video',
     quality: normalizeQuality(args.quality),
     durationSec: normalizeDuration(args.durationSec),
     referenceAssetIds: Array.isArray(args.referenceAssetIds) ? args.referenceAssetIds : undefined,
     aspectRatio: normalizeString(args.aspectRatio) || undefined,
-    placement:
-      args.autoPlaceWhenReady === false || !placement
-        ? undefined
-        : {
-            ...placement,
-            removeMarkerOnPlace: true,
-          },
-  });
+  };
+  if (shouldAttachPlacement && placement) {
+    generationArgs.placement = {
+      ...placement,
+      removeMarkerOnPlace: true,
+    };
+  }
+
+  const generation = await globalToolRegistry.execute('generate_video', generationArgs);
 
   if (!generation.success) {
     await removePendingMarkerBestEffort(pendingTimeline);
@@ -298,7 +301,7 @@ async function generateTimelineMedia(args: Record<string, unknown>, context: Age
       jobId: getString(generationResult, 'jobId'),
       estimatedCostCents: getNumber(generationResult, 'estimatedCostCents'),
       pendingTimeline,
-      autoPlaceWhenReady: args.autoPlaceWhenReady !== false && Boolean(placement),
+      autoPlaceWhenReady: shouldAttachPlacement,
       nextAction: 'resolve_generation_job',
     },
   };

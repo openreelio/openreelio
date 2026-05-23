@@ -227,13 +227,12 @@ fn parse_position_json(position_json: Option<String>) -> anyhow::Result<Option<s
     let value: serde_json::Value = serde_json::from_str(&position_json)
         .map_err(|e| anyhow::anyhow!("Invalid --position-json payload: {}", e))?;
 
-    if !value.is_object() {
+    let Some(object) = value.as_object() else {
         return Err(anyhow::anyhow!(
             "--position-json must be a JSON object, for example '{{\"type\":\"custom\",\"xPercent\":50,\"yPercent\":88}}'"
         ));
-    }
+    };
 
-    let object = value.as_object().expect("checked above");
     let position_type = object
         .get("type")
         .and_then(|kind| kind.as_str())
@@ -251,13 +250,15 @@ fn parse_position_json(position_json: Option<String>) -> anyhow::Result<Option<s
             }
         }
         "custom" => {
-            let has_x = object.get("xPercent").or_else(|| object.get("x")).is_some();
-            let has_y = object.get("yPercent").or_else(|| object.get("y")).is_some();
-            if !has_x || !has_y {
+            let x = object.get("xPercent").or_else(|| object.get("x"));
+            let y = object.get("yPercent").or_else(|| object.get("y"));
+            let (Some(x), Some(y)) = (x, y) else {
                 return Err(anyhow::anyhow!(
                     "--position-json custom position requires xPercent and yPercent"
                 ));
-            }
+            };
+            validate_custom_position_coordinate("xPercent", x)?;
+            validate_custom_position_coordinate("yPercent", y)?;
         }
         other => {
             return Err(anyhow::anyhow!(
@@ -268,6 +269,27 @@ fn parse_position_json(position_json: Option<String>) -> anyhow::Result<Option<s
     }
 
     Ok(Some(value))
+}
+
+fn validate_custom_position_coordinate(
+    field: &str,
+    value: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let Some(number) = value.as_f64() else {
+        return Err(anyhow::anyhow!(
+            "--position-json custom {} must be a number between 0 and 100",
+            field
+        ));
+    };
+
+    if !(0.0..=100.0).contains(&number) {
+        return Err(anyhow::anyhow!(
+            "--position-json custom {} must be between 0 and 100",
+            field
+        ));
+    }
+
+    Ok(())
 }
 
 fn parse_caption_position(
@@ -779,5 +801,48 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 "captionCount": caption_data.len(),
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_position_json_accepts_custom_coordinate_aliases() {
+        let parsed = parse_position_json(Some(r#"{"type":"custom","x":25,"y":75}"#.to_string()))
+            .expect("position json should parse")
+            .expect("position json should be present");
+
+        assert_eq!(parsed["x"], 25);
+        assert_eq!(parsed["y"], 75);
+    }
+
+    #[test]
+    fn parse_position_json_rejects_non_numeric_custom_coordinates() {
+        let error = parse_position_json(Some(
+            r#"{"type":"custom","xPercent":"50","yPercent":75}"#.to_string(),
+        ))
+        .expect_err("non-numeric xPercent should fail");
+
+        assert!(
+            error.to_string().contains("xPercent must be a number"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn parse_position_json_rejects_out_of_range_custom_coordinates() {
+        let error = parse_position_json(Some(
+            r#"{"type":"custom","xPercent":101,"yPercent":75}"#.to_string(),
+        ))
+        .expect_err("out-of-range xPercent should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("xPercent must be between 0 and 100"),
+            "unexpected error: {error}"
+        );
     }
 }

@@ -164,7 +164,6 @@ export function normalizeCaptionStyle(style: unknown): CaptionStyle {
 
   return {
     ...DEFAULT_CAPTION_STYLE,
-    ...source,
     fontFamily:
       typeof source.fontFamily === 'string' && source.fontFamily.trim().length > 0
         ? source.fontFamily.trim()

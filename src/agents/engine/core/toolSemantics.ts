@@ -60,6 +60,45 @@ const MUTATING_UTILITY_TOOLS = new Set([
   'execute_plan',
 ]);
 
+function normalizeActionArg(args?: Record<string, unknown>): string {
+  if (typeof args?.action !== 'string') {
+    return '';
+  }
+
+  return args.action
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[\s-]+/g, '_')
+    .replace(/__+/g, '_')
+    .toLowerCase();
+}
+
+function generationActionRequiresProjectMutationPreflight(
+  toolName: string,
+  args?: Record<string, unknown>,
+): boolean {
+  const action = toolName === 'generate' ? normalizeActionArg(args) : toolName;
+
+  if (action === 'resolve_generation_job') {
+    return args?.placeWhenComplete === true;
+  }
+
+  if (action === 'generate_video') {
+    return args?.placement !== undefined && args.placement !== null;
+  }
+
+  if (action !== 'generate_timeline_media') {
+    return false;
+  }
+
+  const mediaType =
+    typeof args?.mediaType === 'string' ? args.mediaType.trim().toLowerCase() : 'video';
+  const placementMode =
+    typeof args?.placementMode === 'string' ? args.placementMode.trim().toLowerCase() : 'pending';
+
+  return mediaType !== 'sfx' && placementMode !== 'import_only';
+}
+
 export const MUTATION_INTENT_PATTERN = new RegExp(
   [
     '\\b(split|cut|trim|move|shift|delete|remove|insert|add|place|put|edit|update|change|replace|reorder|caption|subtitle|transcribe|mute|unmute|fade|normalize|speed|rename|create|write|apply)\\b',
@@ -103,6 +142,7 @@ export function isReadOnlyToolName(toolName: string, category?: string | null): 
 export function requiresProjectMutationPreflight(
   toolName: string,
   category?: string | null,
+  args?: Record<string, unknown>,
 ): boolean {
   const normalizedToolName = toolName.trim().toLowerCase();
   const normalizedCategory = category?.trim().toLowerCase() ?? null;
@@ -112,6 +152,10 @@ export function requiresProjectMutationPreflight(
   }
 
   if (PROJECT_MUTATION_UTILITY_TOOLS.has(normalizedToolName)) {
+    return true;
+  }
+
+  if (generationActionRequiresProjectMutationPreflight(normalizedToolName, args)) {
     return true;
   }
 

@@ -137,6 +137,20 @@ const EXACT_SUBJECTS: Record<string, { subjectType: PermissionSubjectType; subje
 
 const READ_PREFIXES = ['get_', 'list_', 'find_', 'search_', 'inspect_', 'query_', 'read_'];
 
+function resolveExactSubject(
+  normalizedToolName: string,
+  args: Record<string, unknown>,
+): { subjectType: PermissionSubjectType; subject: string } | undefined {
+  if (normalizedToolName === 'resolve_generation_job' && args.placeWhenComplete === true) {
+    return {
+      subjectType: 'capability',
+      subject: 'timeline.clip.create',
+    };
+  }
+
+  return EXACT_SUBJECTS[normalizedToolName];
+}
+
 function matchLegacyPermissionPattern(pattern: string, value: string): boolean {
   if (pattern === '*') {
     return true;
@@ -518,7 +532,7 @@ export function buildPermissionSubject(
 ): PermissionSubject {
   const rawToolName = toolName.trim().toLowerCase();
   const normalizedToolName = normalizeToolName(toolName, args);
-  const exact = EXACT_SUBJECTS[normalizedToolName];
+  const exact = resolveExactSubject(normalizedToolName, args);
   const resourceBinding = extractResourceBinding(args);
 
   if (exact) {

@@ -154,6 +154,46 @@ describe('generativeTimelineTools', () => {
     );
   });
 
+  it('does not attach timeline placement for import-only generation', async () => {
+    const generateVideo = vi.fn().mockResolvedValue({
+      success: true,
+      result: { jobId: 'job-import-only', estimatedCostCents: 18 },
+    });
+
+    registerStubTool({
+      name: 'generate_video',
+      description: 'generate video',
+      category: 'generation',
+      parameters: { type: 'object' },
+      handler: generateVideo,
+    });
+
+    const result = await globalToolRegistry.execute(
+      'generate_timeline_media',
+      {
+        prompt: 'Wide establishing shot',
+        mediaType: 'video',
+        placementMode: 'import_only',
+        sequenceId: 'seq-1',
+        trackId: 'video-1',
+        timelineStart: 4,
+      },
+      {},
+    );
+
+    expect(result.success).toBe(true);
+    expect(generateVideo).toHaveBeenCalledWith(
+      expect.not.objectContaining({
+        placement: expect.anything(),
+      }),
+      expect.anything(),
+    );
+    expect(result.result).toMatchObject({
+      pendingTimeline: null,
+      autoPlaceWhenReady: false,
+    });
+  });
+
   it('rejects pending generation when no placement target is available', async () => {
     registerStubTool({
       name: 'generate_video',
@@ -205,7 +245,12 @@ describe('generativeTimelineTools', () => {
       parameters: { type: 'object' },
       handler: vi.fn().mockResolvedValue({
         success: true,
-        result: { status: 'failed', progress: 100, assetId: null, error: 'provider quota exceeded' },
+        result: {
+          status: 'failed',
+          progress: 100,
+          assetId: null,
+          error: 'provider quota exceeded',
+        },
       }),
     });
 

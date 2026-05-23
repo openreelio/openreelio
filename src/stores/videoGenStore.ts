@@ -131,23 +131,25 @@ function normalizeReferencePaths(values: string[] | undefined, maxItems: number)
     .slice(0, maxItems);
 }
 
-function normalizePlacement(placement?: VideoGenPlacementRequest | null): VideoGenPlacementRequest | null {
-  if (!placement) return null;
-  const sequenceId = placement.sequenceId.trim();
-  const trackId = placement.trackId.trim();
+function normalizePlacement(placement?: unknown): VideoGenPlacementRequest | null {
+  if (!placement || typeof placement !== 'object' || Array.isArray(placement)) return null;
+
+  const raw = placement as Record<string, unknown>;
+  const sequenceId = typeof raw.sequenceId === 'string' ? raw.sequenceId.trim() : '';
+  const trackId = typeof raw.trackId === 'string' ? raw.trackId.trim() : '';
   if (!sequenceId || !trackId) return null;
 
   const timelineStart =
-    typeof placement.timelineStart === 'number' && Number.isFinite(placement.timelineStart)
-      ? Math.max(0, placement.timelineStart)
+    typeof raw.timelineStart === 'number' && Number.isFinite(raw.timelineStart)
+      ? Math.max(0, raw.timelineStart)
       : 0;
 
   return {
     sequenceId,
     trackId,
     timelineStart,
-    markerId: placement.markerId?.trim() || null,
-    removeMarkerOnPlace: placement.removeMarkerOnPlace !== false,
+    markerId: typeof raw.markerId === 'string' && raw.markerId.trim() ? raw.markerId.trim() : null,
+    removeMarkerOnPlace: raw.removeMarkerOnPlace !== false,
   };
 }
 
