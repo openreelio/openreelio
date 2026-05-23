@@ -21,6 +21,7 @@ import {
 import { formatDuration } from '@/utils/formatters';
 import {
   captionColorToHex,
+  getCaptionFontWeightNumber,
   normalizeCaptionPosition,
   normalizeCaptionStyle,
   parseCaptionHexColor,
@@ -616,14 +617,7 @@ export function CaptionInspectorPanel({
     });
   };
 
-  const fontWeightValue =
-    typeof captionStyle.fontWeight === 'number'
-      ? captionStyle.fontWeight
-      : captionStyle.bold || captionStyle.fontWeight === 'bold'
-        ? 700
-        : captionStyle.fontWeight === 'light'
-          ? 300
-          : 400;
+  const fontWeightValue = getCaptionFontWeightNumber(captionStyle);
   const hasBackground = Boolean(captionStyle.backgroundColor);
   const hasOutline = Boolean(captionStyle.outlineColor && captionStyle.outlineWidth > 0);
   const hasShadow = Boolean(captionStyle.shadowColor);
@@ -676,19 +670,20 @@ export function CaptionInspectorPanel({
         <InspectorSection title="Font" icon={<Type className="w-3 h-3" />}>
           <div className="flex items-center justify-between gap-3">
             <label className="text-xs text-editor-text-muted">Family</label>
-            <select
-              data-testid="caption-font-family"
+            <input
+              data-testid="caption-font-family-input"
+              type="text"
+              list="caption-font-families"
               value={captionStyle.fontFamily}
               className="w-36 rounded border border-editor-border bg-editor-input px-2 py-1 text-xs text-editor-text focus:border-primary-500 focus:outline-none disabled:opacity-50"
               onChange={(event) => commitCaptionStyle({ fontFamily: event.target.value })}
               disabled={isReadOnly}
-            >
+            />
+            <datalist id="caption-font-families">
               {CAPTION_FONT_FAMILIES.map((family) => (
-                <option key={family} value={family}>
-                  {family}
-                </option>
+                <option key={family} value={family} />
               ))}
-            </select>
+            </datalist>
           </div>
 
           <NumberField
@@ -721,7 +716,7 @@ export function CaptionInspectorPanel({
                 active={fontWeightValue >= 600}
                 onClick={() =>
                   commitCaptionStyle({
-                    fontWeight: fontWeightValue >= 600 ? 'normal' : 'bold',
+                    fontWeight: fontWeightValue >= 600 ? 400 : 700,
                     bold: fontWeightValue < 600,
                   })
                 }

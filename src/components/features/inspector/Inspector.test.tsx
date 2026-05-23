@@ -353,6 +353,53 @@ describe('Inspector', () => {
     );
   });
 
+  it('allows custom caption font names and numeric bold toggles', () => {
+    const selectedCaption = {
+      id: 'cap-1',
+      text: 'Hello',
+      startSec: 0,
+      endSec: 5,
+      style: {
+        fontFamily: 'Arial',
+        fontSize: 24,
+        fontWeight: 'normal' as const,
+        color: { r: 255, g: 255, b: 255, a: 255 },
+        outlineColor: { r: 0, g: 0, b: 0, a: 255 },
+        outlineWidth: 2,
+        shadowColor: { r: 0, g: 0, b: 0, a: 128 },
+        shadowOffset: 2,
+        alignment: 'center' as const,
+        italic: false,
+        underline: false,
+      },
+    };
+
+    const handleCaptionChange = vi.fn();
+
+    render(<Inspector selectedCaption={selectedCaption} onCaptionChange={handleCaptionChange} />);
+
+    fireEvent.change(screen.getByTestId('caption-font-family-input'), {
+      target: { value: 'Brand Caption' },
+    });
+    expect(handleCaptionChange).toHaveBeenLastCalledWith(
+      'cap-1',
+      'style',
+      expect.objectContaining({
+        fontFamily: 'Brand Caption',
+      }),
+    );
+
+    fireEvent.click(screen.getByTestId('caption-bold-toggle'));
+    expect(handleCaptionChange).toHaveBeenLastCalledWith(
+      'cap-1',
+      'style',
+      expect.objectContaining({
+        fontWeight: 700,
+        bold: true,
+      }),
+    );
+  });
+
   it('disables caption editing controls when readOnly is true', () => {
     const selectedCaption = {
       id: 'cap-1',
