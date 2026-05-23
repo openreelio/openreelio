@@ -155,6 +155,8 @@ jobs:
     name: Rust Tests
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    env:
+      SKIP_FFMPEG_DOWNLOAD: '1'
 
     steps:
       - name: Checkout repository
