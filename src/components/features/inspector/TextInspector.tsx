@@ -71,6 +71,27 @@ export interface TextInspectorProps {
 // Sub-components
 // =============================================================================
 
+const TEXT_FONT_FAMILIES = [
+  'Arial',
+  'Helvetica',
+  'Verdana',
+  'Inter',
+  'Roboto',
+  'Noto Sans',
+  'Noto Sans KR',
+  'Pretendard',
+  'Apple SD Gothic Neo',
+  'Malgun Gothic',
+  'Nanum Gothic',
+  'Georgia',
+  'Times New Roman',
+  'Courier New',
+  'Impact',
+  'Montserrat',
+  'Poppins',
+  'Oswald',
+];
+
 interface SectionProps {
   title: string;
   children: React.ReactNode;
@@ -101,9 +122,7 @@ function Section({
           {title}
         </span>
         {collapsible && (
-          <span className="text-editor-text-muted text-xs">
-            {isExpanded ? '-' : '+'}
-          </span>
+          <span className="text-editor-text-muted text-xs">{isExpanded ? '-' : '+'}</span>
         )}
       </button>
       {isExpanded && <div className="pb-4 space-y-3">{children}</div>}
@@ -119,12 +138,7 @@ interface ColorInputProps {
   disabled?: boolean;
 }
 
-function ColorInput({
-  label,
-  value,
-  onChange,
-  disabled = false,
-}: ColorInputProps): JSX.Element {
+function ColorInput({ label, value, onChange, disabled = false }: ColorInputProps): JSX.Element {
   const [localValue, setLocalValue] = useState(value);
 
   useEffect(() => {
@@ -138,7 +152,7 @@ function ColorInput({
         onChange(newValue);
       }
     },
-    [onChange]
+    [onChange],
   );
 
   return (
@@ -200,7 +214,7 @@ function NumberInput({
         onChange(parsed);
       }
     },
-    [onChange]
+    [onChange],
   );
 
   return (
@@ -275,9 +289,7 @@ export function TextInspector({
   // Local State
   // ===========================================================================
 
-  const [localTextData, setLocalTextData] = useState<TextClipData>(
-    selectedTextClip.textData
-  );
+  const [localTextData, setLocalTextData] = useState<TextClipData>(selectedTextClip.textData);
 
   // Sync local state with prop changes
   useEffect(() => {
@@ -292,8 +304,13 @@ export function TextInspector({
   const hasOutline = useMemo(() => !!localTextData.outline, [localTextData.outline]);
   const hasBackground = useMemo(
     () => !!localTextData.style.backgroundColor,
-    [localTextData.style.backgroundColor]
+    [localTextData.style.backgroundColor],
   );
+  const fontFamilyOptions = useMemo(() => {
+    return TEXT_FONT_FAMILIES.includes(localTextData.style.fontFamily)
+      ? TEXT_FONT_FAMILIES
+      : [localTextData.style.fontFamily, ...TEXT_FONT_FAMILIES];
+  }, [localTextData.style.fontFamily]);
 
   // ===========================================================================
   // Update Handlers
@@ -305,7 +322,7 @@ export function TextInspector({
       setLocalTextData(newTextData);
       onTextDataChange(selectedTextClip.id, newTextData);
     },
-    [localTextData, selectedTextClip.id, onTextDataChange]
+    [localTextData, selectedTextClip.id, onTextDataChange],
   );
 
   const updateStyle = useCallback(
@@ -314,7 +331,7 @@ export function TextInspector({
         style: { ...localTextData.style, ...updates },
       });
     },
-    [localTextData.style, updateTextData]
+    [localTextData.style, updateTextData],
   );
 
   const updatePosition = useCallback(
@@ -323,7 +340,7 @@ export function TextInspector({
         position: { ...localTextData.position, ...updates },
       });
     },
-    [localTextData.position, updateTextData]
+    [localTextData.position, updateTextData],
   );
 
   const updateShadow = useCallback(
@@ -333,7 +350,7 @@ export function TextInspector({
         shadow: { ...currentShadow, ...updates },
       });
     },
-    [localTextData.shadow, updateTextData]
+    [localTextData.shadow, updateTextData],
   );
 
   const updateOutline = useCallback(
@@ -343,7 +360,7 @@ export function TextInspector({
         outline: { ...currentOutline, ...updates },
       });
     },
-    [localTextData.outline, updateTextData]
+    [localTextData.outline, updateTextData],
   );
 
   // ===========================================================================
@@ -408,7 +425,7 @@ export function TextInspector({
       setLocalTextData(newTextData);
       onTextDataChange(selectedTextClip.id, newTextData);
     },
-    [localTextData.content, selectedTextClip.id, onTextDataChange]
+    [localTextData.content, selectedTextClip.id, onTextDataChange],
   );
 
   // ===========================================================================
@@ -453,11 +470,7 @@ export function TextInspector({
 
       {/* Presets Section */}
       <Section title="Style Presets" icon={<Palette className="w-4 h-4" />} defaultExpanded={false}>
-        <TextPresetPicker
-          onSelect={handlePresetSelect}
-          disabled={readOnly}
-          compact
-        />
+        <TextPresetPicker onSelect={handlePresetSelect} disabled={readOnly} compact />
       </Section>
 
       {/* Font Section */}
@@ -472,14 +485,24 @@ export function TextInspector({
               disabled={readOnly}
               className="w-32 px-2 py-1 text-xs bg-editor-input border border-editor-border rounded text-editor-text focus:border-primary-500 focus:outline-none disabled:opacity-50"
             >
-              <option value="Arial">Arial</option>
-              <option value="Helvetica">Helvetica</option>
-              <option value="Verdana">Verdana</option>
-              <option value="Georgia">Georgia</option>
-              <option value="Times New Roman">Times New Roman</option>
-              <option value="Courier New">Courier New</option>
-              <option value="Impact">Impact</option>
+              {fontFamilyOptions.map((fontFamily) => (
+                <option key={fontFamily} value={fontFamily}>
+                  {fontFamily}
+                </option>
+              ))}
             </select>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-editor-text-muted">Custom</label>
+            <input
+              type="text"
+              value={localTextData.style.fontFamily}
+              onChange={(e) => updateStyle({ fontFamily: e.target.value })}
+              disabled={readOnly}
+              className="w-32 px-2 py-1 text-xs bg-editor-input border border-editor-border rounded text-editor-text focus:border-primary-500 focus:outline-none disabled:opacity-50"
+              data-testid="text-font-family-input"
+            />
           </div>
 
           {/* Font Size */}
