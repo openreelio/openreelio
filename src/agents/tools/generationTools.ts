@@ -9,6 +9,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { useVideoGenStore } from '@/stores/videoGenStore';
+import type { VideoGenPlacementRequest } from '@/stores/videoGenStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { createLogger } from '@/services/logger';
 
@@ -56,6 +57,11 @@ const GENERATION_TOOLS: ToolDefinition[] = [
           type: 'string',
           description: 'Aspect ratio (16:9, 9:16, 1:1, default: 16:9)',
         },
+        placement: {
+          type: 'object',
+          description:
+            'Optional pending timeline placement intent with sequenceId, trackId, timelineStart, markerId, and removeMarkerOnPlace.',
+        },
       },
       required: ['prompt'],
     },
@@ -68,9 +74,9 @@ const GENERATION_TOOLS: ToolDefinition[] = [
         }
 
         const referenceAssetIds = Array.isArray(args.referenceAssetIds)
-          ? args.referenceAssetIds.filter(
-              (id): id is string => typeof id === 'string' && id.trim().length > 0,
-            )
+          ? args.referenceAssetIds
+              .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+              .map((id) => id.trim())
           : [];
 
         // Resolve asset IDs to provider-ready URI lists by media type.
@@ -121,8 +127,9 @@ const GENERATION_TOOLS: ToolDefinition[] = [
         }
 
         // Estimate cost first
-        const quality = (args.quality as string) ?? 'pro';
-        const durationSec = (args.durationSec as number) ?? 10;
+        const quality = normalizeQualityArg(args.quality);
+        const durationSec = normalizeDurationArg(args.durationSec);
+        const placement = normalizePlacementArg(args.placement);
 
         const estimate = await invoke<{
           estimatedCents: number;
@@ -140,13 +147,14 @@ const GENERATION_TOOLS: ToolDefinition[] = [
         const store = useVideoGenStore.getState();
         const jobId = await store.submitGeneration({
           prompt,
-          mode: (args.mode as 'text_to_video' | 'image_to_video' | 'multimodal') ?? undefined,
-          quality: (args.quality as 'basic' | 'pro' | 'cinema') ?? undefined,
-          durationSec: (args.durationSec as number) ?? undefined,
+          mode: normalizeModeArg(args.mode),
+          quality,
+          durationSec,
           aspectRatio: (args.aspectRatio as string) ?? undefined,
           referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
           referenceVideos: referenceVideos.length > 0 ? referenceVideos : undefined,
           referenceAudio: referenceAudio.length > 0 ? referenceAudio : undefined,
+          placement,
         });
 
         return {
@@ -154,6 +162,7 @@ const GENERATION_TOOLS: ToolDefinition[] = [
           result: {
             jobId,
             estimatedCostCents: estimate.estimatedCents,
+            placement,
             message: `Video generation submitted (est. $${(estimate.estimatedCents / 100).toFixed(2)}). Use check_generation_status with jobId "${jobId}" to monitor progress.`,
           },
         };
@@ -299,6 +308,48 @@ const GENERATION_TOOLS: ToolDefinition[] = [
     },
   },
 ];
+
+function normalizePlacementArg(value: unknown): VideoGenPlacementRequest | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const sequenceId = typeof raw.sequenceId === 'string' ? raw.sequenceId.trim() : '';
+  const trackId = typeof raw.trackId === 'string' ? raw.trackId.trim() : '';
+  if (!sequenceId || !trackId) {
+    return null;
+  }
+
+  const timelineStart =
+    typeof raw.timelineStart === 'number' && Number.isFinite(raw.timelineStart)
+      ? Math.max(0, raw.timelineStart)
+      : 0;
+
+  return {
+    sequenceId,
+    trackId,
+    timelineStart,
+    markerId: typeof raw.markerId === 'string' && raw.markerId.trim() ? raw.markerId.trim() : null,
+    removeMarkerOnPlace: raw.removeMarkerOnPlace !== false,
+  };
+}
+
+function normalizeModeArg(value: unknown): 'text_to_video' | 'image_to_video' | 'multimodal' {
+  return value === 'image_to_video' || value === 'multimodal' || value === 'text_to_video'
+    ? value
+    : 'text_to_video';
+}
+
+function normalizeQualityArg(value: unknown): 'basic' | 'pro' | 'cinema' {
+  return value === 'basic' || value === 'cinema' || value === 'pro' ? value : 'pro';
+}
+
+function normalizeDurationArg(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.min(120, Math.max(5, value))
+    : 10;
+}
 
 // =============================================================================
 // Registration Functions
