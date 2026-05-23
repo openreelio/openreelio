@@ -3,7 +3,7 @@
  *
  * Exports all tool modules for the agent system.
  *
- * When USE_META_TOOLS is enabled, the 6 consolidated meta-tools are
+ * When USE_META_TOOLS is enabled, consolidated meta-tools are
  * registered ON TOP of individual tools. The LLM sees only the meta-tools,
  * and each meta-tool dispatches to the underlying individual tool handler.
  */
@@ -15,6 +15,10 @@ import { registerCaptionTools, unregisterCaptionTools } from './captionTools';
 import { registerEffectTools, unregisterEffectTools } from './effectTools';
 import { registerTransitionTools, unregisterTransitionTools } from './transitionTools';
 import { registerGenerationTools, unregisterGenerationTools } from './generationTools';
+import {
+  registerGenerativeTimelineTools,
+  unregisterGenerativeTimelineTools,
+} from './generativeTimelineTools';
 import { registerAssetDiscoveryTools, unregisterAssetDiscoveryTools } from './assetDiscoveryTools';
 import { registerWorkspaceTools, unregisterWorkspaceTools } from './workspaceTools';
 import { registerMediaAnalysisTools, unregisterMediaAnalysisTools } from './mediaAnalysisTools';
@@ -52,6 +56,12 @@ export {
 } from './generationTools';
 
 export {
+  registerGenerativeTimelineTools,
+  unregisterGenerativeTimelineTools,
+  getGenerativeTimelineToolNames,
+} from './generativeTimelineTools';
+
+export {
   registerAssetDiscoveryTools,
   unregisterAssetDiscoveryTools,
   getAssetDiscoveryToolNames,
@@ -81,7 +91,7 @@ let metaToolsRegistered = false;
  * Register all agent tools with the global registry.
  *
  * Individual tools are always registered (they serve as the execution layer).
- * When USE_META_TOOLS is enabled, the 6 meta-tools are additionally registered
+ * When USE_META_TOOLS is enabled, the meta-tools are additionally registered
  * and the Planner will expose only the meta-tools to the LLM.
  *
  * Each registration is isolated so a single module failure
@@ -97,6 +107,7 @@ export function registerAllTools(): void {
     ['effect', registerEffectTools],
     ['transition', registerTransitionTools],
     ['assetDiscovery', registerAssetDiscoveryTools],
+    ['generativeTimeline', registerGenerativeTimelineTools],
     ['workspace', registerWorkspaceTools],
     ['mediaAnalysis', registerMediaAnalysisTools],
   ];
@@ -127,7 +138,7 @@ export function registerAllTools(): void {
     try {
       registerMetaTools();
       metaToolsRegistered = true;
-      logger.info('Meta-tools enabled: LLM will see 6 consolidated tools');
+      logger.info('Meta-tools enabled: LLM will see consolidated tools');
     } catch (error) {
       logger.error('Failed to register meta-tools', {
         error: error instanceof Error ? error.message : String(error),
@@ -160,6 +171,7 @@ export function unregisterAllTools(): void {
     ['effect', unregisterEffectTools],
     ['transition', unregisterTransitionTools],
     ['assetDiscovery', unregisterAssetDiscoveryTools],
+    ['generativeTimeline', unregisterGenerativeTimelineTools],
     ['workspace', unregisterWorkspaceTools],
     ['mediaAnalysis', unregisterMediaAnalysisTools],
   ];

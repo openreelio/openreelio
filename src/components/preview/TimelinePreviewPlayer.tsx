@@ -27,7 +27,14 @@ import { extractTextDataFromClipWithMap, renderTextToCanvas } from '@/utils/text
 import { getClipSourceTimeAtTimelineTime, isClipActiveAtTime } from '@/utils/clipTiming';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { getEffectiveBlendMode } from '@/utils/blendModes';
+import {
+  captionColorToRgba,
+  getCaptionFontWeightNumber,
+  normalizeCaptionPosition as normalizeCaptionPositionValue,
+  normalizeCaptionStyle as normalizeCaptionStyleValue,
+} from '@/utils/captionStyle';
 import { SeekBar } from './SeekBar';
+import { TextPlacementOverlay, type TextPlacementCommitPayload } from './TextPlacementOverlay';
 import { TransformOverlay } from './TransformOverlay';
 import { isTextClip } from '@/types';
 import type {
@@ -65,6 +72,10 @@ export interface TimelinePreviewPlayerProps {
   onEnded?: () => void;
   /** Callback when frame is rendered */
   onFrameRender?: (time: number) => void;
+  /** Whether the preview should accept click-to-place text input */
+  textPlacementModeActive?: boolean;
+  /** Commit handler for text entered directly on the preview */
+  onTextPlacementCommit?: (payload: TextPlacementCommitPayload) => void | Promise<void>;
 }
 
 /** Clip info with resolved data for rendering */
@@ -225,6 +236,8 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   height = DEFAULT_HEIGHT,
   onEnded,
   onFrameRender,
+  textPlacementModeActive = false,
+  onTextPlacementCommit,
 }: TimelinePreviewPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -432,10 +445,13 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         depth: number,
       ): Promise<boolean> => {
         if (depth > MAX_COMPOUND_RENDER_DEPTH) {
-          console.warn('[TimelinePreviewPlayer] Skipped nested compound render beyond depth limit', {
-            sequenceId: sequence.id,
-            depth,
-          });
+          console.warn(
+            '[TimelinePreviewPlayer] Skipped nested compound render beyond depth limit',
+            {
+              sequenceId: sequence.id,
+              depth,
+            },
+          );
           return true;
         }
 
@@ -667,7 +683,14 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       onFrameRender?.(time);
     },
-    [activeSequence, getActiveClipsAtTime, extractFrameForAsset, onFrameRender, sequences, textClipDataById],
+    [
+      activeSequence,
+      getActiveClipsAtTime,
+      extractFrameForAsset,
+      onFrameRender,
+      sequences,
+      textClipDataById,
+    ],
   );
 
   // Playback loop integration
@@ -874,7 +897,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       ref={containerRef}
       data-testid="timeline-preview-player"
       className={`relative isolate bg-black overflow-hidden ${className}`}
-      style={{ aspectRatio }}
+      style={{ aspectRatio, cursor: textPlacementModeActive ? 'text' : undefined }}
       tabIndex={0}
       role="region"
       aria-label="Timeline preview"
@@ -899,6 +922,14 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         displayScale={overlayDisplayScale}
         panX={0}
         panY={0}
+        zIndex={30}
+      />
+
+      <TextPlacementOverlay
+        active={textPlacementModeActive}
+        aspectRatio={aspectRatio}
+        onCommit={onTextPlacementCommit}
+        zIndex={40}
       />
 
       {/* Loading Indicator */}
@@ -938,7 +969,10 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       {/* Controls */}
       {showControls && (
-        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-2">
+        <div
+          className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-2"
+          style={{ zIndex: 50 }}
+        >
           {/* Seek Bar */}
           <div className="mb-2">
             <SeekBar
@@ -1013,20 +1047,6 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 // Helpers
 // =============================================================================
 
-const DEFAULT_CAPTION_STYLE: CaptionStyle = {
-  fontFamily: 'Arial',
-  fontSize: 48,
-  fontWeight: 'normal',
-  color: { r: 255, g: 255, b: 255, a: 255 },
-  outlineColor: { r: 0, g: 0, b: 0, a: 255 },
-  outlineWidth: 2,
-  shadowColor: { r: 0, g: 0, b: 0, a: 160 },
-  shadowOffset: 2,
-  alignment: 'center',
-  italic: false,
-  underline: false,
-};
-
 const DEFAULT_CAPTION_POSITION: CaptionPosition = {
   type: 'preset',
   vertical: 'bottom',
@@ -1042,66 +1062,71 @@ function clampPercent(value: number, fallback: number): number {
 }
 
 function normalizeCaptionStyle(style: CaptionStyle | undefined): CaptionStyle {
-  if (!style) {
-    return DEFAULT_CAPTION_STYLE;
-  }
-
-  return {
-    ...DEFAULT_CAPTION_STYLE,
-    ...style,
-    color: {
-      ...DEFAULT_CAPTION_STYLE.color,
-      ...style.color,
-    },
-    backgroundColor: style.backgroundColor
-      ? {
-          r: style.backgroundColor.r,
-          g: style.backgroundColor.g,
-          b: style.backgroundColor.b,
-          a: style.backgroundColor.a,
-        }
-      : undefined,
-    outlineColor: style.outlineColor
-      ? {
-          r: style.outlineColor.r,
-          g: style.outlineColor.g,
-          b: style.outlineColor.b,
-          a: style.outlineColor.a,
-        }
-      : undefined,
-    shadowColor: style.shadowColor
-      ? {
-          r: style.shadowColor.r,
-          g: style.shadowColor.g,
-          b: style.shadowColor.b,
-          a: style.shadowColor.a,
-        }
-      : undefined,
-  };
+  return normalizeCaptionStyleValue(style);
 }
 
 function normalizeCaptionPosition(position: CaptionPosition | undefined): CaptionPosition {
-  if (!position) {
-    return DEFAULT_CAPTION_POSITION;
-  }
-
-  if (position.type === 'custom') {
-    return {
-      type: 'custom',
-      xPercent: clampPercent(position.xPercent, 50),
-      yPercent: clampPercent(position.yPercent, 90),
-    };
-  }
-
-  return {
-    type: 'preset',
-    vertical: position.vertical,
-    marginPercent: clampPercent(position.marginPercent, 5),
-  };
+  return normalizeCaptionPositionValue(position);
 }
 
 function toRgba(color: { r: number; g: number; b: number; a: number }): string {
-  return `rgba(${color.r}, ${color.g}, ${color.b}, ${color.a / 255})`;
+  return captionColorToRgba(color);
+}
+
+function measureCaptionLineWidth(
+  ctx: CanvasRenderingContext2D,
+  line: string,
+  letterSpacing: number,
+): number {
+  const characters = Array.from(line);
+  if (characters.length <= 1 || letterSpacing === 0) {
+    return ctx.measureText(line).width;
+  }
+
+  return (
+    characters.reduce((width, character) => width + ctx.measureText(character).width, 0) +
+    letterSpacing * (characters.length - 1)
+  );
+}
+
+function drawCaptionLine(
+  ctx: CanvasRenderingContext2D,
+  line: string,
+  x: number,
+  y: number,
+  alignment: CanvasTextAlign,
+  letterSpacing: number,
+  mode: 'fill' | 'stroke',
+): void {
+  const characters = Array.from(line);
+  if (characters.length <= 1 || letterSpacing === 0) {
+    if (mode === 'stroke') {
+      ctx.strokeText(line, x, y);
+    } else {
+      ctx.fillText(line, x, y);
+    }
+    return;
+  }
+
+  const originalAlign = ctx.textAlign;
+  const totalWidth = measureCaptionLineWidth(ctx, line, letterSpacing);
+  let currentX = x;
+  if (alignment === 'center') {
+    currentX = x - totalWidth / 2;
+  } else if (alignment === 'right') {
+    currentX = x - totalWidth;
+  }
+
+  ctx.textAlign = 'left';
+  for (const character of characters) {
+    if (mode === 'stroke') {
+      ctx.strokeText(character, currentX, y);
+    } else {
+      ctx.fillText(character, currentX, y);
+    }
+    currentX += ctx.measureText(character).width + letterSpacing;
+  }
+  ctx.textAlign = originalAlign;
 }
 
 function renderCaptionClipToCanvas(
@@ -1123,10 +1148,10 @@ function renderCaptionClipToCanvas(
   }
 
   const fontSizePx = Math.max(12, (style.fontSize * canvasHeight) / 1080);
-  const fontWeight =
-    style.fontWeight === 'bold' ? '700' : style.fontWeight === 'light' ? '300' : '400';
+  const fontWeight = String(getCaptionFontWeightNumber(style));
   const fontStyle = style.italic ? 'italic ' : '';
-  const lineHeight = fontSizePx * 1.2;
+  const lineHeight = fontSizePx * (style.lineHeight ?? 1.2);
+  const letterSpacing = style.letterSpacing ?? 0;
 
   let xPercent = 50;
   if (style.alignment === 'left') {
@@ -1153,15 +1178,15 @@ function renderCaptionClipToCanvas(
   const firstLineY = textY - totalHeight / 2 + lineHeight / 2;
 
   ctx.save();
-  ctx.globalAlpha = clip.opacity;
+  ctx.globalAlpha = clip.opacity * (style.opacity ?? 1);
   ctx.font = `${fontStyle}${fontWeight} ${fontSizePx}px ${style.fontFamily}`;
   ctx.textAlign = style.alignment;
   ctx.textBaseline = 'middle';
 
   if (style.backgroundColor) {
-    const padding = fontSizePx * 0.25;
+    const padding = Math.max(0, style.backgroundPadding ?? fontSizePx * 0.25);
     const maxLineWidth = lines.reduce((maxWidth, line) => {
-      return Math.max(maxWidth, ctx.measureText(line).width);
+      return Math.max(maxWidth, measureCaptionLineWidth(ctx, line, letterSpacing));
     }, 0);
 
     let bgX = textX - maxLineWidth / 2 - padding;
@@ -1180,11 +1205,11 @@ function renderCaptionClipToCanvas(
     );
   }
 
-  if (style.shadowColor && style.shadowOffset > 0) {
+  if (style.shadowColor) {
     ctx.shadowColor = toRgba(style.shadowColor);
-    ctx.shadowOffsetX = style.shadowOffset;
-    ctx.shadowOffsetY = style.shadowOffset;
-    ctx.shadowBlur = style.shadowOffset;
+    ctx.shadowOffsetX = style.shadowOffsetX ?? style.shadowOffset;
+    ctx.shadowOffsetY = style.shadowOffsetY ?? style.shadowOffset;
+    ctx.shadowBlur = style.shadowBlur ?? 0;
   }
 
   if (style.outlineColor && style.outlineWidth > 0) {
@@ -1192,7 +1217,15 @@ function renderCaptionClipToCanvas(
     ctx.lineWidth = Math.max(1, style.outlineWidth);
     ctx.lineJoin = 'round';
     lines.forEach((line, index) => {
-      ctx.strokeText(line, textX, firstLineY + index * lineHeight);
+      drawCaptionLine(
+        ctx,
+        line,
+        textX,
+        firstLineY + index * lineHeight,
+        style.alignment,
+        letterSpacing,
+        'stroke',
+      );
     });
     ctx.shadowColor = 'transparent';
     ctx.shadowOffsetX = 0;
@@ -1203,20 +1236,22 @@ function renderCaptionClipToCanvas(
   ctx.fillStyle = toRgba(style.color);
   lines.forEach((line, index) => {
     const lineY = firstLineY + index * lineHeight;
-    ctx.fillText(line, textX, lineY);
+    drawCaptionLine(ctx, line, textX, lineY, style.alignment, letterSpacing, 'fill');
 
     if (style.underline) {
-      const metrics = ctx.measureText(line);
-      let underlineStartX = textX - metrics.width / 2;
+      const lineWidth = measureCaptionLineWidth(ctx, line, letterSpacing);
+      let underlineStartX = textX - lineWidth / 2;
       if (style.alignment === 'left') {
         underlineStartX = textX;
       } else if (style.alignment === 'right') {
-        underlineStartX = textX - metrics.width;
+        underlineStartX = textX - lineWidth;
+      } else {
+        underlineStartX = textX - lineWidth / 2;
       }
       const underlineY = lineY + fontSizePx * 0.35;
       ctx.beginPath();
       ctx.moveTo(underlineStartX, underlineY);
-      ctx.lineTo(underlineStartX + metrics.width, underlineY);
+      ctx.lineTo(underlineStartX + lineWidth, underlineY);
       ctx.lineWidth = Math.max(1, fontSizePx * 0.06);
       ctx.strokeStyle = toRgba(style.color);
       ctx.stroke();

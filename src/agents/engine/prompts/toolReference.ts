@@ -117,6 +117,13 @@ const TEXT_ACTIONS = `## Text Actions (meta-tool: text, require sequenceId)
 - add_captions_from_transcription(segments, trackId?) → create captions from timed transcript segments
 - import_captions_from_file(relativePath, format?, trackId?) → import SRT/VTT subtitle files from the workspace`;
 
+const GENERATE_ACTIONS = `## Generate Actions (meta-tool: generate)
+- generate_timeline_media(prompt, mediaType?, provider?, sequenceId?, trackId?, timelineStart?) → submit provider-neutral generation or SFX discovery; video jobs can create a pending marker and auto-place when ready
+- resolve_generation_job(jobId, placeWhenComplete?) → sync long-running generation status; pending states are successful and completed jobs expose assetId
+- search_sound_for_scene(sceneDescription, mood?, durationSec?, tags?) → search audio/SFX candidates with license policy; does not import
+- import_asset_candidate(candidate, licenseAck=true) → import an approved stock candidate with license snapshot; rejects blocked policy candidates
+- generate_video/check_generation_status/estimate_generation_cost/cancel_generation → provider job primitives used by orchestration when video generation is enabled`;
+
 const WORKSPACE_READ_TOOLS = `## Workspace Document Tools (read-only)
 - list_workspace_documents / read_workspace_document`;
 
@@ -135,6 +142,8 @@ const TOOL_OUTPUT_CONTRACTS = buildToolOutputContractSection([
   'insert_clip',
   'insert_clip_from_file',
   'split_clip',
+  'generate_timeline_media',
+  'resolve_generation_job',
 ]);
 
 const EDITING_CONCEPTS = `## Editing Concepts
@@ -155,7 +164,9 @@ const COMMON_WORKFLOWS = `## Common Workflows
 7. Track-specific clip lookup: get_track_clips(trackId) → reference clip IDs via data.clips[n].id
 8. Time-based clip lookup across tracks: get_clips_at_time(time) → reference clip IDs via data[n].id (never data[n].clipId)
 9. Deep source inspection/editing: find_workspace_file or get_asset_catalog → read_source_analysis_report (this already writes the default ".analysis.md" report beside the asset) → check data.quality.status and do not silently edit from an insufficient/partial report; refresh or use build_source_selects with analyzeMissing=true when source selection depends on transcript or frame semantics → search_source_analysis_report / search_source_library → build_source_selects or edit actions
-10. If the user asks to save the analysis as a file but does not specify a location, do not add a separate write step: source-analysis tools already save "<asset-name>.analysis.md" beside the asset by default. Use write_workspace_document only for a custom second copy/path.`;
+10. Generative edit: generate_timeline_media with sequenceId/trackId/timelineStart creates a pending timeline marker and stores placement intent; the generation store imports and places the asset when the provider job completes. Use resolve_generation_job for explicit status checks.
+11. SFX discovery/import: search_sound_for_scene → present usable candidates and license policy → import_asset_candidate only with licenseAck=true → insert_clip on an audio track.
+12. If the user asks to save the analysis as a file but does not specify a location, do not add a separate write step: source-analysis tools already save "<asset-name>.analysis.md" beside the asset by default. Use write_workspace_document only for a custom second copy/path.`;
 
 const CLI_REFERENCE = `## CLI (headless alternative)
 openreelio-cli <group> <command> --path <dir> [--args]
@@ -178,6 +189,7 @@ function getSectionsForRole(role: ToolReferenceRole): string[] {
         AUDIO_ACTIONS,
         EFFECTS_ACTIONS,
         TEXT_ACTIONS,
+        GENERATE_ACTIONS,
         WORKSPACE_TOOLS,
         EDITING_CONCEPTS,
         COMMON_WORKFLOWS,
@@ -191,6 +203,7 @@ function getSectionsForRole(role: ToolReferenceRole): string[] {
         AUDIO_ACTIONS,
         EFFECTS_ACTIONS,
         TEXT_ACTIONS,
+        GENERATE_ACTIONS,
         WORKSPACE_READ_TOOLS,
         EDITING_CONCEPTS,
         COMMON_WORKFLOWS,
@@ -210,7 +223,14 @@ function getSectionsForRole(role: ToolReferenceRole): string[] {
         CLI_REFERENCE,
       ];
     case 'audio':
-      return [QUERY_ACTIONS, TOOL_OUTPUT_CONTRACTS, AUDIO_ACTIONS, WORKSPACE_TOOLS, CLI_REFERENCE];
+      return [
+        QUERY_ACTIONS,
+        TOOL_OUTPUT_CONTRACTS,
+        AUDIO_ACTIONS,
+        GENERATE_ACTIONS,
+        WORKSPACE_TOOLS,
+        CLI_REFERENCE,
+      ];
     case 'captioner':
       return [QUERY_ACTIONS, TOOL_OUTPUT_CONTRACTS, TEXT_ACTIONS, WORKSPACE_TOOLS, CLI_REFERENCE];
   }

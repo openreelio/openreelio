@@ -9,6 +9,7 @@ export type OrchestrationPlaybookId =
   | 'timeline_interval_split'
   | 'insert_and_segment'
   | 'stock_media_search'
+  | 'sound_effect_search'
   | 'auto_caption'
   | 'music_bed'
   | 'reference_style_transfer';
@@ -128,6 +129,18 @@ const MUSIC_BED_KEYWORDS = [
   /\badd\s+bgm\b/i,
   /배경\s*음악\s*(?:추가|삽입)/i,
   /음악\s*(?:추가|넣|삽입)/i,
+];
+
+const SOUND_EFFECT_KEYWORDS = [
+  /\bsound\s+effects?\b/i,
+  /\bsfx\b/i,
+  /\bfoley\b/i,
+  /\bwhoosh\b/i,
+  /\bimpact\b/i,
+  /\bambien(?:t|ce)\b/i,
+  /효과음/i,
+  /폴리/i,
+  /소리\s*효과/i,
 ];
 
 const AUTO_CAPTION_KEYWORDS = [
@@ -294,6 +307,11 @@ export function buildOrchestrationPlaybook(
   const musicBed = buildMusicBedPlaybook(playbookContext);
   if (musicBed) {
     return musicBed;
+  }
+
+  const soundEffectSearch = buildSoundEffectSearchPlaybook(playbookContext);
+  if (soundEffectSearch) {
+    return soundEffectSearch;
   }
 
   const referenceStyleTransfer = buildReferenceStyleTransferPlaybook(playbookContext);
@@ -599,6 +617,48 @@ function buildMusicBedPlaybook(
       estimatedTotalDuration: estimateTotalDuration(steps),
       requiresApproval: false,
       rollbackStrategy: 'Remove inserted music clip and restore previous volume level.',
+    },
+  };
+}
+
+function buildSoundEffectSearchPlaybook(
+  playbookContext: PlaybookContext,
+): OrchestrationPlaybookMatch | null {
+  const { text, thought, toolExecutor } = playbookContext;
+
+  if (!matchesAny(text, SOUND_EFFECT_KEYWORDS) || !matchesAny(text, SEARCH_KEYWORDS)) {
+    return null;
+  }
+
+  if (!hasTools(toolExecutor, ['search_sound_for_scene'])) {
+    return null;
+  }
+
+  const sceneDescription =
+    extractSearchQuery(thought) || sanitizePrompt(thought.understanding) || 'cinematic sound effect';
+  const steps: PlanStep[] = [
+    {
+      id: 'playbook_search_sound_effect',
+      tool: 'search_sound_for_scene',
+      args: {
+        sceneDescription,
+        count: 8,
+      },
+      description: `Search licensed sound-effect candidates for "${sceneDescription}"`,
+      riskLevel: 'low',
+      estimatedDuration: 250,
+    },
+  ];
+
+  return {
+    id: 'sound_effect_search',
+    confidence: 0.86,
+    plan: {
+      goal: `Find sound-effect candidates matching "${sceneDescription}"`,
+      steps,
+      estimatedTotalDuration: estimateTotalDuration(steps),
+      requiresApproval: false,
+      rollbackStrategy: 'No timeline changes are applied during sound-effect search.',
     },
   };
 }
@@ -967,10 +1027,19 @@ function buildGenerateAndPlacePlaybook(
   playbookContext: PlaybookContext,
 ): OrchestrationPlaybookMatch | null {
   const { text, context, thought, toolExecutor } = playbookContext;
+  const hasGenerativeTimelineTools = hasTools(toolExecutor, [
+    'generate_timeline_media',
+    'generate_video',
+  ]);
+  const hasLegacyGenerateTools = hasTools(toolExecutor, [
+    'generate_video',
+    'check_generation_status',
+    'insert_clip',
+  ]);
 
   if (
     !matchesAll(text, [GENERATE_KEYWORDS, VIDEO_KEYWORDS, PLACE_KEYWORDS]) ||
-    !hasTools(toolExecutor, ['generate_video', 'check_generation_status', 'insert_clip'])
+    (!hasGenerativeTimelineTools && !hasLegacyGenerateTools)
   ) {
     return null;
   }
@@ -991,6 +1060,43 @@ function buildGenerateAndPlacePlaybook(
 
   const generationPrompt = sanitizePrompt(thought.understanding) || 'Create a cinematic short clip';
   const durationSec = parseDurationSeconds(text) ?? 6;
+
+  if (hasGenerativeTimelineTools) {
+    const steps: PlanStep[] = [
+      {
+        id: 'playbook_generate_timeline_media',
+        tool: 'generate_timeline_media',
+        args: {
+          prompt: generationPrompt,
+          mediaType: 'video',
+          provider: 'auto',
+          quality: 'pro',
+          durationSec,
+          sequenceId,
+          trackId: targetTrackId,
+          timelineStart: clampTimelineStart(context.playheadPosition, context.timelineDuration),
+          placementMode: 'pending',
+          autoPlaceWhenReady: true,
+        },
+        description: 'Submit provider-neutral video generation and visualize pending placement',
+        riskLevel: 'high',
+        estimatedDuration: 700,
+      },
+    ];
+
+    return {
+      id: 'generate_and_place',
+      confidence: 0.91,
+      plan: {
+        goal: 'Generate a new video asset, show pending timeline state, and place it when ready',
+        steps,
+        estimatedTotalDuration: estimateTotalDuration(steps),
+        requiresApproval: true,
+        rollbackStrategy:
+          'Cancel generation if still running; remove pending marker or inserted generated clip if already placed.',
+      },
+    };
+  }
 
   const steps: PlanStep[] = [
     {

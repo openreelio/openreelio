@@ -28,7 +28,7 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       expect(screen.getByTestId('text-inspector')).toBeInTheDocument();
@@ -41,7 +41,7 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       expect(screen.getByText('Content')).toBeInTheDocument();
@@ -57,7 +57,7 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       const fontSelector = screen.getByRole('combobox');
@@ -73,10 +73,7 @@ describe('TextInspector', () => {
       };
 
       render(
-        <TextInspector
-          selectedTextClip={titleClip}
-          onTextDataChange={mockOnTextDataChange}
-        />
+        <TextInspector selectedTextClip={titleClip} onTextDataChange={mockOnTextDataChange} />,
       );
 
       expect(screen.getByTestId('text-content-input')).toHaveValue('Title Text');
@@ -91,7 +88,7 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       const textarea = screen.getByTestId('text-content-input');
@@ -114,7 +111,7 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       const boldButton = screen.getByTitle('Bold');
@@ -124,7 +121,7 @@ describe('TextInspector', () => {
         'clip-1',
         expect.objectContaining({
           style: expect.objectContaining({ bold: true }),
-        })
+        }),
       );
     });
 
@@ -135,7 +132,7 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       const italicButton = screen.getByTitle('Italic');
@@ -145,7 +142,7 @@ describe('TextInspector', () => {
         'clip-1',
         expect.objectContaining({
           style: expect.objectContaining({ italic: true }),
-        })
+        }),
       );
     });
 
@@ -156,7 +153,7 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       const underlineButton = screen.getByTitle('Underline');
@@ -166,7 +163,7 @@ describe('TextInspector', () => {
         'clip-1',
         expect.objectContaining({
           style: expect.objectContaining({ underline: true }),
-        })
+        }),
       );
     });
 
@@ -177,7 +174,7 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       const leftAlignButton = screen.getByTitle('Align left');
@@ -187,7 +184,7 @@ describe('TextInspector', () => {
         'clip-1',
         expect.objectContaining({
           style: expect.objectContaining({ alignment: 'left' }),
-        })
+        }),
       );
     });
 
@@ -198,7 +195,7 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       const fontSelector = screen.getByRole('combobox');
@@ -208,8 +205,26 @@ describe('TextInspector', () => {
         'clip-1',
         expect.objectContaining({
           style: expect.objectContaining({ fontFamily: 'Helvetica' }),
-        })
+        }),
       );
+    });
+
+    it('should allow custom installed font family names', async () => {
+      const user = userEvent.setup();
+
+      render(
+        <TextInspector
+          selectedTextClip={defaultTextClip}
+          onTextDataChange={mockOnTextDataChange}
+        />,
+      );
+
+      const fontInput = screen.getByTestId('text-font-family-input');
+      await user.clear(fontInput);
+      await user.type(fontInput, 'Brand Display');
+
+      const lastCall = mockOnTextDataChange.mock.calls[mockOnTextDataChange.mock.calls.length - 1];
+      expect(lastCall[1].style.fontFamily).toBe('Brand Display');
     });
   });
 
@@ -221,16 +236,14 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       await user.click(screen.getByTitle('Enable shadow'));
 
       // Should have been called with shadow data
       const calls = mockOnTextDataChange.mock.calls;
-      const shadowCall = calls.find(
-        (call) => call[1].shadow !== undefined
-      );
+      const shadowCall = calls.find((call) => call[1].shadow !== undefined);
       expect(shadowCall).toBeDefined();
     });
   });
@@ -243,16 +256,14 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       await user.click(screen.getByTitle('Enable outline'));
 
       // Should have been called with outline data
       const calls = mockOnTextDataChange.mock.calls;
-      const outlineCall = calls.find(
-        (call) => call[1].outline !== undefined
-      );
+      const outlineCall = calls.find((call) => call[1].outline !== undefined);
       expect(outlineCall).toBeDefined();
     });
   });
@@ -263,7 +274,7 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       const sliders = screen.getAllByRole('slider');
@@ -277,7 +288,7 @@ describe('TextInspector', () => {
         'clip-1',
         expect.objectContaining({
           position: expect.objectContaining({ x: 0.25 }),
-        })
+        }),
       );
     });
   });
@@ -314,10 +325,7 @@ describe('TextInspector', () => {
       };
 
       render(
-        <TextInspector
-          selectedTextClip={customTextClip}
-          onTextDataChange={mockOnTextDataChange}
-        />
+        <TextInspector selectedTextClip={customTextClip} onTextDataChange={mockOnTextDataChange} />,
       );
 
       const resetButton = screen.getByTitle('Reset to defaults');
@@ -335,7 +343,7 @@ describe('TextInspector', () => {
           }),
           rotation: 0,
           opacity: 1.0,
-        })
+        }),
       );
     });
   });
@@ -347,7 +355,7 @@ describe('TextInspector', () => {
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
           readOnly={true}
-        />
+        />,
       );
 
       const textarea = screen.getByTestId('text-content-input');
@@ -367,7 +375,7 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={defaultTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       // Verify initial content
@@ -385,7 +393,7 @@ describe('TextInspector', () => {
         <TextInspector
           selectedTextClip={updatedTextClip}
           onTextDataChange={mockOnTextDataChange}
-        />
+        />,
       );
 
       // Verify content updated

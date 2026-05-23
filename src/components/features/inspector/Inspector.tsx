@@ -311,6 +311,20 @@ export function Inspector({
   }
 
   // ===========================================================================
+  // Render Caption Properties
+  // ===========================================================================
+
+  if (selectedCaption) {
+    return (
+      <CaptionInspectorPanel
+        selectedCaption={selectedCaption}
+        onCaptionChange={onCaptionChange}
+        readOnly={readOnly}
+      />
+    );
+  }
+
+  // ===========================================================================
   // Render Clip Properties
   // ===========================================================================
 
@@ -350,20 +364,6 @@ export function Inspector({
 
   if (selectedAsset) {
     return <AssetInspectorPanel selectedAsset={selectedAsset} />;
-  }
-
-  // ===========================================================================
-  // Render Caption Properties
-  // ===========================================================================
-
-  if (selectedCaption) {
-    return (
-      <CaptionInspectorPanel
-        selectedCaption={selectedCaption}
-        onCaptionChange={onCaptionChange}
-        readOnly={readOnly}
-      />
-    );
   }
 
   return <></>;

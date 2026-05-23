@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { globalToolRegistry, type AgentContext } from '@/agents';
 import { registerCaptionTools, unregisterCaptionTools } from './captionTools';
@@ -93,15 +93,9 @@ function createSequence(overrides: Partial<Sequence> = {}): Sequence {
 describe('captionTools', () => {
   const executeCommandMock = vi.fn();
 
-  beforeAll(() => {
-    registerCaptionTools();
-  });
-
-  afterAll(() => {
-    unregisterCaptionTools();
-  });
-
   beforeEach(() => {
+    globalToolRegistry.clear();
+    registerCaptionTools();
     vi.clearAllMocks();
     vi.mocked(readWorkspaceDocumentFromBackend).mockResolvedValue({
       relativePath: 'captions/example.srt',
@@ -147,6 +141,11 @@ describe('captionTools', () => {
     } as unknown as ReturnType<typeof useProjectStore.getState>);
   });
 
+  afterEach(() => {
+    unregisterCaptionTools();
+    globalToolRegistry.clear();
+  });
+
   it('should send parsed color and top-level position in style_caption', async () => {
     const tool = globalToolRegistry.get('style_caption');
     expect(tool).toBeDefined();
@@ -159,6 +158,14 @@ describe('captionTools', () => {
         backgroundColor: '#00000066',
         position: 'top',
         fontSize: 42,
+        fontWeight: 700,
+        italic: true,
+        outlineColor: '#445566',
+        outlineWidth: 3,
+        shadowColor: '#00000099',
+        shadowOffsetX: 4,
+        shadowOffsetY: 6,
+        lineHeight: 1.4,
       },
       CTX,
     );
@@ -178,8 +185,16 @@ describe('captionTools', () => {
       captionId: 'cap-001',
       style: {
         fontSize: 42,
+        fontWeight: 700,
+        italic: true,
         color: { r: 17, g: 34, b: 51, a: 204 },
         backgroundColor: { r: 0, g: 0, b: 0, a: 102 },
+        outlineColor: { r: 68, g: 85, b: 102, a: 255 },
+        outlineWidth: 3,
+        shadowColor: { r: 0, g: 0, b: 0, a: 153 },
+        shadowOffsetX: 4,
+        shadowOffsetY: 6,
+        lineHeight: 1.4,
       },
       position: {
         type: 'preset',
@@ -189,6 +204,34 @@ describe('captionTools', () => {
     });
 
     expect((command.payload.style as Record<string, unknown>).position).toBeUndefined();
+  });
+
+  it('should send custom position objects in style_caption', async () => {
+    const tool = globalToolRegistry.get('style_caption');
+    expect(tool).toBeDefined();
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        captionId: 'cap-001',
+        xPercent: 42,
+        yPercent: 84,
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+
+    const command = executeCommandMock.mock.calls[0][0] as {
+      type: string;
+      payload: Record<string, unknown>;
+    };
+
+    expect(command.payload.position).toEqual({
+      type: 'custom',
+      xPercent: 42,
+      yPercent: 84,
+    });
   });
 
   it('should reject invalid caption color in style_caption', async () => {

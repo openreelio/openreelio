@@ -176,4 +176,20 @@ describe('permissionSubject', () => {
     expect(generationSubject.subject).toBe('external_provider.cancel#job:job-42');
     expect(generationSubject.subjectType).toBe('resource');
   });
+
+  it('treats generation resolution placement as a timeline mutation subject', () => {
+    const readSubject = buildPermissionSubject('resolve_generation_job', {
+      jobId: 'job-42',
+    });
+    const placementSubject = buildPermissionSubject('resolve_generation_job', {
+      jobId: 'job-42',
+      sequenceId: 'seq-1',
+      trackId: 'track-1',
+      placeWhenComplete: true,
+    });
+
+    expect(readSubject.subject).toBe('external_provider.status.read#job:job-42');
+    expect(placementSubject.subject).toBe('timeline.clip.create#job:job-42');
+    expect(placementSubject.subjectType).toBe('resource');
+  });
 });

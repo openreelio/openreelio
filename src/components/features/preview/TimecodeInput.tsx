@@ -3,7 +3,7 @@
  * Click to enter edit mode, type SMPTE timecode (HH:MM:SS:FF), press Enter to jump.
  */
 
-import { type FC, useState, useCallback, useRef, useEffect } from 'react';
+import { type FC, useState, useCallback, useRef, useEffect, useLayoutEffect } from 'react';
 import { formatTimecode, parseTimecode, isValidTimecode } from '@/utils/formatters';
 import { PLAYBACK } from '@/constants/preview';
 
@@ -61,10 +61,13 @@ export const TimecodeInput: FC<TimecodeInputProps> = ({
     setEditValue(formatTimecode(currentTime, fps));
     setHasError(false);
     setIsEditing(true);
-    requestAnimationFrame(() => {
-      inputRef.current?.select();
-    });
   }, [currentTime, disabled, fps]);
+
+  useLayoutEffect(() => {
+    if (isEditing) {
+      inputRef.current?.select();
+    }
+  }, [isEditing]);
 
   const cancelEdit = useCallback(() => {
     setIsEditing(false);
@@ -78,12 +81,12 @@ export const TimecodeInput: FC<TimecodeInputProps> = ({
     }
   }, [cancelEdit, disabled, isEditing]);
 
-  const confirmEdit = useCallback(() => {
+  const confirmEdit = useCallback((inputValue = inputRef.current?.value ?? editValue) => {
     if (disabled) {
       return;
     }
 
-    const trimmed = editValue.trim();
+    const trimmed = inputValue.trim();
 
     if (!isValidTimecode(trimmed, fps)) {
       showError();
@@ -104,13 +107,13 @@ export const TimecodeInput: FC<TimecodeInputProps> = ({
   }, [disabled, editValue, fps, duration, onSeek, showError]);
 
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
       // Prevent parent keyboard handlers (JKL shuttle, transport, etc.)
       e.stopPropagation();
 
       if (e.key === 'Enter') {
         e.preventDefault();
-        confirmEdit();
+        confirmEdit(e.currentTarget.value);
       } else if (e.key === 'Escape') {
         e.preventDefault();
         cancelEdit();

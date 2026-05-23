@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { act } from '@testing-library/react';
-import { useEditorToolStore } from './editorToolStore';
+import { TOOL_CONFIGS, getToolCursor, useEditorToolStore } from './editorToolStore';
 
 describe('editorToolStore — editMode', () => {
   beforeEach(() => {
@@ -66,6 +66,24 @@ describe('editorToolStore — editMode', () => {
     });
 
     expect(useEditorToolStore.getState().editMode).toBe('overwrite');
+  });
+});
+
+describe('editorToolStore — text tool', () => {
+  beforeEach(() => {
+    act(() => {
+      useEditorToolStore.getState().reset();
+    });
+  });
+
+  it('exposes the text placement tool with a text cursor', () => {
+    act(() => {
+      useEditorToolStore.getState().setActiveTool('text');
+    });
+
+    expect(useEditorToolStore.getState().activeTool).toBe('text');
+    expect(TOOL_CONFIGS.text.shortcut).toBe('T');
+    expect(getToolCursor('text')).toBe('text');
   });
 });
 

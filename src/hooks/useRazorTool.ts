@@ -272,6 +272,8 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
     switch (activeTool) {
       case 'razor':
         return RAZOR_CURSOR;
+      case 'text':
+        return 'text';
       case 'hand':
         return 'grab';
       case 'slip':

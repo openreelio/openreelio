@@ -1,26 +1,44 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
+  Bold,
   Clock,
   FileText,
   Film,
   Gauge,
   Image as ImageIcon,
   Info,
+  Italic,
   Maximize,
   Music,
+  Palette,
+  Square,
   Type,
+  Underline,
 } from 'lucide-react';
 import { formatDuration } from '@/utils/formatters';
+import {
+  captionColorToHex,
+  getCaptionFontWeightNumber,
+  normalizeCaptionPosition,
+  normalizeCaptionStyle,
+  parseCaptionHexColor,
+} from '@/utils/captionStyle';
 import { EffectsList, SaveEffectPresetDialog } from '../effects';
 import { BlendModePicker } from '../effects/BlendModePicker';
 import { EffectInspector } from '../effects/EffectInspector';
 import type {
   BlendMode,
+  CaptionColor,
   CaptionPosition,
+  CaptionStyle,
   Effect,
   EffectId,
   ParamDef,
   SimpleParamValue,
+  TextAlignment,
 } from '@/types';
 import type { SelectedAsset, SelectedCaption, SelectedClip } from './Inspector';
 
@@ -37,33 +55,6 @@ function getAssetIcon(kind: SelectedAsset['kind']): JSX.Element {
     default:
       return <FileText className="w-4 h-4" />;
   }
-}
-
-function normalizeCaptionPosition(position: CaptionPosition | undefined): CaptionPosition {
-  if (!position) {
-    return {
-      type: 'preset',
-      vertical: 'bottom',
-      marginPercent: 5,
-    };
-  }
-
-  if (position.type === 'custom') {
-    const xPercent = Number.isFinite(position.xPercent) ? position.xPercent : 50;
-    const yPercent = Number.isFinite(position.yPercent) ? position.yPercent : 90;
-    return {
-      type: 'custom',
-      xPercent: Math.max(0, Math.min(100, xPercent)),
-      yPercent: Math.max(0, Math.min(100, yPercent)),
-    };
-  }
-
-  const marginPercent = Number.isFinite(position.marginPercent) ? position.marginPercent : 5;
-  return {
-    type: 'preset',
-    vertical: position.vertical,
-    marginPercent: Math.max(0, Math.min(50, marginPercent)),
-  };
 }
 
 function SpeedInput({
@@ -420,6 +411,152 @@ export function AssetInspectorPanel({ selectedAsset }: AssetInspectorPanelProps)
   );
 }
 
+type CaptionStyleField = keyof Pick<
+  CaptionStyle,
+  'color' | 'backgroundColor' | 'outlineColor' | 'shadowColor'
+>;
+
+const CAPTION_FONT_FAMILIES = [
+  'Arial',
+  'Helvetica',
+  'Verdana',
+  'Inter',
+  'Georgia',
+  'Times New Roman',
+  'Courier New',
+  'Impact',
+  'Noto Sans',
+  'Noto Sans KR',
+];
+
+function InspectorSection({
+  title,
+  icon,
+  children,
+}: {
+  title: string;
+  icon?: JSX.Element;
+  children: ReactNode;
+}): JSX.Element {
+  return (
+    <section className="pt-4 border-t border-editor-border first:border-t-0 first:pt-0">
+      <h4 className="mb-3 flex items-center gap-2 text-xs font-semibold text-editor-text-muted">
+        {icon}
+        {title}
+      </h4>
+      <div className="space-y-3">{children}</div>
+    </section>
+  );
+}
+
+function NumberField({
+  label,
+  value,
+  onChange,
+  min,
+  max,
+  step = 1,
+  unit,
+  disabled,
+  testId,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  min: number;
+  max: number;
+  step?: number;
+  unit?: string;
+  disabled?: boolean;
+  testId?: string;
+}): JSX.Element {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <label className="text-xs text-editor-text-muted">{label}</label>
+      <div className="flex items-center gap-1">
+        <input
+          data-testid={testId}
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          className="w-20 rounded border border-editor-border bg-editor-input px-2 py-1 text-right text-xs text-editor-text focus:border-primary-500 focus:outline-none disabled:opacity-50"
+          value={Number.isFinite(value) ? value : min}
+          onChange={(event) => onChange(Number(event.target.value))}
+          disabled={disabled}
+        />
+        {unit && <span className="w-5 text-[11px] text-editor-text-muted">{unit}</span>}
+      </div>
+    </div>
+  );
+}
+
+function ColorField({
+  label,
+  color,
+  onChange,
+  disabled,
+  testId,
+}: {
+  label: string;
+  color: CaptionColor;
+  onChange: (color: CaptionColor) => void;
+  disabled?: boolean;
+  testId?: string;
+}): JSX.Element {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <label className="text-xs text-editor-text-muted">{label}</label>
+      <input
+        data-testid={testId}
+        type="color"
+        className="h-8 w-12 cursor-pointer rounded border border-editor-border bg-editor-input disabled:cursor-not-allowed disabled:opacity-50"
+        value={captionColorToHex(color)}
+        onChange={(event) => {
+          const parsed = parseCaptionHexColor(event.target.value);
+          if (parsed) {
+            onChange({ ...parsed, a: color.a });
+          }
+        }}
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+
+function StyleToggle({
+  title,
+  active,
+  onClick,
+  disabled,
+  children,
+  testId,
+}: {
+  title: string;
+  active: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+  testId?: string;
+}): JSX.Element {
+  return (
+    <button
+      data-testid={testId}
+      type="button"
+      title={title}
+      onClick={onClick}
+      disabled={disabled}
+      className={`rounded border p-1.5 transition-colors ${
+        active
+          ? 'border-primary-500 bg-primary-500 text-white'
+          : 'border-editor-border bg-editor-input text-editor-text-muted hover:border-primary-500'
+      } disabled:opacity-50`}
+    >
+      {children}
+    </button>
+  );
+}
+
 export interface CaptionInspectorPanelProps {
   selectedCaption: SelectedCaption;
   onCaptionChange?: (captionId: string, property: string, value: unknown) => void;
@@ -432,7 +569,23 @@ export function CaptionInspectorPanel({
   readOnly = false,
 }: CaptionInspectorPanelProps): JSX.Element {
   const captionPosition = normalizeCaptionPosition(selectedCaption.position);
+  const captionStyle = normalizeCaptionStyle(selectedCaption.style);
   const isReadOnly = readOnly || !onCaptionChange;
+
+  const commitCaptionStyle = (updates: Partial<CaptionStyle>): void => {
+    onCaptionChange?.(
+      selectedCaption.id,
+      'style',
+      normalizeCaptionStyle({
+        ...captionStyle,
+        ...updates,
+      }),
+    );
+  };
+
+  const updateCaptionColor = (field: CaptionStyleField, color: CaptionColor | undefined): void => {
+    commitCaptionStyle({ [field]: color } as Partial<CaptionStyle>);
+  };
 
   const commitCaptionPosition = (position: CaptionPosition): void => {
     onCaptionChange?.(selectedCaption.id, 'position', position);
@@ -464,6 +617,11 @@ export function CaptionInspectorPanel({
     });
   };
 
+  const fontWeightValue = getCaptionFontWeightNumber(captionStyle);
+  const hasBackground = Boolean(captionStyle.backgroundColor);
+  const hasOutline = Boolean(captionStyle.outlineColor && captionStyle.outlineWidth > 0);
+  const hasShadow = Boolean(captionStyle.shadowColor);
+
   return (
     <div
       data-testid="inspector"
@@ -476,19 +634,20 @@ export function CaptionInspectorPanel({
         Caption Properties
       </h3>
 
-      <div className="space-y-4">
-        <div className="space-y-2">
+      <div className="space-y-5">
+        <InspectorSection title="Content" icon={<Type className="w-3 h-3" />}>
           <label className="text-xs font-medium text-editor-text-muted">Content</label>
           <textarea
+            data-testid="caption-content-input"
             className="w-full h-24 bg-editor-input bg-opacity-50 border border-editor-border rounded p-2 text-sm text-editor-text focus:border-primary-500 focus:ring-1 focus:ring-primary-500 focus:outline-none resize-none"
             value={selectedCaption.text}
             onChange={(e) => onCaptionChange?.(selectedCaption.id, 'text', e.target.value)}
             placeholder="Enter caption text..."
             disabled={isReadOnly}
           />
-        </div>
+        </InspectorSection>
 
-        <div className="space-y-1">
+        <InspectorSection title="Timing" icon={<Clock className="w-3 h-3" />}>
           <PropertyRow
             label="Start Time"
             value={formatDuration(selectedCaption.startSec)}
@@ -506,9 +665,302 @@ export function CaptionInspectorPanel({
             value={`${(selectedCaption.endSec - selectedCaption.startSec).toFixed(2)}s`}
             testId="caption-duration"
           />
-        </div>
+        </InspectorSection>
 
-        <div className="space-y-2">
+        <InspectorSection title="Font" icon={<Type className="w-3 h-3" />}>
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-xs text-editor-text-muted">Family</label>
+            <input
+              data-testid="caption-font-family-input"
+              type="text"
+              list="caption-font-families"
+              value={captionStyle.fontFamily}
+              className="w-36 rounded border border-editor-border bg-editor-input px-2 py-1 text-xs text-editor-text focus:border-primary-500 focus:outline-none disabled:opacity-50"
+              onChange={(event) => commitCaptionStyle({ fontFamily: event.target.value })}
+              disabled={isReadOnly}
+            />
+            <datalist id="caption-font-families">
+              {CAPTION_FONT_FAMILIES.map((family) => (
+                <option key={family} value={family} />
+              ))}
+            </datalist>
+          </div>
+
+          <NumberField
+            label="Size"
+            value={captionStyle.fontSize}
+            min={1}
+            max={500}
+            unit="pt"
+            testId="caption-font-size"
+            onChange={(fontSize) => commitCaptionStyle({ fontSize })}
+            disabled={isReadOnly}
+          />
+
+          <NumberField
+            label="Weight"
+            value={fontWeightValue}
+            min={100}
+            max={900}
+            step={100}
+            testId="caption-font-weight"
+            onChange={(fontWeight) => commitCaptionStyle({ fontWeight, bold: fontWeight >= 600 })}
+            disabled={isReadOnly}
+          />
+
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-editor-text-muted">Style</label>
+            <div className="flex gap-1">
+              <StyleToggle
+                title="Bold"
+                active={fontWeightValue >= 600}
+                onClick={() =>
+                  commitCaptionStyle({
+                    fontWeight: fontWeightValue >= 600 ? 400 : 700,
+                    bold: fontWeightValue < 600,
+                  })
+                }
+                disabled={isReadOnly}
+                testId="caption-bold-toggle"
+              >
+                <Bold className="h-4 w-4" />
+              </StyleToggle>
+              <StyleToggle
+                title="Italic"
+                active={captionStyle.italic}
+                onClick={() => commitCaptionStyle({ italic: !captionStyle.italic })}
+                disabled={isReadOnly}
+                testId="caption-italic-toggle"
+              >
+                <Italic className="h-4 w-4" />
+              </StyleToggle>
+              <StyleToggle
+                title="Underline"
+                active={captionStyle.underline}
+                onClick={() => commitCaptionStyle({ underline: !captionStyle.underline })}
+                disabled={isReadOnly}
+                testId="caption-underline-toggle"
+              >
+                <Underline className="h-4 w-4" />
+              </StyleToggle>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-editor-text-muted">Alignment</label>
+            <div className="flex gap-1">
+              {(['left', 'center', 'right'] as TextAlignment[]).map((alignment) => (
+                <StyleToggle
+                  key={alignment}
+                  title={`Align ${alignment}`}
+                  active={captionStyle.alignment === alignment}
+                  onClick={() => commitCaptionStyle({ alignment })}
+                  disabled={isReadOnly}
+                  testId={`caption-align-${alignment}`}
+                >
+                  {alignment === 'left' && <AlignLeft className="h-4 w-4" />}
+                  {alignment === 'center' && <AlignCenter className="h-4 w-4" />}
+                  {alignment === 'right' && <AlignRight className="h-4 w-4" />}
+                </StyleToggle>
+              ))}
+            </div>
+          </div>
+
+          <NumberField
+            label="Line Height"
+            value={captionStyle.lineHeight ?? 1.2}
+            min={0.5}
+            max={5}
+            step={0.1}
+            testId="caption-line-height"
+            onChange={(lineHeight) => commitCaptionStyle({ lineHeight })}
+            disabled={isReadOnly}
+          />
+
+          <NumberField
+            label="Letter Spacing"
+            value={captionStyle.letterSpacing ?? 0}
+            min={-100}
+            max={200}
+            unit="px"
+            testId="caption-letter-spacing"
+            onChange={(letterSpacing) => commitCaptionStyle({ letterSpacing })}
+            disabled={isReadOnly}
+          />
+        </InspectorSection>
+
+        <InspectorSection title="Fill" icon={<Palette className="w-3 h-3" />}>
+          <ColorField
+            label="Text Color"
+            color={captionStyle.color}
+            onChange={(color) => updateCaptionColor('color', color)}
+            disabled={isReadOnly}
+            testId="caption-text-color"
+          />
+
+          <NumberField
+            label="Opacity"
+            value={Math.round((captionStyle.opacity ?? 1) * 100)}
+            min={0}
+            max={100}
+            unit="%"
+            testId="caption-opacity"
+            onChange={(opacityPercent) =>
+              commitCaptionStyle({ opacity: Math.max(0, Math.min(100, opacityPercent)) / 100 })
+            }
+            disabled={isReadOnly}
+          />
+
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-editor-text-muted">Background</label>
+            <StyleToggle
+              title={hasBackground ? 'Remove background' : 'Add background'}
+              active={hasBackground}
+              onClick={() =>
+                updateCaptionColor(
+                  'backgroundColor',
+                  hasBackground ? undefined : { r: 0, g: 0, b: 0, a: 180 },
+                )
+              }
+              disabled={isReadOnly}
+              testId="caption-background-toggle"
+            >
+              <Square className="h-4 w-4" />
+            </StyleToggle>
+          </div>
+
+          {captionStyle.backgroundColor && (
+            <>
+              <ColorField
+                label="Background Color"
+                color={captionStyle.backgroundColor}
+                onChange={(color) => updateCaptionColor('backgroundColor', color)}
+                disabled={isReadOnly}
+                testId="caption-background-color"
+              />
+              <NumberField
+                label="Padding"
+                value={captionStyle.backgroundPadding ?? 10}
+                min={0}
+                max={500}
+                unit="px"
+                testId="caption-background-padding"
+                onChange={(backgroundPadding) => commitCaptionStyle({ backgroundPadding })}
+                disabled={isReadOnly}
+              />
+            </>
+          )}
+        </InspectorSection>
+
+        <InspectorSection title="Outline" icon={<Square className="w-3 h-3" />}>
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-editor-text-muted">Enabled</label>
+            <StyleToggle
+              title={hasOutline ? 'Remove outline' : 'Add outline'}
+              active={hasOutline}
+              onClick={() =>
+                hasOutline
+                  ? commitCaptionStyle({ outlineColor: undefined, outlineWidth: 0 })
+                  : commitCaptionStyle({
+                      outlineColor: { r: 0, g: 0, b: 0, a: 255 },
+                      outlineWidth: 2,
+                    })
+              }
+              disabled={isReadOnly}
+              testId="caption-outline-toggle"
+            >
+              <Square className="h-4 w-4" />
+            </StyleToggle>
+          </div>
+
+          {captionStyle.outlineColor && (
+            <>
+              <ColorField
+                label="Outline Color"
+                color={captionStyle.outlineColor}
+                onChange={(color) => updateCaptionColor('outlineColor', color)}
+                disabled={isReadOnly}
+                testId="caption-outline-color"
+              />
+              <NumberField
+                label="Width"
+                value={captionStyle.outlineWidth}
+                min={0}
+                max={100}
+                unit="px"
+                testId="caption-outline-width"
+                onChange={(outlineWidth) => commitCaptionStyle({ outlineWidth })}
+                disabled={isReadOnly}
+              />
+            </>
+          )}
+        </InspectorSection>
+
+        <InspectorSection title="Shadow" icon={<Square className="w-3 h-3" />}>
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-editor-text-muted">Enabled</label>
+            <StyleToggle
+              title={hasShadow ? 'Remove shadow' : 'Add shadow'}
+              active={hasShadow}
+              onClick={() =>
+                updateCaptionColor(
+                  'shadowColor',
+                  hasShadow ? undefined : { r: 0, g: 0, b: 0, a: 160 },
+                )
+              }
+              disabled={isReadOnly}
+              testId="caption-shadow-toggle"
+            >
+              <Square className="h-4 w-4" />
+            </StyleToggle>
+          </div>
+
+          {captionStyle.shadowColor && (
+            <>
+              <ColorField
+                label="Shadow Color"
+                color={captionStyle.shadowColor}
+                onChange={(color) => updateCaptionColor('shadowColor', color)}
+                disabled={isReadOnly}
+                testId="caption-shadow-color"
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <NumberField
+                  label="X"
+                  value={captionStyle.shadowOffsetX ?? captionStyle.shadowOffset}
+                  min={-500}
+                  max={500}
+                  unit="px"
+                  testId="caption-shadow-x"
+                  onChange={(shadowOffsetX) => commitCaptionStyle({ shadowOffsetX })}
+                  disabled={isReadOnly}
+                />
+                <NumberField
+                  label="Y"
+                  value={captionStyle.shadowOffsetY ?? captionStyle.shadowOffset}
+                  min={-500}
+                  max={500}
+                  unit="px"
+                  testId="caption-shadow-y"
+                  onChange={(shadowOffsetY) => commitCaptionStyle({ shadowOffsetY })}
+                  disabled={isReadOnly}
+                />
+              </div>
+              <NumberField
+                label="Blur"
+                value={captionStyle.shadowBlur ?? 0}
+                min={0}
+                max={500}
+                unit="px"
+                testId="caption-shadow-blur"
+                onChange={(shadowBlur) => commitCaptionStyle({ shadowBlur })}
+                disabled={isReadOnly}
+              />
+            </>
+          )}
+        </InspectorSection>
+
+        <InspectorSection title="Position" icon={<Maximize className="w-3 h-3" />}>
           <label className="text-xs font-medium text-editor-text-muted">Position</label>
           <select
             data-testid="caption-position-mode"
@@ -585,7 +1037,7 @@ export function CaptionInspectorPanel({
               </div>
             </div>
           )}
-        </div>
+        </InspectorSection>
       </div>
     </div>
   );

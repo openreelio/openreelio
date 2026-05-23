@@ -139,6 +139,34 @@ function matchesGenerateSourceAnalysisReportPath(path: string): boolean {
   );
 }
 
+function matchesGenerateTimelineMediaPath(path: string): boolean {
+  return (
+    path === 'data' ||
+    path === 'data.jobId' ||
+    path === 'data.status' ||
+    path === 'data.mediaType' ||
+    path === 'data.provider' ||
+    path === 'data.estimatedCostCents' ||
+    path === 'data.autoPlaceWhenReady' ||
+    path === 'data.nextAction' ||
+    path === 'data.pendingTimeline' ||
+    path.startsWith('data.pendingTimeline.')
+  );
+}
+
+function matchesResolveGenerationJobPath(path: string): boolean {
+  return (
+    path === 'data' ||
+    path === 'data.status' ||
+    path === 'data.pending' ||
+    path === 'data.progress' ||
+    path === 'data.assetId' ||
+    path === 'data.message' ||
+    path === 'data.placement' ||
+    path.startsWith('data.placement.')
+  );
+}
+
 export const TOOL_OUTPUT_CONTRACTS: Record<string, ToolOutputContract> = {
   get_timeline_info: {
     summary:
@@ -191,6 +219,18 @@ export const TOOL_OUTPUT_CONTRACTS: Record<string, ToolOutputContract> = {
       'returns structured report fields plus semantic overview/timeline fields and the persisted Markdown report under data.content/data.markdown with its saved workspace path under data.relativePath/data.reportPath',
     examples: ['data.content', 'data.reportPath', 'data.semantic.sceneTimeline[0].summary'],
     validatePath: matchesGenerateSourceAnalysisReportPath,
+  },
+  generate_timeline_media: {
+    summary:
+      'returns submitted generation metadata under data.* including data.jobId, data.pendingTimeline.*, and data.nextAction',
+    examples: ['data.jobId', 'data.pendingTimeline.markerId', 'data.nextAction'],
+    validatePath: matchesGenerateTimelineMediaPath,
+  },
+  resolve_generation_job: {
+    summary:
+      'returns generation sync state under data.* including data.status, data.pending, data.assetId, and optional data.placement',
+    examples: ['data.status', 'data.assetId', 'data.placement.clipId'],
+    validatePath: matchesResolveGenerationJobPath,
   },
 };
 

@@ -112,8 +112,8 @@ impl Command for CreateCaptionCommand {
         clip.place = ClipPlace::new(self.start_sec, duration);
         clip.range = ClipRange::new(0.0, duration);
         clip.label = normalize_caption_text(std::mem::take(&mut self.text));
-        clip.caption_style = self.style.clone();
-        clip.caption_position = self.position.clone();
+        clip.caption_style = self.style.clone().filter(|style| !style.is_null());
+        clip.caption_position = self.position.clone().filter(|position| !position.is_null());
 
         let caption_id = clip.id.clone();
         self.created_caption_id = Some(caption_id.clone());
@@ -376,11 +376,15 @@ impl Command for UpdateCaptionCommand {
         }
 
         if let Some(style) = self.style.clone() {
-            clip.caption_style = Some(style);
+            clip.caption_style = if style.is_null() { None } else { Some(style) };
         }
 
         if let Some(position) = self.position.clone() {
-            clip.caption_position = Some(position);
+            clip.caption_position = if position.is_null() {
+                None
+            } else {
+                Some(position)
+            };
         }
 
         let op_id = ulid::Ulid::new().to_string();

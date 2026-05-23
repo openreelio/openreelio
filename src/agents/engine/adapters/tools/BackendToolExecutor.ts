@@ -288,13 +288,13 @@ export class BackendToolExecutor implements IToolExecutor {
     return BACKEND_DIRECT_TOOLS.has(toolName);
   }
 
-  private isUnsafeMutatingFallback(toolName: string): boolean {
+  private isUnsafeMutatingFallback(toolName: string, args: Record<string, unknown>): boolean {
     const toolDefinition = this.frontendExecutor.getToolDefinition(toolName);
     if (!toolDefinition) {
       return false;
     }
 
-    return requiresProjectMutationPreflight(toolName, toolDefinition.category);
+    return requiresProjectMutationPreflight(toolName, toolDefinition.category, args);
   }
 
   private buildUnsupportedMutationFailure(toolName: string): ToolExecutionResult {
@@ -665,7 +665,7 @@ export class BackendToolExecutor implements IToolExecutor {
     }
 
     if (!executionTarget) {
-      if (this.isUnsafeMutatingFallback(toolName)) {
+      if (this.isUnsafeMutatingFallback(toolName, args)) {
         const preflightFailure = this.getMutationPreflightFailure(toolName, args, context);
         if (preflightFailure) {
           return createFailureResult(preflightFailure, 0);

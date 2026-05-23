@@ -2722,6 +2722,23 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> (f
     (x, y)
 }
 
+fn font_weight_implies_bold(value: &Value) -> Option<bool> {
+    if let Some(raw) = value.as_str() {
+        let normalized = raw.trim().to_ascii_lowercase();
+        if matches!(normalized.as_str(), "bold" | "semibold" | "black" | "heavy") {
+            return Some(true);
+        }
+
+        return normalized
+            .parse::<f64>()
+            .ok()
+            .map(|weight| weight >= 600.0)
+            .or(Some(false));
+    }
+
+    parse_json_number(value).map(|weight| weight >= 600.0)
+}
+
 fn find_transition_effect<'a>(
     clip: &Clip,
     effects: &'a HashMap<String, Effect>,
@@ -2776,6 +2793,16 @@ fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
             }
         }
 
+        if let Some(background_padding) =
+            get_json_field(style, &["backgroundPadding", "background_padding"])
+                .and_then(parse_json_number)
+        {
+            effect.set_param(
+                "background_padding",
+                ParamValue::Int(background_padding.clamp(0.0, 500.0).round() as i64),
+            );
+        }
+
         if let Some(shadow_value) = get_json_field(style, &["shadowColor", "shadow_color"]) {
             if let Some((hex, _)) = parse_caption_color(shadow_value) {
                 effect.set_param("shadow_color", ParamValue::String(hex));
@@ -2788,12 +2815,33 @@ fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
             }
         }
 
-        if let Some(shadow_offset) =
-            get_json_field(style, &["shadowOffset", "shadow_offset"]).and_then(parse_json_number)
-        {
-            let clamped = shadow_offset.clamp(-500.0, 500.0).round() as i64;
-            effect.set_param("shadow_x", ParamValue::Int(clamped));
-            effect.set_param("shadow_y", ParamValue::Int(clamped));
+        let shadow_offset =
+            get_json_field(style, &["shadowOffset", "shadow_offset"]).and_then(parse_json_number);
+        let shadow_offset_x = get_json_field(
+            style,
+            &["shadowOffsetX", "shadow_offset_x", "shadowX", "shadow_x"],
+        )
+        .and_then(parse_json_number)
+        .or(shadow_offset);
+        let shadow_offset_y = get_json_field(
+            style,
+            &["shadowOffsetY", "shadow_offset_y", "shadowY", "shadow_y"],
+        )
+        .and_then(parse_json_number)
+        .or(shadow_offset);
+
+        if let Some(shadow_offset_x) = shadow_offset_x {
+            effect.set_param(
+                "shadow_x",
+                ParamValue::Int(shadow_offset_x.clamp(-500.0, 500.0).round() as i64),
+            );
+        }
+
+        if let Some(shadow_offset_y) = shadow_offset_y {
+            effect.set_param(
+                "shadow_y",
+                ParamValue::Int(shadow_offset_y.clamp(-500.0, 500.0).round() as i64),
+            );
         }
 
         if let Some(outline_width) =
@@ -2821,14 +2869,8 @@ fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
         let bold = get_json_field(style, &["bold"])
             .and_then(parse_json_bool)
             .or_else(|| {
-                get_json_field(style, &["fontWeight", "font_weight"]).and_then(|value| {
-                    if let Some(raw) = value.as_str() {
-                        let normalized = raw.to_ascii_lowercase();
-                        Some(normalized == "bold" || normalized == "700" || normalized == "800")
-                    } else {
-                        parse_json_number(value).map(|weight| weight >= 600.0)
-                    }
-                })
+                get_json_field(style, &["fontWeight", "font_weight"])
+                    .and_then(font_weight_implies_bold)
             });
         if let Some(bold) = bold {
             effect.set_param("bold", ParamValue::Bool(bold));
@@ -2915,15 +2957,16 @@ fn collect_caption_drawtext_filters(all_clips: &[(&Clip, &Track)]) -> Vec<String
         .collect()
 }
 
-fn append_caption_overlays(
+fn append_drawtext_overlays(
     filter_complex: &mut String,
     base_video_label: &str,
-    caption_filters: &[String],
+    drawtext_filters: &[String],
+    label_prefix: &str,
 ) -> String {
     let mut current_video_label = base_video_label.to_string();
 
-    for (index, filter) in caption_filters.iter().enumerate() {
-        let next_video_label = format!("[capv{}]", index);
+    for (index, filter) in drawtext_filters.iter().enumerate() {
+        let next_video_label = format!("[{}{}]", label_prefix, index);
         filter_complex.push(';');
         filter_complex.push_str(&format!(
             "{}{}{}",
@@ -2933,6 +2976,81 @@ fn append_caption_overlays(
     }
 
     current_video_label
+}
+
+fn append_caption_overlays(
+    filter_complex: &mut String,
+    base_video_label: &str,
+    caption_filters: &[String],
+) -> String {
+    append_drawtext_overlays(filter_complex, base_video_label, caption_filters, "capv")
+}
+
+fn append_text_clip_overlays(
+    filter_complex: &mut String,
+    base_video_label: &str,
+    overlay_text_filters: &[String],
+) -> String {
+    append_drawtext_overlays(
+        filter_complex,
+        base_video_label,
+        overlay_text_filters,
+        "txtv",
+    )
+}
+
+fn build_text_clip_drawtext_with_enable(
+    clip: &Clip,
+    effects: &HashMap<String, Effect>,
+) -> Result<String, ExportError> {
+    let text_effect = clip
+        .effects
+        .iter()
+        .find_map(|effect_id| {
+            effects
+                .get(effect_id)
+                .filter(|effect| effect.effect_type == EffectType::TextOverlay && effect.enabled)
+        })
+        .ok_or_else(|| {
+            ExportError::InvalidSettings(format!(
+                "Text clip '{}' is missing an enabled TextOverlay effect",
+                clip.id
+            ))
+        })?;
+
+    let start = clip.place.timeline_in_sec;
+    let end = clip.place.timeline_out_sec();
+    if !start.is_finite() || !end.is_finite() || end <= start {
+        return Err(ExportError::InvalidSettings(format!(
+            "Text clip '{}' has invalid timing",
+            clip.id
+        )));
+    }
+
+    let mut resolved_text_effect = text_effect.clone();
+    apply_text_transform_overrides(&mut resolved_text_effect, clip);
+
+    Ok(format!(
+        "{}:enable='between(t,{:.6},{:.6})'",
+        resolved_text_effect.to_filter_body(),
+        start.max(0.0),
+        end.max(0.0)
+    ))
+}
+
+fn collect_overlay_text_drawtext_filters(
+    all_clips: &[(&Clip, &Track)],
+    effects: &HashMap<String, Effect>,
+) -> Result<Vec<String>, ExportError> {
+    let mut filters = Vec::new();
+
+    for (clip, track) in all_clips {
+        if track.kind == TrackKind::Overlay && is_text_clip(clip) {
+            filters.push(build_text_clip_drawtext_with_enable(clip, effects)?);
+        }
+    }
+
+    Ok(filters)
 }
 
 // =============================================================================
@@ -3171,6 +3289,7 @@ impl ExportEngine {
         }
 
         let caption_filters = collect_caption_drawtext_filters(&all_clips);
+        let overlay_text_filters = collect_overlay_text_drawtext_filters(&all_clips, effects)?;
 
         let (output_width, output_height) = output_video_dimensions(sequence, settings);
         let output_fps = output_video_fps(sequence, settings);
@@ -3199,8 +3318,8 @@ impl ExportEngine {
         // Add inputs and build filter graph
         for (clip, track) in &all_clips {
             if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
-                // Caption/overlay tracks are not rendered by the current export pipeline.
-                // Skip them so virtual caption clips are not treated as file inputs.
+                // Caption tracks and overlay text clips are burned in after the base
+                // video concat. Non-text overlay tracks are rejected during validation.
                 continue;
             }
 
@@ -3482,8 +3601,13 @@ impl ExportEngine {
             filter_complex.push_str(&format!("[{}]null[outv]", adj_video_label));
         }
 
-        let final_video_label =
-            append_caption_overlays(&mut filter_complex, "[outv]", &caption_filters);
+        let text_overlay_video_label =
+            append_text_clip_overlays(&mut filter_complex, "[outv]", &overlay_text_filters);
+        let final_video_label = append_caption_overlays(
+            &mut filter_complex,
+            &text_overlay_video_label,
+            &caption_filters,
+        );
 
         let final_audio_label = append_master_audio_output(
             &mut filter_complex,
@@ -4567,29 +4691,34 @@ pub fn validate_export_settings(
         return validation;
     }
 
-    let has_enabled_overlay_clips = sequence.tracks.iter().any(|track| {
+    let has_enabled_unsupported_overlay_clips = sequence.tracks.iter().any(|track| {
         track.kind == TrackKind::Overlay
             && track_included_in_export(track)
-            && track.clips.iter().any(|clip| clip.enabled)
+            && track
+                .clips
+                .iter()
+                .any(|clip| clip.enabled && !is_text_clip(clip))
     });
-    if has_enabled_overlay_clips {
+    if has_enabled_unsupported_overlay_clips {
         validation.add_error("Overlay tracks are not supported in final render export yet");
     }
 
     let visual_clip_count: usize = sequence
         .tracks
         .iter()
-        .filter(|track| track.kind == TrackKind::Video && track_included_in_export(track))
+        .filter(|track| track_included_in_export(track))
         .map(|track| {
             track
                 .clips
                 .iter()
-                .filter(|clip| clip.enabled && !clip.is_adjustment_layer())
+                .filter(|clip| {
+                    clip.enabled && !clip.is_adjustment_layer() && track.kind == TrackKind::Video
+                })
                 .count()
         })
         .sum();
     if visual_clip_count == 0 {
-        if !has_enabled_overlay_clips {
+        if !has_enabled_unsupported_overlay_clips {
             validation.add_error("Sequence has no visual clips to export");
         }
         return validation;
@@ -4601,14 +4730,17 @@ pub fn validate_export_settings(
             continue;
         }
 
-        if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
-            // Caption/overlay tracks are currently excluded from final render composition.
-            // Skip file-based asset validation for these tracks.
+        if track.kind == TrackKind::Caption {
+            // Caption tracks are burned in separately and do not use file-backed assets.
             continue;
         }
 
         for clip in &track.clips {
             if !clip.enabled {
+                continue;
+            }
+
+            if track.kind == TrackKind::Overlay && !is_text_clip(clip) {
                 continue;
             }
 
@@ -4721,6 +4853,7 @@ pub fn build_complex_filter_args_with_audio_info(
     }
 
     let caption_filters = collect_caption_drawtext_filters(&all_clips);
+    let overlay_text_filters = collect_overlay_text_drawtext_filters(&all_clips, effects)?;
 
     // Build FilterGraph helper (inline version without engine)
     // If effects have keyframes, they are resolved at the midpoint of the clip
@@ -4782,8 +4915,8 @@ pub fn build_complex_filter_args_with_audio_info(
     // Add inputs and build filter graph
     for (clip, track) in &all_clips {
         if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
-            // Caption/overlay tracks are not rendered by the current export pipeline.
-            // Skip them so virtual caption clips are not treated as file inputs.
+            // Caption tracks and overlay text clips are burned in after the base
+            // video concat. Non-text overlay tracks are rejected during validation.
             continue;
         }
 
@@ -5040,8 +5173,13 @@ pub fn build_complex_filter_args_with_audio_info(
         filter_complex.push_str(&format!("[{}]null[outv]", adj_video_label));
     }
 
-    let final_video_label =
-        append_caption_overlays(&mut filter_complex, "[outv]", &caption_filters);
+    let text_overlay_video_label =
+        append_text_clip_overlays(&mut filter_complex, "[outv]", &overlay_text_filters);
+    let final_video_label = append_caption_overlays(
+        &mut filter_complex,
+        &text_overlay_video_label,
+        &caption_filters,
+    );
 
     let final_audio_label = append_master_audio_output(
         &mut filter_complex,
@@ -5653,6 +5791,101 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.to_lowercase().contains("overlay tracks")));
+    }
+
+    #[test]
+    fn test_validation_allows_overlay_text_clips_over_base_video() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::effects::{Effect, EffectType, ParamValue};
+        use crate::core::timeline::{Clip, SequenceFormat, Track, TrackKind};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut overlay_track = Track::new("Overlay Text", TrackKind::Overlay);
+
+        let effect_id = "overlay_text_effect".to_string();
+        let mut text_clip = Clip::new(&format!("{}overlay", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        text_clip.effects.push(effect_id.clone());
+        overlay_track.add_clip(text_clip);
+        sequence.add_track(overlay_track);
+
+        let mut effect = Effect::new(EffectType::TextOverlay);
+        effect.id = effect_id.clone();
+        effect.set_param("text", ParamValue::String("Overlay title".to_string()));
+
+        let mut effects = HashMap::new();
+        effects.insert(effect_id, effect);
+
+        let video_path = create_temp_media_file("validation_overlay_text_base.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_overlay_text_base.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+        assert!(
+            validation.is_valid,
+            "Expected overlay text clips to pass export validation. Got: {validation:?}"
+        );
+    }
+
+    #[test]
+    fn test_validation_does_not_count_overlay_text_as_base_visual() {
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::effects::{Effect, EffectType, ParamValue};
+        use crate::core::timeline::{Clip, SequenceFormat, Track, TrackKind};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut overlay_track = Track::new("Overlay Text", TrackKind::Overlay);
+
+        let effect_id = "overlay_text_effect".to_string();
+        let mut text_clip = Clip::new(&format!("{}overlay", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        text_clip.effects.push(effect_id.clone());
+        overlay_track.add_clip(text_clip);
+        sequence.add_track(overlay_track);
+
+        let mut effect = Effect::new(EffectType::TextOverlay);
+        effect.id = effect_id.clone();
+        effect.set_param("text", ParamValue::String("Overlay title".to_string()));
+
+        let mut effects = HashMap::new();
+        effects.insert(effect_id, effect);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &HashMap::new(),
+            &effects,
+            &ExportSettings::default(),
+        );
+
+        assert!(!validation.is_valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.to_lowercase().contains("no visual clips")),
+            "Expected overlay text without base video to fail as no visual clips. Got: {validation:?}"
+        );
     }
 
     #[test]
@@ -6889,6 +7122,95 @@ mod tests {
     }
 
     #[test]
+    fn test_build_filter_composites_overlay_text_after_video_concat() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::effects::{Effect, EffectType, ParamValue};
+        use crate::core::timeline::{Clip, SequenceFormat, Track, TrackKind};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut overlay_track = Track::new("Overlay Text", TrackKind::Overlay);
+        let effect_id = "overlay_text_effect".to_string();
+        let mut text_clip = Clip::new(&format!("{}overlay", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 2.0)
+            .place_at(0.5);
+        text_clip.effects.push(effect_id.clone());
+        overlay_track.add_clip(text_clip);
+        sequence.add_track(overlay_track);
+
+        let video_path = create_temp_media_file("video_overlay_text.mp4");
+        let mut video_asset =
+            Asset::new_video("video_overlay_text.mp4", &video_path, VideoInfo::default())
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "video_asset".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+
+        let mut text_effect = Effect::new(EffectType::TextOverlay);
+        text_effect.id = effect_id.clone();
+        text_effect.set_param("text", ParamValue::String("Overlay title".to_string()));
+        text_effect.set_param("x", ParamValue::Float(0.5));
+        text_effect.set_param("y", ParamValue::Float(0.2));
+
+        let mut effects = std::collections::HashMap::new();
+        effects.insert(effect_id, text_effect);
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &ExportSettings::default(),
+        )
+        .expect("overlay text filter generation should succeed");
+        let args_str = args.join(" ");
+
+        assert!(
+            args_str.contains("[outv]drawtext="),
+            "Expected overlay text to be drawn over the concatenated video output. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("between(t,0.500000,2.500000)"),
+            "Expected overlay text time window in drawtext enable expression. Got: {}",
+            args_str
+        );
+
+        let input_count = args.iter().filter(|arg| arg.as_str() == "-i").count();
+        assert_eq!(
+            input_count, 1,
+            "Overlay text should not add a color-source video segment"
+        );
+
+        let first_map_index = args
+            .iter()
+            .position(|arg| arg.as_str() == "-map")
+            .expect("Expected at least one -map argument");
+        assert_eq!(
+            args.get(first_map_index + 1).map(String::as_str),
+            Some("[txtv0]"),
+            "Expected video map label to use overlay-text-composited stream"
+        );
+    }
+
+    #[test]
     fn test_build_filter_applies_sequence_master_volume_to_audio_output() {
         use crate::core::assets::VideoInfo;
         use crate::core::timeline::{Clip, SequenceFormat, Track};
@@ -7269,10 +7591,17 @@ mod tests {
         caption_clip.label = Some("Styled caption".to_string());
         caption_clip.caption_style = Some(serde_json::json!({
             "fontSize": 64,
+            "fontWeight": 700,
             "alignment": "left",
             "color": { "r": 255, "g": 0, "b": 0, "a": 128 },
+            "backgroundColor": "#00000080",
+            "backgroundPadding": 18,
             "outlineColor": "#000000",
-            "outlineWidth": 3
+            "outlineWidth": 3,
+            "shadowColor": "#112233",
+            "shadowOffsetX": 4,
+            "shadowOffsetY": 6,
+            "lineHeight": 1.5
         }));
         caption_clip.caption_position = Some(serde_json::json!({
             "type": "preset",
@@ -7325,6 +7654,46 @@ mod tests {
             args_str.contains("x=(w*0.5000)"),
             "Expected left alignment x expression. Got: {}",
             args_str
+        );
+        assert!(
+            args_str.contains("font='Arial\\:style=Bold'") || args_str.contains("style=Bold"),
+            "Expected numeric font weight to request bold font style. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("boxborderw=18"),
+            "Expected caption background padding to map to boxborderw. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("shadowx=4") && args_str.contains("shadowy=6"),
+            "Expected caption shadow offsets to map independently. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("line_spacing=32"),
+            "Expected caption line height to map to drawtext line spacing. Got: {}",
+            args_str
+        );
+    }
+
+    #[test]
+    fn test_font_weight_implies_bold_accepts_numeric_strings() {
+        assert_eq!(
+            font_weight_implies_bold(&serde_json::json!("600")),
+            Some(true)
+        );
+        assert_eq!(
+            font_weight_implies_bold(&serde_json::json!("700.0")),
+            Some(true)
+        );
+        assert_eq!(
+            font_weight_implies_bold(&serde_json::json!("500")),
+            Some(false)
+        );
+        assert_eq!(
+            font_weight_implies_bold(&serde_json::json!(700)),
+            Some(true)
         );
     }
 

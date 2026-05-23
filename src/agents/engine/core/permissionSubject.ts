@@ -26,7 +26,7 @@ export interface PermissionSubject {
   aliases: string[];
 }
 
-const META_TOOL_NAMES = new Set(['query', 'edit', 'audio', 'effects', 'text']);
+const META_TOOL_NAMES = new Set(['query', 'edit', 'audio', 'effects', 'text', 'generate']);
 
 const EXACT_SUBJECTS: Record<string, { subjectType: PermissionSubjectType; subject: string }> = {
   analyze_asset: {
@@ -97,9 +97,25 @@ const EXACT_SUBJECTS: Record<string, { subjectType: PermissionSubjectType; subje
     subjectType: 'external_provider',
     subject: 'external_provider.search',
   },
+  search_sound_for_scene: {
+    subjectType: 'external_provider',
+    subject: 'external_provider.search',
+  },
+  import_asset_candidate: {
+    subjectType: 'external_provider',
+    subject: 'external_provider.import',
+  },
+  generate_timeline_media: {
+    subjectType: 'external_provider',
+    subject: 'external_provider.generate',
+  },
   generate_video: {
     subjectType: 'external_provider',
     subject: 'external_provider.generate',
+  },
+  resolve_generation_job: {
+    subjectType: 'external_provider',
+    subject: 'external_provider.status.read',
   },
   check_generation_status: {
     subjectType: 'external_provider',
@@ -120,6 +136,20 @@ const EXACT_SUBJECTS: Record<string, { subjectType: PermissionSubjectType; subje
 };
 
 const READ_PREFIXES = ['get_', 'list_', 'find_', 'search_', 'inspect_', 'query_', 'read_'];
+
+function resolveExactSubject(
+  normalizedToolName: string,
+  args: Record<string, unknown>,
+): { subjectType: PermissionSubjectType; subject: string } | undefined {
+  if (normalizedToolName === 'resolve_generation_job' && args.placeWhenComplete === true) {
+    return {
+      subjectType: 'capability',
+      subject: 'timeline.clip.create',
+    };
+  }
+
+  return EXACT_SUBJECTS[normalizedToolName];
+}
 
 function matchLegacyPermissionPattern(pattern: string, value: string): boolean {
   if (pattern === '*') {
@@ -502,7 +532,7 @@ export function buildPermissionSubject(
 ): PermissionSubject {
   const rawToolName = toolName.trim().toLowerCase();
   const normalizedToolName = normalizeToolName(toolName, args);
-  const exact = EXACT_SUBJECTS[normalizedToolName];
+  const exact = resolveExactSubject(normalizedToolName, args);
   const resourceBinding = extractResourceBinding(args);
 
   if (exact) {

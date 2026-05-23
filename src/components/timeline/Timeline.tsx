@@ -593,12 +593,14 @@ export function Timeline({
   });
 
   const applyAdvancedTrimChange = useCallback(
-    (change: {
-      clipId: string;
-      sourceIn?: number;
-      sourceOut?: number;
-      timelineIn?: number;
-    } | null) => {
+    (
+      change: {
+        clipId: string;
+        sourceIn?: number;
+        sourceOut?: number;
+        timelineIn?: number;
+      } | null,
+    ) => {
       if (
         !sequence ||
         !onClipTrim ||
@@ -1923,6 +1925,7 @@ export function Timeline({
     const toolCursor = getToolCursorStyle();
     if (toolCursor === 'crosshair') return 'cursor-crosshair';
     if (toolCursor === 'grab') return 'cursor-grab';
+    if (toolCursor === 'text') return 'cursor-text';
     if (toolCursor === 'ew-resize') return 'cursor-ew-resize';
     return '';
   };

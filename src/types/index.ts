@@ -430,12 +430,7 @@ export interface Transform {
 }
 
 /** Audio fade curve type */
-export type FadeType =
-  | 'linear'
-  | 'constantGain'
-  | 'constantPower'
-  | 'exponential'
-  | 'sCurve';
+export type FadeType = 'linear' | 'constantGain' | 'constantPower' | 'exponential' | 'sCurve';
 
 /** Parameters for audio ducking (auto-duck music during speech) */
 export interface AudioDuckingParams {
@@ -537,10 +532,7 @@ export interface Clip {
 
 /** Returns true if the clip has a valid active time remap curve (>= 2 keyframes). */
 export function hasActiveTimeRemap(clip: Pick<Clip, 'timeRemap'>): boolean {
-  return (
-    clip.timeRemap != null &&
-    clip.timeRemap.keyframes.length >= 2
-  );
+  return clip.timeRemap != null && clip.timeRemap.keyframes.length >= 2;
 }
 
 export interface Marker {
@@ -562,7 +554,7 @@ export type VerticalPosition = 'bottom' | 'top' | 'center';
 export type TextAlignment = 'left' | 'center' | 'right';
 
 /** Font weight */
-export type FontWeight = 'normal' | 'bold' | 'light';
+export type FontWeight = 'normal' | 'bold' | 'light' | number;
 
 /** Custom position with x/y coordinates (percentage) */
 export interface CustomPosition {
@@ -588,15 +580,23 @@ export interface CaptionStyle {
   fontFamily: string;
   fontSize: number;
   fontWeight: FontWeight;
+  bold?: boolean;
   color: CaptionColor;
+  opacity?: number;
   backgroundColor?: CaptionColor;
+  backgroundPadding?: number;
   outlineColor?: CaptionColor;
   outlineWidth: number;
   shadowColor?: CaptionColor;
   shadowOffset: number;
+  shadowOffsetX?: number;
+  shadowOffsetY?: number;
+  shadowBlur?: number;
   alignment: TextAlignment;
   italic: boolean;
   underline: boolean;
+  lineHeight?: number;
+  letterSpacing?: number;
 }
 
 /** A single caption entry with text and timing */
@@ -633,9 +633,16 @@ export const DEFAULT_CAPTION_STYLE: CaptionStyle = {
   outlineWidth: 2,
   shadowColor: { r: 0, g: 0, b: 0, a: 128 },
   shadowOffset: 2,
+  shadowOffsetX: 2,
+  shadowOffsetY: 2,
+  shadowBlur: 0,
   alignment: 'center',
   italic: false,
   underline: false,
+  opacity: 1,
+  backgroundPadding: 10,
+  lineHeight: 1.2,
+  letterSpacing: 0,
 };
 
 /** Default caption position */

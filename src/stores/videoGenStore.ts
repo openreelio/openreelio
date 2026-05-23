@@ -10,6 +10,7 @@ import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
 import { invoke } from '@tauri-apps/api/core';
 import { createLogger } from '@/services/logger';
+import { executeAgentCommand } from '@/agents/tools/commandExecutor';
 
 enableMapSet();
 
@@ -30,6 +31,14 @@ export type VideoGenJobStatus =
   | 'completed'
   | 'failed'
   | 'cancelled';
+
+export interface VideoGenPlacementRequest {
+  sequenceId: string;
+  trackId: string;
+  timelineStart: number;
+  markerId?: string | null;
+  removeMarkerOnPlace?: boolean;
+}
 
 export interface VideoGenJob {
   /** Local UUID */
@@ -54,6 +63,12 @@ export interface VideoGenJob {
   actualCostCents: number | null;
   /** Asset ID after import into project */
   assetId: string | null;
+  /** Optional timeline placement intent captured when the job was submitted */
+  placement: VideoGenPlacementRequest | null;
+  /** Clip ID created by automatic placement after import */
+  placedClipId: string | null;
+  /** Placement failure does not invalidate the generated/imported asset */
+  placementError: string | null;
   /** Error message if failed */
   error: string | null;
   /** ISO timestamp when created */
@@ -75,6 +90,7 @@ export interface SubmitGenerationParams {
   aspectRatio?: string;
   seed?: number;
   lipSyncLanguage?: string;
+  placement?: VideoGenPlacementRequest | null;
 }
 
 // =============================================================================
@@ -113,6 +129,28 @@ function normalizeReferencePaths(values: string[] | undefined, maxItems: number)
     .map((value) => value.trim())
     .filter((value) => value.length > 0)
     .slice(0, maxItems);
+}
+
+function normalizePlacement(placement?: unknown): VideoGenPlacementRequest | null {
+  if (!placement || typeof placement !== 'object' || Array.isArray(placement)) return null;
+
+  const raw = placement as Record<string, unknown>;
+  const sequenceId = typeof raw.sequenceId === 'string' ? raw.sequenceId.trim() : '';
+  const trackId = typeof raw.trackId === 'string' ? raw.trackId.trim() : '';
+  if (!sequenceId || !trackId) return null;
+
+  const timelineStart =
+    typeof raw.timelineStart === 'number' && Number.isFinite(raw.timelineStart)
+      ? Math.max(0, raw.timelineStart)
+      : 0;
+
+  return {
+    sequenceId,
+    trackId,
+    timelineStart,
+    markerId: typeof raw.markerId === 'string' && raw.markerId.trim() ? raw.markerId.trim() : null,
+    removeMarkerOnPlace: raw.removeMarkerOnPlace !== false,
+  };
 }
 
 function trimRetainedJobs(jobs: Map<string, VideoGenJob>): void {
@@ -198,6 +236,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
       const referenceImages = normalizeReferencePaths(params.referenceImages, 9);
       const referenceVideos = normalizeReferencePaths(params.referenceVideos, 3);
       const referenceAudio = normalizeReferencePaths(params.referenceAudio, 3);
+      const placement = normalizePlacement(params.placement);
 
       const localId = crypto.randomUUID();
 
@@ -215,6 +254,9 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
           estimatedCostCents: 0,
           actualCostCents: null,
           assetId: null,
+          placement,
+          placedClipId: null,
+          placementError: null,
           error: null,
           createdAt: new Date().toISOString(),
           completedAt: null,
@@ -492,11 +534,51 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
           logger.warn('Thumbnail generation failed', { error: String(thumbErr) });
         }
 
+        const placement = get().jobs.get(jobId)?.placement ?? null;
+        let placedClipId: string | null = null;
+        let placementError: string | null = null;
+
+        if (placement) {
+          try {
+            const placementResult = await executeAgentCommand('InsertClip', {
+              sequenceId: placement.sequenceId,
+              trackId: placement.trackId,
+              assetId: importResult.id,
+              timelineStart: placement.timelineStart,
+            });
+            placedClipId = placementResult.createdIds[0] ?? null;
+
+            if (placement.markerId && placement.removeMarkerOnPlace) {
+              try {
+                await executeAgentCommand('RemoveMarker', {
+                  sequenceId: placement.sequenceId,
+                  markerId: placement.markerId,
+                });
+              } catch (markerError) {
+                logger.warn('Failed to remove pending generation marker after placement', {
+                  jobId,
+                  markerId: placement.markerId,
+                  error: String(markerError),
+                });
+              }
+            }
+          } catch (error) {
+            placementError = error instanceof Error ? error.message : String(error);
+            logger.error('Generated asset placement failed', {
+              jobId,
+              assetId: importResult.id,
+              error: placementError,
+            });
+          }
+        }
+
         set((state) => {
           const j = state.jobs.get(jobId);
           if (j) {
             j.status = 'completed';
             j.assetId = importResult.id;
+            j.placedClipId = placedClipId;
+            j.placementError = placementError;
             j.completedAt = new Date().toISOString();
           }
           trimRetainedJobs(state.jobs);
@@ -505,6 +587,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
         logger.info('Video generation completed and imported', {
           jobId,
           assetId: importResult.id,
+          placedClipId,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

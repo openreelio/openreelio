@@ -11,13 +11,14 @@
  * 3. audio    - audio tools (6 tools)
  * 4. effects  - effect + transition tools (8 tools)
  * 5. text     - caption tools
+ * 6. generate - provider-neutral generation orchestration + provider job tools
  *
  * Legacy compatibility:
  * - execute_plan remains registered for transitional callers, but should not
  *   be part of the default tool surface shown to the model.
  */
 
-import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
+import { globalToolRegistry, type AgentContext, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
 import { getAnalysisToolNames } from './analysisTools';
 import { getMediaAnalysisToolNames } from './mediaAnalysisTools';
@@ -27,6 +28,8 @@ import { getAudioToolNames } from './audioTools';
 import { getEffectToolNames } from './effectTools';
 import { getTransitionToolNames } from './transitionTools';
 import { getCaptionToolNames } from './captionTools';
+import { getGenerationToolNames } from './generationTools';
+import { getGenerativeTimelineToolNames } from './generativeTimelineTools';
 import { canonicalizeToolNameCandidate } from '../toolNameNormalization';
 
 const logger = createLogger('MetaTools');
@@ -43,6 +46,7 @@ async function dispatchToTool(
   metaToolName: string,
   args: Record<string, unknown>,
   validActions: readonly string[],
+  context: AgentContext,
 ) {
   const rawAction = args.action as string | undefined;
   const action =
@@ -75,7 +79,7 @@ async function dispatchToTool(
   }
 
   try {
-    return await globalToolRegistry.execute(action, normalizedArgs, {});
+    return await globalToolRegistry.execute(action, normalizedArgs, context);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`Meta-tool ${metaToolName} dispatch failed`, { action, error: msg });
@@ -202,6 +206,7 @@ const EDIT_ACTIONS = getEditingToolNames();
 const AUDIO_ACTIONS = getAudioToolNames();
 const EFFECTS_ACTIONS = [...getEffectToolNames(), ...getTransitionToolNames()];
 const TEXT_ACTIONS = getCaptionToolNames();
+const GENERATE_ACTIONS = [...getGenerativeTimelineToolNames(), ...getGenerationToolNames()];
 
 // =============================================================================
 // 6. Execute Plan Meta-Tool (batch execution)
@@ -327,7 +332,7 @@ const META_TOOLS: ToolDefinition[] = [
       },
       required: ['action'],
     },
-    handler: async (args) => dispatchToTool('query', args, QUERY_ACTIONS),
+    handler: async (args, context) => dispatchToTool('query', args, QUERY_ACTIONS, context),
   },
 
   // ---------------------------------------------------------------------------
@@ -395,7 +400,7 @@ const META_TOOLS: ToolDefinition[] = [
       },
       required: ['action'],
     },
-    handler: async (args) => dispatchToTool('edit', args, EDIT_ACTIONS),
+    handler: async (args, context) => dispatchToTool('edit', args, EDIT_ACTIONS, context),
   },
 
   // ---------------------------------------------------------------------------
@@ -427,7 +432,7 @@ const META_TOOLS: ToolDefinition[] = [
       },
       required: ['action', 'sequenceId', 'trackId'],
     },
-    handler: async (args) => dispatchToTool('audio', args, AUDIO_ACTIONS),
+    handler: async (args, context) => dispatchToTool('audio', args, AUDIO_ACTIONS, context),
   },
 
   // ---------------------------------------------------------------------------
@@ -463,7 +468,7 @@ const META_TOOLS: ToolDefinition[] = [
       },
       required: ['action'],
     },
-    handler: async (args) => dispatchToTool('effects', args, EFFECTS_ACTIONS),
+    handler: async (args, context) => dispatchToTool('effects', args, EFFECTS_ACTIONS, context),
   },
 
   // ---------------------------------------------------------------------------
@@ -518,11 +523,75 @@ const META_TOOLS: ToolDefinition[] = [
       },
       required: ['action'],
     },
-    handler: async (args) => dispatchToTool('text', args, TEXT_ACTIONS),
+    handler: async (args, context) => dispatchToTool('text', args, TEXT_ACTIONS, context),
   },
 
   // ---------------------------------------------------------------------------
-  // 6. execute_plan
+  // 6. generate
+  // ---------------------------------------------------------------------------
+  {
+    name: 'generate',
+    description: `Create or discover generated media, synchronize long-running generation jobs, search SFX candidates, and import approved stock candidates. Actions: ${GENERATE_ACTIONS.join(', ')}`,
+    category: 'generation',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          description: 'The generation orchestration action to perform',
+          enum: [...GENERATE_ACTIONS],
+        },
+        prompt: { type: 'string', description: 'Generation or discovery prompt' },
+        mediaType: { type: 'string', description: 'Media type: video, image, music, or sfx' },
+        provider: { type: 'string', description: 'Preferred provider or auto' },
+        quality: { type: 'string', description: 'Generation quality tier' },
+        durationSec: { type: 'number', description: 'Preferred duration in seconds' },
+        referenceAssetIds: {
+          type: 'array',
+          description: 'Reference asset IDs',
+          items: { type: 'string' },
+        },
+        aspectRatio: { type: 'string', description: 'Generated video aspect ratio' },
+        sequenceId: { type: 'string', description: 'Target sequence ID' },
+        trackId: { type: 'string', description: 'Target track ID' },
+        timelineStart: { type: 'number', description: 'Timeline start in seconds' },
+        placementMode: {
+          type: 'string',
+          description: 'pending creates a marker; import_only submits/imports without placement',
+        },
+        autoPlaceWhenReady: {
+          type: 'boolean',
+          description: 'Automatically place completed generated video when imported',
+        },
+        markerLabel: { type: 'string', description: 'Pending timeline marker label' },
+        jobId: { type: 'string', description: 'Generation job ID' },
+        placeWhenComplete: {
+          type: 'boolean',
+          description: 'Place the completed generation result immediately when assetId exists',
+        },
+        sceneDescription: { type: 'string', description: 'Scene description for SFX search' },
+        mood: { type: 'string', description: 'Mood/style hint for SFX search' },
+        tags: {
+          type: 'array',
+          description: 'Tags for search/import',
+          items: { type: 'string' },
+        },
+        count: { type: 'number', description: 'Search result count' },
+        candidate: { type: 'object', description: 'Stock candidate object returned by search' },
+        sourceUrl: { type: 'string', description: 'Direct stock media URL override' },
+        name: { type: 'string', description: 'Imported asset name' },
+        assetType: { type: 'string', description: 'Asset type: video, image, or audio' },
+        license: { type: 'object', description: 'Normalized LicenseInfo object' },
+        licenseAck: { type: 'boolean', description: 'Required approval acknowledgement for import' },
+        providerUrl: { type: 'string', description: 'Provider landing page URL' },
+      },
+      required: ['action'],
+    },
+    handler: async (args, context) => dispatchToTool('generate', args, GENERATE_ACTIONS, context),
+  },
+
+  // ---------------------------------------------------------------------------
+  // 7. execute_plan
   // ---------------------------------------------------------------------------
   {
     name: 'execute_plan',
@@ -641,7 +710,7 @@ const META_TOOLS: ToolDefinition[] = [
 // =============================================================================
 
 /**
- * Register the 6 consolidated meta-tools with the global registry.
+ * Register the consolidated meta-tools with the global registry.
  * Individual tools must already be registered (meta-tools dispatch to them).
  */
 export function registerMetaTools(): void {
@@ -650,7 +719,7 @@ export function registerMetaTools(): void {
 }
 
 /**
- * Unregister the 6 meta-tools from the global registry.
+ * Unregister the consolidated meta-tools from the global registry.
  */
 export function unregisterMetaTools(): void {
   for (const tool of META_TOOLS) {

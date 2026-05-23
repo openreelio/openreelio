@@ -36,7 +36,12 @@ import {
 } from 'lucide-react';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
-import { useEditorToolStore, TOOL_CONFIGS, type EditorTool, type EditMode } from '@/stores/editorToolStore';
+import {
+  useEditorToolStore,
+  TOOL_CONFIGS,
+  type EditorTool,
+  type EditMode,
+} from '@/stores/editorToolStore';
 import { formatTimecode } from '@/utils/formatters';
 import { MIN_ZOOM, MAX_ZOOM } from './constants';
 
@@ -95,6 +100,8 @@ const ToolButton = memo(function ToolButton({
     switch (tool) {
       case 'select':
         return <MousePointer className="w-4 h-4" />;
+      case 'text':
+        return <Type className="w-4 h-4" />;
       case 'razor':
         return <Scissors className="w-4 h-4" />;
       case 'hand':
@@ -219,8 +226,9 @@ function EnhancedTimelineToolbarComponent({
   }, [toggleLinkedSelection]);
 
   const handleAddText = useCallback(() => {
+    setActiveTool('text');
     onAddText?.();
-  }, [onAddText]);
+  }, [onAddText, setActiveTool]);
 
   const handleAddVideoTrack = useCallback(() => {
     onAddVideoTrack?.();
@@ -422,10 +430,15 @@ function EnhancedTimelineToolbarComponent({
         <button
           data-testid="add-text-button"
           type="button"
-          className="p-1.5 rounded text-teal-400 hover:bg-teal-600/20 hover:text-teal-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          aria-pressed={activeTool === 'text'}
+          className={`p-1.5 rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${
+            activeTool === 'text'
+              ? 'bg-teal-500/30 text-teal-300'
+              : 'text-teal-400 hover:bg-teal-600/20 hover:text-teal-300'
+          }`}
           onClick={handleAddText}
           disabled={!hasActiveSequence}
-          title="Add text (T)"
+          title="Text Tool (T)"
         >
           <Type className="w-4 h-4" />
         </button>

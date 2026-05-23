@@ -83,6 +83,7 @@ const SEEK_AMOUNT_LARGE = 5;
 /** Tool keyboard mappings */
 const TOOL_KEYS: Record<string, EditorTool> = {
   v: 'select',
+  t: 'text',
   c: 'razor',
   b: 'ripple',
   y: 'slip',
@@ -722,6 +723,7 @@ export const ENHANCED_KEYBOARD_SHORTCUTS = [
     category: 'Tools',
     shortcuts: [
       { key: 'V', description: 'Selection Tool' },
+      { key: 'T', description: 'Text Tool' },
       { key: 'C', description: 'Razor/Cut Tool' },
       { key: 'B', description: 'Ripple Edit Tool' },
       { key: 'Y', description: 'Slip Tool' },

@@ -108,7 +108,11 @@ export class ToolRegistryAdapter implements IToolExecutor {
   ): Promise<ToolExecutionResult> {
     const startTime = performance.now();
     const tool = this.registry.get(toolName);
-    const requiresMutationPreflight = requiresProjectMutationPreflight(toolName, tool?.category);
+    const requiresMutationPreflight = requiresProjectMutationPreflight(
+      toolName,
+      tool?.category,
+      args,
+    );
 
     if (requiresMutationPreflight) {
       const { error: revisionError, currentVersion } = validateMutationStateRevision(
@@ -141,11 +145,15 @@ export class ToolRegistryAdapter implements IToolExecutor {
     const selection = getSelectionContext();
     const isActiveSequence = context.sequenceId === selection.sequenceId;
 
+    const selectedClipIds = isActiveSequence ? selection.selectedClipIds : [];
+    const selectedTrackIds = isActiveSequence ? selection.selectedTrackIds : [];
     const legacyContext = {
       projectId: context.projectId,
       sequenceId: context.sequenceId,
-      selectedClips: isActiveSequence ? selection.selectedClipIds : [],
-      selectedTracks: isActiveSequence ? selection.selectedTrackIds : [],
+      selectedClipIds,
+      selectedTrackIds,
+      selectedClips: selectedClipIds,
+      selectedTracks: selectedTrackIds,
       playheadPosition: isActiveSequence ? selection.playheadPosition : 0,
     };
 
@@ -316,12 +324,20 @@ export class ToolRegistryAdapter implements IToolExecutor {
     const errors = this.collectSchemaErrors(tool.parameters, args);
 
     const action = typeof args.action === 'string' ? args.action.trim() : '';
-    if (action && ['query', 'edit', 'audio', 'effects', 'text'].includes(toolName)) {
+    const normalizedToolName = tool.name;
+    if (
+      action &&
+      ['query', 'edit', 'audio', 'effects', 'text', 'generate'].includes(normalizedToolName)
+    ) {
       const actionTool = this.registry.get(action);
       if (actionTool) {
         const toolArgs = { ...args };
         delete toolArgs.action;
-        const normalizedArgs = normalizeMetaToolArgsForValidation(toolName, action, toolArgs);
+        const normalizedArgs = normalizeMetaToolArgsForValidation(
+          normalizedToolName,
+          actionTool.name,
+          toolArgs,
+        );
         errors.push(...this.collectSchemaErrors(actionTool.parameters, normalizedArgs));
       }
     }

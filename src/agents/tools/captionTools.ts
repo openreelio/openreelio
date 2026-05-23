@@ -121,7 +121,73 @@ function parseAgentCaptionPosition(value: unknown): CaptionPosition | undefined 
     };
   }
 
+  if (value && typeof value === 'object') {
+    const candidate = value as Record<string, unknown>;
+    if (candidate.type === 'preset') {
+      const vertical =
+        candidate.vertical === 'top' ||
+        candidate.vertical === 'center' ||
+        candidate.vertical === 'bottom'
+          ? candidate.vertical
+          : undefined;
+      if (!vertical) {
+        return undefined;
+      }
+      const marginPercent = Number(candidate.marginPercent ?? 5);
+      return {
+        type: 'preset',
+        vertical,
+        marginPercent: Number.isFinite(marginPercent)
+          ? Math.max(0, Math.min(50, marginPercent))
+          : 5,
+      };
+    }
+
+    const xPercent = Number(candidate.xPercent ?? candidate.x);
+    const yPercent = Number(candidate.yPercent ?? candidate.y);
+    if (Number.isFinite(xPercent) && Number.isFinite(yPercent)) {
+      return {
+        type: 'custom',
+        xPercent: Math.max(0, Math.min(100, xPercent)),
+        yPercent: Math.max(0, Math.min(100, yPercent)),
+      };
+    }
+  }
+
   return undefined;
+}
+
+function parseOptionalNumber(
+  value: unknown,
+  field: string,
+  min: number,
+  max: number,
+): { ok: true; value?: number } | { ok: false; error: string } {
+  if (value === undefined) {
+    return { ok: true };
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+    return { ok: false, error: `${field} must be a number between ${min} and ${max}.` };
+  }
+
+  return { ok: true, value: parsed };
+}
+
+function parseOptionalBoolean(
+  value: unknown,
+  field: string,
+): { ok: true; value?: boolean } | { ok: false; error: string } {
+  if (value === undefined) {
+    return { ok: true };
+  }
+
+  if (typeof value === 'boolean') {
+    return { ok: true, value };
+  }
+
+  return { ok: false, error: `${field} must be a boolean.` };
 }
 
 function isTranscriptCapableProvider(provider: ProviderCapabilities): boolean {
@@ -210,10 +276,7 @@ async function transcribeWithAnalysisProvider(
   return {
     provider,
     segments: normalized.segments,
-    duration: normalized.segments.reduce(
-      (maxEnd, segment) => Math.max(maxEnd, segment.endTime),
-      0,
-    ),
+    duration: normalized.segments.reduce((maxEnd, segment) => Math.max(maxEnd, segment.endTime), 0),
     fullText: normalized.segments.map((segment) => segment.text).join(' '),
   };
 }
@@ -654,18 +717,88 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           type: 'string',
           description: 'Font family name',
         },
+        fontWeight: {
+          type: 'number',
+          description: 'Font weight from 100 to 900',
+        },
+        bold: {
+          type: 'boolean',
+          description: 'Enable bold styling',
+        },
+        italic: {
+          type: 'boolean',
+          description: 'Enable italic styling',
+        },
+        underline: {
+          type: 'boolean',
+          description: 'Enable underline styling',
+        },
         color: {
           type: 'string',
           description: 'Text color in hex format',
+        },
+        opacity: {
+          type: 'number',
+          description: 'Text opacity from 0 to 1',
         },
         backgroundColor: {
           type: 'string',
           description: 'Background color in hex format with optional alpha',
         },
+        backgroundPadding: {
+          type: 'number',
+          description: 'Background padding in pixels',
+        },
+        outlineColor: {
+          type: 'string',
+          description: 'Outline color in hex format with optional alpha',
+        },
+        outlineWidth: {
+          type: 'number',
+          description: 'Outline width in pixels',
+        },
+        shadowColor: {
+          type: 'string',
+          description: 'Shadow color in hex format with optional alpha',
+        },
+        shadowOffsetX: {
+          type: 'number',
+          description: 'Shadow horizontal offset in pixels',
+        },
+        shadowOffsetY: {
+          type: 'number',
+          description: 'Shadow vertical offset in pixels',
+        },
+        shadowBlur: {
+          type: 'number',
+          description: 'Shadow blur radius metadata in pixels',
+        },
+        alignment: {
+          type: 'string',
+          description: 'Caption text alignment',
+          enum: ['left', 'center', 'right'],
+        },
+        lineHeight: {
+          type: 'number',
+          description: 'Line height multiplier',
+        },
+        letterSpacing: {
+          type: 'number',
+          description: 'Letter spacing in pixels',
+        },
         position: {
           type: 'string',
-          description: 'Caption position (top, center, bottom)',
+          description:
+            'Caption position preset (top, center, bottom). Use xPercent and yPercent for custom placement.',
           enum: ['top', 'center', 'bottom'],
+        },
+        xPercent: {
+          type: 'number',
+          description: 'Custom caption X position as percent from the left',
+        },
+        yPercent: {
+          type: 'number',
+          description: 'Custom caption Y position as percent from the top',
         },
       },
       required: ['sequenceId', 'captionId'],
@@ -696,6 +829,52 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         if (args.fontSize !== undefined) style.fontSize = args.fontSize;
         if (args.fontFamily !== undefined) style.fontFamily = args.fontFamily;
 
+        const numericFields: Array<[string, number, number]> = [
+          ['fontWeight', 100, 900],
+          ['opacity', 0, 1],
+          ['backgroundPadding', 0, 500],
+          ['outlineWidth', 0, 100],
+          ['shadowOffsetX', -500, 500],
+          ['shadowOffsetY', -500, 500],
+          ['shadowBlur', 0, 500],
+          ['lineHeight', 0.5, 5],
+          ['letterSpacing', -100, 200],
+        ];
+
+        for (const [field, min, max] of numericFields) {
+          const parsed = parseOptionalNumber(args[field], field, min, max);
+          if (!parsed.ok) {
+            return { success: false, error: parsed.error };
+          }
+          if (parsed.value !== undefined) {
+            style[field] = parsed.value;
+          }
+        }
+
+        for (const field of ['bold', 'italic', 'underline']) {
+          const parsed = parseOptionalBoolean(args[field], field);
+          if (!parsed.ok) {
+            return { success: false, error: parsed.error };
+          }
+          if (parsed.value !== undefined) {
+            style[field] = parsed.value;
+          }
+        }
+
+        if (args.alignment !== undefined) {
+          if (
+            args.alignment !== 'left' &&
+            args.alignment !== 'center' &&
+            args.alignment !== 'right'
+          ) {
+            return {
+              success: false,
+              error: `Invalid caption alignment '${String(args.alignment)}'. Use left, center, or right.`,
+            };
+          }
+          style.alignment = args.alignment;
+        }
+
         if (args.color !== undefined) {
           const parsedTextColor = parseHexColorToRgba(String(args.color));
           if (!parsedTextColor) {
@@ -718,11 +897,38 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           style.backgroundColor = parsedBackgroundColor;
         }
 
-        const position = parseAgentCaptionPosition(args.position);
-        if (args.position !== undefined && !position) {
+        if (args.outlineColor !== undefined) {
+          const parsedOutlineColor = parseHexColorToRgba(String(args.outlineColor));
+          if (!parsedOutlineColor) {
+            return {
+              success: false,
+              error: `Invalid caption outlineColor '${String(args.outlineColor)}'. Use #RRGGBB or #RRGGBBAA.`,
+            };
+          }
+          style.outlineColor = parsedOutlineColor;
+        }
+
+        if (args.shadowColor !== undefined) {
+          const parsedShadowColor = parseHexColorToRgba(String(args.shadowColor));
+          if (!parsedShadowColor) {
+            return {
+              success: false,
+              error: `Invalid caption shadowColor '${String(args.shadowColor)}'. Use #RRGGBB or #RRGGBBAA.`,
+            };
+          }
+          style.shadowColor = parsedShadowColor;
+        }
+
+        const positionInput =
+          args.position ??
+          (args.xPercent !== undefined || args.yPercent !== undefined
+            ? { xPercent: args.xPercent, yPercent: args.yPercent }
+            : undefined);
+        const position = parseAgentCaptionPosition(positionInput);
+        if (positionInput !== undefined && !position) {
           return {
             success: false,
-            error: `Invalid caption position '${String(args.position)}'. Use top, center, or bottom.`,
+            error: `Invalid caption position '${String(positionInput)}'. Use top, center, bottom, or numeric xPercent and yPercent.`,
           };
         }
 

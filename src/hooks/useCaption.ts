@@ -7,7 +7,7 @@
 
 import { useState, useCallback } from 'react';
 import { useProjectStore } from '@/stores/projectStore';
-import type { Caption } from '@/types';
+import type { Caption, CaptionPosition, CaptionStyle } from '@/types';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useCaption');
@@ -25,6 +25,10 @@ export interface CreateCaptionParams {
   endSec: number;
   /** Optional speaker name */
   speaker?: string;
+  /** Optional caption style override */
+  style?: CaptionStyle;
+  /** Optional caption position override */
+  position?: CaptionPosition;
 }
 
 export interface UseCaptionResult {
@@ -90,6 +94,10 @@ export function useCaption(): UseCaptionResult {
             text: caption.text,
             startSec: caption.startSec,
             endSec: caption.endSec,
+            ...(caption.styleOverride !== undefined ? { style: caption.styleOverride } : {}),
+            ...(caption.positionOverride !== undefined
+              ? { position: caption.positionOverride }
+              : {}),
           },
         });
 
@@ -135,6 +143,8 @@ export function useCaption(): UseCaptionResult {
             text: params.text,
             startSec: params.startSec,
             endSec: params.endSec,
+            ...(params.style !== undefined ? { style: params.style } : {}),
+            ...(params.position !== undefined ? { position: params.position } : {}),
           },
         });
 

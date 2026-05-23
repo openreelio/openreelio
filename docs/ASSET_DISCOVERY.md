@@ -1,11 +1,13 @@
 # Asset Discovery
 
-OpenReelio uses an English-first asset discovery surface for agent workflows. External provider search returns candidate references and policy metadata only; it does not import, download, or place external assets automatically.
+OpenReelio uses an English-first asset discovery surface for agent workflows. External provider search returns candidate references and policy metadata first; import and timeline placement are separate approval-gated actions.
 
 ## Implemented Foundation
 
 - `search_stock_media` searches configured stock providers through backend adapters.
 - `find_assets_for_script` is the agent-facing high-level wrapper for scene/script-based discovery.
+- `search_sound_for_scene` is the agent-facing high-level wrapper for SFX and ambient audio discovery.
+- `import_asset_candidate` imports an approved candidate through `import_stock_media_asset` with a license snapshot.
 - Openverse image/audio search works without a user API key and is the built-in zero-config fallback.
 - Pexels and Pixabay visual search require configured API keys.
 - Freesound audio search requires a configured API key.
@@ -35,13 +37,12 @@ Every external candidate should flow through this chain:
 provider result
   -> normalized LicenseInfo
   -> LicensePolicyDecision
-  -> import preflight
+  -> import_asset_candidate/import_stock_media_asset preflight
   -> timeline placement preflight
   -> export/QC manifest preflight
 ```
 
-The current implementation covers the first three steps. Future import and placement tools must reject blocked candidates and must require a license snapshot before downloading external media.
-`import_stock_media_asset` now enforces the download/import preflight for selected candidates by requiring `licenseAck`, rejecting blocked policies, and persisting the license snapshot before the asset is registered.
+The current implementation covers provider search, normalized policy decisions, and explicit import with license snapshots. `import_stock_media_asset` enforces the download/import preflight for selected candidates by requiring `licenseAck`, rejecting blocked policies, and persisting the license snapshot before the asset is registered. Timeline placement still must reject unsafe external candidates and export/QC should continue checking attribution and provider terms.
 
 ## Local Search Status
 

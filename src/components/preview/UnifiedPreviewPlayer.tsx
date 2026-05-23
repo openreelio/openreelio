@@ -12,6 +12,7 @@ import { memo, useMemo } from 'react';
 import { Music } from 'lucide-react';
 import { TimelinePreviewPlayer } from './TimelinePreviewPlayer';
 import { ProxyPreviewPlayer } from './ProxyPreviewPlayer';
+import type { TextPlacementCommitPayload } from './TextPlacementOverlay';
 import { usePreviewMode } from '@/hooks/usePreviewMode';
 import { useProjectStore } from '@/stores/projectStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
@@ -36,6 +37,10 @@ export interface UnifiedPreviewPlayerProps {
   onEnded?: () => void;
   /** Callback when frame is rendered (canvas mode only) */
   onFrameRender?: (time: number) => void;
+  /** Whether the preview should accept click-to-place text input */
+  textPlacementModeActive?: boolean;
+  /** Commit handler for text entered directly on the preview */
+  onTextPlacementCommit?: (payload: TextPlacementCommitPayload) => void | Promise<void>;
 }
 
 // =============================================================================
@@ -50,6 +55,8 @@ export const UnifiedPreviewPlayer = memo(function UnifiedPreviewPlayer({
   showStats = false,
   onEnded,
   onFrameRender,
+  textPlacementModeActive = false,
+  onTextPlacementCommit,
 }: UnifiedPreviewPlayerProps) {
   // Get sequence from prop or store
   const activeSequenceId = useProjectStore((state) => state.activeSequenceId);
@@ -113,6 +120,8 @@ export const UnifiedPreviewPlayer = memo(function UnifiedPreviewPlayer({
           assets={assets}
           className="w-full h-full"
           showControls={showControls}
+          textPlacementModeActive={textPlacementModeActive}
+          onTextPlacementCommit={onTextPlacementCommit}
         />
 
         {/* Mode indicator (dev only) */}
@@ -142,6 +151,8 @@ export const UnifiedPreviewPlayer = memo(function UnifiedPreviewPlayer({
         height={sequenceCanvas?.height}
         onEnded={onEnded}
         onFrameRender={onFrameRender}
+        textPlacementModeActive={textPlacementModeActive}
+        onTextPlacementCommit={onTextPlacementCommit}
       />
 
       {isAudioOnlySequence && (
