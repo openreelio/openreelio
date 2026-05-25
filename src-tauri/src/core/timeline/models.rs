@@ -152,8 +152,10 @@ impl SequenceHdrSettings {
             self.max_fall = None;
         } else {
             self.bit_depth = self.bit_depth.max(10);
-            self.max_cll = Some(self.max_cll.unwrap_or(1000).clamp(1, 10000));
-            self.max_fall = Some(self.max_fall.unwrap_or(400).clamp(1, 10000));
+            let max_cll = self.max_cll.unwrap_or(1000).clamp(1, 10000);
+            let max_fall = self.max_fall.unwrap_or(400).clamp(1, 10000).min(max_cll);
+            self.max_cll = Some(max_cll);
+            self.max_fall = Some(max_fall);
         }
 
         self

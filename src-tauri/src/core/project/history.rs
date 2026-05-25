@@ -150,8 +150,18 @@ impl ProjectHistory {
     where
         I: IntoIterator<Item = OpId>,
     {
+        let protected_ids: HashSet<String> = self
+            .applied_op_ids
+            .iter()
+            .take(self.protected_prefix_len)
+            .cloned()
+            .collect();
         let mut discard_set = HashSet::new();
         for op_id in op_ids {
+            if protected_ids.contains(&op_id) {
+                continue;
+            }
+
             if discard_set.insert(op_id.clone())
                 && !self
                     .discarded_op_ids
@@ -319,5 +329,23 @@ mod tests {
             vec!["op2".to_string(), "op3".to_string()]
         );
         assert!(!history.can_undo());
+    }
+
+    #[test]
+    fn discard_operations_should_not_discard_protected_prefix() {
+        let operations = vec![
+            Operation::with_id("op1", OpKind::SequenceCreate, serde_json::json!({})),
+            Operation::with_id("op2", OpKind::AssetImport, serde_json::json!({})),
+        ];
+
+        let mut history =
+            ProjectHistory::from_operations(&operations, ProjectMeta::new("History Test"));
+
+        history.discard_operations(["op1".to_string(), "op2".to_string()]);
+        history.sanitize(&operations);
+
+        assert_eq!(history.applied_op_ids, vec!["op1".to_string()]);
+        assert_eq!(history.discarded_op_ids, vec!["op2".to_string()]);
+        assert_eq!(history.protected_prefix_len, 1);
     }
 }

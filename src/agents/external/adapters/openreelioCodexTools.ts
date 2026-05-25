@@ -920,16 +920,20 @@ async function executeApprovedCommand(
   const approval = await issuePlanApplyApprovalProof(context, plan.id);
   plan.approvalProof = approval.proof;
 
-  const result = await runProjectBackendMutation(
-    `externalAgentPlan:${commandType}`,
-    () => invoke<AgentPlanResult>('execute_agent_plan', { plan }),
-    {
-      refreshProjectState: false,
-      markDirty: false,
-      timeoutMs: EXTERNAL_AGENT_MUTATION_TIMEOUT_MS,
-    },
-  );
-  contextTokensBySessionId.delete(context.sessionId);
+  let result: AgentPlanResult;
+  try {
+    result = await runProjectBackendMutation(
+      `externalAgentPlan:${commandType}`,
+      () => invoke<AgentPlanResult>('execute_agent_plan', { plan }),
+      {
+        refreshProjectState: false,
+        markDirty: false,
+        timeoutMs: EXTERNAL_AGENT_MUTATION_TIMEOUT_MS,
+      },
+    );
+  } finally {
+    contextTokensBySessionId.delete(context.sessionId);
+  }
   const refresh = await refreshProjectStoreAfterMutation();
 
   return {

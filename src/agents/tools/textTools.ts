@@ -720,7 +720,13 @@ async function rollbackAppliedCommands(appliedCount: number): Promise<boolean> {
   }
 
   for (let index = 0; index < appliedCount; index += 1) {
-    const result = await undo();
+    let result: { success: boolean };
+    try {
+      result = await undo();
+    } catch {
+      return false;
+    }
+
     if (!result.success) {
       return false;
     }

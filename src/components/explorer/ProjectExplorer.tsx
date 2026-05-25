@@ -105,8 +105,8 @@ function getParentDirectory(relativePath: string): string {
 
 function isPointInsideElement(element: HTMLElement, clientX: number, clientY: number): boolean {
   const rect = element.getBoundingClientRect();
-  if (rect.width === 0 && rect.height === 0) {
-    return true;
+  if (rect.width <= 0 || rect.height <= 0) {
+    return false;
   }
 
   return (
@@ -120,7 +120,15 @@ function resolveExternalDropTargetDir(
   clientY: number,
   fallbackTarget?: EventTarget | null,
 ): string | null {
-  if (!rootElement || !isPointInsideElement(rootElement, clientX, clientY)) {
+  if (!rootElement) {
+    return null;
+  }
+
+  const fallbackElement =
+    fallbackTarget instanceof Element && rootElement.contains(fallbackTarget)
+      ? fallbackTarget
+      : null;
+  if (!fallbackElement && !isPointInsideElement(rootElement, clientX, clientY)) {
     return null;
   }
 
@@ -132,9 +140,7 @@ function resolveExternalDropTargetDir(
   const candidateElement =
     pointElement instanceof Element && rootElement.contains(pointElement)
       ? pointElement
-      : fallbackTarget instanceof Element && rootElement.contains(fallbackTarget)
-        ? fallbackTarget
-        : null;
+      : fallbackElement;
 
   const entryElement = candidateElement?.closest(WORKSPACE_ENTRY_PATH_SELECTOR);
   if (!(entryElement instanceof HTMLElement)) {

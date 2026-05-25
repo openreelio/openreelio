@@ -55,7 +55,7 @@ pub(super) struct AudioOnlyFfmpegBuildContext<'a> {
 pub(super) fn build_sequence_ffmpeg_args(
     ctx: SequenceFfmpegBuildContext<'_>,
 ) -> Result<Vec<String>, ExportError> {
-    validate_optional_plan_contract(ctx.render_plan, ctx.sequence)?;
+    validate_optional_plan_contract(ctx.render_plan, ctx.sequence, ctx.settings)?;
 
     let mut args = Vec::new();
     let mut input_index = 0;
@@ -415,7 +415,7 @@ pub(super) fn build_sequence_ffmpeg_args(
 pub(super) fn build_audio_only_ffmpeg_args(
     ctx: AudioOnlyFfmpegBuildContext<'_>,
 ) -> Result<Vec<String>, ExportError> {
-    validate_optional_plan_contract(ctx.render_plan, ctx.sequence)?;
+    validate_optional_plan_contract(ctx.render_plan, ctx.sequence, ctx.settings)?;
 
     let mut args = Vec::new();
     let mut input_index = 0;
@@ -521,6 +521,7 @@ pub(super) fn build_audio_only_ffmpeg_args(
 fn validate_optional_plan_contract(
     render_plan: Option<&RenderPlan>,
     sequence: &Sequence,
+    settings: &ExportSettings,
 ) -> Result<(), ExportError> {
     let Some(plan) = render_plan else {
         return Ok(());
@@ -540,20 +541,49 @@ fn validate_optional_plan_contract(
         )));
     }
 
+    let sequence_duration = sequence.duration().max(0.0);
+    let expected_start = settings.start_time.unwrap_or(0.0).max(0.0);
+    let expected_end = settings
+        .end_time
+        .unwrap_or(sequence_duration)
+        .clamp(expected_start, sequence_duration.max(expected_start));
+
+    if (plan.output_start_sec - expected_start).abs() > TIMELINE_EPSILON_SEC
+        || (plan.output_end_sec - expected_end).abs() > TIMELINE_EPSILON_SEC
+    {
+        return Err(ExportError::InvalidSettings(format!(
+            "Render plan range {:.3}-{:.3}s does not match export range {:.3}-{:.3}s",
+            plan.output_start_sec, plan.output_end_sec, expected_start, expected_end
+        )));
+    }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::timeline::SequenceFormat;
+    use crate::core::timeline::{Clip, SequenceFormat, Track};
 
-    fn valid_plan(sequence_id: &str) -> RenderPlan {
+    fn sequence_with_duration(sequence_id: &str, duration_sec: f64) -> Sequence {
+        let mut sequence = Sequence::new("Sequence", SequenceFormat::youtube_1080());
+        sequence.id = sequence_id.to_string();
+        let mut track = Track::new_video("V1");
+        track.add_clip(
+            Clip::new("asset-1")
+                .with_source_range(0.0, duration_sec)
+                .place_at(0.0),
+        );
+        sequence.tracks.push(track);
+        sequence
+    }
+
+    fn valid_plan(sequence_id: &str, start_sec: f64, end_sec: f64) -> RenderPlan {
         RenderPlan {
             sequence_id: sequence_id.to_string(),
             graph_version: 1,
-            output_start_sec: 0.0,
-            output_end_sec: 1.0,
+            output_start_sec: start_sec,
+            output_end_sec: end_sec,
             output_start_frame: 0,
             output_end_frame: 30,
             output_duration_frames: 30,
@@ -570,11 +600,11 @@ mod tests {
 
     #[test]
     fn should_reject_plan_for_different_sequence() {
-        let mut sequence = Sequence::new("Sequence", SequenceFormat::youtube_1080());
-        sequence.id = "seq-1".to_string();
-        let plan = valid_plan("seq-2");
+        let sequence = sequence_with_duration("seq-1", 1.0);
+        let settings = ExportSettings::default();
+        let plan = valid_plan("seq-2", 0.0, 1.0);
 
-        let result = validate_optional_plan_contract(Some(&plan), &sequence);
+        let result = validate_optional_plan_contract(Some(&plan), &sequence, &settings);
 
         assert!(matches!(
             result,
@@ -585,17 +615,35 @@ mod tests {
 
     #[test]
     fn should_reject_invalid_plan_before_building_args() {
-        let mut sequence = Sequence::new("Sequence", SequenceFormat::youtube_1080());
-        sequence.id = "seq-1".to_string();
-        let mut plan = valid_plan("seq-1");
+        let sequence = sequence_with_duration("seq-1", 1.0);
+        let settings = ExportSettings::default();
+        let mut plan = valid_plan("seq-1", 0.0, 1.0);
         plan.validation.is_valid = false;
         plan.validation.errors.push("broken contract".to_string());
 
-        let result = validate_optional_plan_contract(Some(&plan), &sequence);
+        let result = validate_optional_plan_contract(Some(&plan), &sequence, &settings);
 
         assert!(matches!(
             result,
             Err(ExportError::InvalidSettings(message)) if message.contains("broken contract")
+        ));
+    }
+
+    #[test]
+    fn should_reject_plan_for_different_export_range() {
+        let sequence = sequence_with_duration("seq-1", 10.0);
+        let settings = ExportSettings {
+            start_time: Some(2.0),
+            end_time: Some(4.0),
+            ..ExportSettings::default()
+        };
+        let plan = valid_plan("seq-1", 0.0, 10.0);
+
+        let result = validate_optional_plan_contract(Some(&plan), &sequence, &settings);
+
+        assert!(matches!(
+            result,
+            Err(ExportError::InvalidSettings(message)) if message.contains("does not match export range")
         ));
     }
 }

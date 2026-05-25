@@ -152,6 +152,20 @@ function createAsset(id: string, kind: Asset['kind']): Asset {
   };
 }
 
+function mockElementBounds(element: HTMLElement): void {
+  vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 500,
+    bottom: 500,
+    width: 500,
+    height: 500,
+    toJSON: () => ({}),
+  } as DOMRect);
+}
+
 describe('ProjectExplorer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -255,6 +269,8 @@ describe('ProjectExplorer', () => {
 
   it('should import externally dropped files into the workspace root', async () => {
     render(<ProjectExplorer />);
+    const explorer = screen.getByTestId('project-explorer');
+    mockElementBounds(explorer);
 
     const droppedFile = new File(['media'], 'drop.mp4', { type: 'video/mp4' });
     Object.defineProperty(droppedFile, 'path', {
@@ -262,7 +278,7 @@ describe('ProjectExplorer', () => {
       configurable: true,
     });
 
-    fireEvent.drop(screen.getByTestId('project-explorer'), {
+    fireEvent.drop(explorer, {
       dataTransfer: {
         types: ['Files'],
         files: [droppedFile],
@@ -293,6 +309,7 @@ describe('ProjectExplorer', () => {
     ];
 
     render(<ProjectExplorer />);
+    mockElementBounds(screen.getByTestId('project-explorer'));
 
     const droppedFile = new File(['media'], 'drop.mp4', { type: 'video/mp4' });
     Object.defineProperty(droppedFile, 'path', {

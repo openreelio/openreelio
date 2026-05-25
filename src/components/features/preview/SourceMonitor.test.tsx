@@ -223,21 +223,23 @@ describe('SourceMonitor', () => {
     const handleDragEnd = vi.fn();
     document.addEventListener(TIMELINE_ASSET_DRAG_END_EVENT, handleDragEnd);
 
-    fireEvent.pointerDown(dragArea, { button: 0, pointerId: 7, clientX: 10, clientY: 10 });
-    fireEvent.pointerMove(document, { pointerId: 7, clientX: 40, clientY: 10 });
-    fireEvent.pointerUp(document, { pointerId: 7, clientX: 40, clientY: 10 });
+    try {
+      fireEvent.pointerDown(dragArea, { button: 0, pointerId: 7, clientX: 10, clientY: 10 });
+      fireEvent.pointerMove(document, { pointerId: 7, clientX: 40, clientY: 10 });
+      fireEvent.pointerUp(document, { pointerId: 7, clientX: 40, clientY: 10 });
 
-    expect(handleDragEnd).toHaveBeenCalledTimes(1);
-    expect((handleDragEnd.mock.calls[0][0] as CustomEvent).detail.payload).toEqual({
-      assetId: 'test-asset',
-      assetKind: 'video',
-      editMode: 'overwrite',
-      label: 'test-video.mp4',
-      sourceIn: 1.5,
-      sourceOut: 6.25,
-    });
-
-    document.removeEventListener(TIMELINE_ASSET_DRAG_END_EVENT, handleDragEnd);
+      expect(handleDragEnd).toHaveBeenCalledTimes(1);
+      expect((handleDragEnd.mock.calls[0][0] as CustomEvent).detail.payload).toEqual({
+        assetId: 'test-asset',
+        assetKind: 'video',
+        editMode: 'overwrite',
+        label: 'test-video.mp4',
+        sourceIn: 1.5,
+        sourceOut: 6.25,
+      });
+    } finally {
+      document.removeEventListener(TIMELINE_ASSET_DRAG_END_EVENT, handleDragEnd);
+    }
   });
 
   it('should call seek when seek bar is clicked', () => {

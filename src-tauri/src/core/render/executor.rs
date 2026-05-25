@@ -86,9 +86,12 @@ pub async fn execute_ffmpeg_invocation(
 
     let mut cmd = tokio::process::Command::new(ffmpeg_path);
     configure_tokio_command(&mut cmd);
-    cmd.args(&invocation.args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args(&invocation.args).stderr(Stdio::piped());
+    if progress_tx.is_some() {
+        cmd.stdout(Stdio::piped());
+    } else {
+        cmd.stdout(Stdio::null());
+    }
 
     let mut child = cmd
         .spawn()

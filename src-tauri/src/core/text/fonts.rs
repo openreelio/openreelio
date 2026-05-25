@@ -293,8 +293,10 @@ fn parse_name_table(
 }
 
 fn decode_font_name(platform_id: u16, encoding_id: u16, bytes: &[u8]) -> Option<String> {
-    let decoded = if platform_id == 0 || platform_id == 3 || encoding_id == 1 || encoding_id == 10 {
-        if bytes.len() % 2 != 0 {
+    let is_utf16_name =
+        platform_id == 0 || (platform_id == 3 && (encoding_id == 1 || encoding_id == 10));
+    let decoded = if is_utf16_name {
+        if !bytes.len().is_multiple_of(2) {
             return None;
         }
         let units = bytes
@@ -407,6 +409,14 @@ mod tests {
         assert_eq!(
             parse_font_families(&bytes),
             vec!["OpenReelio Sans".to_string()]
+        );
+    }
+
+    #[test]
+    fn decode_font_name_does_not_treat_mac_encoding_one_as_utf16() {
+        assert_eq!(
+            decode_font_name(1, 1, b"MacSans"),
+            Some("MacSans".to_string())
         );
     }
 }

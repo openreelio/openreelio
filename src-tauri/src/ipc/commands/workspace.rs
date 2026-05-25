@@ -550,13 +550,11 @@ pub async fn import_external_files_to_workspace(
         return Err("At least one source path is required".to_string());
     }
 
-    let project_root = {
-        let guard = state.project.lock().await;
-        guard
-            .as_ref()
-            .map(|project| project.path.clone())
-            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?
-    };
+    let mut guard = state.project.lock().await;
+    let project = guard
+        .as_mut()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+    let project_root = project.path.clone();
 
     let normalized_target_dir = normalize_external_import_target_dir(target_dir.as_deref())?;
     let source_paths_for_copy = source_paths;
@@ -580,15 +578,6 @@ pub async fn import_external_files_to_workspace(
     let imported_relative_paths: Vec<String>;
 
     {
-        let mut guard = state.project.lock().await;
-        let project = guard
-            .as_mut()
-            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
-
-        if project.path != project_root {
-            return Err("Project changed while importing external files".to_string());
-        }
-
         let existing_asset_ids: HashSet<String> = project.state.assets.keys().cloned().collect();
         let service = WorkspaceService::open(project.path.clone()).map_err(|e| e.to_ipc_error())?;
 
@@ -644,6 +633,8 @@ pub async fn import_external_files_to_workspace(
             .map(|file| file.relative_path.clone())
             .collect();
     }
+
+    drop(guard);
 
     if let Some(app_handle) = state.app_handle.get() {
         for relative_path in imported_relative_paths {

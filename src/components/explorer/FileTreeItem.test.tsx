@@ -91,25 +91,27 @@ describe('FileTreeItem', () => {
     const handleDragEnd = vi.fn();
     document.addEventListener(TIMELINE_ASSET_DRAG_END_EVENT, handleDragEnd);
 
-    render(<FileTreeItem entry={entry} />);
+    try {
+      render(<FileTreeItem entry={entry} />);
 
-    const row = screen.getByTitle('footage/interview.mp4');
-    expect(row).toHaveAttribute('draggable', 'false');
+      const row = screen.getByTitle('footage/interview.mp4');
+      expect(row).toHaveAttribute('draggable', 'false');
 
-    fireEvent.pointerDown(row, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
-    fireEvent.pointerMove(document, { pointerId: 1, clientX: 30, clientY: 10 });
-    fireEvent.pointerUp(document, { pointerId: 1, clientX: 30, clientY: 10 });
+      fireEvent.pointerDown(row, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+      fireEvent.pointerMove(document, { pointerId: 1, clientX: 30, clientY: 10 });
+      fireEvent.pointerUp(document, { pointerId: 1, clientX: 30, clientY: 10 });
 
-    expect(handleDragEnd).toHaveBeenCalledTimes(1);
-    expect((handleDragEnd.mock.calls[0][0] as CustomEvent).detail.payload).toEqual({
-      assetId: 'asset_interview',
-      assetKind: 'video',
-      label: 'interview.mp4',
-      workspaceRelativePath: 'footage/interview.mp4',
-    });
-    expect(document.querySelector('[data-testid="timeline-asset-drag-preview"]')).toBeNull();
-
-    document.removeEventListener(TIMELINE_ASSET_DRAG_END_EVENT, handleDragEnd);
+      expect(handleDragEnd).toHaveBeenCalledTimes(1);
+      expect((handleDragEnd.mock.calls[0][0] as CustomEvent).detail.payload).toEqual({
+        assetId: 'asset_interview',
+        assetKind: 'video',
+        label: 'interview.mp4',
+        workspaceRelativePath: 'footage/interview.mp4',
+      });
+      expect(document.querySelector('[data-testid="timeline-asset-drag-preview"]')).toBeNull();
+    } finally {
+      document.removeEventListener(TIMELINE_ASSET_DRAG_END_EVENT, handleDragEnd);
+    }
   });
 
   it('shows a drag preview while dragging a file toward the timeline', () => {

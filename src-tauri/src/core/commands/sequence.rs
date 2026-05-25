@@ -305,6 +305,8 @@ pub struct UpdateSequenceHdrSettingsCommand {
     pub settings: SequenceHdrSettings,
     #[serde(skip)]
     previous_settings: Option<SequenceHdrSettings>,
+    #[serde(skip)]
+    previous_modified_at: Option<String>,
 }
 
 impl UpdateSequenceHdrSettingsCommand {
@@ -313,6 +315,7 @@ impl UpdateSequenceHdrSettingsCommand {
             sequence_id: sequence_id.to_string(),
             settings: settings.normalized(),
             previous_settings: None,
+            previous_modified_at: None,
         }
     }
 }
@@ -326,6 +329,7 @@ impl Command for UpdateSequenceHdrSettingsCommand {
 
         self.settings = self.settings.clone().normalized();
         self.previous_settings = Some(sequence.hdr_settings.clone());
+        self.previous_modified_at = Some(sequence.modified_at.clone());
         sequence.hdr_settings = self.settings.clone();
         sequence.modified_at = chrono::Utc::now().to_rfc3339();
         state.is_dirty = true;
@@ -345,7 +349,9 @@ impl Command for UpdateSequenceHdrSettingsCommand {
 
         if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
             sequence.hdr_settings = previous.clone();
-            sequence.modified_at = chrono::Utc::now().to_rfc3339();
+            if let Some(previous_modified_at) = &self.previous_modified_at {
+                sequence.modified_at = previous_modified_at.clone();
+            }
             state.is_dirty = true;
         }
 
@@ -581,6 +587,8 @@ mod tests {
     #[test]
     fn test_update_sequence_hdr_settings_normalizes_and_undoes() {
         let (mut state, seq_id) = create_test_state_with_sequence();
+        let original_modified_at = "2026-01-01T00:00:00Z".to_string();
+        state.sequences.get_mut(&seq_id).unwrap().modified_at = original_modified_at.clone();
 
         let mut cmd = UpdateSequenceHdrSettingsCommand::new(
             &seq_id,
@@ -598,6 +606,7 @@ mod tests {
         assert_eq!(settings.bit_depth, 10);
         assert_eq!(settings.max_cll, Some(10000));
         assert_eq!(settings.max_fall, Some(400));
+        assert_ne!(state.sequences[&seq_id].modified_at, original_modified_at);
 
         cmd.undo(&mut state).unwrap();
 
@@ -606,5 +615,26 @@ mod tests {
         assert_eq!(settings.bit_depth, 8);
         assert_eq!(settings.max_cll, None);
         assert_eq!(settings.max_fall, None);
+        assert_eq!(state.sequences[&seq_id].modified_at, original_modified_at);
+    }
+
+    #[test]
+    fn test_update_sequence_hdr_settings_clamps_fall_to_cll() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+
+        let mut cmd = UpdateSequenceHdrSettingsCommand::new(
+            &seq_id,
+            SequenceHdrSettings {
+                hdr_mode: SequenceHdrMode::Hdr10,
+                max_cll: Some(500),
+                max_fall: Some(900),
+                bit_depth: 10,
+            },
+        );
+        cmd.execute(&mut state).unwrap();
+
+        let settings = &state.sequences[&seq_id].hdr_settings;
+        assert_eq!(settings.max_cll, Some(500));
+        assert_eq!(settings.max_fall, Some(500));
     }
 }

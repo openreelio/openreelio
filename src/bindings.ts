@@ -2004,6 +2004,16 @@ async getWorkspaceTree() : Promise<Result<FileTreeEntryDto[], string>> {
 }
 },
 /**
+ * Import absolute local file paths from an OS drag/drop into the project workspace.
+ */
+async importExternalFilesToWorkspace(sourcePaths: string[], targetDir: string | null) : Promise<Result<ExternalWorkspaceImportResultDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_external_files_to_workspace", { sourcePaths, targetDir }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Reveal a workspace file in the system file explorer
  */
 async revealInExplorer(relativePath: string) : Promise<Result<null, string>> {
@@ -4320,6 +4330,18 @@ export type ExternalAgentSessionLinkDto = { conversationSessionId: string; proje
 export type ExternalAgentSetupInfo = { codexLoginCommand: string; codexPluginMarketplaceRoot: string | null; codexPluginMarketplaceCommand: string | null; codexMcpCommand: string | null; codexMcpCommandReason: string | null }
 export type ExternalAgentSetupInfoInput = { projectPath: string | null }
 export type ExternalDiarizationRunSummary = { assetId: string; inputAudioPath: string; outputJsonPath: string; transcriptSegmentCount: number; speakerCount: number; speakerTurnCount: number }
+/**
+ * Per-file import failure for batch external drops.
+ */
+export type ExternalWorkspaceImportFailureDto = { sourcePath: string; message: string }
+/**
+ * Result returned after importing external OS files into the workspace.
+ */
+export type ExternalWorkspaceImportResultDto = { importedFiles: ExternalWorkspaceImportedFileDto[]; failedFiles: ExternalWorkspaceImportFailureDto[] }
+/**
+ * A file imported into the workspace from an external OS file drop.
+ */
+export type ExternalWorkspaceImportedFileDto = { sourcePath: string; relativePath: string; name: string; kind: AssetKind; fileSize: number; assetId: string | null; alreadyInWorkspace: boolean }
 /**
  * FFmpeg availability and version information.
  */

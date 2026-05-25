@@ -254,8 +254,9 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         return [];
       }
 
-      if (renderGraph) {
-        return getActiveVisualLayers(renderGraph, time, {
+      const graphForSequence = renderGraph?.sequenceId === sequence.id ? renderGraph : null;
+      if (graphForSequence) {
+        return getActiveVisualLayers(graphForSequence, time, {
           trackKinds: ['video', 'overlay', 'caption'],
         })
           .map((layer): ActiveClipInfo | null => {

@@ -3218,6 +3218,7 @@ fn ass_color_param(effect: &Effect, name: &str, fallback: &str, opacity: f64) ->
         .map(|value| AssColor::from_hex(value, fallback, opacity))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_ass_text_style_and_event(
     styles: &mut String,
     events: &mut String,
@@ -3761,6 +3762,7 @@ impl ExportEngine {
     }
 
     /// Export a sequence using a precomputed render plan contract.
+    #[allow(clippy::too_many_arguments)]
     pub async fn export_sequence_with_effects_for_plan(
         &self,
         sequence: &Sequence,
@@ -3783,6 +3785,7 @@ impl ExportEngine {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn export_sequence_with_effects_internal(
         &self,
         sequence: &Sequence,
@@ -4086,6 +4089,7 @@ impl ExportEngine {
     }
 
     /// Export audio using a precomputed render plan contract.
+    #[allow(clippy::too_many_arguments)]
     pub async fn export_audio_only_for_plan(
         &self,
         sequence: &Sequence,
@@ -4108,6 +4112,7 @@ impl ExportEngine {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn export_audio_only_internal(
         &self,
         sequence: &Sequence,

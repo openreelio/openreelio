@@ -2296,7 +2296,7 @@ mod tests {
         assert_eq!(project.state.meta.name, "Discarded Name");
 
         project
-            .discard_persisted_operations(&[result.op_id.clone()])
+            .discard_persisted_operations(std::slice::from_ref(&result.op_id))
             .unwrap();
         project.save().unwrap();
 
@@ -2329,7 +2329,7 @@ mod tests {
             .unwrap();
 
         project
-            .discard_persisted_operations(&[discarded.op_id.clone()])
+            .discard_persisted_operations(std::slice::from_ref(&discarded.op_id))
             .unwrap();
 
         let kept = project

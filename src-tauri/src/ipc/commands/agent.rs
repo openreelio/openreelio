@@ -519,31 +519,16 @@ pub async fn execute_agent_plan(
         .validate_and_prepare()
         .map_err(|e| format!("Plan validation failed: {e}"))?;
 
-    let approved_project_id = {
-        let guard = state.project.lock().await;
-        let project = guard
-            .as_ref()
-            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
-        project.state.meta.id.clone()
-    };
-
-    if let Err(error) = consume_agent_plan_approval_proof(&plan, &approved_project_id, &state).await
-    {
-        return Ok(build_agent_plan_failure(plan_id, total_steps, start, error));
-    }
-
     // Lock the project for the duration of plan execution.
     let mut guard = state.project.lock().await;
     let project = guard
         .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
-    if project.state.meta.id != approved_project_id {
-        return Ok(build_agent_plan_failure(
-            plan_id,
-            total_steps,
-            start,
-            "Active project changed after plan approval",
-        ));
+    let approved_project_id = project.state.meta.id.clone();
+
+    if let Err(error) = consume_agent_plan_approval_proof(&plan, &approved_project_id, &state).await
+    {
+        return Ok(build_agent_plan_failure(plan_id, total_steps, start, error));
     }
     let project_path = project.path.clone();
 

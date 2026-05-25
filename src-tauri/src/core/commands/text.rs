@@ -349,6 +349,10 @@ pub struct UpdateTextCommand {
     /// Previous text data for undo
     #[serde(skip)]
     previous_text_data: Option<TextClipData>,
+    #[serde(skip)]
+    previous_clip_opacity: Option<f32>,
+    #[serde(skip)]
+    previous_effect_opacity: Option<f64>,
     /// Effect ID for updates
     #[serde(skip)]
     effect_id: Option<EffectId>,
@@ -368,6 +372,8 @@ impl UpdateTextCommand {
             clip_id: clip_id.into(),
             text_data,
             previous_text_data: None,
+            previous_clip_opacity: None,
+            previous_effect_opacity: None,
             effect_id: None,
         }
     }
@@ -436,6 +442,8 @@ impl Command for UpdateTextCommand {
         // 5. Store previous data for undo
         if let Some(effect) = state.effects.get(&effect_id) {
             self.previous_text_data = Some(extract_text_data_from_clip_effect(effect, clip));
+            self.previous_clip_opacity = Some(clip.opacity);
+            self.previous_effect_opacity = effect.get_float("opacity");
         }
 
         // 6. Update the effect
@@ -469,13 +477,18 @@ impl Command for UpdateTextCommand {
         // Restore effect parameters
         if let Some(effect) = state.effects.get_mut(effect_id) {
             set_text_params_on_effect(effect, previous_data);
+            if let Some(previous_effect_opacity) = self.previous_effect_opacity {
+                effect.set_param("opacity", ParamValue::Float(previous_effect_opacity));
+            }
         }
 
         // Restore clip opacity, label, and transform anchors used by preview interactions
         if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
             if let Some(track) = sequence.get_track_mut(&self.track_id) {
                 if let Some(clip) = track.get_clip_mut(&self.clip_id) {
-                    clip.opacity = previous_data.opacity as f32;
+                    clip.opacity = self
+                        .previous_clip_opacity
+                        .unwrap_or(previous_data.opacity as f32);
                     clip.label = Some(format!(
                         "Text: {}",
                         truncate_text(&previous_data.content, 20)
@@ -1392,6 +1405,56 @@ mod tests {
         assert_eq!(effect.get_float("x"), Some(0.7));
         assert_eq!(effect.get_float("y"), Some(0.8));
         assert_eq!(effect.get_float("rotation"), Some(12.0));
+    }
+
+    #[test]
+    fn test_update_text_undo_restores_distinct_clip_and_effect_opacity() {
+        let mut state = create_test_state();
+
+        let mut add_cmd = AddTextClipCommand::new(
+            "seq-1",
+            "video-track",
+            0.0,
+            5.0,
+            TextClipData::new("Original").with_opacity(0.8),
+        );
+        add_cmd.execute(&mut state).unwrap();
+        let clip_id = add_cmd.created_clip_id.clone().unwrap();
+        let effect_id = {
+            let sequence = state.get_sequence("seq-1").unwrap();
+            let track = sequence.get_track("video-track").unwrap();
+            let clip = track.get_clip(&clip_id).unwrap();
+            clip.effects[0].clone()
+        };
+
+        {
+            let sequence = state.get_sequence_mut("seq-1").unwrap();
+            let track = sequence.get_track_mut("video-track").unwrap();
+            let clip = track.get_clip_mut(&clip_id).unwrap();
+            clip.opacity = 0.25;
+        }
+        state
+            .effects
+            .get_mut(&effect_id)
+            .unwrap()
+            .set_param("opacity", ParamValue::Float(0.8));
+
+        let mut update_cmd = UpdateTextCommand::new(
+            "seq-1",
+            "video-track",
+            &clip_id,
+            TextClipData::new("Updated").with_opacity(0.4),
+        );
+        update_cmd.execute(&mut state).unwrap();
+        update_cmd.undo(&mut state).unwrap();
+
+        let sequence = state.get_sequence("seq-1").unwrap();
+        let track = sequence.get_track("video-track").unwrap();
+        let clip = track.get_clip(&clip_id).unwrap();
+        let effect = state.effects.get(&effect_id).unwrap();
+
+        assert!((clip.opacity - 0.25).abs() < 0.001);
+        assert_eq!(effect.get_float("opacity"), Some(0.8));
     }
 
     // -------------------------------------------------------------------------

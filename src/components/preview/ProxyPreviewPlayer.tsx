@@ -428,7 +428,8 @@ export function ProxyPreviewPlayer({
       return prevActiveClipsRef.current;
     }
 
-    const graphLayers = getActiveMediaVisualLayers(renderGraph, assets, currentTime, {
+    const graphForSequence = renderGraph?.sequenceId === sequence.id ? renderGraph : null;
+    const graphLayers = getActiveMediaVisualLayers(graphForSequence, assets, currentTime, {
       trackKinds: ['video'],
     });
     const clips: ActiveClip[] =
@@ -451,7 +452,7 @@ export function ProxyPreviewPlayer({
             .filter((clip): clip is ActiveClip => clip !== null)
         : [];
 
-    if (clips.length === 0 && !renderGraph) {
+    if (clips.length === 0 && !graphForSequence) {
       sequence.tracks.forEach((track, trackIndex) => {
         if (track.muted || !track.visible) return;
 

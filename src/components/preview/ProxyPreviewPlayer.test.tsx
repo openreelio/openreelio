@@ -192,6 +192,68 @@ describe('ProxyPreviewPlayer', () => {
     expect(screen.getByTestId('proxy-video-clip-bottom')).toBeInTheDocument();
   });
 
+  it('ignores a stale render graph from a different sequence and keeps raw-track fallback', async () => {
+    runtimeMocks.isTauriRuntime.mockReturnValue(true);
+    const sequence = createSequence();
+    const staleGraph: RenderGraph = {
+      graphVersion: 1,
+      sequenceId: 'previous-sequence',
+      format: sequence.format,
+      durationSec: 10,
+      durationFrames: 300,
+      visualLayers: [
+        {
+          layerIndex: 0,
+          trackId: 'previous-track',
+          trackKind: 'video',
+          trackIndex: 0,
+          clipId: 'previous-clip',
+          timelineInSec: 0,
+          timelineOutSec: 10,
+          timelineInFrame: 0,
+          timelineOutFrame: 300,
+          durationFrames: 300,
+          sourceInSec: 0,
+          sourceOutSec: 10,
+          sourceInFrame: 0,
+          sourceOutFrame: 300,
+          transform: sequence.tracks[0].clips[0].transform,
+          opacity: 1,
+          blendMode: 'normal',
+          effects: [],
+          source: {
+            type: 'media',
+            assetId: 'asset-top',
+          },
+        },
+      ],
+      audioLayers: [],
+    };
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_sequence_render_graph') {
+        return staleGraph;
+      }
+
+      return [];
+    });
+
+    const assets = new Map<string, Asset>([
+      ['asset-top', createVideoAsset('asset-top', 'https://example.com/top.mp4')],
+      ['asset-bottom', createVideoAsset('asset-bottom', 'https://example.com/bottom.mp4')],
+    ]);
+
+    render(<ProxyPreviewPlayer sequence={sequence} assets={assets} showControls />);
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('get_sequence_render_graph', {
+        sequenceId: sequence.id,
+      });
+    });
+
+    expect(screen.getByTestId('proxy-video-clip-top')).toBeInTheDocument();
+    expect(screen.getByTestId('proxy-video-clip-bottom')).toBeInTheDocument();
+  });
+
   it('renders active text overlays from the sequence render graph', async () => {
     runtimeMocks.isTauriRuntime.mockReturnValue(true);
     const sequence = createSequence();
