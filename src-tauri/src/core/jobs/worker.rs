@@ -1229,7 +1229,10 @@ impl JobProcessor {
     /// * `preview:failed` - Emitted on failure
     async fn process_preview_render(&self, job: &Job) -> Result<serde_json::Value, String> {
         #[cfg(not(test))]
-        use crate::core::render::{ExportEngine, ExportSettings};
+        use crate::core::render::{
+            build_render_graph, build_render_plan, validate_export_settings, ExportEngine,
+            ExportSettings,
+        };
 
         // Validate required payload fields
         let sequence_id = job
@@ -1283,7 +1286,7 @@ impl JobProcessor {
 
         #[cfg(not(test))]
         {
-            let (sequence, assets, effects) = {
+            let (sequence, assets, effects, render_graph) = {
                 // Get project state from AppState
                 let app_state = self.app_handle.state::<crate::AppState>();
                 let guard = app_state.project.lock().await;
@@ -1298,9 +1301,11 @@ impl JobProcessor {
 
                 // Clone required data to release the lock
                 let sequence = sequence.clone();
+                let render_graph = build_render_graph(&project.state, sequence_id)
+                    .map_err(|error| format!("Failed to build render graph: {}", error))?;
                 let assets = project.state.assets.clone();
                 let effects = project.state.effects.clone();
-                (sequence, assets, effects)
+                (sequence, assets, effects, render_graph)
             };
 
             // Check if sequence has clips
@@ -1333,6 +1338,39 @@ impl JobProcessor {
 
             // Create preview-optimized export settings
             let settings = ExportSettings::preview(output_path.clone(), start_time, end_time);
+            let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
+            if !validation.is_valid {
+                let error_msg = validation.errors.join("; ");
+                emit_or_warn(
+                    &self.app_handle,
+                    "preview:failed",
+                    serde_json::json!({
+                        "jobId": job.id,
+                        "sequenceId": sequence_id,
+                        "error": error_msg,
+                    }),
+                );
+                return Err(format!("Preview validation failed: {}", error_msg));
+            }
+
+            let render_plan = build_render_plan(&render_graph, &assets, &effects, &settings);
+            if !render_plan.validation.is_valid {
+                let error_msg = render_plan.validation.errors.join("; ");
+                emit_or_warn(
+                    &self.app_handle,
+                    "preview:failed",
+                    serde_json::json!({
+                        "jobId": job.id,
+                        "sequenceId": sequence_id,
+                        "error": error_msg,
+                    }),
+                );
+                return Err(format!(
+                    "Preview render plan validation failed: {}",
+                    error_msg
+                ));
+            }
+            let plan_hash = render_plan.plan_hash.clone();
 
             // Get FFmpeg runner
             let state = self.ffmpeg_state.read().await;
@@ -1371,11 +1409,12 @@ impl JobProcessor {
 
             // Execute preview render
             let result = export_engine
-                .export_sequence_with_effects(
+                .export_sequence_with_effects_for_plan(
                     &sequence,
                     &assets,
                     &effects,
                     &settings,
+                    &render_plan,
                     Some(progress_tx),
                     None,
                 )
@@ -1399,6 +1438,7 @@ impl JobProcessor {
                             "durationSec": export_result.duration_sec,
                             "fileSizeBytes": export_result.file_size,
                             "encodingTimeSec": export_result.encoding_time_sec,
+                            "planHash": plan_hash.clone(),
                         }),
                     );
 
@@ -1416,6 +1456,7 @@ impl JobProcessor {
                         "durationSec": export_result.duration_sec,
                         "fileSizeBytes": export_result.file_size,
                         "encodingTimeSec": export_result.encoding_time_sec,
+                        "planHash": plan_hash,
                     }))
                 }
                 Err(e) => {
@@ -1459,7 +1500,10 @@ impl JobProcessor {
         #[cfg(not(test))]
         use crate::core::{
             fs::{default_export_allowed_roots, validate_scoped_output_path},
-            render::{validate_export_settings, ExportEngine, ExportPreset, ExportSettings},
+            render::{
+                build_render_graph, build_render_plan, validate_export_settings, ExportEngine,
+                ExportPreset, ExportSettings,
+            },
         };
 
         // Validate required payload fields
@@ -1498,7 +1542,7 @@ impl JobProcessor {
         #[cfg(not(test))]
         {
             // 1. Get project state and validate inputs
-            let (sequence, assets, effects, project_path) = {
+            let (sequence, assets, effects, render_graph, project_path) = {
                 let app_state = self.app_handle.state::<crate::AppState>();
                 let guard = app_state.project.lock().await;
                 let project = guard.as_ref().ok_or("No project open")?;
@@ -1509,12 +1553,15 @@ impl JobProcessor {
                     .get(sequence_id)
                     .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
                     .clone();
+                let render_graph = build_render_graph(&project.state, sequence_id)
+                    .map_err(|error| format!("Failed to build render graph: {}", error))?;
 
                 // Clone needed data to release lock quickly
                 (
                     sequence,
                     project.state.assets.clone(),
                     project.state.effects.clone(),
+                    render_graph,
                     project.path.clone(),
                 )
             };
@@ -1560,6 +1607,21 @@ impl JobProcessor {
                 );
                 return Err(format!("Export validation failed: {}", error_msg));
             }
+            let render_plan = build_render_plan(&render_graph, &assets, &effects, &settings);
+            if !render_plan.validation.is_valid {
+                let error_msg = render_plan.validation.errors.join("; ");
+                emit_or_warn(
+                    &self.app_handle,
+                    "render:failed",
+                    serde_json::json!({
+                        "jobId": job.id,
+                        "sequenceId": sequence_id,
+                        "error": error_msg,
+                    }),
+                );
+                return Err(format!("Render plan validation failed: {}", error_msg));
+            }
+            let plan_hash = render_plan.plan_hash.clone();
 
             // 5. Setup Engine and Progress
             let state = self.ffmpeg_state.read().await;
@@ -1595,11 +1657,12 @@ impl JobProcessor {
 
             // 6. Execute Export
             let result = export_engine
-                .export_sequence_with_effects(
+                .export_sequence_with_effects_for_plan(
                     &sequence,
                     &assets,
                     &effects,
                     &settings,
+                    &render_plan,
                     Some(progress_tx),
                     None,
                 )
@@ -1621,6 +1684,7 @@ impl JobProcessor {
                             "durationSec": export_result.duration_sec,
                             "fileSizeBytes": export_result.file_size,
                             "encodingTimeSec": export_result.encoding_time_sec,
+                            "planHash": plan_hash.clone(),
                         }),
                     );
 
@@ -1635,6 +1699,7 @@ impl JobProcessor {
                         "durationSec": export_result.duration_sec,
                         "fileSizeBytes": export_result.file_size,
                         "encodingTimeSec": export_result.encoding_time_sec,
+                        "planHash": plan_hash,
                     }))
                 }
                 Err(e) => {

@@ -1,9 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { invoke } from '@tauri-apps/api/core';
 import { ProxyPreviewPlayer } from './ProxyPreviewPlayer';
 import { usePlaybackStore } from '@/stores/playbackStore';
+import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
+import type { RenderGraph } from '@/bindings';
 import type { Asset, Clip, Sequence, Track } from '@/types';
+
+const runtimeMocks = vi.hoisted(() => ({
+  isTauriRuntime: vi.fn(() => false),
+}));
+
+vi.mock('@tauri-apps/api/core', () => ({
+  convertFileSrc: vi.fn((path: string) => path),
+  invoke: vi.fn(),
+}));
+
+vi.mock('@/services/framePaths', () => ({
+  isTauriRuntime: runtimeMocks.isTauriRuntime,
+}));
+
+const mockedInvoke = vi.mocked(invoke);
 
 function createClip(id: string, assetId: string): Clip {
   return {
@@ -30,6 +48,20 @@ function createVideoTrack(id: string, clip: Clip): Track {
     id,
     name: id,
     kind: 'video',
+    clips: [clip],
+    blendMode: 'normal',
+    muted: false,
+    visible: true,
+    locked: false,
+    volume: 1,
+  };
+}
+
+function createCaptionTrack(id: string, clip: Clip): Track {
+  return {
+    id,
+    name: id,
+    kind: 'caption',
     clips: [clip],
     blendMode: 'normal',
     muted: false,
@@ -78,6 +110,8 @@ function createSequence(): Sequence {
 
 describe('ProxyPreviewPlayer', () => {
   beforeEach(() => {
+    mockedInvoke.mockReset();
+    runtimeMocks.isTauriRuntime.mockReturnValue(false);
     usePlaybackStore.getState().reset();
     usePlaybackStore.setState({
       currentTime: 2,
@@ -89,6 +123,24 @@ describe('ProxyPreviewPlayer', () => {
       playbackRate: 1,
     });
     useTimelineStore.setState({ selectedClipIds: [] });
+    useProjectStore.setState({
+      executeCommand: vi.fn().mockResolvedValue({
+        opId: 'op-preview-test',
+        changes: [],
+        createdIds: [],
+        deletedIds: [],
+      }),
+    });
+
+    if (!HTMLElement.prototype.setPointerCapture) {
+      HTMLElement.prototype.setPointerCapture = vi.fn();
+    }
+    if (!HTMLElement.prototype.releasePointerCapture) {
+      HTMLElement.prototype.releasePointerCapture = vi.fn();
+    }
+    if (!HTMLElement.prototype.hasPointerCapture) {
+      HTMLElement.prototype.hasPointerCapture = vi.fn(() => true);
+    }
   });
 
   it('keeps media layers non-interactive so controls are not blocked', () => {
@@ -138,6 +190,105 @@ describe('ProxyPreviewPlayer', () => {
 
     expect(screen.queryByTestId('proxy-video-clip-top')).not.toBeInTheDocument();
     expect(screen.getByTestId('proxy-video-clip-bottom')).toBeInTheDocument();
+  });
+
+  it('renders active text overlays from the sequence render graph', async () => {
+    runtimeMocks.isTauriRuntime.mockReturnValue(true);
+    const sequence = createSequence();
+    const textClip = createClip('text-clip', '__text__title');
+    sequence.tracks[0].clips.push(textClip);
+
+    const renderGraph: RenderGraph = {
+      graphVersion: 1,
+      sequenceId: sequence.id,
+      format: sequence.format,
+      durationSec: 10,
+      durationFrames: 300,
+      visualLayers: [
+        {
+          layerIndex: 0,
+          trackId: sequence.tracks[0].id,
+          trackKind: 'video',
+          trackIndex: 0,
+          clipId: textClip.id,
+          timelineInSec: 0,
+          timelineOutSec: 10,
+          timelineInFrame: 0,
+          timelineOutFrame: 300,
+          durationFrames: 300,
+          sourceInSec: 0,
+          sourceOutSec: 10,
+          sourceInFrame: 0,
+          sourceOutFrame: 300,
+          transform: textClip.transform,
+          opacity: 1,
+          blendMode: 'normal',
+          effects: [],
+          source: {
+            type: 'text',
+            assetId: textClip.assetId,
+            textData: null,
+            renderSpec: {
+              text: 'Graph title',
+              style: {
+                fontFamily: 'Inter',
+                fontSizePx: 64,
+                fontWeight: 650,
+                bold: true,
+                italic: false,
+                underline: false,
+                alignment: 'center',
+                lineHeight: 1.2,
+                letterSpacingPx: 2,
+                fillColor: { r: 255, g: 10, b: 20, a: 255 },
+                opacity: 0.8,
+              },
+              position: {
+                xPercent: 25,
+                yPercent: 75,
+                anchorXPercent: 50,
+                anchorYPercent: 50,
+              },
+              background: null,
+              outline: null,
+              shadow: null,
+              rotationDeg: 0,
+            },
+          },
+        },
+      ],
+      audioLayers: [],
+    };
+
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_sequence_render_graph') {
+        return renderGraph;
+      }
+
+      return [];
+    });
+
+    const assets = new Map<string, Asset>([
+      ['asset-top', createVideoAsset('asset-top', 'https://example.com/top.mp4')],
+      ['asset-bottom', createVideoAsset('asset-bottom', 'https://example.com/bottom.mp4')],
+    ]);
+
+    render(<ProxyPreviewPlayer sequence={sequence} assets={assets} showControls />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('proxy-text-overlay-text-clip')).toHaveTextContent('Graph title');
+    });
+
+    const overlay = screen.getByTestId('proxy-text-overlay-text-clip') as HTMLElement;
+    expect(overlay.style.left).toBe('25%');
+    expect(overlay.style.top).toBe('75%');
+    expect(overlay.style.fontFamily).toBe('Inter');
+    expect(overlay.style.fontSize).toBe('64px');
+    expect(overlay.style.fontWeight).toBe('650');
+    expect(overlay.style.letterSpacing).toBe('2px');
+    expect(overlay.style.transform).toBe('translate(-50%, -50%) rotate(0deg)');
+    expect(overlay.style.transformOrigin).toBe('center center');
+    expect(overlay.style.opacity).toBe('0.8');
   });
 
   it('commits text placement from an inline preview input', async () => {
@@ -278,6 +429,71 @@ describe('ProxyPreviewPlayer', () => {
         content: 'Composing title',
         position: { x: 0.5, y: 0.5 },
       });
+    });
+  });
+
+  it('commits caption preview drag as a single UpdateCaption on pointer up', async () => {
+    const captionClip = createClip('caption-clip', 'caption-asset');
+    captionClip.label = 'Caption line';
+    captionClip.captionPosition = {
+      type: 'preset',
+      vertical: 'bottom',
+      marginPercent: 5,
+    };
+    const sequence = {
+      ...createSequence(),
+      tracks: [createCaptionTrack('caption-track', captionClip)],
+    };
+    const executeCommand = vi.fn().mockResolvedValue({
+      opId: 'op-caption-position',
+      changes: [],
+      createdIds: [],
+      deletedIds: [],
+    });
+    useProjectStore.setState({ executeCommand });
+    useTimelineStore.setState({ selectedClipIds: [captionClip.id] });
+
+    render(<ProxyPreviewPlayer sequence={sequence} assets={new Map()} showControls />);
+
+    const player = screen.getByTestId('proxy-preview-player');
+    Object.defineProperty(player, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        left: 0,
+        top: 0,
+        width: 400,
+        height: 300,
+        right: 400,
+        bottom: 300,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+
+    const caption = screen.getByTestId(`proxy-caption-${captionClip.id}`);
+    fireEvent.pointerDown(caption, { clientX: 200, clientY: 285, pointerId: 1 });
+    fireEvent.pointerMove(caption, { clientX: 280, clientY: 150, pointerId: 1 });
+
+    expect(executeCommand).not.toHaveBeenCalled();
+
+    fireEvent.pointerUp(caption, { clientX: 280, clientY: 150, pointerId: 1 });
+
+    await waitFor(() => {
+      expect(executeCommand).toHaveBeenCalledTimes(1);
+    });
+    expect(executeCommand).toHaveBeenCalledWith({
+      type: 'UpdateCaption',
+      payload: {
+        sequenceId: sequence.id,
+        trackId: 'caption-track',
+        captionId: captionClip.id,
+        position: {
+          type: 'custom',
+          xPercent: 70,
+          yPercent: 50,
+        },
+      },
     });
   });
 });

@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+use crate::core::assets::Asset;
 use crate::core::effects::Effect;
+use crate::core::render::{build_render_plan, ExportSettings, RenderGraph};
 use crate::core::timeline::{Clip, Sequence, Track};
 use crate::core::types::SequenceId;
 
@@ -276,6 +278,59 @@ pub fn compute_segment_fingerprint(
     }
 
     hasher.finish()
+}
+
+/// Computes the cache fingerprint from a render plan hash.
+pub fn compute_plan_segment_fingerprint(plan_hash: &str) -> SegmentFingerprint {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    plan_hash.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Refreshes segment fingerprints from RenderPlan hashes.
+///
+/// This is the cache side of the preview/export contract: cache identity is
+/// derived from the same graph/plan boundary that export validates.
+pub fn refresh_manifest_plan_fingerprints(
+    manifest: &mut RenderCacheManifest,
+    project_path: &Path,
+    graph: &RenderGraph,
+    assets: &HashMap<String, Asset>,
+    effects: &HashMap<String, Effect>,
+) -> Result<bool, String> {
+    let mut changed = false;
+
+    for segment in &mut manifest.segments {
+        let segment_output = segment_cache_file(project_path, &manifest.sequence_id, segment.index);
+        let settings = ExportSettings::preview(
+            segment_output,
+            Some(segment.start_sec),
+            Some(segment.end_sec),
+        );
+        let plan = build_render_plan(graph, assets, effects, &settings);
+        if !plan.validation.is_valid {
+            return Err(format!(
+                "Preview cache segment {} render plan validation failed: {}",
+                segment.index,
+                plan.validation.errors.join("; ")
+            ));
+        }
+
+        let next_fingerprint = compute_plan_segment_fingerprint(&plan.plan_hash);
+        if next_fingerprint != segment.fingerprint {
+            if segment.state == CacheSegmentState::Cached {
+                segment.state = CacheSegmentState::Stale;
+            }
+            segment.fingerprint = next_fingerprint;
+            changed = true;
+        }
+    }
+
+    if changed {
+        manifest.updated_at = chrono::Utc::now().to_rfc3339();
+    }
+
+    Ok(changed)
 }
 
 // =============================================================================
@@ -956,7 +1011,10 @@ pub fn enforce_cache_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::assets::{Asset, VideoInfo};
     use crate::core::effects::{EffectType, ParamValue};
+    use crate::core::project::ProjectState;
+    use crate::core::render::build_render_graph;
     use crate::core::timeline::{
         AudioSettings, BlendMode, Canvas, ClipPlace, ClipRange, SequenceFormat, Track, TrackKind,
         Transform,
@@ -1032,6 +1090,7 @@ mod tests {
             tracks,
             markers: vec![],
             master_volume_db: 0.0,
+            hdr_settings: Default::default(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
             modified_at: "2026-01-01T00:00:00Z".to_string(),
         }
@@ -1041,6 +1100,15 @@ mod tests {
         let mut effect = Effect::new(effect_type);
         effect.id = id.to_string();
         effect
+    }
+
+    fn make_video_asset(id: &str) -> Asset {
+        let name = format!("{id}.mp4");
+        let uri = format!("/tmp/{id}.mp4");
+        let mut asset = Asset::new_video(&name, &uri, VideoInfo::default());
+        asset.id = id.to_string();
+        asset.hash = format!("hash-{id}");
+        asset
     }
 
     // -----------------------------------------------------------------------
@@ -1064,6 +1132,47 @@ mod tests {
         assert_eq!(manifest.segments[0].end_sec, 5.0);
         assert_eq!(manifest.segments[5].start_sec, 25.0);
         assert_eq!(manifest.segments[5].end_sec, 30.0);
+    }
+
+    #[test]
+    fn should_refresh_cache_fingerprints_from_render_plan_hashes() {
+        let clip = make_test_clip("c1", "a1", 0.0, 5.0);
+        let track = make_test_track("t1", TrackKind::Video, vec![clip]);
+        let seq = make_test_sequence("seq1", vec![track]);
+        let effects = HashMap::new();
+        let mut state = ProjectState::new("Cache Plan Test");
+        state.sequences.clear();
+        state.sequences.insert("seq1".to_string(), seq.clone());
+        state.active_sequence_id = Some("seq1".to_string());
+        let mut assets = HashMap::from([("a1".to_string(), make_video_asset("a1"))]);
+        let graph = build_render_graph(&state, "seq1").expect("graph");
+        let mut manifest = RenderCacheManifest::new("seq1", 5.0, 5.0, &seq, &effects);
+
+        let changed = refresh_manifest_plan_fingerprints(
+            &mut manifest,
+            Path::new("/tmp/openreelio-cache-test"),
+            &graph,
+            &assets,
+            &effects,
+        )
+        .expect("plan fingerprints");
+        assert!(changed);
+        manifest.segments[0].state = CacheSegmentState::Cached;
+        let original_fingerprint = manifest.segments[0].fingerprint;
+
+        assets.get_mut("a1").unwrap().hash = "changed-asset-hash".to_string();
+        let changed = refresh_manifest_plan_fingerprints(
+            &mut manifest,
+            Path::new("/tmp/openreelio-cache-test"),
+            &graph,
+            &assets,
+            &effects,
+        )
+        .expect("plan fingerprints");
+
+        assert!(changed);
+        assert_eq!(manifest.segments[0].state, CacheSegmentState::Stale);
+        assert_ne!(manifest.segments[0].fingerprint, original_fingerprint);
     }
 
     #[test]

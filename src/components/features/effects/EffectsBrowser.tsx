@@ -10,6 +10,8 @@ import { Wand2, Search, Star } from 'lucide-react';
 import type { EffectCategory } from '@/types';
 import { EFFECT_CATEGORY_LABELS } from '@/types';
 import { useEffectSearch, getEffectTypeKey, type EffectEntry } from '@/hooks/useEffectSearch';
+import { useEffectCapabilityRegistry } from '@/hooks/useEffectCapabilities';
+import { getEffectCapabilityBadge } from '@/utils/effectCapabilities';
 import { EFFECT_CATEGORIES, CATEGORY_ICONS, totalEffectCount } from './effectCategoryData';
 
 // =============================================================================
@@ -65,19 +67,37 @@ export const EffectsBrowser = memo(function EffectsBrowser({
     toggleFavorite,
     isFavorite,
   } = useEffectSearch({ categories: EFFECT_CATEGORIES });
+  const capabilityRegistry = useEffectCapabilityRegistry();
 
   const renderEffectButton = (effect: EffectEntry): ReactNode => {
     const key = getEffectTypeKey(effect.type);
     const favorited = isFavorite(key);
+    const badge = getEffectCapabilityBadge(effect.type, capabilityRegistry);
+    const badgeClass =
+      badge.tone === 'success'
+        ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+        : badge.tone === 'warning'
+          ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+          : 'border-editor-border bg-editor-input text-editor-text-muted';
 
     return (
       <div key={key} className="flex items-center group">
         <button
           type="button"
-          className="flex-1 text-left px-3 py-1.5 text-sm rounded transition-colors text-editor-text hover:bg-editor-hover focus-visible:ring-1 focus-visible:ring-primary-500 focus-visible:outline-none"
+          className="flex-1 min-w-0 px-3 py-1.5 text-sm rounded transition-colors text-editor-text hover:bg-editor-hover focus-visible:ring-1 focus-visible:ring-primary-500 focus-visible:outline-none"
           onClick={() => onEffectSelect?.(key)}
+          title={badge.title}
         >
-          <HighlightedLabel label={effect.label} query={searchQuery} />
+          <span className="flex min-w-0 items-center justify-between gap-2">
+            <span className="min-w-0 truncate text-left">
+              <HighlightedLabel label={effect.label} query={searchQuery} />
+            </span>
+            <span
+              className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] leading-none ${badgeClass}`}
+            >
+              {badge.label}
+            </span>
+          </span>
         </button>
         <button
           type="button"

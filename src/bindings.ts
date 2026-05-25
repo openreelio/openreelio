@@ -9,12 +9,22 @@
 export const commands = {
 /**
  * Performs best-effort cleanup when the user closes the window.
- * 
+ *
  * This command is intentionally resilient: failures should never prevent the app from exiting.
  */
 async appCleanup() : Promise<Result<AppCleanupResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("app_cleanup") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lists installed system font family names for text editing controls.
+ */
+async listSystemFontFamilies() : Promise<Result<string[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_system_font_families") };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -139,6 +149,39 @@ async getProjectState() : Promise<Result<ProjectStateDto, string>> {
 async getSequenceTextClipData(sequenceId: string) : Promise<Result<TextClipDataDto[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_sequence_text_clip_data", { sequenceId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Returns saved HDR export settings for a sequence.
+ */
+async getSequenceHdrSettings(sequenceId: string) : Promise<Result<SequenceHdrSettings, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_sequence_hdr_settings", { sequenceId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Returns the renderer-agnostic graph for a sequence.
+ *
+ * Preview, export, and future worker renderers should consume this graph
+ * instead of independently parsing timeline clips and text payloads.
+ */
+async getSequenceRenderGraph(sequenceId: string) : Promise<Result<RenderGraph, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_sequence_render_graph", { sequenceId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Returns the backend effect capability contract used by export validation.
+ */
+async getEffectCapabilities() : Promise<Result<EffectCapabilityDto[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_effect_capabilities") };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -2154,10 +2197,11 @@ async readAgentTrace(traceId: string) : Promise<Result<string, string>> {
  * respecting step dependencies via topological sort and resolving
  * `$fromStep`/`$path` references between steps.
  * 
- * On failure, attempts to rollback completed steps in reverse order
- * using the CommandExecutor's undo stack. Emits Tauri events for
- * each step's lifecycle (`agent:plan_step_start`, `agent:plan_step_complete`,
- * `agent:plan_step_failed`).
+ * On failure, rolls back completed steps in reverse order and marks their
+ * persisted operation IDs as discarded so the append-only ops log cannot
+ * resurrect partial plan work on reopen or history sync. Emits Tauri events
+ * for each step's lifecycle (`agent:plan_step_start`,
+ * `agent:plan_step_complete`, `agent:plan_step_failed`).
  */
 async executeAgentPlan(plan: AgentPlan) : Promise<Result<AgentPlanResult, string>> {
     try {
@@ -2609,9 +2653,37 @@ steps: PlanStep[];
  */
 approvalGranted: boolean; 
 /**
+ * Backend-verifiable proof that the approved plan may be executed.
+ */
+approvalProof?: AgentPlanApprovalProof | null;
+/**
  * Session ID for tracing
  */
 sessionId?: string | null }
+/**
+ * One-time approval proof consumed by the backend before plan execution.
+ */
+export type AgentPlanApprovalProof = {
+/**
+ * Bearer approval token issued by the backend approval token store.
+ */
+token: string;
+/**
+ * Human-readable token ID for audit/debug output. Not used as a secret.
+ */
+tokenId?: string | null;
+/**
+ * Project ID that was approved by the user.
+ */
+projectId: string;
+/**
+ * Runtime that requested approval, such as "codex" or "tpao".
+ */
+runtimeId: string;
+/**
+ * Scope required for this proof. Defaults to openreelio.plan.apply.
+ */
+requiredScope?: string | null }
 /**
  * Result of executing an entire agent plan.
  */
@@ -3239,6 +3311,10 @@ silenceRegions: SilenceRegion[];
  */
 speechRegions?: SpeechRegion[] }
 /**
+ * An audio clip layer in timeline order.
+ */
+export type AudioRenderLayer = { trackId: string; trackIndex: number; clipId: string; assetId: string; timelineInSec: number; timelineOutSec: number; timelineInFrame: number; timelineOutFrame: number; durationFrames: number; sourceInSec: number; sourceOutSec: number; sourceInFrame: number; sourceOutFrame: number; speed: number; reverse: boolean; audio: AudioSettings; effects: string[] }
+/**
  * Audio settings for clips
  */
 export type AudioSettings = { 
@@ -3488,7 +3564,7 @@ export type CancelRenderResult = {
 /**
  * The job ID that was cancelled
  */
-jobId: string; 
+jobId: string;
 /**
  * Whether the job was found and cancelled
  */
@@ -3729,6 +3805,10 @@ saturationMultiplier: number;
  * Temperature shift estimate (negative=cooler, positive=warmer)
  */
 temperatureShift: number }
+/**
+ * RGBA color in straight alpha byte space.
+ */
+export type ColorRgba = { r: number; g: number; b: number; a: number }
 /**
  * Result of executing an edit command.
  */
@@ -4176,6 +4256,7 @@ contentMap: ContentSegment[];
  */
 cameraPatterns: FrameAnalysis[] }
 export type EditorSettingsDto = { defaultTimelineZoom: number; snapToGrid: boolean; snapTolerance: number; showClipThumbnails: boolean; showAudioWaveforms: boolean; rippleEditDefault: boolean; favoriteEffects: string[] }
+export type EffectCapabilityDto = { effectType: string; preview: string; export: string; renderCache: string; ffmpegFilter: string | null; exportReason: string | null; previewReason: string | null }
 /**
  * Summary information for listing ESDs without loading full documents
  */
@@ -5494,7 +5575,11 @@ paddingSec: number }
 /**
  * Result of starting a render cache job
  */
-export type RenderCacheJobResult = { 
+export type RenderCacheJobResult = {
+/**
+ * Job ID for lifecycle/progress correlation
+ */
+jobId: string;
 /**
  * Sequence being cached
  */
@@ -5567,6 +5652,30 @@ maxCacheBytes: number;
  * Per-segment status for timeline indicator
  */
 segmentStates: CacheSegmentStatusDto[] }
+/**
+ * Renderer-agnostic graph for a sequence.
+ */
+export type RenderGraph = { graphVersion: number; sequenceId: string; format: SequenceFormat; durationSec: number; durationFrames: number;
+/**
+ * Visual layers sorted back-to-front for compositing.
+ */
+visualLayers: VisualRenderLayer[];
+/**
+ * Audio layers sorted by timeline order, independent from visual compositing.
+ */
+audioLayers: AudioRenderLayer[] }
+/**
+ * Unified render lifecycle event payload.
+ */
+export type RenderLifecycleEvent = { jobId: string; sequenceId: string | null; kind: RenderLifecycleKind; state: RenderLifecycleState; progress: number | null; message: string | null; outputPath: string | null; planHash: string | null }
+/**
+ * Render lifecycle category.
+ */
+export type RenderLifecycleKind = "export" | "range_export" | "audio_export" | "preview_cache"
+/**
+ * Render lifecycle state shared by export, preview cache, and cancellation paths.
+ */
+export type RenderLifecycleState = "queued" | "running" | "completed" | "failed" | "cancelled" | "already_cached"
 /**
  * Result of starting a render export job.
  */
@@ -5929,7 +6038,7 @@ tracks: Track[]; markers: Marker[];
 /**
  * Master output volume in dB (-60.0 to +6.0, 0.0 = unity gain)
  */
-masterVolumeDb?: number; createdAt: string; modifiedAt: string }
+masterVolumeDb?: number; hdrSettings?: SequenceHdrSettings; createdAt: string; modifiedAt: string }
 /**
  * Sequence format specification
  */
@@ -5950,6 +6059,14 @@ audioSampleRate: number;
  * Number of audio channels
  */
 audioChannels: number }
+/**
+ * Sequence-level HDR export mode.
+ */
+export type SequenceHdrMode = "sdr" | "hdr10" | "hlg"
+/**
+ * Sequence-level HDR export settings.
+ */
+export type SequenceHdrSettings = { hdrMode: SequenceHdrMode; maxCll?: number | null; maxFall?: number | null; bitDepth: number }
 /**
  * Summary of an AI conversation session, suitable for list views.
  */
@@ -6755,6 +6872,30 @@ x: number;
  */
 y: number }
 /**
+ * Text background box styling.
+ */
+export type TextRenderBackground = { color: ColorRgba; paddingPx: number }
+/**
+ * Text stroke styling.
+ */
+export type TextRenderOutline = { color: ColorRgba; widthPx: number }
+/**
+ * Normalized text anchor and placement in sequence percentage space.
+ */
+export type TextRenderPosition = { xPercent: number; yPercent: number; anchorXPercent: number; anchorYPercent: number }
+/**
+ * Text drop shadow styling.
+ */
+export type TextRenderShadow = { color: ColorRgba; offsetXPx: number; offsetYPx: number; blurPx: number }
+/**
+ * Complete normalized text render specification for text and caption layers.
+ */
+export type TextRenderSpec = { text: string; style: TextRenderStyle; position: TextRenderPosition; background: TextRenderBackground | null; outline: TextRenderOutline | null; shadow: TextRenderShadow | null; rotationDeg: number }
+/**
+ * Normalized text style that renderers can consume without parsing UI payloads.
+ */
+export type TextRenderStyle = { fontFamily: string; fontSizePx: number; fontWeight: number; bold: boolean; italic: boolean; underline: boolean; alignment: TextAlignment; lineHeight: number; letterSpacingPx: number; fillColor: ColorRgba; opacity: number }
+/**
  * Text shadow effect configuration.
  * 
  * Creates a drop shadow behind the text for improved readability
@@ -6774,9 +6915,9 @@ offsetX: number;
  */
 offsetY: number; 
 /**
- * Shadow blur radius (0 = sharp shadow)
- * Note: FFmpeg drawtext doesn't support blur, so this is for future use
- * or canvas-based preview rendering.
+ * Shadow blur radius (0 = sharp shadow).
+ * Canvas preview and ASS/libass export preserve this value; legacy drawtext
+ * fallback paths may approximate it.
  */
 blur?: number }
 /**
@@ -6795,6 +6936,10 @@ fontFamily: string;
  * Font size in points (12-200 typical range)
  */
 fontSize: number; 
+/**
+ * Numeric font weight (100-900, CSS/OpenType style)
+ */
+fontWeight?: number;
 /**
  * Text color in hex format (#RRGGBB or #RRGGBBAA)
  */
@@ -7449,6 +7594,14 @@ isHdr?: boolean;
  * FFprobe color transfer string (e.g. `smpte2084`, `arib-std-b67`).
  */
 colorTransfer?: string | null }
+/**
+ * A visual clip layer in compositor order.
+ */
+export type VisualRenderLayer = { layerIndex: number; trackId: string; trackKind: TrackKind; trackIndex: number; clipId: string; timelineInSec: number; timelineOutSec: number; timelineInFrame: number; timelineOutFrame: number; durationFrames: number; sourceInSec: number; sourceOutSec: number; sourceInFrame: number; sourceOutFrame: number; transform: Transform; opacity: number; blendMode: BlendMode; effects: string[]; source: VisualRenderSource }
+/**
+ * The source payload for a visual layer.
+ */
+export type VisualRenderSource = { type: "media"; assetId: string } | { type: "text"; assetId: string; renderSpec: TextRenderSpec | null; textData: TextClipData | null } | { type: "caption"; text: string; renderSpec: TextRenderSpec; style: JsonValue | null; position: JsonValue | null } | { type: "compound"; sequenceId: string } | { type: "adjustment" }
 /**
  * Audio waveform peak data for visualization.
  * 

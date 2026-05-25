@@ -19,9 +19,10 @@
 //! ```
 
 use super::{
-    curve_points_to_ffmpeg, default_flat_curve, is_flat_identity_curve, is_identity_curve,
-    mask_filters::apply_effect_through_mask_group, parse_curve_points,
-    parse_curve_points_with_fallback, sample_curve_at, CurvePoint, Effect, EffectType,
+    curve_points_to_ffmpeg, default_flat_curve, effect_type_supports_export,
+    is_flat_identity_curve, is_identity_curve, mask_filters::apply_effect_through_mask_group,
+    parse_curve_points, parse_curve_points_with_fallback, sample_curve_at, CurvePoint, Effect,
+    EffectType,
 };
 use tracing::warn;
 
@@ -331,13 +332,7 @@ impl IntoFFmpegFilter for Effect {
     }
 
     fn is_ffmpeg_compatible(&self) -> bool {
-        !matches!(
-            self.effect_type,
-            EffectType::BackgroundRemoval
-                | EffectType::FaceBlur
-                | EffectType::ObjectTracking
-                | EffectType::Custom(_)
-        )
+        effect_type_supports_export(&self.effect_type)
     }
 
     fn to_filter_body(&self) -> String {
@@ -1571,6 +1566,7 @@ impl Effect {
     /// - `text`: Text content to display (required)
     /// - `font_family`: Font family name (default: "Arial")
     /// - `font_size`: Font size in points (default: 48)
+    /// - `font_weight`: Numeric font weight 100-900 (default: 400)
     /// - `color`: Text color as hex string (default: "#FFFFFF")
     /// - `bold`: Enable bold weight (default: false)
     /// - `italic`: Enable italic style (default: false)
@@ -1605,6 +1601,11 @@ impl Effect {
             .and_then(|v| v.as_str())
             .unwrap_or("Arial");
         let font_size = self.get_float("font_size").unwrap_or(48.0) as i64;
+        let font_weight = self
+            .get_param("font_weight")
+            .and_then(|value| value.as_int())
+            .map(|value| value.clamp(100, 900))
+            .unwrap_or(400);
 
         // Text color with alpha
         let color_hex = self
@@ -1639,7 +1640,7 @@ impl Effect {
 
         // Bold/italic are best expressed via fontconfig style (when available).
         // Avoid using non-standard drawtext options like `fontweight`/`fontstyle`.
-        let bold = self.get_bool("bold").unwrap_or(false);
+        let bold = self.get_bool("bold").unwrap_or(false) || font_weight >= 600;
         let italic = self.get_bool("italic").unwrap_or(false);
         let mut font_value = font_family.to_string();
         if (bold || italic) && !font_value.to_lowercase().contains(":style=") {

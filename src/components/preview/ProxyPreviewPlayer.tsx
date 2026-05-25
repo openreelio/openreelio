@@ -17,10 +17,16 @@ import { useTimelineStore } from '@/stores/timelineStore';
 import { createLogger } from '@/services/logger';
 import { PlayerControls } from './PlayerControls';
 import { normalizeFileUriToPath } from '@/utils/uri';
+import { getActiveMediaVisualLayers } from '@/utils/renderGraphLayers';
+import { useSequenceRenderGraph } from '@/hooks/useSequenceRenderGraph';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
-import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
+import { textRenderSpecToTextClipData } from '@/utils/renderGraphText';
 import {
-  buildCaptionCssTextShadow,
+  applyClipTransformToRenderedTextData,
+  extractTextDataFromClipWithMap,
+  getTextFontWeightNumber,
+} from '@/utils/textRenderer';
+import {
   captionColorToRgba as captionColorToCssRgba,
   getCaptionFontWeightNumber,
   normalizeCaptionPosition as normalizeCaptionPositionValue,
@@ -168,8 +174,64 @@ function toRgba(color: CaptionStyle['color']): string {
   return captionColorToCssRgba(color);
 }
 
-function buildCaptionTextShadow(style: CaptionStyle): string | undefined {
-  return buildCaptionCssTextShadow(style);
+function canvasPxToScreenPx(value: number, displayScale: number): number {
+  if (!Number.isFinite(value) || !Number.isFinite(displayScale)) {
+    return 0;
+  }
+
+  return value * displayScale;
+}
+
+function textAnchorTranslateX(alignment: 'left' | 'center' | 'right'): string {
+  if (alignment === 'left') {
+    return '0%';
+  }
+
+  if (alignment === 'right') {
+    return '-100%';
+  }
+
+  return '-50%';
+}
+
+function textTransformOrigin(alignment: 'left' | 'center' | 'right'): string {
+  if (alignment === 'left') {
+    return 'left center';
+  }
+
+  if (alignment === 'right') {
+    return 'right center';
+  }
+
+  return 'center center';
+}
+
+function buildCaptionTextShadow(style: CaptionStyle, displayScale: number): string | undefined {
+  const parts: string[] = [];
+
+  if (style.outlineColor && style.outlineWidth > 0) {
+    const width = Math.max(1, canvasPxToScreenPx(style.outlineWidth, displayScale));
+    const outlineColor = toRgba(style.outlineColor);
+    parts.push(
+      `${-width}px 0 ${outlineColor}`,
+      `${width}px 0 ${outlineColor}`,
+      `0 ${-width}px ${outlineColor}`,
+      `0 ${width}px ${outlineColor}`,
+      `${-width}px ${-width}px ${outlineColor}`,
+      `${width}px ${-width}px ${outlineColor}`,
+      `${-width}px ${width}px ${outlineColor}`,
+      `${width}px ${width}px ${outlineColor}`,
+    );
+  }
+
+  if (style.shadowColor) {
+    const shadowX = canvasPxToScreenPx(style.shadowOffsetX ?? style.shadowOffset, displayScale);
+    const shadowY = canvasPxToScreenPx(style.shadowOffsetY ?? style.shadowOffset, displayScale);
+    const shadowBlur = Math.max(0, canvasPxToScreenPx(style.shadowBlur ?? 0, displayScale));
+    parts.push(`${shadowX}px ${shadowY}px ${shadowBlur}px ${toRgba(style.shadowColor)}`);
+  }
+
+  return parts.length > 0 ? parts.join(', ') : undefined;
 }
 
 function resolveCaptionPositionForClip(
@@ -197,63 +259,6 @@ function resolveCaptionPositionForClip(
   }
 
   return DEFAULT_CAPTION_POSITION;
-}
-
-function isIdentityClipTransform(clip: Clip): boolean {
-  const { transform } = clip;
-
-  return (
-    Math.abs(transform.position.x - 0.5) < 0.0001 &&
-    Math.abs(transform.position.y - 0.5) < 0.0001 &&
-    Math.abs(transform.scale.x - 1) < 0.0001 &&
-    Math.abs(transform.scale.y - 1) < 0.0001 &&
-    Math.abs(transform.rotationDeg) < 0.0001 &&
-    Math.abs(transform.anchor.x - 0.5) < 0.0001 &&
-    Math.abs(transform.anchor.y - 0.5) < 0.0001
-  );
-}
-
-function applyClipTransformToTextData(clip: Clip, textData: TextClipData): TextClipData {
-  if (isIdentityClipTransform(clip)) {
-    return textData;
-  }
-
-  const scaleFactor = Math.max(
-    0.1,
-    (Math.abs(clip.transform.scale.x) + Math.abs(clip.transform.scale.y)) / 2,
-  );
-
-  return {
-    ...textData,
-    position: {
-      x: clip.transform.position.x,
-      y: clip.transform.position.y,
-    },
-    rotation: clip.transform.rotationDeg,
-    style: {
-      ...textData.style,
-      fontSize: Math.max(1, Math.round(textData.style.fontSize * scaleFactor)),
-      backgroundPadding: Math.max(0, Math.round(textData.style.backgroundPadding * scaleFactor)),
-      letterSpacing: Math.round(textData.style.letterSpacing * scaleFactor),
-    },
-    shadow: textData.shadow
-      ? {
-          ...textData.shadow,
-          offsetX: Math.round(textData.shadow.offsetX * scaleFactor),
-          offsetY: Math.round(textData.shadow.offsetY * scaleFactor),
-          blur: Math.max(0, Math.round(textData.shadow.blur * scaleFactor)),
-        }
-      : textData.shadow,
-    outline: textData.outline
-      ? {
-          ...textData.outline,
-          width:
-            textData.outline.width <= 0
-              ? 0
-              : Math.max(1, Math.round(textData.outline.width * scaleFactor)),
-        }
-      : textData.outline,
-  };
 }
 
 function parseHexColor(color: string): string | null {
@@ -299,11 +304,11 @@ function resolveTextColor(color: string | undefined, fallback: string): string {
   return parseHexColor(candidate) ?? candidate;
 }
 
-function buildTextOverlayShadow(textData: TextClipData): string | undefined {
+function buildTextOverlayShadow(textData: TextClipData, displayScale: number): string | undefined {
   const parts: string[] = [];
 
   if (textData.outline && textData.outline.width > 0) {
-    const width = Math.max(1, Math.round(textData.outline.width));
+    const width = Math.max(1, canvasPxToScreenPx(textData.outline.width, displayScale));
     const outlineColor = resolveTextColor(textData.outline.color, '#000000');
     parts.push(
       `${-width}px 0 ${outlineColor}`,
@@ -320,7 +325,13 @@ function buildTextOverlayShadow(textData: TextClipData): string | undefined {
   if (textData.shadow) {
     const shadow = textData.shadow;
     parts.push(
-      `${shadow.offsetX}px ${shadow.offsetY}px ${Math.max(0, shadow.blur)}px ${resolveTextColor(shadow.color, '#000000')}`,
+      `${canvasPxToScreenPx(shadow.offsetX, displayScale)}px ${canvasPxToScreenPx(
+        shadow.offsetY,
+        displayScale,
+      )}px ${Math.max(0, canvasPxToScreenPx(shadow.blur, displayScale))}px ${resolveTextColor(
+        shadow.color,
+        '#000000',
+      )}`,
     );
   }
 
@@ -386,7 +397,23 @@ export function ProxyPreviewPlayer({
     return den > 0 ? num / den : 30;
   }, [sequence]);
 
+  const renderGraph = useSequenceRenderGraph(sequence);
   const textClipDataById = useSequenceTextClipData(sequence);
+
+  const clipById = useMemo(() => {
+    const clips = new Map<string, Clip>();
+    if (!sequence) {
+      return clips;
+    }
+
+    for (const track of sequence.tracks) {
+      for (const clip of track.clips) {
+        clips.set(clip.id, clip);
+      }
+    }
+
+    return clips;
+  }, [sequence]);
 
   // Cache previous active clip result to stabilize the reference when the same
   // clips are active across consecutive frames. This prevents unnecessary
@@ -401,39 +428,61 @@ export function ProxyPreviewPlayer({
       return prevActiveClipsRef.current;
     }
 
-    const clips: ActiveClip[] = [];
+    const graphLayers = getActiveMediaVisualLayers(renderGraph, assets, currentTime, {
+      trackKinds: ['video'],
+    });
+    const clips: ActiveClip[] =
+      graphLayers.length > 0
+        ? graphLayers
+            .filter(({ asset }) => asset?.kind === 'video')
+            .map(({ layer, asset }) => {
+              const clip = clipById.get(layer.clipId);
+              if (!clip || !asset) {
+                return null;
+              }
 
-    sequence.tracks.forEach((track, trackIndex) => {
-      if (track.muted || !track.visible) return;
+              return {
+                clip,
+                asset,
+                trackId: layer.trackId,
+                trackIndex: layer.trackIndex,
+              };
+            })
+            .filter((clip): clip is ActiveClip => clip !== null)
+        : [];
 
-      // Proxy mode renders plain video tracks only (no overlay/caption compositing).
-      if (track.kind !== 'video') return;
+    if (clips.length === 0 && !renderGraph) {
+      sequence.tracks.forEach((track, trackIndex) => {
+        if (track.muted || !track.visible) return;
 
-      for (const clip of track.clips) {
-        if (!isClipEnabled(clip)) {
-          continue;
-        }
+        // Proxy mode renders plain video tracks only (no overlay/caption compositing).
+        if (track.kind !== 'video') return;
 
-        // Check if clip is active at current time
-        if (isClipActiveAtTime(clip, currentTime)) {
-          const asset = assets.get(clip.assetId);
-          if (!asset || asset.kind !== 'video') {
+        for (const clip of track.clips) {
+          if (!isClipEnabled(clip)) {
             continue;
           }
 
-          clips.push({
-            clip,
-            asset,
-            trackId: track.id,
-            trackIndex,
-          });
-        }
-      }
-    });
+          if (isClipActiveAtTime(clip, currentTime)) {
+            const asset = assets.get(clip.assetId);
+            if (!asset || asset.kind !== 'video') {
+              continue;
+            }
 
-    // Sort back-to-front by timeline lane order.
-    // Timeline renders lower indices as higher lanes, so higher indices should render first.
-    clips.sort((a, b) => b.trackIndex - a.trackIndex);
+            clips.push({
+              clip,
+              asset,
+              trackId: track.id,
+              trackIndex,
+            });
+          }
+        }
+      });
+
+      // Sort back-to-front by timeline lane order.
+      // Timeline renders lower indices as higher lanes, so higher indices should render first.
+      clips.sort((a, b) => b.trackIndex - a.trackIndex);
+    }
 
     // Return the same reference if the active clip set hasn't changed.
     // This avoids cascading re-renders when playhead moves within the same clip.
@@ -453,7 +502,7 @@ export function ProxyPreviewPlayer({
 
     prevActiveClipsRef.current = clips;
     return clips;
-  }, [sequence, currentTime, assets]);
+  }, [sequence, renderGraph, currentTime, assets, clipById]);
 
   // Get video source URL for an asset
   // Prioritizes proxy URL when proxy is ready, falls back to original.
@@ -579,6 +628,38 @@ export function ProxyPreviewPlayer({
 
     const overlays: ActiveTextOverlay[] = [];
 
+    if (renderGraph?.sequenceId === sequence.id) {
+      for (const layer of renderGraph.visualLayers) {
+        if (
+          currentTime < layer.timelineInSec ||
+          currentTime >= layer.timelineOutSec ||
+          layer.source.type !== 'text' ||
+          !layer.source.renderSpec
+        ) {
+          continue;
+        }
+
+        const clip = clipById.get(layer.clipId);
+        if (!clip) {
+          continue;
+        }
+
+        const textData = textRenderSpecToTextClipData(layer.source.renderSpec);
+        if (!textData.content.trim()) {
+          continue;
+        }
+
+        overlays.push({
+          clip,
+          trackIndex: layer.trackIndex,
+          textData: applyClipTransformToRenderedTextData(clip, textData),
+        });
+      }
+
+      overlays.sort((a, b) => b.trackIndex - a.trackIndex);
+      return overlays;
+    }
+
     sequence.tracks.forEach((track, trackIndex) => {
       if (track.muted || !track.visible) {
         return;
@@ -601,14 +682,14 @@ export function ProxyPreviewPlayer({
         overlays.push({
           clip,
           trackIndex,
-          textData: applyClipTransformToTextData(clip, textData),
+          textData: applyClipTransformToRenderedTextData(clip, textData),
         });
       }
     });
 
     overlays.sort((a, b) => b.trackIndex - a.trackIndex);
     return overlays;
-  }, [sequence, currentTime, textClipDataById]);
+  }, [sequence, renderGraph, currentTime, clipById, textClipDataById]);
 
   const selectedCaptionId = selectedClipIds.length === 1 ? selectedClipIds[0] : null;
   const selectedActiveCaption = useMemo(() => {
@@ -1398,9 +1479,16 @@ export function ProxyPreviewPlayer({
               captionDragState?.captionId === caption.clip.id && captionDragState.pointerId != null;
 
             const fontWeight = getCaptionFontWeightNumber(style);
-            const textShadow = buildCaptionTextShadow(style);
+            const textShadow = buildCaptionTextShadow(style, overlayDisplayScale);
             const textDecoration = style.underline ? 'underline' : 'none';
-            const backgroundPadding = Math.max(0, style.backgroundPadding ?? 0);
+            const captionFontSize = Math.max(
+              1,
+              Math.max(12, (style.fontSize * previewCanvasHeight) / 1080) * overlayDisplayScale,
+            );
+            const backgroundPadding = Math.max(
+              0,
+              canvasPxToScreenPx(style.backgroundPadding ?? 0, overlayDisplayScale),
+            );
 
             return (
               <div
@@ -1413,14 +1501,17 @@ export function ProxyPreviewPlayer({
                   transform: `translate(${translateX}, -50%)`,
                   color: toRgba(style.color),
                   fontFamily: style.fontFamily,
-                  fontSize: `${Math.max(12, style.fontSize * 0.75)}px`,
+                  fontSize: `${captionFontSize}px`,
                   fontWeight,
                   fontStyle: style.italic ? 'italic' : 'normal',
                   textAlign: style.alignment,
                   textDecoration,
                   whiteSpace: 'pre-line',
                   lineHeight: style.lineHeight ?? 1.2,
-                  letterSpacing: `${style.letterSpacing ?? 0}px`,
+                  letterSpacing: `${canvasPxToScreenPx(
+                    style.letterSpacing ?? 0,
+                    overlayDisplayScale,
+                  )}px`,
                   opacity: (style.opacity ?? 1) * caption.clip.opacity,
                   backgroundColor: style.backgroundColor
                     ? toRgba(style.backgroundColor)
@@ -1430,7 +1521,7 @@ export function ProxyPreviewPlayer({
                   borderRadius: isEditableSelected ? '4px' : '0',
                   padding:
                     isEditableSelected || style.backgroundColor
-                      ? `${Math.max(2, backgroundPadding * 0.2)}px ${Math.max(6, backgroundPadding * 0.6)}px`
+                      ? `${Math.max(0, backgroundPadding)}px`
                       : '0',
                   cursor: isEditableSelected
                     ? isDraggingSelected
@@ -1461,18 +1552,23 @@ export function ProxyPreviewPlayer({
           data-testid="proxy-text-overlay-layer"
         >
           {activeTextOverlays.map(({ clip, trackIndex, textData }) => {
-            const translateX =
-              textData.style.alignment === 'left'
-                ? '0%'
-                : textData.style.alignment === 'right'
-                  ? '-100%'
-                  : '-50%';
+            const translateX = textAnchorTranslateX(textData.style.alignment);
             const rotation = Number.isFinite(textData.rotation) ? textData.rotation : 0;
-            const fontSize = Math.max(10, textData.style.fontSize * 0.75);
-            const opacity = Math.max(0, Math.min(1, textData.opacity * clip.opacity));
-            const textShadow = buildTextOverlayShadow(textData);
+            const fontSize = Math.max(
+              1,
+              ((textData.style.fontSize * previewCanvasHeight) / 1080) * overlayDisplayScale,
+            );
+            const opacity = Math.max(0, Math.min(1, textData.opacity));
+            const textShadow = buildTextOverlayShadow(textData, overlayDisplayScale);
             const hasBackground = !!textData.style.backgroundColor;
-            const backgroundPadding = Math.max(0, textData.style.backgroundPadding * 0.75);
+            const backgroundPadding = Math.max(
+              0,
+              canvasPxToScreenPx(textData.style.backgroundPadding, overlayDisplayScale),
+            );
+            const letterSpacing = canvasPxToScreenPx(
+              textData.style.letterSpacing,
+              overlayDisplayScale,
+            );
 
             return (
               <div
@@ -1483,21 +1579,16 @@ export function ProxyPreviewPlayer({
                   left: `${clampPercent(textData.position.x * 100, 50)}%`,
                   top: `${clampPercent(textData.position.y * 100, 50)}%`,
                   transform: `translate(${translateX}, -50%) rotate(${rotation}deg)`,
-                  transformOrigin:
-                    textData.style.alignment === 'left'
-                      ? 'left center'
-                      : textData.style.alignment === 'right'
-                        ? 'right center'
-                        : 'center center',
+                  transformOrigin: textTransformOrigin(textData.style.alignment),
                   color: resolveTextColor(textData.style.color, '#FFFFFF'),
                   fontFamily: textData.style.fontFamily,
                   fontSize: `${fontSize}px`,
-                  fontWeight: textData.style.bold ? 700 : 400,
+                  fontWeight: getTextFontWeightNumber(textData.style),
                   fontStyle: textData.style.italic ? 'italic' : 'normal',
                   textAlign: textData.style.alignment,
                   textDecoration: textData.style.underline ? 'underline' : 'none',
                   lineHeight: textData.style.lineHeight,
-                  letterSpacing: `${textData.style.letterSpacing}px`,
+                  letterSpacing: `${letterSpacing}px`,
                   whiteSpace: 'pre-line',
                   backgroundColor: hasBackground
                     ? resolveTextColor(textData.style.backgroundColor, 'transparent')

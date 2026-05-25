@@ -15,15 +15,21 @@ use tokio::sync::mpsc::Sender;
 use crate::core::{
     assets::{Asset, AssetKind},
     commands::TEXT_ASSET_PREFIX,
-    effects::{Effect, EffectCategory, EffectType, FilterGraph, IntoFFmpegFilter, ParamValue},
+    effects::{
+        effect_capability, effect_type_label, Effect, EffectCategory, EffectType, FilterGraph,
+        IntoFFmpegFilter, ParamValue,
+    },
     ffmpeg::FFmpegRunner,
     fs::validate_local_input_path,
-    process::configure_tokio_command,
     render::hdr::{build_tonemap_filter, HdrMetadata, TonemapMode, TonemapParams},
-    timeline::{BlendMode, Clip, Sequence, Track, TrackKind},
+    render::{
+        build_ffmpeg_invocation_for_render_plan, build_ffmpeg_invocation_from_args,
+        execute_ffmpeg_invocation, execute_ffmpeg_output, RenderPlan,
+    },
+    timeline::{BlendMode, Clip, Sequence, TimelineClock, Track, TrackKind},
 };
 
-fn hdr_metadata_for_asset(asset: &Asset) -> HdrMetadata {
+pub(super) fn hdr_metadata_for_asset(asset: &Asset) -> HdrMetadata {
     let Some(video_info) = asset.video.as_ref() else {
         return HdrMetadata::sdr();
     };
@@ -65,7 +71,7 @@ fn track_included_in_media_collection(track: &Track) -> bool {
     }
 }
 
-fn asset_has_playable_audio(
+pub(super) fn asset_has_playable_audio(
     asset: &Asset,
     track_kind: &TrackKind,
     audio_info: Option<&AssetAudioInfo>,
@@ -104,7 +110,7 @@ fn create_audio_companion_key(clip: &Clip) -> String {
     .join("|")
 }
 
-fn collect_audio_companion_keys(
+pub(super) fn collect_audio_companion_keys(
     sequence: &Sequence,
     assets: &HashMap<String, Asset>,
     audio_info: &HashMap<String, AssetAudioInfo>,
@@ -136,7 +142,7 @@ fn collect_audio_companion_keys(
     keys
 }
 
-fn clip_audio_is_suppressed_by_companion(
+pub(super) fn clip_audio_is_suppressed_by_companion(
     clip: &Clip,
     track: &Track,
     asset: &Asset,
@@ -172,7 +178,7 @@ fn has_layered_visual_overlap(sequence: &Sequence) -> bool {
         }
 
         for clip in &track.clips {
-            if !clip.enabled || clip.is_adjustment_layer() {
+            if !clip.enabled || clip.is_adjustment_layer() || is_text_clip(clip) {
                 continue;
             }
 
@@ -1614,7 +1620,7 @@ fn insert_output_option_args(
     Ok(())
 }
 
-fn append_output_time_range_args(
+pub(super) fn append_output_time_range_args(
     args: &mut Vec<String>,
     start_time: Option<f64>,
     end_time: Option<f64>,
@@ -1822,7 +1828,7 @@ fn format_speed_number(value: f64) -> String {
 ///
 /// Generates the complete video filter chain from input to the trim output label:
 /// - trim → setpts (speed/time_remap) → [reverse] → [freeze loop] → output
-fn build_video_trim_filter(
+pub(super) fn build_video_trim_filter(
     clip: &Clip,
     input_index: usize,
     trim_label: &str,
@@ -1996,7 +2002,7 @@ fn build_time_remap_setpts(curve: &crate::core::timeline::TimeRemapCurve) -> Str
 /// including atempo for speed, areverse for reverse playback, and volume automation
 /// from audio keyframes.
 /// Returns the label to use as input for subsequent audio effects.
-fn build_audio_trim_filter(
+pub(super) fn build_audio_trim_filter(
     clip: &Clip,
     input_index: usize,
     audio_trim_label: &str,
@@ -2155,7 +2161,7 @@ fn volume_db_to_linear(volume_db: f32) -> f64 {
     }
 }
 
-fn apply_audio_mix_settings(
+pub(super) fn apply_audio_mix_settings(
     clip: &Clip,
     track: &Track,
     input_index: usize,
@@ -2204,14 +2210,14 @@ fn apply_audio_mix_settings(
     current_label
 }
 
-const TIMELINE_EPSILON_SEC: f64 = 0.001;
+pub(super) const TIMELINE_EPSILON_SEC: f64 = 0.001;
 
 #[derive(Clone, Debug)]
-struct VideoTimelineSegment {
-    stream_label: String,
-    start_sec: f64,
-    end_sec: f64,
-    transition_filter: Option<String>,
+pub(super) struct VideoTimelineSegment {
+    pub stream_label: String,
+    pub start_sec: f64,
+    pub end_sec: f64,
+    pub transition_filter: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -2220,7 +2226,10 @@ struct VideoConcatPart {
     transition_filter: Option<String>,
 }
 
-fn output_video_dimensions(sequence: &Sequence, settings: &ExportSettings) -> (u32, u32) {
+pub(super) fn output_video_dimensions(
+    sequence: &Sequence,
+    settings: &ExportSettings,
+) -> (u32, u32) {
     let width = settings
         .width
         .unwrap_or(sequence.format.canvas.width)
@@ -2232,7 +2241,7 @@ fn output_video_dimensions(sequence: &Sequence, settings: &ExportSettings) -> (u
     (width, height)
 }
 
-fn output_video_fps(sequence: &Sequence, settings: &ExportSettings) -> f64 {
+pub(super) fn output_video_fps(sequence: &Sequence, settings: &ExportSettings) -> f64 {
     let fps = settings.fps.unwrap_or_else(|| sequence.format.fps.as_f64());
 
     if fps.is_finite() && fps > 0.0 {
@@ -2242,7 +2251,7 @@ fn output_video_fps(sequence: &Sequence, settings: &ExportSettings) -> f64 {
     }
 }
 
-fn output_video_pixel_format(settings: &ExportSettings) -> &'static str {
+pub(super) fn output_video_pixel_format(settings: &ExportSettings) -> &'static str {
     let use_10_bit = settings.is_hdr() || settings.bit_depth.unwrap_or(8) >= 10;
 
     match settings.video_codec {
@@ -2257,7 +2266,7 @@ fn output_video_pixel_format(settings: &ExportSettings) -> &'static str {
     }
 }
 
-fn append_video_stream_normalization(
+pub(super) fn append_video_stream_normalization(
     filter_complex: &mut String,
     input_label: &str,
     output_label: &str,
@@ -2279,7 +2288,7 @@ fn append_video_stream_normalization(
     ));
 }
 
-fn append_black_video_gap(
+pub(super) fn append_black_video_gap(
     filter_complex: &mut String,
     output_label: &str,
     duration_sec: f64,
@@ -2299,7 +2308,7 @@ fn append_black_video_gap(
     ));
 }
 
-fn append_timeline_video_output(
+pub(super) fn append_timeline_video_output(
     filter_complex: &mut String,
     segments: &[VideoTimelineSegment],
     timeline_end_sec: f64,
@@ -2419,7 +2428,7 @@ fn append_timeline_video_output(
     Ok(())
 }
 
-fn append_master_audio_output(
+pub(super) fn append_master_audio_output(
     filter_complex: &mut String,
     audio_streams: &[String],
     master_volume_db: f32,
@@ -2471,53 +2480,19 @@ pub fn is_text_clip(clip: &Clip) -> bool {
     clip.asset_id.starts_with(TEXT_ASSET_PREFIX)
 }
 
-/// Build FFmpeg filter for a text clip.
-///
-/// Text clips use a color source as input and apply the drawtext filter
-/// from the TextOverlay effect to generate the video.
-///
-/// # Arguments
-///
-/// * `clip` - The text clip
-/// * `effects` - Map of effect ID to Effect (for looking up TextOverlay effect)
-/// * `width` - Output video width
-/// * `height` - Output video height
-///
-/// # Returns
-///
-/// FFmpeg input arguments and filter string for the text clip
-fn build_text_clip_filter(
-    clip: &Clip,
-    effects: &HashMap<String, Effect>,
-    width: u32,
-    height: u32,
-) -> Option<(Vec<String>, String)> {
-    // Find the TextOverlay effect
-    let text_effect = clip.effects.iter().find_map(|effect_id| {
-        effects
-            .get(effect_id)
-            .filter(|e| e.effect_type == EffectType::TextOverlay && e.enabled)
-    })?;
+fn effective_text_layer_opacity(text_opacity: f64, clip_opacity: f32) -> f64 {
+    let clip_opacity = if clip_opacity.is_finite() {
+        (clip_opacity as f64).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let text_opacity = text_opacity.clamp(0.0, 1.0);
 
-    let mut resolved_text_effect = text_effect.clone();
-    apply_text_transform_overrides(&mut resolved_text_effect, clip);
-
-    // Calculate clip duration
-    let duration = clip.range.source_out_sec - clip.range.source_in_sec;
-
-    // Build color source input for transparent background
-    // Using color=c=black for solid background (can be changed to color=c=black@0.0 for transparent)
-    let input_args = vec![
-        "-f".to_string(),
-        "lavfi".to_string(),
-        "-i".to_string(),
-        format!("color=c=black:s={}x{}:d={}:r=30", width, height, duration),
-    ];
-
-    // Build drawtext filter from text effect parameters
-    let drawtext_filter = resolved_text_effect.to_filter_body();
-
-    Some((input_args, drawtext_filter))
+    if (text_opacity - clip_opacity).abs() < 0.001 {
+        text_opacity
+    } else {
+        text_opacity * clip_opacity
+    }
 }
 
 fn apply_text_transform_overrides(effect: &mut Effect, clip: &Clip) {
@@ -2543,16 +2518,35 @@ fn apply_text_transform_overrides(effect: &mut Effect, clip: &Clip) {
     effect.set_param("y", ParamValue::Float(y));
     effect.set_param("rotation", ParamValue::Float(rotation));
 
+    let text_opacity = effect.get_float("opacity").unwrap_or(1.0).clamp(0.0, 1.0);
+    effect.set_param(
+        "opacity",
+        ParamValue::Float(effective_text_layer_opacity(text_opacity, clip.opacity)),
+    );
+
     if let Some(font_size) = effect.get_float("font_size") {
-        let raw_scale = (clip.transform.scale.x.abs() + clip.transform.scale.y.abs()) / 2.0;
-        let normalized_scale = if raw_scale.is_finite() {
-            raw_scale.clamp(0.01, 100.0)
+        let scale_x = if clip.transform.scale.x.is_finite() {
+            clip.transform.scale.x.abs().clamp(0.01, 100.0)
         } else {
             1.0
         };
+        let scale_y = if clip.transform.scale.y.is_finite() {
+            clip.transform.scale.y.abs().clamp(0.01, 100.0)
+        } else {
+            1.0
+        };
+        let normalized_scale = ((scale_x + scale_y) / 2.0).clamp(0.01, 100.0);
 
         let scaled_font_size = (font_size * normalized_scale).clamp(1.0, 500.0);
         effect.set_param("font_size", ParamValue::Float(scaled_font_size));
+        effect.set_param(
+            "scale_x_percent",
+            ParamValue::Float((scale_x / normalized_scale) * 100.0),
+        );
+        effect.set_param(
+            "scale_y_percent",
+            ParamValue::Float((scale_y / normalized_scale) * 100.0),
+        );
     }
 }
 
@@ -2739,7 +2733,7 @@ fn font_weight_implies_bold(value: &Value) -> Option<bool> {
     parse_json_number(value).map(|weight| weight >= 600.0)
 }
 
-fn find_transition_effect<'a>(
+pub(super) fn find_transition_effect<'a>(
     clip: &Clip,
     effects: &'a HashMap<String, Effect>,
 ) -> Option<&'a Effect> {
@@ -2751,7 +2745,7 @@ fn find_transition_effect<'a>(
         })
 }
 
-fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
+fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
     let text = clip.label.as_deref()?.trim();
     if text.is_empty() {
         return None;
@@ -2896,6 +2890,17 @@ fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
         resolve_caption_anchor(clip.caption_position.as_ref(), clip.caption_style.as_ref());
     effect.set_param("x", ParamValue::Float(x));
     effect.set_param("y", ParamValue::Float(y));
+    let text_opacity = effect.get_float("opacity").unwrap_or(1.0);
+    effect.set_param(
+        "opacity",
+        ParamValue::Float(effective_text_layer_opacity(text_opacity, clip.opacity)),
+    );
+
+    Some(effect)
+}
+
+fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
+    let effect = build_caption_text_effect(clip)?;
 
     let start = clip.place.timeline_in_sec;
     let end = clip.place.timeline_out_sec();
@@ -2912,7 +2917,7 @@ fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
     ))
 }
 
-fn collect_enabled_clips_sorted(sequence: &Sequence) -> Vec<(&Clip, &Track)> {
+pub(super) fn collect_enabled_clips_sorted(sequence: &Sequence) -> Vec<(&Clip, &Track)> {
     let mut all_clips: Vec<(&Clip, &Track)> = Vec::new();
 
     for track in &sequence.tracks {
@@ -2944,7 +2949,7 @@ fn collect_enabled_clips_sorted(sequence: &Sequence) -> Vec<(&Clip, &Track)> {
 /// The caller is expected to pass only enabled clips (e.g. from
 /// [`collect_enabled_clips_sorted`]), so no additional `clip.enabled`
 /// check is performed here.
-fn collect_caption_drawtext_filters(all_clips: &[(&Clip, &Track)]) -> Vec<String> {
+pub(super) fn collect_caption_drawtext_filters(all_clips: &[(&Clip, &Track)]) -> Vec<String> {
     all_clips
         .iter()
         .filter_map(|(clip, track)| {
@@ -2978,7 +2983,7 @@ fn append_drawtext_overlays(
     current_video_label
 }
 
-fn append_caption_overlays(
+pub(super) fn append_caption_overlays(
     filter_complex: &mut String,
     base_video_label: &str,
     caption_filters: &[String],
@@ -2986,7 +2991,7 @@ fn append_caption_overlays(
     append_drawtext_overlays(filter_complex, base_video_label, caption_filters, "capv")
 }
 
-fn append_text_clip_overlays(
+pub(super) fn append_text_clip_overlays(
     filter_complex: &mut String,
     base_video_label: &str,
     overlay_text_filters: &[String],
@@ -3003,6 +3008,29 @@ fn build_text_clip_drawtext_with_enable(
     clip: &Clip,
     effects: &HashMap<String, Effect>,
 ) -> Result<String, ExportError> {
+    let resolved_text_effect = build_text_clip_effect_with_transform(clip, effects)?;
+
+    let start = clip.place.timeline_in_sec;
+    let end = clip.place.timeline_out_sec();
+    if !start.is_finite() || !end.is_finite() || end <= start {
+        return Err(ExportError::InvalidSettings(format!(
+            "Text clip '{}' has invalid timing",
+            clip.id
+        )));
+    }
+
+    Ok(format!(
+        "{}:enable='between(t,{:.6},{:.6})'",
+        resolved_text_effect.to_filter_body(),
+        start.max(0.0),
+        end.max(0.0)
+    ))
+}
+
+fn build_text_clip_effect_with_transform(
+    clip: &Clip,
+    effects: &HashMap<String, Effect>,
+) -> Result<Effect, ExportError> {
     let text_effect = clip
         .effects
         .iter()
@@ -3018,39 +3046,374 @@ fn build_text_clip_drawtext_with_enable(
             ))
         })?;
 
-    let start = clip.place.timeline_in_sec;
-    let end = clip.place.timeline_out_sec();
-    if !start.is_finite() || !end.is_finite() || end <= start {
-        return Err(ExportError::InvalidSettings(format!(
-            "Text clip '{}' has invalid timing",
-            clip.id
-        )));
-    }
-
     let mut resolved_text_effect = text_effect.clone();
     apply_text_transform_overrides(&mut resolved_text_effect, clip);
-
-    Ok(format!(
-        "{}:enable='between(t,{:.6},{:.6})'",
-        resolved_text_effect.to_filter_body(),
-        start.max(0.0),
-        end.max(0.0)
-    ))
+    Ok(resolved_text_effect)
 }
 
-fn collect_overlay_text_drawtext_filters(
+pub(super) fn collect_overlay_text_drawtext_filters(
     all_clips: &[(&Clip, &Track)],
     effects: &HashMap<String, Effect>,
 ) -> Result<Vec<String>, ExportError> {
     let mut filters = Vec::new();
 
     for (clip, track) in all_clips {
-        if track.kind == TrackKind::Overlay && is_text_clip(clip) {
+        if matches!(track.kind, TrackKind::Video | TrackKind::Overlay) && is_text_clip(clip) {
             filters.push(build_text_clip_drawtext_with_enable(clip, effects)?);
         }
     }
 
     Ok(filters)
+}
+
+pub(super) fn generated_text_visual_end_sec(all_clips: &[(&Clip, &Track)]) -> f64 {
+    all_clips
+        .iter()
+        .filter(|(clip, track)| {
+            track.kind == TrackKind::Caption
+                || (matches!(track.kind, TrackKind::Video | TrackKind::Overlay)
+                    && is_text_clip(clip))
+        })
+        .map(|(clip, _track)| clip.place.timeline_out_sec())
+        .filter(|end| end.is_finite())
+        .fold(0.0_f64, f64::max)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AssColor {
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+}
+
+impl AssColor {
+    fn from_hex(raw: &str, fallback: &str, opacity: f64) -> Self {
+        let opacity = opacity.clamp(0.0, 1.0);
+        let (hex, alpha) = parse_hex_color(raw)
+            .or_else(|| parse_hex_color(fallback))
+            .unwrap_or_else(|| ("#FFFFFF".to_string(), None));
+        let hex = hex.trim_start_matches('#');
+        let red = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255);
+        let green = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);
+        let blue = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255);
+        let visible_alpha = alpha.unwrap_or(1.0).clamp(0.0, 1.0) * opacity;
+        let alpha = ((1.0 - visible_alpha) * 255.0).round().clamp(0.0, 255.0) as u8;
+
+        Self {
+            red,
+            green,
+            blue,
+            alpha,
+        }
+    }
+
+    fn transparent_black() -> Self {
+        Self {
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 255,
+        }
+    }
+
+    fn ass_value(self) -> String {
+        format!(
+            "&H{:02X}{:02X}{:02X}{:02X}",
+            self.alpha, self.blue, self.green, self.red
+        )
+    }
+}
+
+fn ass_timecode(seconds: f64) -> String {
+    let total_centiseconds = (seconds.max(0.0) * 100.0).round() as u64;
+    let centiseconds = total_centiseconds % 100;
+    let total_seconds = total_centiseconds / 100;
+    let secs = total_seconds % 60;
+    let total_minutes = total_seconds / 60;
+    let mins = total_minutes % 60;
+    let hours = total_minutes / 60;
+
+    format!("{hours}:{mins:02}:{secs:02}.{centiseconds:02}")
+}
+
+fn ass_sanitize_style_field(raw: &str, fallback: &str) -> String {
+    let sanitized = raw.replace([',', '\r', '\n', '\t'], " ").trim().to_string();
+
+    if sanitized.is_empty() {
+        fallback.to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn ass_escape_text(raw: &str) -> String {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let mut escaped = String::with_capacity(normalized.len());
+
+    for ch in normalized.chars() {
+        match ch {
+            '\n' => escaped.push_str(r"\N"),
+            '\\' => escaped.push_str(r"\\"),
+            '{' => escaped.push_str(r"\{"),
+            '}' => escaped.push_str(r"\}"),
+            _ if ch.is_control() => escaped.push(' '),
+            _ => escaped.push(ch),
+        }
+    }
+
+    escaped
+}
+
+fn escape_filtergraph_value(raw: &str) -> String {
+    raw.replace('\\', r"\\")
+        .replace(':', r"\:")
+        .replace(',', r"\,")
+        .replace('\'', r"\'")
+}
+
+fn ass_alignment_from_effect(effect: &Effect) -> i32 {
+    match effect
+        .get_param("alignment")
+        .and_then(ParamValue::as_str)
+        .unwrap_or("center")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "left" => 4,
+        "right" => 6,
+        _ => 5,
+    }
+}
+
+fn effect_string_param(effect: &Effect, name: &str, fallback: &str) -> String {
+    effect
+        .get_param(name)
+        .and_then(ParamValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn effect_int_param(effect: &Effect, name: &str, fallback: i64) -> i64 {
+    effect
+        .get_param(name)
+        .and_then(ParamValue::as_int)
+        .unwrap_or(fallback)
+}
+
+fn effect_float_param(effect: &Effect, name: &str, fallback: f64) -> f64 {
+    effect.get_float(name).unwrap_or(fallback)
+}
+
+fn effect_bool_param(effect: &Effect, name: &str, fallback: bool) -> bool {
+    effect.get_bool(name).unwrap_or(fallback)
+}
+
+fn ass_color_param(effect: &Effect, name: &str, fallback: &str, opacity: f64) -> Option<AssColor> {
+    effect
+        .get_param(name)
+        .and_then(ParamValue::as_str)
+        .map(|value| AssColor::from_hex(value, fallback, opacity))
+}
+
+fn append_ass_text_style_and_event(
+    styles: &mut String,
+    events: &mut String,
+    style_name: &str,
+    layer: i32,
+    clip: &Clip,
+    effect: &Effect,
+    output_width: u32,
+    output_height: u32,
+) {
+    let opacity = effect_float_param(effect, "opacity", 1.0).clamp(0.0, 1.0);
+    let font_family = ass_sanitize_style_field(
+        &effect_string_param(effect, "font_family", "Arial"),
+        "Arial",
+    );
+    let font_size = effect_float_param(effect, "font_size", 48.0).clamp(1.0, 500.0);
+    let font_weight = effect_int_param(effect, "font_weight", 400).clamp(100, 900);
+    let bold = effect_bool_param(effect, "bold", false) || font_weight >= 600;
+    let italic = effect_bool_param(effect, "italic", false);
+    let underline = effect_bool_param(effect, "underline", false);
+    let letter_spacing = effect_int_param(effect, "letter_spacing", 0).clamp(-100, 200);
+    let scale_x_percent = effect_float_param(effect, "scale_x_percent", 100.0).clamp(1.0, 1000.0);
+    let scale_y_percent = effect_float_param(effect, "scale_y_percent", 100.0).clamp(1.0, 1000.0);
+    let primary = AssColor::from_hex(
+        &effect_string_param(effect, "color", "#FFFFFF"),
+        "#FFFFFF",
+        opacity,
+    );
+    let outline_color = ass_color_param(effect, "outline_color", "#000000", opacity)
+        .unwrap_or_else(AssColor::transparent_black);
+    let outline_width = if effect.get_param("outline_color").is_some() {
+        effect_int_param(effect, "outline_width", 2).clamp(0, 100) as f64
+    } else {
+        0.0
+    };
+    let shadow_color = ass_color_param(effect, "shadow_color", "#000000", opacity * 0.8);
+    let has_shadow = shadow_color.is_some();
+    let shadow_x = if has_shadow {
+        effect_int_param(effect, "shadow_x", 0).clamp(-500, 500)
+    } else {
+        0
+    };
+    let shadow_y = if has_shadow {
+        effect_int_param(effect, "shadow_y", 0).clamp(-500, 500)
+    } else {
+        0
+    };
+    let shadow_size = if has_shadow {
+        shadow_x.abs().max(shadow_y.abs()) as f64
+    } else {
+        0.0
+    };
+    let background_color = ass_color_param(effect, "background_color", "#000000", opacity);
+    let background_padding = effect_int_param(effect, "background_padding", 10).clamp(0, 500);
+    let border_style = if background_color.is_some() { 3 } else { 1 };
+    let style_outline_width = if background_color.is_some() {
+        background_padding as f64
+    } else {
+        outline_width
+    };
+    let back_color = background_color
+        .or(shadow_color)
+        .unwrap_or_else(AssColor::transparent_black);
+    let alignment = ass_alignment_from_effect(effect);
+
+    styles.push_str(&format!(
+        "Style: {style_name},{font_family},{font_size:.2},{},{},{},{},{},{},{},0,{scale_x_percent:.2},{scale_y_percent:.2},{letter_spacing},0,{border_style},{style_outline_width:.2},{shadow_size:.2},{alignment},0,0,0,1\n",
+        primary.ass_value(),
+        primary.ass_value(),
+        outline_color.ass_value(),
+        back_color.ass_value(),
+        if bold { -1 } else { 0 },
+        if italic { -1 } else { 0 },
+        if underline { -1 } else { 0 },
+    ));
+
+    let x = effect_float_param(effect, "x", 0.5).clamp(0.0, 1.0) * output_width as f64;
+    let y = effect_float_param(effect, "y", 0.5).clamp(0.0, 1.0) * output_height as f64;
+    let rotation = effect_float_param(effect, "rotation", 0.0);
+    let shadow_blur = effect_int_param(effect, "shadow_blur", 0).clamp(0, 500);
+    let line_height = effect_float_param(effect, "line_height", 1.2).clamp(0.5, 5.0);
+    let raw_text = effect_string_param(effect, "text", "Title");
+    let normalized_text = raw_text.replace("\r\n", "\n").replace('\r', "\n");
+    let text_lines: Vec<String> = normalized_text.split('\n').map(ass_escape_text).collect();
+    let event_border_width = style_outline_width;
+    let start = ass_timecode(clip.place.timeline_in_sec);
+    let end = ass_timecode(clip.place.timeline_out_sec());
+    let line_count = text_lines.len().max(1);
+    let line_center = (line_count.saturating_sub(1) as f64) / 2.0;
+    let line_step = font_size * line_height;
+    let rotation_radians = rotation.to_radians();
+
+    for (index, text) in text_lines.iter().enumerate() {
+        let line_offset = (index as f64 - line_center) * line_step;
+        let line_x = x - line_offset * rotation_radians.sin();
+        let line_y = y + line_offset * rotation_radians.cos();
+
+        events.push_str(&format!(
+            "Dialogue: {layer},{start},{end},{style_name},,0,0,0,,{{\\pos({line_x:.2},{line_y:.2})\\an{alignment}\\frz{rotation:.2}\\b{font_weight}\\bord{event_border_width:.2}\\xshad{shadow_x}\\yshad{shadow_y}\\blur{shadow_blur}\\fsp{letter_spacing}}}{text}\n",
+        ));
+    }
+}
+
+fn build_ass_text_overlay_script(
+    sequence: &Sequence,
+    effects: &HashMap<String, Effect>,
+    output_width: u32,
+    output_height: u32,
+) -> Result<Option<String>, ExportError> {
+    let mut styles = String::new();
+    let mut events = String::new();
+    let mut event_count = 0usize;
+
+    for (track_index, track) in sequence.tracks.iter().enumerate() {
+        if !track_included_in_media_collection(track) {
+            continue;
+        }
+
+        for (clip_index, clip) in track.clips.iter().enumerate() {
+            if !clip.enabled {
+                continue;
+            }
+
+            let Some(effect) = (match track.kind {
+                TrackKind::Caption => build_caption_text_effect(clip),
+                TrackKind::Video | TrackKind::Overlay if is_text_clip(clip) => {
+                    Some(build_text_clip_effect_with_transform(clip, effects)?)
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+
+            let start = clip.place.timeline_in_sec;
+            let end = clip.place.timeline_out_sec();
+            if !start.is_finite() || !end.is_finite() || end <= start {
+                if is_text_clip(clip) {
+                    return Err(ExportError::InvalidSettings(format!(
+                        "Text clip '{}' has invalid timing",
+                        clip.id
+                    )));
+                }
+                continue;
+            }
+
+            let style_name = format!("OpenReelioText{event_count}");
+            let layer = (track_index as i32 * 1000) + clip_index as i32;
+            append_ass_text_style_and_event(
+                &mut styles,
+                &mut events,
+                &style_name,
+                layer,
+                clip,
+                &effect,
+                output_width,
+                output_height,
+            );
+            event_count += 1;
+        }
+    }
+
+    if event_count == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(format!(
+        "[Script Info]\nScriptType: v4.00+\nWrapStyle: 2\nScaledBorderAndShadow: yes\nYCbCr Matrix: TV.709\nPlayResX: {output_width}\nPlayResY: {output_height}\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n{styles}\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n{events}"
+    )))
+}
+
+pub(super) fn append_ass_text_overlay(
+    filter_complex: &mut String,
+    base_video_label: &str,
+    ass_path: &Path,
+    output_width: u32,
+    output_height: u32,
+) -> String {
+    let output_label = "[txtass0]";
+    let path_text = ass_path.to_string_lossy();
+    let escaped_path = escape_filtergraph_value(path_text.as_ref());
+    let fonts_dir_option = crate::core::text::fonts::system_font_directories()
+        .into_iter()
+        .next()
+        .map(|directory| {
+            let directory_text = directory.to_string_lossy();
+            format!(
+                ":fontsdir='{}'",
+                escape_filtergraph_value(directory_text.as_ref())
+            )
+        })
+        .unwrap_or_default();
+    filter_complex.push(';');
+    filter_complex.push_str(&format!(
+        "{base_video_label}subtitles=filename='{escaped_path}'{fonts_dir_option}:original_size={output_width}x{output_height}{output_label}"
+    ));
+    output_label.to_string()
 }
 
 // =============================================================================
@@ -3133,6 +3496,24 @@ impl ExportEngine {
         audio_info_map
     }
 
+    async fn ffmpeg_supports_filter(&self, filter_name: &str) -> bool {
+        let args = vec!["-hide_banner".to_string(), "-filters".to_string()];
+        let Ok(output) =
+            execute_ffmpeg_output(self.ffmpeg.info().ffmpeg_path.as_path(), &args).await
+        else {
+            return false;
+        };
+
+        let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+
+        text.lines().any(|line| {
+            let mut parts = line.split_whitespace();
+            let _flags = parts.next();
+            parts.next().is_some_and(|name| name == filter_name)
+        })
+    }
+
     /// Build FFmpeg arguments for simple single-clip export
     fn build_simple_export_args(
         &self,
@@ -3204,7 +3585,7 @@ impl ExportEngine {
     /// If effects have keyframes, they are resolved at the midpoint of the clip
     /// duration since FFmpeg filters cannot animate parameters directly.
     /// Dimensions are used for mask-aware (power window) filter generation.
-    fn build_clip_filter_graph(
+    pub(super) fn build_clip_filter_graph(
         &self,
         clip: &Clip,
         effects: &std::collections::HashMap<String, Effect>,
@@ -3273,411 +3654,35 @@ impl ExportEngine {
         audio_info: &std::collections::HashMap<String, AssetAudioInfo>,
         settings: &ExportSettings,
     ) -> Result<Vec<String>, ExportError> {
-        let mut args = Vec::new();
-        let mut input_index = 0;
-        let mut filter_complex = String::new();
-        let mut video_segments = Vec::new();
-        let mut audio_streams = Vec::new();
-        let mut timeline_end_sec = 0.0_f64;
-        let audio_companion_keys = collect_audio_companion_keys(sequence, assets, audio_info);
-
-        // Collect enabled clips sorted by timeline position.
-        let all_clips = collect_enabled_clips_sorted(sequence);
-
-        if all_clips.is_empty() {
-            return Err(ExportError::NoClips);
-        }
-
-        let caption_filters = collect_caption_drawtext_filters(&all_clips);
-        let overlay_text_filters = collect_overlay_text_drawtext_filters(&all_clips, effects)?;
-
-        let (output_width, output_height) = output_video_dimensions(sequence, settings);
-        let output_fps = output_video_fps(sequence, settings);
-        let output_pixel_format = output_video_pixel_format(settings);
-
-        // Collect adjustment layer effects for post-processing.
-        // These are applied to the composited output after the main concat,
-        // time-scoped to the adjustment layer's timeline range.
-        let mut adjustment_layer_effects: Vec<(FilterGraph, f64, f64)> = Vec::new();
-        for (clip, _track) in &all_clips {
-            if clip.is_adjustment_layer() && !clip.effects.is_empty() {
-                let graph = self.build_clip_filter_graph(
-                    clip,
-                    effects,
-                    Some(output_width),
-                    Some(output_height),
-                );
-                if graph.has_video_effects() {
-                    let start = clip.place.timeline_in_sec;
-                    let end = clip.place.timeline_out_sec();
-                    adjustment_layer_effects.push((graph, start, end));
-                }
-            }
-        }
-
-        // Add inputs and build filter graph
-        for (clip, track) in &all_clips {
-            if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
-                // Caption tracks and overlay text clips are burned in after the base
-                // video concat. Non-text overlay tracks are rejected during validation.
-                continue;
-            }
-
-            // Adjustment layers have no source media — their effects are applied as post-processing.
-            if clip.is_adjustment_layer() {
-                continue;
-            }
-
-            // Check if this is a text clip (virtual asset with __text__ prefix)
-            if is_text_clip(clip) {
-                // Text clips use a color source input with drawtext filter
-                if let Some((input_args, drawtext_filter)) =
-                    build_text_clip_filter(clip, effects, output_width, output_height)
-                {
-                    // Add color source input
-                    args.extend(input_args);
-
-                    let video_out_label = format!("v{}", input_index);
-                    let normalized_video_label = format!("vnorm{}", input_index);
-
-                    // Apply drawtext filter directly to color source
-                    let text_filter = format!(
-                        "[{}:v]{}[{}]",
-                        input_index, drawtext_filter, video_out_label
-                    );
-                    filter_complex.push_str(&text_filter);
-                    filter_complex.push(';');
-
-                    append_video_stream_normalization(
-                        &mut filter_complex,
-                        &video_out_label,
-                        &normalized_video_label,
-                        output_width,
-                        output_height,
-                        output_fps,
-                        output_pixel_format,
-                    );
-
-                    video_segments.push(VideoTimelineSegment {
-                        stream_label: format!("[{}]", normalized_video_label),
-                        start_sec: clip.place.timeline_in_sec,
-                        end_sec: clip.place.timeline_out_sec(),
-                        transition_filter: find_transition_effect(clip, effects)
-                            .map(|effect| effect.to_filter_body()),
-                    });
-                    timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
-
-                    // Text clips have no audio
-                    input_index += 1;
-                    continue;
-                } else {
-                    return Err(ExportError::InvalidSettings(format!(
-                        "Text clip '{}' is missing an enabled TextOverlay effect",
-                        clip.id
-                    )));
-                }
-            }
-
-            // Regular clip - look up the asset
-            let asset = assets.get(&clip.asset_id).ok_or_else(|| {
-                ExportError::InvalidSettings(format!("Asset not found: {}", clip.asset_id))
-            })?;
-
-            // Validate asset URI before passing to FFmpeg
-            let validated_path = validate_local_input_path(&asset.uri, "Asset file")
-                .map_err(ExportError::InvalidSettings)?;
-
-            // Check if this asset has audio
-            let clip_has_audio =
-                asset_has_playable_audio(asset, &track.kind, audio_info.get(&clip.asset_id))
-                    && !clip_audio_is_suppressed_by_companion(
-                        clip,
-                        track,
-                        asset,
-                        &audio_companion_keys,
-                    );
-
-            let contributes_visual_output = matches!(track.kind, TrackKind::Video) && track.visible;
-            if !contributes_visual_output && !clip_has_audio {
-                continue;
-            }
-            timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
-
-            // Add input (using validated path)
-            args.push("-i".to_string());
-            args.push(validated_path.to_string_lossy().to_string());
-
-            // Build FilterGraph for this clip's effects (with dimensions for mask support)
-            let clip_filter_graph = self.build_clip_filter_graph(
-                clip,
-                effects,
-                Some(output_width),
-                Some(output_height),
-            );
-
-            // Build tonemapping filter if needed (HDR source → SDR output)
-            let source_hdr_metadata = hdr_metadata_for_asset(asset);
-            let tonemap_filter = settings.build_tonemap_video_filter(&source_hdr_metadata);
-
-            // Build filters based on track type
-            match track.kind {
-                TrackKind::Video => {
-                    if track.visible {
-                        // Video processing: trim → [reverse] → [speed] → effects → [tonemap] → output
-                        let trim_label = format!("trim{}", input_index);
-                        let video_out_label = format!("v{}", input_index);
-                        let normalized_video_label = format!("vnorm{}", input_index);
-
-                        let effects_out_label = if tonemap_filter.is_some() {
-                            format!("vfx{}", input_index)
-                        } else {
-                            video_out_label.clone()
-                        };
-
-                        // Step 1: Video trim with speed/reverse/freeze support
-                        build_video_trim_filter(
-                            clip,
-                            input_index,
-                            &trim_label,
-                            &mut filter_complex,
-                        );
-
-                        // Step 2: Apply video effects if any
-                        if clip_filter_graph.has_video_effects() {
-                            let effects_filter = clip_filter_graph
-                                .to_video_filter_complex(&trim_label, &effects_out_label);
-                            filter_complex.push_str(&effects_filter);
-                            filter_complex.push(';');
-                        } else {
-                            filter_complex
-                                .push_str(&format!("[{}]null[{}];", trim_label, effects_out_label));
-                        }
-
-                        // Step 3: Apply tonemapping if needed (HDR → SDR)
-                        if let Some(ref tm_filter) = tonemap_filter {
-                            filter_complex.push_str(&format!(
-                                "[{}]{}[{}];",
-                                effects_out_label, tm_filter, video_out_label
-                            ));
-                        }
-
-                        append_video_stream_normalization(
-                            &mut filter_complex,
-                            &video_out_label,
-                            &normalized_video_label,
-                            output_width,
-                            output_height,
-                            output_fps,
-                            output_pixel_format,
-                        );
-
-                        video_segments.push(VideoTimelineSegment {
-                            stream_label: format!("[{}]", normalized_video_label),
-                            start_sec: clip.place.timeline_in_sec,
-                            end_sec: clip.place.timeline_out_sec(),
-                            transition_filter: find_transition_effect(clip, effects)
-                                .map(|effect| effect.to_filter_body()),
-                        });
-                    }
-
-                    // Audio processing: ONLY if this asset has audio
-                    // Freeze frame clips have muted audio, so skip
-                    if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
-                        let audio_trim_label = format!("atrim{}", input_index);
-                        let audio_out_label = format!("a{}", input_index);
-
-                        let audio_effects_input = build_audio_trim_filter(
-                            clip,
-                            input_index,
-                            &audio_trim_label,
-                            &mut filter_complex,
-                        );
-
-                        if clip_filter_graph.has_audio_effects() {
-                            let effects_filter = clip_filter_graph
-                                .to_audio_filter_complex(&audio_effects_input, &audio_out_label);
-                            filter_complex.push_str(&effects_filter);
-                            filter_complex.push(';');
-                        } else {
-                            filter_complex.push_str(&format!(
-                                "[{}]anull[{}];",
-                                audio_effects_input, audio_out_label
-                            ));
-                        }
-
-                        let mixed_audio_label = apply_audio_mix_settings(
-                            clip,
-                            track,
-                            input_index,
-                            &audio_out_label,
-                            &mut filter_complex,
-                        );
-
-                        audio_streams.push(format!("[{}]", mixed_audio_label));
-                    }
-                }
-                TrackKind::Audio => {
-                    // Audio-only track processing
-                    if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
-                        let audio_trim_label = format!("atrim{}", input_index);
-                        let audio_out_label = format!("a{}", input_index);
-
-                        let audio_effects_input = build_audio_trim_filter(
-                            clip,
-                            input_index,
-                            &audio_trim_label,
-                            &mut filter_complex,
-                        );
-
-                        if clip_filter_graph.has_audio_effects() {
-                            let effects_filter = clip_filter_graph
-                                .to_audio_filter_complex(&audio_effects_input, &audio_out_label);
-                            filter_complex.push_str(&effects_filter);
-                            filter_complex.push(';');
-                        } else {
-                            filter_complex.push_str(&format!(
-                                "[{}]anull[{}];",
-                                audio_effects_input, audio_out_label
-                            ));
-                        }
-
-                        let mixed_audio_label = apply_audio_mix_settings(
-                            clip,
-                            track,
-                            input_index,
-                            &audio_out_label,
-                            &mut filter_complex,
-                        );
-
-                        audio_streams.push(format!("[{}]", mixed_audio_label));
-                    }
-                }
-                _ => {
-                    // Skip non-video/audio tracks (caption, overlay)
-                }
-            }
-
-            input_index += 1;
-        }
-
-        if video_segments.is_empty() {
-            return Err(ExportError::InvalidSettings(
-                "Sequence has no visual clips to export".to_string(),
-            ));
-        }
-
-        // Remove trailing semicolon if present
-        if filter_complex.ends_with(';') {
-            filter_complex.pop();
-        }
-        filter_complex.push(';');
-
-        append_timeline_video_output(
-            &mut filter_complex,
-            &video_segments,
-            timeline_end_sec,
-            output_width,
-            output_height,
-            output_fps,
-            output_pixel_format,
-        )?;
-
-        // Apply adjustment layer effects as post-processing on the composited output.
-        // Each adjustment layer's effects are time-scoped to the layer's clip range
-        // using FFmpeg's enable='between(t,start,end)' clause.
-        let mut adj_video_label = "outv".to_string();
-        for (i, (graph, start, end)) in adjustment_layer_effects.iter().enumerate() {
-            let out_label = format!("adj{}", i);
-            let adj_filter =
-                graph.to_video_filter_complex_timed(&adj_video_label, &out_label, *start, *end);
-            filter_complex.push(';');
-            filter_complex.push_str(&adj_filter);
-            adj_video_label = out_label;
-        }
-
-        // Rename the final adjustment output back to [outv] if we applied any
-        if !adjustment_layer_effects.is_empty() {
-            filter_complex.push(';');
-            filter_complex.push_str(&format!("[{}]null[outv]", adj_video_label));
-        }
-
-        let text_overlay_video_label =
-            append_text_clip_overlays(&mut filter_complex, "[outv]", &overlay_text_filters);
-        let final_video_label = append_caption_overlays(
-            &mut filter_complex,
-            &text_overlay_video_label,
-            &caption_filters,
-        );
-
-        let final_audio_label = append_master_audio_output(
-            &mut filter_complex,
-            &audio_streams,
-            sequence.master_volume_db,
-        );
-
-        // Add filter complex
-        args.push("-filter_complex".to_string());
-        args.push(filter_complex);
-
-        // Map outputs
-        args.push("-map".to_string());
-        args.push(final_video_label);
-
-        // Map audio output ONLY if we have audio streams
-        if let Some(final_audio_label) = final_audio_label.as_deref() {
-            args.push("-map".to_string());
-            args.push(final_audio_label.to_string());
-        }
-
-        // Video codec (resolved: may use GPU encoder)
-        let video_encoder = settings.video_encoder_name();
-        args.push("-c:v".to_string());
-        args.push(video_encoder.clone());
-
-        // Audio codec ONLY if we have audio
-        if final_audio_label.is_some() {
-            args.push("-c:a".to_string());
-            args.push(settings.audio_encoder_name().to_string());
-        }
-
-        // Quality settings
-        if let Some(ref bitrate) = settings.video_bitrate {
-            args.push("-b:v".to_string());
-            args.push(bitrate.clone());
-        }
-
-        // Audio bitrate ONLY if we have audio
-        if let Some(ref bitrate) = settings.audio_bitrate {
-            if final_audio_label.is_some() {
-                args.push("-b:a".to_string());
-                args.push(bitrate.clone());
-            }
-        }
-
-        // Quality args (CRF for software, CQ/QP for hardware encoders)
-        if let Some(crf) = settings.crf {
-            if matches!(
-                settings.video_codec,
-                VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp9
-            ) {
-                args.extend(super::hardware::resolve_quality_args(&video_encoder, crf));
-            }
-        }
-
-        // HDR metadata (color primaries, transfer, colorspace, x265 params)
-        args.extend(settings.hdr_args());
-
-        append_output_time_range_args(&mut args, settings.start_time, settings.end_time);
-
-        // Overwrite
-        args.push("-y".to_string());
-
-        // Output
-        args.push(settings.output_path.to_string_lossy().to_string());
-
-        Ok(args)
+        self.build_complex_filter_args_with_audio_info_internal(
+            sequence, assets, effects, audio_info, settings, None,
+        )
     }
 
+    fn build_complex_filter_args_with_audio_info_internal(
+        &self,
+        sequence: &Sequence,
+        assets: &std::collections::HashMap<String, Asset>,
+        effects: &std::collections::HashMap<String, Effect>,
+        audio_info: &std::collections::HashMap<String, AssetAudioInfo>,
+        settings: &ExportSettings,
+        ass_text_overlay_path: Option<&Path>,
+    ) -> Result<Vec<String>, ExportError> {
+        super::ffmpeg_plan::build_sequence_ffmpeg_args(
+            super::ffmpeg_plan::SequenceFfmpegBuildContext {
+                engine: self,
+                sequence,
+                assets,
+                effects,
+                audio_info,
+                settings,
+                render_plan: None,
+                ass_text_overlay_path,
+            },
+        )
+    }
+
+    #[cfg(test)]
     fn build_audio_only_filter_args_with_audio_info(
         &self,
         sequence: &Sequence,
@@ -3686,107 +3691,17 @@ impl ExportEngine {
         audio_info: &std::collections::HashMap<String, AssetAudioInfo>,
         settings: &ExportSettings,
     ) -> Result<Vec<String>, ExportError> {
-        let mut args = Vec::new();
-        let mut input_index = 0;
-        let mut filter_complex = String::new();
-        let mut audio_streams = Vec::new();
-        let audio_companion_keys = collect_audio_companion_keys(sequence, assets, audio_info);
-        let all_clips = collect_enabled_clips_sorted(sequence);
-
-        if all_clips.is_empty() {
-            return Err(ExportError::NoClips);
-        }
-
-        for (clip, track) in &all_clips {
-            if !matches!(track.kind, TrackKind::Video | TrackKind::Audio) {
-                continue;
-            }
-
-            if clip.is_adjustment_layer()
-                || is_text_clip(clip)
-                || clip.freeze_frame
-                || clip.audio.muted
-            {
-                continue;
-            }
-
-            let asset = assets.get(&clip.asset_id).ok_or_else(|| {
-                ExportError::InvalidSettings(format!("Asset not found: {}", clip.asset_id))
-            })?;
-
-            let clip_has_audio =
-                asset_has_playable_audio(asset, &track.kind, audio_info.get(&clip.asset_id))
-                    && !clip_audio_is_suppressed_by_companion(
-                        clip,
-                        track,
-                        asset,
-                        &audio_companion_keys,
-                    );
-
-            if !clip_has_audio {
-                continue;
-            }
-
-            let validated_path = validate_local_input_path(&asset.uri, "Asset file")
-                .map_err(ExportError::InvalidSettings)?;
-
-            args.push("-i".to_string());
-            args.push(validated_path.to_string_lossy().to_string());
-
-            let clip_filter_graph = self.build_clip_filter_graph(clip, effects, None, None);
-            let audio_trim_label = format!("atrim{}", input_index);
-            let audio_out_label = format!("a{}", input_index);
-
-            let audio_effects_input =
-                build_audio_trim_filter(clip, input_index, &audio_trim_label, &mut filter_complex);
-
-            if clip_filter_graph.has_audio_effects() {
-                let effects_filter = clip_filter_graph
-                    .to_audio_filter_complex(&audio_effects_input, &audio_out_label);
-                filter_complex.push_str(&effects_filter);
-                filter_complex.push(';');
-            } else {
-                filter_complex.push_str(&format!(
-                    "[{}]anull[{}];",
-                    audio_effects_input, audio_out_label
-                ));
-            }
-
-            let mixed_audio_label = apply_audio_mix_settings(
-                clip,
-                track,
-                input_index,
-                &audio_out_label,
-                &mut filter_complex,
-            );
-
-            audio_streams.push(format!("[{}]", mixed_audio_label));
-            input_index += 1;
-        }
-
-        if filter_complex.ends_with(';') {
-            filter_complex.pop();
-        }
-
-        let final_audio_label = append_master_audio_output(
-            &mut filter_complex,
-            &audio_streams,
-            sequence.master_volume_db,
+        super::ffmpeg_plan::build_audio_only_ffmpeg_args(
+            super::ffmpeg_plan::AudioOnlyFfmpegBuildContext {
+                engine: self,
+                sequence,
+                assets,
+                effects,
+                audio_info,
+                settings,
+                render_plan: None,
+            },
         )
-        .ok_or_else(|| {
-            ExportError::InvalidSettings("No audio tracks found in sequence".to_string())
-        })?;
-
-        args.push("-filter_complex".to_string());
-        args.push(filter_complex);
-        args.push("-map".to_string());
-        args.push(final_audio_label);
-
-        append_output_time_range_args(&mut args, settings.start_time, settings.end_time);
-        args.push("-y".to_string());
-        args.push(settings.output_path.to_string_lossy().to_string());
-
-        Ok(args)
     }
 
     /// Export a sequence to a video file
@@ -3833,23 +3748,102 @@ impl ExportEngine {
         progress_tx: Option<Sender<ExportProgress>>,
         cancel_rx: Option<oneshot::Receiver<()>>,
     ) -> Result<ExportResult, ExportError> {
-        use std::process::Stdio;
-        use tokio::io::{AsyncBufReadExt, BufReader};
+        self.export_sequence_with_effects_internal(
+            sequence,
+            assets,
+            effects,
+            settings,
+            None,
+            progress_tx,
+            cancel_rx,
+        )
+        .await
+    }
 
-        let start_time = std::time::Instant::now();
+    /// Export a sequence using a precomputed render plan contract.
+    pub async fn export_sequence_with_effects_for_plan(
+        &self,
+        sequence: &Sequence,
+        assets: &std::collections::HashMap<String, Asset>,
+        effects: &std::collections::HashMap<String, Effect>,
+        settings: &ExportSettings,
+        render_plan: &RenderPlan,
+        progress_tx: Option<Sender<ExportProgress>>,
+        cancel_rx: Option<oneshot::Receiver<()>>,
+    ) -> Result<ExportResult, ExportError> {
+        self.export_sequence_with_effects_internal(
+            sequence,
+            assets,
+            effects,
+            settings,
+            Some(render_plan),
+            progress_tx,
+            cancel_rx,
+        )
+        .await
+    }
+
+    async fn export_sequence_with_effects_internal(
+        &self,
+        sequence: &Sequence,
+        assets: &std::collections::HashMap<String, Asset>,
+        effects: &std::collections::HashMap<String, Effect>,
+        settings: &ExportSettings,
+        render_plan: Option<&RenderPlan>,
+        progress_tx: Option<Sender<ExportProgress>>,
+        cancel_rx: Option<oneshot::Receiver<()>>,
+    ) -> Result<ExportResult, ExportError> {
+        if let Some(plan) = render_plan {
+            if !plan.validation.is_valid {
+                return Err(ExportError::InvalidSettings(format!(
+                    "Render plan validation failed: {}",
+                    plan.validation.errors.join("; ")
+                )));
+            }
+        }
 
         // Probe all assets to determine audio stream availability
         // This prevents FFmpeg from failing when clips don't have audio
         let audio_info = self.probe_assets_for_audio(sequence, assets).await;
 
-        // Build FFmpeg arguments with effects and audio info
-        let mut args = self.build_complex_filter_args_with_audio_info(
-            sequence,
-            assets,
-            effects,
-            &audio_info,
-            settings,
+        let (output_width, output_height) = output_video_dimensions(sequence, settings);
+        let mut ass_text_overlay_dir: Option<tempfile::TempDir> = None;
+        let mut ass_text_overlay_path: Option<PathBuf> = None;
+        if let Some(ass_script) =
+            build_ass_text_overlay_script(sequence, effects, output_width, output_height)?
+        {
+            if self.ffmpeg_supports_filter("subtitles").await {
+                let temp_dir = tempfile::Builder::new()
+                    .prefix("openreelio-text-overlays-")
+                    .tempdir()
+                    .map_err(ExportError::IoError)?;
+                let ass_path = temp_dir.path().join("text-overlays.ass");
+                tokio::fs::write(&ass_path, ass_script)
+                    .await
+                    .map_err(ExportError::IoError)?;
+                ass_text_overlay_path = Some(ass_path);
+                ass_text_overlay_dir = Some(temp_dir);
+            } else {
+                tracing::warn!(
+                    "FFmpeg subtitles filter is unavailable; falling back to drawtext overlays"
+                );
+            }
+        }
+
+        let mut args = super::ffmpeg_plan::build_sequence_ffmpeg_args(
+            super::ffmpeg_plan::SequenceFfmpegBuildContext {
+                engine: self,
+                sequence,
+                assets,
+                effects,
+                audio_info: &audio_info,
+                settings,
+                render_plan,
+                ass_text_overlay_path: ass_text_overlay_path.as_deref(),
+            },
         )?;
+
+        let _keep_ass_text_overlay_dir_alive = ass_text_overlay_dir;
 
         // Calculate total duration from enabled clips only so progress/ETA
         // are accurate when trailing clips are disabled.
@@ -3860,131 +3854,29 @@ impl ExportEngine {
 
         // Add progress output to stdout for real-time tracking.
         insert_output_option_args(&mut args, ["-progress".to_string(), "pipe:1".to_string()])?;
-
-        // Send initial progress
-        if let Some(ref tx) = progress_tx {
-            let _ = tx
-                .send(ExportProgress {
-                    frame: 0,
-                    total_frames,
-                    percent: 0.0,
-                    fps: 0.0,
-                    eta_seconds: 0,
-                    message: "Starting export...".to_string(),
-                })
-                .await;
-        }
-
-        // Spawn FFmpeg process with piped stdout for progress
-        let mut cmd = tokio::process::Command::new(self.ffmpeg.info().ffmpeg_path.as_path());
-        configure_tokio_command(&mut cmd);
-        cmd.args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| ExportError::FFmpegFailed(format!("Failed to spawn FFmpeg: {}", e)))?;
-
-        // Take stderr immediately and spawn a task to drain it concurrently.
-        // This prevents deadlock when FFmpeg fills the stderr pipe buffer.
-        let stderr_handle = child.stderr.take().map(|stderr| {
-            tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut buf = Vec::new();
-                let mut stderr = stderr;
-                let _ = stderr.read_to_end(&mut buf).await;
-                String::from_utf8_lossy(&buf).to_string()
-            })
-        });
-
-        // Handle progress if channel provided
-        if let Some(tx) = progress_tx {
-            if let Some(stdout) = child.stdout.take() {
-                let total_dur = total_duration;
-                let total_frm = total_frames;
-
-                // Spawn progress parsing task
-                tokio::spawn(async move {
-                    let reader = BufReader::new(stdout);
-                    let mut lines = reader.lines();
-                    let mut progress_data = FFmpegProgressData::default();
-
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        let is_progress_line =
-                            parse_ffmpeg_progress_line(&line, &mut progress_data);
-
-                        // Send update on progress= lines (block boundary)
-                        if is_progress_line && line.starts_with("progress=") {
-                            let progress =
-                                calculate_export_progress(&progress_data, total_dur, total_frm);
-
-                            if tx.send(progress).await.is_err() {
-                                // Channel closed, stop parsing
-                                break;
-                            }
-                        }
-                    }
-
-                    // Send final progress
-                    let _ = tx
-                        .send(ExportProgress {
-                            frame: total_frm,
-                            total_frames: total_frm,
-                            percent: 100.0,
-                            fps: 0.0,
-                            eta_seconds: 0,
-                            message: "Export complete!".to_string(),
-                        })
-                        .await;
-                });
-            }
-        }
-
-        // Wait for FFmpeg to complete, or cancel if requested
-        let status = if let Some(cancel_rx) = cancel_rx {
-            tokio::select! {
-                result = child.wait() => {
-                    result.map_err(|e| ExportError::FFmpegFailed(
-                        format!("Failed to wait for FFmpeg: {}", e),
-                    ))?
-                }
-                _ = cancel_rx => {
-                    // Cancel signal received — kill the FFmpeg child process
-                    let _ = child.kill().await;
-                    // Clean up partial output file
-                    let _ = tokio::fs::remove_file(&settings.output_path).await;
-                    return Err(ExportError::Cancelled);
-                }
-            }
+        let invocation = if let Some(plan) = render_plan {
+            build_ffmpeg_invocation_for_render_plan(plan, args)
         } else {
-            child.wait().await.map_err(|e| {
-                ExportError::FFmpegFailed(format!("Failed to wait for FFmpeg: {}", e))
-            })?
-        };
-
-        if !status.success() {
-            // Get stderr from the drain task
-            let stderr_msg = if let Some(handle) = stderr_handle {
-                handle
-                    .await
-                    .unwrap_or_else(|_| "Failed to read stderr".to_string())
-            } else {
-                format!("FFmpeg exited with status: {}", status)
-            };
-            return Err(ExportError::FFmpegFailed(stderr_msg));
+            build_ffmpeg_invocation_from_args(args, total_frames, None)
         }
+        .map_err(|error| ExportError::InvalidSettings(error.to_string()))?;
 
-        // Get file info
-        let file_size = std::fs::metadata(&settings.output_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let execution = execute_ffmpeg_invocation(
+            self.ffmpeg.info().ffmpeg_path.as_path(),
+            invocation,
+            total_duration,
+            progress_tx,
+            cancel_rx,
+            "Starting export...",
+            "Export complete!",
+        )
+        .await?;
 
         Ok(ExportResult {
-            output_path: settings.output_path.clone(),
+            output_path: execution.output_path,
             duration_sec: total_duration,
-            file_size,
-            encoding_time_sec: start_time.elapsed().as_secs_f64(),
+            file_size: execution.file_size,
+            encoding_time_sec: execution.encoding_time_sec,
         })
     }
 
@@ -3997,11 +3889,6 @@ impl ExportEngine {
         settings: &ExportSettings,
         progress_tx: Option<Sender<ExportProgress>>,
     ) -> Result<ExportResult, ExportError> {
-        use std::process::Stdio;
-        use tokio::io::{AsyncBufReadExt, BufReader};
-
-        let start_time = std::time::Instant::now();
-
         let input_path = Path::new(&asset.uri);
         let mut args = self.build_simple_export_args(input_path, settings);
 
@@ -4010,122 +3897,25 @@ impl ExportEngine {
         let fps = settings.fps.unwrap_or(30.0);
         let total_frames = (duration * fps) as u64;
 
-        // Add progress output to stdout for real-time tracking
-        // Insert before output path (last argument)
-        let output_path_arg = args.pop().ok_or_else(|| {
-            ExportError::InvalidSettings("No output path in FFmpeg arguments".to_string())
-        })?;
-        args.push("-progress".to_string());
-        args.push("pipe:1".to_string());
-        args.push(output_path_arg);
-
-        // Send initial progress
-        if let Some(ref tx) = progress_tx {
-            let _ = tx
-                .send(ExportProgress {
-                    frame: 0,
-                    total_frames,
-                    percent: 0.0,
-                    fps: 0.0,
-                    eta_seconds: 0,
-                    message: "Starting export...".to_string(),
-                })
-                .await;
-        }
-
-        // Spawn FFmpeg process with piped stdout for progress
-        let mut cmd = tokio::process::Command::new(self.ffmpeg.info().ffmpeg_path.as_path());
-        configure_tokio_command(&mut cmd);
-        cmd.args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| ExportError::FFmpegFailed(format!("Failed to spawn FFmpeg: {}", e)))?;
-
-        // Take stderr immediately and spawn a task to drain it concurrently.
-        // This prevents deadlock when FFmpeg fills the stderr pipe buffer.
-        let stderr_handle = child.stderr.take().map(|stderr| {
-            tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut buf = Vec::new();
-                let mut stderr = stderr;
-                let _ = stderr.read_to_end(&mut buf).await;
-                String::from_utf8_lossy(&buf).to_string()
-            })
-        });
-
-        // Handle progress if channel provided
-        if let Some(tx) = progress_tx {
-            if let Some(stdout) = child.stdout.take() {
-                let total_dur = duration;
-                let total_frm = total_frames;
-
-                // Spawn progress parsing task
-                tokio::spawn(async move {
-                    let reader = BufReader::new(stdout);
-                    let mut lines = reader.lines();
-                    let mut progress_data = FFmpegProgressData::default();
-
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        let is_progress_line =
-                            parse_ffmpeg_progress_line(&line, &mut progress_data);
-
-                        // Send update on progress= lines (block boundary)
-                        if is_progress_line && line.starts_with("progress=") {
-                            let progress =
-                                calculate_export_progress(&progress_data, total_dur, total_frm);
-
-                            if tx.send(progress).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-
-                    // Send final progress
-                    let _ = tx
-                        .send(ExportProgress {
-                            frame: total_frm,
-                            total_frames: total_frm,
-                            percent: 100.0,
-                            fps: 0.0,
-                            eta_seconds: 0,
-                            message: "Export complete!".to_string(),
-                        })
-                        .await;
-                });
-            }
-        }
-
-        // Wait for FFmpeg to complete
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| ExportError::FFmpegFailed(format!("Failed to wait for FFmpeg: {}", e)))?;
-
-        if !status.success() {
-            // Get stderr from the drain task
-            let stderr_msg = if let Some(handle) = stderr_handle {
-                handle
-                    .await
-                    .unwrap_or_else(|_| "Failed to read stderr".to_string())
-            } else {
-                format!("FFmpeg exited with status: {}", status)
-            };
-            return Err(ExportError::FFmpegFailed(stderr_msg));
-        }
-
-        // Get file info
-        let file_size = std::fs::metadata(&settings.output_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        insert_output_option_args(&mut args, ["-progress".to_string(), "pipe:1".to_string()])?;
+        let invocation = build_ffmpeg_invocation_from_args(args, total_frames, None)
+            .map_err(|error| ExportError::InvalidSettings(error.to_string()))?;
+        let execution = execute_ffmpeg_invocation(
+            self.ffmpeg.info().ffmpeg_path.as_path(),
+            invocation,
+            duration,
+            progress_tx,
+            None,
+            "Starting export...",
+            "Export complete!",
+        )
+        .await?;
 
         Ok(ExportResult {
-            output_path: settings.output_path.clone(),
+            output_path: execution.output_path,
             duration_sec: duration,
-            file_size,
-            encoding_time_sec: start_time.elapsed().as_secs_f64(),
+            file_size: execution.file_size,
+            encoding_time_sec: execution.encoding_time_sec,
         })
     }
 
@@ -4229,23 +4019,15 @@ impl ExportEngine {
             }
         }
 
-        // Run FFmpeg
         let ffmpeg_path = &self.ffmpeg.info().ffmpeg_path;
-        let mut cmd = tokio::process::Command::new(ffmpeg_path);
-        configure_tokio_command(&mut cmd);
-        let output = cmd
-            .args(&args)
-            .output()
+        execute_ffmpeg_output(ffmpeg_path, &args)
             .await
-            .map_err(|e| ExportError::FFmpegFailed(format!("Failed to spawn FFmpeg: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ExportError::FFmpegFailed(format!(
-                "Frame export failed: {}",
-                stderr
-            )));
-        }
+            .map_err(|error| match error {
+                ExportError::FFmpegFailed(message) => {
+                    ExportError::FFmpegFailed(format!("Frame export failed: {}", message))
+                }
+                other => other,
+            })?;
 
         // Read output file metadata
         let metadata = tokio::fs::metadata(&settings.output_path).await?;
@@ -4291,8 +4073,59 @@ impl ExportEngine {
         progress_tx: Option<Sender<ExportProgress>>,
         cancel_rx: Option<oneshot::Receiver<()>>,
     ) -> Result<AudioExportResult, ExportError> {
-        use std::process::Stdio;
-        use tokio::io::{AsyncBufReadExt, BufReader};
+        self.export_audio_only_internal(
+            sequence,
+            assets,
+            effects,
+            settings,
+            None,
+            progress_tx,
+            cancel_rx,
+        )
+        .await
+    }
+
+    /// Export audio using a precomputed render plan contract.
+    pub async fn export_audio_only_for_plan(
+        &self,
+        sequence: &Sequence,
+        assets: &HashMap<String, Asset>,
+        effects: &HashMap<String, Effect>,
+        settings: &AudioExportSettings,
+        render_plan: &RenderPlan,
+        progress_tx: Option<Sender<ExportProgress>>,
+        cancel_rx: Option<oneshot::Receiver<()>>,
+    ) -> Result<AudioExportResult, ExportError> {
+        self.export_audio_only_internal(
+            sequence,
+            assets,
+            effects,
+            settings,
+            Some(render_plan),
+            progress_tx,
+            cancel_rx,
+        )
+        .await
+    }
+
+    async fn export_audio_only_internal(
+        &self,
+        sequence: &Sequence,
+        assets: &HashMap<String, Asset>,
+        effects: &HashMap<String, Effect>,
+        settings: &AudioExportSettings,
+        render_plan: Option<&RenderPlan>,
+        progress_tx: Option<Sender<ExportProgress>>,
+        cancel_rx: Option<oneshot::Receiver<()>>,
+    ) -> Result<AudioExportResult, ExportError> {
+        if let Some(plan) = render_plan {
+            if !plan.validation.is_valid {
+                return Err(ExportError::InvalidSettings(format!(
+                    "Render plan validation failed: {}",
+                    plan.validation.errors.join("; ")
+                )));
+            }
+        }
 
         settings.validate()?;
 
@@ -4306,7 +4139,6 @@ impl ExportEngine {
             ));
         }
 
-        let start_time = std::time::Instant::now();
         let (normalized_start_time, normalized_end_time) =
             normalize_output_time_range(sequence, settings.start_time, settings.end_time)?;
         let mut normalized_settings = settings.clone();
@@ -4316,12 +4148,16 @@ impl ExportEngine {
         // Convert to export settings so we can reuse range handling/output path wiring.
         let export_settings = normalized_settings.to_export_settings();
 
-        let mut args = self.build_audio_only_filter_args_with_audio_info(
-            sequence,
-            assets,
-            effects,
-            &audio_info,
-            &export_settings,
+        let mut args = super::ffmpeg_plan::build_audio_only_ffmpeg_args(
+            super::ffmpeg_plan::AudioOnlyFfmpegBuildContext {
+                engine: self,
+                sequence,
+                assets,
+                effects,
+                audio_info: &audio_info,
+                settings: &export_settings,
+                render_plan,
+            },
         )?;
 
         // Replace video-related args: strip video, keep audio only
@@ -4376,89 +4212,36 @@ impl ExportEngine {
             normalized_settings.end_time,
         );
         let total_frames = (duration * sequence.format.fps.as_f64()).ceil() as u64;
-
-        // Run FFmpeg with progress tracking
-        let ffmpeg_path = &self.ffmpeg.info().ffmpeg_path;
-        let mut cmd = tokio::process::Command::new(ffmpeg_path);
-        configure_tokio_command(&mut cmd);
-        cmd.args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| ExportError::FFmpegFailed(format!("Failed to spawn FFmpeg: {}", e)))?;
-
-        let stdout = child.stdout.take();
-        let stderr_handle = child.stderr.take();
-
-        // Progress tracking task
-        let progress_handle = if let (Some(stdout), Some(tx)) = (stdout, progress_tx) {
-            Some(tokio::spawn(async move {
-                let reader = BufReader::new(stdout);
-                let mut lines = reader.lines();
-                let mut progress_data = FFmpegProgressData::default();
-
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if parse_ffmpeg_progress_line(&line, &mut progress_data) {
-                        let progress =
-                            calculate_export_progress(&progress_data, duration, total_frames);
-                        let _ = tx.send(progress).await;
-                    }
-                }
-            }))
+        let invocation = if let Some(plan) = render_plan {
+            build_ffmpeg_invocation_for_render_plan(plan, args)
         } else {
-            None
-        };
+            build_ffmpeg_invocation_from_args(args, total_frames, None)
+        }
+        .map_err(|error| ExportError::InvalidSettings(error.to_string()))?;
 
-        // Wait for completion or cancellation
-        let result = if let Some(cancel_rx) = cancel_rx {
-            tokio::select! {
-                status = child.wait() => {
-                    status.map_err(|e| ExportError::FFmpegFailed(e.to_string()))
-                }
-                _ = cancel_rx => {
-                    let _ = child.kill().await;
-                    let _ = tokio::fs::remove_file(&settings.output_path).await;
-                    return Err(ExportError::Cancelled);
-                }
+        let execution = execute_ffmpeg_invocation(
+            self.ffmpeg.info().ffmpeg_path.as_path(),
+            invocation,
+            duration,
+            progress_tx,
+            cancel_rx,
+            "Starting audio export...",
+            "Audio export complete!",
+        )
+        .await
+        .map_err(|error| match error {
+            ExportError::FFmpegFailed(message) => {
+                ExportError::FFmpegFailed(format!("Audio export failed: {}", message))
             }
-        } else {
-            child
-                .wait()
-                .await
-                .map_err(|e| ExportError::FFmpegFailed(e.to_string()))
-        };
-
-        if let Some(handle) = progress_handle {
-            let _ = handle.await;
-        }
-
-        let status = result?;
-        if !status.success() {
-            let stderr_content = if let Some(stderr) = stderr_handle {
-                let mut buf = String::new();
-                let mut reader = BufReader::new(stderr);
-                let _ = tokio::io::AsyncReadExt::read_to_string(&mut reader, &mut buf).await;
-                buf
-            } else {
-                String::new()
-            };
-            return Err(ExportError::FFmpegFailed(format!(
-                "Audio export failed: {}",
-                stderr_content
-            )));
-        }
-
-        let metadata = tokio::fs::metadata(&settings.output_path).await?;
-        let file_size = metadata.len();
+            other => other,
+        })?;
 
         Ok(AudioExportResult {
-            output_path: settings.output_path.clone(),
+            output_path: execution.output_path,
             duration_sec: duration,
-            file_size,
+            file_size: execution.file_size,
             format: settings.format.clone(),
-            encoding_time_sec: start_time.elapsed().as_secs_f64(),
+            encoding_time_sec: execution.encoding_time_sec,
         })
     }
 
@@ -4666,6 +4449,71 @@ impl ExportValidation {
     }
 }
 
+fn validate_clip_effect_contract(
+    validation: &mut ExportValidation,
+    clip: &Clip,
+    track: &Track,
+    effects: &std::collections::HashMap<String, Effect>,
+) {
+    if !clip.enabled || clip.effects.is_empty() {
+        return;
+    }
+
+    for effect_id in &clip.effects {
+        let Some(effect) = effects.get(effect_id) else {
+            validation.add_error(format!(
+                "Clip '{}' on track '{}' references missing effect '{}'",
+                clip.id, track.name, effect_id
+            ));
+            continue;
+        };
+
+        if !effect.enabled {
+            continue;
+        }
+
+        let capability = effect_capability(&effect.effect_type);
+        let label = effect_type_label(&effect.effect_type);
+
+        if !capability.export.is_supported() {
+            let reason = capability
+                .export_reason
+                .unwrap_or("This effect is not implemented by final export.");
+            validation.add_error(format!(
+                "Effect '{}' on clip '{}' is not supported in final export: {}",
+                label, clip.id, reason
+            ));
+        }
+
+        if !effect.keyframes.is_empty() {
+            validation.add_error(format!(
+                "Keyframed effect '{}' on clip '{}' is not supported in final export yet; export would otherwise render a static sampled value",
+                label, clip.id
+            ));
+        }
+    }
+}
+
+fn validate_clip_frame_alignment(
+    validation: &mut ExportValidation,
+    clock: &TimelineClock,
+    clip: &Clip,
+    track: &Track,
+) {
+    let start = clip.place.timeline_in_sec;
+    let end = clip.place.timeline_out_sec();
+
+    if !clock.is_frame_aligned(start) || !clock.is_frame_aligned(end) {
+        validation.add_warning(format!(
+            "Clip '{}' on track '{}' is not aligned to sequence frame boundaries at {}/{} fps",
+            clip.id,
+            track.name,
+            clock.fps().num,
+            clock.fps().den
+        ));
+    }
+}
+
 /// Validate export settings before starting export
 pub fn validate_export_settings(
     sequence: &Sequence,
@@ -4674,6 +4522,7 @@ pub fn validate_export_settings(
     settings: &ExportSettings,
 ) -> ExportValidation {
     let mut validation = ExportValidation::valid();
+    let timeline_clock = TimelineClock::new(sequence.format.fps.clone());
 
     for error in validate_export_settings_options(settings) {
         validation.add_error(error);
@@ -4712,7 +4561,11 @@ pub fn validate_export_settings(
                 .clips
                 .iter()
                 .filter(|clip| {
-                    clip.enabled && !clip.is_adjustment_layer() && track.kind == TrackKind::Video
+                    clip.enabled
+                        && !clip.is_adjustment_layer()
+                        && (track.kind == TrackKind::Video
+                            || track.kind == TrackKind::Caption
+                            || (track.kind == TrackKind::Overlay && is_text_clip(clip)))
                 })
                 .count()
         })
@@ -4743,6 +4596,9 @@ pub fn validate_export_settings(
             if track.kind == TrackKind::Overlay && !is_text_clip(clip) {
                 continue;
             }
+
+            validate_clip_frame_alignment(&mut validation, &timeline_clock, clip, track);
+            validate_clip_effect_contract(&mut validation, clip, track, effects);
 
             if track.kind == TrackKind::Video && uses_non_normal_blend_mode(clip, track) {
                 validation.add_error(format!(
@@ -4837,408 +4693,26 @@ pub fn build_complex_filter_args_with_audio_info(
     audio_info: &std::collections::HashMap<String, AssetAudioInfo>,
     settings: &ExportSettings,
 ) -> Result<Vec<String>, ExportError> {
-    let mut args = Vec::new();
-    let mut input_index = 0;
-    let mut filter_complex = String::new();
-    let mut video_segments = Vec::new();
-    let mut audio_streams = Vec::new();
-    let mut timeline_end_sec = 0.0_f64;
-    let audio_companion_keys = collect_audio_companion_keys(sequence, assets, audio_info);
+    let engine = ExportEngine::new(crate::core::ffmpeg::FFmpegRunner::new(
+        crate::core::ffmpeg::FFmpegInfo {
+            ffmpeg_path: PathBuf::from("ffmpeg"),
+            ffprobe_path: PathBuf::from("ffprobe"),
+            version: "test-builder".to_string(),
+            is_bundled: false,
+        },
+    ));
 
-    // Collect enabled clips sorted by timeline position.
-    let all_clips = collect_enabled_clips_sorted(sequence);
-
-    if all_clips.is_empty() {
-        return Err(ExportError::NoClips);
-    }
-
-    let caption_filters = collect_caption_drawtext_filters(&all_clips);
-    let overlay_text_filters = collect_overlay_text_drawtext_filters(&all_clips, effects)?;
-
-    // Build FilterGraph helper (inline version without engine)
-    // If effects have keyframes, they are resolved at the midpoint of the clip
-    fn build_clip_filter_graph_standalone(
-        clip: &Clip,
-        effects: &std::collections::HashMap<String, Effect>,
-        width: u32,
-        height: u32,
-    ) -> FilterGraph {
-        let mut graph = FilterGraph::new();
-        graph.set_dimensions(width as i32, height as i32);
-
-        // Calculate midpoint for keyframe interpolation
-        let clip_duration = clip.range.source_out_sec - clip.range.source_in_sec;
-        let midpoint_time = clip_duration / 2.0;
-
-        // When volume automation keyframes are active, skip Volume effects
-        // to prevent double-application (keyframe filter + effect filter).
-        let skip_volume_effects = clip.audio.has_volume_automation();
-
-        for effect_id in &clip.effects {
-            if let Some(effect) = effects.get(effect_id) {
-                if skip_volume_effects && effect.effect_type == EffectType::Volume && effect.enabled
-                {
-                    continue;
-                }
-
-                // If effect has keyframes, resolve them at midpoint
-                let resolved_effect = if effect.has_keyframes() {
-                    effect.with_params_at_time(midpoint_time)
-                } else {
-                    effect.clone()
-                };
-                graph.add_effect(resolved_effect);
-            }
-        }
-        graph.sort_by_order();
-        graph
-    }
-
-    let (output_width, output_height) = output_video_dimensions(sequence, settings);
-    let output_fps = output_video_fps(sequence, settings);
-    let output_pixel_format = output_video_pixel_format(settings);
-
-    // Collect adjustment layer effects for post-processing, time-scoped to clip range
-    let mut adjustment_layer_effects: Vec<(FilterGraph, f64, f64)> = Vec::new();
-    for (clip, _track) in &all_clips {
-        if clip.is_adjustment_layer() && !clip.effects.is_empty() {
-            let graph =
-                build_clip_filter_graph_standalone(clip, effects, output_width, output_height);
-            if graph.has_video_effects() {
-                let start = clip.place.timeline_in_sec;
-                let end = clip.place.timeline_out_sec();
-                adjustment_layer_effects.push((graph, start, end));
-            }
-        }
-    }
-
-    // Add inputs and build filter graph
-    for (clip, track) in &all_clips {
-        if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
-            // Caption tracks and overlay text clips are burned in after the base
-            // video concat. Non-text overlay tracks are rejected during validation.
-            continue;
-        }
-
-        // Adjustment layers have no source media — their effects are applied as post-processing.
-        if clip.is_adjustment_layer() {
-            continue;
-        }
-
-        // Check if this is a text clip (virtual asset with __text__ prefix)
-        if is_text_clip(clip) {
-            // Text clips use a color source input with drawtext filter
-            if let Some((input_args, drawtext_filter)) =
-                build_text_clip_filter(clip, effects, output_width, output_height)
-            {
-                // Add color source input
-                args.extend(input_args);
-
-                let video_out_label = format!("v{}", input_index);
-                let normalized_video_label = format!("vnorm{}", input_index);
-
-                // Apply drawtext filter directly to color source
-                let text_filter = format!(
-                    "[{}:v]{}[{}]",
-                    input_index, drawtext_filter, video_out_label
-                );
-                filter_complex.push_str(&text_filter);
-                filter_complex.push(';');
-
-                append_video_stream_normalization(
-                    &mut filter_complex,
-                    &video_out_label,
-                    &normalized_video_label,
-                    output_width,
-                    output_height,
-                    output_fps,
-                    output_pixel_format,
-                );
-
-                video_segments.push(VideoTimelineSegment {
-                    stream_label: format!("[{}]", normalized_video_label),
-                    start_sec: clip.place.timeline_in_sec,
-                    end_sec: clip.place.timeline_out_sec(),
-                    transition_filter: find_transition_effect(clip, effects)
-                        .map(|effect| effect.to_filter_body()),
-                });
-                timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
-
-                // Text clips have no audio
-                input_index += 1;
-                continue;
-            } else {
-                return Err(ExportError::InvalidSettings(format!(
-                    "Text clip '{}' is missing an enabled TextOverlay effect",
-                    clip.id
-                )));
-            }
-        }
-
-        // Regular clip - look up the asset
-        let asset = assets.get(&clip.asset_id).ok_or_else(|| {
-            ExportError::InvalidSettings(format!("Asset not found: {}", clip.asset_id))
-        })?;
-
-        // Check if this asset has audio
-        let clip_has_audio =
-            asset_has_playable_audio(asset, &track.kind, audio_info.get(&clip.asset_id))
-                && !clip_audio_is_suppressed_by_companion(
-                    clip,
-                    track,
-                    asset,
-                    &audio_companion_keys,
-                );
-
-        let contributes_visual_output = matches!(track.kind, TrackKind::Video) && track.visible;
-        if !contributes_visual_output && !clip_has_audio {
-            continue;
-        }
-        timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
-
-        // Validate asset URI before passing to FFmpeg
-        let validated_path = validate_local_input_path(&asset.uri, "Asset file")
-            .map_err(ExportError::InvalidSettings)?;
-
-        // Add input (using validated path)
-        args.push("-i".to_string());
-        args.push(validated_path.to_string_lossy().to_string());
-
-        // Build FilterGraph for this clip's effects (with dimensions for mask support)
-        let clip_filter_graph =
-            build_clip_filter_graph_standalone(clip, effects, output_width, output_height);
-        let source_hdr_metadata = hdr_metadata_for_asset(asset);
-        let tonemap_filter = settings.build_tonemap_video_filter(&source_hdr_metadata);
-
-        // Build filters based on track type
-        match track.kind {
-            TrackKind::Video => {
-                if track.visible {
-                    let trim_label = format!("trim{}", input_index);
-                    let video_out_label = format!("v{}", input_index);
-                    let normalized_video_label = format!("vnorm{}", input_index);
-                    let effects_out_label = if tonemap_filter.is_some() {
-                        format!("vfx{}", input_index)
-                    } else {
-                        video_out_label.clone()
-                    };
-
-                    build_video_trim_filter(clip, input_index, &trim_label, &mut filter_complex);
-
-                    if clip_filter_graph.has_video_effects() {
-                        let effects_filter = clip_filter_graph
-                            .to_video_filter_complex(&trim_label, &effects_out_label);
-                        filter_complex.push_str(&effects_filter);
-                        filter_complex.push(';');
-                    } else {
-                        filter_complex
-                            .push_str(&format!("[{}]null[{}];", trim_label, effects_out_label));
-                    }
-
-                    if let Some(ref tm_filter) = tonemap_filter {
-                        filter_complex.push_str(&format!(
-                            "[{}]{}[{}];",
-                            effects_out_label, tm_filter, video_out_label
-                        ));
-                    }
-
-                    append_video_stream_normalization(
-                        &mut filter_complex,
-                        &video_out_label,
-                        &normalized_video_label,
-                        output_width,
-                        output_height,
-                        output_fps,
-                        output_pixel_format,
-                    );
-
-                    video_segments.push(VideoTimelineSegment {
-                        stream_label: format!("[{}]", normalized_video_label),
-                        start_sec: clip.place.timeline_in_sec,
-                        end_sec: clip.place.timeline_out_sec(),
-                        transition_filter: find_transition_effect(clip, effects)
-                            .map(|effect| effect.to_filter_body()),
-                    });
-                }
-
-                if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
-                    let audio_trim_label = format!("atrim{}", input_index);
-                    let audio_out_label = format!("a{}", input_index);
-
-                    let audio_effects_input = build_audio_trim_filter(
-                        clip,
-                        input_index,
-                        &audio_trim_label,
-                        &mut filter_complex,
-                    );
-
-                    if clip_filter_graph.has_audio_effects() {
-                        let effects_filter = clip_filter_graph
-                            .to_audio_filter_complex(&audio_effects_input, &audio_out_label);
-                        filter_complex.push_str(&effects_filter);
-                        filter_complex.push(';');
-                    } else {
-                        filter_complex.push_str(&format!(
-                            "[{}]anull[{}];",
-                            audio_effects_input, audio_out_label
-                        ));
-                    }
-
-                    let mixed_audio_label = apply_audio_mix_settings(
-                        clip,
-                        track,
-                        input_index,
-                        &audio_out_label,
-                        &mut filter_complex,
-                    );
-
-                    audio_streams.push(format!("[{}]", mixed_audio_label));
-                }
-            }
-            TrackKind::Audio => {
-                if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
-                    let audio_trim_label = format!("atrim{}", input_index);
-                    let audio_out_label = format!("a{}", input_index);
-
-                    let audio_effects_input = build_audio_trim_filter(
-                        clip,
-                        input_index,
-                        &audio_trim_label,
-                        &mut filter_complex,
-                    );
-
-                    if clip_filter_graph.has_audio_effects() {
-                        let effects_filter = clip_filter_graph
-                            .to_audio_filter_complex(&audio_effects_input, &audio_out_label);
-                        filter_complex.push_str(&effects_filter);
-                        filter_complex.push(';');
-                    } else {
-                        filter_complex.push_str(&format!(
-                            "[{}]anull[{}];",
-                            audio_effects_input, audio_out_label
-                        ));
-                    }
-
-                    let mixed_audio_label = apply_audio_mix_settings(
-                        clip,
-                        track,
-                        input_index,
-                        &audio_out_label,
-                        &mut filter_complex,
-                    );
-
-                    audio_streams.push(format!("[{}]", mixed_audio_label));
-                }
-            }
-            _ => {}
-        }
-
-        input_index += 1;
-    }
-
-    if video_segments.is_empty() {
-        return Err(ExportError::InvalidSettings(
-            "Sequence has no visual clips to export".to_string(),
-        ));
-    }
-
-    // Remove trailing semicolon if present
-    if filter_complex.ends_with(';') {
-        filter_complex.pop();
-    }
-    filter_complex.push(';');
-
-    append_timeline_video_output(
-        &mut filter_complex,
-        &video_segments,
-        timeline_end_sec,
-        output_width,
-        output_height,
-        output_fps,
-        output_pixel_format,
-    )?;
-
-    // Apply adjustment layer effects as post-processing, time-scoped via enable clause
-    let mut adj_video_label = "outv".to_string();
-    for (i, (graph, start, end)) in adjustment_layer_effects.iter().enumerate() {
-        let out_label = format!("adj{}", i);
-        let adj_filter =
-            graph.to_video_filter_complex_timed(&adj_video_label, &out_label, *start, *end);
-        filter_complex.push(';');
-        filter_complex.push_str(&adj_filter);
-        adj_video_label = out_label;
-    }
-    if !adjustment_layer_effects.is_empty() {
-        filter_complex.push(';');
-        filter_complex.push_str(&format!("[{}]null[outv]", adj_video_label));
-    }
-
-    let text_overlay_video_label =
-        append_text_clip_overlays(&mut filter_complex, "[outv]", &overlay_text_filters);
-    let final_video_label = append_caption_overlays(
-        &mut filter_complex,
-        &text_overlay_video_label,
-        &caption_filters,
-    );
-
-    let final_audio_label = append_master_audio_output(
-        &mut filter_complex,
-        &audio_streams,
-        sequence.master_volume_db,
-    );
-
-    // Build FFmpeg arguments
-    args.push("-filter_complex".to_string());
-    args.push(filter_complex);
-
-    args.push("-map".to_string());
-    args.push(final_video_label);
-
-    if let Some(final_audio_label) = final_audio_label.as_deref() {
-        args.push("-map".to_string());
-        args.push(final_audio_label.to_string());
-    }
-
-    // Video codec (resolved: may use GPU encoder)
-    let video_encoder = settings.video_encoder_name();
-    args.push("-c:v".to_string());
-    args.push(video_encoder.clone());
-
-    if final_audio_label.is_some() {
-        args.push("-c:a".to_string());
-        args.push(settings.audio_encoder_name().to_string());
-    }
-
-    if let Some(ref bitrate) = settings.video_bitrate {
-        args.push("-b:v".to_string());
-        args.push(bitrate.clone());
-    }
-
-    if let Some(ref bitrate) = settings.audio_bitrate {
-        if !audio_streams.is_empty() {
-            args.push("-b:a".to_string());
-            args.push(bitrate.clone());
-        }
-    }
-
-    // Quality args (CRF for software, CQ/QP for hardware encoders)
-    if let Some(crf) = settings.crf {
-        if matches!(
-            settings.video_codec,
-            VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp9
-        ) {
-            args.extend(super::hardware::resolve_quality_args(&video_encoder, crf));
-        }
-    }
-
-    append_output_time_range_args(&mut args, settings.start_time, settings.end_time);
-
-    args.push("-y".to_string());
-    args.push(settings.output_path.to_string_lossy().to_string());
-
-    Ok(args)
+    super::ffmpeg_plan::build_sequence_ffmpeg_args(super::ffmpeg_plan::SequenceFfmpegBuildContext {
+        engine: &engine,
+        sequence,
+        assets,
+        effects,
+        audio_info,
+        settings,
+        render_plan: None,
+        ass_text_overlay_path: None,
+    })
 }
-
 /// Detect gaps in the timeline between clips
 pub fn detect_timeline_gaps(sequence: &Sequence) -> Vec<TimelineGap> {
     let mut gaps = Vec::new();
@@ -5316,6 +4790,202 @@ mod tests {
         let path = dir.join(format!("{unique}_{filename}"));
         std::fs::write(&path, b"").expect("create temp media file");
         path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn test_build_ass_text_overlay_script_maps_text_clip_style_and_transform() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+        use crate::core::Point2D;
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        let effect_id = "text-effect".to_string();
+        let mut text_clip = Clip::new(&format!("{}title", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 3.5)
+            .place_at(1.25);
+        text_clip.effects.push(effect_id.clone());
+        text_clip.transform.position = Point2D::new(0.25, 0.75);
+        text_clip.transform.scale = Point2D::new(2.0, 1.0);
+        text_clip.transform.rotation_deg = 15.0;
+        text_clip.opacity = 0.75;
+        track.add_clip(text_clip);
+        sequence.add_track(track);
+
+        let mut effect = Effect::with_id(&effect_id, EffectType::TextOverlay);
+        effect.set_param(
+            "text",
+            ParamValue::String("Hello\nWorld {safe}".to_string()),
+        );
+        effect.set_param("font_family", ParamValue::String("Inter".to_string()));
+        effect.set_param("font_size", ParamValue::Float(64.0));
+        effect.set_param("font_weight", ParamValue::Int(700));
+        effect.set_param("color", ParamValue::String("#AABBCC".to_string()));
+        effect.set_param("opacity", ParamValue::Float(0.75));
+        effect.set_param("outline_color", ParamValue::String("#101112".to_string()));
+        effect.set_param("outline_width", ParamValue::Int(3));
+        effect.set_param("shadow_color", ParamValue::String("#00000080".to_string()));
+        effect.set_param("shadow_x", ParamValue::Int(8));
+        effect.set_param("shadow_y", ParamValue::Int(4));
+        effect.set_param("line_height", ParamValue::Float(1.5));
+
+        let mut effects = HashMap::new();
+        effects.insert(effect_id, effect);
+
+        let script = build_ass_text_overlay_script(&sequence, &effects, 1920, 1080)
+            .expect("script result")
+            .expect("script exists");
+
+        assert!(script.contains("PlayResX: 1920"));
+        assert!(script.contains("Style: OpenReelioText0,Inter,96.00,&H40CCBBAA"));
+        assert!(script.contains(",133.33,66.67,"));
+        assert_eq!(script.matches("Dialogue:").count(), 2);
+        assert!(script.contains("Dialogue: 0,0:00:01.25,0:00:04.75,OpenReelioText0"));
+        assert!(script.contains(r"\an5\frz15.00\b700"));
+        assert!(script.contains(r"\xshad8\yshad4"));
+        assert!(script.contains(r"Hello"));
+        assert!(script.contains(r"World \{safe\}"));
+    }
+
+    #[test]
+    fn test_build_ass_text_overlay_script_preserves_background_padding() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        let effect_id = "boxed-text-effect".to_string();
+        let mut text_clip = Clip::new(&format!("{}boxed", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        text_clip.effects.push(effect_id.clone());
+        track.add_clip(text_clip);
+        sequence.add_track(track);
+
+        let mut effect = Effect::with_id(&effect_id, EffectType::TextOverlay);
+        effect.set_param("text", ParamValue::String("Boxed".to_string()));
+        effect.set_param(
+            "background_color",
+            ParamValue::String("#00000080".to_string()),
+        );
+        effect.set_param("background_padding", ParamValue::Int(24));
+
+        let mut effects = HashMap::new();
+        effects.insert(effect_id, effect);
+
+        let script = build_ass_text_overlay_script(&sequence, &effects, 1920, 1080)
+            .expect("script result")
+            .expect("script exists");
+
+        assert!(
+            script.contains(",3,24.00,0.00,5,"),
+            "Expected BorderStyle=3 with exported background padding. Got: {script}"
+        );
+        assert!(
+            script.contains(r"\bord24.00"),
+            "Expected dialogue override to preserve background padding. Got: {script}"
+        );
+    }
+
+    #[test]
+    fn test_build_ass_text_overlay_script_maps_caption_style_and_position() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut caption_track = Track::new_caption("Captions");
+        let mut caption_clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.5);
+        caption_clip.label = Some("Caption line".to_string());
+        caption_clip.caption_style = Some(serde_json::json!({
+            "fontFamily": "Arial",
+            "fontSize": 42,
+            "color": { "r": 255, "g": 240, "b": 32, "a": 204 },
+            "outlineColor": "#000000",
+            "outlineWidth": 4,
+            "alignment": "right",
+            "fontWeight": 700
+        }));
+        caption_clip.caption_position = Some(serde_json::json!({
+            "type": "custom",
+            "xPercent": 80,
+            "yPercent": 90
+        }));
+        caption_track.add_clip(caption_clip);
+        sequence.add_track(caption_track);
+
+        let script = build_ass_text_overlay_script(&sequence, &HashMap::new(), 1920, 1080)
+            .expect("script result")
+            .expect("script exists");
+
+        assert!(script.contains("Style: OpenReelioText0,Arial,42.00,&H3320F0FF"));
+        assert!(script.contains("Dialogue: 0,0:00:00.50,0:00:02.50,OpenReelioText0"));
+        assert!(script.contains(r"\pos(1536.00,972.00)\an6"));
+        assert!(script.contains("Caption line"));
+    }
+
+    #[test]
+    fn test_build_filter_uses_ass_subtitles_when_sidecar_is_provided() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::ffmpeg::{FFmpegInfo, FFmpegRunner};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut caption_track = Track::new_caption("Captions");
+        let mut caption_clip = Clip::new("caption_asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.25);
+        caption_clip.label = Some("Caption".to_string());
+        caption_track.add_clip(caption_clip);
+        sequence.add_track(caption_track);
+
+        let video_path = create_temp_media_file("ass_sidecar_base.mp4");
+        let mut video_asset =
+            Asset::new_video("ass_sidecar_base.mp4", &video_path, VideoInfo::default())
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = HashMap::new();
+        assets.insert(video_asset.id.clone(), video_asset);
+        let mut audio_info = HashMap::new();
+        audio_info.insert(
+            "video_asset".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+        let settings = ExportSettings::default();
+        let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
+            ffmpeg_path: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
+            version: "test".to_string(),
+            is_bundled: false,
+        }));
+        let ass_path = PathBuf::from("/tmp/openreelio:text,overlay.ass");
+
+        let args = engine
+            .build_complex_filter_args_with_audio_info_internal(
+                &sequence,
+                &assets,
+                &HashMap::new(),
+                &audio_info,
+                &settings,
+                Some(&ass_path),
+            )
+            .expect("filter args");
+        let filter = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-filter_complex").then_some(pair[1].as_str()))
+            .expect("filter complex");
+
+        assert!(filter.contains("subtitles=filename='/tmp/openreelio\\:text\\,overlay.ass'"));
+        assert!(filter.contains("original_size=1920x1080[txtass0]"));
+        assert!(!filter.contains("drawtext="));
     }
 
     // -------------------------------------------------------------------------
@@ -5481,6 +5151,224 @@ mod tests {
 
         assert!(!validation.is_valid);
         assert!(validation.errors.iter().any(|e| e.contains("not found")));
+    }
+
+    #[test]
+    fn test_validation_rejects_missing_clip_effect_reference() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.effects.push("missing_effect".to_string());
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_missing_effect.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_missing_effect.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(!validation.is_valid);
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.contains("references missing effect")));
+    }
+
+    #[test]
+    fn test_validation_rejects_unsupported_final_export_effect() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let effect = Effect::new(EffectType::BackgroundRemoval);
+        let effect_id = effect.id.clone();
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.effects.push(effect_id.clone());
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_unsupported_effect.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_unsupported_effect.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut effects = HashMap::new();
+        effects.insert(effect_id, effect);
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+        assert!(!validation.is_valid);
+        assert!(validation.errors.iter().any(|error| {
+            error.contains("Background Removal") && error.contains("not supported in final export")
+        }));
+    }
+
+    #[test]
+    fn test_validation_allows_disabled_unsupported_effect() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let mut effect = Effect::new(EffectType::BackgroundRemoval);
+        effect.enabled = false;
+        let effect_id = effect.id.clone();
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.effects.push(effect_id.clone());
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_disabled_unsupported_effect.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_disabled_unsupported_effect.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut effects = HashMap::new();
+        effects.insert(effect_id, effect);
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+        assert!(
+            validation.is_valid,
+            "Disabled unsupported effects should not block export. Got: {validation:?}"
+        );
+    }
+
+    #[test]
+    fn test_validation_warns_when_clip_is_not_frame_aligned() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.01),
+        );
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_frame_alignment.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_frame_alignment.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            validation.is_valid,
+            "Frame alignment warnings should not block compatibility exports"
+        );
+        assert!(validation
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("frame boundaries")));
+    }
+
+    #[test]
+    fn test_validation_rejects_keyframed_effects_for_final_export() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::effects::Keyframe;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let mut effect = Effect::new(EffectType::Brightness);
+        effect.keyframes.insert(
+            "value".to_string(),
+            vec![
+                Keyframe::new(0.0, ParamValue::Float(0.0)),
+                Keyframe::new(1.0, ParamValue::Float(0.5)),
+            ],
+        );
+        let effect_id = effect.id.clone();
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.effects.push(effect_id.clone());
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_keyframed_effect.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_keyframed_effect.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut effects = HashMap::new();
+        effects.insert(effect_id, effect);
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+        assert!(!validation.is_valid);
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.contains("Keyframed effect 'Brightness'")));
     }
 
     #[test]
@@ -5848,7 +5736,61 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_does_not_count_overlay_text_as_base_visual() {
+    fn test_validation_allows_video_track_text_layer_over_base_video() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::effects::{Effect, EffectType, ParamValue};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut text_track = Track::new_video("Text Layer");
+        let effect_id = "title_text_effect".to_string();
+        let mut text_clip = Clip::new(&format!("{}title", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        text_clip.effects.push(effect_id.clone());
+        text_track.add_clip(text_clip);
+        sequence.add_track(text_track);
+
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut effect = Effect::new(EffectType::TextOverlay);
+        effect.id = effect_id.clone();
+        effect.set_param("text", ParamValue::String("Title".to_string()));
+
+        let mut effects = HashMap::new();
+        effects.insert(effect_id, effect);
+
+        let video_path = create_temp_media_file("validation_video_text_layer_base.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_video_text_layer_base.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+        assert!(
+            validation.is_valid,
+            "Expected video-track text layers over video to pass validation. Got: {validation:?}"
+        );
+    }
+
+    #[test]
+    fn test_validation_allows_text_only_overlay_export_with_generated_base() {
         use crate::core::commands::TEXT_ASSET_PREFIX;
         use crate::core::effects::{Effect, EffectType, ParamValue};
         use crate::core::timeline::{Clip, SequenceFormat, Track, TrackKind};
@@ -5878,13 +5820,9 @@ mod tests {
             &ExportSettings::default(),
         );
 
-        assert!(!validation.is_valid);
         assert!(
-            validation
-                .errors
-                .iter()
-                .any(|error| error.to_lowercase().contains("no visual clips")),
-            "Expected overlay text without base video to fail as no visual clips. Got: {validation:?}"
+            validation.is_valid,
+            "Expected text-only overlay export to pass validation so export can generate a base. Got: {validation:?}"
         );
     }
 
@@ -7211,6 +7149,86 @@ mod tests {
     }
 
     #[test]
+    fn test_build_filter_composites_video_track_text_after_video_concat() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::effects::{Effect, EffectType, ParamValue};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut text_track = Track::new_video("Text Layer");
+        let effect_id = "video_track_text_effect".to_string();
+        let mut text_clip = Clip::new(&format!("{}title", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 2.0)
+            .place_at(0.5);
+        text_clip.effects.push(effect_id.clone());
+        text_track.add_clip(text_clip);
+        sequence.add_track(text_track);
+
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let video_path = create_temp_media_file("video_track_text_base.mp4");
+        let mut video_asset = Asset::new_video(
+            "video_track_text_base.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "video_asset".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+
+        let mut text_effect = Effect::new(EffectType::TextOverlay);
+        text_effect.id = effect_id.clone();
+        text_effect.set_param("text", ParamValue::String("Video layer title".to_string()));
+
+        let mut effects = std::collections::HashMap::new();
+        effects.insert(effect_id, text_effect);
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &ExportSettings::default(),
+        )
+        .expect("video-track text filter generation should succeed");
+        let args_str = args.join(" ");
+
+        assert!(
+            args_str.contains("[outv]drawtext="),
+            "Expected video-track text to be drawn over the concatenated video output. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("between(t,0.500000,2.500000)"),
+            "Expected text layer time window in drawtext enable expression. Got: {}",
+            args_str
+        );
+
+        let input_count = args.iter().filter(|arg| arg.as_str() == "-i").count();
+        assert_eq!(
+            input_count, 1,
+            "Video-track text overlay should not add a color-source video segment"
+        );
+    }
+
+    #[test]
     fn test_build_filter_applies_sequence_master_volume_to_audio_output() {
         use crate::core::assets::VideoInfo;
         use crate::core::timeline::{Clip, SequenceFormat, Track};
@@ -8304,24 +8322,25 @@ mod tests {
         let args = result.unwrap();
         let args_str = args.join(" ");
 
-        // Should have both file input and color source
+        // Text clips should be composited over the regular video instead of becoming
+        // a separate black video segment in the concat timeline.
         assert!(
             args_str.contains(&regular_path),
             "Should include file input for regular clip. Got: {}",
             args_str
         );
         assert!(
-            args_str.contains("color=c="),
-            "Should include color source for text clip. Got: {}",
+            !args_str.contains("color=c="),
+            "Text overlay should not add a color-source segment when regular video exists. Got: {}",
             args_str
         );
-
-        // Should have concat for multiple clips
         assert!(
-            args_str.contains("concat=n=2"),
-            "Should concat two video streams. Got: {}",
+            args_str.contains("[outv]drawtext="),
+            "Text clip should be drawn over the concatenated video output. Got: {}",
             args_str
         );
+        let input_count = args.iter().filter(|arg| arg.as_str() == "-i").count();
+        assert_eq!(input_count, 1, "Text overlay should not add a media input");
     }
 
     #[test]
