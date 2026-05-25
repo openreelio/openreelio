@@ -47,6 +47,7 @@ const DEFAULT_TEXT = 'Text';
 const DEFAULT_TEXT_STYLE: TextClipData['style'] = {
   fontSize: 42,
   fontFamily: 'Arial',
+  fontWeight: 400,
   color: '#FFFFFF',
   bold: false,
   italic: false,

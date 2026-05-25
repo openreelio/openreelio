@@ -12,10 +12,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { TransformOverlay } from './TransformOverlay';
-import type { Sequence, Clip, Track, Asset } from '@/types';
+import type { Sequence, Clip, Track, Asset, TextClipAlignment, TextClipData } from '@/types';
 
 const mockExecuteCommand = vi.fn();
 let mockSelectedClipIds: string[] = ['clip-1'];
+let mockTextClipDataById = new Map<string, TextClipData>();
 
 vi.mock('@/stores/projectStore', () => ({
   useProjectStore: (selector: (state: { executeCommand: typeof mockExecuteCommand }) => unknown) =>
@@ -25,6 +26,10 @@ vi.mock('@/stores/projectStore', () => ({
 vi.mock('@/stores/timelineStore', () => ({
   useTimelineStore: (selector: (state: { selectedClipIds: string[] }) => unknown) =>
     selector({ selectedClipIds: mockSelectedClipIds }),
+}));
+
+vi.mock('@/hooks/useSequenceTextClipData', () => ({
+  useSequenceTextClipData: () => mockTextClipDataById,
 }));
 
 function makeSequence(): Sequence {
@@ -72,6 +77,33 @@ function makeSequence(): Sequence {
   };
 }
 
+function makeTextSequence(alignment: TextClipAlignment): Sequence {
+  const sequence = makeSequence();
+  const clip = sequence.tracks[0].clips[0];
+  clip.assetId = '__text__clip-1';
+  clip.label = 'Text: Anchored title';
+  mockTextClipDataById.set(clip.id, {
+    content: 'Anchored title',
+    style: {
+      fontFamily: 'Arial',
+      fontSize: 48,
+      fontWeight: 400,
+      color: '#FFFFFF',
+      backgroundPadding: 0,
+      alignment,
+      bold: false,
+      italic: false,
+      underline: false,
+      lineHeight: 1.2,
+      letterSpacing: 0,
+    },
+    position: { x: 0.25, y: 0.5 },
+    rotation: 0,
+    opacity: 1,
+  });
+  return sequence;
+}
+
 function makeAssets(): Map<string, Asset> {
   return new Map<string, Asset>([
     [
@@ -117,6 +149,7 @@ describe('TransformOverlay', () => {
   beforeEach(() => {
     mockExecuteCommand.mockReset();
     mockSelectedClipIds = ['clip-1'];
+    mockTextClipDataById = new Map<string, TextClipData>();
   });
 
   // ===========================================================================
@@ -280,6 +313,17 @@ describe('TransformOverlay', () => {
       expect(screen.getByTestId('transform-handle-left')).toBeInTheDocument();
     });
 
+    it('should align text bounds to the same left anchor used by the preview renderer', () => {
+      const sequence = makeTextSequence('left');
+      const assets = makeAssets();
+
+      render(<TransformOverlay sequence={sequence} assets={assets} {...defaultProps} />);
+
+      const bounds = screen.getByTestId('transform-bounds');
+
+      expect(bounds).toHaveStyle({ left: '0px' });
+    });
+
     it('should update scale when dragging right handle', () => {
       const sequence = makeSequence();
       const assets = makeAssets();
@@ -300,6 +344,50 @@ describe('TransformOverlay', () => {
       expect(scale.x).toBeGreaterThan(1);
       // Scale Y should remain unchanged
       expect(scale.y).toBe(1);
+    });
+
+    it('should move the center while resizing from an edge so the opposite edge stays anchored', () => {
+      const sequence = makeSequence();
+      const assets = makeAssets();
+
+      render(<TransformOverlay sequence={sequence} assets={assets} {...defaultProps} />);
+
+      const rightHandle = screen.getByTestId('transform-handle-right');
+
+      fireEvent.mouseDown(rightHandle, { clientX: 0, clientY: 0 });
+      fireEvent.mouseMove(window, { clientX: 100, clientY: 0 });
+      fireEvent.mouseUp(window);
+
+      expect(mockExecuteCommand).toHaveBeenCalledTimes(1);
+      const call = mockExecuteCommand.mock.calls[0][0];
+      const position = call.payload.transform.position;
+
+      expect(position.x).toBeGreaterThan(0.5);
+      expect(position.y).toBe(0.5);
+    });
+
+    it('should keep a left-aligned text anchor fixed when resizing from the right edge', () => {
+      const sequence = makeTextSequence('left');
+      const assets = makeAssets();
+
+      render(<TransformOverlay sequence={sequence} assets={assets} {...defaultProps} />);
+
+      const rightHandle = screen.getByTestId('transform-handle-right');
+
+      fireEvent.mouseDown(rightHandle, { clientX: 0, clientY: 0 });
+      fireEvent.mouseMove(window, { clientX: 120, clientY: 0 });
+      fireEvent.mouseUp(window);
+
+      expect(mockExecuteCommand).toHaveBeenCalledTimes(1);
+      const call = mockExecuteCommand.mock.calls[0][0];
+      const transform = call.payload.transform;
+
+      expect(transform.position.x).toBeCloseTo(0.25);
+      expect(transform.position.y).toBe(0.5);
+      expect(transform.anchor.x).toBe(0);
+      expect(transform.anchor.y).toBe(0.5);
+      expect(transform.scale.x).toBeGreaterThan(1);
+      expect(transform.scale.y).toBeCloseTo(transform.scale.x);
     });
 
     it('should update scale when dragging bottom handle', () => {
@@ -362,6 +450,31 @@ describe('TransformOverlay', () => {
       const scale = call.payload.transform.scale;
 
       expect(scale.x).toBeGreaterThanOrEqual(0.1);
+    });
+  });
+
+  // ===========================================================================
+  // Rotation Interaction Tests
+  // ===========================================================================
+
+  describe('rotation interaction', () => {
+    it('should update rotation when dragging the rotation handle', () => {
+      const sequence = makeSequence();
+      const assets = makeAssets();
+
+      render(<TransformOverlay sequence={sequence} assets={assets} {...defaultProps} />);
+
+      const rotateHandle = screen.getByTestId('transform-handle-rotate');
+
+      fireEvent.mouseDown(rotateHandle, { clientX: 480, clientY: 242 });
+      fireEvent.mouseMove(window, { clientX: 508, clientY: 270 });
+      fireEvent.mouseUp(window);
+
+      expect(mockExecuteCommand).toHaveBeenCalledTimes(1);
+      const call = mockExecuteCommand.mock.calls[0][0];
+      const rotation = call.payload.transform.rotationDeg;
+
+      expect(rotation).toBeGreaterThan(45);
     });
   });
 

@@ -10,8 +10,8 @@ import { memo, useCallback, useRef, useState, useEffect, useMemo } from 'react';
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { isTextClip } from '@/types';
-import type { Asset, Transform, Sequence, TextClipData } from '@/types';
-import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
+import type { Asset, Transform, Sequence, TextClipAlignment, TextClipData } from '@/types';
+import { extractTextDataFromClipWithMap, getTextFontWeightNumber } from '@/utils/textRenderer';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 
 // =============================================================================
@@ -59,6 +59,15 @@ interface DragState {
   startX: number;
   startY: number;
   startTransform: Transform;
+  startBounds: {
+    width: number;
+    height: number;
+  };
+  startCenter: {
+    x: number;
+    y: number;
+  };
+  startAngleDeg: number;
 }
 
 // =============================================================================
@@ -67,6 +76,7 @@ interface DragState {
 
 const HANDLE_SIZE = 10;
 const HANDLE_OFFSET = HANDLE_SIZE / 2;
+const ROTATION_HANDLE_OFFSET = 28;
 const DEFAULT_TEXT_BOUNDS = { width: 320, height: 96 };
 
 let measurementCanvas: HTMLCanvasElement | null = null;
@@ -93,6 +103,44 @@ function isIdentityTransform(transform: Transform): boolean {
     Math.abs(transform.anchor.x - 0.5) < 0.0001 &&
     Math.abs(transform.anchor.y - 0.5) < 0.0001
   );
+}
+
+function getTextAnchorX(alignment: TextClipAlignment): number {
+  if (alignment === 'left') {
+    return 0;
+  }
+
+  if (alignment === 'right') {
+    return 1;
+  }
+
+  return 0.5;
+}
+
+function resolveTransformForTextOverlay(
+  clipTransform: Transform,
+  textData: TextClipData | undefined,
+): Transform {
+  if (!textData) {
+    return clipTransform;
+  }
+
+  const baseTransform = isIdentityTransform(clipTransform)
+    ? {
+        ...clipTransform,
+        position: { ...textData.position },
+        rotationDeg: textData.rotation,
+      }
+    : clipTransform;
+
+  return {
+    ...baseTransform,
+    anchor: {
+      ...baseTransform.anchor,
+      x: getTextAnchorX(textData.style.alignment),
+      y: 0.5,
+    },
+  };
 }
 
 function measureLineWidth(
@@ -122,9 +170,9 @@ function measureTextBounds(
     return DEFAULT_TEXT_BOUNDS;
   }
 
-  const scaledFontSize = Math.max(8, (textData.style.fontSize * canvasHeight) / 1080);
+  const scaledFontSize = Math.max(1, (textData.style.fontSize * canvasHeight) / 1080);
   const fontStyle = textData.style.italic ? 'italic ' : '';
-  const fontWeight = textData.style.bold ? 'bold ' : '';
+  const fontWeight = `${getTextFontWeightNumber(textData.style)} `;
   ctx.font = `${fontStyle}${fontWeight}${scaledFontSize}px ${textData.style.fontFamily}`;
 
   const maxLineWidth = lines.reduce((maxWidth, line) => {
@@ -218,14 +266,7 @@ export const TransformOverlay = memo(function TransformOverlay({
       ? extractTextDataFromClipWithMap(clip, textClipDataById)
       : undefined;
 
-    const transform =
-      textData && !previewTransform && isIdentityTransform(resolvedClipTransform)
-        ? {
-            ...resolvedClipTransform,
-            position: { ...textData.position },
-            rotationDeg: textData.rotation,
-          }
-        : resolvedClipTransform;
+    const transform = resolveTransformForTextOverlay(resolvedClipTransform, textData);
 
     const measuredTextBounds = textData ? measureTextBounds(textData, canvasHeight) : null;
 
@@ -260,14 +301,14 @@ export const TransformOverlay = memo(function TransformOverlay({
     const clipWidth = fittedWidth * transform.scale.x;
     const clipHeight = fittedHeight * transform.scale.y;
 
-    // Position is normalized (0.5, 0.5 = center of canvas)
-    // Calculate the center position in canvas coordinates
-    const centerX = transform.position.x * canvasWidth;
-    const centerY = transform.position.y * canvasHeight;
+    // Position is normalized canvas space. For text, the horizontal anchor
+    // follows text alignment so left/right aligned text stays under the box.
+    const anchorCanvasX = transform.position.x * canvasWidth;
+    const anchorCanvasY = transform.position.y * canvasHeight;
 
     // Calculate top-left corner based on anchor point
-    const left = centerX - clipWidth * transform.anchor.x;
-    const top = centerY - clipHeight * transform.anchor.y;
+    const left = anchorCanvasX - clipWidth * transform.anchor.x;
+    const top = anchorCanvasY - clipHeight * transform.anchor.y;
 
     // Convert to container coordinates with zoom and pan
     const containerCenterX = containerWidth / 2;
@@ -326,20 +367,14 @@ export const TransformOverlay = memo(function TransformOverlay({
       e.preventDefault();
 
       if (!selectedClip) return;
+      if (!clipBounds) return;
 
       const resolvedClipTransform = selectedClip.clip.transform ?? getDefaultTransform();
       const textData = isTextClip(selectedClip.clip.assetId)
         ? extractTextDataFromClipWithMap(selectedClip.clip, textClipDataById)
         : undefined;
 
-      const transform =
-        textData && isIdentityTransform(resolvedClipTransform)
-          ? {
-              ...resolvedClipTransform,
-              position: { ...textData.position },
-              rotationDeg: textData.rotation,
-            }
-          : resolvedClipTransform;
+      const transform = resolveTransformForTextOverlay(resolvedClipTransform, textData);
 
       setDragState({
         type,
@@ -347,10 +382,21 @@ export const TransformOverlay = memo(function TransformOverlay({
         startX: e.clientX,
         startY: e.clientY,
         startTransform: { ...transform },
+        startBounds: {
+          width: Math.max(1, clipBounds.width),
+          height: Math.max(1, clipBounds.height),
+        },
+        startCenter: {
+          x: clipBounds.centerX,
+          y: clipBounds.centerY,
+        },
+        startAngleDeg:
+          (Math.atan2(e.clientY - clipBounds.centerY, e.clientX - clipBounds.centerX) * 180) /
+          Math.PI,
       });
       setPreviewTransform({ ...transform });
     },
-    [selectedClip, textClipDataById],
+    [clipBounds, selectedClip, textClipDataById],
   );
 
   // Handle drag
@@ -371,6 +417,7 @@ export const TransformOverlay = memo(function TransformOverlay({
       const canvasDeltaY = deltaY / displayScale / canvasHeight;
 
       let transformPatch: Partial<Transform> = {};
+      const isTextSelection = isTextClip(selectedClip.clip.assetId);
 
       if (dragState.type === 'move') {
         // Move: update position
@@ -385,39 +432,120 @@ export const TransformOverlay = memo(function TransformOverlay({
         const handle = dragState.handle;
         let scaleX = dragState.startTransform.scale.x;
         let scaleY = dragState.startTransform.scale.y;
+        let centerDeltaX = 0;
+        let centerDeltaY = 0;
 
-        const scaleDeltaX = (deltaX / displayScale / canvasWidth) * 2;
-        const scaleDeltaY = (deltaY / displayScale / canvasHeight) * 2;
+        const startWidth = Math.max(1, dragState.startBounds.width);
+        const startHeight = Math.max(1, dragState.startBounds.height);
+        const minScaleX = 0.1;
+        const minScaleY = 0.1;
+        const minWidth = startWidth * (minScaleX / Math.max(0.0001, Math.abs(scaleX)));
+        const minHeight = startHeight * (minScaleY / Math.max(0.0001, Math.abs(scaleY)));
+
+        let targetWidth = startWidth;
+        let targetHeight = startHeight;
 
         // Apply scale based on which handle is being dragged
         if (handle.includes('right')) {
-          scaleX = Math.max(0.1, dragState.startTransform.scale.x + scaleDeltaX);
+          targetWidth = Math.max(minWidth, startWidth + deltaX);
         } else if (handle.includes('left')) {
-          scaleX = Math.max(0.1, dragState.startTransform.scale.x - scaleDeltaX);
+          targetWidth = Math.max(minWidth, startWidth - deltaX);
         }
 
         if (handle.includes('bottom')) {
-          scaleY = Math.max(0.1, dragState.startTransform.scale.y + scaleDeltaY);
+          targetHeight = Math.max(minHeight, startHeight + deltaY);
         } else if (handle.includes('top')) {
-          scaleY = Math.max(0.1, dragState.startTransform.scale.y - scaleDeltaY);
+          targetHeight = Math.max(minHeight, startHeight - deltaY);
         }
 
-        // Corner handles: maintain aspect ratio if shift is held
+        // Text scale is stored as clip transform scale but rendered as font-size changes,
+        // so keep text resizing uniform to match the visible preview.
         if (
-          e.shiftKey &&
-          (handle === 'top-left' ||
+          (isTextSelection || e.shiftKey) &&
+          (isTextSelection ||
+            handle === 'top-left' ||
             handle === 'top-right' ||
             handle === 'bottom-left' ||
             handle === 'bottom-right')
         ) {
-          const aspectRatio = dragState.startTransform.scale.x / dragState.startTransform.scale.y;
-          const avgScale = (scaleX + scaleY * aspectRatio) / 2;
-          scaleX = avgScale;
-          scaleY = avgScale / aspectRatio;
+          const widthRatio = targetWidth / startWidth;
+          const heightRatio = targetHeight / startHeight;
+          let uniformRatio = 1;
+
+          if (handle.includes('left') || handle.includes('right')) {
+            uniformRatio = widthRatio;
+          }
+
+          if (handle.includes('top') || handle.includes('bottom')) {
+            const shouldUseHeight =
+              !handle.includes('left') && !handle.includes('right')
+                ? true
+                : Math.abs(heightRatio - 1) > Math.abs(widthRatio - 1);
+            if (shouldUseHeight) {
+              uniformRatio = heightRatio;
+            }
+          }
+
+          targetWidth = Math.max(minWidth, startWidth * uniformRatio);
+          targetHeight = Math.max(minHeight, startHeight * uniformRatio);
+        }
+
+        scaleX = Math.max(
+          minScaleX,
+          dragState.startTransform.scale.x * (targetWidth / startWidth),
+        );
+        scaleY = Math.max(
+          minScaleY,
+          dragState.startTransform.scale.y * (targetHeight / startHeight),
+        );
+
+        const anchorX = dragState.startTransform.anchor.x;
+        const anchorY = dragState.startTransform.anchor.y;
+
+        if (handle.includes('right')) {
+          centerDeltaX = (targetWidth - startWidth) * anchorX;
+        } else if (handle.includes('left')) {
+          centerDeltaX = (startWidth - targetWidth) * (1 - anchorX);
+        }
+
+        if (handle.includes('bottom')) {
+          centerDeltaY = (targetHeight - startHeight) * anchorY;
+        } else if (handle.includes('top')) {
+          centerDeltaY = (startHeight - targetHeight) * (1 - anchorY);
         }
 
         transformPatch = {
           scale: { x: scaleX, y: scaleY },
+          position: {
+            x: Math.max(
+              0,
+              Math.min(
+                1,
+                dragState.startTransform.position.x +
+                  centerDeltaX / displayScale / canvasWidth,
+              ),
+            ),
+            y: Math.max(
+              0,
+              Math.min(
+                1,
+                dragState.startTransform.position.y +
+                  centerDeltaY / displayScale / canvasHeight,
+              ),
+            ),
+          },
+        };
+      } else if (dragState.type === 'rotate') {
+        const currentAngleDeg =
+          (Math.atan2(
+            e.clientY - dragState.startCenter.y,
+            e.clientX - dragState.startCenter.x,
+          ) *
+            180) /
+          Math.PI;
+        const deltaAngle = currentAngleDeg - dragState.startAngleDeg;
+        transformPatch = {
+          rotationDeg: dragState.startTransform.rotationDeg + deltaAngle,
         };
       }
 
@@ -425,6 +553,9 @@ export const TransformOverlay = memo(function TransformOverlay({
         ...dragState.startTransform,
         ...(transformPatch.position ? { position: transformPatch.position } : {}),
         ...(transformPatch.scale ? { scale: transformPatch.scale } : {}),
+        ...(transformPatch.rotationDeg !== undefined
+          ? { rotationDeg: transformPatch.rotationDeg }
+          : {}),
       };
 
       setPreviewTransform(nextTransform);
@@ -527,6 +658,19 @@ export const TransformOverlay = memo(function TransformOverlay({
             data-testid={`transform-handle-${position}`}
           />
         ))}
+
+        <div
+          className="absolute bg-blue-500 border-2 border-white rounded-full pointer-events-auto"
+          style={{
+            left: clipBounds.width / 2 - HANDLE_OFFSET,
+            top: -ROTATION_HANDLE_OFFSET - HANDLE_OFFSET,
+            width: HANDLE_SIZE,
+            height: HANDLE_SIZE,
+            cursor: dragState?.type === 'rotate' ? 'grabbing' : 'grab',
+          }}
+          onMouseDown={(e) => handleMouseDown(e, 'rotate')}
+          data-testid="transform-handle-rotate"
+        />
       </div>
 
       {/* Info display */}

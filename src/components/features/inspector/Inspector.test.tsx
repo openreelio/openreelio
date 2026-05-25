@@ -682,6 +682,25 @@ describe('Inspector', () => {
       );
     });
 
+    it('passes text timing edits to the parent handler', () => {
+      const handleTextTimingChange = vi.fn();
+      const selectedTextClip = createTestTextClip('Timed Text');
+
+      render(
+        <Inspector
+          selectedTextClip={selectedTextClip}
+          onTextTimingChange={handleTextTimingChange}
+        />,
+      );
+
+      fireEvent.click(screen.getByText('Timing'));
+      fireEvent.change(screen.getByLabelText('Start'), { target: { value: '7.25' } });
+
+      expect(handleTextTimingChange).toHaveBeenCalledWith('text-clip-1', {
+        timelineInSec: 7.25,
+      });
+    });
+
     it('passes readOnly prop to TextInspector', () => {
       const selectedTextClip = createTestTextClip('Read Only Text');
 

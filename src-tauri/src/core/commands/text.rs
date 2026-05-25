@@ -21,8 +21,8 @@ use crate::core::{
     commands::{Command, CommandResult, StateChange},
     effects::{Effect, EffectType, ParamValue},
     project::ProjectState,
-    text::TextClipData,
-    timeline::{Clip, ClipPlace, ClipRange, TrackKind},
+    text::{TextClipData, TextPosition},
+    timeline::{Clip, ClipPlace, ClipRange, TrackKind, Transform},
     ClipId, CoreError, CoreResult, EffectId, Point2D, SequenceId, TimeSec, TrackId,
 };
 
@@ -311,70 +311,7 @@ impl Command for AddTextClipCommand {
 impl AddTextClipCommand {
     /// Sets text data as effect parameters.
     fn set_text_params(&self, effect: &mut Effect) {
-        // Content
-        effect.set_param("text", ParamValue::String(self.text_data.content.clone()));
-
-        // Style
-        effect.set_param(
-            "font_family",
-            ParamValue::String(self.text_data.style.font_family.clone()),
-        );
-        effect.set_param(
-            "font_size",
-            ParamValue::Float(self.text_data.style.font_size as f64),
-        );
-        effect.set_param(
-            "color",
-            ParamValue::String(self.text_data.style.color.clone()),
-        );
-        effect.set_param(
-            "background_padding",
-            ParamValue::Int(self.text_data.style.background_padding as i64),
-        );
-        effect.set_param("bold", ParamValue::Bool(self.text_data.style.bold));
-        effect.set_param("italic", ParamValue::Bool(self.text_data.style.italic));
-        effect.set_param(
-            "underline",
-            ParamValue::Bool(self.text_data.style.underline),
-        );
-        effect.set_param(
-            "line_height",
-            ParamValue::Float(self.text_data.style.line_height),
-        );
-        effect.set_param(
-            "letter_spacing",
-            ParamValue::Int(self.text_data.style.letter_spacing as i64),
-        );
-        effect.set_param(
-            "alignment",
-            ParamValue::String(format!("{:?}", self.text_data.style.alignment).to_lowercase()),
-        );
-
-        if let Some(ref bg) = self.text_data.style.background_color {
-            effect.set_param("background_color", ParamValue::String(bg.clone()));
-        }
-
-        // Position (normalized -> will be converted to pixels in filter builder)
-        effect.set_param("x", ParamValue::Float(self.text_data.position.x));
-        effect.set_param("y", ParamValue::Float(self.text_data.position.y));
-
-        // Shadow
-        if let Some(ref shadow) = self.text_data.shadow {
-            effect.set_param("shadow_color", ParamValue::String(shadow.color.clone()));
-            effect.set_param("shadow_x", ParamValue::Int(shadow.offset_x as i64));
-            effect.set_param("shadow_y", ParamValue::Int(shadow.offset_y as i64));
-            effect.set_param("shadow_blur", ParamValue::Int(shadow.blur as i64));
-        }
-
-        // Outline
-        if let Some(ref outline) = self.text_data.outline {
-            effect.set_param("outline_color", ParamValue::String(outline.color.clone()));
-            effect.set_param("outline_width", ParamValue::Int(outline.width as i64));
-        }
-
-        // Other properties
-        effect.set_param("rotation", ParamValue::Float(self.text_data.rotation));
-        effect.set_param("opacity", ParamValue::Float(self.text_data.opacity));
+        set_text_params_on_effect(effect, &self.text_data);
     }
 }
 
@@ -498,7 +435,7 @@ impl Command for UpdateTextCommand {
 
         // 5. Store previous data for undo
         if let Some(effect) = state.effects.get(&effect_id) {
-            self.previous_text_data = Some(extract_text_data_from_effect(effect));
+            self.previous_text_data = Some(extract_text_data_from_clip_effect(effect, clip));
         }
 
         // 6. Update the effect
@@ -738,6 +675,15 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     }
 }
 
+fn effective_font_weight(style: &crate::core::text::TextStyle) -> u16 {
+    let font_weight = style.font_weight.clamp(100, 900);
+    if style.bold && font_weight < 600 {
+        700
+    } else {
+        font_weight
+    }
+}
+
 /// Sets text data parameters on an effect.
 fn set_text_params_on_effect(effect: &mut Effect, text_data: &TextClipData) {
     effect.set_param("text", ParamValue::String(text_data.content.clone()));
@@ -748,6 +694,10 @@ fn set_text_params_on_effect(effect: &mut Effect, text_data: &TextClipData) {
     effect.set_param(
         "font_size",
         ParamValue::Float(text_data.style.font_size as f64),
+    );
+    effect.set_param(
+        "font_weight",
+        ParamValue::Int(effective_font_weight(&text_data.style) as i64),
     );
     effect.set_param("color", ParamValue::String(text_data.style.color.clone()));
     effect.set_param(
@@ -772,6 +722,8 @@ fn set_text_params_on_effect(effect: &mut Effect, text_data: &TextClipData) {
 
     if let Some(ref bg) = text_data.style.background_color {
         effect.set_param("background_color", ParamValue::String(bg.clone()));
+    } else {
+        effect.params.remove("background_color");
     }
 
     effect.set_param("x", ParamValue::Float(text_data.position.x));
@@ -782,11 +734,19 @@ fn set_text_params_on_effect(effect: &mut Effect, text_data: &TextClipData) {
         effect.set_param("shadow_x", ParamValue::Int(shadow.offset_x as i64));
         effect.set_param("shadow_y", ParamValue::Int(shadow.offset_y as i64));
         effect.set_param("shadow_blur", ParamValue::Int(shadow.blur as i64));
+    } else {
+        effect.params.remove("shadow_color");
+        effect.params.remove("shadow_x");
+        effect.params.remove("shadow_y");
+        effect.params.remove("shadow_blur");
     }
 
     if let Some(ref outline) = text_data.outline {
         effect.set_param("outline_color", ParamValue::String(outline.color.clone()));
         effect.set_param("outline_width", ParamValue::Int(outline.width as i64));
+    } else {
+        effect.params.remove("outline_color");
+        effect.params.remove("outline_width");
     }
 
     effect.set_param("rotation", ParamValue::Float(text_data.rotation));
@@ -803,6 +763,18 @@ fn extract_text_data_from_effect(effect: &Effect) -> TextClipData {
         .unwrap_or("Title")
         .to_string();
 
+    let bold = effect.get_bool("bold").unwrap_or(false);
+    let font_weight = effect
+        .get_param("font_weight")
+        .and_then(|v| v.as_int())
+        .map(|value| value.clamp(100, 900) as u16)
+        .unwrap_or_else(|| if bold { 700 } else { 400 });
+    let font_weight = if bold && font_weight < 600 {
+        700
+    } else {
+        font_weight
+    };
+
     let style = TextStyle {
         font_family: effect
             .get_param("font_family")
@@ -810,6 +782,7 @@ fn extract_text_data_from_effect(effect: &Effect) -> TextClipData {
             .unwrap_or("Arial")
             .to_string(),
         font_size: effect.get_float("font_size").unwrap_or(48.0) as u32,
+        font_weight,
         color: effect
             .get_param("color")
             .and_then(|v| v.as_str())
@@ -833,7 +806,7 @@ fn extract_text_data_from_effect(effect: &Effect) -> TextClipData {
             "right" => TextAlignment::Right,
             _ => TextAlignment::Center,
         },
-        bold: effect.get_bool("bold").unwrap_or(false),
+        bold,
         italic: effect.get_bool("italic").unwrap_or(false),
         underline: effect.get_bool("underline").unwrap_or(false),
         line_height: effect.get_float("line_height").unwrap_or(1.2),
@@ -893,6 +866,44 @@ fn extract_text_data_from_effect(effect: &Effect) -> TextClipData {
     }
 }
 
+fn is_identity_transform(transform: &Transform) -> bool {
+    const EPSILON: f64 = 0.0001;
+    (transform.position.x - 0.5).abs() < EPSILON
+        && (transform.position.y - 0.5).abs() < EPSILON
+        && (transform.scale.x - 1.0).abs() < EPSILON
+        && (transform.scale.y - 1.0).abs() < EPSILON
+        && transform.rotation_deg.abs() < EPSILON
+        && (transform.anchor.x - 0.5).abs() < EPSILON
+        && (transform.anchor.y - 0.5).abs() < EPSILON
+}
+
+fn apply_clip_transform_to_text_data(mut text_data: TextClipData, clip: &Clip) -> TextClipData {
+    if !is_identity_transform(&clip.transform) {
+        text_data.position =
+            TextPosition::new(clip.transform.position.x, clip.transform.position.y);
+        if clip.transform.rotation_deg.is_finite() {
+            text_data.rotation = clip.transform.rotation_deg;
+        }
+    }
+
+    let clip_opacity = clip.opacity as f64;
+    if clip_opacity.is_finite() {
+        let text_opacity = text_data.opacity.clamp(0.0, 1.0);
+        let clip_opacity = clip_opacity.clamp(0.0, 1.0);
+        text_data.opacity = if (text_opacity - clip_opacity).abs() < 0.001 {
+            text_opacity
+        } else {
+            (text_opacity * clip_opacity).clamp(0.0, 1.0)
+        };
+    }
+
+    text_data
+}
+
+fn extract_text_data_from_clip_effect(effect: &Effect, clip: &Clip) -> TextClipData {
+    apply_clip_transform_to_text_data(extract_text_data_from_effect(effect), clip)
+}
+
 /// Checks if a clip is a text clip (has virtual text asset).
 pub fn is_text_clip(clip: &Clip) -> bool {
     clip.asset_id.starts_with(TEXT_ASSET_PREFIX)
@@ -907,7 +918,7 @@ pub fn get_text_data(clip: &Clip, state: &ProjectState) -> Option<TextClipData> 
     for effect_id in &clip.effects {
         if let Some(effect) = state.effects.get(effect_id) {
             if effect.effect_type == EffectType::TextOverlay {
-                return Some(extract_text_data_from_effect(effect));
+                return Some(extract_text_data_from_clip_effect(effect, clip));
             }
         }
     }
@@ -1185,6 +1196,10 @@ mod tests {
         );
         assert_eq!(effect.get_float("font_size"), Some(72.0));
         assert_eq!(
+            effect.get_param("font_weight").and_then(|v| v.as_int()),
+            Some(700)
+        );
+        assert_eq!(
             effect.get_param("color").and_then(|v| v.as_str()),
             Some("#FF0000")
         );
@@ -1235,6 +1250,38 @@ mod tests {
             effect.get_param("text").and_then(|v| v.as_str()),
             Some("Updated")
         );
+    }
+
+    #[test]
+    fn test_update_text_removes_optional_effect_params() {
+        use crate::core::text::{TextOutline, TextShadow, TextStyle};
+
+        let mut state = create_test_state();
+        let initial_data = TextClipData::new("Styled")
+            .with_style(TextStyle::default().with_background("#000000AA"))
+            .with_shadow(TextShadow::soft())
+            .with_outline(TextOutline::thin());
+
+        let mut add_cmd = AddTextClipCommand::new("seq-1", "video-track", 0.0, 5.0, initial_data);
+        add_cmd.execute(&mut state).unwrap();
+        let clip_id = add_cmd.created_clip_id.clone().unwrap();
+
+        let mut update_cmd =
+            UpdateTextCommand::new("seq-1", "video-track", &clip_id, TextClipData::new("Plain"));
+        update_cmd.execute(&mut state).unwrap();
+
+        let sequence = state.get_sequence("seq-1").unwrap();
+        let track = sequence.get_track("video-track").unwrap();
+        let clip = track.get_clip(&clip_id).unwrap();
+        let effect = state.effects.get(&clip.effects[0]).unwrap();
+
+        assert!(effect.get_param("background_color").is_none());
+        assert!(effect.get_param("shadow_color").is_none());
+        assert!(effect.get_param("shadow_x").is_none());
+        assert!(effect.get_param("shadow_y").is_none());
+        assert!(effect.get_param("shadow_blur").is_none());
+        assert!(effect.get_param("outline_color").is_none());
+        assert!(effect.get_param("outline_width").is_none());
     }
 
     #[test]
@@ -1297,6 +1344,54 @@ mod tests {
             effect.get_param("text").and_then(|v| v.as_str()),
             Some("Original")
         );
+    }
+
+    #[test]
+    fn test_update_text_undo_preserves_transform_modified_before_update() {
+        let mut state = create_test_state();
+        let initial_data = TextClipData::new("Original")
+            .with_position(TextPosition::new(0.25, 0.3))
+            .with_rotation(5.0);
+
+        let mut add_cmd = AddTextClipCommand::new("seq-1", "video-track", 0.0, 5.0, initial_data);
+        add_cmd.execute(&mut state).unwrap();
+        let clip_id = add_cmd.created_clip_id.clone().unwrap();
+
+        {
+            let sequence = state.get_sequence_mut("seq-1").unwrap();
+            let track = sequence.get_track_mut("video-track").unwrap();
+            let clip = track.get_clip_mut(&clip_id).unwrap();
+            clip.transform.position = Point2D::new(0.7, 0.8);
+            clip.transform.rotation_deg = 12.0;
+        }
+
+        let mut current_data = {
+            let sequence = state.get_sequence("seq-1").unwrap();
+            let track = sequence.get_track("video-track").unwrap();
+            let clip = track.get_clip(&clip_id).unwrap();
+            get_text_data(clip, &state).unwrap()
+        };
+        current_data.content = "Updated".to_string();
+        current_data.style.font_size = 72;
+
+        let mut update_cmd = UpdateTextCommand::new("seq-1", "video-track", &clip_id, current_data);
+        update_cmd.execute(&mut state).unwrap();
+        update_cmd.undo(&mut state).unwrap();
+
+        let sequence = state.get_sequence("seq-1").unwrap();
+        let track = sequence.get_track("video-track").unwrap();
+        let clip = track.get_clip(&clip_id).unwrap();
+        let effect = state.effects.get(&clip.effects[0]).unwrap();
+
+        assert_eq!(clip.transform.position, Point2D::new(0.7, 0.8));
+        assert_eq!(clip.transform.rotation_deg, 12.0);
+        assert_eq!(
+            effect.get_param("text").and_then(|v| v.as_str()),
+            Some("Original")
+        );
+        assert_eq!(effect.get_float("x"), Some(0.7));
+        assert_eq!(effect.get_float("y"), Some(0.8));
+        assert_eq!(effect.get_float("rotation"), Some(12.0));
     }
 
     // -------------------------------------------------------------------------
@@ -1484,6 +1579,58 @@ mod tests {
         let text_data = get_text_data(clip, &state);
         assert!(text_data.is_some());
         assert_eq!(text_data.unwrap().content, "Test Content");
+    }
+
+    #[test]
+    fn test_get_text_data_applies_clip_transform_overrides() {
+        let mut state = create_test_state();
+        let initial_data = TextClipData::new("Transform")
+            .with_position(TextPosition::new(0.25, 0.3))
+            .with_rotation(5.0);
+
+        let mut add_cmd = AddTextClipCommand::new("seq-1", "video-track", 0.0, 5.0, initial_data);
+        add_cmd.execute(&mut state).unwrap();
+        let clip_id = add_cmd.created_clip_id.clone().unwrap();
+
+        {
+            let sequence = state.get_sequence_mut("seq-1").unwrap();
+            let track = sequence.get_track_mut("video-track").unwrap();
+            let clip = track.get_clip_mut(&clip_id).unwrap();
+            clip.transform.position = Point2D::new(0.72, 0.64);
+            clip.transform.rotation_deg = 18.0;
+        }
+
+        let sequence = state.get_sequence("seq-1").unwrap();
+        let track = sequence.get_track("video-track").unwrap();
+        let clip = track.get_clip(&clip_id).unwrap();
+        let text_data = get_text_data(clip, &state).unwrap();
+
+        assert_eq!(text_data.position, TextPosition::new(0.72, 0.64));
+        assert_eq!(text_data.rotation, 18.0);
+    }
+
+    #[test]
+    fn test_get_text_data_keeps_effect_position_for_identity_transform() {
+        let mut state = create_test_state();
+        let initial_data = TextClipData::new("Legacy").with_position(TextPosition::new(0.25, 0.3));
+
+        let mut add_cmd = AddTextClipCommand::new("seq-1", "video-track", 0.0, 5.0, initial_data);
+        add_cmd.execute(&mut state).unwrap();
+        let clip_id = add_cmd.created_clip_id.clone().unwrap();
+
+        {
+            let sequence = state.get_sequence_mut("seq-1").unwrap();
+            let track = sequence.get_track_mut("video-track").unwrap();
+            let clip = track.get_clip_mut(&clip_id).unwrap();
+            clip.transform = Transform::default();
+        }
+
+        let sequence = state.get_sequence("seq-1").unwrap();
+        let track = sequence.get_track("video-track").unwrap();
+        let clip = track.get_clip(&clip_id).unwrap();
+        let text_data = get_text_data(clip, &state).unwrap();
+
+        assert_eq!(text_data.position, TextPosition::new(0.25, 0.3));
     }
 
     #[test]

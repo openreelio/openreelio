@@ -109,12 +109,17 @@ const EFFECTS_ACTIONS = `## Effects Actions (meta-tool: effects)
 - set_transition_duration(transitionId, duration) → change transition length`;
 
 const TEXT_ACTIONS = `## Text Actions (meta-tool: text, require sequenceId)
+- list_text_clips() → inspect editable text overlay clips with textData, style, transform, trackId, and clipId
+- add_text_clip(text, startTime, duration?, endTime?, trackId?, preset?, style?, position?, shadow?, outline?, transform?) → add editable on-video text; video text track auto-created if needed
+- update_text_clip(clipId, text?, style?, position?, shadow?, outline?, transform?) → edit text content, font, size, weight, color, outline, shadow, rotation, opacity, and transform
+- set_text_transform(clipId, transform? or transformX/transformY/scaleX/scaleY/rotationDeg) → move, resize, or rotate a text clip
+- delete_text_clip(clipId) → remove an editable text overlay clip
 - add_caption(text, startTime, endTime) → add subtitle (track auto-created if needed)
 - update_caption(captionId, text?, startTime?, endTime?) → edit caption
 - delete_caption(captionId) → remove caption
 - style_caption(captionId, fontSize?, fontFamily?, color?, backgroundColor?, position?) → style caption
 - auto_transcribe(assetId, language?, model?, provider?, async?) → transcribe audio/video into timed text segments; uses local Whisper when available, otherwise a configured transcript analysis provider
-- add_captions_from_transcription(segments, trackId?) → create captions from timed transcript segments
+- add_captions_from_transcription(segments, trackId?, replaceExisting?) → create captions from timed transcript segments as one atomic caption import
 - import_captions_from_file(relativePath, format?, trackId?) → import SRT/VTT subtitle files from the workspace`;
 
 const GENERATE_ACTIONS = `## Generate Actions (meta-tool: generate)

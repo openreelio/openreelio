@@ -10,7 +10,7 @@
  * 2. edit     - editing tools (20 tools)
  * 3. audio    - audio tools (6 tools)
  * 4. effects  - effect + transition tools (8 tools)
- * 5. text     - caption tools
+ * 5. text     - caption + text overlay tools
  * 6. generate - provider-neutral generation orchestration + provider job tools
  *
  * Legacy compatibility:
@@ -28,6 +28,7 @@ import { getAudioToolNames } from './audioTools';
 import { getEffectToolNames } from './effectTools';
 import { getTransitionToolNames } from './transitionTools';
 import { getCaptionToolNames } from './captionTools';
+import { getTextToolNames } from './textTools';
 import { getGenerationToolNames } from './generationTools';
 import { getGenerativeTimelineToolNames } from './generativeTimelineTools';
 import { canonicalizeToolNameCandidate } from '../toolNameNormalization';
@@ -205,7 +206,7 @@ const QUERY_ACTIONS = [
 const EDIT_ACTIONS = getEditingToolNames();
 const AUDIO_ACTIONS = getAudioToolNames();
 const EFFECTS_ACTIONS = [...getEffectToolNames(), ...getTransitionToolNames()];
-const TEXT_ACTIONS = getCaptionToolNames();
+const TEXT_ACTIONS = [...getCaptionToolNames(), ...getTextToolNames()];
 const GENERATE_ACTIONS = [...getGenerativeTimelineToolNames(), ...getGenerationToolNames()];
 
 // =============================================================================

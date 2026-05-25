@@ -15,6 +15,7 @@ import { getCaptionToolNames } from '@/agents/tools/captionTools';
 import { getEditingToolNames } from '@/agents/tools/editingTools';
 import { getEffectToolNames } from '@/agents/tools/effectTools';
 import { getMediaAnalysisToolNames } from '@/agents/tools/mediaAnalysisTools';
+import { getTextToolNames } from '@/agents/tools/textTools';
 import { getTransitionToolNames } from '@/agents/tools/transitionTools';
 import {
   getReadOnlyWorkspaceToolNames,
@@ -26,7 +27,7 @@ const TOOL_NAMES_BY_SCOPE: Record<Exclude<AgentToolScope, '*'>, Set<string>> = {
   edit: new Set(['edit', ...getEditingToolNames()]),
   audio: new Set(['audio', ...getAudioToolNames()]),
   effects: new Set(['effects', ...getEffectToolNames(), ...getTransitionToolNames()]),
-  text: new Set(['text', ...getCaptionToolNames()]),
+  text: new Set(['text', ...getCaptionToolNames(), ...getTextToolNames()]),
   workspace: new Set(getWorkspaceToolNames()),
   workspace_read: new Set(getReadOnlyWorkspaceToolNames()),
 };

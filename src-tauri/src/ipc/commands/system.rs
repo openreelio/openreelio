@@ -279,7 +279,7 @@ pub struct AISettingsDto {
 }
 
 fn default_assistant_runtime_dto() -> AssistantRuntimeDto {
-    AssistantRuntimeDto::Api
+    AssistantRuntimeDto::Codex
 }
 
 fn default_video_gen_default_quality_dto() -> String {
@@ -842,6 +842,15 @@ pub async fn app_cleanup(_state: State<'_, AppState>) -> Result<AppCleanupResult
         workers_shutdown,
         error: None,
     })
+}
+
+/// Lists installed system font family names for text editing controls.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_system_font_families() -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(crate::core::text::fonts::list_system_font_families)
+        .await
+        .map_err(|error| format!("Failed to list system fonts: {error}"))
 }
 
 /// Updates the backend runtime playhead position for cross-layer synchronization.

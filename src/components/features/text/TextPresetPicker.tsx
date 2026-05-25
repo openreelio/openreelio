@@ -9,7 +9,13 @@
 
 import { useCallback, useMemo, useState } from 'react';
 import { Palette } from 'lucide-react';
-import { TEXT_PRESETS, getPresetsByCategory, type TextPreset, type TextPresetCategory } from '@/data/textPresets';
+import {
+  TEXT_PRESETS,
+  getPresetsByCategory,
+  type TextPreset,
+  type TextPresetCategory,
+} from '@/data/textPresets';
+import { getTextFontWeightNumber } from '@/utils/textRenderer';
 
 // =============================================================================
 // Types
@@ -44,7 +50,7 @@ function PresetPreview({ preset, compact = false }: PresetPreviewProps): JSX.Ele
     const style: React.CSSProperties = {
       fontFamily: preset.style.fontFamily,
       fontSize: compact ? '10px' : '12px',
-      fontWeight: preset.style.bold ? 'bold' : 'normal',
+      fontWeight: getTextFontWeightNumber(preset.style),
       fontStyle: preset.style.italic ? 'italic' : 'normal',
       textDecoration: preset.style.underline ? 'underline' : 'none',
       color: preset.style.color,
@@ -92,10 +98,7 @@ function PresetPreview({ preset, compact = false }: PresetPreviewProps): JSX.Ele
       data-testid={`preset-preview-${preset.id}`}
       className={`w-full h-full flex ${positionClass} ${horizontalClass} bg-zinc-800 overflow-hidden`}
     >
-      <span
-        style={previewStyle}
-        className="truncate max-w-full text-center px-0.5"
-      >
+      <span style={previewStyle} className="truncate max-w-full text-center px-0.5">
         Aa
       </span>
     </div>
@@ -141,7 +144,7 @@ export function TextPresetPicker({
         onSelect(preset);
       }
     },
-    [disabled, onSelect]
+    [disabled, onSelect],
   );
 
   const filteredPresets = useMemo(() => {
@@ -159,20 +162,16 @@ export function TextPresetPicker({
       ]
         .filter(Boolean)
         .join(' '),
-    [compact, disabled, className]
+    [compact, disabled, className],
   );
 
   const gridClasses = useMemo(
-    () =>
-      ['grid', 'gap-2', compact ? 'grid-cols-4' : 'grid-cols-2'].join(' '),
-    [compact]
+    () => ['grid', 'gap-2', compact ? 'grid-cols-4' : 'grid-cols-2'].join(' '),
+    [compact],
   );
 
   return (
-    <div
-      data-testid="text-preset-picker"
-      className={containerClasses}
-    >
+    <div data-testid="text-preset-picker" className={containerClasses}>
       {/* Header */}
       <div className="flex items-center gap-2 text-xs text-editor-text-muted">
         <Palette className="w-3 h-3" />
@@ -190,9 +189,10 @@ export function TextPresetPicker({
               onClick={() => setActiveCategory(cat)}
               className={`
                 px-2 py-0.5 text-xs rounded-full border transition-colors
-                ${activeCategory === cat
-                  ? 'bg-primary-500/20 border-primary-500 text-primary-400'
-                  : 'border-editor-border text-editor-text-muted hover:text-editor-text hover:border-editor-text-muted'
+                ${
+                  activeCategory === cat
+                    ? 'bg-primary-500/20 border-primary-500 text-primary-400'
+                    : 'border-editor-border text-editor-text-muted hover:text-editor-text hover:border-editor-text-muted'
                 }
               `}
             >
@@ -203,10 +203,7 @@ export function TextPresetPicker({
       )}
 
       {/* Preset Grid */}
-      <div
-        data-testid="preset-grid"
-        className={gridClasses}
-      >
+      <div data-testid="preset-grid" className={gridClasses}>
         {filteredPresets.map((preset) => {
           const isSelected = selectedPresetId === preset.id;
 

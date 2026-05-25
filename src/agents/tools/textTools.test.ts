@@ -1,0 +1,422 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { globalToolRegistry, type AgentContext } from '@/agents';
+import { registerTextTools, unregisterTextTools } from './textTools';
+import { useProjectStore } from '@/stores/projectStore';
+import { TEXT_ASSET_PREFIX, type Clip, type Effect, type Sequence, type Track } from '@/types';
+
+vi.mock('@/stores/projectStore', () => ({
+  useProjectStore: {
+    getState: vi.fn(),
+  },
+}));
+
+const CTX: AgentContext = {
+  projectId: 'project-1',
+  sequenceId: 'seq-1',
+};
+
+function createClip(overrides: Partial<Clip> = {}): Clip {
+  return {
+    id: 'clip-1',
+    assetId: 'asset-1',
+    range: {
+      sourceInSec: 0,
+      sourceOutSec: 4,
+    },
+    place: {
+      timelineInSec: 0,
+      durationSec: 4,
+    },
+    transform: {
+      position: { x: 0.5, y: 0.5 },
+      scale: { x: 1, y: 1 },
+      rotationDeg: 0,
+      anchor: { x: 0.5, y: 0.5 },
+    },
+    opacity: 1,
+    speed: 1,
+    effects: [],
+    audio: {
+      volumeDb: 0,
+      pan: 0,
+      muted: false,
+    },
+    ...overrides,
+  };
+}
+
+function createTrack(overrides: Partial<Track> = {}): Track {
+  return {
+    id: 'track-video-1',
+    kind: 'video',
+    name: 'Video 1',
+    clips: [],
+    blendMode: 'normal',
+    muted: false,
+    locked: false,
+    visible: true,
+    volume: 1,
+    ...overrides,
+  };
+}
+
+function createSequence(overrides: Partial<Sequence> = {}): Sequence {
+  return {
+    id: 'seq-1',
+    name: 'Main Sequence',
+    format: {
+      canvas: { width: 1920, height: 1080 },
+      fps: { num: 30, den: 1 },
+      audioSampleRate: 48000,
+      audioChannels: 2,
+    },
+    tracks: [],
+    markers: [],
+    ...overrides,
+  };
+}
+
+function createTextEffect(overrides: Partial<Effect> = {}): Effect {
+  return {
+    id: 'effect-text-1',
+    effectType: 'text_overlay',
+    enabled: true,
+    order: 0,
+    keyframes: {},
+    params: {
+      text: 'Original Text',
+      font_family: 'Inter',
+      font_size: 48,
+      font_weight: 500,
+      color: '#FFFFFF',
+      background_color: '#00000080',
+      background_padding: 12,
+      alignment: 'center',
+      bold: false,
+      italic: false,
+      underline: false,
+      line_height: 1.2,
+      letter_spacing: 0,
+      x: 0.4,
+      y: 0.3,
+      outline_color: '#000000',
+      outline_width: 2,
+      shadow_color: '#000000',
+      shadow_x: 2,
+      shadow_y: 3,
+      shadow_blur: 4,
+      rotation: 0,
+      opacity: 1,
+    },
+    ...overrides,
+  };
+}
+
+describe('textTools', () => {
+  const executeCommandMock = vi.fn();
+
+  beforeEach(() => {
+    globalToolRegistry.clear();
+    registerTextTools();
+    vi.clearAllMocks();
+    executeCommandMock.mockResolvedValue({
+      opId: 'op-text',
+      createdIds: ['clip-text-created'],
+      deletedIds: [],
+      changes: [],
+    });
+  });
+
+  afterEach(() => {
+    unregisterTextTools();
+    globalToolRegistry.clear();
+  });
+
+  function mockProject(sequence: Sequence, effects: Effect[] = []): void {
+    vi.mocked(useProjectStore.getState).mockReturnValue({
+      isLoaded: true,
+      meta: {
+        id: 'project-1',
+        name: 'Test Project',
+      },
+      activeSequenceId: sequence.id,
+      sequences: new Map([[sequence.id, sequence]]),
+      effects: new Map(effects.map((effect) => [effect.id, effect])),
+      executeCommand: executeCommandMock,
+      undo: vi.fn().mockResolvedValue({ success: true }),
+    } as unknown as ReturnType<typeof useProjectStore.getState>);
+  }
+
+  it('should add a styled text clip and auto-create a video text track when needed', async () => {
+    mockProject(createSequence());
+    executeCommandMock
+      .mockResolvedValueOnce({
+        opId: 'op-track',
+        createdIds: ['track-video-created'],
+        deletedIds: [],
+        changes: [],
+      })
+      .mockResolvedValueOnce({
+        opId: 'op-add',
+        createdIds: ['clip-text-created', 'effect-text-created'],
+        deletedIds: [],
+        changes: [],
+      })
+      .mockResolvedValueOnce({
+        opId: 'op-transform',
+        createdIds: [],
+        deletedIds: [],
+        changes: [],
+      });
+
+    const tool = globalToolRegistry.get('add_text_clip');
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        text: 'Launch title',
+        startTime: 1,
+        duration: 3,
+        preset: 'title',
+        fontFamily: 'Inter',
+        fontSize: 72,
+        fontWeight: 800,
+        color: '#112233',
+        position: { xPercent: 25, yPercent: 35 },
+        outlineColor: '#000000',
+        outlineWidth: 3,
+        shadowColor: '#00000099',
+        shadowOffsetX: 4,
+        shadowOffsetY: 5,
+        shadowBlur: 6,
+        transform: {
+          scale: { x: 1.25, y: 1.1 },
+          rotationDeg: -8,
+        },
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeCommandMock).toHaveBeenCalledTimes(3);
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({
+      type: 'CreateTrack',
+      payload: {
+        sequenceId: 'seq-1',
+        kind: 'video',
+        name: 'Video 1',
+      },
+    });
+    expect(executeCommandMock.mock.calls[1][0]).toMatchObject({
+      type: 'AddTextClip',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-video-created',
+        timelineIn: 1,
+        duration: 3,
+        textData: {
+          content: 'Launch title',
+          style: {
+            fontFamily: 'Inter',
+            fontSize: 72,
+            fontWeight: 800,
+            color: '#112233',
+          },
+          position: { x: 0.25, y: 0.35 },
+          outline: { color: '#000000', width: 3 },
+          shadow: { color: '#00000099', offsetX: 4, offsetY: 5, blur: 6 },
+        },
+      },
+    });
+    expect(executeCommandMock.mock.calls[2][0]).toMatchObject({
+      type: 'SetClipTransform',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-video-created',
+        clipId: 'clip-text-created',
+        transform: {
+          position: { x: 0.25, y: 0.35 },
+          scale: { x: 1.25, y: 1.1 },
+          rotationDeg: -8,
+        },
+      },
+    });
+  });
+
+  it('should update text data and clip transform while preserving existing style fields', async () => {
+    const textClip = createClip({
+      id: 'clip-text-1',
+      assetId: `${TEXT_ASSET_PREFIX}clip-text-1`,
+      effects: ['effect-text-1'],
+      transform: {
+        position: { x: 0.4, y: 0.3 },
+        scale: { x: 1, y: 1 },
+        rotationDeg: 0,
+        anchor: { x: 0.5, y: 0.5 },
+      },
+    });
+    mockProject(
+      createSequence({
+        tracks: [createTrack({ clips: [textClip] })],
+      }),
+      [createTextEffect()],
+    );
+
+    const tool = globalToolRegistry.get('update_text_clip');
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        clipId: 'clip-text-1',
+        text: 'Updated Text',
+        fontSize: 64,
+        color: '#AABBCC',
+        outline: null,
+        transform: {
+          scale: { x: 1.5, y: 1.25 },
+          rotationDeg: 15,
+        },
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeCommandMock).toHaveBeenCalledTimes(2);
+    const updateCommand = executeCommandMock.mock.calls[0][0] as {
+      type: string;
+      payload: { textData: Record<string, unknown> };
+    };
+    expect(updateCommand.type).toBe('UpdateTextClip');
+    expect(updateCommand.payload.textData).toMatchObject({
+      content: 'Updated Text',
+      style: {
+        fontFamily: 'Inter',
+        fontSize: 64,
+        fontWeight: 500,
+        color: '#AABBCC',
+      },
+      position: { x: 0.4, y: 0.3 },
+      shadow: { color: '#000000', offsetX: 2, offsetY: 3, blur: 4 },
+    });
+    expect((updateCommand.payload.textData as { outline?: unknown }).outline).toBeUndefined();
+    expect(executeCommandMock.mock.calls[1][0]).toMatchObject({
+      type: 'SetClipTransform',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-video-1',
+        clipId: 'clip-text-1',
+        transform: {
+          position: { x: 0.4, y: 0.3 },
+          scale: { x: 1.5, y: 1.25 },
+          rotationDeg: 15,
+        },
+      },
+    });
+  });
+
+  it('should preserve preview transform when styling a dragged text clip', async () => {
+    const textClip = createClip({
+      id: 'clip-text-1',
+      assetId: `${TEXT_ASSET_PREFIX}clip-text-1`,
+      effects: ['effect-text-1'],
+      transform: {
+        position: { x: 0.72, y: 0.64 },
+        scale: { x: 1.4, y: 1.1 },
+        rotationDeg: 18,
+        anchor: { x: 0.5, y: 0.5 },
+      },
+    });
+    mockProject(
+      createSequence({
+        tracks: [createTrack({ clips: [textClip] })],
+      }),
+      [createTextEffect()],
+    );
+
+    const tool = globalToolRegistry.get('update_text_clip');
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        clipId: 'clip-text-1',
+        fontSize: 72,
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeCommandMock).toHaveBeenCalledTimes(1);
+    const updateCommand = executeCommandMock.mock.calls[0][0] as {
+      type: string;
+      payload: { textData: Record<string, unknown> };
+    };
+    expect(updateCommand.type).toBe('UpdateTextClip');
+    expect(updateCommand.payload.textData).toMatchObject({
+      style: {
+        fontSize: 72,
+      },
+      position: { x: 0.72, y: 0.64 },
+      rotation: 18,
+    });
+  });
+
+  it('should list text clips with resolved editable style and transform data', async () => {
+    const textClip = createClip({
+      id: 'clip-text-1',
+      assetId: `${TEXT_ASSET_PREFIX}clip-text-1`,
+      effects: ['effect-text-1'],
+    });
+    mockProject(
+      createSequence({
+        tracks: [createTrack({ clips: [textClip, createClip({ id: 'clip-video-1' })] })],
+      }),
+      [createTextEffect()],
+    );
+
+    const tool = globalToolRegistry.get('list_text_clips');
+    const result = await tool!.handler({ sequenceId: 'seq-1' }, CTX);
+
+    expect(result.success).toBe(true);
+    expect(result.result).toMatchObject({
+      sequenceId: 'seq-1',
+      count: 1,
+      clips: [
+        {
+          clipId: 'clip-text-1',
+          trackId: 'track-video-1',
+          textData: {
+            content: 'Original Text',
+            style: {
+              fontFamily: 'Inter',
+              fontSize: 48,
+              fontWeight: 500,
+            },
+            position: { x: 0.4, y: 0.3 },
+          },
+          transform: {
+            position: { x: 0.5, y: 0.5 },
+          },
+        },
+      ],
+    });
+    expect(executeCommandMock).not.toHaveBeenCalled();
+  });
+
+  it('should reject deleting non-text clips', async () => {
+    mockProject(
+      createSequence({
+        tracks: [createTrack({ clips: [createClip({ id: 'clip-video-1' })] })],
+      }),
+    );
+
+    const tool = globalToolRegistry.get('delete_text_clip');
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        clipId: 'clip-video-1',
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('not a text clip');
+    expect(executeCommandMock).not.toHaveBeenCalled();
+  });
+});
