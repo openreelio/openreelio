@@ -288,18 +288,18 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli caption export --path ./project --format srt --output captions.srt"
             },
             "caption.import": {
-                "description": "Import captions from an SRT or VTT file",
+                "description": "Import captions from an SRT, VTT, or transcription JSON file",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
-                    "file": { "type": "string", "required": true, "desc": "Subtitle file path" },
+                    "file": { "type": "string", "required": true, "desc": "Subtitle or transcription JSON file path" },
                     "track": { "type": "string", "required": false, "desc": "Caption track ID (auto-created when omitted)" },
-                    "format": { "type": "string", "required": false, "desc": "Subtitle format: srt or vtt (auto-detected when omitted)" },
+                    "format": { "type": "string", "required": false, "desc": "Subtitle format: srt, vtt, or transcript-json (auto-detected when omitted)" },
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object applied to all cues" },
                     "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
                     "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object applied to all cues" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
-                "example": "openreelio-cli caption import --path ./project --file captions.srt"
+                "example": "openreelio-cli caption import --path ./project --file transcript.json --format transcript-json"
             },
             "caption.update": {
                 "description": "Update a caption's text, timing, and style",
@@ -326,6 +326,112 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
                 "example": "openreelio-cli caption remove --path ./project --id cap_001"
+            },
+            "text.add": {
+                "description": "Add an editable text overlay clip with full style, effect, position, and timing data",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "track": { "type": "string", "required": false, "desc": "Video or overlay track ID (auto-created when omitted)" },
+                    "text": { "type": "string", "required": true, "desc": "Text content" },
+                    "start": { "type": "number", "required": true, "desc": "Timeline start time in seconds" },
+                    "duration": { "type": "number", "required": false, "desc": "Clip duration in seconds" },
+                    "preset": { "type": "string", "required": false, "desc": "default, title, lower-third, or subtitle" },
+                    "text-json": { "type": "string", "required": false, "desc": "Full TextClipData JSON object" },
+                    "style-json": { "type": "string", "required": false, "desc": "Full TextStyle JSON object" },
+                    "position-json": { "type": "string", "required": false, "desc": "Text position JSON object" },
+                    "shadow-json": { "type": "string", "required": false, "desc": "Text shadow JSON object" },
+                    "outline-json": { "type": "string", "required": false, "desc": "Text outline JSON object" },
+                    "font-family": { "type": "string", "required": false, "desc": "Font family name" },
+                    "font-size": { "type": "number", "required": false, "desc": "Font size" },
+                    "font-weight": { "type": "number", "required": false, "desc": "Numeric font weight, 100-900" },
+                    "color": { "type": "string", "required": false, "desc": "Text color hex" },
+                    "background-color": { "type": "string", "required": false, "desc": "Background color hex" },
+                    "background-padding": { "type": "number", "required": false, "desc": "Background padding in pixels" },
+                    "bold": { "type": "boolean", "required": false, "desc": "Enable bold" },
+                    "italic": { "type": "boolean", "required": false, "desc": "Enable italic" },
+                    "underline": { "type": "boolean", "required": false, "desc": "Enable underline" },
+                    "align": { "type": "string", "required": false, "desc": "left, center, or right" },
+                    "line-height": { "type": "number", "required": false, "desc": "Line height multiplier" },
+                    "letter-spacing": { "type": "number", "required": false, "desc": "Letter spacing in pixels" },
+                    "x": { "type": "number", "required": false, "desc": "Normalized X position, 0-1" },
+                    "y": { "type": "number", "required": false, "desc": "Normalized Y position, 0-1" },
+                    "rotation": { "type": "number", "required": false, "desc": "Rotation in degrees" },
+                    "opacity": { "type": "number", "required": false, "desc": "Opacity, 0-1" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                },
+                "example": "openreelio-cli text add --path ./project --text \"Title\" --start 0 --duration 3 --font-family Inter --font-size 72 --font-weight 700 --x 0.5 --y 0.2"
+            },
+            "text.update": {
+                "description": "Update an editable text clip's content, style, position, effects, and timing",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Text clip ID" },
+                    "track": { "type": "string", "required": false, "desc": "Track ID containing the text clip" },
+                    "text": { "type": "string", "required": false, "desc": "New text content" },
+                    "start": { "type": "number", "required": false, "desc": "New timeline start time in seconds" },
+                    "duration": { "type": "number", "required": false, "desc": "New duration in seconds" },
+                    "text-json": { "type": "string", "required": false, "desc": "Full TextClipData JSON object" },
+                    "style-json": { "type": "string", "required": false, "desc": "Full TextStyle JSON object" },
+                    "position-json": { "type": "string", "required": false, "desc": "Text position JSON object" },
+                    "shadow-json": { "type": "string", "required": false, "desc": "Text shadow JSON object" },
+                    "outline-json": { "type": "string", "required": false, "desc": "Text outline JSON object" },
+                    "clear-shadow": { "type": "boolean", "required": false, "desc": "Remove shadow" },
+                    "clear-outline": { "type": "boolean", "required": false, "desc": "Remove outline" },
+                    "clear-background": { "type": "boolean", "required": false, "desc": "Remove background color" },
+                    "font-family": { "type": "string", "required": false, "desc": "Font family name" },
+                    "font-size": { "type": "number", "required": false, "desc": "Font size" },
+                    "font-weight": { "type": "number", "required": false, "desc": "Numeric font weight, 100-900" },
+                    "color": { "type": "string", "required": false, "desc": "Text color hex" },
+                    "background-color": { "type": "string", "required": false, "desc": "Background color hex" },
+                    "background-padding": { "type": "number", "required": false, "desc": "Background padding in pixels" },
+                    "bold": { "type": "boolean", "required": false, "desc": "Set bold true or false" },
+                    "italic": { "type": "boolean", "required": false, "desc": "Set italic true or false" },
+                    "underline": { "type": "boolean", "required": false, "desc": "Set underline true or false" },
+                    "align": { "type": "string", "required": false, "desc": "left, center, or right" },
+                    "line-height": { "type": "number", "required": false, "desc": "Line height multiplier" },
+                    "letter-spacing": { "type": "number", "required": false, "desc": "Letter spacing in pixels" },
+                    "x": { "type": "number", "required": false, "desc": "Normalized X position, 0-1" },
+                    "y": { "type": "number", "required": false, "desc": "Normalized Y position, 0-1" },
+                    "rotation": { "type": "number", "required": false, "desc": "Rotation in degrees" },
+                    "opacity": { "type": "number", "required": false, "desc": "Opacity, 0-1" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                },
+                "example": "openreelio-cli text update --path ./project --id clip_001 --text \"Updated\" --font-weight 600 --start 1.25 --duration 4.5"
+            },
+            "text.transform": {
+                "description": "Move, scale, rotate, or re-anchor an editable text clip in preview space",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Text clip ID" },
+                    "track": { "type": "string", "required": false, "desc": "Track ID containing the text clip" },
+                    "x": { "type": "number", "required": false, "desc": "Normalized X position, 0-1" },
+                    "y": { "type": "number", "required": false, "desc": "Normalized Y position, 0-1" },
+                    "scale-x": { "type": "number", "required": false, "desc": "Horizontal scale, 1.0 = 100%" },
+                    "scale-y": { "type": "number", "required": false, "desc": "Vertical scale, 1.0 = 100%" },
+                    "rotation": { "type": "number", "required": false, "desc": "Rotation in degrees" },
+                    "anchor-x": { "type": "number", "required": false, "desc": "Normalized anchor X, 0-1" },
+                    "anchor-y": { "type": "number", "required": false, "desc": "Normalized anchor Y, 0-1" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                },
+                "example": "openreelio-cli text transform --path ./project --id clip_001 --x 0.38 --y 0.42 --scale-x 1.2 --scale-y 1.2 --rotation 8"
+            },
+            "text.remove": {
+                "description": "Remove an editable text overlay clip",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Text clip ID" },
+                    "track": { "type": "string", "required": false, "desc": "Track ID containing the text clip" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                },
+                "example": "openreelio-cli text remove --path ./project --id clip_001"
+            },
+            "text.list": {
+                "description": "List editable text overlay clips with full text data, transform, position, and timing",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                },
+                "example": "openreelio-cli text list --path ./project"
             },
             "plan.execute": {
                 "description": "Execute a plan file atomically (rollback on failure)",
@@ -401,6 +507,14 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "description": "List available render presets",
                 "params": {},
                 "example": "openreelio-cli render presets"
+            },
+            "render.graph": {
+                "description": "Output the renderer-agnostic graph for preview, export, and agent tooling",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                },
+                "example": "openreelio-cli render graph --path ./project"
             },
             "render.start": {
                 "description": "Render a sequence to a final output file using the shared FFmpeg export engine",
@@ -479,9 +593,16 @@ mod tests {
         assert!(commands["caption.update"]["params"]["style-json"].is_object());
         assert!(commands["caption.update"]["params"]["position-json"].is_object());
         assert!(commands["caption.add"]["params"]["track"]["required"] == false);
+        assert!(commands.contains_key("text.add"));
+        assert!(commands.contains_key("text.update"));
+        assert!(commands.contains_key("text.transform"));
+        assert!(commands["text.add"]["params"]["font-weight"].is_object());
+        assert!(commands["text.update"]["params"]["duration"].is_object());
+        assert!(commands["text.transform"]["params"]["scale-x"].is_object());
         assert!(commands.contains_key("analysis.report"));
         assert!(commands.contains_key("analysis.search"));
         assert!(commands.contains_key("analysis.search-library"));
         assert!(commands.contains_key("analysis.build-selects"));
+        assert!(commands.contains_key("render.graph"));
     }
 }

@@ -516,6 +516,140 @@ fn test_timeline_undo_without_history_should_fail() {
 }
 
 // =============================================================================
+// Text Commands
+// =============================================================================
+
+#[test]
+fn test_text_add_update_transform_remove_roundtrip() {
+    let dir = create_temp_project("text_roundtrip_test");
+    let path = project_path(&dir, "text_roundtrip_test");
+
+    let add = run_cli_ok(&[
+        "text",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "CLI Title",
+        "--start",
+        "0.5",
+        "--duration",
+        "2.5",
+        "--preset",
+        "title",
+        "--font-family",
+        "Inter",
+        "--font-size",
+        "64",
+        "--font-weight",
+        "700",
+        "--color",
+        "#FFEE00",
+        "--x",
+        "0.4",
+        "--y",
+        "0.25",
+        "--shadow-json",
+        r##"{"color":"#000000AA","offsetX":4,"offsetY":5,"blur":6}"##,
+        "--outline-json",
+        r##"{"color":"#111111","width":3}"##,
+    ]);
+    assert_eq!(add["status"], "ok");
+    let text_clip_id = add["createdIds"][0].as_str().unwrap().to_string();
+
+    let list = run_cli_ok(&["text", "list", "--path", &path]);
+    assert_eq!(list["count"], 1);
+    assert_eq!(list["clips"][0]["id"], text_clip_id);
+    assert_eq!(list["clips"][0]["textData"]["content"], "CLI Title");
+    assert_eq!(list["clips"][0]["textData"]["style"]["fontFamily"], "Inter");
+    assert_eq!(list["clips"][0]["textData"]["style"]["fontWeight"], 700);
+    assert_eq!(list["clips"][0]["textData"]["position"]["x"], 0.4);
+    assert_eq!(list["clips"][0]["textData"]["outline"]["width"], 3);
+
+    let update = run_cli_ok(&[
+        "text",
+        "update",
+        "--path",
+        &path,
+        "--id",
+        &text_clip_id,
+        "--text",
+        "Updated CLI Title",
+        "--start",
+        "1.25",
+        "--duration",
+        "4.5",
+        "--font-weight",
+        "600",
+        "--background-color",
+        "#000000CC",
+        "--clear-shadow",
+    ]);
+    assert_eq!(update["status"], "ok");
+
+    let transform = run_cli_ok(&[
+        "text",
+        "transform",
+        "--path",
+        &path,
+        "--id",
+        &text_clip_id,
+        "--x",
+        "0.65",
+        "--y",
+        "0.7",
+        "--scale-x",
+        "1.25",
+        "--scale-y",
+        "1.1",
+        "--rotation",
+        "12",
+    ]);
+    assert_eq!(transform["status"], "ok");
+
+    let updated = run_cli_ok(&["text", "list", "--path", &path]);
+    let clip = &updated["clips"][0];
+    assert_eq!(clip["textData"]["content"], "Updated CLI Title");
+    assert_eq!(clip["startSec"], 1.25);
+    assert_eq!(clip["durationSec"], 4.5);
+    assert_eq!(clip["textData"]["style"]["fontWeight"], 600);
+    assert!(clip["textData"].get("shadow").is_none());
+    assert_eq!(clip["transform"]["position"]["x"], 0.65);
+    assert_eq!(clip["textData"]["position"]["x"], 0.65);
+    assert_eq!(clip["textData"]["position"]["y"], 0.7);
+    assert_eq!(clip["transform"]["scale"]["x"], 1.25);
+    assert_eq!(clip["transform"]["rotationDeg"], 12.0);
+
+    let restyle = run_cli_ok(&[
+        "text",
+        "update",
+        "--path",
+        &path,
+        "--id",
+        &text_clip_id,
+        "--font-size",
+        "72",
+    ]);
+    assert_eq!(restyle["status"], "ok");
+
+    let restyled = run_cli_ok(&["text", "list", "--path", &path]);
+    let clip = &restyled["clips"][0];
+    assert_eq!(clip["textData"]["style"]["fontSize"], 72);
+    assert_eq!(clip["textData"]["position"]["x"], 0.65);
+    assert_eq!(clip["textData"]["position"]["y"], 0.7);
+    assert_eq!(clip["transform"]["position"]["x"], 0.65);
+    assert_eq!(clip["transform"]["position"]["y"], 0.7);
+    assert_eq!(clip["transform"]["scale"]["x"], 1.25);
+    assert_eq!(clip["transform"]["rotationDeg"], 12.0);
+
+    let remove = run_cli_ok(&["text", "remove", "--path", &path, "--id", &text_clip_id]);
+    assert_eq!(remove["status"], "ok");
+
+    let empty = run_cli_ok(&["text", "list", "--path", &path]);
+    assert_eq!(empty["count"], 0);
+}
+
+// =============================================================================
 // Input Validation
 // =============================================================================
 
@@ -920,6 +1054,11 @@ fn test_help_json_contains_all_commands() {
         "caption.list",
         "caption.import",
         "caption.export",
+        "text.add",
+        "text.update",
+        "text.transform",
+        "text.remove",
+        "text.list",
         "plan.execute",
         "plan.validate",
         "plan.template",
@@ -1077,6 +1216,90 @@ fn test_caption_add_auto_creates_track() {
 
     let list = run_cli_ok(&["caption", "list", "--path", &path]);
     assert_eq!(list["count"], 1);
+}
+
+#[test]
+fn test_caption_style_and_position_roundtrip() {
+    let dir = create_temp_project("caption_style_roundtrip_test");
+    let path = project_path(&dir, "caption_style_roundtrip_test");
+
+    let result = run_cli_ok(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Styled caption",
+        "--start",
+        "0",
+        "--end",
+        "2",
+        "--style-json",
+        r##"{"fontFamily":"Inter","fontSize":42,"fontWeight":700,"color":"#112233CC","backgroundColor":{"r":0,"g":0,"b":0,"a":128},"backgroundPadding":18,"outlineColor":"#445566","outlineWidth":3,"shadowColor":"#00000099","shadowOffsetX":4,"shadowOffsetY":6,"shadowBlur":8,"alignment":"center","lineHeight":1.4,"letterSpacing":2}"##,
+        "--position-json",
+        r##"{"type":"custom","xPercent":42,"yPercent":84}"##,
+    ]);
+    assert_eq!(result["status"], "ok");
+
+    let list = run_cli_ok(&["caption", "list", "--path", &path]);
+    let caption_id = list["captions"][0]["id"].as_str().unwrap().to_string();
+    let caption = &list["captions"][0];
+    assert_eq!(caption["style"]["fontFamily"], "Inter");
+    assert_eq!(caption["style"]["fontSize"], 42);
+    assert_eq!(caption["style"]["fontWeight"], 700);
+    assert_eq!(caption["style"]["color"], "#112233CC");
+    assert_eq!(caption["style"]["backgroundColor"]["a"], 128);
+    assert_eq!(caption["style"]["outlineWidth"], 3);
+    assert_eq!(caption["style"]["shadowOffsetX"], 4);
+    assert_eq!(caption["style"]["lineHeight"], 1.4);
+    assert_eq!(caption["style"]["letterSpacing"], 2);
+    assert_eq!(caption["position"]["type"], "custom");
+    assert_eq!(caption["position"]["xPercent"], 42);
+    assert_eq!(caption["position"]["yPercent"], 84);
+
+    let clear = run_cli_ok(&[
+        "caption",
+        "update",
+        "--path",
+        &path,
+        "--id",
+        &caption_id,
+        "--style-json",
+        "null",
+        "--position-json",
+        "null",
+    ]);
+    assert_eq!(clear["status"], "ok");
+
+    let cleared = run_cli_ok(&["caption", "list", "--path", &path]);
+    assert!(cleared["captions"][0]["style"].is_null());
+    assert!(cleared["captions"][0]["position"].is_null());
+}
+
+#[test]
+fn test_caption_style_json_validation() {
+    let dir = create_temp_project("caption_style_validation_test");
+    let path = project_path(&dir, "caption_style_validation_test");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Invalid style",
+        "--start",
+        "0",
+        "--end",
+        "2",
+        "--style-json",
+        r##"{"fontSize":0,"color":"not-a-color"}"##,
+    ]);
+    assert!(
+        stderr.contains("fontSize") || stderr.contains("color"),
+        "Expected caption style validation error, got: {}",
+        stderr
+    );
 }
 
 #[test]
