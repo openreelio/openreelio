@@ -1,7 +1,7 @@
 use crate::core::effects::{EffectType, ParamValue};
 use crate::core::masks::{MaskBlendMode, MaskShape};
 use crate::core::text::TextClipData;
-use crate::core::timeline::{BlendMode, MarkerType, TrackKind, Transform};
+use crate::core::timeline::{BlendMode, MarkerType, SequenceHdrSettings, TrackKind, Transform};
 use crate::core::{AssetId, ClipId, Color, EffectId, MaskId, SequenceId, TimeSec, TrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -449,6 +449,13 @@ pub struct SetMasterVolumePayload {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateSequenceHdrSettingsPayload {
+    pub sequence_id: SequenceId,
+    pub settings: SequenceHdrSettings,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateTrackPayload {
     pub sequence_id: SequenceId,
     pub kind: TrackKind,
@@ -559,6 +566,32 @@ pub struct CreateCaptionPayload {
     // applied by core command logic yet.
     pub style: Option<serde_json::Value>,
     pub position: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GeneratedCaptionSegmentPayload {
+    #[serde(alias = "startTime", alias = "start")]
+    pub start_sec: TimeSec,
+    #[serde(alias = "endTime", alias = "end")]
+    pub end_sec: TimeSec,
+    pub text: String,
+    pub confidence: Option<f64>,
+    #[serde(alias = "speakerId")]
+    pub speaker: Option<String>,
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportGeneratedCaptionsPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub segments: Vec<GeneratedCaptionSegmentPayload>,
+    pub style: Option<serde_json::Value>,
+    pub position: Option<serde_json::Value>,
+    #[serde(default)]
+    pub replace_existing: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1080,6 +1113,12 @@ pub enum CommandPayload {
     SetMasterVolume(SetMasterVolumePayload),
 
     #[serde(
+        alias = "updateSequenceHdrSettings",
+        alias = "UpdateSequenceHdrSettings"
+    )]
+    UpdateSequenceHdrSettings(UpdateSequenceHdrSettingsPayload),
+
+    #[serde(
         alias = "createTrack",
         alias = "CreateTrack",
         alias = "addTrack",
@@ -1129,6 +1168,16 @@ pub enum CommandPayload {
         alias = "AddCaption"
     )]
     CreateCaption(CreateCaptionPayload),
+
+    #[serde(
+        alias = "importGeneratedCaptions",
+        alias = "ImportGeneratedCaptions",
+        alias = "createCaptionsFromTranscript",
+        alias = "CreateCaptionsFromTranscript",
+        alias = "addCaptionsFromTranscription",
+        alias = "AddCaptionsFromTranscription"
+    )]
+    ImportGeneratedCaptions(ImportGeneratedCaptionsPayload),
 
     #[serde(alias = "deleteCaption", alias = "DeleteCaption")]
     DeleteCaption(DeleteCaptionPayload),
@@ -1250,6 +1299,7 @@ impl CommandPayload {
         "RemoveAsset",
         "CreateSequence",
         "SetMasterVolume",
+        "UpdateSequenceHdrSettings",
         "CreateTrack",
         "RemoveTrack",
         "RenameTrack",
@@ -1260,6 +1310,7 @@ impl CommandPayload {
         "AddMarker",
         "RemoveMarker",
         "CreateCaption",
+        "ImportGeneratedCaptions",
         "DeleteCaption",
         "UpdateCaption",
         "AddEffect",
@@ -1338,20 +1389,22 @@ impl CommandPayload {
             AddTextClipCommand, AddTrackCommand, ApplyAudioDuckingCommand, ClearTimeRemapCommand,
             CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand, CreateFolderCommand,
             CreateFreezeFrameCommand, CreateSequenceCommand, DeleteCaptionCommand,
-            DeleteFileCommand, DetachAudioCommand, ExtractEditCommand, GroupClipsCommand,
-            ImportAssetCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
-            LinkClipsCommand, MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand,
-            OverwriteEditCommand, RemoveAssetCommand, RemoveAudioKeyframeCommand,
-            RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand,
-            RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand, RenameTrackCommand,
-            ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand, SetAudioFadeInCommand,
-            SetAudioFadeOutCommand, SetAudioKeyframeValueCommand, SetClipAudioCommand,
-            SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMuteCommand,
-            SetClipSpeedCommand, SetClipTransformCommand, SetMasterVolumeCommand,
-            SetTimeRemapCommand, SetTrackBlendModeCommand, SplitClipCommand,
-            ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
-            TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
-            UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
+            DeleteFileCommand, DetachAudioCommand, ExtractEditCommand, GeneratedCaptionSegment,
+            GroupClipsCommand, ImportAssetCommand, ImportGeneratedCaptionsCommand,
+            InsertClipCommand, InsertEditCommand, LiftCommand, LinkClipsCommand,
+            MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand, OverwriteEditCommand,
+            RemoveAssetCommand, RemoveAudioKeyframeCommand, RemoveClipCommand, RemoveEffectCommand,
+            RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand,
+            RenameFileCommand, RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand,
+            RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
+            SetAudioKeyframeValueCommand, SetClipAudioCommand, SetClipBlendModeCommand,
+            SetClipEnabledCommand, SetClipMuteCommand, SetClipSpeedCommand,
+            SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
+            SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand,
+            ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand,
+            UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
+            UpdateEffectCommand, UpdateMaskCommand, UpdateSequenceHdrSettingsCommand,
+            UpdateTextCommand,
         };
 
         use crate::core::commands::{
@@ -1599,6 +1652,9 @@ impl CommandPayload {
             CommandPayload::SetMasterVolume(p) => {
                 Box::new(SetMasterVolumeCommand::new(&p.sequence_id, p.volume_db))
             }
+            CommandPayload::UpdateSequenceHdrSettings(p) => Box::new(
+                UpdateSequenceHdrSettingsCommand::new(&p.sequence_id, p.settings),
+            ),
             CommandPayload::CreateTrack(p) => {
                 let mut cmd = AddTrackCommand::new(&p.sequence_id, &p.name, p.kind);
                 if let Some(position) = p.position {
@@ -1649,6 +1705,26 @@ impl CommandPayload {
                     .with_style(p.style)
                     .with_position(p.position),
             ),
+            CommandPayload::ImportGeneratedCaptions(p) => {
+                let segments = p
+                    .segments
+                    .into_iter()
+                    .map(|segment| GeneratedCaptionSegment {
+                        start_sec: segment.start_sec,
+                        end_sec: segment.end_sec,
+                        text: segment.text,
+                        confidence: segment.confidence,
+                        speaker: segment.speaker,
+                        language: segment.language,
+                    })
+                    .collect();
+                Box::new(
+                    ImportGeneratedCaptionsCommand::new(&p.sequence_id, &p.track_id, segments)
+                        .with_style(p.style)
+                        .with_position(p.position)
+                        .replace_existing(p.replace_existing),
+                )
+            }
             CommandPayload::DeleteCaption(p) => Box::new(DeleteCaptionCommand::new(
                 &p.sequence_id,
                 &p.track_id,
@@ -1856,6 +1932,7 @@ impl CommandPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::timeline::SequenceHdrMode;
     use std::collections::HashSet;
 
     #[test]
@@ -1876,6 +1953,31 @@ mod tests {
                     "{command_type} is listed but not recognized by CommandPayload::parse: {error}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn parse_update_sequence_hdr_settings_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "settings": {
+                "hdrMode": "hdr10",
+                "maxCll": 1000,
+                "maxFall": 400,
+                "bitDepth": 10,
+            },
+        });
+
+        let parsed = CommandPayload::parse("UpdateSequenceHdrSettings".to_string(), payload);
+        match parsed {
+            Ok(CommandPayload::UpdateSequenceHdrSettings(inner)) => {
+                assert_eq!(inner.sequence_id, "seq_001");
+                assert_eq!(inner.settings.hdr_mode, SequenceHdrMode::Hdr10);
+                assert_eq!(inner.settings.bit_depth, 10);
+                assert_eq!(inner.settings.max_cll, Some(1000));
+                assert_eq!(inner.settings.max_fall, Some(400));
+            }
+            other => panic!("expected UpdateSequenceHdrSettings payload, got: {other:?}"),
         }
     }
 
@@ -1912,6 +2014,45 @@ mod tests {
                 matches!(parsed, Ok(CommandPayload::CreateCaption(_))),
                 "expected {command_type} alias to parse, got: {parsed:?}"
             );
+        }
+    }
+
+    #[test]
+    fn parse_import_generated_captions_payload_supports_transcription_aliases() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "segments": [
+                {
+                    "startTime": 0.0,
+                    "endTime": 1.25,
+                    "text": "Hello",
+                    "confidence": 0.95,
+                    "speakerId": "speaker_1",
+                    "language": "en"
+                }
+            ],
+            "style": { "fontSize": 42 },
+            "position": { "type": "preset", "vertical": "bottom" },
+            "replaceExisting": true
+        });
+
+        for command_type in [
+            "ImportGeneratedCaptions",
+            "importGeneratedCaptions",
+            "CreateCaptionsFromTranscript",
+            "addCaptionsFromTranscription",
+        ] {
+            let parsed = CommandPayload::parse(command_type.to_string(), payload.clone());
+            match parsed {
+                Ok(CommandPayload::ImportGeneratedCaptions(inner)) => {
+                    assert_eq!(inner.segments.len(), 1);
+                    assert_eq!(inner.segments[0].start_sec, 0.0);
+                    assert_eq!(inner.segments[0].speaker.as_deref(), Some("speaker_1"));
+                    assert!(inner.replace_existing);
+                }
+                other => panic!("expected {command_type} to parse, got: {other:?}"),
+            }
         }
     }
 

@@ -7,6 +7,7 @@ use openreelio_core::captions::{parse_srt, parse_vtt, Caption};
 use openreelio_core::commands::*;
 use openreelio_core::timeline::{Sequence, TrackKind};
 use openreelio_core::ActiveProject;
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
@@ -123,7 +124,7 @@ pub enum CaptionAction {
         sequence: Option<String>,
     },
 
-    /// Import captions from an SRT or VTT file
+    /// Import captions from an SRT, VTT, or transcription JSON file
     Import {
         /// Project directory path
         #[arg(long)]
@@ -137,7 +138,7 @@ pub enum CaptionAction {
         #[arg(long)]
         track: Option<String>,
 
-        /// Optional explicit format: srt or vtt (auto-detected from extension when omitted)
+        /// Optional explicit format: srt, vtt, or transcript-json (auto-detected from extension when omitted)
         #[arg(long)]
         format: Option<String>,
 
@@ -186,13 +187,301 @@ fn parse_style_json(style_json: Option<String>) -> anyhow::Result<Option<serde_j
     let value: serde_json::Value = serde_json::from_str(&style_json)
         .map_err(|e| anyhow::anyhow!("Invalid --style-json payload: {}", e))?;
 
+    if value.is_null() {
+        return Ok(Some(value));
+    }
+
     if !value.is_object() {
         return Err(anyhow::anyhow!(
-            "--style-json must be a JSON object, for example '{{\"fontSize\": 42}}'"
+            "--style-json must be a JSON object or null, for example '{{\"fontSize\": 42}}'"
         ));
     }
 
+    validate_caption_style_json(&value)?;
+
     Ok(Some(value))
+}
+
+fn style_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter().find_map(|key| object.get(*key))
+}
+
+fn json_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(raw) => raw.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn json_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        Value::String(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Some(true),
+            "false" | "0" | "no" | "off" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn validate_style_number(
+    object: &Map<String, Value>,
+    keys: &[&str],
+    label: &str,
+    min: f64,
+    max: f64,
+) -> anyhow::Result<()> {
+    let Some(value) = style_field(object, keys) else {
+        return Ok(());
+    };
+
+    let Some(number) = json_number(value) else {
+        return Err(anyhow::anyhow!(
+            "--style-json {} must be a number between {} and {}",
+            label,
+            min,
+            max
+        ));
+    };
+
+    if !number.is_finite() || number < min || number > max {
+        return Err(anyhow::anyhow!(
+            "--style-json {} must be between {} and {}",
+            label,
+            min,
+            max
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_style_bool(
+    object: &Map<String, Value>,
+    keys: &[&str],
+    label: &str,
+) -> anyhow::Result<()> {
+    let Some(value) = style_field(object, keys) else {
+        return Ok(());
+    };
+
+    if json_bool(value).is_none() {
+        return Err(anyhow::anyhow!("--style-json {} must be a boolean", label));
+    }
+
+    Ok(())
+}
+
+fn validate_hex_color(raw: &str) -> bool {
+    let hex = raw.trim().trim_start_matches('#');
+    matches!(hex.len(), 3 | 4 | 6 | 8) && hex.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn validate_color_component(value: Option<&Value>, field: &str) -> anyhow::Result<()> {
+    let Some(value) = value else {
+        return Err(anyhow::anyhow!(
+            "--style-json {} color component is required",
+            field
+        ));
+    };
+    let Some(number) = json_number(value) else {
+        return Err(anyhow::anyhow!(
+            "--style-json {} color component must be a number between 0 and 255",
+            field
+        ));
+    };
+    if !number.is_finite() || !(0.0..=255.0).contains(&number) {
+        return Err(anyhow::anyhow!(
+            "--style-json {} color component must be between 0 and 255",
+            field
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_style_color(
+    object: &Map<String, Value>,
+    keys: &[&str],
+    label: &str,
+) -> anyhow::Result<()> {
+    let Some(value) = style_field(object, keys) else {
+        return Ok(());
+    };
+
+    if let Some(raw) = value.as_str() {
+        if validate_hex_color(raw) {
+            return Ok(());
+        }
+        return Err(anyhow::anyhow!(
+            "--style-json {} must be a hex color (#RGB, #RGBA, #RRGGBB, or #RRGGBBAA)",
+            label
+        ));
+    }
+
+    let Some(color) = value.as_object() else {
+        return Err(anyhow::anyhow!(
+            "--style-json {} must be a hex string or an object with r, g, b, and optional a",
+            label
+        ));
+    };
+
+    validate_color_component(
+        color.get("r").or_else(|| color.get("red")),
+        &format!("{}.r", label),
+    )?;
+    validate_color_component(
+        color.get("g").or_else(|| color.get("green")),
+        &format!("{}.g", label),
+    )?;
+    validate_color_component(
+        color.get("b").or_else(|| color.get("blue")),
+        &format!("{}.b", label),
+    )?;
+    if let Some(alpha) = color.get("a").or_else(|| color.get("alpha")) {
+        validate_color_component(Some(alpha), &format!("{}.a", label))?;
+    }
+
+    Ok(())
+}
+
+fn validate_caption_style_json(style: &Value) -> anyhow::Result<()> {
+    let object = style
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("--style-json must be a JSON object"))?;
+
+    if let Some(font_family) = style_field(object, &["fontFamily", "font_family"]) {
+        let valid = font_family
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some();
+        if !valid {
+            return Err(anyhow::anyhow!(
+                "--style-json fontFamily must be a non-empty string"
+            ));
+        }
+    }
+
+    validate_style_number(object, &["fontSize", "font_size"], "fontSize", 1.0, 500.0)?;
+    validate_style_number(object, &["opacity"], "opacity", 0.0, 1.0)?;
+    validate_style_number(
+        object,
+        &["backgroundPadding", "background_padding"],
+        "backgroundPadding",
+        0.0,
+        500.0,
+    )?;
+    validate_style_number(
+        object,
+        &["outlineWidth", "outline_width"],
+        "outlineWidth",
+        0.0,
+        100.0,
+    )?;
+    validate_style_number(
+        object,
+        &["shadowOffset", "shadow_offset"],
+        "shadowOffset",
+        -500.0,
+        500.0,
+    )?;
+    validate_style_number(
+        object,
+        &["shadowOffsetX", "shadow_offset_x", "shadowX", "shadow_x"],
+        "shadowOffsetX",
+        -500.0,
+        500.0,
+    )?;
+    validate_style_number(
+        object,
+        &["shadowOffsetY", "shadow_offset_y", "shadowY", "shadow_y"],
+        "shadowOffsetY",
+        -500.0,
+        500.0,
+    )?;
+    validate_style_number(
+        object,
+        &["shadowBlur", "shadow_blur"],
+        "shadowBlur",
+        0.0,
+        500.0,
+    )?;
+    validate_style_number(
+        object,
+        &["lineHeight", "line_height"],
+        "lineHeight",
+        0.5,
+        5.0,
+    )?;
+    validate_style_number(
+        object,
+        &["letterSpacing", "letter_spacing"],
+        "letterSpacing",
+        -100.0,
+        200.0,
+    )?;
+
+    validate_style_bool(object, &["bold"], "bold")?;
+    validate_style_bool(object, &["italic"], "italic")?;
+    validate_style_bool(object, &["underline"], "underline")?;
+
+    if let Some(font_weight) = style_field(object, &["fontWeight", "font_weight"]) {
+        if let Some(weight) = json_number(font_weight) {
+            if !weight.is_finite() || !(100.0..=900.0).contains(&weight) {
+                return Err(anyhow::anyhow!(
+                    "--style-json fontWeight must be between 100 and 900"
+                ));
+            }
+        } else if let Some(raw) = font_weight.as_str() {
+            let normalized = raw.trim().to_ascii_lowercase();
+            let valid = matches!(
+                normalized.as_str(),
+                "normal" | "light" | "bold" | "semibold" | "black" | "heavy"
+            );
+            if !valid {
+                return Err(anyhow::anyhow!(
+                    "--style-json fontWeight must be normal, light, bold, semibold, black, heavy, or a number from 100 to 900"
+                ));
+            }
+        } else {
+            return Err(anyhow::anyhow!(
+                "--style-json fontWeight must be a string or number"
+            ));
+        }
+    }
+
+    if let Some(alignment) = style_field(object, &["alignment", "textAlign", "text_align"]) {
+        if !matches!(alignment.as_str(), Some("left" | "center" | "right")) {
+            return Err(anyhow::anyhow!(
+                "--style-json alignment must be left, center, or right"
+            ));
+        }
+    }
+
+    if let Some(vertical) = style_field(object, &["verticalAlign", "vertical_align"]) {
+        if !matches!(
+            vertical.as_str(),
+            Some("top" | "middle" | "center" | "bottom")
+        ) {
+            return Err(anyhow::anyhow!(
+                "--style-json verticalAlign must be top, middle, center, or bottom"
+            ));
+        }
+    }
+
+    validate_style_color(object, &["color"], "color")?;
+    validate_style_color(
+        object,
+        &["backgroundColor", "background_color"],
+        "backgroundColor",
+    )?;
+    validate_style_color(object, &["outlineColor", "outline_color"], "outlineColor")?;
+    validate_style_color(object, &["shadowColor", "shadow_color"], "shadowColor")?;
+
+    Ok(())
 }
 
 fn parse_position_preset(position: Option<String>) -> anyhow::Result<Option<serde_json::Value>> {
@@ -227,9 +516,13 @@ fn parse_position_json(position_json: Option<String>) -> anyhow::Result<Option<s
     let value: serde_json::Value = serde_json::from_str(&position_json)
         .map_err(|e| anyhow::anyhow!("Invalid --position-json payload: {}", e))?;
 
+    if value.is_null() {
+        return Ok(Some(value));
+    }
+
     let Some(object) = value.as_object() else {
         return Err(anyhow::anyhow!(
-            "--position-json must be a JSON object, for example '{{\"type\":\"custom\",\"xPercent\":50,\"yPercent\":88}}'"
+            "--position-json must be a JSON object or null, for example '{{\"type\":\"custom\",\"xPercent\":50,\"yPercent\":88}}'"
         ));
     };
 
@@ -423,6 +716,7 @@ fn resolve_caption_track_id(
 enum CaptionFileFormat {
     Srt,
     Vtt,
+    TranscriptJson,
 }
 
 impl CaptionFileFormat {
@@ -430,6 +724,7 @@ impl CaptionFileFormat {
         match self {
             Self::Srt => "srt",
             Self::Vtt => "vtt",
+            Self::TranscriptJson => "transcript-json",
         }
     }
 }
@@ -442,8 +737,11 @@ fn detect_caption_file_format(
         return match format.to_lowercase().as_str() {
             "srt" => Ok(CaptionFileFormat::Srt),
             "vtt" => Ok(CaptionFileFormat::Vtt),
+            "json" | "transcript-json" | "transcription-json" => {
+                Ok(CaptionFileFormat::TranscriptJson)
+            }
             other => Err(anyhow::anyhow!(
-                "Unsupported caption format '{}'. Use 'srt' or 'vtt'.",
+                "Unsupported caption format '{}'. Use 'srt', 'vtt', or 'transcript-json'.",
                 other
             )),
         };
@@ -457,11 +755,83 @@ fn detect_caption_file_format(
     {
         Some("srt") => Ok(CaptionFileFormat::Srt),
         Some("vtt") => Ok(CaptionFileFormat::Vtt),
+        Some("json") => Ok(CaptionFileFormat::TranscriptJson),
         _ => Err(anyhow::anyhow!(
-            "Could not detect subtitle format from '{}'. Provide --format srt|vtt.",
+            "Could not detect subtitle format from '{}'. Provide --format srt|vtt|transcript-json.",
             path.display()
         )),
     }
+}
+
+fn segment_number(segment: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| segment.get(*key).and_then(|value| value.as_f64()))
+}
+
+fn segment_text(segment: &serde_json::Value) -> Option<String> {
+    segment
+        .get("text")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_transcription_json(content: &str) -> anyhow::Result<Vec<Caption>> {
+    let value: serde_json::Value = serde_json::from_str(content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse transcription JSON: {}", e))?;
+
+    let segments = if let Some(segments) = value.as_array() {
+        segments
+    } else if let Some(segments) = value
+        .get("segments")
+        .and_then(|segments| segments.as_array())
+    {
+        segments
+    } else {
+        return Err(anyhow::anyhow!(
+            "Transcription JSON must be an array of segments or an object with a segments array"
+        ));
+    };
+
+    let mut captions = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        let start_sec = segment_number(segment, &["startTime", "startSec", "start"])
+            .ok_or_else(|| anyhow::anyhow!("Segment {} is missing start time", index + 1))?;
+        let end_sec = segment_number(segment, &["endTime", "endSec", "end"])
+            .ok_or_else(|| anyhow::anyhow!("Segment {} is missing end time", index + 1))?;
+        let text = segment_text(segment)
+            .ok_or_else(|| anyhow::anyhow!("Segment {} text cannot be empty", index + 1))?;
+
+        validate::time_range_ordered(start_sec, end_sec, "start", "end")?;
+
+        let mut caption = Caption::create(start_sec, end_sec, &text);
+        caption.speaker = segment
+            .get("speakerId")
+            .or_else(|| segment.get("speaker"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        if let Some(language) = segment.get("language").and_then(|value| value.as_str()) {
+            caption
+                .metadata
+                .insert("language".to_string(), language.to_string());
+        }
+        if let Some(confidence) = segment.get("confidence").and_then(|value| value.as_f64()) {
+            caption
+                .metadata
+                .insert("confidence".to_string(), confidence.to_string());
+        }
+        captions.push(caption);
+    }
+
+    captions.sort_by(|left, right| {
+        left.start_sec
+            .total_cmp(&right.start_sec)
+            .then_with(|| left.end_sec.total_cmp(&right.end_sec))
+            .then_with(|| left.text.cmp(&right.text))
+    });
+
+    Ok(captions)
 }
 
 fn load_caption_file(path: &Path, format: CaptionFileFormat) -> anyhow::Result<Vec<Caption>> {
@@ -475,6 +845,7 @@ fn load_caption_file(path: &Path, format: CaptionFileFormat) -> anyhow::Result<V
         CaptionFileFormat::Vtt => {
             parse_vtt(&content).map_err(|e| anyhow::anyhow!("Failed to parse VTT: {}", e))
         }
+        CaptionFileFormat::TranscriptJson => parse_transcription_json(&content),
     }
 }
 
@@ -699,42 +1070,71 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 ensure_caption_track(&mut project, &seq_id, track.as_deref())?;
 
             let mut created_ids = Vec::new();
-            for caption in captions {
-                let cmd = CreateCaptionCommand::new(
-                    &seq_id,
-                    &track_id,
-                    caption.start_sec,
-                    caption.end_sec,
-                )
-                .with_text(&caption.text)
-                .with_style(style.clone())
-                .with_position(position.clone());
+            if matches!(format, CaptionFileFormat::TranscriptJson) {
+                let segments = captions
+                    .iter()
+                    .map(|caption| {
+                        GeneratedCaptionSegment::new(
+                            caption.start_sec,
+                            caption.end_sec,
+                            caption.text.clone(),
+                        )
+                    })
+                    .collect();
+                let cmd = ImportGeneratedCaptionsCommand::new(&seq_id, &track_id, segments)
+                    .with_style(style.clone())
+                    .with_position(position.clone());
 
                 match project.executor.execute(Box::new(cmd), &mut project.state) {
                     Ok(result) => {
-                        if let Some(created_id) = result.created_ids.first() {
-                            created_ids.push(created_id.clone());
-                        }
+                        created_ids = result.created_ids;
                     }
                     Err(error) => {
-                        let rollback_errors = rollback_import(
-                            &mut project,
-                            &seq_id,
-                            &track_id,
-                            &created_ids,
-                            created_track,
-                        );
-                        let rollback_suffix = if rollback_errors.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" Rollback errors: {}", rollback_errors.join("; "))
-                        };
-                        return Err(anyhow::anyhow!(
-                            "Caption import failed after {} caption(s): {}.{}",
-                            created_ids.len(),
-                            error,
-                            rollback_suffix
-                        ));
+                        if created_track {
+                            let cmd = RemoveTrackCommand::new(&seq_id, &track_id);
+                            let _ = project.executor.execute(Box::new(cmd), &mut project.state);
+                        }
+                        return Err(anyhow::anyhow!("Caption import failed: {}", error));
+                    }
+                }
+            } else {
+                for caption in captions {
+                    let cmd = CreateCaptionCommand::new(
+                        &seq_id,
+                        &track_id,
+                        caption.start_sec,
+                        caption.end_sec,
+                    )
+                    .with_text(&caption.text)
+                    .with_style(style.clone())
+                    .with_position(position.clone());
+
+                    match project.executor.execute(Box::new(cmd), &mut project.state) {
+                        Ok(result) => {
+                            if let Some(created_id) = result.created_ids.first() {
+                                created_ids.push(created_id.clone());
+                            }
+                        }
+                        Err(error) => {
+                            let rollback_errors = rollback_import(
+                                &mut project,
+                                &seq_id,
+                                &track_id,
+                                &created_ids,
+                                created_track,
+                            );
+                            let rollback_suffix = if rollback_errors.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" Rollback errors: {}", rollback_errors.join("; "))
+                            };
+                            return Err(anyhow::anyhow!(
+                                "Caption import failed after {} caption(s): {}.{}",
+                                created_ids.len(),
+                                error,
+                                rollback_suffix
+                            ));
+                        }
                     }
                 }
             }
@@ -844,5 +1244,43 @@ mod tests {
                 .contains("xPercent must be between 0 and 100"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn detect_caption_file_format_accepts_transcript_json() {
+        let path = Path::new("transcript.json");
+
+        assert!(matches!(
+            detect_caption_file_format(path, None).unwrap(),
+            CaptionFileFormat::TranscriptJson
+        ));
+        assert!(matches!(
+            detect_caption_file_format(path, Some("transcription-json")).unwrap(),
+            CaptionFileFormat::TranscriptJson
+        ));
+    }
+
+    #[test]
+    fn parse_transcription_json_accepts_result_and_segment_aliases() {
+        let captions = parse_transcription_json(
+            r#"{
+                "language": "en",
+                "segments": [
+                    { "startTime": 1.0, "endTime": 2.5, "text": " World ", "speakerId": "A" },
+                    { "startSec": 0.0, "endSec": 0.8, "text": "Hello", "confidence": 0.91 }
+                ],
+                "fullText": "Hello World"
+            }"#,
+        )
+        .expect("transcription JSON should parse");
+
+        assert_eq!(captions.len(), 2);
+        assert_eq!(captions[0].text, "Hello");
+        assert_eq!(
+            captions[0].metadata.get("confidence").map(String::as_str),
+            Some("0.91")
+        );
+        assert_eq!(captions[1].text, "World");
+        assert_eq!(captions[1].speaker.as_deref(), Some("A"));
     }
 }

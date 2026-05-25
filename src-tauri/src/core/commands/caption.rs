@@ -30,6 +30,18 @@ fn normalize_caption_text(text: String) -> Option<String> {
     }
 }
 
+fn normalize_generated_caption_text(text: &str) -> Option<String> {
+    let trimmed = text
+        .trim_matches(['\u{FEFF}', '\u{0000}'])
+        .trim()
+        .to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 // =============================================================================
 // CreateCaptionCommand
 // =============================================================================
@@ -142,6 +154,237 @@ impl Command for CreateCaptionCommand {
 
     fn type_name(&self) -> &'static str {
         "CreateCaption"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
+// ImportGeneratedCaptionsCommand
+// =============================================================================
+
+/// A single segment produced by speech-to-text or another caption generator.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedCaptionSegment {
+    #[serde(alias = "startTime", alias = "start")]
+    pub start_sec: TimeSec,
+    #[serde(alias = "endTime", alias = "end")]
+    pub end_sec: TimeSec,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(alias = "speakerId", skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+}
+
+impl GeneratedCaptionSegment {
+    pub fn new(start_sec: TimeSec, end_sec: TimeSec, text: impl Into<String>) -> Self {
+        Self {
+            start_sec,
+            end_sec,
+            text: text.into(),
+            confidence: None,
+            speaker: None,
+            language: None,
+        }
+    }
+}
+
+/// Command to import generated captions as one atomic edit operation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportGeneratedCaptionsCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub segments: Vec<GeneratedCaptionSegment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<serde_json::Value>,
+    #[serde(default)]
+    pub replace_existing: bool,
+    #[serde(skip)]
+    created_caption_ids: Vec<ClipId>,
+    #[serde(skip)]
+    removed_clips: Vec<(usize, Clip)>,
+}
+
+impl ImportGeneratedCaptionsCommand {
+    pub fn new(sequence_id: &str, track_id: &str, segments: Vec<GeneratedCaptionSegment>) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            segments,
+            style: None,
+            position: None,
+            replace_existing: false,
+            created_caption_ids: Vec::new(),
+            removed_clips: Vec::new(),
+        }
+    }
+
+    pub fn with_style(mut self, style: Option<serde_json::Value>) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn with_position(mut self, position: Option<serde_json::Value>) -> Self {
+        self.position = position;
+        self
+    }
+
+    pub fn replace_existing(mut self, replace_existing: bool) -> Self {
+        self.replace_existing = replace_existing;
+        self
+    }
+
+    fn normalized_segments(&self) -> CoreResult<Vec<GeneratedCaptionSegment>> {
+        if self.segments.is_empty() {
+            return Err(CoreError::ValidationError(
+                "Generated caption import requires at least one segment".to_string(),
+            ));
+        }
+
+        let mut segments = Vec::with_capacity(self.segments.len());
+        for (index, segment) in self.segments.iter().enumerate() {
+            if !is_valid_time_sec(segment.start_sec) || !is_valid_time_sec(segment.end_sec) {
+                return Err(CoreError::ValidationError(format!(
+                    "Generated caption segment {} time range must be finite and non-negative",
+                    index + 1
+                )));
+            }
+            if segment.start_sec >= segment.end_sec {
+                return Err(CoreError::InvalidTimeRange(
+                    segment.start_sec,
+                    segment.end_sec,
+                ));
+            }
+
+            let text = normalize_generated_caption_text(&segment.text).ok_or_else(|| {
+                CoreError::ValidationError(format!(
+                    "Generated caption segment {} text cannot be empty",
+                    index + 1
+                ))
+            })?;
+
+            let mut normalized = segment.clone();
+            normalized.text = text;
+            segments.push(normalized);
+        }
+
+        segments.sort_by(|left, right| {
+            left.start_sec
+                .total_cmp(&right.start_sec)
+                .then_with(|| left.end_sec.total_cmp(&right.end_sec))
+                .then_with(|| left.text.cmp(&right.text))
+        });
+
+        Ok(segments)
+    }
+}
+
+impl Command for ImportGeneratedCaptionsCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let segments = self.normalized_segments()?;
+        self.created_caption_ids.clear();
+        self.removed_clips.clear();
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+        let track = sequence
+            .get_track_mut(&self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+        if !track.is_caption() {
+            return Err(CoreError::ValidationError(format!(
+                "Track is not a caption track: {}",
+                self.track_id
+            )));
+        }
+
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id);
+
+        if self.replace_existing {
+            self.removed_clips = track.clips.iter().cloned().enumerate().collect();
+            for (_, clip) in &self.removed_clips {
+                result = result
+                    .with_change(StateChange::CaptionDeleted {
+                        caption_id: clip.id.clone(),
+                    })
+                    .with_deleted_id(&clip.id);
+            }
+            track.clips.clear();
+        }
+
+        for segment in segments {
+            let duration = segment.end_sec - segment.start_sec;
+            let mut clip = Clip::new(CAPTION_ASSET_ID);
+            clip.speed = 1.0;
+            clip.place = ClipPlace::new(segment.start_sec, duration);
+            clip.range = ClipRange::new(0.0, duration);
+            clip.label = Some(segment.text);
+            clip.caption_style = self.style.clone().filter(|style| !style.is_null());
+            clip.caption_position = self.position.clone().filter(|position| !position.is_null());
+
+            let caption_id = clip.id.clone();
+            self.created_caption_ids.push(caption_id.clone());
+            track.add_clip(clip);
+            result = result
+                .with_change(StateChange::CaptionCreated {
+                    caption_id: caption_id.clone(),
+                })
+                .with_created_id(&caption_id);
+        }
+
+        track.clips.sort_by(|left, right| {
+            left.place
+                .timeline_in_sec
+                .total_cmp(&right.place.timeline_in_sec)
+                .then_with(|| {
+                    left.place
+                        .timeline_out_sec()
+                        .total_cmp(&right.place.timeline_out_sec())
+                })
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+        let Some(track) = sequence.get_track_mut(&self.track_id) else {
+            return Ok(());
+        };
+
+        for caption_id in &self.created_caption_ids {
+            track.remove_clip(caption_id);
+        }
+
+        if self.replace_existing {
+            for (position, clip) in &self.removed_clips {
+                if *position <= track.clips.len() {
+                    track.clips.insert(*position, clip.clone());
+                } else {
+                    track.clips.push(clip.clone());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "ImportGeneratedCaptions"
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -442,6 +685,99 @@ impl Command for UpdateCaptionCommand {
 mod tests {
     use super::*;
     use crate::core::timeline::{Sequence, SequenceFormat, Track};
+
+    fn state_with_caption_track() -> (ProjectState, String, String) {
+        let mut state = ProjectState::new_empty("Test");
+        let mut sequence = Sequence::new("Sequence 1", SequenceFormat::youtube_1080());
+        let track = Track::new_caption("Captions");
+        let seq_id = sequence.id.clone();
+        let track_id = track.id.clone();
+        sequence.add_track(track);
+        state.active_sequence_id = Some(seq_id.clone());
+        state.sequences.insert(seq_id.clone(), sequence);
+        (state, seq_id, track_id)
+    }
+
+    #[test]
+    fn import_generated_captions_creates_sorted_caption_clips() {
+        let (mut state, seq_id, track_id) = state_with_caption_track();
+        let style = serde_json::json!({ "fontSize": 48 });
+        let position = serde_json::json!({ "type": "preset", "vertical": "bottom" });
+        let mut cmd = ImportGeneratedCaptionsCommand::new(
+            &seq_id,
+            &track_id,
+            vec![
+                GeneratedCaptionSegment::new(2.0, 3.0, "Second"),
+                GeneratedCaptionSegment::new(0.0, 1.5, " First "),
+            ],
+        )
+        .with_style(Some(style.clone()))
+        .with_position(Some(position.clone()));
+
+        let result = cmd.execute(&mut state).unwrap();
+
+        assert_eq!(result.created_ids.len(), 2);
+        let sequence = state.get_sequence(&seq_id).unwrap();
+        let track = sequence.get_track(&track_id).unwrap();
+        assert_eq!(track.clips.len(), 2);
+        assert_eq!(track.clips[0].label.as_deref(), Some("First"));
+        assert_eq!(track.clips[0].caption_style, Some(style));
+        assert_eq!(track.clips[0].caption_position, Some(position));
+        assert_eq!(track.clips[1].label.as_deref(), Some("Second"));
+    }
+
+    #[test]
+    fn import_generated_captions_can_replace_existing_captions_and_undo() {
+        let (mut state, seq_id, track_id) = state_with_caption_track();
+        let existing_id = {
+            let sequence = state.sequences.get_mut(&seq_id).unwrap();
+            let track = sequence.get_track_mut(&track_id).unwrap();
+            let mut clip = Clip::new(CAPTION_ASSET_ID);
+            clip.label = Some("Old".to_string());
+            clip.place = ClipPlace::new(0.0, 1.0);
+            clip.range = ClipRange::new(0.0, 1.0);
+            let id = clip.id.clone();
+            track.add_clip(clip);
+            id
+        };
+
+        let mut cmd = ImportGeneratedCaptionsCommand::new(
+            &seq_id,
+            &track_id,
+            vec![GeneratedCaptionSegment::new(1.0, 2.0, "New")],
+        )
+        .replace_existing(true);
+
+        let result = cmd.execute(&mut state).unwrap();
+        assert_eq!(result.deleted_ids, vec![existing_id.clone()]);
+        assert_eq!(result.created_ids.len(), 1);
+        {
+            let sequence = state.get_sequence(&seq_id).unwrap();
+            let track = sequence.get_track(&track_id).unwrap();
+            assert_eq!(track.clips.len(), 1);
+            assert_eq!(track.clips[0].label.as_deref(), Some("New"));
+        }
+
+        cmd.undo(&mut state).unwrap();
+        let sequence = state.get_sequence(&seq_id).unwrap();
+        let track = sequence.get_track(&track_id).unwrap();
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0].id, existing_id);
+        assert_eq!(track.clips[0].label.as_deref(), Some("Old"));
+    }
+
+    #[test]
+    fn import_generated_captions_rejects_empty_segment_text() {
+        let (mut state, seq_id, track_id) = state_with_caption_track();
+        let mut cmd = ImportGeneratedCaptionsCommand::new(
+            &seq_id,
+            &track_id,
+            vec![GeneratedCaptionSegment::new(0.0, 1.0, "   ")],
+        );
+
+        let err = cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::ValidationError(_)));
+    }
 
     #[test]
     fn update_caption_updates_label_and_time_range() {

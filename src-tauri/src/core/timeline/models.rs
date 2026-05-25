@@ -104,6 +104,62 @@ impl Default for SequenceFormat {
     }
 }
 
+/// Sequence-level HDR export mode.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum SequenceHdrMode {
+    #[default]
+    Sdr,
+    Hdr10,
+    Hlg,
+}
+
+/// Sequence-level HDR export settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SequenceHdrSettings {
+    pub hdr_mode: SequenceHdrMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cll: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_fall: Option<u32>,
+    pub bit_depth: u8,
+}
+
+impl Default for SequenceHdrSettings {
+    fn default() -> Self {
+        Self {
+            hdr_mode: SequenceHdrMode::Sdr,
+            max_cll: None,
+            max_fall: None,
+            bit_depth: 8,
+        }
+    }
+}
+
+impl SequenceHdrSettings {
+    pub fn normalized(mut self) -> Self {
+        self.bit_depth = match self.bit_depth {
+            8 | 10 | 12 => self.bit_depth,
+            depth if depth < 10 => 8,
+            depth if depth < 12 => 10,
+            _ => 12,
+        };
+
+        if matches!(self.hdr_mode, SequenceHdrMode::Sdr) {
+            self.bit_depth = 8;
+            self.max_cll = None;
+            self.max_fall = None;
+        } else {
+            self.bit_depth = self.bit_depth.max(10);
+            self.max_cll = Some(self.max_cll.unwrap_or(1000).clamp(1, 10000));
+            self.max_fall = Some(self.max_fall.unwrap_or(400).clamp(1, 10000));
+        }
+
+        self
+    }
+}
+
 /// Canvas size
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct Canvas {
@@ -187,6 +243,8 @@ pub struct Sequence {
     /// Master output volume in dB (-60.0 to +6.0, 0.0 = unity gain)
     #[serde(default)]
     pub master_volume_db: f32,
+    #[serde(default)]
+    pub hdr_settings: SequenceHdrSettings,
     pub created_at: String,
     pub modified_at: String,
 }
@@ -202,6 +260,7 @@ impl Sequence {
             tracks: vec![],
             markers: vec![],
             master_volume_db: 0.0,
+            hdr_settings: SequenceHdrSettings::default(),
             created_at: now.clone(),
             modified_at: now,
         }

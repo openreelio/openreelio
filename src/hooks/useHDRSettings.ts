@@ -18,6 +18,7 @@ import {
 } from '@/types/hdr';
 import type { SequenceId } from '@/types';
 import { createLogger } from '@/services/logger';
+import { executeProjectCommandByType } from '@/services/projectMutationGateway';
 
 const logger = createLogger('useHDRSettings');
 
@@ -150,12 +151,12 @@ function normalizeHdrSettings(raw: unknown): HdrExportSettings {
   const maxCll = clamp(
     typeof candidate.maxCll === 'number' ? candidate.maxCll : 1000,
     MAX_CLL_MIN,
-    MAX_CLL_MAX
+    MAX_CLL_MAX,
   );
   const maxFall = clamp(
     typeof candidate.maxFall === 'number' ? candidate.maxFall : 400,
     MAX_FALL_MIN,
-    MAX_FALL_MAX
+    MAX_FALL_MAX,
   );
 
   return {
@@ -180,10 +181,10 @@ export function useHDRSettings({
   // ---------------------------------------------------------------------------
 
   const [settings, setSettings] = useState<HdrExportSettings>(
-    initialSettings ?? DEFAULT_HDR_EXPORT
+    initialSettings ?? DEFAULT_HDR_EXPORT,
   );
   const [originalSettings, setOriginalSettings] = useState<HdrExportSettings>(
-    initialSettings ?? DEFAULT_HDR_EXPORT
+    initialSettings ?? DEFAULT_HDR_EXPORT,
   );
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -223,10 +224,7 @@ export function useHDRSettings({
       try {
         logger.debug('Fetching HDR settings', { sequenceId });
 
-        const fetchedSettings = await invoke<unknown>(
-          'get_sequence_hdr_settings',
-          { sequenceId }
-        );
+        const fetchedSettings = await invoke<unknown>('get_sequence_hdr_settings', { sequenceId });
         const normalizedSettings = normalizeHdrSettings(fetchedSettings);
 
         if (cancelled) return;
@@ -345,7 +343,7 @@ export function useHDRSettings({
     (codec: string): string | null => {
       return validateHdrExportSettings(settings, codec);
     },
-    [settings]
+    [settings],
   );
 
   // ---------------------------------------------------------------------------
@@ -362,12 +360,9 @@ export function useHDRSettings({
     try {
       logger.debug('Saving HDR settings', { sequenceId, settings: snapshot });
 
-      await invoke('execute_command', {
-        commandType: 'UpdateSequenceHdrSettings',
-        payload: {
-          sequenceId,
-          settings: snapshot,
-        },
+      await executeProjectCommandByType('UpdateSequenceHdrSettings', {
+        sequenceId,
+        settings: snapshot,
       });
 
       if (saveToken === latestSaveTokenRef.current) {

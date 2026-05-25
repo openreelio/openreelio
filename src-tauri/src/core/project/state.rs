@@ -13,7 +13,7 @@ use crate::core::{
     effects::Effect,
     masks::MaskGroup,
     project::{OpKind, Operation, OpsLog},
-    timeline::{AudioSettings, BlendMode, Clip, Marker, Sequence, Track},
+    timeline::{AudioSettings, BlendMode, Clip, Marker, Sequence, SequenceHdrSettings, Track},
     AssetId, CoreError, CoreResult, EffectId, SequenceId,
 };
 
@@ -546,6 +546,25 @@ impl ProjectState {
             } else {
                 None
             };
+            let next_hdr_settings = if let Some(settings_value) = op
+                .payload
+                .get("settings")
+                .or_else(|| op.payload.get("hdrSettings"))
+                .or_else(|| op.payload.get("hdr_settings"))
+            {
+                Some(
+                    serde_json::from_value::<SequenceHdrSettings>(settings_value.clone())
+                        .map_err(|e| {
+                            CoreError::InvalidCommand(format!(
+                                "Invalid sequence HDR settings: {}",
+                                e
+                            ))
+                        })?
+                        .normalized(),
+                )
+            } else {
+                None
+            };
 
             // Commit all mutations after validation
             if let Some(name) = next_name {
@@ -553,6 +572,9 @@ impl ProjectState {
             }
             if let Some(volume_db) = next_master_volume_db {
                 sequence.master_volume_db = volume_db;
+            }
+            if let Some(settings) = next_hdr_settings {
+                sequence.hdr_settings = settings;
             }
         }
         Ok(())

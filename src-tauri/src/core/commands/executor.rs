@@ -955,6 +955,73 @@ impl CommandExecutor {
         }))
     }
 
+    fn build_import_generated_captions_batch_payload(
+        command_json: &serde_json::Value,
+        result: &CommandResult,
+        state: &ProjectState,
+    ) -> CoreResult<serde_json::Value> {
+        fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+            value.get(key).and_then(|v| v.as_str())
+        }
+
+        fn to_value<T: serde::Serialize>(value: &T) -> CoreResult<serde_json::Value> {
+            serde_json::to_value(value).map_err(|e| {
+                CoreError::Internal(format!("Failed to serialize operation payload: {e}"))
+            })
+        }
+
+        let seq_id = get_str(command_json, "sequenceId").ok_or_else(|| {
+            CoreError::Internal("ImportGeneratedCaptions payload missing sequenceId".to_string())
+        })?;
+        let track_id = get_str(command_json, "trackId").ok_or_else(|| {
+            CoreError::Internal("ImportGeneratedCaptions payload missing trackId".to_string())
+        })?;
+
+        let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+            CoreError::Internal(format!(
+                "ImportGeneratedCaptions could not find sequence: {seq_id}"
+            ))
+        })?;
+        let track = sequence.get_track(track_id).ok_or_else(|| {
+            CoreError::Internal(format!(
+                "ImportGeneratedCaptions could not find track: {track_id}"
+            ))
+        })?;
+
+        let mut operations =
+            Vec::with_capacity(result.deleted_ids.len() + result.created_ids.len());
+        for caption_id in &result.deleted_ids {
+            operations.push(Operation::new(
+                OpKind::CaptionRemove,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "captionId": caption_id,
+                }),
+            ));
+        }
+
+        for caption_id in &result.created_ids {
+            let clip = track.get_clip(caption_id).ok_or_else(|| {
+                CoreError::Internal(format!(
+                    "ImportGeneratedCaptions could not find created caption: {caption_id}"
+                ))
+            })?;
+            operations.push(Operation::new(
+                OpKind::CaptionAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": to_value(clip)?,
+                }),
+            ));
+        }
+
+        Ok(serde_json::json!({
+            "operations": operations,
+        }))
+    }
+
     fn build_operation_payload(
         type_name: &str,
         op_kind: OpKind,
@@ -1033,6 +1100,14 @@ impl CommandExecutor {
                 payload.insert(
                     "masterVolumeDb".to_string(),
                     serde_json::json!(sequence.master_volume_db),
+                );
+                payload.insert(
+                    "hdrSettings".to_string(),
+                    serde_json::to_value(&sequence.hdr_settings).map_err(|e| {
+                        CoreError::Internal(format!(
+                            "Failed to serialize sequence HDR settings: {e}"
+                        ))
+                    })?,
                 );
 
                 Ok(serde_json::Value::Object(payload))
@@ -1620,6 +1695,11 @@ impl CommandExecutor {
                 "ExtractEdit" => {
                     Self::build_extract_edit_batch_payload(&command_json, result, state)
                 }
+                "ImportGeneratedCaptions" => Self::build_import_generated_captions_batch_payload(
+                    &command_json,
+                    result,
+                    state,
+                ),
                 unknown => Err(CoreError::Internal(format!(
                     "Unregistered batch command type: {unknown}"
                 ))),
@@ -1848,13 +1928,16 @@ impl CommandExecutor {
             "AddCaption" => OpKind::CaptionAdd,
             "RemoveCaption" => OpKind::CaptionRemove,
             "UpdateCaption" => OpKind::CaptionUpdate,
+            "ImportGeneratedCaptions" => OpKind::Batch,
             "AddTextClip" => OpKind::TextClipAdd,
             "UpdateText" | "UpdateTextClip" => OpKind::TextClipUpdate,
             "RemoveTextClip" => OpKind::TextClipRemove,
             "CreateCaption" => OpKind::CaptionAdd,
             "DeleteCaption" => OpKind::CaptionRemove,
             "CreateSequence" => OpKind::SequenceCreate,
-            "UpdateSequence" | "SetMasterVolume" => OpKind::SequenceUpdate,
+            "UpdateSequence" | "SetMasterVolume" | "UpdateSequenceHdrSettings" => {
+                OpKind::SequenceUpdate
+            }
             "RemoveSequence" | "DeleteSequence" => OpKind::SequenceRemove,
             "CreateProject" => OpKind::ProjectCreate,
             "UpdateProjectSettings" => OpKind::ProjectSettings,
@@ -2000,12 +2083,13 @@ mod tests {
     use crate::core::commands::{
         AddAudioKeyframeCommand, AddEffectCommand, AddMarkerCommand, AddMaskCommand,
         AddTextClipCommand, CloseAllGapsCommand, CloseGapCommand, CreateAdjustmentLayerCommand,
-        CreateCompoundClipCommand, CreateSequenceCommand, ExtractEditCommand, GroupClipsCommand,
-        ImportAssetCommand, InsertClipCommand, InsertEditCommand, LiftCommand, MoveClipCommand,
-        OverwriteEditCommand, RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
-        SetClipBlendModeCommand, SetMasterVolumeCommand, SetTrackBlendModeCommand,
-        SplitClipCommand, StateChange, TrimClipCommand, UngroupClipsCommand,
-        UnnestCompoundClipCommand,
+        CreateCompoundClipCommand, CreateSequenceCommand, ExtractEditCommand,
+        GeneratedCaptionSegment, GroupClipsCommand, ImportAssetCommand,
+        ImportGeneratedCaptionsCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
+        MoveClipCommand, OverwriteEditCommand, RippleDeleteCommand, SetAudioFadeInCommand,
+        SetAudioFadeOutCommand, SetClipBlendModeCommand, SetMasterVolumeCommand,
+        SetTrackBlendModeCommand, SplitClipCommand, StateChange, TrimClipCommand,
+        UngroupClipsCommand, UnnestCompoundClipCommand,
     };
     use crate::core::effects::{EffectType, ParamValue};
     use crate::core::masks::{MaskShape, RectMask};
@@ -2153,6 +2237,35 @@ mod tests {
         }
 
         (seq_id, track_id, clip_ids)
+    }
+
+    fn seed_replayable_caption_track(
+        ops_log: &OpsLog,
+        state: &mut ProjectState,
+    ) -> (String, String) {
+        let sequence = Sequence::new("Test Sequence", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        let seq_op = Operation::new(
+            OpKind::SequenceCreate,
+            serde_json::to_value(&sequence).unwrap(),
+        );
+        ops_log.append(&seq_op).unwrap();
+        state.apply_operation(&seq_op).unwrap();
+
+        let track = Track::new("Captions", TrackKind::Caption);
+        let track_id = track.id.clone();
+        let track_op = Operation::new(
+            OpKind::TrackAdd,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "track": track,
+                "position": 0,
+            }),
+        );
+        ops_log.append(&track_op).unwrap();
+        state.apply_operation(&track_op).unwrap();
+
+        (seq_id, track_id)
     }
 
     #[test]
@@ -3469,6 +3582,10 @@ mod tests {
             OpKind::Batch
         );
         assert_eq!(
+            CommandExecutor::type_name_to_op_kind("ImportGeneratedCaptions"),
+            OpKind::Batch
+        );
+        assert_eq!(
             CommandExecutor::type_name_to_op_kind("SplitClip"),
             OpKind::ClipSplit
         );
@@ -3548,6 +3665,50 @@ mod tests {
         assert_eq!(result.operations.len(), 2);
         assert_eq!(result.operations[0].kind, OpKind::AssetImport);
         assert_eq!(result.operations[1].kind, OpKind::AssetImport);
+    }
+
+    #[test]
+    fn test_executor_persists_import_generated_captions_as_replayable_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+        let ops_log = OpsLog::new(&ops_path);
+        let mut state = ProjectState::new_empty("Test Project");
+        let (seq_id, track_id) = seed_replayable_caption_track(&ops_log, &mut state);
+
+        let mut executor = CommandExecutor::with_ops_log(ops_log);
+        let command = ImportGeneratedCaptionsCommand::new(
+            &seq_id,
+            &track_id,
+            vec![
+                GeneratedCaptionSegment::new(1.5, 2.0, "Second"),
+                GeneratedCaptionSegment::new(0.0, 1.0, "First"),
+            ],
+        )
+        .with_style(Some(serde_json::json!({ "fontSize": 42 })));
+
+        let result = executor.execute(Box::new(command), &mut state).unwrap();
+        assert_eq!(result.created_ids.len(), 2);
+
+        let ops_log = OpsLog::new(&ops_path);
+        let read = ops_log.read_all().unwrap();
+        let persisted = read.operations.last().unwrap();
+        assert_eq!(persisted.kind, OpKind::Batch);
+        let sub_ops: Vec<Operation> =
+            serde_json::from_value(persisted.payload["operations"].clone()).unwrap();
+        assert_eq!(sub_ops.len(), 2);
+        assert!(sub_ops.iter().all(|op| op.kind == OpKind::CaptionAdd));
+
+        let replayed =
+            ProjectState::from_operations(read.operations, ProjectMeta::new("Replayed")).unwrap();
+        let sequence = replayed.get_sequence(&seq_id).unwrap();
+        let track = sequence.get_track(&track_id).unwrap();
+        assert_eq!(track.clips.len(), 2);
+        assert_eq!(track.clips[0].label.as_deref(), Some("First"));
+        assert_eq!(
+            track.clips[0].caption_style,
+            Some(serde_json::json!({ "fontSize": 42 }))
+        );
+        assert_eq!(track.clips[1].label.as_deref(), Some("Second"));
     }
 
     #[test]
