@@ -89,7 +89,23 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           CURRENT_TAG="${{ github.ref_name }}"
-          PREVIOUS_TAG="$(git tag --merged "$CURRENT_TAG" --sort=-creatordate | grep -v "^${CURRENT_TAG}$" | head -n 1 || true)"
+          PUBLISHED_RELEASES_JSON="$(gh api "repos/${REPOSITORY}/releases?per_page=100" || echo '[]')"
+          PREVIOUS_TAG=""
+          while IFS= read -r CANDIDATE_TAG; do
+            if [ -z "$CANDIDATE_TAG" ]; then
+              continue
+            fi
+
+            if git rev-parse -q --verify "refs/tags/${CANDIDATE_TAG}" > /dev/null &&
+              git merge-base --is-ancestor "$CANDIDATE_TAG" "$CURRENT_TAG"; then
+              PREVIOUS_TAG="$CANDIDATE_TAG"
+              break
+            fi
+          done < <(
+            jq -r --arg current "$CURRENT_TAG" \
+              '.[] | select(.draft == false and .tag_name != $current) | .tag_name' \
+              <<< "$PUBLISHED_RELEASES_JSON"
+          )
 
           if [ -n "$PREVIOUS_TAG" ]; then
             RANGE="${PREVIOUS_TAG}..${CURRENT_TAG}"
@@ -279,10 +295,10 @@ jobs:
           - os: windows-latest
             platform: windows
             target: x86_64-pc-windows-msvc
-          - os: macos-latest
+          - os: macos-15-intel
             platform: macos-intel
             target: x86_64-apple-darwin
-          - os: macos-latest
+          - os: macos-15
             platform: macos-arm
             target: aarch64-apple-darwin
 
