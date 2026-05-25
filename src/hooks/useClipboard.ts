@@ -95,11 +95,36 @@ function getClipDuration(clip: Clip): number {
   return getClipTimelineDurationSec(clip);
 }
 
+function cloneSerializable<T>(value: T): T {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => cloneSerializable(item)) as T;
+  }
+
+  const cloned: Record<string, unknown> = {};
+  for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+    cloned[key] = cloneSerializable(nestedValue);
+  }
+
+  return cloned as T;
+}
+
 /**
  * Convert a Clip to ClipboardItem
  */
 function clipToClipboardItem(clip: Clip, track: Track, textData?: TextClipData): ClipboardItem {
   const durationSec = getClipDuration(clip);
+  const captionStyle =
+    track.kind === 'caption' && clip.captionStyle
+      ? cloneSerializable(clip.captionStyle)
+      : undefined;
+  const captionPosition =
+    track.kind === 'caption' && clip.captionPosition
+      ? cloneSerializable(clip.captionPosition)
+      : undefined;
 
   return {
     type: 'clip',
@@ -117,18 +142,18 @@ function clipToClipboardItem(clip: Clip, track: Track, textData?: TextClipData):
       speed: clip.speed,
       reverse: clip.reverse,
       opacity: clip.opacity,
-      transform: clip.transform,
+      transform: cloneSerializable(clip.transform),
       blendMode: clip.blendMode,
-      audio: { ...clip.audio },
-      textData,
+      audio: clip.audio ? cloneSerializable(clip.audio) : undefined,
+      textData: textData ? cloneSerializable(textData) : undefined,
       caption:
         track.kind === 'caption'
           ? {
               text: clip.label || '',
               startSec: clip.place.timelineInSec,
               endSec: getClipTimelineEndSec(clip),
-              style: clip.captionStyle,
-              position: clip.captionPosition,
+              style: captionStyle,
+              position: captionPosition,
             }
           : undefined,
     },
@@ -227,8 +252,8 @@ export function useClipboard(options: UseClipboardOptions): UseClipboardReturn {
       return { success: false, message: 'Could not find selected clips' };
     }
 
-    copyToClipboard(clipboardItems);
-    onCopy?.(clipboardItems);
+    copyToClipboard(cloneSerializable(clipboardItems));
+    onCopy?.(cloneSerializable(clipboardItems));
 
     return {
       success: true,
@@ -278,13 +303,17 @@ export function useClipboard(options: UseClipboardOptions): UseClipboardReturn {
         }
       }
 
-      const offsetClips: ClipboardItem[] = clipboard.map((item) => ({
-        ...item,
-        clipData: {
-          ...item.clipData,
-          timelineIn: item.clipData.timelineIn - earliestTime + currentTime,
-        },
-      }));
+      const offsetClips: ClipboardItem[] = clipboard.map((item) => {
+        const clonedItem = cloneSerializable(item);
+
+        return {
+          ...clonedItem,
+          clipData: {
+            ...clonedItem.clipData,
+            timelineIn: item.clipData.timelineIn - earliestTime + currentTime,
+          },
+        };
+      });
 
       onPaste?.(offsetClips, currentTime, targetTrackId);
 
