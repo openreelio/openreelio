@@ -8,7 +8,14 @@
  * - Collapse/expand toggle
  */
 
-import { useCallback, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 import {
   Activity,
   ChevronDown,
@@ -92,6 +99,38 @@ const PANEL_ICONS: Record<PanelId, LucideIcon> = {
   generation: Sparkles,
 };
 
+const DOCK_PANEL_DRAG_MOVE_EVENT = 'openreelio:dock-panel-drag-move';
+const DOCK_PANEL_DRAG_END_EVENT = 'openreelio:dock-panel-drag-end';
+const DOCK_PANEL_DRAG_CANCEL_EVENT = 'openreelio:dock-panel-drag-cancel';
+const DOCK_PANEL_DRAG_THRESHOLD_PX = 4;
+
+interface DockPanelDragDetail {
+  panelId: PanelId;
+  clientX: number;
+  clientY: number;
+}
+
+function emitDockPanelDragEvent(type: string, detail: DockPanelDragDetail): void {
+  document.dispatchEvent(new CustomEvent<DockPanelDragDetail>(type, { detail }));
+}
+
+function isDockPanelDragEvent(event: Event): event is CustomEvent<DockPanelDragDetail> {
+  return (
+    event instanceof CustomEvent &&
+    event.detail != null &&
+    typeof event.detail.panelId === 'string' &&
+    typeof event.detail.clientX === 'number' &&
+    typeof event.detail.clientY === 'number'
+  );
+}
+
+function isPointInsideElement(element: HTMLElement, clientX: number, clientY: number): boolean {
+  const rect = element.getBoundingClientRect();
+  return (
+    clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom
+  );
+}
+
 export function DockZone({
   zoneId,
   panelIds,
@@ -111,6 +150,61 @@ export function DockZone({
   headerActions = null,
 }: DockZoneProps): JSX.Element {
   const [isDropTarget, setIsDropTarget] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const pendingPanelDragRef = useRef<{
+    panelId: PanelId;
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    isDragging: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    const handlePanelDragMove = (event: Event) => {
+      if (!isDockPanelDragEvent(event)) {
+        return;
+      }
+
+      const { panelId, clientX, clientY } = event.detail;
+      const root = rootRef.current;
+      if (!root || panelIds.includes(panelId)) {
+        setIsDropTarget(false);
+        return;
+      }
+
+      setIsDropTarget(isPointInsideElement(root, clientX, clientY));
+    };
+
+    const handlePanelDragEnd = (event: Event) => {
+      if (!isDockPanelDragEvent(event)) {
+        return;
+      }
+
+      const { panelId, clientX, clientY } = event.detail;
+      const root = rootRef.current;
+      const shouldDrop =
+        root != null && !panelIds.includes(panelId) && isPointInsideElement(root, clientX, clientY);
+
+      setIsDropTarget(false);
+      if (shouldDrop) {
+        onDrop(panelId);
+      }
+    };
+
+    const handlePanelDragCancel = () => {
+      setIsDropTarget(false);
+    };
+
+    document.addEventListener(DOCK_PANEL_DRAG_MOVE_EVENT, handlePanelDragMove);
+    document.addEventListener(DOCK_PANEL_DRAG_END_EVENT, handlePanelDragEnd);
+    document.addEventListener(DOCK_PANEL_DRAG_CANCEL_EVENT, handlePanelDragCancel);
+
+    return () => {
+      document.removeEventListener(DOCK_PANEL_DRAG_MOVE_EVENT, handlePanelDragMove);
+      document.removeEventListener(DOCK_PANEL_DRAG_END_EVENT, handlePanelDragEnd);
+      document.removeEventListener(DOCK_PANEL_DRAG_CANCEL_EVENT, handlePanelDragCancel);
+    };
+  }, [onDrop, panelIds]);
 
   const handleDragOver = useCallback(
     (e: React.DragEvent) => {
@@ -153,12 +247,89 @@ export function DockZone({
     onDragEnd();
   }, [onDragEnd]);
 
+  const handleTabPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>, panelId: PanelId) => {
+      if (event.button !== 0) {
+        return;
+      }
+
+      pendingPanelDragRef.current = {
+        panelId,
+        pointerId: event.pointerId,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        isDragging: false,
+      };
+
+      const handlePointerMove = (pointerEvent: PointerEvent) => {
+        const currentDrag = pendingPanelDragRef.current;
+        if (!currentDrag || currentDrag.pointerId !== pointerEvent.pointerId) {
+          return;
+        }
+
+        const deltaX = pointerEvent.clientX - currentDrag.startClientX;
+        const deltaY = pointerEvent.clientY - currentDrag.startClientY;
+        if (!currentDrag.isDragging && Math.hypot(deltaX, deltaY) < DOCK_PANEL_DRAG_THRESHOLD_PX) {
+          return;
+        }
+
+        if (!currentDrag.isDragging) {
+          currentDrag.isDragging = true;
+          onDragStart(currentDrag.panelId);
+        }
+
+        pointerEvent.preventDefault();
+        emitDockPanelDragEvent(DOCK_PANEL_DRAG_MOVE_EVENT, {
+          panelId: currentDrag.panelId,
+          clientX: pointerEvent.clientX,
+          clientY: pointerEvent.clientY,
+        });
+      };
+
+      const handlePointerUp = (pointerEvent: PointerEvent) => {
+        const currentDrag = pendingPanelDragRef.current;
+        if (!currentDrag || currentDrag.pointerId !== pointerEvent.pointerId) {
+          return;
+        }
+
+        document.removeEventListener('pointermove', handlePointerMove);
+        document.removeEventListener('pointerup', handlePointerUp);
+        document.removeEventListener('pointercancel', handlePointerUp);
+        pendingPanelDragRef.current = null;
+
+        if (!currentDrag.isDragging) {
+          return;
+        }
+
+        pointerEvent.preventDefault();
+        emitDockPanelDragEvent(
+          pointerEvent.type === 'pointercancel'
+            ? DOCK_PANEL_DRAG_CANCEL_EVENT
+            : DOCK_PANEL_DRAG_END_EVENT,
+          {
+            panelId: currentDrag.panelId,
+            clientX: pointerEvent.clientX,
+            clientY: pointerEvent.clientY,
+          },
+        );
+        onDragEnd();
+      };
+
+      document.addEventListener('pointermove', handlePointerMove);
+      document.addEventListener('pointerup', handlePointerUp);
+      document.addEventListener('pointercancel', handlePointerUp);
+    },
+    [onDragEnd, onDragStart],
+  );
+
   if (panelIds.length === 0) {
     // Empty zone — only show as drop target when dragging
     if (!isDragging) return <></>;
     return (
       <div
+        ref={rootRef}
         data-testid={`dock-zone-${zoneId}-empty`}
+        data-dock-zone-id={zoneId}
         className={`flex items-center justify-center border-2 border-dashed ${
           isDropTarget ? 'border-primary-500 bg-primary-500/10' : 'border-editor-border/50'
         } rounded transition-colors ${className}`}
@@ -200,7 +371,9 @@ export function DockZone({
 
   return (
     <div
+      ref={rootRef}
       data-testid={`dock-zone-${zoneId}`}
+      data-dock-zone-id={zoneId}
       className={`flex flex-col overflow-hidden bg-editor-sidebar ${dropHighlight} transition-shadow ${className}`}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -223,9 +396,12 @@ export function DockZone({
               return (
                 <button
                   key={panelId}
-                  draggable={isDraggable}
+                  draggable={false}
                   onDragStart={isDraggable ? (e) => handleTabDragStart(e, panelId) : undefined}
                   onDragEnd={handleTabDragEnd}
+                  onPointerDown={
+                    isDraggable ? (event) => handleTabPointerDown(event, panelId) : undefined
+                  }
                   onClick={() => onTabClick(panelId)}
                   className={`flex shrink-0 items-center gap-1 text-xs font-medium transition-colors ${
                     isHorizontalCollapsed
