@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 /// Settings schema version for migration support
-pub const SETTINGS_VERSION: u32 = 1;
+pub const SETTINGS_VERSION: u32 = 2;
 
 /// Settings file name
 pub const SETTINGS_FILE: &str = "settings.json";
@@ -630,9 +630,9 @@ pub enum ProposalReviewMode {
 #[serde(rename_all = "snake_case")]
 pub enum AssistantRuntime {
     /// Use OpenReelio's built-in API-backed agent runtime.
-    #[default]
     Api,
     /// Use the user's locally authenticated Codex agent through app-server.
+    #[default]
     Codex,
 }
 
@@ -877,6 +877,8 @@ impl Default for AISettings {
 impl AISettings {
     /// Normalize and clamp AI settings values to valid ranges
     pub fn normalize(&mut self) {
+        self.assistant_runtime = AssistantRuntime::Codex;
+
         self.codex_model = self
             .codex_model
             .trim()
@@ -1205,12 +1207,9 @@ impl SettingsManager {
 
     /// Migrate settings from older version
     fn migrate(&self, mut settings: AppSettings) -> AppSettings {
-        // Future migrations would go here
-        // Example:
-        // if settings.version < 2 {
-        //     // Migrate from v1 to v2
-        //     settings.new_field = old_field_migration();
-        // }
+        if settings.version < 2 && settings.ai.assistant_runtime == AssistantRuntime::Api {
+            settings.ai.assistant_runtime = AssistantRuntime::Codex;
+        }
 
         settings.version = SETTINGS_VERSION;
         settings
@@ -1231,7 +1230,7 @@ mod tests {
         let ai_settings = AISettings::default();
 
         // Runtime default
-        assert_eq!(ai_settings.assistant_runtime, AssistantRuntime::Api);
+        assert_eq!(ai_settings.assistant_runtime, AssistantRuntime::Codex);
 
         // Provider defaults
         assert_eq!(ai_settings.primary_provider, ProviderType::Anthropic);
@@ -1486,6 +1485,7 @@ mod tests {
         assert!((settings.ai.temperature - 0.7).abs() < 0.001);
 
         // Defaults for missing fields
+        assert_eq!(settings.ai.assistant_runtime, AssistantRuntime::Codex);
         assert_eq!(settings.ai.max_tokens, 4096);
         assert!(!settings.ai.auto_analyze_on_import);
     }
@@ -1534,6 +1534,21 @@ mod tests {
 
         assert_eq!(loaded.general.language, "ko");
         assert_eq!(loaded.appearance.theme, "light");
+    }
+
+    #[test]
+    fn test_save_normalizes_api_runtime_to_codex() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = SettingsManager::new(temp_dir.path().to_path_buf());
+
+        let mut settings = AppSettings::default();
+        settings.ai.assistant_runtime = AssistantRuntime::Api;
+
+        let saved = manager.save(&settings).unwrap();
+        let loaded = manager.load();
+
+        assert_eq!(saved.ai.assistant_runtime, AssistantRuntime::Codex);
+        assert_eq!(loaded.ai.assistant_runtime, AssistantRuntime::Codex);
     }
 
     #[test]
@@ -1846,6 +1861,40 @@ mod tests {
 
         // Version should be migrated to current
         assert_eq!(settings.version, SETTINGS_VERSION);
+    }
+
+    #[test]
+    fn test_v1_api_runtime_migrates_to_codex_default() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(SETTINGS_FILE);
+        fs::write(
+            &settings_path,
+            r#"{
+                "version": 1,
+                "ai": {
+                    "assistantRuntime": "api"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let manager = SettingsManager::new(temp_dir.path().to_path_buf());
+        let settings = manager.load();
+
+        assert_eq!(settings.version, SETTINGS_VERSION);
+        assert_eq!(settings.ai.assistant_runtime, AssistantRuntime::Codex);
+    }
+
+    #[test]
+    fn test_ai_settings_normalization_forces_codex_runtime() {
+        let mut settings = AISettings {
+            assistant_runtime: AssistantRuntime::Api,
+            ..Default::default()
+        };
+
+        settings.normalize();
+
+        assert_eq!(settings.assistant_runtime, AssistantRuntime::Codex);
     }
 
     #[test]

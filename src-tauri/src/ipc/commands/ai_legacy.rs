@@ -12,6 +12,17 @@ use crate::ipc::{
 };
 use crate::AppState;
 
+const LEGACY_AI_REQUEST_RESPONSE_DISABLED_MESSAGE: &str =
+    "Legacy AI request/response runtime is disabled. Use the Codex agent runtime; project mutations must execute approved AgentPlans through execute_agent_plan.";
+
+fn legacy_ai_request_response_disabled() -> bool {
+    true
+}
+
+fn legacy_ai_request_response_disabled_error(command: &str) -> String {
+    format!("{command} is disabled. {LEGACY_AI_REQUEST_RESPONSE_DISABLED_MESSAGE}")
+}
+
 // =============================================================================
 // AI DTOs
 // =============================================================================
@@ -634,6 +645,10 @@ pub async fn analyze_intent(
     context: AIContextDto,
     state: State<'_, AppState>,
 ) -> Result<EditScriptDto, String> {
+    if legacy_ai_request_response_disabled() {
+        return Err(legacy_ai_request_response_disabled_error("analyze_intent"));
+    }
+
     #[allow(unused_imports)]
     use crate::core::ai::{EditCommand, EditScript};
 
@@ -724,6 +739,10 @@ pub async fn create_proposal(
     edit_script: EditScriptDto,
     state: State<'_, AppState>,
 ) -> Result<ProposalDto, String> {
+    if legacy_ai_request_response_disabled() {
+        return Err(legacy_ai_request_response_disabled_error("create_proposal"));
+    }
+
     let proposal_id = ulid::Ulid::new().to_string();
     let created_at = chrono::Utc::now().to_rfc3339();
 
@@ -758,23 +777,31 @@ pub async fn apply_edit_script(
     edit_script: EditScriptDto,
     state: State<'_, AppState>,
 ) -> Result<ApplyEditScriptResult, String> {
+    if legacy_ai_request_response_disabled() {
+        return Err(legacy_ai_request_response_disabled_error(
+            "apply_edit_script",
+        ));
+    }
+
     use crate::core::commands::{
         AddAudioKeyframeCommand, AddEffectCommand, AddMarkerCommand, AddMaskCommand,
         AddTextClipCommand, AddTrackCommand, ApplyAudioDuckingCommand, ClearTimeRemapCommand,
         CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand, CreateFolderCommand,
         CreateFreezeFrameCommand, CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand,
-        DetachAudioCommand, ExtractEditCommand, GroupClipsCommand, InsertClipCommand,
-        InsertEditCommand, LiftCommand, LinkClipsCommand, MoveAudioKeyframeCommand,
-        MoveClipCommand, MoveFileCommand, OverwriteEditCommand, RemoveAssetCommand,
-        RemoveAudioKeyframeCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
-        RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
-        RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand,
-        SetAudioFadeInCommand, SetAudioFadeOutCommand, SetAudioKeyframeValueCommand,
-        SetClipAudioCommand, SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMuteCommand,
-        SetClipSpeedCommand, SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
-        SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
-        ToggleTrackVisibilityCommand, TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand,
-        UnnestCompoundClipCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
+        DetachAudioCommand, ExtractEditCommand, GeneratedCaptionSegment, GroupClipsCommand,
+        ImportGeneratedCaptionsCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
+        LinkClipsCommand, MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand,
+        OverwriteEditCommand, RemoveAssetCommand, RemoveAudioKeyframeCommand, RemoveClipCommand,
+        RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
+        RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, ReorderTracksCommand,
+        ReverseClipCommand, RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
+        SetAudioKeyframeValueCommand, SetClipAudioCommand, SetClipBlendModeCommand,
+        SetClipEnabledCommand, SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
+        SetMasterVolumeCommand, SetTimeRemapCommand, SetTrackBlendModeCommand, SplitClipCommand,
+        ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
+        TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
+        UpdateEffectCommand, UpdateMaskCommand, UpdateSequenceHdrSettingsCommand,
+        UpdateTextCommand,
     };
     use crate::core::commands::{
         CreateAdjustmentLayerCommand, CreateCompoundClipCommand, PasteAttributesCommand,
@@ -1151,6 +1178,9 @@ pub async fn apply_edit_script(
             CommandPayload::SetMasterVolume(p) => {
                 Box::new(SetMasterVolumeCommand::new(&p.sequence_id, p.volume_db))
             }
+            CommandPayload::UpdateSequenceHdrSettings(p) => Box::new(
+                UpdateSequenceHdrSettingsCommand::new(&p.sequence_id, p.settings),
+            ),
             CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
                 &p.sequence_id,
                 &p.track_id,
@@ -1204,6 +1234,26 @@ pub async fn apply_edit_script(
                     .with_style(p.style)
                     .with_position(p.position),
             ),
+            CommandPayload::ImportGeneratedCaptions(p) => {
+                let segments = p
+                    .segments
+                    .into_iter()
+                    .map(|segment| GeneratedCaptionSegment {
+                        start_sec: segment.start_sec,
+                        end_sec: segment.end_sec,
+                        text: segment.text,
+                        confidence: segment.confidence,
+                        speaker: segment.speaker,
+                        language: segment.language,
+                    })
+                    .collect();
+                Box::new(
+                    ImportGeneratedCaptionsCommand::new(&p.sequence_id, &p.track_id, segments)
+                        .with_style(p.style)
+                        .with_position(p.position)
+                        .replace_existing(p.replace_existing),
+                )
+            }
             CommandPayload::DeleteCaption(p) => Box::new(DeleteCaptionCommand::new(
                 &p.sequence_id,
                 &p.track_id,
@@ -1456,6 +1506,12 @@ pub async fn validate_edit_script(
     edit_script: EditScriptDto,
     state: State<'_, AppState>,
 ) -> Result<ValidationResultDto, String> {
+    if legacy_ai_request_response_disabled() {
+        return Err(legacy_ai_request_response_disabled_error(
+            "validate_edit_script",
+        ));
+    }
+
     let guard = state.project.lock().await;
 
     let project = guard
@@ -2476,6 +2532,10 @@ pub async fn chat_with_ai(
     context: AIContextDto,
     state: State<'_, AppState>,
 ) -> Result<AIResponseDto, String> {
+    if legacy_ai_request_response_disabled() {
+        return Err(legacy_ai_request_response_disabled_error("chat_with_ai"));
+    }
+
     use crate::core::ai::{ConversationMessage, EditContext};
 
     let gateway = state.ai_gateway.lock().await;
@@ -2717,6 +2777,12 @@ pub async fn generate_edit_script_with_ai(
     context: AIContextDto,
     state: State<'_, AppState>,
 ) -> Result<EditScriptDto, String> {
+    if legacy_ai_request_response_disabled() {
+        return Err(legacy_ai_request_response_disabled_error(
+            "generate_edit_script_with_ai",
+        ));
+    }
+
     use crate::core::ai::EditContext;
 
     let gateway = state.ai_gateway.lock().await;

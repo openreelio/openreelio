@@ -10,8 +10,8 @@
  * `stream_ai_completion` emits incremental events that are
  * converted to the ILLMClient async generator contract.
  *
- * Non-streaming methods (`complete`, `generateStructured`) continue
- * to use `invoke()` for request-response semantics.
+ * Non-streaming methods (`complete`, `generateStructured`) use raw completion
+ * IPC for request-response semantics.
  */
 
 import { invoke } from '@tauri-apps/api/core';
@@ -30,41 +30,11 @@ import type {
 // =============================================================================
 
 /**
- * Context sent to the backend
- */
-interface TauriAIContext {
-  playheadPosition: number;
-  selectedClips: string[];
-  selectedTracks: string[];
-  timelineDuration?: number;
-  assetIds: string[];
-  trackIds: string[];
-  preferredLanguage?: string;
-}
-
-/**
  * Message format for backend
  */
 interface TauriConversationMessage {
   role: string;
   content: string;
-}
-
-/**
- * Response from backend chat_with_ai
- */
-interface TauriAIResponse {
-  message: string;
-  actions?: Array<{
-    commandType: string;
-    params: Record<string, unknown>;
-    description?: string;
-  }> | null;
-  needsConfirmation?: boolean;
-  intent?: {
-    intentType: string;
-    confidence: number;
-  } | null;
 }
 
 /**
@@ -462,8 +432,8 @@ export class TauriLLMAdapter implements ILLMClient {
   /**
    * Non-streaming completion.
    *
-   * Uses the existing `chat_with_ai` backend command for
-   * request-response semantics.
+   * Uses `complete_with_ai_raw` so the frontend agentic runtime owns prompting
+   * and parsing without touching the disabled legacy chat command.
    *
    * @param messages - Conversation messages
    * @param options - Generation options
@@ -473,20 +443,14 @@ export class TauriLLMAdapter implements ILLMClient {
     const requestId = this.beginRequest();
 
     try {
-      const response = await this.callBackend(messages, options);
-
-      const hasToolCalls = response.actions && response.actions.length > 0;
-
+      const response = await this.callRawCompletion(messages, options);
       return {
-        content: response.message,
-        finishReason: hasToolCalls ? 'tool_call' : 'stop',
-        toolCalls: hasToolCalls
-          ? response.actions!.map((action, index) => ({
-              id: `tool_${index}_${Date.now()}`,
-              name: action.commandType,
-              args: action.params,
-            }))
-          : undefined,
+        content: response.text,
+        usage: {
+          inputTokens: response.usage.promptTokens,
+          outputTokens: response.usage.completionTokens,
+        },
+        finishReason: this.mapRawFinishReason(response.finishReason),
       };
     } finally {
       this.finishRequest(requestId);
@@ -707,45 +671,6 @@ export class TauriLLMAdapter implements ILLMClient {
   // ===========================================================================
 
   /**
-   * Call the backend `chat_with_ai` command (non-streaming).
-   *
-   * Used by `complete()` for request-response semantics.
-   */
-  private async callBackend(
-    messages: LLMMessage[],
-    options?: GenerateOptions,
-  ): Promise<TauriAIResponse> {
-    if (this._aborted) {
-      throw new Error('Generation aborted');
-    }
-
-    const backendMessages = this.convertMessages(messages, options);
-
-    // Build context
-    const context: TauriAIContext = {
-      playheadPosition: this.config.defaultContext?.playheadPosition ?? 0,
-      selectedClips: this.config.defaultContext?.selectedClips ?? [],
-      selectedTracks: this.config.defaultContext?.selectedTracks ?? [],
-      timelineDuration: this.config.defaultContext?.timelineDuration,
-      assetIds: this.config.defaultContext?.assetIds ?? [],
-      trackIds: this.config.defaultContext?.trackIds ?? [],
-      preferredLanguage: this.config.defaultContext?.preferredLanguage,
-    };
-
-    // Call backend
-    const response = await invoke<unknown>('chat_with_ai', {
-      messages: backendMessages,
-      context,
-    });
-
-    if (this._aborted) {
-      throw new Error('Generation aborted');
-    }
-
-    return this.validateChatResponse(response);
-  }
-
-  /**
    * Call the backend `complete_with_ai_raw` command (non-streaming).
    *
    * Used by `generateStructured()` for JSON-mode completions.
@@ -830,37 +755,6 @@ export class TauriLLMAdapter implements ILLMClient {
   // ===========================================================================
 
   /**
-   * Validate `chat_with_ai` response shape at runtime.
-   *
-   * The generic `invoke<T>` only provides compile-time types; the backend
-   * could return an unexpected shape after a version mismatch or bug.
-   */
-  private validateChatResponse(response: unknown): TauriAIResponse {
-    if (typeof response !== 'object' || response === null) {
-      throw new Error('Backend returned invalid chat response: expected object');
-    }
-
-    const record = response as Record<string, unknown>;
-
-    if (typeof record.message !== 'string') {
-      throw new Error(
-        `Backend returned invalid chat response: "message" must be a string, got ${typeof record.message}`,
-      );
-    }
-
-    return {
-      message: record.message,
-      actions: Array.isArray(record.actions) ? record.actions : undefined,
-      needsConfirmation:
-        typeof record.needsConfirmation === 'boolean' ? record.needsConfirmation : undefined,
-      intent:
-        typeof record.intent === 'object' && record.intent !== null
-          ? (record.intent as TauriAIResponse['intent'])
-          : undefined,
-    };
-  }
-
-  /**
    * Validate `complete_with_ai_raw` response shape at runtime.
    */
   private validateRawCompletionResponse(response: unknown): TauriRawCompletionResponse {
@@ -885,6 +779,21 @@ export class TauriLLMAdapter implements ILLMClient {
           : { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       finishReason: typeof record.finishReason === 'string' ? record.finishReason : 'unknown',
     };
+  }
+
+  private mapRawFinishReason(finishReason: string): LLMCompletionResult['finishReason'] {
+    switch (finishReason) {
+      case 'stop':
+        return 'stop';
+      case 'length':
+      case 'max_tokens':
+        return 'max_tokens';
+      case 'tool_call':
+      case 'tool_calls':
+        return 'tool_call';
+      default:
+        return 'error';
+    }
   }
 
   // ===========================================================================

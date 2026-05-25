@@ -21,9 +21,14 @@ import {
 import { registerAllTools, globalToolRegistry } from '@/agents';
 import { registerDefaultCompoundExpanders } from '@/agents/engine/adapters/tools/registerDefaultCompoundExpanders';
 import { useConversationStore } from './conversationStore';
-import { useProjectStore } from './projectStore';
 
 const logger = createLogger('AIStore');
+const LEGACY_AI_PATH_DISABLED_MESSAGE =
+  'Legacy API AI request-response path is disabled. Use the Codex assistant runtime, which routes edits through approved AgentPlan execution.';
+
+function createLegacyAiPathDisabledError(operation: string): Error {
+  return new Error(`${LEGACY_AI_PATH_DISABLED_MESSAGE} Blocked operation: ${operation}.`);
+}
 
 // Debounced saver for chat persistence (1 second delay)
 const debouncedSaveChatHistory = createDebouncedSaver(1000);
@@ -421,351 +426,64 @@ export const useAIStore = create<AIState>()(
           });
         },
 
-        // Generate edit script from natural language
-        generateEditScript: async (intent: string, context?: AIContext) => {
+        // Retained only as a compatibility API. Shipping assistant work must use
+        // AgenticSidebarContent/Codex and execute mutations through AgentPlan.
+        generateEditScript: async (intent: string) => {
+          const error = createLegacyAiPathDisabledError('generateEditScript');
           set((state) => {
-            state.isGenerating = true;
+            state.isGenerating = false;
             state.isCancelled = false;
-            state.error = null;
+            state.error = error.message;
           });
-
-          // Add user message to chat
           get().addChatMessage('user', intent);
-
-          try {
-            const editScript = await invoke<EditScript>('generate_edit_script_with_ai', {
-              intent,
-              context: context ?? {
-                playheadPosition: 0,
-                selectedClips: [],
-                selectedTracks: [],
-              },
-            });
-
-            // Check if cancelled during generation
-            if (get().isCancelled) {
-              set((state) => {
-                state.isCancelled = false;
-                state.isGenerating = false;
-              });
-              get().addChatMessage('system', 'Generation cancelled.');
-              throw new Error('Generation cancelled');
-            }
-
-            set((state) => {
-              state.isGenerating = false;
-            });
-
-            // Create proposal first, then add assistant message with it attached
-            get().createProposal(editScript);
-            get().addChatMessage(
-              'assistant',
-              editScript.explanation,
-              get().currentProposal ?? undefined,
-            );
-
-            return editScript;
-          } catch (error) {
-            // Check if it was a cancellation
-            if (
-              get().isCancelled ||
-              (error instanceof Error && error.message === 'Generation cancelled')
-            ) {
-              set((state) => {
-                state.isCancelled = false;
-                state.isGenerating = false;
-              });
-              // Only add message if not already added
-              const messages = get().chatMessages;
-              const lastMessage = messages[messages.length - 1];
-              if (!lastMessage || lastMessage.content !== 'Generation cancelled.') {
-                get().addChatMessage('system', 'Generation cancelled.');
-              }
-              throw new Error('Generation cancelled');
-            }
-
-            // Fall back to local intent parsing
-            try {
-              const editScript = await invoke<EditScript>('analyze_intent', {
-                intent,
-                context: context ?? {
-                  playheadPosition: 0,
-                  selectedClips: [],
-                  selectedTracks: [],
-                },
-              });
-
-              // Check if cancelled during fallback
-              if (get().isCancelled) {
-                set((state) => {
-                  state.isCancelled = false;
-                  state.isGenerating = false;
-                });
-                // Only add message if not already added
-                const messages = get().chatMessages;
-                const lastMessage = messages[messages.length - 1];
-                if (!lastMessage || lastMessage.content !== 'Generation cancelled.') {
-                  get().addChatMessage('system', 'Generation cancelled.');
-                }
-                throw new Error('Generation cancelled');
-              }
-
-              set((state) => {
-                state.isGenerating = false;
-              });
-
-              // Create proposal first, then add assistant message with it attached
-              get().createProposal(editScript);
-              get().addChatMessage(
-                'assistant',
-                editScript.explanation,
-                get().currentProposal ?? undefined,
-              );
-
-              return editScript;
-            } catch (fallbackError) {
-              const primaryErrorMessage = error instanceof Error ? error.message : String(error);
-              const fallbackErrorMessage =
-                fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-              const combinedErrorMessage = `AI generation failed: ${primaryErrorMessage}; fallback failed: ${fallbackErrorMessage}`;
-
-              set((state) => {
-                state.isGenerating = false;
-                state.error = combinedErrorMessage;
-              });
-
-              logger.error('AI generation and fallback both failed', {
-                primaryError: primaryErrorMessage,
-                fallbackError: fallbackErrorMessage,
-              });
-
-              get().addChatMessage('assistant', `I encountered an error: ${combinedErrorMessage}`);
-
-              throw new Error(combinedErrorMessage);
-            }
-          }
-        },
-
-        // Send a message through the legacy/internal request-response path
-        sendMessage: async (message: string, context?: AIContext) => {
-          // Check if provider is configured, if not try to sync from settings first
-          const currentStatus = get().providerStatus;
-          if (!currentStatus.isConfigured) {
-            logger.info('Provider not configured, attempting to sync from settings...');
-            try {
-              await get().syncFromSettings();
-            } catch (syncError) {
-              logger.warn('Failed to auto-sync provider', { error: syncError });
-            }
-
-            // Re-check after sync attempt
-            const updatedStatus = get().providerStatus;
-            if (!updatedStatus.isConfigured) {
-              const errorMsg =
-                'No AI provider configured. Please configure an API key in Settings.';
-              get().addChatMessage('user', message);
-              get().addChatMessage('system', errorMsg);
-              throw new Error(errorMsg);
-            }
-          }
-
-          set((state) => {
-            state.isGenerating = true;
-            state.isCancelled = false;
-            state.error = null;
+          get().addChatMessage('system', error.message);
+          logger.warn('Blocked legacy AI edit script generation', {
+            operation: 'generateEditScript',
           });
-
-          // Add user message to chat
-          get().addChatMessage('user', message);
-
-          try {
-            // Build conversation history from chat messages
-            const chatHistory = get().chatMessages;
-            const conversationMessages: ConversationMessage[] = chatHistory
-              .filter((msg) => msg.role !== 'system') // Exclude system messages
-              .map((msg) => ({
-                role: msg.role,
-                content: msg.content,
-                timestamp: msg.timestamp,
-                // Include applied actions for context
-                appliedActions:
-                  msg.proposal?.status === 'applied'
-                    ? msg.proposal.editScript.commands.map((cmd) => ({
-                        commandType: cmd.commandType,
-                        params: cmd.params,
-                        description: cmd.description,
-                      }))
-                    : undefined,
-              }));
-
-            // Call the legacy/internal request-response chat endpoint
-            const response = await invoke<AIResponse>('chat_with_ai', {
-              messages: conversationMessages.map((m) => ({
-                role: m.role,
-                content: m.content,
-              })),
-              context: {
-                playheadPosition: context?.playheadPosition ?? 0,
-                selectedClips: context?.selectedClips ?? [],
-                selectedTracks: context?.selectedTracks ?? [],
-                timelineDuration: context?.timelineDuration,
-                assetIds: context?.assetIds ?? [],
-                trackIds: context?.trackIds ?? [],
-                preferredLanguage: context?.preferredLanguage,
-              },
-            });
-
-            // Check if cancelled during generation
-            if (get().isCancelled) {
-              set((state) => {
-                state.isCancelled = false;
-                state.isGenerating = false;
-              });
-              get().addChatMessage('system', 'Generation cancelled.');
-              throw new Error('Generation cancelled');
-            }
-
-            set((state) => {
-              state.isGenerating = false;
-            });
-
-            // If response has actions, create a proposal
-            if (response.actions && response.actions.length > 0) {
-              const editScript: EditScript = {
-                intent: message,
-                commands: response.actions.map((a) => ({
-                  commandType: a.commandType,
-                  params: a.params as Record<string, unknown>,
-                  description: a.description,
-                })),
-                requires: [],
-                qcRules: [],
-                risk: response.risk ?? { copyright: 'none', nsfw: 'none' },
-                explanation: response.message,
-              };
-
-              get().createProposal(editScript);
-              get().addChatMessage(
-                'assistant',
-                response.message,
-                get().currentProposal ?? undefined,
-              );
-            } else {
-              // Pure conversation response (no actions)
-              get().addChatMessage('assistant', response.message);
-            }
-
-            return response;
-          } catch (error) {
-            // Check if it was a cancellation
-            if (
-              get().isCancelled ||
-              (error instanceof Error && error.message === 'Generation cancelled')
-            ) {
-              set((state) => {
-                state.isCancelled = false;
-                state.isGenerating = false;
-              });
-              throw new Error('Generation cancelled');
-            }
-
-            const errorMessage = error instanceof Error ? error.message : String(error);
-
-            set((state) => {
-              state.isGenerating = false;
-              state.error = errorMessage;
-            });
-
-            logger.error('AI chat failed', { error: errorMessage });
-
-            // Add error message to chat
-            get().addChatMessage('assistant', `I encountered an error: ${errorMessage}`);
-
-            throw error;
-          }
+          throw error;
         },
 
-        // Apply edit script
-        applyEditScript: async (editScript: EditScript) => {
-          try {
-            const result = await invoke<{
-              success: boolean;
-              appliedOpIds: string[];
-              errors: string[];
-            }>('apply_edit_script', { editScript });
+        // Retained only as a compatibility API. The product chat surface is the
+        // Codex-backed AgenticSidebarContent path.
+        sendMessage: async (message: string) => {
+          const error = createLegacyAiPathDisabledError('sendMessage');
+          set((state) => {
+            state.isGenerating = false;
+            state.isCancelled = false;
+            state.error = error.message;
+          });
+          get().addChatMessage('user', message);
+          get().addChatMessage('system', error.message);
+          logger.warn('Blocked legacy AI chat request', { operation: 'sendMessage' });
+          throw error;
+        },
 
-            if (result.success) {
-              await useProjectStore.getState().refreshFromBackendMutation();
-
-              set((state) => {
-                if (state.currentProposal) {
-                  const id = state.currentProposal.id;
-                  state.currentProposal.status = 'applied';
-                  state.currentProposal.appliedOpIds = result.appliedOpIds;
-                  // Sync to the embedded proposal in chat messages (Immer structural sharing)
-                  const msg = state.chatMessages.find((m) => m.proposal?.id === id);
-                  if (msg?.proposal) {
-                    msg.proposal.status = 'applied';
-                    msg.proposal.appliedOpIds = result.appliedOpIds;
-                  }
-                  // Sync to proposalHistory
-                  const historyEntry = state.proposalHistory.find((p) => p.id === id);
-                  if (historyEntry) {
-                    historyEntry.status = 'applied';
-                    historyEntry.appliedOpIds = result.appliedOpIds;
-                  }
-                }
-              });
-            } else {
-              await useProjectStore.getState().refreshFromBackendMutation();
-
-              set((state) => {
-                if (state.currentProposal) {
-                  const id = state.currentProposal.id;
-                  const errorMsg = result.errors.join('; ');
-                  state.currentProposal.status = 'failed';
-                  state.currentProposal.error = errorMsg;
-                  // Sync to the embedded proposal in chat messages (Immer structural sharing)
-                  const msg = state.chatMessages.find((m) => m.proposal?.id === id);
-                  if (msg?.proposal) {
-                    msg.proposal.status = 'failed';
-                    msg.proposal.error = errorMsg;
-                  }
-                  // Sync to proposalHistory
-                  const historyEntry = state.proposalHistory.find((p) => p.id === id);
-                  if (historyEntry) {
-                    historyEntry.status = 'failed';
-                    historyEntry.error = errorMsg;
-                  }
-                }
-              });
-            }
-
-            return result;
-          } catch (error) {
-            set((state) => {
-              const errorMsg = error instanceof Error ? error.message : String(error);
-              state.error = errorMsg;
-              if (state.currentProposal) {
-                const id = state.currentProposal.id;
-                state.currentProposal.status = 'failed';
-                state.currentProposal.error = errorMsg;
-                // Sync to the embedded proposal in chat messages (Immer structural sharing)
-                const msg = state.chatMessages.find((m) => m.proposal?.id === id);
-                if (msg?.proposal) {
-                  msg.proposal.status = 'failed';
-                  msg.proposal.error = errorMsg;
-                }
-                // Sync to proposalHistory
-                const historyEntry = state.proposalHistory.find((p) => p.id === id);
-                if (historyEntry) {
-                  historyEntry.status = 'failed';
-                  historyEntry.error = errorMsg;
-                }
+        // Retained only as a compatibility API. Mutations must be applied as
+        // approved AgentPlan executions.
+        applyEditScript: async () => {
+          const error = createLegacyAiPathDisabledError('applyEditScript');
+          set((state) => {
+            state.error = error.message;
+            if (state.currentProposal) {
+              const id = state.currentProposal.id;
+              state.currentProposal.status = 'failed';
+              state.currentProposal.error = error.message;
+              const msg = state.chatMessages.find((m) => m.proposal?.id === id);
+              if (msg?.proposal) {
+                msg.proposal.status = 'failed';
+                msg.proposal.error = error.message;
               }
-            });
-            throw error;
-          }
+              const historyEntry = state.proposalHistory.find((p) => p.id === id);
+              if (historyEntry) {
+                historyEntry.status = 'failed';
+                historyEntry.error = error.message;
+              }
+            }
+          });
+          logger.warn('Blocked legacy AI edit script application', {
+            operation: 'applyEditScript',
+          });
+          throw error;
         },
 
         // Create proposal
