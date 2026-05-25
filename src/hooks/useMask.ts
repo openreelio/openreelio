@@ -6,7 +6,6 @@
  */
 
 import { useState, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import type {
   SequenceId,
   TrackId,
@@ -18,9 +17,9 @@ import type {
   GradientType,
   Point2D,
   BezierPoint,
-  CommandResult,
 } from '@/types';
 import { createLogger } from '@/services/logger';
+import { executeProjectCommandByType } from '@/services/projectMutationGateway';
 
 const logger = createLogger('useMask');
 
@@ -127,7 +126,7 @@ export function createRectangleMask(
   x = DEFAULT_CENTER_X,
   y = DEFAULT_CENTER_Y,
   width = DEFAULT_RECT_WIDTH,
-  height = DEFAULT_RECT_HEIGHT
+  height = DEFAULT_RECT_HEIGHT,
 ): RectangleMaskShape {
   return {
     type: 'rectangle',
@@ -147,7 +146,7 @@ export function createEllipseMask(
   x = DEFAULT_CENTER_X,
   y = DEFAULT_CENTER_Y,
   radiusX = DEFAULT_ELLIPSE_RADIUS_X,
-  radiusY = DEFAULT_ELLIPSE_RADIUS_Y
+  radiusY = DEFAULT_ELLIPSE_RADIUS_Y,
 ): EllipseMaskShape {
   return {
     type: 'ellipse',
@@ -180,10 +179,7 @@ export function createPolygonMask(points?: Point2D[]): PolygonMaskShape {
  * Creates a bezier mask shape with provided control points.
  * If no points provided, creates a default simple curve.
  */
-export function createBezierMask(
-  points?: BezierPoint[],
-  closed = true
-): BezierMaskShape {
+export function createBezierMask(points?: BezierPoint[], closed = true): BezierMaskShape {
   const defaultCurve: BezierPoint[] = [
     { anchor: { x: 0.3, y: 0.5 }, handleOut: { x: 0.4, y: 0.2 } },
     { anchor: { x: 0.7, y: 0.5 }, handleIn: { x: 0.6, y: 0.2 } },
@@ -203,7 +199,7 @@ export function createBezierMask(
 export function createGradientMask(
   start?: Point2D,
   end?: Point2D,
-  gradientType: GradientType = 'linear'
+  gradientType: GradientType = 'linear',
 ): GradientMaskShape {
   return {
     type: 'gradient',
@@ -226,103 +222,85 @@ export function useMask(): UseMaskResult {
   /**
    * Add a new mask to an effect
    */
-  const addMask = useCallback(
-    async (payload: AddMaskPayload): Promise<MaskId | null> => {
-      setIsAdding(true);
-      setError(null);
+  const addMask = useCallback(async (payload: AddMaskPayload): Promise<MaskId | null> => {
+    setIsAdding(true);
+    setError(null);
 
-      try {
-        logger.debug('Adding mask', {
-          effectId: payload.effectId,
-          shapeType: payload.shape.type,
-        });
+    try {
+      logger.debug('Adding mask', {
+        effectId: payload.effectId,
+        shapeType: payload.shape.type,
+      });
 
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'AddMask',
-          payload,
-        });
+      const result = await executeProjectCommandByType('AddMask', payload);
 
-        const createdId = result.createdIds?.[0] ?? null;
-        logger.info('Mask added successfully', { maskId: createdId });
+      const createdId = result.createdIds?.[0] ?? null;
+      logger.info('Mask added successfully', { maskId: createdId });
 
-        return createdId;
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        logger.error('Failed to add mask', { error: err });
-        setError(errorMsg);
-        return null;
-      } finally {
-        setIsAdding(false);
-      }
-    },
-    []
-  );
+      return createdId;
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      logger.error('Failed to add mask', { error: err });
+      setError(errorMsg);
+      return null;
+    } finally {
+      setIsAdding(false);
+    }
+  }, []);
 
   /**
    * Update an existing mask
    */
-  const updateMask = useCallback(
-    async (payload: UpdateMaskPayload): Promise<boolean> => {
-      setIsUpdating(true);
-      setError(null);
+  const updateMask = useCallback(async (payload: UpdateMaskPayload): Promise<boolean> => {
+    setIsUpdating(true);
+    setError(null);
 
-      try {
-        logger.debug('Updating mask', {
-          effectId: payload.effectId,
-          maskId: payload.maskId,
-        });
+    try {
+      logger.debug('Updating mask', {
+        effectId: payload.effectId,
+        maskId: payload.maskId,
+      });
 
-        await invoke<CommandResult>('execute_command', {
-          commandType: 'UpdateMask',
-          payload,
-        });
+      await executeProjectCommandByType('UpdateMask', payload);
 
-        logger.info('Mask updated successfully', { maskId: payload.maskId });
-        return true;
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        logger.error('Failed to update mask', { error: err, maskId: payload.maskId });
-        setError(errorMsg);
-        return false;
-      } finally {
-        setIsUpdating(false);
-      }
-    },
-    []
-  );
+      logger.info('Mask updated successfully', { maskId: payload.maskId });
+      return true;
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      logger.error('Failed to update mask', { error: err, maskId: payload.maskId });
+      setError(errorMsg);
+      return false;
+    } finally {
+      setIsUpdating(false);
+    }
+  }, []);
 
   /**
    * Remove a mask from an effect
    */
-  const removeMask = useCallback(
-    async (payload: RemoveMaskPayload): Promise<boolean> => {
-      setIsRemoving(true);
-      setError(null);
+  const removeMask = useCallback(async (payload: RemoveMaskPayload): Promise<boolean> => {
+    setIsRemoving(true);
+    setError(null);
 
-      try {
-        logger.debug('Removing mask', {
-          effectId: payload.effectId,
-          maskId: payload.maskId,
-        });
+    try {
+      logger.debug('Removing mask', {
+        effectId: payload.effectId,
+        maskId: payload.maskId,
+      });
 
-        await invoke<CommandResult>('execute_command', {
-          commandType: 'RemoveMask',
-          payload,
-        });
+      await executeProjectCommandByType('RemoveMask', payload);
 
-        logger.info('Mask removed successfully', { maskId: payload.maskId });
-        return true;
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        logger.error('Failed to remove mask', { error: err, maskId: payload.maskId });
-        setError(errorMsg);
-        return false;
-      } finally {
-        setIsRemoving(false);
-      }
-    },
-    []
-  );
+      logger.info('Mask removed successfully', { maskId: payload.maskId });
+      return true;
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      logger.error('Failed to remove mask', { error: err, maskId: payload.maskId });
+      setError(errorMsg);
+      return false;
+    } finally {
+      setIsRemoving(false);
+    }
+  }, []);
 
   /**
    * Clear the error state

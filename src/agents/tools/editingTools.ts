@@ -16,7 +16,8 @@ import { useProjectStore } from '@/stores/projectStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { probeMedia } from '@/utils/ffmpeg';
 import { getClipTimelineEndSec } from '@/utils/clipTiming';
-import { applyProjectState, refreshProjectState } from '@/utils/stateRefreshHelper';
+import { refreshProjectState } from '@/utils/stateRefreshHelper';
+import { runProjectBackendMutation } from '@/services/projectMutationGateway';
 import {
   buildRippleEditPlan,
   buildRollEditPlan,
@@ -32,6 +33,7 @@ const DEFAULT_INSERT_CLIP_DURATION_SEC = 10;
 const DEFAULT_FREEZE_FRAME_RATE = 30;
 const SPLIT_TIME_EPSILON = 1e-6;
 const MAX_INTERVAL_SPLIT_OPERATIONS = 5000;
+const AGENT_PLAN_MUTATION_TIMEOUT_MS = 5 * 60 * 1000;
 
 type IntervalSplitOperation = {
   trackId: string;
@@ -1921,9 +1923,18 @@ const EDITING_TOOLS: ToolDefinition[] = [
           esdId,
           sourceAssetId,
         });
-        const execution = await invoke<AgentPlanResult>('execute_agent_plan', {
-          plan: result.plan,
-        });
+        const execution = await runProjectBackendMutation(
+          'applyEditingStylePlan',
+          () =>
+            invoke<AgentPlanResult>('execute_agent_plan', {
+              plan: result.plan,
+            }),
+          {
+            refreshProjectState: false,
+            markDirty: false,
+            timeoutMs: AGENT_PLAN_MUTATION_TIMEOUT_MS,
+          },
+        );
         if (!execution.success) {
           return {
             success: false,
@@ -1931,19 +1942,14 @@ const EDITING_TOOLS: ToolDefinition[] = [
           };
         }
         let syncWarning: string | undefined;
-        if (typeof useProjectStore.setState === 'function') {
-          try {
-            const freshState = await refreshProjectState();
-            useProjectStore.setState((draft) => {
-              applyProjectState(draft, freshState);
-            });
-          } catch (syncError) {
-            const syncMessage = syncError instanceof Error ? syncError.message : String(syncError);
-            syncWarning = syncMessage;
-            logger.warn('apply_editing_style executed but state refresh failed', {
-              error: syncMessage,
-            });
-          }
+        try {
+          await useProjectStore.getState().refreshFromBackendMutation();
+        } catch (syncError) {
+          const syncMessage = syncError instanceof Error ? syncError.message : String(syncError);
+          syncWarning = syncMessage;
+          logger.warn('apply_editing_style executed but state refresh failed', {
+            error: syncMessage,
+          });
         }
         const stepCount = result.plan.steps?.length ?? 0;
         const warnings = result.warnings ?? [];

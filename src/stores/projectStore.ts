@@ -39,6 +39,10 @@ import { useWorkspaceStore, setupWorkspaceEventListeners } from '@/stores/worksp
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useCommandPaletteStore } from '@/stores/commandPaletteStore';
 import { cleanupTerminalSessions } from '@/stores/terminalStore';
+import {
+  configureProjectMutationGateway,
+  type ProjectBackendMutationOptions,
+} from '@/services/projectMutationGateway';
 
 const logger = createLogger('ProjectStore');
 
@@ -139,6 +143,11 @@ interface ProjectState {
 
   // Command execution
   executeCommand: (command: Command) => Promise<CommandResult>;
+  executeBackendMutation: <T>(
+    operationName: string,
+    mutation: () => Promise<T>,
+    options?: ProjectBackendMutationOptions,
+  ) => Promise<T>;
   refreshFromBackendMutation: () => Promise<number>;
   undo: () => Promise<UndoRedoResult>;
   redo: () => Promise<UndoRedoResult>;
@@ -697,6 +706,79 @@ export const useProjectStore = create<ProjectState>()(
       );
     },
 
+    executeBackendMutation: async <T>(
+      operationName: string,
+      mutation: () => Promise<T>,
+      options?: ProjectBackendMutationOptions,
+    ): Promise<T> => {
+      const shouldRefresh = options?.refreshProjectState ?? true;
+      const shouldMarkDirty = options?.markDirty ?? shouldRefresh;
+
+      return commandQueue.enqueue(
+        async () => {
+          const versionBefore = get().stateVersion;
+
+          try {
+            logger.debug('Executing backend mutation', { operationName, version: versionBefore });
+            const result = await mutation();
+
+            if (!shouldRefresh) {
+              set((state) => {
+                state.error = null;
+                if (shouldMarkDirty) {
+                  state.isDirty = true;
+                }
+              });
+              return result;
+            }
+
+            const freshState = await refreshProjectState();
+
+            let concurrentModificationDetected = false;
+            set((state) => {
+              if (state.stateVersion !== versionBefore) {
+                concurrentModificationDetected = true;
+                logger.error('Concurrent modification detected during backend mutation', {
+                  operationName,
+                  expectedVersion: versionBefore,
+                  actualVersion: state.stateVersion,
+                });
+                return;
+              }
+
+              state.isDirty = shouldMarkDirty || state.isDirty;
+              state.stateVersion += 1;
+              state.error = null;
+              applyProjectState(state, freshState);
+            });
+
+            if (concurrentModificationDetected) {
+              throw new Error(
+                'Concurrent modification detected during backend mutation. Please retry the operation.',
+              );
+            }
+
+            logger.debug('Backend mutation completed', {
+              operationName,
+              newVersion: get().stateVersion,
+            });
+
+            return result;
+          } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            logger.error('Backend mutation failed', { operationName, error: errorMessage });
+
+            set((state) => {
+              state.error = errorMessage;
+            });
+            throw error;
+          }
+        },
+        operationName,
+        { timeoutMs: options?.timeoutMs },
+      );
+    },
+
     refreshFromBackendMutation: async () => {
       return commandQueue.enqueue(async () => {
         const versionBefore = get().stateVersion;
@@ -925,6 +1007,19 @@ export const useProjectStore = create<ProjectState>()(
     },
   })),
 );
+
+configureProjectMutationGateway({
+  executeCommand: (command) => useProjectStore.getState().executeCommand(command),
+  executeCommandByType: (commandType, payload) =>
+    useProjectStore.getState().executeBackendMutation(`executeCommand:${commandType}`, () =>
+      invoke<CommandResult>('execute_command', {
+        commandType,
+        payload,
+      }),
+    ),
+  executeBackendMutation: (operationName, mutation, options) =>
+    useProjectStore.getState().executeBackendMutation(operationName, mutation, options),
+});
 
 // =============================================================================
 // Proxy Event Listeners

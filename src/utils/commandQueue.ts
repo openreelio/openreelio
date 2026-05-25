@@ -30,6 +30,11 @@ const logger = createLogger('CommandQueue');
  */
 export type CancellableOperation<T> = (signal: AbortSignal) => Promise<T>;
 
+export interface CommandQueueOptions {
+  /** Operation timeout in milliseconds. Defaults to the queue's standard timeout. */
+  timeoutMs?: number;
+}
+
 /**
  * Queue item structure for pending operations
  */
@@ -90,6 +95,7 @@ export class CommandQueue {
   async enqueue<T>(
     operation: CancellableOperation<T> | (() => Promise<T>),
     operationName = 'unknown',
+    options?: CommandQueueOptions,
   ): Promise<T> {
     // Backpressure protection: reject if queue is full
     if (this.queue.length >= CommandQueue.MAX_QUEUE_SIZE) {
@@ -112,7 +118,7 @@ export class CommandQueue {
         const timeoutId = setTimeout(() => {
           logger.error('Operation timeout - aborting', { operationName });
           abortController.abort(new Error(`Operation timeout: ${operationName}`));
-        }, CommandQueue.OPERATION_TIMEOUT_MS);
+        }, options?.timeoutMs ?? CommandQueue.OPERATION_TIMEOUT_MS);
 
         try {
           // Check if already aborted before starting

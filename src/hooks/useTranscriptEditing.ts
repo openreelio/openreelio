@@ -11,7 +11,7 @@ import { createLogger } from '@/services/logger';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
-import { applyProjectState, refreshProjectState } from '@/utils/stateRefreshHelper';
+import { runProjectBackendMutation } from '@/services/projectMutationGateway';
 import {
   getClipSourceTimeAtTimelineTime,
   getClipTimelineTimeAtSourceTime,
@@ -216,28 +216,20 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
     mutationInFlightRef.current = true;
     setError(null);
     try {
-      await invoke('delete_transcript_range', {
-        args: {
-          sequenceId: clipInfo.sequenceId,
-          trackId: clipInfo.trackId,
-          clipId: clipInfo.clipId,
-          startSec: startWord.startSec,
-          endSec: endWord.endSec,
-        },
-      });
+      await runProjectBackendMutation('deleteTranscriptRange', () =>
+        invoke('delete_transcript_range', {
+          args: {
+            sequenceId: clipInfo.sequenceId,
+            trackId: clipInfo.trackId,
+            clipId: clipInfo.clipId,
+            startSec: startWord.startSec,
+            endSec: endWord.endSec,
+          },
+        }),
+      );
       if (isMountedRef.current) {
         setSelection(null);
         setLoadTrigger((t) => t + 1); // Trigger reload after edit
-      }
-
-      // Refresh project state after timeline modifications
-      const freshState = await refreshProjectState();
-      if (isMountedRef.current) {
-        useProjectStore.setState((state) => {
-          state.isDirty = true;
-          state.stateVersion += 1;
-          applyProjectState(state, freshState);
-        });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -264,29 +256,21 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
       mutationInFlightRef.current = true;
       setError(null);
       try {
-        await invoke('reorder_transcript_segment', {
-          args: {
-            sequenceId: clipInfo.sequenceId,
-            trackId: clipInfo.trackId,
-            clipId: clipInfo.clipId,
-            sourceStartSec: startWord.startSec,
-            sourceEndSec: endWord.endSec,
-            targetPositionSec: targetTimelineSec,
-          },
-        });
+        await runProjectBackendMutation('reorderTranscriptSegment', () =>
+          invoke('reorder_transcript_segment', {
+            args: {
+              sequenceId: clipInfo.sequenceId,
+              trackId: clipInfo.trackId,
+              clipId: clipInfo.clipId,
+              sourceStartSec: startWord.startSec,
+              sourceEndSec: endWord.endSec,
+              targetPositionSec: targetTimelineSec,
+            },
+          }),
+        );
         if (isMountedRef.current) {
           setSelection(null);
           setLoadTrigger((t) => t + 1);
-        }
-
-        // Refresh project state after timeline modifications
-        const freshState = await refreshProjectState();
-        if (isMountedRef.current) {
-          useProjectStore.setState((state) => {
-            state.isDirty = true;
-            state.stateVersion += 1;
-            applyProjectState(state, freshState);
-          });
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
