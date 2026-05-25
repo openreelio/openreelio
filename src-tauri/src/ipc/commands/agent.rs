@@ -22,6 +22,7 @@ use crate::core::assets::{
 };
 use crate::core::commands::ImportAssetCommand;
 use crate::core::credentials::{CredentialType, CredentialVault};
+use crate::core::external_agent::{ConsumeExternalAgentApprovalTokenInput, PLAN_APPLY_SCOPE};
 use crate::core::plugin::api::{
     AssetProviderPlugin, PluginAssetRef, PluginAssetType, PluginSearchQuery,
 };
@@ -376,16 +377,111 @@ struct PlanStepFailedEvent {
     error: String,
 }
 
+fn build_agent_plan_failure(
+    plan_id: String,
+    total_steps: usize,
+    start: std::time::Instant,
+    error_message: impl Into<String>,
+) -> AgentPlanResult {
+    AgentPlanResult {
+        plan_id,
+        success: false,
+        total_steps,
+        steps_completed: 0,
+        step_results: vec![],
+        operation_ids: vec![],
+        rollback_report: None,
+        error_message: Some(error_message.into()),
+        execution_time_ms: start.elapsed().as_millis() as u64,
+    }
+}
+
+async fn consume_agent_plan_approval_proof(
+    plan: &AgentPlan,
+    project_id: &str,
+    state: &State<'_, AppState>,
+) -> Result<(), String> {
+    let Some(proof) = plan.approval_proof.as_ref() else {
+        if plan_requires_backend_approval_proof(plan) {
+            return Err("Plan approval proof is required".to_string());
+        }
+        return Ok(());
+    };
+
+    let token = proof.token.trim();
+    if token.is_empty() {
+        return Err("Plan approval proof token is required".to_string());
+    }
+
+    let session_id = plan
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Plan sessionId is required for approval proof validation".to_string())?;
+
+    let approved_project_id = proof.project_id.trim();
+    if approved_project_id.is_empty() {
+        return Err("Plan approval proof projectId is required".to_string());
+    }
+    if approved_project_id != project_id {
+        return Err("Plan approval proof projectId does not match the active project".to_string());
+    }
+
+    let runtime_id = proof.runtime_id.trim();
+    if runtime_id.is_empty() {
+        return Err("Plan approval proof runtimeId is required".to_string());
+    }
+
+    let required_scope = proof
+        .required_scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(PLAN_APPLY_SCOPE);
+
+    let mut token_store = state.external_agent_approval_tokens.lock().await;
+    let validation = token_store.consume(
+        ConsumeExternalAgentApprovalTokenInput {
+            token: token.to_string(),
+            session_id: session_id.to_string(),
+            plan_id: Some(plan.id.clone()),
+            project_id: project_id.to_string(),
+            runtime_id: runtime_id.to_string(),
+            required_scope: required_scope.to_string(),
+        },
+        chrono::Utc::now().timestamp_millis(),
+    );
+
+    if validation.valid {
+        Ok(())
+    } else {
+        Err(validation
+            .reason
+            .unwrap_or_else(|| "Plan approval proof was rejected".to_string()))
+    }
+}
+
+fn plan_requires_backend_approval_proof(plan: &AgentPlan) -> bool {
+    plan.id.starts_with("codex-")
+        || plan
+            .session_id
+            .as_deref()
+            .map(|session_id| session_id.starts_with("thr_"))
+            .unwrap_or(false)
+}
+
 /// Execute an agent plan atomically against the active project.
 ///
 /// Runs each plan step as a command through the CommandExecutor,
 /// respecting step dependencies via topological sort and resolving
 /// `$fromStep`/`$path` references between steps.
 ///
-/// On failure, attempts to rollback completed steps in reverse order
-/// using the CommandExecutor's undo stack. Emits Tauri events for
-/// each step's lifecycle (`agent:plan_step_start`, `agent:plan_step_complete`,
-/// `agent:plan_step_failed`).
+/// On failure, rolls back completed steps in reverse order and marks their
+/// persisted operation IDs as discarded so the append-only ops log cannot
+/// resurrect partial plan work on reopen or history sync. Emits Tauri events
+/// for each step's lifecycle (`agent:plan_step_start`,
+/// `agent:plan_step_complete`, `agent:plan_step_failed`).
 #[tauri::command]
 #[specta::specta]
 #[tracing::instrument(skip(app, state), fields(plan_id = %plan.id))]
@@ -398,19 +494,23 @@ pub async fn execute_agent_plan(
     let plan_id = plan.id.clone();
     let total_steps = plan.steps.len();
 
+    if !plan.approval_granted {
+        return Ok(build_agent_plan_failure(
+            plan_id,
+            total_steps,
+            start,
+            "Plan approval was not granted",
+        ));
+    }
+
     // Validate plan is non-empty
     if plan.steps.is_empty() {
-        return Ok(AgentPlanResult {
+        return Ok(build_agent_plan_failure(
             plan_id,
-            success: false,
-            total_steps: 0,
-            steps_completed: 0,
-            step_results: vec![],
-            operation_ids: vec![],
-            rollback_report: None,
-            error_message: Some("Plan has no steps to execute".to_string()),
-            execution_time_ms: start.elapsed().as_millis() as u64,
-        });
+            0,
+            start,
+            "Plan has no steps to execute",
+        ));
     }
 
     // Validate plan structure and compute execution order
@@ -419,11 +519,32 @@ pub async fn execute_agent_plan(
         .validate_and_prepare()
         .map_err(|e| format!("Plan validation failed: {e}"))?;
 
-    // Lock the project for the duration of plan execution
+    let approved_project_id = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        project.state.meta.id.clone()
+    };
+
+    if let Err(error) = consume_agent_plan_approval_proof(&plan, &approved_project_id, &state).await
+    {
+        return Ok(build_agent_plan_failure(plan_id, total_steps, start, error));
+    }
+
+    // Lock the project for the duration of plan execution.
     let mut guard = state.project.lock().await;
     let project = guard
         .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+    if project.state.meta.id != approved_project_id {
+        return Ok(build_agent_plan_failure(
+            plan_id,
+            total_steps,
+            start,
+            "Active project changed after plan approval",
+        ));
+    }
     let project_path = project.path.clone();
 
     let mut step_results: Vec<StepResult> = Vec::with_capacity(total_steps);
@@ -660,7 +781,7 @@ pub async fn execute_agent_plan(
     })
 }
 
-/// Rollback completed steps in reverse order using the CommandExecutor's undo stack.
+/// Rollback completed steps in reverse order and exclude their persisted ops from history replay.
 fn rollback_steps(
     project: &mut crate::ActiveProject,
     executor: &PlanExecutor,
@@ -678,6 +799,10 @@ fn rollback_steps(
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let mut rollback_errors = Vec::new();
+    let completed_operation_ids = step_results
+        .iter()
+        .filter_map(|result| result.operation_id.clone())
+        .collect::<Vec<_>>();
 
     for step_id in &report.rolled_back_steps.clone() {
         match project.executor.undo(&mut project.state) {
@@ -692,6 +817,24 @@ fn rollback_steps(
                 rollback_errors.push(error_msg);
                 // Stop rollback on first undo failure to avoid inconsistent state
                 break;
+            }
+        }
+    }
+
+    if !completed_operation_ids.is_empty() {
+        match project.discard_persisted_operations(&completed_operation_ids) {
+            Ok(()) => {
+                tracing::debug!(
+                    discarded_ops = completed_operation_ids.len(),
+                    "Discarded rolled-back agent plan operations from persisted history"
+                );
+            }
+            Err(e) => {
+                let error_msg =
+                    format!("Failed to discard rolled-back operations from persisted history: {e}");
+                tracing::error!("{}", error_msg);
+                rollback_errors.push(error_msg);
+                failed = failed.max(1);
             }
         }
     }

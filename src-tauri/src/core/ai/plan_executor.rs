@@ -559,6 +559,7 @@ mod tests {
                 make_step("step-3", vec!["step-2"]),
             ],
             approval_granted: true,
+            approval_proof: None,
             session_id: None,
         };
 
@@ -588,6 +589,7 @@ mod tests {
             goal: "Fail immediately".to_string(),
             steps: vec![make_step("step-1", vec![])],
             approval_granted: true,
+            approval_proof: None,
             session_id: None,
         };
 
@@ -618,6 +620,7 @@ mod tests {
                 make_step("step-4", vec!["step-3"]),
             ],
             approval_granted: true,
+            approval_proof: None,
             session_id: None,
         };
 
@@ -662,6 +665,7 @@ mod tests {
                 make_step("step-3", vec!["step-1"]),
             ],
             approval_granted: true,
+            approval_proof: None,
             session_id: None,
         };
 
@@ -680,6 +684,7 @@ mod tests {
             goal: "Bad plan".to_string(),
             steps: vec![make_step("a", vec!["b"]), make_step("b", vec!["a"])],
             approval_granted: true,
+            approval_proof: None,
             session_id: None,
         };
 
@@ -697,6 +702,7 @@ mod tests {
             goal: "Plan with duplicate IDs".to_string(),
             steps: vec![make_step("step-1", vec![]), make_step("step-1", vec![])],
             approval_granted: true,
+            approval_proof: None,
             session_id: None,
         };
 
@@ -714,6 +720,7 @@ mod tests {
             goal: "Test accessor".to_string(),
             steps: vec![],
             approval_granted: false,
+            approval_proof: None,
             session_id: Some("sess-1".to_string()),
         };
 
@@ -807,6 +814,7 @@ mod tests {
                 },
             ],
             approval_granted: true,
+            approval_proof: None,
             session_id: Some("integration-test".to_string()),
         };
 

@@ -427,6 +427,7 @@ impl ActiveProject {
             base_meta: Some(state.meta.clone()),
             applied_op_ids: vec![default_sequence_result.op_id],
             redo_op_ids: Vec::new(),
+            discarded_op_ids: Vec::new(),
             protected_prefix_len: 1,
         };
         history.save(&history_path)?;
@@ -636,6 +637,7 @@ impl ActiveProject {
             .applied_op_ids
             .iter()
             .chain(history.redo_op_ids.iter())
+            .chain(history.discarded_op_ids.iter())
             .map(String::as_str)
             .collect();
         let new_ids = if let Some(last_known_index) = operations
@@ -693,6 +695,32 @@ impl ActiveProject {
     ) -> crate::core::CoreResult<()> {
         let read_result = self.ops_log.read_all_with_archive()?;
         Self::sync_history_with_operations(&mut candidate_history, &read_result.operations);
+        let candidate_state =
+            self.build_state_from_operations(&mut candidate_history, &read_result.operations)?;
+        candidate_history.save(&self.history_path)?;
+
+        self.history = candidate_history;
+        self.state = candidate_state;
+        self.executor.clear_history();
+
+        Ok(())
+    }
+
+    pub(crate) fn discard_persisted_operations(
+        &mut self,
+        op_ids: &[OpId],
+    ) -> crate::core::CoreResult<()> {
+        if op_ids.is_empty() {
+            return Ok(());
+        }
+
+        let read_result = self.ops_log.read_all_with_archive()?;
+        Self::sync_history_with_operations(&mut self.history, &read_result.operations);
+
+        let mut candidate_history = self.history.clone();
+        candidate_history.discard_operations(op_ids.iter().cloned());
+        candidate_history.sanitize(&read_result.operations);
+
         let candidate_state =
             self.build_state_from_operations(&mut candidate_history, &read_result.operations)?;
         candidate_history.save(&self.history_path)?;
@@ -1230,6 +1258,7 @@ mod tauri_app {
             tauri_specta::collect_commands![
                 // App lifecycle / runtime sync
                 $crate::ipc::app_cleanup,
+                $crate::ipc::list_system_font_families,
                 $crate::ipc::set_playhead_position,
                 $crate::ipc::get_playhead_position,
                 // Project commands
@@ -1241,6 +1270,9 @@ mod tauri_app {
                 $crate::ipc::get_project_info,
                 $crate::ipc::get_project_state,
                 $crate::ipc::get_sequence_text_clip_data,
+                $crate::ipc::get_sequence_hdr_settings,
+                $crate::ipc::get_sequence_render_graph,
+                $crate::ipc::get_effect_capabilities,
                 // Asset commands
                 $crate::ipc::import_asset,
                 $crate::ipc::get_assets,
@@ -1441,6 +1473,7 @@ mod tauri_app {
                 // Workspace commands
                 $crate::ipc::scan_workspace,
                 $crate::ipc::get_workspace_tree,
+                $crate::ipc::import_external_files_to_workspace,
                 $crate::ipc::reveal_in_explorer,
                 $crate::ipc::list_workspace_documents,
                 $crate::ipc::read_workspace_document,
@@ -1708,6 +1741,7 @@ mod tauri_app {
             greet,
             // App lifecycle
             ipc::app_cleanup,
+            ipc::list_system_font_families,
             ipc::set_playhead_position,
             ipc::get_playhead_position,
             // Project commands
@@ -1719,6 +1753,9 @@ mod tauri_app {
             ipc::get_project_info,
             ipc::get_project_state,
             ipc::get_sequence_text_clip_data,
+            ipc::get_sequence_hdr_settings,
+            ipc::get_sequence_render_graph,
+            ipc::get_effect_capabilities,
             // Asset commands
             ipc::import_asset,
             ipc::get_assets,
@@ -1920,6 +1957,7 @@ mod tauri_app {
             // Workspace commands
             ipc::scan_workspace,
             ipc::get_workspace_tree,
+            ipc::import_external_files_to_workspace,
             ipc::reveal_in_explorer,
             ipc::list_workspace_documents,
             ipc::read_workspace_document,
@@ -2236,6 +2274,86 @@ mod tests {
             Some(concurrent_op_id.as_str())
         );
         assert!(project.history.redo_op_ids.is_empty());
+    }
+
+    #[test]
+    fn test_active_project_discard_persisted_operations_survives_reopen() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("history_discard_project");
+
+        let mut project = ActiveProject::create("History Discard", project_path.clone()).unwrap();
+        let result = project
+            .executor
+            .execute(
+                Box::new(
+                    crate::core::commands::UpdateProjectSettingsCommand::new()
+                        .with_name("Discarded Name"),
+                ),
+                &mut project.state,
+            )
+            .unwrap();
+
+        assert_eq!(project.state.meta.name, "Discarded Name");
+
+        project
+            .discard_persisted_operations(&[result.op_id.clone()])
+            .unwrap();
+        project.save().unwrap();
+
+        assert_eq!(project.state.meta.name, "History Discard");
+        assert!(!project.history.applied_op_ids.contains(&result.op_id));
+        assert!(!project.history.redo_op_ids.contains(&result.op_id));
+        assert!(project.history.discarded_op_ids.contains(&result.op_id));
+
+        let reopened = ActiveProject::open(project_path).unwrap();
+        assert_eq!(reopened.state.meta.name, "History Discard");
+        assert!(!reopened.history.applied_op_ids.contains(&result.op_id));
+        assert!(reopened.history.discarded_op_ids.contains(&result.op_id));
+    }
+
+    #[test]
+    fn test_active_project_sync_appends_new_ops_after_discarded_operations() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("history_discard_future_project");
+
+        let mut project = ActiveProject::create("History Future", project_path.clone()).unwrap();
+        let discarded = project
+            .executor
+            .execute(
+                Box::new(
+                    crate::core::commands::UpdateProjectSettingsCommand::new()
+                        .with_name("Discarded Name"),
+                ),
+                &mut project.state,
+            )
+            .unwrap();
+
+        project
+            .discard_persisted_operations(&[discarded.op_id.clone()])
+            .unwrap();
+
+        let kept = project
+            .executor
+            .execute(
+                Box::new(
+                    crate::core::commands::UpdateProjectSettingsCommand::new()
+                        .with_name("Kept Name"),
+                ),
+                &mut project.state,
+            )
+            .unwrap();
+        project.save().unwrap();
+
+        assert_eq!(project.state.meta.name, "Kept Name");
+        assert!(project.history.discarded_op_ids.contains(&discarded.op_id));
+        assert!(!project.history.applied_op_ids.contains(&discarded.op_id));
+        assert!(project.history.applied_op_ids.contains(&kept.op_id));
+
+        let reopened = ActiveProject::open(project_path).unwrap();
+        assert_eq!(reopened.state.meta.name, "Kept Name");
+        assert!(reopened.history.discarded_op_ids.contains(&discarded.op_id));
+        assert!(!reopened.history.applied_op_ids.contains(&discarded.op_id));
+        assert!(reopened.history.applied_op_ids.contains(&kept.op_id));
     }
 
     #[test]
