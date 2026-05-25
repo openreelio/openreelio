@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tauri::State;
@@ -17,7 +18,8 @@ use walkdir::{DirEntry, WalkDir};
 
 use crate::core::assets::{media_kind_from_extension, AssetKind};
 use crate::core::fs::{
-    validate_scoped_output_path, validate_workspace_relative_path, write_bytes_atomic_no_symlink,
+    validate_local_input_path, validate_scoped_output_path, validate_workspace_relative_path,
+    write_bytes_atomic_no_symlink,
 };
 use crate::core::project::{OpKind, Operation};
 use crate::core::workspace::{
@@ -47,6 +49,35 @@ pub struct WorkspaceScanResultDto {
     pub registered_files: usize,
     /// Number of files auto-registered during this scan
     pub auto_registered_files: usize,
+}
+
+/// A file imported into the workspace from an external OS file drop.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalWorkspaceImportedFileDto {
+    pub source_path: String,
+    pub relative_path: String,
+    pub name: String,
+    pub kind: AssetKind,
+    pub file_size: u64,
+    pub asset_id: Option<String>,
+    pub already_in_workspace: bool,
+}
+
+/// Per-file import failure for batch external drops.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalWorkspaceImportFailureDto {
+    pub source_path: String,
+    pub message: String,
+}
+
+/// Result returned after importing external OS files into the workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalWorkspaceImportResultDto {
+    pub imported_files: Vec<ExternalWorkspaceImportedFileDto>,
+    pub failed_files: Vec<ExternalWorkspaceImportFailureDto>,
 }
 
 /// A file tree entry for the frontend
@@ -507,6 +538,133 @@ pub async fn get_workspace_tree(
         .collect())
 }
 
+/// Import absolute local file paths from an OS drag/drop into the project workspace.
+#[tauri::command]
+#[specta::specta]
+pub async fn import_external_files_to_workspace(
+    source_paths: Vec<String>,
+    target_dir: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<ExternalWorkspaceImportResultDto, String> {
+    if source_paths.is_empty() {
+        return Err("At least one source path is required".to_string());
+    }
+
+    let project_root = {
+        let guard = state.project.lock().await;
+        guard
+            .as_ref()
+            .map(|project| project.path.clone())
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?
+    };
+
+    let normalized_target_dir = normalize_external_import_target_dir(target_dir.as_deref())?;
+    let source_paths_for_copy = source_paths;
+    let target_dir_for_copy = normalized_target_dir.clone();
+    let project_root_for_copy = project_root.clone();
+
+    let mut result = tokio::task::spawn_blocking(move || {
+        copy_external_files_into_workspace(
+            &project_root_for_copy,
+            &source_paths_for_copy,
+            target_dir_for_copy.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("External workspace import task failed: {e}"))??;
+
+    if result.imported_files.is_empty() {
+        return Ok(result);
+    }
+
+    let imported_relative_paths: Vec<String>;
+
+    {
+        let mut guard = state.project.lock().await;
+        let project = guard
+            .as_mut()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        if project.path != project_root {
+            return Err("Project changed while importing external files".to_string());
+        }
+
+        let existing_asset_ids: HashSet<String> = project.state.assets.keys().cloned().collect();
+        let service = WorkspaceService::open(project.path.clone()).map_err(|e| e.to_ipc_error())?;
+
+        for imported_file in &result.imported_files {
+            if let Err(error) = service.handle_event(&WorkspaceEvent::FileAdded(
+                imported_file.relative_path.clone(),
+            )) {
+                result.failed_files.push(ExternalWorkspaceImportFailureDto {
+                    source_path: imported_file.source_path.clone(),
+                    message: format!(
+                        "File was copied but could not be indexed as '{}': {}",
+                        imported_file.relative_path, error
+                    ),
+                });
+            }
+        }
+
+        service
+            .auto_register_discovered_files(&mut project.state, &project.path)
+            .map_err(|e| e.to_ipc_error())?;
+
+        let new_asset_ids: Vec<String> = project
+            .state
+            .assets
+            .keys()
+            .filter(|asset_id| !existing_asset_ids.contains(*asset_id))
+            .cloned()
+            .collect();
+
+        record_workspace_asset_imports(project, &new_asset_ids)?;
+
+        for imported_file in &mut result.imported_files {
+            imported_file.asset_id = project
+                .state
+                .assets
+                .values()
+                .find(|asset| {
+                    asset.relative_path.as_deref() == Some(imported_file.relative_path.as_str())
+                })
+                .map(|asset| asset.id.clone());
+        }
+
+        for asset in project.state.assets.values() {
+            if asset.workspace_managed {
+                let resolved_path = PathBuf::from(&asset.uri);
+                state.allow_asset_protocol_file(&resolved_path);
+            }
+        }
+
+        imported_relative_paths = result
+            .imported_files
+            .iter()
+            .map(|file| file.relative_path.clone())
+            .collect();
+    }
+
+    if let Some(app_handle) = state.app_handle.get() {
+        for relative_path in imported_relative_paths {
+            let payload = serde_json::json!({
+                "relativePath": relative_path,
+                "kind": kind_string_for_path(&relative_path),
+            });
+
+            if let Err(error) = app_handle.emit("workspace:file-added", payload) {
+                tracing::warn!(
+                    path = %relative_path,
+                    error = %error,
+                    "Failed to emit external workspace import event"
+                );
+            }
+        }
+    }
+
+    Ok(result)
+}
+
 /// Reveal a workspace file in the system file explorer
 #[tauri::command]
 #[specta::specta]
@@ -541,8 +699,13 @@ pub async fn reveal_in_explorer(
     #[cfg(target_os = "windows")]
     {
         let path_str = abs_path.to_string_lossy().to_string();
-        std::process::Command::new("explorer")
-            .args(["/select,", &path_str])
+        let mut command = std::process::Command::new("explorer");
+        if abs_path.is_file() {
+            command.args(["/select,", &path_str]);
+        } else {
+            command.arg(&path_str);
+        }
+        command
             .spawn()
             .map_err(|e| format!("Failed to open explorer: {}", e))?;
     }
@@ -932,6 +1095,342 @@ fn resolve_workspace_output_path(
     validate_scoped_output_path(&absolute_str, "workspace document path", &[project_root])
 }
 
+fn normalize_external_import_target_dir(
+    target_dir: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(raw_target_dir) = target_dir.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let relative = validate_workspace_relative_path(raw_target_dir)?;
+    Ok(normalize_workspace_relative_path(&relative))
+}
+
+fn normalize_workspace_relative_path(path: &Path) -> Option<String> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn workspace_relative_path(project_root: &Path, absolute_path: &Path) -> Result<String, String> {
+    let relative = absolute_path
+        .strip_prefix(project_root)
+        .map_err(|_| "Path is outside the project directory".to_string())?;
+    let normalized = relative.to_string_lossy().replace('\\', "/");
+    validate_workspace_relative_path(&normalized)?;
+    Ok(normalized)
+}
+
+fn parent_workspace_dir(relative_path: &str) -> Option<String> {
+    Path::new(relative_path)
+        .parent()
+        .and_then(normalize_workspace_relative_path)
+}
+
+fn resolve_external_import_target_directory(
+    project_root: &Path,
+    target_dir: Option<&str>,
+) -> Result<PathBuf, String> {
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve project root: {e}"))?;
+
+    let directory = match target_dir {
+        Some(relative_dir) if !relative_dir.is_empty() => {
+            let relative = validate_workspace_relative_path(relative_dir)?;
+            canonical_root.join(relative)
+        }
+        _ => canonical_root.clone(),
+    };
+
+    let canonical_directory = directory
+        .canonicalize()
+        .map_err(|e| format!("Drop target folder not found: {e}"))?;
+
+    if !canonical_directory.starts_with(&canonical_root) {
+        return Err("Drop target is outside the project directory".to_string());
+    }
+
+    if !canonical_directory.is_dir() {
+        return Err("Drop target is not a workspace folder".to_string());
+    }
+
+    Ok(canonical_directory)
+}
+
+fn sanitize_external_import_file_name(file_name: &str) -> String {
+    let sanitized = file_name
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '\0' | '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*'
+                )
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .trim_matches('.')
+        .to_string();
+
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        "imported-file".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn collision_file_name(file_name: &str, collision_index: usize) -> String {
+    if collision_index == 0 {
+        return file_name.to_string();
+    }
+
+    let path = Path::new(file_name);
+    let extension = path.extension().and_then(|value| value.to_str());
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(file_name);
+
+    match extension {
+        Some(extension) if !extension.is_empty() => {
+            format!("{stem} {collision_index}.{extension}")
+        }
+        _ => format!("{file_name} {collision_index}"),
+    }
+}
+
+fn unique_external_import_destination(
+    project_root: &Path,
+    target_dir: Option<&str>,
+    file_name: &str,
+    reserved_relative_paths: &mut HashSet<String>,
+) -> Result<(PathBuf, String), String> {
+    for collision_index in 0..10_000 {
+        let candidate_name = collision_file_name(file_name, collision_index);
+        let relative_path = match target_dir {
+            Some(target_dir) if !target_dir.is_empty() => format!("{target_dir}/{candidate_name}"),
+            _ => candidate_name,
+        };
+
+        validate_workspace_relative_path(&relative_path)?;
+
+        if reserved_relative_paths.contains(&relative_path) {
+            continue;
+        }
+
+        let absolute_path = project_root.join(&relative_path);
+        let absolute_path_string = absolute_path.to_string_lossy().to_string();
+        let validated_path = validate_scoped_output_path(
+            &absolute_path_string,
+            "workspace import path",
+            &[project_root],
+        )?;
+
+        if validated_path.exists() {
+            continue;
+        }
+
+        reserved_relative_paths.insert(relative_path.clone());
+        return Ok((validated_path, relative_path));
+    }
+
+    Err(format!(
+        "Could not find an available destination name for '{}'",
+        file_name
+    ))
+}
+
+fn copy_file_no_overwrite(source_path: &Path, destination_path: &Path) -> Result<u64, String> {
+    let parent = destination_path
+        .parent()
+        .ok_or_else(|| format!("Destination has no parent: {}", destination_path.display()))?;
+
+    let mut source_file = std::fs::File::open(source_path).map_err(|e| {
+        format!(
+            "Failed to open source file '{}': {e}",
+            source_path.display()
+        )
+    })?;
+    let mut temp_file = tempfile::Builder::new()
+        .prefix(".openreelio-import-")
+        .tempfile_in(parent)
+        .map_err(|e| format!("Failed to create temporary import file: {e}"))?;
+
+    let bytes_copied = std::io::copy(&mut source_file, temp_file.as_file_mut())
+        .map_err(|e| format!("Failed to copy file '{}': {e}", source_path.display()))?;
+
+    temp_file
+        .as_file_mut()
+        .sync_all()
+        .map_err(|e| format!("Failed to flush imported file: {e}"))?;
+
+    match temp_file.persist_noclobber(destination_path) {
+        Ok(_) => Ok(bytes_copied),
+        Err(error) => Err(format!(
+            "Failed to finalize imported file '{}': {}",
+            destination_path.display(),
+            error.error
+        )),
+    }
+}
+
+fn copy_external_files_into_workspace(
+    project_root: &Path,
+    source_paths: &[String],
+    target_dir: Option<&str>,
+) -> Result<ExternalWorkspaceImportResultDto, String> {
+    let canonical_project_root = project_root
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve project root: {e}"))?;
+    let target_directory =
+        resolve_external_import_target_directory(&canonical_project_root, target_dir)?;
+    let normalized_target_dir = target_dir.and_then(|value| {
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    });
+
+    let mut imported_files = Vec::new();
+    let mut failed_files = Vec::new();
+    let mut seen_sources: HashSet<PathBuf> = HashSet::new();
+    let mut reserved_relative_paths: HashSet<String> = HashSet::new();
+
+    for source_path in source_paths {
+        match copy_single_external_file_into_workspace(
+            &canonical_project_root,
+            &target_directory,
+            normalized_target_dir.as_deref(),
+            source_path,
+            &mut seen_sources,
+            &mut reserved_relative_paths,
+        ) {
+            Ok(Some(imported_file)) => imported_files.push(imported_file),
+            Ok(None) => {}
+            Err(message) => failed_files.push(ExternalWorkspaceImportFailureDto {
+                source_path: source_path.clone(),
+                message,
+            }),
+        }
+    }
+
+    Ok(ExternalWorkspaceImportResultDto {
+        imported_files,
+        failed_files,
+    })
+}
+
+fn copy_single_external_file_into_workspace(
+    canonical_project_root: &Path,
+    target_directory: &Path,
+    target_dir: Option<&str>,
+    source_path: &str,
+    seen_sources: &mut HashSet<PathBuf>,
+    reserved_relative_paths: &mut HashSet<String>,
+) -> Result<Option<ExternalWorkspaceImportedFileDto>, String> {
+    let source = validate_local_input_path(source_path, "sourcePath")?;
+    if !seen_sources.insert(source.clone()) {
+        return Ok(None);
+    }
+
+    let file_name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("Invalid source file name: {}", source.display()))?;
+    let file_name = sanitize_external_import_file_name(file_name);
+    let extension = Path::new(&file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let kind = media_kind_from_extension(extension).ok_or_else(|| {
+        format!(
+            "Unsupported file type '{}'",
+            Path::new(&file_name)
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("unknown")
+        )
+    })?;
+
+    let metadata = std::fs::metadata(&source)
+        .map_err(|e| format!("Failed to read source metadata '{}': {e}", source.display()))?;
+
+    let source_workspace_relative = if source.starts_with(canonical_project_root) {
+        Some(workspace_relative_path(canonical_project_root, &source)?)
+    } else {
+        None
+    };
+
+    let desired_relative_path =
+        workspace_relative_path(canonical_project_root, &target_directory.join(&file_name))?;
+
+    if let Some(existing_relative_path) = source_workspace_relative.as_ref() {
+        let existing_parent = parent_workspace_dir(existing_relative_path);
+        if existing_parent.as_deref() == target_dir
+            && Path::new(existing_relative_path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                == Some(file_name.as_str())
+        {
+            return Ok(Some(ExternalWorkspaceImportedFileDto {
+                source_path: source_path.to_string(),
+                relative_path: existing_relative_path.clone(),
+                name: file_name,
+                kind,
+                file_size: metadata.len(),
+                asset_id: None,
+                already_in_workspace: true,
+            }));
+        }
+    }
+
+    let (destination_path, relative_path) =
+        if !canonical_project_root.join(&desired_relative_path).exists()
+            && !reserved_relative_paths.contains(&desired_relative_path)
+        {
+            validate_workspace_relative_path(&desired_relative_path)?;
+            let absolute_path = canonical_project_root.join(&desired_relative_path);
+            let absolute_path_string = absolute_path.to_string_lossy().to_string();
+            let validated_path = validate_scoped_output_path(
+                &absolute_path_string,
+                "workspace import path",
+                &[canonical_project_root],
+            )?;
+            reserved_relative_paths.insert(desired_relative_path.clone());
+            (validated_path, desired_relative_path)
+        } else {
+            unique_external_import_destination(
+                canonical_project_root,
+                target_dir,
+                &file_name,
+                reserved_relative_paths,
+            )?
+        };
+
+    copy_file_no_overwrite(&source, &destination_path)?;
+
+    Ok(Some(ExternalWorkspaceImportedFileDto {
+        source_path: source_path.to_string(),
+        relative_path,
+        name: file_name,
+        kind,
+        file_size: metadata.len(),
+        asset_id: None,
+        already_in_workspace: false,
+    }))
+}
+
 /// Convert internal FileTreeEntry to DTO, populating asset_id and missing flag
 /// from project state when the index entry doesn't have them yet.
 fn convert_tree_entry_with_assets(
@@ -1174,5 +1673,75 @@ mod tests {
         let output = resolve_workspace_output_path(root, "docs/new.md").unwrap();
         assert!(output.ends_with(Path::new("docs/new.md")));
         assert!(root.join("docs").is_dir());
+    }
+
+    #[test]
+    fn sanitize_external_import_file_name_replaces_unsafe_characters() {
+        assert_eq!(
+            sanitize_external_import_file_name("my:clip?.mp4"),
+            "my_clip_.mp4"
+        );
+        assert_eq!(sanitize_external_import_file_name("..."), "imported-file");
+    }
+
+    #[test]
+    fn unique_external_import_destination_uses_collision_suffixes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("footage")).unwrap();
+        fs::write(root.join("footage/clip.mp4"), "existing").unwrap();
+
+        let mut reserved = HashSet::new();
+        let (_path, relative_path) =
+            unique_external_import_destination(root, Some("footage"), "clip.mp4", &mut reserved)
+                .unwrap();
+
+        assert_eq!(relative_path, "footage/clip 1.mp4");
+        assert!(reserved.contains("footage/clip 1.mp4"));
+    }
+
+    #[test]
+    fn copy_external_files_into_workspace_copies_supported_media_to_target_dir() {
+        let project = tempfile::tempdir().unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(project.path().join("footage")).unwrap();
+        fs::write(source_dir.path().join("clip.mp4"), b"media").unwrap();
+
+        let source_path = source_dir
+            .path()
+            .join("clip.mp4")
+            .to_string_lossy()
+            .to_string();
+        let result =
+            copy_external_files_into_workspace(project.path(), &[source_path], Some("footage"))
+                .unwrap();
+
+        assert!(result.failed_files.is_empty());
+        assert_eq!(result.imported_files.len(), 1);
+        assert_eq!(result.imported_files[0].relative_path, "footage/clip.mp4");
+        assert_eq!(result.imported_files[0].kind, AssetKind::Video);
+        assert!(project.path().join("footage/clip.mp4").is_file());
+    }
+
+    #[test]
+    fn copy_external_files_into_workspace_reports_unsupported_files() {
+        let project = tempfile::tempdir().unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        fs::write(source_dir.path().join("notes.txt"), b"text").unwrap();
+
+        let source_path = source_dir
+            .path()
+            .join("notes.txt")
+            .to_string_lossy()
+            .to_string();
+        let result = copy_external_files_into_workspace(project.path(), &[source_path], None)
+            .expect("batch import should return per-file failures");
+
+        assert!(result.imported_files.is_empty());
+        assert_eq!(result.failed_files.len(), 1);
+        assert!(result.failed_files[0]
+            .message
+            .contains("Unsupported file type"));
+        assert!(!project.path().join("notes.txt").exists());
     }
 }

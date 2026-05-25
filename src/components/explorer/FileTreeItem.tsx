@@ -2,8 +2,8 @@
  * FileTreeItem Component
  *
  * Individual file or folder item in the workspace file tree.
- * Supports expand/collapse for directories and drag for files.
- * All media files are draggable (auto-registered as assets by the backend).
+ * Supports expand/collapse for directories and timeline drops for files.
+ * All media files can be dragged to the timeline (auto-registered by the backend).
  */
 
 import { useState, useCallback, type DragEvent, type MouseEvent } from 'react';
@@ -19,6 +19,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import type { FileTreeEntry, AssetKind } from '@/types';
+import { useTimelineAssetDragSource } from '@/hooks/useTimelineAssetDragSource';
 
 // =============================================================================
 // Types
@@ -103,6 +104,7 @@ export function FileTreeItem({
   const handleContextMenu = useCallback(
     (event: MouseEvent) => {
       event.preventDefault();
+      event.stopPropagation();
       onContextMenu?.(event, entry);
     },
     [entry, onContextMenu],
@@ -130,11 +132,28 @@ export function FileTreeItem({
     [entry, onDragStart],
   );
 
+  const getTimelineAssetDragPayload = useCallback(() => {
+    if (entry.isDirectory) {
+      return null;
+    }
+
+    return {
+      ...(entry.assetId != null ? { assetId: entry.assetId } : {}),
+      ...(entry.kind != null ? { assetKind: entry.kind } : {}),
+      label: entry.name,
+      workspaceRelativePath: entry.relativePath,
+    };
+  }, [entry]);
+
+  const timelineAssetDragSource = useTimelineAssetDragSource(getTimelineAssetDragPayload);
+
   const paddingLeft = 8 + depth * 16;
 
   return (
     <>
       <div
+        data-workspace-entry-path={entry.relativePath}
+        data-workspace-entry-directory={entry.isDirectory ? 'true' : 'false'}
         className={`flex items-center gap-1.5 py-0.5 text-sm cursor-pointer hover:bg-surface-active transition-colors group ${
           entry.missing ? 'opacity-50' : ''
         }`}
@@ -142,7 +161,8 @@ export function FileTreeItem({
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
-        draggable={!entry.isDirectory}
+        onPointerDown={timelineAssetDragSource.onPointerDown}
+        draggable={false}
         onDragStart={handleDragStart}
         title={entry.relativePath}
       >

@@ -6,6 +6,10 @@ import { renderHook, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useAssetDrop } from './useAssetDrop';
 import type { Sequence, Track, TrackKind } from '@/types';
+import {
+  TIMELINE_ASSET_DRAG_END_EVENT,
+  TIMELINE_ASSET_DRAG_MOVE_EVENT,
+} from '@/utils/timelineAssetDrag';
 
 // =============================================================================
 // Test Fixtures
@@ -675,6 +679,54 @@ describe('useAssetDrop', () => {
           timelinePosition: 0,
         }),
       );
+    });
+  });
+
+  describe('pointer-driven asset drag', () => {
+    it('should call onAssetDrop when an app-level asset drag ends over the timeline', () => {
+      const onAssetDrop = vi.fn();
+      const container = createTrackRowContainer([{ trackId: 'track-0', top: 0, height: 60 }]);
+      const { result } = renderHook(() =>
+        useAssetDrop({
+          ...defaultOptions,
+          onAssetDrop,
+          dropContainerRef: { current: container },
+        }),
+      );
+
+      act(() => {
+        document.dispatchEvent(
+          new CustomEvent(TIMELINE_ASSET_DRAG_MOVE_EVENT, {
+            detail: {
+              payload: { assetId: 'asset-1', assetKind: 'video' },
+              clientX: 300,
+              clientY: 30,
+            },
+          }),
+        );
+      });
+      expect(result.current.isDraggingOver).toBe(true);
+
+      act(() => {
+        document.dispatchEvent(
+          new CustomEvent(TIMELINE_ASSET_DRAG_END_EVENT, {
+            detail: {
+              payload: { assetId: 'asset-1', assetKind: 'video' },
+              clientX: 300,
+              clientY: 30,
+            },
+          }),
+        );
+      });
+
+      expect(result.current.isDraggingOver).toBe(false);
+      expect(onAssetDrop).toHaveBeenCalledWith({
+        assetId: 'asset-1',
+        assetKind: 'video',
+        trackId: 'track-0',
+        timelinePosition: 1,
+        editMode: 'overwrite',
+      });
     });
   });
 });

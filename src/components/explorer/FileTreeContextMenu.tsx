@@ -12,6 +12,7 @@ import {
   ExternalLink,
   Copy,
   Plus,
+  Upload,
   MessageSquare,
   Loader2,
 } from 'lucide-react';
@@ -26,6 +27,7 @@ export interface FileTreeContextMenuProps {
   onDelete?: (entry: FileTreeEntry) => void;
   onRevealInExplorer?: (relativePath: string) => void;
   onCopyPath?: (relativePath: string) => void;
+  onImportFiles?: (entry: FileTreeEntry) => void;
   onAddToTimeline?: (entry: FileTreeEntry) => void;
   onTranscribe?: (entry: FileTreeEntry) => void;
   isTranscribing?: boolean;
@@ -40,6 +42,7 @@ export function FileTreeContextMenu({
   onDelete,
   onRevealInExplorer,
   onCopyPath,
+  onImportFiles,
   onAddToTimeline,
   onTranscribe,
   isTranscribing = false,
@@ -90,6 +93,11 @@ export function FileTreeContextMenu({
     onClose();
   }, [entry.relativePath, onRevealInExplorer, onClose]);
 
+  const handleImportFiles = useCallback(() => {
+    onImportFiles?.(entry);
+    onClose();
+  }, [entry, onClose, onImportFiles]);
+
   const handleCopyPath = useCallback(() => {
     onCopyPath?.(entry.relativePath);
     onClose();
@@ -113,6 +121,12 @@ export function FileTreeContextMenu({
     !entry.isDirectory &&
     entry.assetId != null &&
     (entry.kind === 'video' || entry.kind === 'audio');
+  const isWorkspaceRoot = entry.relativePath === '';
+  const revealLabel = isWorkspaceRoot
+    ? 'Open Workspace Folder'
+    : entry.isDirectory
+      ? 'Open Folder in File Explorer'
+      : 'Reveal in File Explorer';
 
   // Ensure menu stays within viewport
   const style: React.CSSProperties = {
@@ -170,26 +184,41 @@ export function FileTreeContextMenu({
         </button>
       )}
 
+      {/* Import Files */}
+      {(entry.isDirectory || !isWorkspaceRoot) && (
+        <button
+          className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-editor-text hover:bg-surface-active transition-colors"
+          onClick={handleImportFiles}
+        >
+          <Upload className="w-3.5 h-3.5" />
+          Import Files...
+        </button>
+      )}
+
       {/* Rename */}
-      <button
-        className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-editor-text hover:bg-surface-active transition-colors"
-        onClick={handleRename}
-      >
-        <Pencil className="w-3.5 h-3.5" />
-        Rename
-      </button>
+      {!isWorkspaceRoot && (
+        <button
+          className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-editor-text hover:bg-surface-active transition-colors"
+          onClick={handleRename}
+        >
+          <Pencil className="w-3.5 h-3.5" />
+          Rename
+        </button>
+      )}
 
       {/* Divider */}
       <div className="my-1 border-t border-editor-border" />
 
       {/* Copy Path */}
-      <button
-        className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-editor-text hover:bg-surface-active transition-colors"
-        onClick={handleCopyPath}
-      >
-        <Copy className="w-3.5 h-3.5" />
-        Copy Path
-      </button>
+      {!isWorkspaceRoot && (
+        <button
+          className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-editor-text hover:bg-surface-active transition-colors"
+          onClick={handleCopyPath}
+        >
+          <Copy className="w-3.5 h-3.5" />
+          Copy Path
+        </button>
+      )}
 
       {/* Reveal in Explorer */}
       <button
@@ -197,20 +226,22 @@ export function FileTreeContextMenu({
         onClick={handleReveal}
       >
         <ExternalLink className="w-3.5 h-3.5" />
-        Reveal in File Explorer
+        {revealLabel}
       </button>
 
       {/* Divider */}
-      <div className="my-1 border-t border-editor-border" />
+      {!isWorkspaceRoot && <div className="my-1 border-t border-editor-border" />}
 
       {/* Delete */}
-      <button
-        className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-red-400 hover:bg-surface-active transition-colors"
-        onClick={handleDelete}
-      >
-        <Trash2 className="w-3.5 h-3.5" />
-        Delete
-      </button>
+      {!isWorkspaceRoot && (
+        <button
+          className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-red-400 hover:bg-surface-active transition-colors"
+          onClick={handleDelete}
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+          Delete
+        </button>
+      )}
     </div>
   );
 }

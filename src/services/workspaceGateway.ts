@@ -10,9 +10,10 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import type { FileTreeEntry, WorkspaceScanResult } from '@/types';
+import type { AssetKind, FileTreeEntry, WorkspaceScanResult } from '@/types';
 import { createLogger } from '@/services/logger';
 import { parseWorkspaceScanResult, parseWorkspaceTree } from '@/schemas/workspaceSchemas';
+import { executeProjectCommandByType } from '@/services/projectMutationGateway';
 
 const logger = createLogger('WorkspaceGateway');
 
@@ -22,10 +23,21 @@ type FailureLogLevel = 'debug' | 'error';
 type WorkspaceQueryCommand =
   | 'scan_workspace'
   | 'get_workspace_tree'
+  | 'import_external_files_to_workspace'
   | 'reveal_in_explorer'
   | 'list_workspace_documents'
   | 'read_workspace_document'
   | 'write_workspace_document';
+
+const ASSET_KINDS = new Set<AssetKind>([
+  'video',
+  'audio',
+  'image',
+  'subtitle',
+  'font',
+  'effectPreset',
+  'memePack',
+]);
 
 export interface WorkspaceDocumentEntry {
   relativePath: string;
@@ -44,6 +56,26 @@ export interface WorkspaceDocumentWriteResult {
   relativePath: string;
   bytesWritten: number;
   created: boolean;
+}
+
+export interface ExternalWorkspaceImportedFile {
+  sourcePath: string;
+  relativePath: string;
+  name: string;
+  kind: AssetKind;
+  fileSize: number;
+  assetId?: string;
+  alreadyInWorkspace: boolean;
+}
+
+export interface ExternalWorkspaceImportFailure {
+  sourcePath: string;
+  message: string;
+}
+
+export interface ExternalWorkspaceImportResult {
+  importedFiles: ExternalWorkspaceImportedFile[];
+  failedFiles: ExternalWorkspaceImportFailure[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -138,6 +170,86 @@ function parseWorkspaceDocumentWriteResult(input: unknown): WorkspaceDocumentWri
   };
 }
 
+function parseAssetKind(input: unknown): AssetKind {
+  if (typeof input !== 'string' || !ASSET_KINDS.has(input as AssetKind)) {
+    throw new Error('Invalid external workspace import asset kind');
+  }
+
+  return input as AssetKind;
+}
+
+function parseExternalWorkspaceImportedFile(input: unknown): ExternalWorkspaceImportedFile {
+  if (!isRecord(input)) {
+    throw new Error('Invalid external workspace imported file payload');
+  }
+
+  const sourcePath = input.sourcePath;
+  const relativePath = input.relativePath;
+  const name = input.name;
+  const kind = parseAssetKind(input.kind);
+  const fileSize = input.fileSize;
+  const assetId = input.assetId;
+  const alreadyInWorkspace = input.alreadyInWorkspace;
+
+  if (
+    typeof sourcePath !== 'string' ||
+    typeof relativePath !== 'string' ||
+    typeof name !== 'string' ||
+    typeof fileSize !== 'number' ||
+    !Number.isFinite(fileSize) ||
+    (assetId !== undefined && assetId !== null && typeof assetId !== 'string') ||
+    typeof alreadyInWorkspace !== 'boolean'
+  ) {
+    throw new Error('Invalid external workspace imported file fields');
+  }
+
+  return {
+    sourcePath,
+    relativePath,
+    name,
+    kind,
+    fileSize,
+    assetId: assetId ?? undefined,
+    alreadyInWorkspace,
+  };
+}
+
+function parseExternalWorkspaceImportFailure(input: unknown): ExternalWorkspaceImportFailure {
+  if (!isRecord(input)) {
+    throw new Error('Invalid external workspace import failure payload');
+  }
+
+  const sourcePath = input.sourcePath;
+  const message = input.message;
+
+  if (typeof sourcePath !== 'string' || typeof message !== 'string') {
+    throw new Error('Invalid external workspace import failure fields');
+  }
+
+  return {
+    sourcePath,
+    message,
+  };
+}
+
+function parseExternalWorkspaceImportResult(input: unknown): ExternalWorkspaceImportResult {
+  if (!isRecord(input)) {
+    throw new Error('Invalid external workspace import result payload');
+  }
+
+  const importedFiles = input.importedFiles;
+  const failedFiles = input.failedFiles;
+
+  if (!Array.isArray(importedFiles) || !Array.isArray(failedFiles)) {
+    throw new Error('Invalid external workspace import result fields');
+  }
+
+  return {
+    importedFiles: importedFiles.map(parseExternalWorkspaceImportedFile),
+    failedFiles: failedFiles.map(parseExternalWorkspaceImportFailure),
+  };
+}
+
 /**
  * Validate that a relative path does not escape the project root.
  * Defense-in-depth: the Rust backend MUST also validate, but we reject
@@ -219,7 +331,7 @@ async function executeFilesystemCommand(
   const startedAt = performance.now();
 
   try {
-    await invoke('execute_command', { commandType, payload });
+    await executeProjectCommandByType(commandType, payload);
     const durationMs = Math.round(performance.now() - startedAt);
 
     if (durationMs >= SLOW_IPC_WARNING_THRESHOLD_MS) {
@@ -270,9 +382,46 @@ export async function deleteFileInBackend(relativePath: string): Promise<void> {
   return executeFilesystemCommand('DeleteFile', { relativePath });
 }
 
+export async function importExternalFilesToWorkspaceFromBackend(
+  sourcePaths: string[],
+  targetDir?: string,
+): Promise<ExternalWorkspaceImportResult> {
+  if (!Array.isArray(sourcePaths) || sourcePaths.length === 0) {
+    throw new Error('At least one source path is required');
+  }
+
+  for (const sourcePath of sourcePaths) {
+    if (typeof sourcePath !== 'string' || sourcePath.trim().length === 0) {
+      throw new Error('Source paths must be non-empty strings');
+    }
+    if (sourcePath.includes('\0')) {
+      throw new Error('Source paths must not contain null bytes');
+    }
+  }
+
+  const normalizedTargetDir = targetDir?.trim();
+  if (normalizedTargetDir) {
+    validateRelativePath(normalizedTargetDir);
+  }
+
+  return invokeAndValidate(
+    'import_external_files_to_workspace',
+    parseExternalWorkspaceImportResult,
+    {
+      sourcePaths,
+      targetDir: normalizedTargetDir || undefined,
+    },
+  );
+}
+
 export async function revealInExplorerFromBackend(relativePath: string): Promise<void> {
-  validateRelativePath(relativePath);
-  return invokeAndValidate('reveal_in_explorer', (r) => r as void, { relativePath });
+  const normalizedPath = relativePath.trim();
+  if (normalizedPath.length > 0) {
+    validateRelativePath(normalizedPath);
+  }
+  return invokeAndValidate('reveal_in_explorer', (r) => r as void, {
+    relativePath: normalizedPath,
+  });
 }
 
 export async function listWorkspaceDocumentsFromBackend(

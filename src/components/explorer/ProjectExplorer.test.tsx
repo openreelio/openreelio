@@ -5,11 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { Asset, FileTreeEntry } from '@/types';
 
 const mockState = vi.hoisted(() => ({
   scanWorkspace: vi.fn(),
+  importExternalFiles: vi.fn(),
   selectAsset: vi.fn(),
   executeCommand: vi.fn(),
   setSourceAsset: vi.fn(),
@@ -28,6 +29,7 @@ vi.mock('@/stores', () => ({
       fileTree: mockState.fileTree,
       isScanning: false,
       scanWorkspace: mockState.scanWorkspace,
+      importExternalFiles: mockState.importExternalFiles,
     };
     return typeof selector === 'function' ? selector(state) : state;
   },
@@ -65,8 +67,14 @@ vi.mock('@/bindings', () => ({
   },
 }));
 
+vi.mock('@tauri-apps/api/core', () => ({
+  isTauri: () => false,
+}));
+
 vi.mock('@/services/logger', () => ({
   createLogger: () => ({
+    info: vi.fn(),
+    debug: vi.fn(),
     error: vi.fn(),
     warn: vi.fn(),
   }),
@@ -87,6 +95,8 @@ vi.mock('./FileTree', () => ({
         <button
           key={entry.relativePath}
           type="button"
+          data-workspace-entry-path={entry.relativePath}
+          data-workspace-entry-directory={entry.isDirectory ? 'true' : 'false'}
           onClick={() => onFileClick?.(entry)}
           onDoubleClick={() => onFileDoubleClick?.(entry)}
         >
@@ -147,6 +157,14 @@ describe('ProjectExplorer', () => {
     vi.clearAllMocks();
     mockState.fileTree = [];
     mockState.assets = new Map();
+    mockState.createFolder.mockResolvedValue(undefined);
+    mockState.renameFile.mockResolvedValue(undefined);
+    mockState.deleteFile.mockResolvedValue(undefined);
+    mockState.revealInExplorer.mockResolvedValue(undefined);
+    mockState.importExternalFiles.mockResolvedValue({
+      importedFiles: [],
+      failedFiles: [],
+    });
     mockState.setSourceAsset.mockResolvedValue({
       status: 'ok',
       data: {
@@ -214,5 +232,89 @@ describe('ProjectExplorer', () => {
 
     expect(mockState.selectAsset).toHaveBeenCalledWith('audio-1');
     expect(onAddToTimeline).toHaveBeenCalledWith(entry);
+  });
+
+  it('should create a unique root folder name from the header action', () => {
+    mockState.fileTree = [
+      createFileEntry({
+        relativePath: 'New Folder',
+        name: 'New Folder',
+        isDirectory: true,
+        assetId: undefined,
+        kind: undefined,
+        children: [],
+      }),
+    ];
+
+    render(<ProjectExplorer />);
+
+    fireEvent.click(screen.getByTestId('create-folder-button'));
+
+    expect(mockState.createFolder).toHaveBeenCalledWith('New Folder 1');
+  });
+
+  it('should import externally dropped files into the workspace root', async () => {
+    render(<ProjectExplorer />);
+
+    const droppedFile = new File(['media'], 'drop.mp4', { type: 'video/mp4' });
+    Object.defineProperty(droppedFile, 'path', {
+      value: '/Users/test/Desktop/drop.mp4',
+      configurable: true,
+    });
+
+    fireEvent.drop(screen.getByTestId('project-explorer'), {
+      dataTransfer: {
+        types: ['Files'],
+        files: [droppedFile],
+        dropEffect: 'none',
+      },
+      clientX: 10,
+      clientY: 10,
+    });
+
+    await waitFor(() => {
+      expect(mockState.importExternalFiles).toHaveBeenCalledWith(
+        ['/Users/test/Desktop/drop.mp4'],
+        undefined,
+      );
+    });
+  });
+
+  it('should import externally dropped files into a hovered folder', async () => {
+    mockState.fileTree = [
+      createFileEntry({
+        relativePath: 'footage',
+        name: 'footage',
+        isDirectory: true,
+        assetId: undefined,
+        kind: undefined,
+        children: [],
+      }),
+    ];
+
+    render(<ProjectExplorer />);
+
+    const droppedFile = new File(['media'], 'drop.mp4', { type: 'video/mp4' });
+    Object.defineProperty(droppedFile, 'path', {
+      value: '/Users/test/Desktop/drop.mp4',
+      configurable: true,
+    });
+
+    fireEvent.drop(screen.getByRole('button', { name: 'footage' }), {
+      dataTransfer: {
+        types: ['Files'],
+        files: [droppedFile],
+        dropEffect: 'none',
+      },
+      clientX: 10,
+      clientY: 10,
+    });
+
+    await waitFor(() => {
+      expect(mockState.importExternalFiles).toHaveBeenCalledWith(
+        ['/Users/test/Desktop/drop.mp4'],
+        'footage',
+      );
+    });
   });
 });

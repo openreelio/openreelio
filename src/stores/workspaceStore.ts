@@ -17,6 +17,8 @@ import {
   renameFileInBackend,
   moveFileInBackend,
   deleteFileInBackend,
+  importExternalFilesToWorkspaceFromBackend,
+  type ExternalWorkspaceImportResult,
 } from '@/services/workspaceGateway';
 import {
   parseWorkspaceFileEvent,
@@ -68,6 +70,11 @@ interface WorkspaceActions {
   moveFile: (sourcePath: string, destFolderPath: string) => Promise<void>;
   /** Delete a file or folder from the workspace */
   deleteFile: (relativePath: string) => Promise<void>;
+  /** Import absolute OS file paths into the workspace */
+  importExternalFiles: (
+    sourcePaths: string[],
+    targetDir?: string,
+  ) => Promise<ExternalWorkspaceImportResult>;
   /** Reset the workspace store to initial state */
   reset: () => void;
 }
@@ -272,6 +279,42 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       } catch (error) {
         const message = toErrorMessage(error);
         logger.error('Failed to delete file', { error: message });
+        set((state) => {
+          state.error = message;
+        });
+        throw error;
+      }
+    },
+
+    importExternalFiles: async (sourcePaths: string[], targetDir?: string) => {
+      try {
+        const result = await importExternalFilesToWorkspaceFromBackend(sourcePaths, targetDir);
+        await get().refreshTree();
+
+        if (result.importedFiles.length > 0) {
+          await syncProjectStoreAfterMutation('importExternalFiles');
+        }
+
+        if (result.failedFiles.length > 0) {
+          const message = `Failed to import ${result.failedFiles.length} file(s)`;
+          logger.warn(message, { failedFiles: result.failedFiles });
+          set((state) => {
+            state.error = message;
+          });
+
+          if (result.importedFiles.length === 0) {
+            throw new Error(message);
+          }
+        } else {
+          set((state) => {
+            state.error = null;
+          });
+        }
+
+        return result;
+      } catch (error) {
+        const message = toErrorMessage(error);
+        logger.error('Failed to import external files', { error: message });
         set((state) => {
           state.error = message;
         });

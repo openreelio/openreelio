@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import type { UseSourceMonitorReturn } from '@/hooks/useSourceMonitor';
+import { TIMELINE_ASSET_DRAG_END_EVENT } from '@/utils/timelineAssetDrag';
 
 // =============================================================================
 // External boundary mocks
@@ -200,43 +201,43 @@ describe('SourceMonitor', () => {
     expect(screen.getByTestId('preview-player')).toHaveAttribute('data-playback-rate', '2');
   });
 
-  it('should set up draggable for source-to-timeline drag', () => {
+  it('should set up pointer-driven source-to-timeline drag', () => {
     mockSourceMonitor.assetId = 'test-asset';
     mockSourceMonitor.inPoint = 1.0;
     mockSourceMonitor.outPoint = 5.0;
 
-    const { container } = render(<SourceMonitor />);
-    const draggableArea = container.querySelector('[draggable="true"]');
+    render(<SourceMonitor />);
+    const draggableArea = screen.getByTestId('source-monitor-drag-surface');
 
     expect(draggableArea).toBeInTheDocument();
+    expect(draggableArea).toHaveAttribute('draggable', 'false');
   });
 
-  it('should serialize marked source range into drag payload', () => {
+  it('should serialize marked source range into pointer drag payload', () => {
     mockSourceMonitor.assetId = 'test-asset';
     mockSourceMonitor.inPoint = 1.5;
     mockSourceMonitor.outPoint = 6.25;
 
-    const { container } = render(<SourceMonitor />);
-    const draggableArea = container.querySelector('[draggable="true"]');
-    const setData = vi.fn();
+    render(<SourceMonitor />);
+    const dragArea = screen.getByTestId('source-monitor-drag-surface');
+    const handleDragEnd = vi.fn();
+    document.addEventListener(TIMELINE_ASSET_DRAG_END_EVENT, handleDragEnd);
 
-    fireEvent.dragStart(draggableArea!, {
-      dataTransfer: {
-        setData,
-        effectAllowed: 'none',
-      },
+    fireEvent.pointerDown(dragArea, { button: 0, pointerId: 7, clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(document, { pointerId: 7, clientX: 40, clientY: 10 });
+    fireEvent.pointerUp(document, { pointerId: 7, clientX: 40, clientY: 10 });
+
+    expect(handleDragEnd).toHaveBeenCalledTimes(1);
+    expect((handleDragEnd.mock.calls[0][0] as CustomEvent).detail.payload).toEqual({
+      assetId: 'test-asset',
+      assetKind: 'video',
+      editMode: 'overwrite',
+      label: 'test-video.mp4',
+      sourceIn: 1.5,
+      sourceOut: 6.25,
     });
 
-    // editMode comes from editorToolStore (real store, default: 'overwrite')
-    expect(setData).toHaveBeenCalledWith(
-      'application/x-openreelio-source',
-      JSON.stringify({
-        assetId: 'test-asset',
-        editMode: 'overwrite',
-        sourceIn: 1.5,
-        sourceOut: 6.25,
-      }),
-    );
+    document.removeEventListener(TIMELINE_ASSET_DRAG_END_EVENT, handleDragEnd);
   });
 
   it('should call seek when seek bar is clicked', () => {
