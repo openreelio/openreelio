@@ -214,6 +214,7 @@ impl StylePlanner {
             goal: format!("Apply editing style '{}' to source footage", esd.name),
             steps,
             approval_granted: false,
+            approval_proof: None,
             session_id: None,
         };
 
@@ -931,6 +932,7 @@ mod tests {
                     optional: false,
                 }],
                 approval_granted: false,
+                approval_proof: None,
                 session_id: None,
             },
             compatibility_score: 0.85,
