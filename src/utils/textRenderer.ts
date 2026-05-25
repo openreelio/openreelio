@@ -4,12 +4,22 @@
  * Canvas 2D text rendering functions for text clips in preview.
  */
 
-import type { TextClipData, TextStyle, Clip } from '@/types';
+import type { TextClipData, TextStyle, Clip, Transform } from '@/types';
 import { isTextClip } from '@/types';
 
 // =============================================================================
 // Text Data Extraction
 // =============================================================================
+
+export function getTextFontWeightNumber(style: Pick<TextStyle, 'fontWeight' | 'bold'>): number {
+  const fontWeight = style.fontWeight;
+  if (typeof fontWeight === 'number' && Number.isFinite(fontWeight)) {
+    const normalized = Math.round(Math.max(100, Math.min(900, fontWeight)));
+    return style.bold && normalized < 600 ? 700 : normalized;
+  }
+
+  return style.bold ? 700 : 400;
+}
 
 /**
  * Extracts TextClipData from a text clip.
@@ -54,6 +64,135 @@ export function extractTextDataFromClipWithMap(
   return createBasicTextData(textContent);
 }
 
+function clampFinite(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, value));
+}
+
+function isIdentityTransform(transform: Transform): boolean {
+  return (
+    Math.abs(transform.position.x - 0.5) < 0.0001 &&
+    Math.abs(transform.position.y - 0.5) < 0.0001 &&
+    Math.abs(transform.scale.x - 1) < 0.0001 &&
+    Math.abs(transform.scale.y - 1) < 0.0001 &&
+    Math.abs(transform.rotationDeg) < 0.0001 &&
+    Math.abs(transform.anchor.x - 0.5) < 0.0001 &&
+    Math.abs(transform.anchor.y - 0.5) < 0.0001
+  );
+}
+
+function effectiveTextOpacity(textOpacity: number, clipOpacity: number): number {
+  const normalizedTextOpacity = clampFinite(textOpacity, 0, 1, 1);
+  const normalizedClipOpacity = clampFinite(clipOpacity, 0, 1, 1);
+
+  // Text commands mirror TextClipData.opacity into clip.opacity for generic layer
+  // compatibility. Treat mirrored values as one opacity source instead of
+  // multiplying them into a darker preview.
+  if (Math.abs(normalizedTextOpacity - normalizedClipOpacity) < 0.001) {
+    return normalizedTextOpacity;
+  }
+
+  return normalizedTextOpacity * normalizedClipOpacity;
+}
+
+function clipScaleFactor(transform: Transform): number {
+  const scaleX = clampFinite(Math.abs(transform.scale.x), 0.01, 100, 1);
+  const scaleY = clampFinite(Math.abs(transform.scale.y), 0.01, 100, 1);
+  return Math.max(0.01, (scaleX + scaleY) / 2);
+}
+
+/**
+ * Applies clip transform fields that should be visible in the inspector.
+ *
+ * Scale is intentionally not baked into TextClipData here. The text inspector
+ * edits semantic text style, while preview resize persists as clip.transform
+ * scale. Baking scale into fontSize would double-apply size on the next update.
+ */
+export function applyClipTransformToEditableTextData(
+  clip: Clip,
+  textData: TextClipData,
+): TextClipData {
+  const transform = clip.transform;
+  const nextOpacity = effectiveTextOpacity(textData.opacity, clip.opacity);
+  const hasCustomTransform = !isIdentityTransform(transform);
+
+  if (
+    !hasCustomTransform &&
+    Math.abs(nextOpacity - textData.opacity) < 0.001
+  ) {
+    return textData;
+  }
+
+  return {
+    ...textData,
+    position: hasCustomTransform
+      ? {
+          x: clampFinite(transform.position.x, 0, 1, textData.position.x),
+          y: clampFinite(transform.position.y, 0, 1, textData.position.y),
+        }
+      : textData.position,
+    rotation:
+      hasCustomTransform && Number.isFinite(transform.rotationDeg)
+        ? transform.rotationDeg
+        : textData.rotation,
+    opacity: nextOpacity,
+  };
+}
+
+/**
+ * Applies clip transform fields for rendered preview text.
+ *
+ * The current text model has semantic font styling but no separate transform
+ * payload, so preview rendering folds scale into visible style dimensions.
+ * Export keeps the original transform separately and can preserve more detail
+ * through ASS/libass.
+ */
+export function applyClipTransformToRenderedTextData(
+  clip: Clip,
+  textData: TextClipData,
+): TextClipData {
+  const editableTextData = applyClipTransformToEditableTextData(clip, textData);
+
+  if (isIdentityTransform(clip.transform)) {
+    return editableTextData;
+  }
+
+  const scaleFactor = clipScaleFactor(clip.transform);
+
+  return {
+    ...editableTextData,
+    style: {
+      ...editableTextData.style,
+      fontSize: Math.max(1, Math.round(editableTextData.style.fontSize * scaleFactor)),
+      backgroundPadding: Math.max(
+        0,
+        Math.round(editableTextData.style.backgroundPadding * scaleFactor),
+      ),
+      letterSpacing: Math.round(editableTextData.style.letterSpacing * scaleFactor),
+    },
+    shadow: editableTextData.shadow
+      ? {
+          ...editableTextData.shadow,
+          offsetX: Math.round(editableTextData.shadow.offsetX * scaleFactor),
+          offsetY: Math.round(editableTextData.shadow.offsetY * scaleFactor),
+          blur: Math.max(0, Math.round(editableTextData.shadow.blur * scaleFactor)),
+        }
+      : editableTextData.shadow,
+    outline: editableTextData.outline
+      ? {
+          ...editableTextData.outline,
+          width:
+            editableTextData.outline.width <= 0
+              ? 0
+              : Math.max(1, Math.round(editableTextData.outline.width * scaleFactor)),
+        }
+      : editableTextData.outline,
+  };
+}
+
 /**
  * Creates basic TextClipData from a simple string.
  */
@@ -63,6 +202,7 @@ function createBasicTextData(content: string): TextClipData {
     style: {
       fontFamily: 'Arial',
       fontSize: 48,
+      fontWeight: 400,
       color: '#FFFFFF',
       backgroundPadding: 10,
       alignment: 'center',
@@ -113,7 +253,7 @@ export function renderTextToCanvas(
 
   // Build font string
   const fontStyle = style.italic ? 'italic ' : '';
-  const fontWeight = style.bold ? 'bold ' : '';
+  const fontWeight = `${getTextFontWeightNumber(style)} `;
   // Scale font size relative to canvas (assuming 1080p reference)
   const scaledFontSize = (style.fontSize * canvasHeight) / 1080;
   ctx.font = `${fontStyle}${fontWeight}${scaledFontSize}px ${style.fontFamily}`;

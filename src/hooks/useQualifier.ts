@@ -20,6 +20,7 @@ import {
 } from '@/types/qualifier';
 import type { ClipId, EffectId } from '@/types';
 import { createLogger } from '@/services/logger';
+import { executeProjectCommandByType } from '@/services/projectMutationGateway';
 
 const logger = createLogger('useQualifier');
 
@@ -41,12 +42,9 @@ const NUMERIC_QUALIFIER_KEYS = [
   'hue_shift',
   'sat_adjust',
   'lum_adjust',
-  ] as const;
+] as const;
 
-const QUALIFIER_KEYS: ReadonlyArray<keyof QualifierValues> = [
-  ...NUMERIC_QUALIFIER_KEYS,
-  'invert',
-];
+const QUALIFIER_KEYS: ReadonlyArray<keyof QualifierValues> = [...NUMERIC_QUALIFIER_KEYS, 'invert'];
 
 // =============================================================================
 // Types
@@ -65,10 +63,7 @@ export interface UseQualifierResult {
   /** Current qualifier values */
   values: QualifierValues;
   /** Update a single parameter */
-  updateValue: <K extends keyof QualifierValues>(
-    key: K,
-    value: QualifierValues[K]
-  ) => void;
+  updateValue: <K extends keyof QualifierValues>(key: K, value: QualifierValues[K]) => void;
   /** Apply a preset configuration */
   applyPreset: (preset: Exclude<QualifierPreset, 'custom'>) => void;
   /** Reset to default values */
@@ -98,7 +93,7 @@ export interface UseQualifierResult {
  */
 function clampValue<K extends keyof QualifierValues>(
   key: K,
-  value: QualifierValues[K]
+  value: QualifierValues[K],
 ): QualifierValues[K] {
   if (key === 'invert') {
     return value; // Boolean, no clamping needed
@@ -110,6 +105,33 @@ function clampValue<K extends keyof QualifierValues>(
   }
 
   return Math.max(constraint.min, Math.min(constraint.max, value)) as QualifierValues[K];
+}
+
+function normalizeValueAgainstCurrentState<K extends keyof QualifierValues>(
+  key: K,
+  value: QualifierValues[K],
+  currentValues: QualifierValues,
+): QualifierValues[K] {
+  const clampedValue = clampValue(key, value);
+
+  if (typeof clampedValue !== 'number') {
+    return clampedValue;
+  }
+
+  if (key === 'sat_min' && clampedValue > currentValues.sat_max) {
+    return currentValues.sat_max as QualifierValues[K];
+  }
+  if (key === 'sat_max' && clampedValue < currentValues.sat_min) {
+    return currentValues.sat_min as QualifierValues[K];
+  }
+  if (key === 'lum_min' && clampedValue > currentValues.lum_max) {
+    return currentValues.lum_max as QualifierValues[K];
+  }
+  if (key === 'lum_max' && clampedValue < currentValues.lum_min) {
+    return currentValues.lum_min as QualifierValues[K];
+  }
+
+  return clampedValue;
 }
 
 /**
@@ -144,18 +166,16 @@ export function useQualifier({
   // State
   // ---------------------------------------------------------------------------
 
-  const [values, setValues] = useState<QualifierValues>(
-    initialValues ?? DEFAULT_QUALIFIER_VALUES
-  );
+  const [values, setValues] = useState<QualifierValues>(initialValues ?? DEFAULT_QUALIFIER_VALUES);
   const [previewEnabled, setPreviewEnabled] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const valuesRef = useRef<QualifierValues>(initialValues ?? DEFAULT_QUALIFIER_VALUES);
+
   // Track original values for dirty detection
-  const originalValuesRef = useRef<QualifierValues>(
-    initialValues ?? DEFAULT_QUALIFIER_VALUES
-  );
+  const originalValuesRef = useRef<QualifierValues>(initialValues ?? DEFAULT_QUALIFIER_VALUES);
 
   // Debounce timer ref - use ReturnType for cross-environment compatibility
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -207,6 +227,7 @@ export function useQualifier({
         setValues((prev) => {
           const modifiedKeys = modifiedKeysRef.current;
           if (modifiedKeys.size === 0) {
+            valuesRef.current = qualifierValues;
             return qualifierValues;
           }
 
@@ -219,6 +240,7 @@ export function useQualifier({
           if (!modifiedKeys.has('invert')) {
             merged.invert = qualifierValues.invert;
           }
+          valuesRef.current = merged;
           return merged;
         });
 
@@ -256,12 +278,10 @@ export function useQualifier({
       try {
         setIsSaving(true);
 
-        await invoke('execute_command', {
-          commandType: 'UpdateEffectParam',
-          payload: {
-            effectId,
-            paramName,
-            value,
+        await executeProjectCommandByType('UpdateEffect', {
+          effectId,
+          params: {
+            [paramName]: value,
           },
         });
 
@@ -274,7 +294,7 @@ export function useQualifier({
         setIsSaving(false);
       }
     },
-    [clipId, effectId]
+    [clipId, effectId],
   );
 
   const syncAllToBackend = useCallback(
@@ -286,12 +306,9 @@ export function useQualifier({
       try {
         setIsSaving(true);
 
-        await invoke('execute_command', {
-          commandType: 'UpdateEffectParams',
-          payload: {
-            effectId,
-            params: newValues,
-          },
+        await executeProjectCommandByType('UpdateEffect', {
+          effectId,
+          params: newValues,
         });
 
         logger.debug('All params synced to backend', { clipId, effectId });
@@ -303,7 +320,7 @@ export function useQualifier({
         setIsSaving(false);
       }
     },
-    [clipId, effectId]
+    [clipId, effectId],
   );
 
   // ---------------------------------------------------------------------------
@@ -313,28 +330,12 @@ export function useQualifier({
   const updateValue = useCallback(
     <K extends keyof QualifierValues>(key: K, value: QualifierValues[K]) => {
       modifiedKeysRef.current.add(key);
-      const clampedValue = clampValue(key, value);
+      const currentValues = valuesRef.current;
+      const normalizedValue = normalizeValueAgainstCurrentState(key, value, currentValues);
+      const nextValues = { ...currentValues, [key]: normalizedValue };
 
-      // Update local state immediately with range validation
-      setValues((prev) => {
-        const newValues = { ...prev, [key]: clampedValue };
-
-        // Validate range constraints: min must not exceed max
-        if (key === 'sat_min' && typeof clampedValue === 'number' && clampedValue > prev.sat_max) {
-          return { ...newValues, sat_min: prev.sat_max };
-        }
-        if (key === 'sat_max' && typeof clampedValue === 'number' && clampedValue < prev.sat_min) {
-          return { ...newValues, sat_max: prev.sat_min };
-        }
-        if (key === 'lum_min' && typeof clampedValue === 'number' && clampedValue > prev.lum_max) {
-          return { ...newValues, lum_min: prev.lum_max };
-        }
-        if (key === 'lum_max' && typeof clampedValue === 'number' && clampedValue < prev.lum_min) {
-          return { ...newValues, lum_max: prev.lum_min };
-        }
-
-        return newValues;
-      });
+      valuesRef.current = nextValues;
+      setValues(nextValues);
 
       // Clear previous debounce timer
       if (debounceTimerRef.current) {
@@ -343,7 +344,7 @@ export function useQualifier({
       }
 
       // Store pending update
-      pendingUpdatesRef.current[key] = clampedValue;
+      pendingUpdatesRef.current[key] = normalizedValue;
 
       // Debounce IPC call
       debounceTimerRef.current = setTimeout(() => {
@@ -358,7 +359,7 @@ export function useQualifier({
         debounceTimerRef.current = null;
       }, DEBOUNCE_DELAY);
     },
-    [syncToBackend]
+    [syncToBackend],
   );
 
   // ---------------------------------------------------------------------------
@@ -371,12 +372,13 @@ export function useQualifier({
       modifiedKeysRef.current = new Set(QUALIFIER_KEYS);
       const presetValues = QUALIFIER_PRESETS[preset];
 
+      valuesRef.current = presetValues;
       setValues(presetValues);
       syncAllToBackend(presetValues);
 
       logger.info('Preset applied', { preset });
     },
-    [clearPendingDebounce, syncAllToBackend]
+    [clearPendingDebounce, syncAllToBackend],
   );
 
   // ---------------------------------------------------------------------------
@@ -386,6 +388,7 @@ export function useQualifier({
   const reset = useCallback(() => {
     clearPendingDebounce();
     modifiedKeysRef.current = new Set();
+    valuesRef.current = DEFAULT_QUALIFIER_VALUES;
     setValues(DEFAULT_QUALIFIER_VALUES);
     originalValuesRef.current = DEFAULT_QUALIFIER_VALUES;
     setError(null);
@@ -417,25 +420,23 @@ export function useQualifier({
 
       // Flush any pending updates before unmount
       const pendingUpdates = pendingUpdatesRef.current;
-        if (effectId && Object.keys(pendingUpdates).length > 0) {
-          pendingUpdatesRef.current = {};
-          // Fire and forget - component is unmounting
-          Object.entries(pendingUpdates).forEach(([paramName, paramValue]) => {
-            Promise.resolve(
-              invoke('execute_command', {
-                commandType: 'UpdateEffectParam',
-                payload: {
-                  effectId,
-                  paramName,
-                  value: paramValue,
-                },
-              })
-            ).catch((err) => {
-              logger.warn('Failed to flush pending update on unmount', { clipId, effectId, paramName, error: err });
-            });
+      if (effectId && Object.keys(pendingUpdates).length > 0) {
+        pendingUpdatesRef.current = {};
+        // Fire and forget - component is unmounting
+        Promise.resolve(
+          executeProjectCommandByType('UpdateEffect', {
+            effectId,
+            params: pendingUpdates,
+          }),
+        ).catch((err) => {
+          logger.warn('Failed to flush pending updates on unmount', {
+            clipId,
+            effectId,
+            error: err,
           });
-        }
-      };
+        });
+      }
+    };
   }, [clipId, effectId]);
 
   // ---------------------------------------------------------------------------

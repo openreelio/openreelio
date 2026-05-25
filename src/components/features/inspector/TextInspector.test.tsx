@@ -6,10 +6,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { TextInspector, SelectedTextClip } from './TextInspector';
-import { createTextClipData, createTitleTextClipData } from '@/types';
+import { createTextClipData, createTitleTextClipData, type Transform } from '@/types';
 
 describe('TextInspector', () => {
   const mockOnTextDataChange = vi.fn();
+  const mockOnTextTransformChange = vi.fn();
+  const mockOnTextTimingChange = vi.fn();
+  const defaultTransform: Transform = {
+    position: { x: 0.5, y: 0.5 },
+    scale: { x: 1, y: 1 },
+    rotationDeg: 0,
+    anchor: { x: 0.5, y: 0.5 },
+  };
 
   const defaultTextClip: SelectedTextClip = {
     id: 'clip-1',
@@ -121,6 +129,25 @@ describe('TextInspector', () => {
         'clip-1',
         expect.objectContaining({
           style: expect.objectContaining({ bold: true }),
+        }),
+      );
+    });
+
+    it('should update numeric font weight', () => {
+      render(
+        <TextInspector
+          selectedTextClip={defaultTextClip}
+          onTextDataChange={mockOnTextDataChange}
+        />,
+      );
+
+      const weightInput = screen.getByLabelText('Weight');
+      fireEvent.change(weightInput, { target: { value: '600' } });
+
+      expect(mockOnTextDataChange).toHaveBeenCalledWith(
+        'clip-1',
+        expect.objectContaining({
+          style: expect.objectContaining({ fontWeight: 600, bold: true }),
         }),
       );
     });
@@ -291,6 +318,143 @@ describe('TextInspector', () => {
         }),
       );
     });
+
+    it('should update exact position via numeric percent inputs', () => {
+      render(
+        <TextInspector
+          selectedTextClip={defaultTextClip}
+          onTextDataChange={mockOnTextDataChange}
+        />,
+      );
+
+      fireEvent.change(screen.getByLabelText('X'), { target: { value: '37.5' } });
+      fireEvent.change(screen.getByLabelText('Y'), { target: { value: '62.5' } });
+
+      expect(mockOnTextDataChange).toHaveBeenCalledWith(
+        'clip-1',
+        expect.objectContaining({
+          position: expect.objectContaining({ x: 0.375 }),
+        }),
+      );
+      expect(mockOnTextDataChange).toHaveBeenCalledWith(
+        'clip-1',
+        expect.objectContaining({
+          position: expect.objectContaining({ y: 0.625 }),
+        }),
+      );
+    });
+
+    it('should update clip transform when transform callback is provided', () => {
+      render(
+        <TextInspector
+          selectedTextClip={{ ...defaultTextClip, transform: defaultTransform }}
+          onTextDataChange={mockOnTextDataChange}
+          onTextTransformChange={mockOnTextTransformChange}
+        />,
+      );
+
+      const sliders = screen.getAllByRole('slider');
+      fireEvent.change(sliders[0], { target: { value: '0.25' } });
+
+      expect(mockOnTextTransformChange).toHaveBeenCalledWith(
+        'clip-1',
+        expect.objectContaining({
+          position: expect.objectContaining({ x: 0.25, y: 0.5 }),
+          scale: expect.objectContaining({ x: 1, y: 1 }),
+        }),
+      );
+      expect(mockOnTextDataChange).not.toHaveBeenCalled();
+    });
+
+    it('should update exact clip transform position via numeric percent inputs', () => {
+      render(
+        <TextInspector
+          selectedTextClip={{ ...defaultTextClip, transform: defaultTransform }}
+          onTextDataChange={mockOnTextDataChange}
+          onTextTransformChange={mockOnTextTransformChange}
+        />,
+      );
+
+      fireEvent.change(screen.getByLabelText('X'), { target: { value: '12.5' } });
+
+      expect(mockOnTextTransformChange).toHaveBeenCalledWith(
+        'clip-1',
+        expect.objectContaining({
+          position: expect.objectContaining({ x: 0.125, y: 0.5 }),
+        }),
+      );
+      expect(mockOnTextDataChange).not.toHaveBeenCalled();
+    });
+
+    it('should update transform scale with exact inspector controls', () => {
+      render(
+        <TextInspector
+          selectedTextClip={{ ...defaultTextClip, transform: defaultTransform }}
+          onTextDataChange={mockOnTextDataChange}
+          onTextTransformChange={mockOnTextTransformChange}
+        />,
+      );
+
+      fireEvent.change(screen.getByLabelText('Scale X'), { target: { value: '150' } });
+
+      expect(mockOnTextTransformChange).toHaveBeenCalledWith(
+        'clip-1',
+        expect.objectContaining({
+          scale: expect.objectContaining({ x: 1.5, y: 1 }),
+        }),
+      );
+    });
+  });
+
+  describe('timing controls', () => {
+    it('should update clip start time from the timing section', () => {
+      render(
+        <TextInspector
+          selectedTextClip={defaultTextClip}
+          onTextDataChange={mockOnTextDataChange}
+          onTextTimingChange={mockOnTextTimingChange}
+        />,
+      );
+
+      fireEvent.click(screen.getByText('Timing'));
+      fireEvent.change(screen.getByLabelText('Start'), { target: { value: '2.5' } });
+
+      expect(mockOnTextTimingChange).toHaveBeenCalledWith('clip-1', { timelineInSec: 2.5 });
+      expect(mockOnTextDataChange).not.toHaveBeenCalled();
+    });
+
+    it('should update clip duration from the timing section', () => {
+      render(
+        <TextInspector
+          selectedTextClip={defaultTextClip}
+          onTextDataChange={mockOnTextDataChange}
+          onTextTimingChange={mockOnTextTimingChange}
+        />,
+      );
+
+      fireEvent.click(screen.getByText('Timing'));
+      fireEvent.change(screen.getByLabelText('Duration'), { target: { value: '4.25' } });
+
+      expect(mockOnTextTimingChange).toHaveBeenCalledWith('clip-1', { durationSec: 4.25 });
+      expect(mockOnTextDataChange).not.toHaveBeenCalled();
+    });
+
+    it('should clamp invalid timing edits before dispatching them', () => {
+      render(
+        <TextInspector
+          selectedTextClip={defaultTextClip}
+          onTextDataChange={mockOnTextDataChange}
+          onTextTimingChange={mockOnTextTimingChange}
+        />,
+      );
+
+      fireEvent.click(screen.getByText('Timing'));
+      fireEvent.change(screen.getByLabelText('Start'), { target: { value: '-1' } });
+      fireEvent.change(screen.getByLabelText('Duration'), { target: { value: '0' } });
+
+      expect(mockOnTextTimingChange).toHaveBeenCalledWith('clip-1', { timelineInSec: 0 });
+      expect(mockOnTextTimingChange).toHaveBeenCalledWith('clip-1', { durationSec: 0.01 });
+    });
   });
 
   describe('reset functionality', () => {
@@ -343,6 +507,35 @@ describe('TextInspector', () => {
           }),
           rotation: 0,
           opacity: 1.0,
+        }),
+      );
+    });
+
+    it('should reset clip transform when transform callback is provided', async () => {
+      const user = userEvent.setup();
+      const customTransform: Transform = {
+        position: { x: 0.25, y: 0.75 },
+        scale: { x: 1.8, y: 1.2 },
+        rotationDeg: 35,
+        anchor: { x: 0.5, y: 0.5 },
+      };
+
+      render(
+        <TextInspector
+          selectedTextClip={{ ...defaultTextClip, transform: customTransform }}
+          onTextDataChange={mockOnTextDataChange}
+          onTextTransformChange={mockOnTextTransformChange}
+        />,
+      );
+
+      await user.click(screen.getByTitle('Reset to defaults'));
+
+      expect(mockOnTextTransformChange).toHaveBeenCalledWith(
+        'clip-1',
+        expect.objectContaining({
+          position: { x: 0.5, y: 0.5 },
+          scale: { x: 1, y: 1 },
+          rotationDeg: 0,
         }),
       );
     });

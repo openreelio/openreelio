@@ -99,10 +99,10 @@ describe('DockZone', () => {
   });
 
   describe('drag and drop', () => {
-    it('should set draggable on tab buttons', () => {
+    it('should avoid native HTML5 dragging on tab buttons', () => {
       render(<DockZone {...createDefaultProps()} />);
       const tab = screen.getByRole('tab', { name: /Project Explorer/i });
-      expect(tab).toHaveAttribute('draggable', 'true');
+      expect(tab).toHaveAttribute('draggable', 'false');
     });
 
     it('should call onDragStart when tab drag begins', () => {
@@ -132,6 +132,56 @@ describe('DockZone', () => {
         preventDefault: vi.fn(),
       });
       expect(onDrop).toHaveBeenCalledWith('timeline');
+    });
+
+    it('should move panels through pointer-driven tab drag', () => {
+      const onDragStart = vi.fn();
+      const onDragEnd = vi.fn();
+      const onDrop = vi.fn();
+
+      render(
+        <>
+          <DockZone
+            {...createDefaultProps({
+              zoneId: 'left',
+              panelIds: ['explorer'],
+              activePanelId: 'explorer',
+              onDragStart,
+              onDragEnd,
+            })}
+          />
+          <DockZone
+            {...createDefaultProps({
+              zoneId: 'right',
+              panelIds: ['timeline'],
+              activePanelId: 'timeline',
+              onDrop,
+            })}
+          />
+        </>,
+      );
+
+      const targetZone = screen.getByTestId('dock-zone-right');
+      targetZone.getBoundingClientRect = vi.fn().mockReturnValue({
+        x: 200,
+        y: 0,
+        top: 0,
+        left: 200,
+        width: 300,
+        height: 200,
+        right: 500,
+        bottom: 200,
+        toJSON: () => ({}),
+      });
+
+      const tab = screen.getByRole('tab', { name: /Project Explorer/i });
+      fireEvent.pointerDown(tab, { button: 0, pointerId: 4, clientX: 10, clientY: 10 });
+      fireEvent.pointerMove(document, { pointerId: 4, clientX: 250, clientY: 50 });
+      fireEvent.pointerUp(document, { pointerId: 4, clientX: 250, clientY: 50 });
+
+      expect(onDragStart).toHaveBeenCalledWith('explorer');
+      expect(onDrop).toHaveBeenCalledWith('explorer');
+      expect(onDragEnd).toHaveBeenCalledTimes(1);
     });
   });
 

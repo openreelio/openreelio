@@ -72,16 +72,16 @@ const RAW_ENVELOPE = {
   finishReason: 'stop',
 };
 
-/** Convenience builder for simple chat responses */
-function chatResponse(
-  message: string,
-  extras: {
-    actions?: Array<{ commandType: string; params: Record<string, unknown>; description?: string }>;
-    needsConfirmation?: boolean;
-    intent?: { intentType: string; confidence: number };
-  } = {},
+/** Convenience builder for raw completion responses */
+function rawResponse(
+  text: string,
+  extras: Partial<{
+    model: string;
+    usage: { promptTokens: number; completionTokens: number; totalTokens: number };
+    finishReason: string;
+  }> = {},
 ) {
-  return { message, ...extras };
+  return { text, ...RAW_ENVELOPE, ...extras };
 }
 
 /** Collect all values from an async generator */
@@ -153,7 +153,7 @@ describe('TauriLLMAdapter', () => {
       if (command === 'abort_ai_stream') {
         return Promise.resolve();
       }
-      // Other commands (chat_with_ai, etc.) should be explicitly mocked per-test
+      // Other commands (complete_with_ai_raw, etc.) should be explicitly mocked per-test
       return Promise.reject(new Error(`Unmocked invoke: ${command}`));
     });
   });
@@ -189,7 +189,7 @@ describe('TauriLLMAdapter', () => {
   describe('complete()', () => {
     it('should return content and finishReason "stop" for a basic response', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.resolve(chatResponse('Hello world'));
+        if (command === 'complete_with_ai_raw') return Promise.resolve(rawResponse('Hello world'));
         return Promise.resolve();
       });
 
@@ -201,17 +201,10 @@ describe('TauriLLMAdapter', () => {
       expect(result.toolCalls).toBeUndefined();
     });
 
-    it('should return finishReason "tool_call" and toolCalls when actions are present', async () => {
+    it('should map raw tool-call finish reason without parsing legacy actions', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') {
-          return Promise.resolve(
-            chatResponse('Applying split', {
-              actions: [
-                { commandType: 'splitClip', params: { clipId: 'c1', time: 5.0 } },
-                { commandType: 'deleteClip', params: { clipId: 'c2' } },
-              ],
-            }),
-          );
+        if (command === 'complete_with_ai_raw') {
+          return Promise.resolve(rawResponse('Applying split', { finishReason: 'tool_calls' }));
         }
         return Promise.resolve();
       });
@@ -220,15 +213,12 @@ describe('TauriLLMAdapter', () => {
       const result = await adapter.complete(USER_MSG);
 
       expect(result.finishReason).toBe('tool_call');
-      expect(result.toolCalls).toHaveLength(2);
-      expect(result.toolCalls![0].name).toBe('splitClip');
-      expect(result.toolCalls![0].args).toEqual({ clipId: 'c1', time: 5.0 });
-      expect(result.toolCalls![1].name).toBe('deleteClip');
+      expect(result.toolCalls).toBeUndefined();
     });
 
     it('should return empty string content when the backend message is empty', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.resolve(chatResponse(''));
+        if (command === 'complete_with_ai_raw') return Promise.resolve(rawResponse(''));
         return Promise.resolve();
       });
 
@@ -239,18 +229,20 @@ describe('TauriLLMAdapter', () => {
       expect(result.finishReason).toBe('stop');
     });
 
-    it('should call invoke with "chat_with_ai" and formatted messages', async () => {
+    it('should call invoke with "complete_with_ai_raw" and formatted messages', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.resolve(chatResponse('ok'));
+        if (command === 'complete_with_ai_raw') return Promise.resolve(rawResponse('ok'));
         return Promise.resolve();
       });
 
       const adapter = createTauriLLMAdapter();
       await adapter.complete([{ role: 'user', content: 'test prompt' }]);
 
-      const chatCalls = invokeMock.mock.calls.filter((c: unknown[]) => c[0] === 'chat_with_ai');
-      expect(chatCalls).toHaveLength(1);
-      expect(chatCalls[0][1]).toEqual(
+      const rawCalls = invokeMock.mock.calls.filter(
+        (c: unknown[]) => c[0] === 'complete_with_ai_raw',
+      );
+      expect(rawCalls).toHaveLength(1);
+      expect(rawCalls[0][1]).toEqual(
         expect.objectContaining({
           messages: expect.arrayContaining([{ role: 'user', content: 'test prompt' }]),
         }),
@@ -259,7 +251,8 @@ describe('TauriLLMAdapter', () => {
 
     it('should propagate backend errors', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.reject(new Error('Backend timeout'));
+        if (command === 'complete_with_ai_raw')
+          return Promise.reject(new Error('Backend timeout'));
         return Promise.resolve();
       });
 
@@ -268,9 +261,9 @@ describe('TauriLLMAdapter', () => {
     });
 
     it('should set isGenerating to true during the call and false after', async () => {
-      const deferred = createDeferred<{ message: string }>();
+      const deferred = createDeferred<ReturnType<typeof rawResponse>>();
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return deferred.promise;
+        if (command === 'complete_with_ai_raw') return deferred.promise;
         return Promise.resolve();
       });
 
@@ -279,7 +272,7 @@ describe('TauriLLMAdapter', () => {
 
       expect(adapter.isGenerating()).toBe(true);
 
-      deferred.resolve(chatResponse('done'));
+      deferred.resolve(rawResponse('done'));
       await promise;
 
       expect(adapter.isGenerating()).toBe(false);
@@ -1063,71 +1056,71 @@ describe('TauriLLMAdapter', () => {
   // Response Validation
   // =========================================================================
   describe('response validation', () => {
-    describe('validateChatResponse (via complete)', () => {
+    describe('validateRawCompletionResponse (via complete)', () => {
       it('should reject null response', async () => {
         invokeMock.mockImplementation((command: string) => {
-          if (command === 'chat_with_ai') return Promise.resolve(null);
+          if (command === 'complete_with_ai_raw') return Promise.resolve(null);
           return Promise.resolve();
         });
 
         const adapter = createTauriLLMAdapter();
         await expect(adapter.complete(USER_MSG)).rejects.toThrow(
-          'Backend returned invalid chat response: expected object',
+          'Backend returned invalid raw completion response: expected object',
         );
       });
 
       it('should reject non-object response (number)', async () => {
         invokeMock.mockImplementation((command: string) => {
-          if (command === 'chat_with_ai') return Promise.resolve(42);
+          if (command === 'complete_with_ai_raw') return Promise.resolve(42);
           return Promise.resolve();
         });
 
         const adapter = createTauriLLMAdapter();
         await expect(adapter.complete(USER_MSG)).rejects.toThrow(
-          'Backend returned invalid chat response: expected object',
+          'Backend returned invalid raw completion response: expected object',
         );
       });
 
       it('should reject non-object response (string)', async () => {
         invokeMock.mockImplementation((command: string) => {
-          if (command === 'chat_with_ai') return Promise.resolve('just a string');
+          if (command === 'complete_with_ai_raw') return Promise.resolve('just a string');
           return Promise.resolve();
         });
 
         const adapter = createTauriLLMAdapter();
         await expect(adapter.complete(USER_MSG)).rejects.toThrow(
-          'Backend returned invalid chat response: expected object',
+          'Backend returned invalid raw completion response: expected object',
         );
       });
 
-      it('should reject when message field is missing', async () => {
+      it('should reject when text field is missing', async () => {
         invokeMock.mockImplementation((command: string) => {
-          if (command === 'chat_with_ai') return Promise.resolve({ actions: [] });
+          if (command === 'complete_with_ai_raw') return Promise.resolve({ actions: [] });
           return Promise.resolve();
         });
 
         const adapter = createTauriLLMAdapter();
         await expect(adapter.complete(USER_MSG)).rejects.toThrow(
-          '"message" must be a string, got undefined',
+          '"text" must be a string, got undefined',
         );
       });
 
-      it('should reject when message field is a number', async () => {
+      it('should reject when text field is a number', async () => {
         invokeMock.mockImplementation((command: string) => {
-          if (command === 'chat_with_ai') return Promise.resolve({ message: 123 });
+          if (command === 'complete_with_ai_raw') return Promise.resolve({ text: 123 });
           return Promise.resolve();
         });
 
         const adapter = createTauriLLMAdapter();
         await expect(adapter.complete(USER_MSG)).rejects.toThrow(
-          '"message" must be a string, got number',
+          '"text" must be a string, got number',
         );
       });
 
-      it('should strip non-array actions to undefined', async () => {
+      it('should ignore legacy action fields on raw completion responses', async () => {
         invokeMock.mockImplementation((command: string) => {
-          if (command === 'chat_with_ai')
-            return Promise.resolve({ message: 'hi', actions: 'not-an-array' });
+          if (command === 'complete_with_ai_raw')
+            return Promise.resolve({ ...rawResponse('hi'), actions: 'not-an-array' });
           return Promise.resolve();
         });
 
@@ -1138,11 +1131,11 @@ describe('TauriLLMAdapter', () => {
         expect(result.finishReason).toBe('stop');
       });
 
-      it('should strip non-boolean needsConfirmation', async () => {
+      it('should ignore legacy confirmation fields on raw completion responses', async () => {
         invokeMock.mockImplementation((command: string) => {
-          if (command === 'chat_with_ai') {
+          if (command === 'complete_with_ai_raw') {
             return Promise.resolve({
-              message: 'hi',
+              ...rawResponse('hi'),
               needsConfirmation: 'yes',
               actions: null,
             });
@@ -1236,12 +1229,12 @@ describe('TauriLLMAdapter', () => {
   });
 
   // =========================================================================
-  // System Prompt Merging
+  // System Prompt Forwarding
   // =========================================================================
-  describe('system prompt merging', () => {
-    it('should prepend a system message when none exists in the input', async () => {
+  describe('system prompt forwarding', () => {
+    it('should forward a system prompt as raw completion options', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.resolve(chatResponse('ack'));
+        if (command === 'complete_with_ai_raw') return Promise.resolve(rawResponse('ack'));
         return Promise.resolve();
       });
 
@@ -1250,18 +1243,18 @@ describe('TauriLLMAdapter', () => {
         systemPrompt: 'You are a video editor',
       });
 
-      const chatCalls = invokeMock.mock.calls.filter((c: unknown[]) => c[0] === 'chat_with_ai');
-      const messages = chatCalls[0][1].messages as Array<{ role: string; content: string }>;
+      const rawCalls = invokeMock.mock.calls.filter(
+        (c: unknown[]) => c[0] === 'complete_with_ai_raw',
+      );
+      const messages = rawCalls[0][1].messages as Array<{ role: string; content: string }>;
 
-      expect(messages[0].role).toBe('system');
-      expect(messages[0].content).toBe('You are a video editor');
-      expect(messages[1].role).toBe('user');
-      expect(messages[1].content).toBe('do something');
+      expect(messages).toEqual([{ role: 'user', content: 'do something' }]);
+      expect(rawCalls[0][1].options.systemPrompt).toBe('You are a video editor');
     });
 
-    it('should append system prompt to existing system message content', async () => {
+    it('should preserve existing system messages and pass extra system prompt separately', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.resolve(chatResponse('ack'));
+        if (command === 'complete_with_ai_raw') return Promise.resolve(rawResponse('ack'));
         return Promise.resolve();
       });
 
@@ -1274,31 +1267,33 @@ describe('TauriLLMAdapter', () => {
         { systemPrompt: 'Additional context' },
       );
 
-      const chatCalls = invokeMock.mock.calls.filter((c: unknown[]) => c[0] === 'chat_with_ai');
-      const messages = chatCalls[0][1].messages as Array<{ role: string; content: string }>;
+      const rawCalls = invokeMock.mock.calls.filter(
+        (c: unknown[]) => c[0] === 'complete_with_ai_raw',
+      );
+      const messages = rawCalls[0][1].messages as Array<{ role: string; content: string }>;
 
-      // System prompt is prepended to existing system message content
       expect(messages[0].role).toBe('system');
-      expect(messages[0].content).toBe('Additional context\n\nBase instructions');
-      // Should NOT add a separate system message since one already exists
-      const systemMessages = messages.filter((m) => m.role === 'system');
-      expect(systemMessages).toHaveLength(1);
+      expect(messages[0].content).toBe('Base instructions');
+      expect(rawCalls[0][1].options.systemPrompt).toBe('Additional context');
     });
 
     it('should not add a system message when systemPrompt is not provided', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.resolve(chatResponse('ack'));
+        if (command === 'complete_with_ai_raw') return Promise.resolve(rawResponse('ack'));
         return Promise.resolve();
       });
 
       const adapter = createTauriLLMAdapter();
       await adapter.complete([{ role: 'user', content: 'hi' }]);
 
-      const chatCalls = invokeMock.mock.calls.filter((c: unknown[]) => c[0] === 'chat_with_ai');
-      const messages = chatCalls[0][1].messages as Array<{ role: string; content: string }>;
+      const rawCalls = invokeMock.mock.calls.filter(
+        (c: unknown[]) => c[0] === 'complete_with_ai_raw',
+      );
+      const messages = rawCalls[0][1].messages as Array<{ role: string; content: string }>;
 
       expect(messages).toHaveLength(1);
       expect(messages[0].role).toBe('user');
+      expect(rawCalls[0][1].options.systemPrompt).toBeUndefined();
     });
   });
 
@@ -1306,9 +1301,9 @@ describe('TauriLLMAdapter', () => {
   // setDefaultContext()
   // =========================================================================
   describe('setDefaultContext()', () => {
-    it('should pass custom context to the backend call', async () => {
+    it('should not send legacy chat context through raw completion', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.resolve(chatResponse('ok'));
+        if (command === 'complete_with_ai_raw') return Promise.resolve(rawResponse('ok'));
         return Promise.resolve();
       });
 
@@ -1324,40 +1319,30 @@ describe('TauriLLMAdapter', () => {
       });
       await adapter.complete(USER_MSG);
 
-      const chatCalls = invokeMock.mock.calls.filter((c: unknown[]) => c[0] === 'chat_with_ai');
-      const context = chatCalls[0][1].context;
-
-      expect(context.playheadPosition).toBe(42.5);
-      expect(context.selectedClips).toEqual(['clip-1', 'clip-2']);
-      expect(context.selectedTracks).toEqual(['track-v1']);
-      expect(context.timelineDuration).toBe(120);
-      expect(context.assetIds).toEqual(['asset-a']);
-      expect(context.trackIds).toEqual(['t1']);
-      expect(context.preferredLanguage).toBe('en');
+      const rawCalls = invokeMock.mock.calls.filter(
+        (c: unknown[]) => c[0] === 'complete_with_ai_raw',
+      );
+      expect(rawCalls[0][1].context).toBeUndefined();
     });
 
-    it('should use default empty context when not set', async () => {
+    it('should omit context when not set', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.resolve(chatResponse('ok'));
+        if (command === 'complete_with_ai_raw') return Promise.resolve(rawResponse('ok'));
         return Promise.resolve();
       });
 
       const adapter = createTauriLLMAdapter();
       await adapter.complete(USER_MSG);
 
-      const chatCalls = invokeMock.mock.calls.filter((c: unknown[]) => c[0] === 'chat_with_ai');
-      const context = chatCalls[0][1].context;
-
-      expect(context.playheadPosition).toBe(0);
-      expect(context.selectedClips).toEqual([]);
-      expect(context.selectedTracks).toEqual([]);
-      expect(context.assetIds).toEqual([]);
-      expect(context.trackIds).toEqual([]);
+      const rawCalls = invokeMock.mock.calls.filter(
+        (c: unknown[]) => c[0] === 'complete_with_ai_raw',
+      );
+      expect(rawCalls[0][1].context).toBeUndefined();
     });
 
-    it('should reset context when called with undefined', async () => {
+    it('should remain raw-completion only after context reset', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.resolve(chatResponse('ok'));
+        if (command === 'complete_with_ai_raw') return Promise.resolve(rawResponse('ok'));
         return Promise.resolve();
       });
 
@@ -1365,16 +1350,18 @@ describe('TauriLLMAdapter', () => {
       adapter.setDefaultContext({ playheadPosition: 99 });
       await adapter.complete(USER_MSG);
 
-      const firstChatCalls = invokeMock.mock.calls.filter(
-        (c: unknown[]) => c[0] === 'chat_with_ai',
+      const firstRawCalls = invokeMock.mock.calls.filter(
+        (c: unknown[]) => c[0] === 'complete_with_ai_raw',
       );
-      expect(firstChatCalls[0][1].context.playheadPosition).toBe(99);
+      expect(firstRawCalls[0][1].context).toBeUndefined();
 
       adapter.setDefaultContext(undefined);
       await adapter.complete(USER_MSG);
 
-      const allChatCalls = invokeMock.mock.calls.filter((c: unknown[]) => c[0] === 'chat_with_ai');
-      expect(allChatCalls[1][1].context.playheadPosition).toBe(0);
+      const allRawCalls = invokeMock.mock.calls.filter(
+        (c: unknown[]) => c[0] === 'complete_with_ai_raw',
+      );
+      expect(allRawCalls[1][1].context).toBeUndefined();
     });
   });
 
@@ -1382,10 +1369,10 @@ describe('TauriLLMAdapter', () => {
   // Abort
   // =========================================================================
   describe('abort()', () => {
-    it('should throw "Generation aborted" when abort is called before callBackend resolves', async () => {
-      const deferred = createDeferred<{ message: string }>();
+    it('should throw "Generation aborted" when abort is called before raw completion resolves', async () => {
+      const deferred = createDeferred<ReturnType<typeof rawResponse>>();
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return deferred.promise;
+        if (command === 'complete_with_ai_raw') return deferred.promise;
         return Promise.resolve();
       });
 
@@ -1393,7 +1380,7 @@ describe('TauriLLMAdapter', () => {
       const promise = adapter.complete(USER_MSG);
 
       adapter.abort();
-      deferred.resolve(chatResponse('late'));
+      deferred.resolve(rawResponse('late'));
 
       await expect(promise).rejects.toThrow('Generation aborted');
     });
@@ -1420,9 +1407,9 @@ describe('TauriLLMAdapter', () => {
     });
 
     it('should set isGenerating to false immediately after abort', async () => {
-      const deferred = createDeferred<{ message: string }>();
+      const deferred = createDeferred<ReturnType<typeof rawResponse>>();
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return deferred.promise;
+        if (command === 'complete_with_ai_raw') return deferred.promise;
         return Promise.resolve();
       });
 
@@ -1432,19 +1419,19 @@ describe('TauriLLMAdapter', () => {
       expect(adapter.isGenerating()).toBe(true);
 
       adapter.abort();
-      deferred.resolve(chatResponse('late'));
+      deferred.resolve(rawResponse('late'));
       await expect(promise).rejects.toThrow('Generation aborted');
       expect(adapter.isGenerating()).toBe(false);
     });
 
     it('should allow new requests after aborting a previous one', async () => {
-      const deferred1 = createDeferred<{ message: string }>();
+      const deferred1 = createDeferred<ReturnType<typeof rawResponse>>();
       let callCount = 0;
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') {
+        if (command === 'complete_with_ai_raw') {
           callCount++;
           if (callCount === 1) return deferred1.promise;
-          return Promise.resolve(chatResponse('fresh'));
+          return Promise.resolve(rawResponse('fresh'));
         }
         return Promise.resolve();
       });
@@ -1453,7 +1440,7 @@ describe('TauriLLMAdapter', () => {
       const p1 = adapter.complete(USER_MSG);
       adapter.abort();
 
-      deferred1.resolve(chatResponse('stale'));
+      deferred1.resolve(rawResponse('stale'));
       await expect(p1).rejects.toThrow('Generation aborted');
 
       // New request should work fine
@@ -1517,12 +1504,12 @@ describe('TauriLLMAdapter', () => {
   // =========================================================================
   describe('request sequence management', () => {
     it('should keep isGenerating true while newer overlapping request is pending', async () => {
-      const first = createDeferred<{ message: string }>();
-      const second = createDeferred<{ message: string }>();
+      const first = createDeferred<ReturnType<typeof rawResponse>>();
+      const second = createDeferred<ReturnType<typeof rawResponse>>();
       let callCount = 0;
 
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') {
+        if (command === 'complete_with_ai_raw') {
           callCount++;
           return callCount === 1 ? first.promise : second.promise;
         }
@@ -1535,25 +1522,25 @@ describe('TauriLLMAdapter', () => {
       const p2 = adapter.complete(USER_MSG);
 
       // Resolve the older request first
-      first.resolve(chatResponse('first'));
+      first.resolve(rawResponse('first'));
       await p1;
 
       // Adapter should still be generating because p2 is the active request
       expect(adapter.isGenerating()).toBe(true);
 
-      second.resolve(chatResponse('second'));
+      second.resolve(rawResponse('second'));
       await p2;
 
       expect(adapter.isGenerating()).toBe(false);
     });
 
     it('should set isGenerating to false when only the newest request finishes first', async () => {
-      const first = createDeferred<{ message: string }>();
-      const second = createDeferred<{ message: string }>();
+      const first = createDeferred<ReturnType<typeof rawResponse>>();
+      const second = createDeferred<ReturnType<typeof rawResponse>>();
       let callCount = 0;
 
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') {
+        if (command === 'complete_with_ai_raw') {
           callCount++;
           return callCount === 1 ? first.promise : second.promise;
         }
@@ -1566,27 +1553,27 @@ describe('TauriLLMAdapter', () => {
       const p2 = adapter.complete(USER_MSG);
 
       // Resolve the newer request first
-      second.resolve(chatResponse('second'));
+      second.resolve(rawResponse('second'));
       await p2;
 
       // isGenerating should be false because the active request finished
       expect(adapter.isGenerating()).toBe(false);
 
       // Resolve the stale one
-      first.resolve(chatResponse('first'));
+      first.resolve(rawResponse('first'));
       await p1;
 
       expect(adapter.isGenerating()).toBe(false);
     });
 
     it('should not clear generating state when a stale request finishes', async () => {
-      const first = createDeferred<{ message: string }>();
-      const second = createDeferred<{ message: string }>();
-      const third = createDeferred<{ message: string }>();
+      const first = createDeferred<ReturnType<typeof rawResponse>>();
+      const second = createDeferred<ReturnType<typeof rawResponse>>();
+      const third = createDeferred<ReturnType<typeof rawResponse>>();
       let callCount = 0;
 
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') {
+        if (command === 'complete_with_ai_raw') {
           callCount++;
           if (callCount === 1) return first.promise;
           if (callCount === 2) return second.promise;
@@ -1601,15 +1588,15 @@ describe('TauriLLMAdapter', () => {
       const p2 = adapter.complete(USER_MSG);
       const p3 = adapter.complete(USER_MSG);
 
-      first.resolve(chatResponse('1'));
+      first.resolve(rawResponse('1'));
       await p1;
       expect(adapter.isGenerating()).toBe(true);
 
-      second.resolve(chatResponse('2'));
+      second.resolve(rawResponse('2'));
       await p2;
       expect(adapter.isGenerating()).toBe(true);
 
-      third.resolve(chatResponse('3'));
+      third.resolve(rawResponse('3'));
       await p3;
       expect(adapter.isGenerating()).toBe(false);
     });
@@ -1617,10 +1604,10 @@ describe('TauriLLMAdapter', () => {
     it('should reset abort state for new requests after a previous abort', async () => {
       let callCount = 0;
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') {
+        if (command === 'complete_with_ai_raw') {
           callCount++;
           if (callCount === 1) return new Promise(() => {}); // never resolves
-          return Promise.resolve(chatResponse('works'));
+          return Promise.resolve(rawResponse('works'));
         }
         return Promise.resolve();
       });
@@ -1710,9 +1697,9 @@ describe('TauriLLMAdapter', () => {
   // Configuration
   // =========================================================================
   describe('configuration', () => {
-    it('should accept initial defaultContext via config', async () => {
+    it('should ignore legacy defaultContext in raw completion payloads', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.resolve(chatResponse('ok'));
+        if (command === 'complete_with_ai_raw') return Promise.resolve(rawResponse('ok'));
         return Promise.resolve();
       });
 
@@ -1724,9 +1711,10 @@ describe('TauriLLMAdapter', () => {
       });
       await adapter.complete(USER_MSG);
 
-      const chatCalls = invokeMock.mock.calls.filter((c: unknown[]) => c[0] === 'chat_with_ai');
-      expect(chatCalls[0][1].context.playheadPosition).toBe(10);
-      expect(chatCalls[0][1].context.assetIds).toEqual(['a1']);
+      const rawCalls = invokeMock.mock.calls.filter(
+        (c: unknown[]) => c[0] === 'complete_with_ai_raw',
+      );
+      expect(rawCalls[0][1].context).toBeUndefined();
     });
   });
 
@@ -1734,9 +1722,10 @@ describe('TauriLLMAdapter', () => {
   // Edge Cases
   // =========================================================================
   describe('edge cases', () => {
-    it('should handle response with actions set to null', async () => {
+    it('should ignore response with actions set to null', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.resolve({ message: 'hi', actions: null });
+        if (command === 'complete_with_ai_raw')
+          return Promise.resolve({ ...rawResponse('hi'), actions: null });
         return Promise.resolve();
       });
 
@@ -1747,9 +1736,10 @@ describe('TauriLLMAdapter', () => {
       expect(result.toolCalls).toBeUndefined();
     });
 
-    it('should handle response with empty actions array', async () => {
+    it('should ignore response with empty actions array', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') return Promise.resolve({ message: 'hi', actions: [] });
+        if (command === 'complete_with_ai_raw')
+          return Promise.resolve({ ...rawResponse('hi'), actions: [] });
         return Promise.resolve();
       });
 
@@ -1760,11 +1750,11 @@ describe('TauriLLMAdapter', () => {
       expect(result.toolCalls).toBeUndefined();
     });
 
-    it('should handle intent field in response', async () => {
+    it('should ignore intent field in raw completion response', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') {
+        if (command === 'complete_with_ai_raw') {
           return Promise.resolve({
-            message: 'I will trim the clip',
+            ...rawResponse('I will trim the clip'),
             intent: { intentType: 'trim', confidence: 0.95 },
           });
         }
@@ -1847,16 +1837,17 @@ describe('TauriLLMAdapter', () => {
       expect(events[0].type).toBe('done');
     });
 
-    it('should generate unique tool call IDs for each action in complete()', async () => {
+    it('should not synthesize tool calls from legacy action fields in complete()', async () => {
       invokeMock.mockImplementation((command: string) => {
-        if (command === 'chat_with_ai') {
+        if (command === 'complete_with_ai_raw') {
           return Promise.resolve(
-            chatResponse('multi', {
+            {
+              ...rawResponse('multi'),
               actions: [
                 { commandType: 'a', params: {} },
                 { commandType: 'b', params: {} },
               ],
-            }),
+            },
           );
         }
         return Promise.resolve();
@@ -1865,8 +1856,7 @@ describe('TauriLLMAdapter', () => {
       const adapter = createTauriLLMAdapter();
       const result = await adapter.complete(USER_MSG);
 
-      expect(result.toolCalls).toHaveLength(2);
-      expect(result.toolCalls![0].id).not.toBe(result.toolCalls![1].id);
+      expect(result.toolCalls).toBeUndefined();
     });
 
     it('should handle many rapid text deltas in generateStream', async () => {

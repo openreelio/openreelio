@@ -85,7 +85,7 @@ function createMockClip(overrides: Partial<Clip> = {}): Clip {
       durationSec: 10,
     },
     transform: {
-      position: { x: 0, y: 0 },
+      position: { x: 0.5, y: 0.5 },
       scale: { x: 1, y: 1 },
       rotationDeg: 0,
       anchor: { x: 0.5, y: 0.5 },
@@ -3244,6 +3244,86 @@ describe('useTimelineActions', () => {
           },
         ]),
       );
+    });
+
+    it('should not restore transform when pasted media uses the engine identity transform', async () => {
+      const track = createMockTrack({ id: 'track_v1', kind: 'video' });
+      const asset = createMockAsset({
+        id: 'asset_media_001',
+        kind: 'video',
+        durationSec: 30,
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const call = args as { commandType: string; payload: Record<string, unknown> };
+          executeCalls.push(call);
+
+          if (call.commandType === 'InsertClip') {
+            return Promise.resolve({
+              opId: 'op_insert',
+              createdIds: ['clip_pasted_001'],
+              deletedIds: [],
+            });
+          }
+
+          return Promise.resolve({
+            opId: `op_${call.commandType.toLowerCase()}`,
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleClipPaste({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          pasteTime: 12,
+          clipData: {
+            sourceClipId: 'clip_source_001',
+            trackKind: 'video',
+            assetId: 'asset_media_001',
+            timelineIn: 12,
+            durationSec: 5,
+            sourceIn: 0,
+            sourceOut: 5,
+            speed: 1,
+            opacity: 1,
+            transform: {
+              position: { x: 0.5, y: 0.5 },
+              scale: { x: 1, y: 1 },
+              rotationDeg: 0,
+              anchor: { x: 0.5, y: 0.5 },
+            },
+          },
+        });
+      });
+
+      expect(executeCalls.map((call) => call.commandType)).not.toContain('SetClipTransform');
     });
 
     it('should create a caption track when pasting a caption clip without an available caption lane', async () => {

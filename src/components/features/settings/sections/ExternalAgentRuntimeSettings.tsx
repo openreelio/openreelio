@@ -91,7 +91,6 @@ const RUNTIME_OPTIONS: Array<{
   title: string;
   badge: string;
 }> = [
-  { value: 'api', title: 'Built-in API model', badge: 'API key' },
   { value: 'codex', title: 'Codex account agent', badge: 'OAuth' },
 ];
 
@@ -180,7 +179,9 @@ export function ExternalAgentRuntimeSettings({
   const [isInstalling, setIsInstalling] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const lastAutoConfigureKeyRef = useRef<string | null>(null);
-  const codexSelected = settings.assistantRuntime === 'codex';
+  const effectiveAssistantRuntime: AssistantRuntime =
+    settings.assistantRuntime === 'codex' ? settings.assistantRuntime : 'codex';
+  const codexSelected = effectiveAssistantRuntime === 'codex';
   const codexStatus = useExternalAgentHostStatus({
     hostEnabled: codexSelected,
     codexEnabled: codexSelected,
@@ -223,6 +224,12 @@ export function ExternalAgentRuntimeSettings({
     codexSelected && codexStatusKnown && !codexInstalled && !launcherExecutableError,
   );
   const isRuntimeActionPending = isConfiguring || isSigningIn || isInstalling || isUpdating;
+
+  useEffect(() => {
+    if (!disabled && settings.assistantRuntime !== 'codex') {
+      onUpdate({ assistantRuntime: 'codex' });
+    }
+  }, [disabled, onUpdate, settings.assistantRuntime]);
 
   const refreshExternalAgentStatus = useCallback(() => {
     window.dispatchEvent(new Event(EXTERNAL_AGENT_STATUS_REFRESH_EVENT));
@@ -444,13 +451,13 @@ export function ExternalAgentRuntimeSettings({
       <div className="mb-3 border-b border-editor-border pb-2">
         <h3 className="text-sm font-medium text-editor-text">Assistant Runtime</h3>
         <p className="mt-1 text-xs text-editor-text-muted">
-          API models use stored credentials. OAuth agents use an installed local account.
+          OpenReelio routes assistant work through the local Codex account agent.
         </p>
       </div>
 
       <div className="grid gap-2 sm:grid-cols-2">
         {RUNTIME_OPTIONS.map((option) => {
-          const selected = settings.assistantRuntime === option.value;
+          const selected = effectiveAssistantRuntime === option.value;
           return (
             <button
               key={option.value}

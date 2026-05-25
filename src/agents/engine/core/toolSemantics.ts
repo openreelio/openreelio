@@ -35,6 +35,11 @@ const PROJECT_MUTATION_UTILITY_TOOLS = new Set([
   'style_caption',
   'add_captions_from_transcription',
   'import_captions_from_file',
+  'add_text_clip',
+  'update_text_clip',
+  'set_text_transform',
+  'delete_text_clip',
+  'remove_text_clip',
 ]);
 
 const MUTATING_TOOL_CATEGORIES = new Set([

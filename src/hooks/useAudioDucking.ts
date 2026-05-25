@@ -10,9 +10,8 @@ import { useCallback, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { AudioDuckingParams } from '@/types';
 import { useProjectStore } from '@/stores/projectStore';
-import { commandQueue } from '@/utils/commandQueue';
 import { requestDeduplicator } from '@/utils/requestDeduplicator';
-import { applyProjectState, refreshProjectState } from '@/utils/stateRefreshHelper';
+import { runProjectBackendMutation } from '@/services/projectMutationGateway';
 
 /** Default ducking parameters */
 export const DEFAULT_DUCKING_PARAMS: AudioDuckingParams = {
@@ -87,39 +86,12 @@ export function useAudioDucking(): UseAudioDuckingReturn {
       };
 
       try {
-        const result = await requestDeduplicator.execute(
-          'apply_audio_ducking',
-          payload,
-          () =>
-            commandQueue.enqueue(async () => {
-              const versionBefore = useProjectStore.getState().stateVersion;
-
-              const commandResult = await invoke<ApplyDuckingResult>('apply_audio_ducking', {
-                args: payload,
-              });
-              const freshState = await refreshProjectState();
-
-              let concurrentModificationDetected = false;
-              useProjectStore.setState((state) => {
-                if (state.stateVersion !== versionBefore) {
-                  concurrentModificationDetected = true;
-                  return;
-                }
-
-                state.isDirty = true;
-                state.stateVersion += 1;
-                state.error = null;
-                applyProjectState(state, freshState);
-              });
-
-              if (concurrentModificationDetected) {
-                throw new Error(
-                  'Concurrent modification detected during audio ducking. Please retry.',
-                );
-              }
-
-              return commandResult;
-            }, 'applyAudioDucking'),
+        const result = await requestDeduplicator.execute('apply_audio_ducking', payload, () =>
+          runProjectBackendMutation('applyAudioDucking', () =>
+            invoke<ApplyDuckingResult>('apply_audio_ducking', {
+              args: payload,
+            }),
+          ),
         );
 
         return result;

@@ -27,6 +27,10 @@ pub struct ProjectHistory {
     pub applied_op_ids: Vec<OpId>,
     /// Undone operations in redo order. The last entry is the next redo target.
     pub redo_op_ids: Vec<OpId>,
+    /// Operations recorded in the append-only ops log but intentionally excluded
+    /// from active history, such as rolled-back failed agent plan steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discarded_op_ids: Vec<OpId>,
     /// Number of applied operations that are intentionally excluded from undo.
     pub protected_prefix_len: usize,
 }
@@ -38,6 +42,7 @@ impl Default for ProjectHistory {
             base_meta: None,
             applied_op_ids: Vec::new(),
             redo_op_ids: Vec::new(),
+            discarded_op_ids: Vec::new(),
             protected_prefix_len: 0,
         }
     }
@@ -51,6 +56,7 @@ impl ProjectHistory {
             base_meta: Some(base_meta),
             applied_op_ids: operations.iter().map(|op| op.id.clone()).collect(),
             redo_op_ids: Vec::new(),
+            discarded_op_ids: Vec::new(),
             protected_prefix_len: protected_prefix_len_for_operations(operations),
         };
         history.sanitize(operations);
@@ -118,6 +124,10 @@ impl ProjectHistory {
                 .iter()
                 .any(|existing| existing == &op_id)
                 || self.redo_op_ids.iter().any(|existing| existing == &op_id)
+                || self
+                    .discarded_op_ids
+                    .iter()
+                    .any(|existing| existing == &op_id)
             {
                 continue;
             }
@@ -131,13 +141,64 @@ impl ProjectHistory {
         }
     }
 
+    /// Marks operations as intentionally excluded from both applied and redo history.
+    ///
+    /// The ops log remains append-only, so failed transactional work cannot be
+    /// deleted from disk. Recording discarded IDs prevents later history syncs
+    /// from treating those durable log entries as newly applied user edits.
+    pub fn discard_operations<I>(&mut self, op_ids: I)
+    where
+        I: IntoIterator<Item = OpId>,
+    {
+        let protected_ids: HashSet<String> = self
+            .applied_op_ids
+            .iter()
+            .take(self.protected_prefix_len)
+            .cloned()
+            .collect();
+        let mut discard_set = HashSet::new();
+        for op_id in op_ids {
+            if protected_ids.contains(&op_id) {
+                continue;
+            }
+
+            if discard_set.insert(op_id.clone())
+                && !self
+                    .discarded_op_ids
+                    .iter()
+                    .any(|existing| existing == &op_id)
+            {
+                self.discarded_op_ids.push(op_id);
+            }
+        }
+
+        if discard_set.is_empty() {
+            return;
+        }
+
+        self.applied_op_ids
+            .retain(|op_id| !discard_set.contains(op_id));
+        self.redo_op_ids
+            .retain(|op_id| !discard_set.contains(op_id));
+        self.protected_prefix_len = self.protected_prefix_len.min(self.applied_op_ids.len());
+    }
+
     /// Removes references to missing/duplicate operation IDs.
     pub fn sanitize(&mut self, operations: &[Operation]) {
         let valid_ids: HashSet<&str> = operations.iter().map(|op| op.id.as_str()).collect();
 
+        let mut seen_discarded = HashSet::new();
+        self.discarded_op_ids.retain(|op_id| {
+            valid_ids.contains(op_id.as_str()) && seen_discarded.insert(op_id.clone())
+        });
+        let discarded_ids: HashSet<&str> =
+            self.discarded_op_ids.iter().map(String::as_str).collect();
+
         let mut seen_applied = HashSet::new();
         self.applied_op_ids.retain(|op_id| {
-            valid_ids.contains(op_id.as_str()) && seen_applied.insert(op_id.clone())
+            valid_ids.contains(op_id.as_str())
+                && !discarded_ids.contains(op_id.as_str())
+                && seen_applied.insert(op_id.clone())
         });
 
         self.protected_prefix_len =
@@ -148,6 +209,7 @@ impl ProjectHistory {
         self.redo_op_ids.retain(|op_id| {
             valid_ids.contains(op_id.as_str())
                 && !applied_ids.contains(op_id.as_str())
+                && !discarded_ids.contains(op_id.as_str())
                 && seen_redo.insert(op_id.clone())
         });
     }
@@ -242,5 +304,48 @@ mod tests {
 
         assert_eq!(history.protected_prefix_len, 1);
         assert!(history.can_undo());
+    }
+
+    #[test]
+    fn discarded_operations_should_not_be_reapplied_by_history_sync() {
+        let operations = vec![
+            Operation::with_id("op1", OpKind::SequenceCreate, serde_json::json!({})),
+            Operation::with_id("op2", OpKind::AssetImport, serde_json::json!({})),
+            Operation::with_id("op3", OpKind::ClipAdd, serde_json::json!({})),
+        ];
+
+        let mut history =
+            ProjectHistory::from_operations(&operations, ProjectMeta::new("History Test"));
+
+        history.discard_operations(["op2".to_string(), "op3".to_string()]);
+        history.sanitize(&operations);
+        history.append_new_operations(["op2".to_string(), "op3".to_string()]);
+        history.sanitize(&operations);
+
+        assert_eq!(history.applied_op_ids, vec!["op1".to_string()]);
+        assert!(history.redo_op_ids.is_empty());
+        assert_eq!(
+            history.discarded_op_ids,
+            vec!["op2".to_string(), "op3".to_string()]
+        );
+        assert!(!history.can_undo());
+    }
+
+    #[test]
+    fn discard_operations_should_not_discard_protected_prefix() {
+        let operations = vec![
+            Operation::with_id("op1", OpKind::SequenceCreate, serde_json::json!({})),
+            Operation::with_id("op2", OpKind::AssetImport, serde_json::json!({})),
+        ];
+
+        let mut history =
+            ProjectHistory::from_operations(&operations, ProjectMeta::new("History Test"));
+
+        history.discard_operations(["op1".to_string(), "op2".to_string()]);
+        history.sanitize(&operations);
+
+        assert_eq!(history.applied_op_ids, vec!["op1".to_string()]);
+        assert_eq!(history.discarded_op_ids, vec!["op2".to_string()]);
+        assert_eq!(history.protected_prefix_len, 1);
     }
 }

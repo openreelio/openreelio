@@ -20,6 +20,7 @@ import { SeekBar } from '@/components/preview';
 import { ShuttleSpeedIndicator } from '@/components/preview/ShuttleSpeedIndicator';
 import { useSourceMonitor } from '@/hooks/useSourceMonitor';
 import { useJKLShuttle } from '@/hooks/useJKLShuttle';
+import { useTimelineAssetDragSource } from '@/hooks/useTimelineAssetDragSource';
 import { useProjectStore } from '@/stores';
 import { useEditorToolStore } from '@/stores/editorToolStore';
 import { convertFileSrc } from '@tauri-apps/api/core';
@@ -165,6 +166,23 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
     [assetId, editMode, inPoint, outPoint],
   );
 
+  const getTimelineAssetDragPayload = useCallback(() => {
+    if (!assetId || !asset) {
+      return null;
+    }
+
+    return {
+      assetId,
+      ...(asset.kind != null ? { assetKind: asset.kind } : {}),
+      label: asset.name,
+      editMode,
+      ...(inPoint !== null ? { sourceIn: inPoint } : {}),
+      ...(outPoint !== null ? { sourceOut: outPoint } : {}),
+    };
+  }, [asset, assetId, editMode, inPoint, outPoint]);
+
+  const timelineAssetDragSource = useTimelineAssetDragSource(getTimelineAssetDragPayload);
+
   // In/Out marker percentages
   const inPercent = inPoint !== null && duration > 0 ? (inPoint / duration) * 100 : null;
   const outPercent = outPoint !== null && duration > 0 ? (outPoint / duration) * 100 : null;
@@ -202,8 +220,10 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
 
       {/* Video preview area (draggable to timeline) */}
       <div
+        data-testid="source-monitor-drag-surface"
         className="relative flex-1 cursor-grab overflow-hidden"
-        draggable={!!assetId}
+        draggable={false}
+        onPointerDown={timelineAssetDragSource.onPointerDown}
         onDragStart={handleDragStart}
       >
         <PreviewPlayer

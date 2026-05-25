@@ -74,6 +74,42 @@ pub struct CancelRenderResult {
     pub cancelled: bool,
 }
 
+/// Render lifecycle category.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderLifecycleKind {
+    Export,
+    RangeExport,
+    AudioExport,
+    PreviewCache,
+}
+
+/// Render lifecycle state shared by export, preview cache, and cancellation paths.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderLifecycleState {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    AlreadyCached,
+}
+
+/// Unified render lifecycle event payload.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderLifecycleEvent {
+    pub job_id: String,
+    pub sequence_id: Option<String>,
+    pub kind: RenderLifecycleKind,
+    pub state: RenderLifecycleState,
+    pub progress: Option<f64>,
+    pub message: Option<String>,
+    pub output_path: Option<String>,
+    pub plan_hash: Option<String>,
+}
+
 /// Result of a single-frame export.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -149,6 +185,58 @@ fn validate_batch_item_range(
     }
 
     Ok(())
+}
+
+fn emit_render_lifecycle(app: &tauri::AppHandle, event: RenderLifecycleEvent) {
+    use tauri::Emitter;
+
+    let _ = app.emit("render-lifecycle", event);
+}
+
+fn emit_render_progress_events(
+    app: &tauri::AppHandle,
+    job_id: &str,
+    sequence_id: &str,
+    kind: RenderLifecycleKind,
+    progress: &crate::core::render::ExportProgress,
+) {
+    use tauri::Emitter;
+
+    let progress_message = progress.message.clone();
+    let _ = app.emit(
+        "render-progress",
+        serde_json::json!({
+            "jobId": job_id,
+            "frame": progress.frame,
+            "totalFrames": progress.total_frames,
+            "percent": progress.percent,
+            "fps": progress.fps,
+            "etaSeconds": progress.eta_seconds,
+            "message": progress_message,
+        }),
+    );
+
+    emit_render_lifecycle(
+        app,
+        RenderLifecycleEvent {
+            job_id: job_id.to_string(),
+            sequence_id: Some(sequence_id.to_string()),
+            kind,
+            state: RenderLifecycleState::Running,
+            progress: Some(f64::from(progress.percent)),
+            message: Some(progress.message.clone()),
+            output_path: None,
+            plan_hash: None,
+        },
+    );
+}
+
+fn lifecycle_state_for_export_error(error: &ExportError) -> RenderLifecycleState {
+    if matches!(error, ExportError::Cancelled) {
+        RenderLifecycleState::Cancelled
+    } else {
+        RenderLifecycleState::Failed
+    }
 }
 
 /// Cached FFmpeg hardware probe results (decoders + encoders).
@@ -251,7 +339,7 @@ pub async fn start_render(
     use tauri::Emitter;
 
     // Get sequence/assets/effects + project path from project state
-    let (sequence, assets, effects, project_path) = {
+    let (sequence, assets, effects, render_graph, project_path) = {
         let guard = state.project.lock().await;
 
         let project = guard
@@ -264,6 +352,9 @@ pub async fn start_render(
             .get(&sequence_id)
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
+
+        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
+            .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -279,7 +370,13 @@ pub async fn start_render(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        (sequence, assets, effects, project.path.clone())
+        (
+            sequence,
+            assets,
+            effects,
+            render_graph,
+            project.path.clone(),
+        )
     };
 
     // Validate output path within allowed roots (defense-in-depth for compromised renderer).
@@ -327,6 +424,17 @@ pub async fn start_render(
         tracing::warn!("Export warning: {}", warning);
     }
 
+    let render_plan =
+        crate::core::render::build_render_plan(&render_graph, &assets, &effects, &settings);
+    if !render_plan.validation.is_valid {
+        let error_msg = render_plan.validation.errors.join("; ");
+        return Err(format!("Render plan validation failed: {}", error_msg));
+    }
+    for warning in &render_plan.validation.warnings {
+        tracing::warn!("Render plan warning: {}", warning);
+    }
+    let plan_hash = render_plan.plan_hash.clone();
+
     // Create export engine
     let engine = ExportEngine::new(ffmpeg.clone());
     let job_id = ulid::Ulid::new().to_string();
@@ -337,24 +445,34 @@ pub async fn start_render(
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     register_render_job(&job_id, cancel_tx).await;
 
+    emit_render_lifecycle(
+        &app_handle,
+        RenderLifecycleEvent {
+            job_id: job_id.clone(),
+            sequence_id: Some(sequence_id.clone()),
+            kind: RenderLifecycleKind::Export,
+            state: RenderLifecycleState::Queued,
+            progress: Some(0.0),
+            message: Some("Export queued".to_string()),
+            output_path: Some(settings.output_path.to_string_lossy().to_string()),
+            plan_hash: Some(plan_hash.clone()),
+        },
+    );
+
     // Create progress channel
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<ExportProgress>(100);
     let app_handle_clone = app_handle.clone();
+    let sequence_id_progress = sequence_id.clone();
 
     // Spawn progress forwarding task
     tokio::spawn(async move {
         while let Some(progress) = progress_rx.recv().await {
-            let _ = app_handle_clone.emit(
-                "render-progress",
-                serde_json::json!({
-                    "jobId": job_id_clone,
-                    "frame": progress.frame,
-                    "totalFrames": progress.total_frames,
-                    "percent": progress.percent,
-                    "fps": progress.fps,
-                    "etaSeconds": progress.eta_seconds,
-                    "message": progress.message,
-                }),
+            emit_render_progress_events(
+                &app_handle_clone,
+                &job_id_clone,
+                &sequence_id_progress,
+                RenderLifecycleKind::Export,
+                &progress,
             );
         }
     });
@@ -365,14 +483,17 @@ pub async fn start_render(
     let settings_clone = settings.clone();
     let app_handle_for_task = app_handle.clone();
     let job_id_for_task = job_id.clone();
+    let plan_hash_for_task = plan_hash.clone();
+    let render_plan_for_task = render_plan.clone();
 
     tokio::spawn(async move {
         match engine
-            .export_sequence_with_effects(
+            .export_sequence_with_effects_for_plan(
                 &sequence_clone,
                 &assets_clone,
                 &effects,
                 &settings_clone,
+                &render_plan_for_task,
                 Some(progress_tx),
                 Some(cancel_rx),
             )
@@ -390,24 +511,52 @@ pub async fn start_render(
                 let _ = app_handle_for_task.emit(
                     "render-complete",
                     serde_json::json!({
-                        "jobId": job_id_for_task,
+                        "jobId": job_id_for_task.clone(),
                         "outputPath": result.output_path.to_string_lossy().to_string(),
                         "durationSec": result.duration_sec,
                         "fileSize": result.file_size,
                         "encodingTimeSec": result.encoding_time_sec,
                     }),
                 );
+                emit_render_lifecycle(
+                    &app_handle_for_task,
+                    RenderLifecycleEvent {
+                        job_id: job_id_for_task,
+                        sequence_id: Some(sequence_clone.id.clone()),
+                        kind: RenderLifecycleKind::Export,
+                        state: RenderLifecycleState::Completed,
+                        progress: Some(100.0),
+                        message: Some("Export completed".to_string()),
+                        output_path: Some(result.output_path.to_string_lossy().to_string()),
+                        plan_hash: Some(plan_hash_for_task.clone()),
+                    },
+                );
             }
             Err(e) => {
                 unregister_render_job(&job_id_for_task).await;
                 tracing::error!("Export failed: {}", e);
+                let lifecycle_state = lifecycle_state_for_export_error(&e);
+                let error_message = e.to_string();
 
                 let _ = app_handle_for_task.emit(
                     "render-error",
                     serde_json::json!({
-                        "jobId": job_id_for_task,
-                        "error": e.to_string(),
+                        "jobId": job_id_for_task.clone(),
+                        "error": error_message.clone(),
                     }),
+                );
+                emit_render_lifecycle(
+                    &app_handle_for_task,
+                    RenderLifecycleEvent {
+                        job_id: job_id_for_task,
+                        sequence_id: Some(sequence_clone.id.clone()),
+                        kind: RenderLifecycleKind::Export,
+                        state: lifecycle_state,
+                        progress: None,
+                        message: Some(error_message),
+                        output_path: Some(settings_clone.output_path.to_string_lossy().to_string()),
+                        plan_hash: Some(plan_hash_for_task.clone()),
+                    },
                 );
             }
         }
@@ -456,7 +605,7 @@ pub async fn render_range(
     }
 
     // Get sequence/assets/effects + project path
-    let (sequence, assets, effects, project_path) = {
+    let (sequence, assets, effects, render_graph, project_path) = {
         let guard = state.project.lock().await;
         let project = guard
             .as_ref()
@@ -468,6 +617,9 @@ pub async fn render_range(
             .get(&sequence_id)
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
+
+        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
+            .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -483,7 +635,13 @@ pub async fn render_range(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        (sequence, assets, effects, project.path.clone())
+        (
+            sequence,
+            assets,
+            effects,
+            render_graph,
+            project.path.clone(),
+        )
     };
 
     // Validate output path
@@ -517,6 +675,19 @@ pub async fn render_range(
         ));
     }
 
+    let render_plan =
+        crate::core::render::build_render_plan(&render_graph, &assets, &effects, &settings);
+    if !render_plan.validation.is_valid {
+        return Err(format!(
+            "Render plan validation failed: {}",
+            render_plan.validation.errors.join("; ")
+        ));
+    }
+    for warning in &render_plan.validation.warnings {
+        tracing::warn!("Render plan warning: {}", warning);
+    }
+    let plan_hash = render_plan.plan_hash.clone();
+
     let engine = ExportEngine::new(ffmpeg.clone());
     let job_id = ulid::Ulid::new().to_string();
     let job_id_for_return = job_id.clone();
@@ -525,38 +696,53 @@ pub async fn render_range(
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     register_render_job(&job_id, cancel_tx).await;
 
+    emit_render_lifecycle(
+        &app_handle,
+        RenderLifecycleEvent {
+            job_id: job_id.clone(),
+            sequence_id: Some(sequence_id.clone()),
+            kind: RenderLifecycleKind::RangeExport,
+            state: RenderLifecycleState::Queued,
+            progress: Some(0.0),
+            message: Some("Range export queued".to_string()),
+            output_path: Some(settings.output_path.to_string_lossy().to_string()),
+            plan_hash: Some(plan_hash.clone()),
+        },
+    );
+
     // Progress channel
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<ExportProgress>(100);
     let app_handle_progress = app_handle.clone();
     let job_id_progress = job_id.clone();
+    let sequence_id_progress = sequence_id.clone();
 
     tokio::spawn(async move {
         while let Some(progress) = progress_rx.recv().await {
-            let _ = app_handle_progress.emit(
-                "render-progress",
-                serde_json::json!({
-                    "jobId": job_id_progress,
-                    "frame": progress.frame,
-                    "totalFrames": progress.total_frames,
-                    "percent": progress.percent,
-                    "fps": progress.fps,
-                    "etaSeconds": progress.eta_seconds,
-                    "message": progress.message,
-                }),
+            emit_render_progress_events(
+                &app_handle_progress,
+                &job_id_progress,
+                &sequence_id_progress,
+                RenderLifecycleKind::RangeExport,
+                &progress,
             );
         }
     });
 
     let app_handle_task = app_handle.clone();
     let job_id_task = job_id.clone();
+    let sequence_id_task = sequence_id.clone();
+    let output_path_task = settings.output_path.clone();
+    let plan_hash_task = plan_hash.clone();
+    let render_plan_task = render_plan.clone();
 
     tokio::spawn(async move {
         match engine
-            .export_sequence_with_effects(
+            .export_sequence_with_effects_for_plan(
                 &sequence,
                 &assets,
                 &effects,
                 &settings,
+                &render_plan_task,
                 Some(progress_tx),
                 Some(cancel_rx),
             )
@@ -567,22 +753,50 @@ pub async fn render_range(
                 let _ = app_handle_task.emit(
                     "render-complete",
                     serde_json::json!({
-                        "jobId": job_id_task,
+                        "jobId": job_id_task.clone(),
                         "outputPath": result.output_path.to_string_lossy().to_string(),
                         "durationSec": result.duration_sec,
                         "fileSize": result.file_size,
                         "encodingTimeSec": result.encoding_time_sec,
                     }),
                 );
+                emit_render_lifecycle(
+                    &app_handle_task,
+                    RenderLifecycleEvent {
+                        job_id: job_id_task,
+                        sequence_id: Some(sequence_id_task),
+                        kind: RenderLifecycleKind::RangeExport,
+                        state: RenderLifecycleState::Completed,
+                        progress: Some(100.0),
+                        message: Some("Range export completed".to_string()),
+                        output_path: Some(result.output_path.to_string_lossy().to_string()),
+                        plan_hash: Some(plan_hash_task.clone()),
+                    },
+                );
             }
             Err(e) => {
                 unregister_render_job(&job_id_task).await;
+                let lifecycle_state = lifecycle_state_for_export_error(&e);
+                let error_message = e.to_string();
                 let _ = app_handle_task.emit(
                     "render-error",
                     serde_json::json!({
-                        "jobId": job_id_task,
-                        "error": e.to_string(),
+                        "jobId": job_id_task.clone(),
+                        "error": error_message.clone(),
                     }),
+                );
+                emit_render_lifecycle(
+                    &app_handle_task,
+                    RenderLifecycleEvent {
+                        job_id: job_id_task,
+                        sequence_id: Some(sequence_id_task),
+                        kind: RenderLifecycleKind::RangeExport,
+                        state: lifecycle_state,
+                        progress: None,
+                        message: Some(error_message),
+                        output_path: Some(output_path_task.to_string_lossy().to_string()),
+                        plan_hash: Some(plan_hash_task.clone()),
+                    },
                 );
             }
         }
@@ -628,7 +842,7 @@ pub async fn batch_render(
     }
 
     // Get project state (shared across all batch items)
-    let (sequence, assets, effects, project_path) = {
+    let (sequence, assets, effects, render_graph, project_path) = {
         let guard = state.project.lock().await;
         let project = guard
             .as_ref()
@@ -640,6 +854,9 @@ pub async fn batch_render(
             .get(&sequence_id)
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
+
+        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
+            .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -655,7 +872,13 @@ pub async fn batch_render(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        (sequence, assets, effects, project.path.clone())
+        (
+            sequence,
+            assets,
+            effects,
+            render_graph,
+            project.path.clone(),
+        )
     };
 
     // Validate all output paths upfront before starting any renders
@@ -703,6 +926,24 @@ pub async fn batch_render(
         apply_hardware_preferences(&app_handle, &hw_probe, settings)?;
     }
 
+    let mut render_plans: Vec<crate::core::render::RenderPlan> =
+        Vec::with_capacity(validated_items.len());
+    for (i, (settings, _)) in validated_items.iter().enumerate() {
+        let render_plan =
+            crate::core::render::build_render_plan(&render_graph, &assets, &effects, settings);
+        if !render_plan.validation.is_valid {
+            return Err(format!(
+                "Batch item {} render plan validation failed: {}",
+                i,
+                render_plan.validation.errors.join("; ")
+            ));
+        }
+        for warning in &render_plan.validation.warnings {
+            tracing::warn!("Batch item {} render plan warning: {}", i, warning);
+        }
+        render_plans.push(render_plan);
+    }
+
     // Generate batch ID and per-item job IDs
     let batch_id = ulid::Ulid::new().to_string();
     let total_items = validated_items.len() as u32;
@@ -723,25 +964,45 @@ pub async fn batch_render(
     tokio::spawn(async move {
         let mut completed_results: Vec<serde_json::Value> = Vec::new();
 
-        for (idx, ((settings, output_path_str), job_id)) in
-            validated_items.into_iter().zip(job_ids.iter()).enumerate()
+        for (idx, (((settings, output_path_str), job_id), render_plan)) in validated_items
+            .into_iter()
+            .zip(job_ids.iter())
+            .zip(render_plans.into_iter())
+            .enumerate()
         {
             let item_index = idx as u32;
+            let plan_hash = render_plan.plan_hash.clone();
 
             // Register cancel token for this item
             let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
             register_render_job(job_id, cancel_tx).await;
+            emit_render_lifecycle(
+                &app_handle,
+                RenderLifecycleEvent {
+                    job_id: job_id.clone(),
+                    sequence_id: Some(sequence.id.clone()),
+                    kind: RenderLifecycleKind::Export,
+                    state: RenderLifecycleState::Queued,
+                    progress: Some(0.0),
+                    message: Some(format!("Batch item {} queued", item_index)),
+                    output_path: Some(settings.output_path.to_string_lossy().to_string()),
+                    plan_hash: Some(plan_hash.clone()),
+                },
+            );
 
             // Progress channel for this item
             let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<ExportProgress>(100);
             let app_handle_progress = app_handle.clone();
             let batch_id_progress = batch_id.clone();
             let job_id_progress = job_id.clone();
+            let sequence_id_progress = sequence.id.clone();
+            let plan_hash_progress = plan_hash.clone();
             let total = total_items;
 
             // Forward per-item progress as batch-render-progress events
             let progress_task = tokio::spawn(async move {
                 while let Some(progress) = progress_rx.recv().await {
+                    let progress_message = progress.message.clone();
                     // Calculate overall batch progress:
                     // completed items + fraction of current item
                     let batch_percent =
@@ -758,19 +1019,33 @@ pub async fn batch_render(
                             "batchPercent": batch_percent,
                             "fps": progress.fps,
                             "etaSeconds": progress.eta_seconds,
-                            "message": progress.message,
+                            "message": progress_message.clone(),
                         }),
+                    );
+                    emit_render_lifecycle(
+                        &app_handle_progress,
+                        RenderLifecycleEvent {
+                            job_id: job_id_progress.clone(),
+                            sequence_id: Some(sequence_id_progress.clone()),
+                            kind: RenderLifecycleKind::Export,
+                            state: RenderLifecycleState::Running,
+                            progress: Some(f64::from(progress.percent)),
+                            message: Some(progress_message),
+                            output_path: None,
+                            plan_hash: Some(plan_hash_progress.clone()),
+                        },
                     );
                 }
             });
 
             // Execute render
             let render_result = engine
-                .export_sequence_with_effects(
+                .export_sequence_with_effects_for_plan(
                     &sequence,
                     &assets,
                     &effects,
                     &settings,
+                    &render_plan,
                     Some(progress_tx),
                     Some(cancel_rx),
                 )
@@ -783,6 +1058,21 @@ pub async fn batch_render(
             // Emit per-item completion
             let item_result = match render_result {
                 Ok(ref export_result) => {
+                    emit_render_lifecycle(
+                        &app_handle,
+                        RenderLifecycleEvent {
+                            job_id: job_id.clone(),
+                            sequence_id: Some(sequence.id.clone()),
+                            kind: RenderLifecycleKind::Export,
+                            state: RenderLifecycleState::Completed,
+                            progress: Some(100.0),
+                            message: Some(format!("Batch item {} completed", item_index)),
+                            output_path: Some(
+                                export_result.output_path.to_string_lossy().to_string(),
+                            ),
+                            plan_hash: Some(plan_hash.clone()),
+                        },
+                    );
                     serde_json::json!({
                         "batchId": batch_id,
                         "jobId": job_id,
@@ -801,6 +1091,19 @@ pub async fn batch_render(
                     } else {
                         "failed"
                     };
+                    emit_render_lifecycle(
+                        &app_handle,
+                        RenderLifecycleEvent {
+                            job_id: job_id.clone(),
+                            sequence_id: Some(sequence.id.clone()),
+                            kind: RenderLifecycleKind::Export,
+                            state: lifecycle_state_for_export_error(e),
+                            progress: None,
+                            message: Some(e.to_string()),
+                            output_path: Some(output_path_str.clone()),
+                            plan_hash: Some(plan_hash.clone()),
+                        },
+                    );
                     serde_json::json!({
                         "batchId": batch_id,
                         "jobId": job_id,
@@ -981,7 +1284,7 @@ pub async fn export_audio_only(
     };
 
     // Get sequence/assets/effects + project path
-    let (sequence, assets, effects, project_path) = {
+    let (sequence, assets, effects, render_graph, project_path) = {
         let guard = state.project.lock().await;
         let project = guard
             .as_ref()
@@ -993,6 +1296,9 @@ pub async fn export_audio_only(
             .get(&sequence_id)
             .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
             .clone();
+
+        let render_graph = crate::core::render::build_render_graph(&project.state, &sequence_id)
+            .map_err(|e| e.to_ipc_error())?;
 
         let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
             .state
@@ -1008,7 +1314,13 @@ pub async fn export_audio_only(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        (sequence, assets, effects, project.path.clone())
+        (
+            sequence,
+            assets,
+            effects,
+            render_graph,
+            project.path.clone(),
+        )
     };
 
     // Validate output path
@@ -1033,6 +1345,24 @@ pub async fn export_audio_only(
         end_time,
     };
 
+    let audio_export_settings = audio_settings.to_export_settings();
+    let render_plan = crate::core::render::build_render_plan(
+        &render_graph,
+        &assets,
+        &effects,
+        &audio_export_settings,
+    );
+    if !render_plan.validation.is_valid {
+        return Err(format!(
+            "Render plan validation failed: {}",
+            render_plan.validation.errors.join("; ")
+        ));
+    }
+    for warning in &render_plan.validation.warnings {
+        tracing::warn!("Render plan warning: {}", warning);
+    }
+    let plan_hash = render_plan.plan_hash.clone();
+
     let job_id = ulid::Ulid::new().to_string();
     let job_id_for_return = job_id.clone();
 
@@ -1040,38 +1370,53 @@ pub async fn export_audio_only(
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     register_render_job(&job_id, cancel_tx).await;
 
+    emit_render_lifecycle(
+        &app_handle,
+        RenderLifecycleEvent {
+            job_id: job_id.clone(),
+            sequence_id: Some(sequence_id.clone()),
+            kind: RenderLifecycleKind::AudioExport,
+            state: RenderLifecycleState::Queued,
+            progress: Some(0.0),
+            message: Some("Audio export queued".to_string()),
+            output_path: Some(audio_settings.output_path.to_string_lossy().to_string()),
+            plan_hash: Some(plan_hash.clone()),
+        },
+    );
+
     // Progress channel
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<ExportProgress>(100);
     let app_handle_progress = app_handle.clone();
     let job_id_progress = job_id.clone();
+    let sequence_id_progress = sequence_id.clone();
 
     tokio::spawn(async move {
         while let Some(progress) = progress_rx.recv().await {
-            let _ = app_handle_progress.emit(
-                "render-progress",
-                serde_json::json!({
-                    "jobId": job_id_progress,
-                    "frame": progress.frame,
-                    "totalFrames": progress.total_frames,
-                    "percent": progress.percent,
-                    "fps": progress.fps,
-                    "etaSeconds": progress.eta_seconds,
-                    "message": progress.message,
-                }),
+            emit_render_progress_events(
+                &app_handle_progress,
+                &job_id_progress,
+                &sequence_id_progress,
+                RenderLifecycleKind::AudioExport,
+                &progress,
             );
         }
     });
 
     let app_handle_task = app_handle.clone();
     let job_id_task = job_id.clone();
+    let sequence_id_task = sequence_id.clone();
+    let output_path_task = audio_settings.output_path.clone();
+    let plan_hash_task = plan_hash.clone();
+    let render_plan_task = render_plan.clone();
 
     tokio::spawn(async move {
         match engine
-            .export_audio_only(
+            .export_audio_only_for_plan(
                 &sequence,
                 &assets,
                 &effects,
                 &audio_settings,
+                &render_plan_task,
                 Some(progress_tx),
                 Some(cancel_rx),
             )
@@ -1089,24 +1434,52 @@ pub async fn export_audio_only(
                 let _ = app_handle_task.emit(
                     "render-complete",
                     serde_json::json!({
-                        "jobId": job_id_task,
+                        "jobId": job_id_task.clone(),
                         "outputPath": result.output_path.to_string_lossy().to_string(),
                         "durationSec": result.duration_sec,
                         "fileSize": result.file_size,
                         "encodingTimeSec": result.encoding_time_sec,
                     }),
                 );
+                emit_render_lifecycle(
+                    &app_handle_task,
+                    RenderLifecycleEvent {
+                        job_id: job_id_task,
+                        sequence_id: Some(sequence_id_task),
+                        kind: RenderLifecycleKind::AudioExport,
+                        state: RenderLifecycleState::Completed,
+                        progress: Some(100.0),
+                        message: Some("Audio export completed".to_string()),
+                        output_path: Some(result.output_path.to_string_lossy().to_string()),
+                        plan_hash: Some(plan_hash_task.clone()),
+                    },
+                );
             }
             Err(e) => {
                 unregister_render_job(&job_id_task).await;
                 tracing::error!("Audio export failed: {}", e);
+                let lifecycle_state = lifecycle_state_for_export_error(&e);
+                let error_message = e.to_string();
 
                 let _ = app_handle_task.emit(
                     "render-error",
                     serde_json::json!({
-                        "jobId": job_id_task,
-                        "error": e.to_string(),
+                        "jobId": job_id_task.clone(),
+                        "error": error_message.clone(),
                     }),
+                );
+                emit_render_lifecycle(
+                    &app_handle_task,
+                    RenderLifecycleEvent {
+                        job_id: job_id_task,
+                        sequence_id: Some(sequence_id_task),
+                        kind: RenderLifecycleKind::AudioExport,
+                        state: lifecycle_state,
+                        progress: None,
+                        message: Some(error_message),
+                        output_path: Some(output_path_task.to_string_lossy().to_string()),
+                        plan_hash: Some(plan_hash_task.clone()),
+                    },
                 );
             }
         }
@@ -1989,13 +2362,18 @@ fn reconcile_cache_manifest(
     Ok(())
 }
 
-/// Abort handle for the active cache render task.
+/// Abort handle and identity for the active cache render task.
 ///
 /// Starting a new cache render aborts any in-flight background task so that
 /// only one cache render is active at a time.
-static ACTIVE_CACHE_RENDER: std::sync::LazyLock<
-    std::sync::Mutex<Option<tokio::task::AbortHandle>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+struct ActiveCacheRender {
+    job_id: String,
+    sequence_id: String,
+    abort_handle: tokio::task::AbortHandle,
+}
+
+static ACTIVE_CACHE_RENDER: std::sync::LazyLock<std::sync::Mutex<Option<ActiveCacheRender>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// Render preview cache for the active sequence.
 ///
@@ -2018,7 +2396,7 @@ pub async fn render_preview_cache(
     let config = resolve_cache_config(&app_handle);
 
     // Gather project data
-    let (sequence, effects, project_path, seq_id) = {
+    let (sequence, assets, effects, render_graph, project_path, seq_id) = {
         let guard = state.project.lock().await;
         let project = guard
             .as_ref()
@@ -2038,6 +2416,16 @@ pub async fn render_preview_cache(
             .ok_or_else(|| format!("Sequence not found: {seq_id}"))?
             .clone();
 
+        let render_graph = crate::core::render::build_render_graph(&project.state, &seq_id)
+            .map_err(|error| format!("Failed to build render graph: {error}"))?;
+
+        let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
+            .state
+            .assets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
         let effects: std::collections::HashMap<String, crate::core::effects::Effect> = project
             .state
             .effects
@@ -2045,10 +2433,18 @@ pub async fn render_preview_cache(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        (sequence, effects, project.path.clone(), seq_id)
+        (
+            sequence,
+            assets,
+            effects,
+            render_graph,
+            project.path.clone(),
+            seq_id,
+        )
     };
 
     // Load or create manifest
+    let cache_job_id = ulid::Ulid::new().to_string();
     let mut manifest = load_manifest(&project_path, &seq_id)
         .map_err(|e| format!("Failed to load cache manifest: {e}"))?
         .unwrap_or_else(|| {
@@ -2062,6 +2458,16 @@ pub async fn render_preview_cache(
         });
 
     reconcile_cache_manifest(&mut manifest, &project_path, &sequence, &effects, &config)?;
+    if crate::core::render::refresh_manifest_plan_fingerprints(
+        &mut manifest,
+        &project_path,
+        &render_graph,
+        &assets,
+        &effects,
+    )? {
+        save_manifest(&project_path, &manifest)
+            .map_err(|error| format!("Failed to save cache manifest: {error}"))?;
+    }
     cleanup_stale_files(&project_path, &mut manifest);
 
     // Find segments that need rendering
@@ -2075,7 +2481,22 @@ pub async fn render_preview_cache(
     let total_pending = pending_indices.len() as u32;
 
     if total_pending == 0 {
+        emit_render_lifecycle(
+            &app_handle,
+            RenderLifecycleEvent {
+                job_id: cache_job_id.clone(),
+                sequence_id: Some(seq_id.clone()),
+                kind: RenderLifecycleKind::PreviewCache,
+                state: RenderLifecycleState::AlreadyCached,
+                progress: Some(100.0),
+                message: Some("Preview cache is already current".to_string()),
+                output_path: None,
+                plan_hash: None,
+            },
+        );
+
         return Ok(RenderCacheJobResult {
+            job_id: cache_job_id,
             sequence_id: seq_id,
             total_segments: manifest.segments.len() as u32,
             segments_to_render: 0,
@@ -2101,6 +2522,20 @@ pub async fn render_preview_cache(
 
     let total_segments = manifest.segments.len() as u32;
 
+    emit_render_lifecycle(
+        &app_handle,
+        RenderLifecycleEvent {
+            job_id: cache_job_id.clone(),
+            sequence_id: Some(seq_id.clone()),
+            kind: RenderLifecycleKind::PreviewCache,
+            state: RenderLifecycleState::Queued,
+            progress: Some(0.0),
+            message: Some("Preview cache render queued".to_string()),
+            output_path: None,
+            plan_hash: None,
+        },
+    );
+
     // Clone FFmpegRunner before spawning (State<'_> cannot be moved into spawn)
     let ffmpeg_runner = {
         let ffmpeg_guard = ffmpeg_state.read().await;
@@ -2116,36 +2551,86 @@ pub async fn render_preview_cache(
     // Cancel any in-flight cache render before starting a new one.
     if let Ok(mut handle) = ACTIVE_CACHE_RENDER.lock() {
         if let Some(previous) = handle.take() {
-            previous.abort();
+            previous.abort_handle.abort();
             tracing::info!("Aborted previous cache render task");
+            emit_render_lifecycle(
+                &app_handle,
+                RenderLifecycleEvent {
+                    job_id: previous.job_id,
+                    sequence_id: Some(previous.sequence_id),
+                    kind: RenderLifecycleKind::PreviewCache,
+                    state: RenderLifecycleState::Cancelled,
+                    progress: None,
+                    message: Some("Preview cache render was replaced by a newer job".to_string()),
+                    output_path: None,
+                    plan_hash: None,
+                },
+            );
         }
     }
 
+    let cache_job_id_for_task = cache_job_id.clone();
     let join_handle = tokio::spawn(async move {
         use tauri::Manager;
 
         let engine = ExportEngine::new(ffmpeg_runner);
         let mut completed_normally = true;
 
+        emit_render_lifecycle(
+            &app_handle,
+            RenderLifecycleEvent {
+                job_id: cache_job_id_for_task.clone(),
+                sequence_id: Some(job_seq_id.clone()),
+                kind: RenderLifecycleKind::PreviewCache,
+                state: RenderLifecycleState::Running,
+                progress: Some(0.0),
+                message: Some("Preview cache render started".to_string()),
+                output_path: None,
+                plan_hash: None,
+            },
+        );
+
         for (completed, (idx, start_sec, end_sec)) in segment_ranges.iter().enumerate() {
             // Re-load manifest to get latest state
             let mut current_manifest = match load_manifest(&project_path, &job_seq_id) {
                 Ok(Some(m)) => m,
                 Ok(None) => {
-                    let _ = app_handle.emit(
-                        "render-cache-error",
-                        format!(
-                            "Cache manifest disappeared while rendering sequence {}",
-                            job_seq_id
-                        ),
+                    let message = format!(
+                        "Cache manifest disappeared while rendering sequence {}",
+                        job_seq_id
+                    );
+                    let _ = app_handle.emit("render-cache-error", message.clone());
+                    emit_render_lifecycle(
+                        &app_handle,
+                        RenderLifecycleEvent {
+                            job_id: cache_job_id_for_task.clone(),
+                            sequence_id: Some(job_seq_id.clone()),
+                            kind: RenderLifecycleKind::PreviewCache,
+                            state: RenderLifecycleState::Failed,
+                            progress: None,
+                            message: Some(message),
+                            output_path: None,
+                            plan_hash: None,
+                        },
                     );
                     completed_normally = false;
                     break;
                 }
                 Err(error) => {
-                    let _ = app_handle.emit(
-                        "render-cache-error",
-                        format!("Failed to reload cache manifest: {error}"),
+                    let message = format!("Failed to reload cache manifest: {error}");
+                    let _ = app_handle.emit("render-cache-error", message.clone());
+                    emit_render_lifecycle(
+                        &app_handle,
+                        RenderLifecycleEvent {
+                            job_id: cache_job_id_for_task.clone(),
+                            sequence_id: Some(job_seq_id.clone()),
+                            kind: RenderLifecycleKind::PreviewCache,
+                            state: RenderLifecycleState::Failed,
+                            progress: None,
+                            message: Some(message),
+                            output_path: None,
+                            plan_hash: None,
+                        },
                     );
                     completed_normally = false;
                     break;
@@ -2154,7 +2639,7 @@ pub async fn render_preview_cache(
 
             // Re-acquire fresh project state for each segment to avoid rendering
             // with stale data if the user edits the timeline during cache rendering.
-            let (fresh_sequence, fresh_assets, fresh_effects) = {
+            let (fresh_sequence, fresh_assets, fresh_effects, fresh_render_graph) = {
                 let app_state = app_handle.state::<crate::AppState>();
                 let guard = app_state.project.lock().await;
                 match guard.as_ref() {
@@ -2162,9 +2647,49 @@ pub async fn render_preview_cache(
                         let seq = match project.state.sequences.get(&job_seq_id) {
                             Some(s) => s.clone(),
                             None => {
-                                tracing::warn!(
-                                    "Sequence {} removed during cache render",
-                                    job_seq_id
+                                let message =
+                                    format!("Sequence {} removed during cache render", job_seq_id);
+                                tracing::warn!("{message}");
+                                let _ = app_handle.emit("render-cache-error", message.clone());
+                                emit_render_lifecycle(
+                                    &app_handle,
+                                    RenderLifecycleEvent {
+                                        job_id: cache_job_id_for_task.clone(),
+                                        sequence_id: Some(job_seq_id.clone()),
+                                        kind: RenderLifecycleKind::PreviewCache,
+                                        state: RenderLifecycleState::Failed,
+                                        progress: None,
+                                        message: Some(message),
+                                        output_path: None,
+                                        plan_hash: None,
+                                    },
+                                );
+                                completed_normally = false;
+                                break;
+                            }
+                        };
+                        let graph = match crate::core::render::build_render_graph(
+                            &project.state,
+                            &job_seq_id,
+                        ) {
+                            Ok(graph) => graph,
+                            Err(error) => {
+                                let message =
+                                    format!("Failed to build preview cache render graph: {error}");
+                                tracing::warn!("{message}");
+                                let _ = app_handle.emit("render-cache-error", message.clone());
+                                emit_render_lifecycle(
+                                    &app_handle,
+                                    RenderLifecycleEvent {
+                                        job_id: cache_job_id_for_task.clone(),
+                                        sequence_id: Some(job_seq_id.clone()),
+                                        kind: RenderLifecycleKind::PreviewCache,
+                                        state: RenderLifecycleState::Failed,
+                                        progress: None,
+                                        message: Some(message),
+                                        output_path: None,
+                                        plan_hash: None,
+                                    },
                                 );
                                 completed_normally = false;
                                 break;
@@ -2184,10 +2709,25 @@ pub async fn render_preview_cache(
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v.clone()))
                                 .collect();
-                        (seq, a, e)
+                        (seq, a, e, graph)
                     }
                     None => {
-                        tracing::warn!("Project closed during cache render");
+                        let message = "Project closed during cache render".to_string();
+                        tracing::warn!("{message}");
+                        let _ = app_handle.emit("render-cache-error", message.clone());
+                        emit_render_lifecycle(
+                            &app_handle,
+                            RenderLifecycleEvent {
+                                job_id: cache_job_id_for_task.clone(),
+                                sequence_id: Some(job_seq_id.clone()),
+                                kind: RenderLifecycleKind::PreviewCache,
+                                state: RenderLifecycleState::Failed,
+                                progress: None,
+                                message: Some(message),
+                                output_path: None,
+                                plan_hash: None,
+                            },
+                        );
                         completed_normally = false;
                         break;
                     }
@@ -2214,20 +2754,83 @@ pub async fn render_preview_cache(
                 }
             }
 
-            let seg_settings = crate::core::render::ExportSettings {
-                output_path: seg_output.clone(),
-                start_time: Some(*start_sec),
-                end_time: Some(*end_sec),
-                ..crate::core::render::ExportSettings::default()
-            };
+            let seg_settings = crate::core::render::ExportSettings::preview(
+                seg_output.clone(),
+                Some(*start_sec),
+                Some(*end_sec),
+            );
+
+            let validation = crate::core::render::validate_export_settings(
+                &fresh_sequence,
+                &fresh_assets,
+                &fresh_effects,
+                &seg_settings,
+            );
+            if !validation.is_valid {
+                let error = format!(
+                    "Preview cache segment {} validation failed: {}",
+                    idx,
+                    validation.errors.join("; ")
+                );
+                tracing::warn!("{error}");
+                let _ = app_handle.emit("render-cache-error", error.clone());
+                emit_render_lifecycle(
+                    &app_handle,
+                    RenderLifecycleEvent {
+                        job_id: cache_job_id_for_task.clone(),
+                        sequence_id: Some(job_seq_id.clone()),
+                        kind: RenderLifecycleKind::PreviewCache,
+                        state: RenderLifecycleState::Failed,
+                        progress: None,
+                        message: Some(error),
+                        output_path: None,
+                        plan_hash: None,
+                    },
+                );
+                completed_normally = false;
+                break;
+            }
+
+            let render_plan = crate::core::render::build_render_plan(
+                &fresh_render_graph,
+                &fresh_assets,
+                &fresh_effects,
+                &seg_settings,
+            );
+            if !render_plan.validation.is_valid {
+                let error = format!(
+                    "Preview cache segment {} render plan validation failed: {}",
+                    idx,
+                    render_plan.validation.errors.join("; ")
+                );
+                tracing::warn!("{error}");
+                let _ = app_handle.emit("render-cache-error", error.clone());
+                emit_render_lifecycle(
+                    &app_handle,
+                    RenderLifecycleEvent {
+                        job_id: cache_job_id_for_task.clone(),
+                        sequence_id: Some(job_seq_id.clone()),
+                        kind: RenderLifecycleKind::PreviewCache,
+                        state: RenderLifecycleState::Failed,
+                        progress: None,
+                        message: Some(error),
+                        output_path: None,
+                        plan_hash: Some(render_plan.plan_hash.clone()),
+                    },
+                );
+                completed_normally = false;
+                break;
+            }
+            let segment_plan_hash = render_plan.plan_hash.clone();
 
             // Render with fresh data
             let result = engine
-                .export_sequence_with_effects(
+                .export_sequence_with_effects_for_plan(
                     &fresh_sequence,
                     &fresh_assets,
                     &fresh_effects,
                     &seg_settings,
+                    &render_plan,
                     None,
                     None,
                 )
@@ -2237,20 +2840,42 @@ pub async fn render_preview_cache(
             let mut updated_manifest = match load_manifest(&project_path, &job_seq_id) {
                 Ok(Some(m)) => m,
                 Ok(None) => {
-                    let _ = app_handle.emit(
-                        "render-cache-error",
-                        format!(
-                            "Cache manifest disappeared while finalizing sequence {}",
-                            job_seq_id
-                        ),
+                    let message = format!(
+                        "Cache manifest disappeared while finalizing sequence {}",
+                        job_seq_id
+                    );
+                    let _ = app_handle.emit("render-cache-error", message.clone());
+                    emit_render_lifecycle(
+                        &app_handle,
+                        RenderLifecycleEvent {
+                            job_id: cache_job_id_for_task.clone(),
+                            sequence_id: Some(job_seq_id.clone()),
+                            kind: RenderLifecycleKind::PreviewCache,
+                            state: RenderLifecycleState::Failed,
+                            progress: None,
+                            message: Some(message),
+                            output_path: None,
+                            plan_hash: None,
+                        },
                     );
                     completed_normally = false;
                     break;
                 }
                 Err(error) => {
-                    let _ = app_handle.emit(
-                        "render-cache-error",
-                        format!("Failed to reload cache manifest: {error}"),
+                    let message = format!("Failed to reload cache manifest: {error}");
+                    let _ = app_handle.emit("render-cache-error", message.clone());
+                    emit_render_lifecycle(
+                        &app_handle,
+                        RenderLifecycleEvent {
+                            job_id: cache_job_id_for_task.clone(),
+                            sequence_id: Some(job_seq_id.clone()),
+                            kind: RenderLifecycleKind::PreviewCache,
+                            state: RenderLifecycleState::Failed,
+                            progress: None,
+                            message: Some(message),
+                            output_path: None,
+                            plan_hash: None,
+                        },
                     );
                     completed_normally = false;
                     break;
@@ -2284,10 +2909,23 @@ pub async fn render_preview_cache(
                         seg.cached_file = None;
                         seg.file_size_bytes = 0;
                     }
-                    let _ = app_handle.emit(
-                        "render-cache-error",
-                        format!("Failed to render cache segment {}: {}", idx, error),
+                    let error_message =
+                        format!("Failed to render cache segment {}: {}", idx, error);
+                    let _ = app_handle.emit("render-cache-error", error_message.clone());
+                    emit_render_lifecycle(
+                        &app_handle,
+                        RenderLifecycleEvent {
+                            job_id: cache_job_id_for_task.clone(),
+                            sequence_id: Some(job_seq_id.clone()),
+                            kind: RenderLifecycleKind::PreviewCache,
+                            state: RenderLifecycleState::Failed,
+                            progress: None,
+                            message: Some(error_message),
+                            output_path: None,
+                            plan_hash: Some(segment_plan_hash.clone()),
+                        },
                     );
+                    completed_normally = false;
                 }
             }
 
@@ -2297,11 +2935,25 @@ pub async fn render_preview_cache(
             let _ = app_handle.emit(
                 "render-cache-progress",
                 serde_json::json!({
-                    "sequenceId": job_seq_id,
+                    "jobId": cache_job_id_for_task.clone(),
+                    "sequenceId": job_seq_id.clone(),
                     "completedSegments": completed + 1,
                     "totalSegments": total_pending,
                     "percent": ((completed + 1) as f64 / total_pending as f64) * 100.0,
                 }),
+            );
+            emit_render_lifecycle(
+                &app_handle,
+                RenderLifecycleEvent {
+                    job_id: cache_job_id_for_task.clone(),
+                    sequence_id: Some(job_seq_id.clone()),
+                    kind: RenderLifecycleKind::PreviewCache,
+                    state: RenderLifecycleState::Running,
+                    progress: Some(((completed + 1) as f64 / total_pending as f64) * 100.0),
+                    message: Some(format!("Rendered preview cache segment {}", idx)),
+                    output_path: None,
+                    plan_hash: Some(segment_plan_hash),
+                },
             );
         }
 
@@ -2312,18 +2964,46 @@ pub async fn render_preview_cache(
             let _ = app_handle.emit(
                 "render-cache-complete",
                 serde_json::json!({
-                    "sequenceId": job_seq_id,
+                    "jobId": cache_job_id_for_task.clone(),
+                    "sequenceId": job_seq_id.clone(),
                 }),
             );
+            emit_render_lifecycle(
+                &app_handle,
+                RenderLifecycleEvent {
+                    job_id: cache_job_id_for_task.clone(),
+                    sequence_id: Some(job_seq_id.clone()),
+                    kind: RenderLifecycleKind::PreviewCache,
+                    state: RenderLifecycleState::Completed,
+                    progress: Some(100.0),
+                    message: Some("Preview cache render completed".to_string()),
+                    output_path: None,
+                    plan_hash: None,
+                },
+            );
+        }
+
+        if let Ok(mut handle) = ACTIVE_CACHE_RENDER.lock() {
+            if handle
+                .as_ref()
+                .is_some_and(|active| active.job_id == cache_job_id_for_task)
+            {
+                *handle = None;
+            }
         }
     });
 
     // Store the abort handle so the next render call can cancel this one.
     if let Ok(mut handle) = ACTIVE_CACHE_RENDER.lock() {
-        *handle = Some(join_handle.abort_handle());
+        *handle = Some(ActiveCacheRender {
+            job_id: cache_job_id.clone(),
+            sequence_id: seq_id.clone(),
+            abort_handle: join_handle.abort_handle(),
+        });
     }
 
     Ok(RenderCacheJobResult {
+        job_id: cache_job_id,
         sequence_id: seq_id,
         total_segments,
         segments_to_render: total_pending,
@@ -2345,6 +3025,8 @@ pub enum RenderCacheJobStatus {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderCacheJobResult {
+    /// Job ID for lifecycle/progress correlation
+    pub job_id: String,
     /// Sequence being cached
     pub sequence_id: String,
     /// Total segments in the timeline

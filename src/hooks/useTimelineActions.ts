@@ -21,10 +21,10 @@ import { useToastStore } from '@/hooks/useToast';
 import { commands } from '@/bindings';
 import { createLogger } from '@/services/logger';
 import { isTauriRuntime } from '@/services/framePaths';
-import { applyProjectState, refreshProjectState } from '@/utils/stateRefreshHelper';
-import { commandQueue } from '@/utils/commandQueue';
+import { refreshProjectState } from '@/utils/stateRefreshHelper';
 import { probeMedia } from '@/utils/ffmpeg';
 import { requestDeduplicator } from '@/utils/requestDeduplicator';
+import { runProjectBackendMutation } from '@/services/projectMutationGateway';
 import type {
   AssetDropData,
   ClipAudioUpdateData,
@@ -111,7 +111,12 @@ interface TimelineActions {
   handleLiftClips: (clipIds: string[]) => Promise<void>;
   handleInsertEditFromSource: () => Promise<void>;
   handleOverwriteEditFromSource: () => Promise<void>;
-  handleSetClipSpeed: (clipId: string, trackId: string, speed: number, reverse: boolean) => Promise<void>;
+  handleSetClipSpeed: (
+    clipId: string,
+    trackId: string,
+    speed: number,
+    reverse: boolean,
+  ) => Promise<void>;
   handleReverseClip: (clipId: string, trackId: string) => Promise<void>;
   handleCreateFreezeFrame: (clipId: string, trackId: string) => Promise<void>;
   handleToggleClipEnabled: (clipId: string, trackId: string) => Promise<void>;
@@ -648,11 +653,11 @@ async function resolveOrCreateTrack({
 }: ResolveOrCreateTrackOptions): Promise<Track | null> {
   const selectedTrack =
     (allowPreferredTrackOverlap
-      ? selectUnlockedTrackByExactKind(preferredTrack, kind)
+      ? (selectUnlockedTrackByExactKind(preferredTrack, kind) ??
         // Preferred track kind doesn't match (e.g. audio on video track):
         // find first unlocked track of the correct kind, ignoring overlap
         // because InsertEdit/OverwriteEdit will handle overlap resolution.
-        ?? sequenceSnapshot.tracks.find((t) => t.kind === kind && !t.locked)
+        sequenceSnapshot.tracks.find((t) => t.kind === kind && !t.locked))
       : undefined) ??
     (kind === 'video'
       ? selectPreferredVisualTrack(sequenceSnapshot, preferredTrack, timelineIn, durationSec)
@@ -709,14 +714,21 @@ function isIdentityTransform(transform: ClipPasteData['clipData']['transform']):
     return true;
   }
 
+  const positionX = transform.position?.x ?? 0.5;
+  const positionY = transform.position?.y ?? 0.5;
+  const scaleX = transform.scale?.x ?? 1;
+  const scaleY = transform.scale?.y ?? 1;
+  const anchorX = transform.anchor?.x ?? 0.5;
+  const anchorY = transform.anchor?.y ?? 0.5;
+
   return (
-    transform.position.x === 0 &&
-    transform.position.y === 0 &&
-    transform.scale.x === 1 &&
-    transform.scale.y === 1 &&
-    transform.rotationDeg === 0 &&
-    transform.anchor.x === 0.5 &&
-    transform.anchor.y === 0.5
+    Math.abs(positionX - 0.5) < 0.0001 &&
+    Math.abs(positionY - 0.5) < 0.0001 &&
+    Math.abs(scaleX - 1) < 0.0001 &&
+    Math.abs(scaleY - 1) < 0.0001 &&
+    Math.abs((transform.rotationDeg ?? 0) - 0) < 0.0001 &&
+    Math.abs(anchorX - 0.5) < 0.0001 &&
+    Math.abs(anchorY - 0.5) < 0.0001
   );
 }
 
@@ -2081,15 +2093,18 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           }
 
           if (!primaryVideoClipId || !insertedAudioClipId) {
-            logger.warn('Linked A/V pair inserted, but explicit link targets could not be resolved', {
-              sequenceId: sequence.id,
-              assetId: droppedAssetId,
-              videoTrackId: visualTrack.id,
-              audioTrackId: audioTrack.id,
-              videoClipId: primaryVideoClipId,
-              audioClipId: insertedAudioClipId,
-              timelinePosition: data.timelinePosition,
-            });
+            logger.warn(
+              'Linked A/V pair inserted, but explicit link targets could not be resolved',
+              {
+                sequenceId: sequence.id,
+                assetId: droppedAssetId,
+                videoTrackId: visualTrack.id,
+                audioTrackId: audioTrack.id,
+                videoClipId: primaryVideoClipId,
+                audioClipId: insertedAudioClipId,
+                timelinePosition: data.timelinePosition,
+              },
+            );
           } else {
             try {
               await executeCommand({
@@ -2860,67 +2875,41 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     [sequence, linkedSelectionEnabled, executeCommand, getCurrentSequence],
   );
 
-  const runThreePointEdit = useCallback(async (editMode: 'insert' | 'overwrite'): Promise<void> => {
-    if (!sequence) return;
+  const runThreePointEdit = useCallback(
+    async (editMode: 'insert' | 'overwrite'): Promise<void> => {
+      if (!sequence) return;
 
-    const playhead = usePlaybackStore.getState().currentTime;
-    const payload = {
-      sequenceId: sequence.id,
-      trackId: null,
-      timelinePosition: playhead,
-      editMode,
-    };
-    const operationSuffix = editMode === 'insert' ? 'insert' : 'overwrite';
+      const playhead = usePlaybackStore.getState().currentTime;
+      const payload = {
+        sequenceId: sequence.id,
+        trackId: null,
+        timelinePosition: playhead,
+        editMode,
+      };
+      const operationSuffix = editMode === 'insert' ? 'insert' : 'overwrite';
 
-    try {
-      await requestDeduplicator.execute('threePointInsert', payload, () =>
-        commandQueue.enqueue(async () => {
-          const versionBefore = useProjectStore.getState().stateVersion;
-          const result = await commands.threePointInsert(payload);
+      try {
+        await requestDeduplicator.execute('threePointInsert', payload, () =>
+          runProjectBackendMutation(`threePointInsert:${operationSuffix}`, async () => {
+            const result = await commands.threePointInsert(payload);
 
-          if (result.status !== 'ok') {
-            const errorMessage = extractErrorMessage(result.error);
-            useProjectStore.setState((draft) => {
-              draft.error = errorMessage;
-            });
-            throw new Error(errorMessage);
-          }
-
-          const freshState = await refreshProjectState();
-          let concurrentModificationDetected = false;
-
-          useProjectStore.setState((draft) => {
-            if (draft.stateVersion !== versionBefore) {
-              concurrentModificationDetected = true;
-              logger.error(`Concurrent modification detected during 3-point ${operationSuffix} edit`, {
-                expectedVersion: versionBefore,
-                actualVersion: draft.stateVersion,
-              });
-              return;
+            if (result.status !== 'ok') {
+              const errorMessage = extractErrorMessage(result.error);
+              throw new Error(errorMessage);
             }
 
-            draft.isDirty = true;
-            draft.stateVersion += 1;
-            draft.error = null;
-            applyProjectState(draft, freshState);
-          });
-
-          if (concurrentModificationDetected) {
-            throw new Error(
-              `Concurrent modification detected during 3-point ${operationSuffix} edit. Please retry the operation.`,
-            );
-          }
-
-          logger.info(`3-point ${operationSuffix} edit completed`, {
-            clipId: result.data.clipId,
-            duration: result.data.duration,
-          });
-        }, `threePointInsert:${operationSuffix}`),
-      );
-    } catch (error) {
-      logger.error(`Failed to ${operationSuffix} edit from source`, { error });
-    }
-  }, [sequence]);
+            logger.info(`3-point ${operationSuffix} edit completed`, {
+              clipId: result.data.clipId,
+              duration: result.data.duration,
+            });
+          }),
+        );
+      } catch (error) {
+        logger.error(`Failed to ${operationSuffix} edit from source`, { error });
+      }
+    },
+    [sequence],
+  );
 
   const handleInsertEditFromSource = useCallback(async (): Promise<void> => {
     await runThreePointEdit('insert');

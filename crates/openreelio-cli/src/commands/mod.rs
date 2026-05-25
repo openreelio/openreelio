@@ -17,6 +17,7 @@ mod plan;
 mod project;
 mod render;
 mod state;
+mod text;
 mod timeline;
 
 use clap::{Parser, Subcommand};
@@ -69,6 +70,12 @@ pub enum Commands {
         action: caption::CaptionAction,
     },
 
+    /// Editable text overlay operations
+    Text {
+        #[command(subcommand)]
+        action: text::TextAction,
+    },
+
     /// Render and export operations
     Render {
         #[command(subcommand)]
@@ -108,6 +115,7 @@ pub fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Analysis { action } => analysis::execute(action),
         Commands::Timeline { action } => timeline::execute(action),
         Commands::Caption { action } => caption::execute(action),
+        Commands::Text { action } => text::execute(action),
         Commands::Render { action } => render::execute(action),
         Commands::Plan { action } => plan::execute(action),
         Commands::Command { action } => command::execute(action),

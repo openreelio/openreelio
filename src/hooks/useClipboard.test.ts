@@ -12,7 +12,7 @@ import { renderHook, act } from '@testing-library/react';
 import { useClipboard } from './useClipboard';
 import { useEditorToolStore } from '@/stores/editorToolStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
-import type { Sequence, Clip, Track } from '@/types';
+import type { CaptionPosition, CaptionStyle, Sequence, Clip, Track, TextClipData } from '@/types';
 
 // =============================================================================
 // Test Fixtures
@@ -32,9 +32,10 @@ function createTestClip(overrides: Partial<Clip> = {}): Clip {
       sourceOutSec: 5,
     },
     transform: {
-      position: { x: 0, y: 0 },
+      position: { x: 0.5, y: 0.5 },
       scale: { x: 1, y: 1 },
       rotationDeg: 0,
+      anchor: { x: 0.5, y: 0.5 },
     },
     opacity: 1,
     speed: 1,
@@ -185,6 +186,169 @@ describe('useClipboard', () => {
 
       const clipboardItem = useEditorToolStore.getState().clipboard?.[0];
       expect(clipboardItem?.clipData.durationSec).toBe(3);
+    });
+
+    it('should preserve rich text clip data as a copy-time snapshot', () => {
+      const clip = createTestClip({ id: 'clip-text', assetId: 'text:clip-text' });
+      const track = createTestTrack([clip]);
+      const sequence = createTestSequence([track]);
+      const textData: TextClipData = {
+        content: 'Styled title',
+        style: {
+          fontFamily: 'Inter',
+          fontSize: 72,
+          fontWeight: 700,
+          color: '#F8FAFC',
+          backgroundColor: '#111827',
+          backgroundPadding: 18,
+          alignment: 'center',
+          bold: true,
+          italic: true,
+          underline: true,
+          lineHeight: 1.15,
+          letterSpacing: 2,
+        },
+        position: { x: 0.42, y: 0.31 },
+        rotation: -8,
+        opacity: 0.82,
+        outline: { color: '#0F172A', width: 3 },
+        shadow: { color: '#000000', offsetX: 8, offsetY: 10, blur: 12 },
+      };
+
+      const { result } = renderHook(() =>
+        useClipboard({
+          sequence,
+          selectedClipIds: ['clip-text'],
+          getTextClipData: () => textData,
+        })
+      );
+
+      act(() => {
+        result.current.copy();
+      });
+
+      textData.style.fontFamily = 'Mutated Font';
+      textData.style.fontSize = 12;
+      textData.position.x = 0.9;
+      textData.shadow!.blur = 1;
+
+      const clipboardItem = useEditorToolStore.getState().clipboard?.[0];
+      expect(clipboardItem?.clipData.textData).toEqual({
+        content: 'Styled title',
+        style: {
+          fontFamily: 'Inter',
+          fontSize: 72,
+          fontWeight: 700,
+          color: '#F8FAFC',
+          backgroundColor: '#111827',
+          backgroundPadding: 18,
+          alignment: 'center',
+          bold: true,
+          italic: true,
+          underline: true,
+          lineHeight: 1.15,
+          letterSpacing: 2,
+        },
+        position: { x: 0.42, y: 0.31 },
+        rotation: -8,
+        opacity: 0.82,
+        outline: { color: '#0F172A', width: 3 },
+        shadow: { color: '#000000', offsetX: 8, offsetY: 10, blur: 12 },
+      });
+    });
+
+    it('should preserve caption style and position as a copy-time snapshot', () => {
+      const captionStyle: CaptionStyle = {
+        fontFamily: 'Pretendard',
+        fontSize: 54,
+        fontWeight: 800,
+        bold: true,
+        color: { r: 248, g: 250, b: 252, a: 255 },
+        opacity: 0.9,
+        backgroundColor: { r: 15, g: 23, b: 42, a: 190 },
+        backgroundPadding: 16,
+        outlineColor: { r: 0, g: 0, b: 0, a: 255 },
+        outlineWidth: 4,
+        shadowColor: { r: 0, g: 0, b: 0, a: 220 },
+        shadowOffset: 6,
+        shadowOffsetX: 5,
+        shadowOffsetY: 9,
+        shadowBlur: 7,
+        alignment: 'center',
+        italic: true,
+        underline: true,
+        lineHeight: 1.18,
+        letterSpacing: 1.5,
+      };
+      const captionPosition: CaptionPosition = {
+        type: 'custom',
+        xPercent: 43,
+        yPercent: 78,
+      };
+      const clip = createTestClip({
+        id: 'caption-1',
+        assetId: 'caption:caption-1',
+        label: 'Caption copy',
+        captionStyle,
+        captionPosition,
+      });
+      const track = {
+        ...createTestTrack([clip], 'caption-track-1'),
+        kind: 'caption' as const,
+      };
+      const sequence = createTestSequence([track]);
+
+      const { result } = renderHook(() =>
+        useClipboard({
+          sequence,
+          selectedClipIds: ['caption-1'],
+        })
+      );
+
+      act(() => {
+        result.current.copy();
+      });
+
+      captionStyle.fontFamily = 'Mutated Font';
+      captionStyle.color.r = 0;
+      captionStyle.shadowBlur = 1;
+      if (captionPosition.type === 'custom') {
+        captionPosition.xPercent = 4;
+      }
+
+      const clipboardCaption = useEditorToolStore.getState().clipboard?.[0]?.clipData.caption;
+      expect(clipboardCaption).toEqual({
+        text: 'Caption copy',
+        startSec: 0,
+        endSec: 5,
+        style: {
+          fontFamily: 'Pretendard',
+          fontSize: 54,
+          fontWeight: 800,
+          bold: true,
+          color: { r: 248, g: 250, b: 252, a: 255 },
+          opacity: 0.9,
+          backgroundColor: { r: 15, g: 23, b: 42, a: 190 },
+          backgroundPadding: 16,
+          outlineColor: { r: 0, g: 0, b: 0, a: 255 },
+          outlineWidth: 4,
+          shadowColor: { r: 0, g: 0, b: 0, a: 220 },
+          shadowOffset: 6,
+          shadowOffsetX: 5,
+          shadowOffsetY: 9,
+          shadowBlur: 7,
+          alignment: 'center',
+          italic: true,
+          underline: true,
+          lineHeight: 1.18,
+          letterSpacing: 1.5,
+        },
+        position: {
+          type: 'custom',
+          xPercent: 43,
+          yPercent: 78,
+        },
+      });
     });
 
     it('should copy multiple clips', () => {
@@ -349,6 +513,56 @@ describe('useClipboard', () => {
       // clip-2 was at 5s, should now be at 10 + (5-2) = 13s
       expect(pastedClips.find((c: { clipId: string }) => c.clipId === 'clip-1').clipData.timelineIn).toBe(10);
       expect(pastedClips.find((c: { clipId: string }) => c.clipId === 'clip-2').clipData.timelineIn).toBe(13);
+    });
+
+    it('should pass cloned rich clip data to paste handlers', () => {
+      const clip = createTestClip({ id: 'clip-text', assetId: 'text:clip-text' });
+      const track = createTestTrack([clip]);
+      const sequence = createTestSequence([track]);
+      const textData: TextClipData = {
+        content: 'Paste snapshot',
+        style: {
+          fontFamily: 'Inter',
+          fontSize: 64,
+          color: '#FFFFFF',
+          backgroundPadding: 8,
+          alignment: 'center',
+          bold: false,
+          italic: false,
+          underline: false,
+          lineHeight: 1.2,
+          letterSpacing: 0,
+        },
+        position: { x: 0.5, y: 0.5 },
+        rotation: 0,
+        opacity: 1,
+      };
+      const onPaste = vi.fn((clips) => {
+        clips[0].clipData.textData.style.fontSize = 11;
+        clips[0].clipData.textData.position.x = 0.1;
+      });
+
+      usePlaybackStore.setState({ currentTime: 10 });
+
+      const { result } = renderHook(() =>
+        useClipboard({
+          sequence,
+          selectedClipIds: ['clip-text'],
+          getTextClipData: () => textData,
+          onPaste,
+        })
+      );
+
+      act(() => {
+        result.current.copy();
+      });
+      act(() => {
+        result.current.paste();
+      });
+
+      const clipboardTextData = useEditorToolStore.getState().clipboard?.[0].clipData.textData;
+      expect(clipboardTextData?.style.fontSize).toBe(64);
+      expect(clipboardTextData?.position.x).toBe(0.5);
     });
 
     it('should fail when clipboard is empty', () => {

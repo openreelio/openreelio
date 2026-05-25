@@ -5,7 +5,9 @@ use crate::{
     output,
 };
 use clap::Args;
+use openreelio_core::commands::{get_text_data, is_text_clip};
 use openreelio_core::ipc::CommandPayload;
+use openreelio_core::timeline::TrackKind;
 use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -669,16 +671,62 @@ fn build_timeline_snapshot(state: &McpServerState) -> Result<Value, ToolError> {
                         .clips
                         .iter()
                         .map(|clip| {
-                            serde_json::json!({
+                            let mut clip_snapshot = serde_json::json!({
                                 "id": clip.id,
                                 "assetId": clip.asset_id,
+                                "label": clip.label,
                                 "timelineInSec": clip.place.timeline_in_sec,
                                 "durationSec": clip.place.duration_sec,
                                 "sourceInSec": clip.range.source_in_sec,
                                 "sourceOutSec": clip.range.source_out_sec,
                                 "speed": clip.speed,
                                 "enabled": clip.enabled,
-                            })
+                                "opacity": clip.opacity,
+                                "transform": clip.transform,
+                                "effectIds": clip.effects,
+                            });
+
+                            if let Some(object) = clip_snapshot.as_object_mut() {
+                                if is_text_clip(clip) {
+                                    object.insert(
+                                        "kind".to_string(),
+                                        Value::String("text".to_string()),
+                                    );
+                                    object.insert(
+                                        "textData".to_string(),
+                                        get_text_data(clip, &project.state)
+                                            .and_then(|data| serde_json::to_value(data).ok())
+                                            .unwrap_or(Value::Null),
+                                    );
+                                } else if matches!(&track.kind, TrackKind::Caption)
+                                    || clip.caption_style.is_some()
+                                    || clip.caption_position.is_some()
+                                {
+                                    object.insert(
+                                        "kind".to_string(),
+                                        Value::String("caption".to_string()),
+                                    );
+                                    object.insert(
+                                        "captionStyle".to_string(),
+                                        clip.caption_style.clone().unwrap_or(Value::Null),
+                                    );
+                                    object.insert(
+                                        "captionPosition".to_string(),
+                                        clip.caption_position.clone().unwrap_or(Value::Null),
+                                    );
+                                    object.insert(
+                                        "text".to_string(),
+                                        Value::String(clip.label.clone().unwrap_or_default()),
+                                    );
+                                } else {
+                                    object.insert(
+                                        "kind".to_string(),
+                                        Value::String("media".to_string()),
+                                    );
+                                }
+                            }
+
+                            clip_snapshot
                         })
                         .collect();
                     serde_json::json!({
@@ -942,6 +990,12 @@ fn build_preview_state() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openreelio_core::commands::{
+        AddTextClipCommand, AddTrackCommand, CreateCaptionCommand, SetClipTransformCommand,
+    };
+    use openreelio_core::text::{TextClipData, TextOutline, TextPosition, TextShadow, TextStyle};
+    use openreelio_core::timeline::Transform;
+    use openreelio_core::Point2D;
 
     fn request(method: &str, params: Value) -> Value {
         serde_json::json!({
@@ -950,6 +1004,150 @@ mod tests {
             "method": method,
             "params": params,
         })
+    }
+
+    #[test]
+    fn should_expose_text_and_caption_details_in_timeline_snapshot() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("text_snapshot_project");
+        let mut project =
+            openreelio_core::ActiveProject::create("Text Snapshot", project_path.clone())
+                .expect("project");
+        let sequence_id = project.state.active_sequence_id.clone().expect("sequence");
+
+        let title_track_result = project
+            .executor
+            .execute(
+                Box::new(AddTrackCommand::new(
+                    &sequence_id,
+                    "Editable Text",
+                    TrackKind::Video,
+                )),
+                &mut project.state,
+            )
+            .expect("add title track");
+        let title_track_id = title_track_result.created_ids[0].clone();
+
+        let text_data = TextClipData::new("Editable Title")
+            .with_style(
+                TextStyle::default()
+                    .with_font_family("Inter")
+                    .with_font_size(64)
+                    .with_font_weight(700)
+                    .with_color("#FFEE00")
+                    .with_background("#000000AA"),
+            )
+            .with_position(TextPosition::new(0.3, 0.72))
+            .with_shadow(TextShadow::soft())
+            .with_outline(TextOutline::thin().with_color("#111111"))
+            .with_rotation(12.0)
+            .with_opacity(0.8);
+        let text_result = project
+            .executor
+            .execute(
+                Box::new(AddTextClipCommand::new(
+                    &sequence_id,
+                    &title_track_id,
+                    1.0,
+                    4.0,
+                    text_data,
+                )),
+                &mut project.state,
+            )
+            .expect("add text clip");
+        let text_clip_id = text_result.created_ids[0].clone();
+
+        let mut transform = Transform::default();
+        transform.position = Point2D::new(0.42, 0.66);
+        transform.scale = Point2D::new(1.2, 0.9);
+        transform.rotation_deg = 18.0;
+        project
+            .executor
+            .execute(
+                Box::new(SetClipTransformCommand::new(
+                    &sequence_id,
+                    &title_track_id,
+                    &text_clip_id,
+                    transform,
+                )),
+                &mut project.state,
+            )
+            .expect("transform text clip");
+
+        let caption_track_result = project
+            .executor
+            .execute(
+                Box::new(AddTrackCommand::new(
+                    &sequence_id,
+                    "Captions",
+                    TrackKind::Caption,
+                )),
+                &mut project.state,
+            )
+            .expect("add caption track");
+        let caption_track_id = caption_track_result.created_ids[0].clone();
+        let caption_result = project
+            .executor
+            .execute(
+                Box::new(
+                    CreateCaptionCommand::new(&sequence_id, &caption_track_id, 2.0, 3.5)
+                        .with_text("Caption line")
+                        .with_style(Some(serde_json::json!({
+                            "fontFamily": "Noto Sans",
+                            "fontSize": 42,
+                            "color": "#FFFFFF"
+                        })))
+                        .with_position(Some(serde_json::json!({
+                            "x": 50,
+                            "y": 86
+                        }))),
+                ),
+                &mut project.state,
+            )
+            .expect("add caption clip");
+        let caption_clip_id = caption_result.created_ids[0].clone();
+
+        project.save().expect("save project");
+        drop(project);
+
+        let state = McpServerState {
+            project: Some(project_path),
+            ..Default::default()
+        };
+        let snapshot = build_timeline_snapshot(&state).expect("timeline snapshot");
+        let tracks = snapshot["sequences"][0]["tracks"]
+            .as_array()
+            .expect("tracks");
+        let text_clip = tracks
+            .iter()
+            .flat_map(|track| track["clips"].as_array().expect("clips"))
+            .find(|clip| clip["id"] == text_clip_id)
+            .expect("text clip");
+        assert_eq!(text_clip["kind"], "text");
+        assert_eq!(text_clip["textData"]["content"], "Editable Title");
+        assert_eq!(text_clip["textData"]["style"]["fontFamily"], "Inter");
+        assert_eq!(text_clip["textData"]["style"]["fontWeight"], 700);
+        assert_eq!(text_clip["textData"]["position"]["x"], 0.42);
+        assert_eq!(text_clip["textData"]["position"]["y"], 0.66);
+        assert_eq!(text_clip["textData"]["rotation"], 18.0);
+        assert_eq!(text_clip["textData"]["shadow"]["blur"], 4);
+        assert_eq!(text_clip["transform"]["position"]["x"], 0.42);
+        assert_eq!(text_clip["transform"]["scale"]["x"], 1.2);
+        assert!(
+            (text_clip["opacity"].as_f64().expect("opacity") - 0.8).abs() < 0.001,
+            "expected text opacity near 0.8, got {}",
+            text_clip["opacity"]
+        );
+
+        let caption_clip = tracks
+            .iter()
+            .flat_map(|track| track["clips"].as_array().expect("clips"))
+            .find(|clip| clip["id"] == caption_clip_id)
+            .expect("caption clip");
+        assert_eq!(caption_clip["kind"], "caption");
+        assert_eq!(caption_clip["text"], "Caption line");
+        assert_eq!(caption_clip["captionStyle"]["fontFamily"], "Noto Sans");
+        assert_eq!(caption_clip["captionPosition"]["y"], 86);
     }
 
     #[test]

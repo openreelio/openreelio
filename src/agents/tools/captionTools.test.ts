@@ -316,26 +316,11 @@ describe('captionTools', () => {
     expect(executeCommandMock).not.toHaveBeenCalled();
   });
 
-  it('should roll back previously created captions when a later segment fails', async () => {
+  it('should report generated caption import failures without partial caption rollback', async () => {
     const tool = globalToolRegistry.get('add_captions_from_transcription');
     expect(tool).toBeDefined();
 
-    executeCommandMock
-      .mockResolvedValueOnce({
-        opId: 'op-caption-1',
-        success: true,
-        createdIds: ['cap-rolled-back'],
-        deletedIds: [],
-        changes: [],
-      })
-      .mockRejectedValueOnce(new Error('Caption overlap detected'))
-      .mockResolvedValueOnce({
-        opId: 'op-caption-delete',
-        success: true,
-        createdIds: [],
-        deletedIds: ['cap-rolled-back'],
-        changes: [],
-      });
+    executeCommandMock.mockRejectedValueOnce(new Error('Caption overlap detected'));
 
     const result = await tool!.handler(
       {
@@ -349,16 +334,17 @@ describe('captionTools', () => {
     );
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('Rolled back 1 caption');
-    expect(executeCommandMock).toHaveBeenCalledTimes(3);
-    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({ type: 'CreateCaption' });
-    expect(executeCommandMock.mock.calls[1][0]).toMatchObject({ type: 'CreateCaption' });
-    expect(executeCommandMock.mock.calls[2][0]).toMatchObject({
-      type: 'DeleteCaption',
+    expect(result.error).toContain('Caption overlap detected');
+    expect(executeCommandMock).toHaveBeenCalledTimes(1);
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({
+      type: 'ImportGeneratedCaptions',
       payload: {
         sequenceId: 'seq-1',
         trackId: 'track-caption-1',
-        captionId: 'cap-rolled-back',
+        segments: [
+          { startSec: 0, endSec: 2, text: 'Intro' },
+          { startSec: 2, endSec: 4, text: 'Outro' },
+        ],
       },
     });
   });
@@ -367,21 +353,13 @@ describe('captionTools', () => {
     const tool = globalToolRegistry.get('import_captions_from_file');
     expect(tool).toBeDefined();
 
-    executeCommandMock
-      .mockResolvedValueOnce({
-        opId: 'op-caption-1',
-        success: true,
-        createdIds: ['cap-101'],
-        deletedIds: [],
-        changes: [],
-      })
-      .mockResolvedValueOnce({
-        opId: 'op-caption-2',
-        success: true,
-        createdIds: ['cap-102'],
-        deletedIds: [],
-        changes: [],
-      });
+    executeCommandMock.mockResolvedValueOnce({
+      opId: 'op-caption-import',
+      success: true,
+      createdIds: ['cap-101', 'cap-102'],
+      deletedIds: [],
+      changes: [],
+    });
 
     vi.mocked(readWorkspaceDocumentFromBackend).mockResolvedValueOnce({
       relativePath: 'captions/example.vtt',
@@ -440,21 +418,7 @@ describe('captionTools', () => {
         deletedIds: [],
         changes: [],
       })
-      .mockResolvedValueOnce({
-        opId: 'op-caption-1',
-        success: true,
-        createdIds: ['cap-created-1'],
-        deletedIds: [],
-        changes: [],
-      })
-      .mockRejectedValueOnce(new Error('caption create failed'))
-      .mockResolvedValueOnce({
-        opId: 'op-caption-rollback',
-        success: true,
-        createdIds: [],
-        deletedIds: ['cap-created-1'],
-        changes: [],
-      })
+      .mockRejectedValueOnce(new Error('caption import failed'))
       .mockResolvedValueOnce({
         opId: 'op-track-rollback',
         success: true,
@@ -475,20 +439,21 @@ describe('captionTools', () => {
     );
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('Rolled back 1 caption');
-    expect(executeCommandMock).toHaveBeenCalledTimes(5);
+    expect(result.error).toContain('caption import failed');
+    expect(executeCommandMock).toHaveBeenCalledTimes(3);
     expect(executeCommandMock.mock.calls[0][0]).toMatchObject({ type: 'CreateTrack' });
-    expect(executeCommandMock.mock.calls[1][0]).toMatchObject({ type: 'CreateCaption' });
-    expect(executeCommandMock.mock.calls[2][0]).toMatchObject({ type: 'CreateCaption' });
-    expect(executeCommandMock.mock.calls[3][0]).toMatchObject({
-      type: 'DeleteCaption',
+    expect(executeCommandMock.mock.calls[1][0]).toMatchObject({
+      type: 'ImportGeneratedCaptions',
       payload: {
         sequenceId: 'seq-1',
         trackId: 'track-caption-created',
-        captionId: 'cap-created-1',
+        segments: [
+          { startSec: 0, endSec: 1, text: 'First line' },
+          { startSec: 1, endSec: 2, text: 'Second line' },
+        ],
       },
     });
-    expect(executeCommandMock.mock.calls[4][0]).toMatchObject({
+    expect(executeCommandMock.mock.calls[2][0]).toMatchObject({
       type: 'DeleteTrack',
       payload: {
         sequenceId: 'seq-1',

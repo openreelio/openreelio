@@ -355,28 +355,6 @@ function normalizeTranscriptionSegments(
   };
 }
 
-async function rollbackCreatedCaptions(
-  sequenceId: string,
-  trackId: string,
-  captions: Array<{ captionId: string; text: string }>,
-): Promise<string[]> {
-  const rollbackFailures: string[] = [];
-
-  for (const caption of [...captions].reverse()) {
-    try {
-      await executeAgentCommand('DeleteCaption', {
-        sequenceId,
-        trackId,
-        captionId: caption.captionId,
-      });
-    } catch (error) {
-      rollbackFailures.push(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  return rollbackFailures;
-}
-
 async function rollbackCreatedCaptionTrack(
   sequenceId: string,
   trackId: string,
@@ -396,6 +374,7 @@ async function createCaptionsFromSegments(
   sequenceId: string,
   segments: TranscriptionSegmentInput[],
   explicitTrackId?: string,
+  replaceExisting = false,
 ): Promise<{
   trackId: string;
   createdTrack: boolean;
@@ -413,56 +392,57 @@ async function createCaptionsFromSegments(
   }
 
   const { trackId, createdTrack } = await ensureCaptionTrack(sequenceId, explicitTrackId);
-  const createdCaptions: Array<{ captionId: string; text: string }> = [];
-
-  for (const segment of normalizedSegments.segments) {
-    try {
-      const result = await executeAgentCommand('CreateCaption', {
-        sequenceId,
-        trackId,
-        text: segment.text,
+  try {
+    const result = await executeAgentCommand('ImportGeneratedCaptions', {
+      sequenceId,
+      trackId,
+      segments: normalizedSegments.segments.map((segment) => ({
         startSec: segment.startTime,
         endSec: segment.endTime,
-      });
-
-      const captionId = result.createdIds[0];
-      if (!captionId) {
-        throw new Error('CreateCaption did not return a caption id');
-      }
-
-      createdCaptions.push({
-        captionId,
         text: segment.text,
+      })),
+      replaceExisting,
+    });
+
+    const createdCaptions = result.createdIds.map((captionId, index) => ({
+      captionId,
+      text: normalizedSegments.segments[index]?.text ?? '',
+    }));
+
+    if (createdCaptions.length !== normalizedSegments.segments.length) {
+      logger.warn('ImportGeneratedCaptions returned an unexpected created id count', {
+        sequenceId,
+        trackId,
+        createdIdCount: createdCaptions.length,
+        segmentCount: normalizedSegments.segments.length,
       });
-    } catch (error) {
-      const rollbackFailures = await rollbackCreatedCaptions(sequenceId, trackId, createdCaptions);
-      if (createdTrack) {
-        const trackRollbackFailure = await rollbackCreatedCaptionTrack(sequenceId, trackId);
-        if (trackRollbackFailure) {
-          rollbackFailures.push(trackRollbackFailure);
-        }
-      }
-      const message = error instanceof Error ? error.message : String(error);
+    }
 
-      if (rollbackFailures.length > 0) {
-        throw new Error(
-          `Failed to create captions: ${message}. Rollback failed for ${rollbackFailures.length} operation(s).`,
-        );
+    return {
+      trackId,
+      createdTrack,
+      captionCount: createdCaptions.length,
+      captions: createdCaptions,
+      skippedSegmentCount: normalizedSegments.skippedCount,
+    };
+  } catch (error) {
+    const rollbackFailures: string[] = [];
+    if (createdTrack) {
+      const trackRollbackFailure = await rollbackCreatedCaptionTrack(sequenceId, trackId);
+      if (trackRollbackFailure) {
+        rollbackFailures.push(trackRollbackFailure);
       }
+    }
+    const message = error instanceof Error ? error.message : String(error);
 
+    if (rollbackFailures.length > 0) {
       throw new Error(
-        `Failed to create captions: ${message}. Rolled back ${createdCaptions.length} caption(s).`,
+        `Failed to create captions: ${message}. Rollback failed for ${rollbackFailures.length} operation(s).`,
       );
     }
-  }
 
-  return {
-    trackId,
-    createdTrack,
-    captionCount: createdCaptions.length,
-    captions: createdCaptions,
-    skippedSegmentCount: normalizedSegments.skippedCount,
-  };
+    throw new Error(`Failed to create captions: ${message}.`);
+  }
 }
 
 function resolveCaptionDocumentFormat(
@@ -1188,6 +1168,10 @@ const CAPTION_TOOLS: ToolDefinition[] = [
             required: ['startTime', 'endTime', 'text'],
           },
         },
+        replaceExisting: {
+          type: 'boolean',
+          description: 'Replace existing captions on the target caption track before inserting',
+        },
       },
       required: ['sequenceId', 'segments'],
     },
@@ -1197,6 +1181,7 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           args.sequenceId as string,
           args.segments as TranscriptionSegmentInput[],
           args.trackId as string | undefined,
+          args.replaceExisting === true,
         );
 
         logger.info('Captions created from transcription', {

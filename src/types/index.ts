@@ -358,6 +358,13 @@ export interface SequenceFormat {
   audioChannels: number;
 }
 
+export interface SequenceHdrSettings {
+  hdrMode: 'sdr' | 'hdr10' | 'hlg';
+  maxCll?: number;
+  maxFall?: number;
+  bitDepth: 8 | 10 | 12;
+}
+
 export interface Sequence {
   id: SequenceId;
   name: string;
@@ -366,6 +373,7 @@ export interface Sequence {
   markers: Marker[];
   /** Master output volume in dB (-60 to +6, 0 = unity) */
   masterVolumeDb?: number;
+  hdrSettings?: SequenceHdrSettings;
 }
 
 export type TrackKind = 'video' | 'audio' | 'caption' | 'overlay';
@@ -672,6 +680,8 @@ export interface TextStyle {
   fontFamily: string;
   /** Font size in points */
   fontSize: number;
+  /** Numeric font weight (100-900) */
+  fontWeight?: number;
   /** Text color as hex string (e.g., "#FFFFFF") */
   color: string;
   /** Optional background color as hex string */
@@ -754,6 +764,7 @@ export interface TextClipData {
 export const DEFAULT_TEXT_STYLE: TextStyle = {
   fontFamily: 'Arial',
   fontSize: 48,
+  fontWeight: 400,
   color: '#FFFFFF',
   backgroundPadding: 10,
   alignment: 'center',
@@ -812,6 +823,7 @@ export function createTitleTextClipData(content: string): TextClipData {
     style: {
       ...DEFAULT_TEXT_STYLE,
       fontSize: 72,
+      fontWeight: 700,
       bold: true,
     },
     position: { x: 0.5, y: 0.5 },
@@ -830,6 +842,7 @@ export function createLowerThirdTextClipData(content: string): TextClipData {
     style: {
       ...DEFAULT_TEXT_STYLE,
       fontSize: 36,
+      fontWeight: 400,
       alignment: 'left',
       backgroundColor: '#000000',
     },
@@ -848,6 +861,7 @@ export function createSubtitleTextClipData(content: string): TextClipData {
     style: {
       ...DEFAULT_TEXT_STYLE,
       fontSize: 32,
+      fontWeight: 400,
     },
     position: { x: 0.5, y: 0.9 },
     outline: { color: '#000000', width: 2 },
@@ -899,6 +913,7 @@ export type CommandType =
   | 'UpdateEffect'
   | 'UpdateCaption'
   | 'CreateCaption'
+  | 'ImportGeneratedCaptions'
   | 'DeleteCaption'
   | 'SetSequenceFormat'
   | 'CreateTrack'

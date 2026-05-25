@@ -12,6 +12,7 @@ import { registerEditingTools, unregisterEditingTools } from './editingTools';
 import { registerAnalysisTools, unregisterAnalysisTools } from './analysisTools';
 import { registerAudioTools, unregisterAudioTools } from './audioTools';
 import { registerCaptionTools, unregisterCaptionTools } from './captionTools';
+import { registerTextTools, unregisterTextTools } from './textTools';
 import { registerEffectTools, unregisterEffectTools } from './effectTools';
 import { registerTransitionTools, unregisterTransitionTools } from './transitionTools';
 import { registerGenerationTools, unregisterGenerationTools } from './generationTools';
@@ -40,6 +41,8 @@ export {
 export { registerAudioTools, unregisterAudioTools, getAudioToolNames } from './audioTools';
 
 export { registerCaptionTools, unregisterCaptionTools, getCaptionToolNames } from './captionTools';
+
+export { registerTextTools, unregisterTextTools, getTextToolNames } from './textTools';
 
 export { registerEffectTools, unregisterEffectTools, getEffectToolNames } from './effectTools';
 
@@ -104,6 +107,7 @@ export function registerAllTools(): void {
     ['analysis', registerAnalysisTools],
     ['audio', registerAudioTools],
     ['caption', registerCaptionTools],
+    ['text', registerTextTools],
     ['effect', registerEffectTools],
     ['transition', registerTransitionTools],
     ['assetDiscovery', registerAssetDiscoveryTools],
@@ -168,6 +172,7 @@ export function unregisterAllTools(): void {
     ['analysis', unregisterAnalysisTools],
     ['audio', unregisterAudioTools],
     ['caption', unregisterCaptionTools],
+    ['text', unregisterTextTools],
     ['effect', unregisterEffectTools],
     ['transition', unregisterTransitionTools],
     ['assetDiscovery', unregisterAssetDiscoveryTools],

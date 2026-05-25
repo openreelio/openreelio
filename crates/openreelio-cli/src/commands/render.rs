@@ -4,8 +4,8 @@ use crate::output;
 use clap::Subcommand;
 use openreelio_core::ffmpeg::{detect_bundled_at_path, detect_system_ffmpeg, FFmpegRunner};
 use openreelio_core::render::{
-    validate_export_settings, AudioCodec, ExportEngine, ExportPreset, ExportSettings, HdrMode,
-    VideoCodec,
+    build_render_graph, build_render_plan, validate_export_settings, AudioCodec, ExportEngine,
+    ExportPreset, ExportSettings, HdrMode, VideoCodec,
 };
 use std::path::PathBuf;
 
@@ -23,6 +23,17 @@ const RENDER_PRESETS: &[(&str, &str, &str)] = &[
 pub enum RenderAction {
     /// List available render presets
     Presets,
+
+    /// Output the renderer-agnostic graph for preview/export tooling
+    Graph {
+        /// Project directory path
+        #[arg(long)]
+        path: PathBuf,
+
+        /// Sequence ID (defaults to active)
+        #[arg(long)]
+        sequence: Option<String>,
+    },
 
     /// Start a render job (requires FFmpeg)
     Start {
@@ -56,6 +67,15 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
             output::print_json_pretty(&serde_json::json!({ "presets": presets }))
         }
 
+        RenderAction::Graph { path, sequence } => {
+            let project = super::load_project(&path)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
+            let graph = build_render_graph(&project.state, &seq_id)
+                .map_err(|error| anyhow::anyhow!("Failed to build render graph: {}", error))?;
+
+            output::print_json_pretty(&graph)
+        }
+
         RenderAction::Start {
             path,
             output: output_path,
@@ -73,6 +93,8 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
             let assets = project.state.assets.clone();
             let effects = project.state.effects.clone();
             let settings = build_export_settings(&preset, output_path.clone())?;
+            let graph = build_render_graph(&project.state, &seq_id)
+                .map_err(|error| anyhow::anyhow!("Failed to build render graph: {}", error))?;
 
             let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
             if !validation.is_valid {
@@ -81,6 +103,14 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
                     validation.errors.join("; ")
                 ));
             }
+            let render_plan = build_render_plan(&graph, &assets, &effects, &settings);
+            if !render_plan.validation.is_valid {
+                return Err(anyhow::anyhow!(
+                    "Render plan validation failed: {}",
+                    render_plan.validation.errors.join("; ")
+                ));
+            }
+            let plan_hash = render_plan.plan_hash.clone();
 
             let ffmpeg_info = detect_cli_ffmpeg()?;
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -90,8 +120,14 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
             let result = runtime.block_on(async move {
                 let engine = ExportEngine::new(FFmpegRunner::new(ffmpeg_info));
                 engine
-                    .export_sequence_with_effects(
-                        &sequence, &assets, &effects, &settings, None, None,
+                    .export_sequence_with_effects_for_plan(
+                        &sequence,
+                        &assets,
+                        &effects,
+                        &settings,
+                        &render_plan,
+                        None,
+                        None,
                     )
                     .await
             })?;
@@ -104,6 +140,7 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
                 "durationSec": result.duration_sec,
                 "fileSize": result.file_size,
                 "encodingTimeSec": result.encoding_time_sec,
+                "planHash": plan_hash,
                 "warnings": validation.warnings,
             }))
         }

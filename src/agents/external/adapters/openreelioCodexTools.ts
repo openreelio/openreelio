@@ -3,9 +3,6 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   AgentPlan,
   AgentPlanResult,
-  CommandResultDto,
-  ExternalAgentApprovalTokenGrant,
-  ExternalAgentApprovalTokenValidation,
   PlanRiskLevel,
   ProjectInfo,
   ProjectStateDto,
@@ -20,6 +17,8 @@ import type {
   CodexDynamicToolSpec,
   CodexJsonObject,
 } from './CodexAppServerClient';
+import { runProjectBackendMutation } from '@/services/projectMutationGateway';
+import { issueAgentPlanApprovalProof } from '@/services/agentPlanApprovalProof';
 
 export interface OpenReelioCodexSessionContext {
   projectId: string;
@@ -32,6 +31,8 @@ export interface OpenReelioCodexToolContext extends OpenReelioCodexSessionContex
   sessionKnown?: boolean;
   approvalDecisionProvider?: ExternalAgentApprovalDecisionProvider;
 }
+
+const EXTERNAL_AGENT_MUTATION_TIMEOUT_MS = 5 * 60 * 1000;
 
 const OPENREELIO_COMMAND_TYPES = [
   'InsertClip',
@@ -82,6 +83,7 @@ const OPENREELIO_COMMAND_TYPES = [
   'AddMarker',
   'RemoveMarker',
   'CreateCaption',
+  'ImportGeneratedCaptions',
   'DeleteCaption',
   'UpdateCaption',
   'AddEffect',
@@ -898,16 +900,49 @@ async function executeApprovedCommand(
     };
   }
 
-  const result = await invoke<CommandResultDto>('execute_command', {
-    commandType,
-    payload,
-  });
-  contextTokensBySessionId.delete(context.sessionId);
+  const plan: AgentPlan = {
+    id: `codex-command-${context.sessionId}-${request.id}`,
+    goal: reason,
+    steps: [
+      {
+        id: 'step-1',
+        toolName: commandType,
+        params: payload as AgentPlan['steps'][number]['params'],
+        description: reason,
+        riskLevel: 'medium',
+        dependsOn: [],
+        optional: false,
+      },
+    ],
+    approvalGranted: true,
+    sessionId: context.sessionId,
+  };
+  const approval = await issuePlanApplyApprovalProof(context, plan.id);
+  plan.approvalProof = approval.proof;
+
+  let result: AgentPlanResult;
+  try {
+    result = await runProjectBackendMutation(
+      `externalAgentPlan:${commandType}`,
+      () => invoke<AgentPlanResult>('execute_agent_plan', { plan }),
+      {
+        refreshProjectState: false,
+        markDirty: false,
+        timeoutMs: EXTERNAL_AGENT_MUTATION_TIMEOUT_MS,
+      },
+    );
+  } finally {
+    contextTokensBySessionId.delete(context.sessionId);
+  }
   const refresh = await refreshProjectStoreAfterMutation();
 
   return {
-    status: 'ok',
+    status: result.success ? 'ok' : 'error',
     commandType,
+    approval: {
+      tokenId: approval.grant.tokenId,
+      consumedBy: 'execute_agent_plan',
+    },
     result,
     refresh,
   };
@@ -1051,13 +1086,22 @@ async function applyApprovedPlan(
     };
   }
 
-  const approvalGrant = await issueAndConsumePlanApplyApproval(context, validation.plan.id);
+  const approval = await issuePlanApplyApprovalProof(context, validation.plan.id);
   const plan: AgentPlan = {
     ...validation.plan,
     approvalGranted: true,
-    sessionId: validation.plan.sessionId ?? context.sessionId,
+    approvalProof: approval.proof,
+    sessionId: context.sessionId,
   };
-  const result = await invoke<AgentPlanResult>('execute_agent_plan', { plan });
+  const result = await runProjectBackendMutation(
+    'externalAgentPlan',
+    () => invoke<AgentPlanResult>('execute_agent_plan', { plan }),
+    {
+      refreshProjectState: false,
+      markDirty: false,
+      timeoutMs: EXTERNAL_AGENT_MUTATION_TIMEOUT_MS,
+    },
+  );
   contextTokensBySessionId.delete(context.sessionId);
   const refresh = await refreshProjectStoreAfterMutation();
 
@@ -1065,8 +1109,8 @@ async function applyApprovedPlan(
     status: result.success ? 'ok' : 'error',
     planId: validation.plan.id,
     approval: {
-      tokenId: approvalGrant.tokenId,
-      consumed: true,
+      tokenId: approval.grant.tokenId,
+      consumedBy: 'execute_agent_plan',
     },
     result,
     refresh,
@@ -1361,45 +1405,17 @@ function buildPlanApprovalRequest(input: {
   };
 }
 
-async function issueAndConsumePlanApplyApproval(
+async function issuePlanApplyApprovalProof(
   context: OpenReelioCodexToolContext,
   planId: string,
-): Promise<ExternalAgentApprovalTokenGrant> {
-  const grant = await invoke<ExternalAgentApprovalTokenGrant>(
-    'create_external_agent_approval_token',
-    {
-      input: {
-        sessionId: context.sessionId,
-        runId: null,
-        planId,
-        projectId: context.projectId,
-        runtimeId: context.runtimeId,
-        scopes: ['openreelio.plan.apply'],
-        ttlMs: 10 * 60 * 1000,
-      },
-    },
-  );
-  const validation = await invoke<ExternalAgentApprovalTokenValidation>(
-    'consume_external_agent_approval_token',
-    {
-      input: {
-        token: grant.token,
-        sessionId: context.sessionId,
-        planId,
-        projectId: context.projectId,
-        runtimeId: context.runtimeId,
-        requiredScope: 'openreelio.plan.apply',
-      },
-    },
-  );
-
-  if (!validation.valid) {
-    throw new Error(
-      validation.reason ?? 'OpenReelio plan approval token was rejected before plan execution.',
-    );
-  }
-
-  return grant;
+): ReturnType<typeof issueAgentPlanApprovalProof> {
+  return issueAgentPlanApprovalProof({
+    sessionId: context.sessionId,
+    runId: null,
+    planId,
+    projectId: context.projectId,
+    runtimeId: context.runtimeId,
+  });
 }
 
 async function readProjectState(): Promise<ProjectStateDto> {
@@ -1571,17 +1587,26 @@ async function importStockMediaToolCall(
     };
   }
 
-  const result = await invoke<StockMediaImportResult>('import_stock_media_asset', {
-    sourceUrl,
-    name,
-    assetType,
-    provider,
-    license,
-    licenseAck,
-    durationSec,
-    tags,
-    providerUrl,
-  });
+  const result = await runProjectBackendMutation(
+    'externalAgentStockMediaImport',
+    () =>
+      invoke<StockMediaImportResult>('import_stock_media_asset', {
+        sourceUrl,
+        name,
+        assetType,
+        provider,
+        license,
+        licenseAck,
+        durationSec,
+        tags,
+        providerUrl,
+      }),
+    {
+      refreshProjectState: false,
+      markDirty: false,
+      timeoutMs: EXTERNAL_AGENT_MUTATION_TIMEOUT_MS,
+    },
+  );
   contextTokensBySessionId.delete(context.sessionId);
   const refresh = await refreshProjectStoreAfterMutation();
 
@@ -1822,6 +1847,27 @@ function buildCommandSchema(): CodexJsonObject {
           'youtube_4k',
         ],
         note: 'Use youtube_shorts or 1080x1920 for Shorts/vertical edits. A newly created sequence becomes the active timeline.',
+      },
+      ImportGeneratedCaptions: {
+        required: ['sequenceId', 'trackId', 'segments'],
+        optional: ['style', 'position', 'replaceExisting'],
+        segmentShape: { startSec: 'number', endSec: 'number', text: 'string' },
+        note: 'Use this for AI/STT transcript segments so generated captions are imported atomically and remain undoable as one command.',
+      },
+      AddTextClip: {
+        required: ['sequenceId', 'trackId', 'timelineIn', 'duration', 'textData'],
+        textDataShape:
+          'TextClipData includes content, style(fontFamily/fontSize/fontWeight/color/backgroundColor/alignment/bold/italic/underline/lineHeight/letterSpacing), position(x/y 0..1), shadow, outline, rotation, and opacity.',
+        note: 'Text clips must be placed on a video or overlay track. Use SetClipTransform after creation when scale or anchor must be exact.',
+      },
+      UpdateTextClip: {
+        required: ['sequenceId', 'trackId', 'clipId', 'textData'],
+        note: 'Send the full updated TextClipData so style, position, shadow, outline, rotation, and opacity remain deterministic.',
+      },
+      SetClipTransform: {
+        required: ['sequenceId', 'trackId', 'clipId', 'transform'],
+        transformShape:
+          'transform includes position{x,y}, scale{x,y}, rotationDeg, and anchor{x,y}; text clips use this for preview drag/resize/rotate parity.',
       },
     },
     payloadFormat: {

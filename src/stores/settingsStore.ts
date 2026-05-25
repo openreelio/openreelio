@@ -252,7 +252,7 @@ interface SettingsActions {
 // =============================================================================
 
 const DEFAULT_SETTINGS: AppSettings = {
-  version: 1,
+  version: 2,
   general: {
     language: 'en',
     showWelcomeOnStartup: true,
@@ -308,7 +308,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     cacheSizeMb: 1024,
   },
   ai: {
-    assistantRuntime: 'api',
+    assistantRuntime: 'codex',
     codexModel: 'gpt-5.5',
     codexReasoningEffort: 'medium',
     primaryProvider: 'anthropic',
@@ -352,6 +352,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function coerceAssistantRuntime(value: unknown): AssistantRuntime {
+  if (value === 'api') {
+    return DEFAULT_SETTINGS.ai.assistantRuntime;
+  }
+  return value === 'codex' ? value : DEFAULT_SETTINGS.ai.assistantRuntime;
+}
+
 function coerceAppSettings(value: unknown): AppSettings {
   if (!isRecord(value) || typeof value.version !== 'number') {
     return DEFAULT_SETTINGS;
@@ -360,9 +367,12 @@ function coerceAppSettings(value: unknown): AppSettings {
   // Always merge with defaults to tolerate backend/frontend schema drift.
   // The backend currently does not persist `workspace`, so this prevents
   // workspace-dependent features from crashing when settings are loaded.
+  const rawAiSettings = isRecord(value.ai) ? value.ai : {};
+  const migratedAssistantRuntime = coerceAssistantRuntime(rawAiSettings.assistantRuntime);
   const aiSettings = {
     ...DEFAULT_SETTINGS.ai,
-    ...(isRecord(value.ai) ? value.ai : {}),
+    ...rawAiSettings,
+    assistantRuntime: migratedAssistantRuntime,
     openaiApiKey: null,
     anthropicApiKey: null,
     googleApiKey: null,
@@ -372,6 +382,7 @@ function coerceAppSettings(value: unknown): AppSettings {
   return {
     ...DEFAULT_SETTINGS,
     ...(value as Partial<AppSettings>),
+    version: DEFAULT_SETTINGS.version,
     general: { ...DEFAULT_SETTINGS.general, ...(isRecord(value.general) ? value.general : {}) },
     editor: { ...DEFAULT_SETTINGS.editor, ...(isRecord(value.editor) ? value.editor : {}) },
     playback: { ...DEFAULT_SETTINGS.playback, ...(isRecord(value.playback) ? value.playback : {}) },

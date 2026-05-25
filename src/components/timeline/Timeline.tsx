@@ -1118,6 +1118,7 @@ export function Timeline({
       trackHeight: TRACK_HEIGHT,
       onAssetDrop,
       assets,
+      dropContainerRef: tracksAreaRef,
     });
 
   // ===========================================================================

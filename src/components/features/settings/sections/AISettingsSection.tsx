@@ -360,7 +360,7 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
 }) => {
   const { status: credentialStatus, isLoading: credentialsLoading } = useCredentials();
   const videoGenerationEnabled = isVideoGenerationEnabled();
-  const usesApiRuntime = settings.assistantRuntime === 'api';
+  const usesApiRuntime = false;
 
   // Handlers
   const handleProviderChange = useCallback(
@@ -559,9 +559,8 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
           />
           <div className="rounded border border-editor-border bg-editor-bg px-3 py-2">
             <p className="text-xs leading-5 text-editor-text-muted">
-              The provider, model, API key, generation parameters, and cost controls below apply
-              only to the built-in API model runtime. Switch back to Built-in API model to edit
-              those settings.
+              The provider, model, API key, generation parameters, and cost controls below are
+              retained only for legacy compatibility and are inactive while Codex is selected.
             </p>
           </div>
         </section>

@@ -103,7 +103,13 @@ describe('useRenderCache', () => {
     } as never);
     vi.mocked(commands.renderPreviewCache).mockResolvedValue({
       status: 'ok',
-      data: { sequenceId: 'seq1', totalSegments: 4, segmentsToRender: 2, status: 'started' },
+      data: {
+        jobId: 'cache-job-1',
+        sequenceId: 'seq1',
+        totalSegments: 4,
+        segmentsToRender: 2,
+        status: 'started',
+      },
     } as never);
 
     const { result } = renderHook(() => useRenderCache());

@@ -21,10 +21,16 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { usePlaybackLoop } from '@/hooks/usePlaybackLoop';
 import { useAssetFrameExtractor } from '@/hooks/useFrameExtractor';
+import { useSequenceRenderGraph } from '@/hooks/useSequenceRenderGraph';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 import { videoFrameBuffer } from '@/services/videoFrameBuffer';
-import { extractTextDataFromClipWithMap, renderTextToCanvas } from '@/utils/textRenderer';
+import {
+  applyClipTransformToRenderedTextData,
+  extractTextDataFromClipWithMap,
+  renderTextToCanvas,
+} from '@/utils/textRenderer';
 import { getClipSourceTimeAtTimelineTime, isClipActiveAtTime } from '@/utils/clipTiming';
+import { getActiveVisualLayers } from '@/utils/renderGraphLayers';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { getEffectiveBlendMode } from '@/utils/blendModes';
 import {
@@ -42,8 +48,6 @@ import type {
   Track,
   Sequence,
   Asset,
-  TextClipData,
-  Transform,
   BlendMode,
   CaptionPosition,
   CaptionStyle,
@@ -123,65 +127,6 @@ const BLEND_MODE_MAP: Record<BlendMode, GlobalCompositeOperation> = {
   difference: 'difference',
   exclusion: 'exclusion',
 };
-
-const DEFAULT_CLIP_TRANSFORM: Transform = {
-  position: { x: 0.5, y: 0.5 },
-  scale: { x: 1.0, y: 1.0 },
-  rotationDeg: 0,
-  anchor: { x: 0.5, y: 0.5 },
-};
-
-function isIdentityTransform(transform: Transform): boolean {
-  return (
-    Math.abs(transform.position.x - DEFAULT_CLIP_TRANSFORM.position.x) < 0.0001 &&
-    Math.abs(transform.position.y - DEFAULT_CLIP_TRANSFORM.position.y) < 0.0001 &&
-    Math.abs(transform.scale.x - DEFAULT_CLIP_TRANSFORM.scale.x) < 0.0001 &&
-    Math.abs(transform.scale.y - DEFAULT_CLIP_TRANSFORM.scale.y) < 0.0001 &&
-    Math.abs(transform.rotationDeg - DEFAULT_CLIP_TRANSFORM.rotationDeg) < 0.0001 &&
-    Math.abs(transform.anchor.x - DEFAULT_CLIP_TRANSFORM.anchor.x) < 0.0001 &&
-    Math.abs(transform.anchor.y - DEFAULT_CLIP_TRANSFORM.anchor.y) < 0.0001
-  );
-}
-
-function applyClipTransformToTextData(textData: TextClipData, transform: Transform): TextClipData {
-  if (isIdentityTransform(transform)) {
-    return textData;
-  }
-
-  const scaleFactor = Math.max(
-    0.1,
-    (Math.abs(transform.scale.x) + Math.abs(transform.scale.y)) / 2,
-  );
-
-  return {
-    ...textData,
-    position: {
-      x: transform.position.x,
-      y: transform.position.y,
-    },
-    rotation: transform.rotationDeg,
-    style: {
-      ...textData.style,
-      fontSize: Math.max(1, Math.round(textData.style.fontSize * scaleFactor)),
-      backgroundPadding: Math.max(0, Math.round(textData.style.backgroundPadding * scaleFactor)),
-      letterSpacing: Math.round(textData.style.letterSpacing * scaleFactor),
-    },
-    shadow: textData.shadow
-      ? {
-          ...textData.shadow,
-          offsetX: Math.round(textData.shadow.offsetX * scaleFactor),
-          offsetY: Math.round(textData.shadow.offsetY * scaleFactor),
-          blur: Math.max(0, Math.round(textData.shadow.blur * scaleFactor)),
-        }
-      : textData.shadow,
-    outline: textData.outline
-      ? {
-          ...textData.outline,
-          width: Math.max(1, Math.round(textData.outline.width * scaleFactor)),
-        }
-      : textData.outline,
-  };
-}
 
 function drawVisualWithClipTransform(
   ctx: CanvasRenderingContext2D,
@@ -276,6 +221,21 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   }, [activeSequenceId, sequences]);
 
   const textClipDataById = useSequenceTextClipData(activeSequence ?? null);
+  const renderGraph = useSequenceRenderGraph(activeSequence ?? null);
+  const timelineLookup = useMemo(() => {
+    const clipById = new Map<
+      string,
+      { clip: Clip; track: Track; trackIndex: number; clipIndex: number }
+    >();
+
+    activeSequence?.tracks.forEach((track, trackIndex) => {
+      track.clips.forEach((clip, clipIndex) => {
+        clipById.set(clip.id, { clip, track, trackIndex, clipIndex });
+      });
+    });
+
+    return clipById;
+  }, [activeSequence]);
 
   // Note: Sequence format canvas dimensions are available via activeSequence?.format.canvas
   // Currently transforms are calculated relative to the preview canvas dimensions
@@ -292,6 +252,29 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     (sequence: Sequence | undefined, time: number): ActiveClipInfo[] => {
       if (!sequence) {
         return [];
+      }
+
+      const graphForSequence = renderGraph?.sequenceId === sequence.id ? renderGraph : null;
+      if (graphForSequence) {
+        return getActiveVisualLayers(graphForSequence, time, {
+          trackKinds: ['video', 'overlay', 'caption'],
+        })
+          .map((layer): ActiveClipInfo | null => {
+            const entry = timelineLookup.get(layer.clipId);
+            if (!entry) {
+              return null;
+            }
+
+            return {
+              clip: entry.clip,
+              track: entry.track,
+              trackIndex: layer.trackIndex,
+              clipIndex: entry.clipIndex,
+              sourceTime: getClipSourceTimeAtTimelineTime(entry.clip, time),
+              asset: assets.get(entry.clip.assetId),
+            };
+          })
+          .filter((clip): clip is ActiveClipInfo => clip !== null);
       }
 
       const activeClips: ActiveClipInfo[] = [];
@@ -340,7 +323,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       return activeClips;
     },
-    [assets],
+    [assets, renderGraph, timelineLookup],
   );
 
   // Get active clip info for the legacy single-asset frame extractor
@@ -602,7 +585,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
               continue;
             }
 
-            const transformedTextData = applyClipTransformToTextData(textData, clip.transform);
+            const transformedTextData = applyClipTransformToRenderedTextData(clip, textData);
 
             targetCtx.save();
             targetCtx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] || 'source-over';
@@ -611,7 +594,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
               transformedTextData,
               targetCtx.canvas.width,
               targetCtx.canvas.height,
-              clip.opacity,
+              1,
             );
             targetCtx.restore();
             continue;

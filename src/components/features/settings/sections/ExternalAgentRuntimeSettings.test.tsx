@@ -143,6 +143,24 @@ describe('ExternalAgentRuntimeSettings', () => {
     expect(onUpdate).toHaveBeenCalledWith({ assistantRuntime: 'codex' });
   });
 
+  it('should hide the legacy API runtime and coerce saved API settings to Codex', async () => {
+    const onUpdate = vi.fn();
+
+    render(
+      <ExternalAgentRuntimeSettings
+        settings={defaultSettings}
+        onUpdate={onUpdate}
+        disabled={false}
+      />,
+    );
+
+    expect(
+      screen.queryByRole('button', { name: /built-in api model/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText('Codex Model')).toBeInTheDocument();
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledWith({ assistantRuntime: 'codex' }));
+  });
+
   it('should check Codex app-server readiness when Codex account agent is selected', async () => {
     render(
       <ExternalAgentRuntimeSettings

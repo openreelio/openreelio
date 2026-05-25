@@ -14,8 +14,10 @@ import {
   type KeyboardEvent,
   type ChangeEvent,
   type MouseEvent,
+  type DragEvent,
 } from 'react';
-import { Search, X, FolderPlus, RefreshCw } from 'lucide-react';
+import { isTauri } from '@tauri-apps/api/core';
+import { Search, X, FolderPlus, RefreshCw, Upload } from 'lucide-react';
 import { useProjectStore, useWorkspaceStore } from '@/stores';
 import { useTranscriptionWithIndexing } from '@/hooks';
 import { useFileOperations } from '@/hooks/useFileOperations';
@@ -33,6 +35,43 @@ import {
 
 const logger = createLogger('ProjectExplorer');
 const SOURCE_MONITOR_SUPPORTED_KINDS = new Set<AssetKind>(['video', 'audio']);
+const WORKSPACE_ENTRY_PATH_SELECTOR = '[data-workspace-entry-path]';
+const DUPLICATE_EXTERNAL_DROP_WINDOW_MS = 1500;
+const IMPORT_DIALOG_MEDIA_EXTENSIONS = [
+  '3g2',
+  '3gp',
+  'aac',
+  'aif',
+  'aifc',
+  'aiff',
+  'avi',
+  'bmp',
+  'caf',
+  'flac',
+  'gif',
+  'heic',
+  'heif',
+  'jpeg',
+  'jpg',
+  'm4a',
+  'm4v',
+  'mkv',
+  'mov',
+  'mp3',
+  'mp4',
+  'mxf',
+  'oga',
+  'ogg',
+  'opus',
+  'png',
+  'srt',
+  'tif',
+  'tiff',
+  'wav',
+  'webm',
+  'webp',
+  'wmv',
+];
 
 export interface ProjectExplorerProps {
   /** Insert the selected workspace asset into the active sequence. */
@@ -41,6 +80,169 @@ export interface ProjectExplorerProps {
 
 function canLoadIntoSourceMonitor(kind: AssetKind | undefined): boolean {
   return kind !== undefined && SOURCE_MONITOR_SUPPORTED_KINDS.has(kind);
+}
+
+function nativeDropPositionToClientPosition(position: { x: number; y: number }): {
+  x: number;
+  y: number;
+} {
+  const scaleFactor =
+    typeof window !== 'undefined' && Number.isFinite(window.devicePixelRatio)
+      ? window.devicePixelRatio || 1
+      : 1;
+
+  return {
+    x: position.x / scaleFactor,
+    y: position.y / scaleFactor,
+  };
+}
+
+function getParentDirectory(relativePath: string): string {
+  const normalized = relativePath.replace(/\\/g, '/');
+  const separatorIndex = normalized.lastIndexOf('/');
+  return separatorIndex > 0 ? normalized.slice(0, separatorIndex) : '';
+}
+
+function isPointInsideElement(element: HTMLElement, clientX: number, clientY: number): boolean {
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return false;
+  }
+
+  return (
+    clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom
+  );
+}
+
+function resolveExternalDropTargetDir(
+  rootElement: HTMLElement | null,
+  clientX: number,
+  clientY: number,
+  fallbackTarget?: EventTarget | null,
+): string | null {
+  if (!rootElement) {
+    return null;
+  }
+
+  const fallbackElement =
+    fallbackTarget instanceof Element && rootElement.contains(fallbackTarget)
+      ? fallbackTarget
+      : null;
+  if (!fallbackElement && !isPointInsideElement(rootElement, clientX, clientY)) {
+    return null;
+  }
+
+  const pointElement =
+    typeof document !== 'undefined' && typeof document.elementFromPoint === 'function'
+      ? document.elementFromPoint(clientX, clientY)
+      : null;
+
+  const candidateElement =
+    pointElement instanceof Element && rootElement.contains(pointElement)
+      ? pointElement
+      : fallbackElement;
+
+  const entryElement = candidateElement?.closest(WORKSPACE_ENTRY_PATH_SELECTOR);
+  if (!(entryElement instanceof HTMLElement)) {
+    return '';
+  }
+
+  const relativePath = entryElement.dataset.workspaceEntryPath;
+  if (!relativePath) {
+    return '';
+  }
+
+  return entryElement.dataset.workspaceEntryDirectory === 'true'
+    ? relativePath
+    : getParentDirectory(relativePath);
+}
+
+function hasExternalFiles(dataTransfer: DataTransfer): boolean {
+  return Array.from(dataTransfer.types).includes('Files');
+}
+
+function isLikelyAbsoluteLocalPath(path: string): boolean {
+  return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\');
+}
+
+function getDataTransferFilePaths(dataTransfer: DataTransfer): string[] {
+  return Array.from(dataTransfer.files)
+    .map((file) => (file as File & { path?: string }).path)
+    .filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
+    .filter(isLikelyAbsoluteLocalPath);
+}
+
+type NativeDragDropEvent = {
+  payload:
+    | { type: 'drop'; paths: string[]; position: { x: number; y: number } }
+    | { type: 'enter'; paths: string[]; position: { x: number; y: number } }
+    | { type: 'over'; position: { x: number; y: number } }
+    | { type: 'leave' };
+};
+
+async function selectExternalImportFiles(): Promise<string[]> {
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({
+    multiple: true,
+    directory: false,
+    title: 'Import Media Files',
+    filters: [{ name: 'Media Files', extensions: IMPORT_DIALOG_MEDIA_EXTENSIONS }],
+  });
+
+  if (selected == null) {
+    return [];
+  }
+
+  return Array.isArray(selected) ? selected : [selected];
+}
+
+function createWorkspaceRootEntry(children: FileTreeEntry[]): FileTreeEntry {
+  return {
+    relativePath: '',
+    name: 'Workspace',
+    isDirectory: true,
+    children,
+  };
+}
+
+function findDirectoryEntries(entries: FileTreeEntry[], relativePath: string): FileTreeEntry[] {
+  if (!relativePath) {
+    return entries;
+  }
+
+  for (const entry of entries) {
+    if (entry.isDirectory && entry.relativePath === relativePath) {
+      return entry.children;
+    }
+
+    if (entry.isDirectory) {
+      const result = findDirectoryEntries(entry.children, relativePath);
+      if (result.length > 0) {
+        return result;
+      }
+    }
+  }
+
+  return [];
+}
+
+function getUniqueFolderName(entries: FileTreeEntry[], baseName = 'New Folder'): string {
+  const existingNames = new Set(
+    entries.filter((entry) => entry.isDirectory).map((entry) => entry.name.toLowerCase()),
+  );
+
+  if (!existingNames.has(baseName.toLowerCase())) {
+    return baseName;
+  }
+
+  for (let index = 1; index < 10_000; index += 1) {
+    const candidate = `${baseName} ${index}`;
+    if (!existingNames.has(candidate.toLowerCase())) {
+      return candidate;
+    }
+  }
+
+  return `${baseName} ${Date.now()}`;
 }
 
 interface CaptionSegmentPayload {
@@ -77,6 +279,8 @@ function buildCaptionSegmentPayloads(
 }
 
 export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const lastExternalDropRef = useRef<{ key: string; timestampMs: number } | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
 
@@ -84,6 +288,7 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
   const fileTree = useWorkspaceStore((state) => state.fileTree);
   const isScanning = useWorkspaceStore((state) => state.isScanning);
   const scanWorkspace = useWorkspaceStore((state) => state.scanWorkspace);
+  const importExternalFiles = useWorkspaceStore((state) => state.importExternalFiles);
 
   // Project store
   const { assets, selectAsset, executeCommand, activeSequenceId, sequences } = useProjectStore();
@@ -144,6 +349,187 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
     void scanWorkspace();
   }, [scanWorkspace]);
 
+  const handleImportExternalFilesToTarget = useCallback(
+    async (targetDir: string) => {
+      try {
+        const sourcePaths = await selectExternalImportFiles();
+        if (sourcePaths.length === 0) {
+          return;
+        }
+
+        const result = await importExternalFiles(sourcePaths, targetDir || undefined);
+        logger.info('External files imported from file picker', {
+          importedCount: result.importedFiles.length,
+          failedCount: result.failedFiles.length,
+          targetDir: targetDir || null,
+        });
+      } catch (error) {
+        logger.error('Failed to import files from picker', { error });
+      }
+    },
+    [importExternalFiles],
+  );
+
+  const handleImportFilesForEntry = useCallback(
+    (entry: FileTreeEntry) => {
+      const targetDir = entry.isDirectory
+        ? entry.relativePath
+        : getParentDirectory(entry.relativePath);
+      void handleImportExternalFilesToTarget(targetDir);
+    },
+    [handleImportExternalFilesToTarget],
+  );
+
+  const handleExternalFileDropPaths = useCallback(
+    async (
+      sourcePaths: string[],
+      clientX: number,
+      clientY: number,
+      fallbackTarget?: EventTarget | null,
+    ) => {
+      const targetDir = resolveExternalDropTargetDir(
+        rootRef.current,
+        clientX,
+        clientY,
+        fallbackTarget,
+      );
+
+      if (targetDir === null) {
+        return;
+      }
+
+      if (sourcePaths.length === 0) {
+        logger.warn('External file drop did not include readable absolute paths');
+        return;
+      }
+
+      const dropKey = `${targetDir}\n${sourcePaths.join('\n')}`;
+      const now = Date.now();
+      if (
+        lastExternalDropRef.current?.key === dropKey &&
+        now - lastExternalDropRef.current.timestampMs < DUPLICATE_EXTERNAL_DROP_WINDOW_MS
+      ) {
+        return;
+      }
+      lastExternalDropRef.current = {
+        key: dropKey,
+        timestampMs: now,
+      };
+
+      try {
+        const result = await importExternalFiles(sourcePaths, targetDir || undefined);
+        logger.info('External files imported into workspace', {
+          importedCount: result.importedFiles.length,
+          failedCount: result.failedFiles.length,
+          targetDir: targetDir || null,
+        });
+      } catch (error) {
+        logger.error('Failed to import external file drop', { error });
+      }
+    },
+    [importExternalFiles],
+  );
+
+  const handleNativeDragDropEvent = useCallback(
+    (event: NativeDragDropEvent) => {
+      const { payload } = event;
+      if (payload.type !== 'drop' || payload.paths.length === 0) {
+        return;
+      }
+
+      logger.debug('Native file drop event received', {
+        pathCount: payload.paths.length,
+        position: payload.position,
+      });
+
+      const clientPosition = nativeDropPositionToClientPosition(payload.position);
+      void handleExternalFileDropPaths(payload.paths, clientPosition.x, clientPosition.y);
+    },
+    [handleExternalFileDropPaths],
+  );
+
+  useEffect(() => {
+    if (!isTauri()) {
+      return undefined;
+    }
+
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void (async () => {
+      const unlistenFns: Array<() => void> = [];
+      const errors: unknown[] = [];
+
+      try {
+        const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+        unlistenFns.push(await getCurrentWebview().onDragDropEvent(handleNativeDragDropEvent));
+      } catch (error) {
+        errors.push(error);
+      }
+
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        unlistenFns.push(await getCurrentWindow().onDragDropEvent(handleNativeDragDropEvent));
+      } catch (error) {
+        errors.push(error);
+      }
+
+      if (unlistenFns.length === 0) {
+        throw errors[0] ?? new Error('No native drag/drop listener could be attached');
+      }
+
+      unlisten = () => {
+        for (const unlistenFn of unlistenFns) {
+          unlistenFn();
+        }
+      };
+
+      logger.info('Native file drop listeners attached', {
+        listenerCount: unlistenFns.length,
+      });
+
+      if (disposed && unlisten) {
+        unlisten();
+        unlisten = null;
+      }
+    })().catch((error) => {
+      logger.error('Failed to attach native file drop listener', { error });
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+        unlisten = null;
+      }
+    };
+  }, [handleNativeDragDropEvent]);
+
+  const handleExternalDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!hasExternalFiles(event.dataTransfer)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+  }, []);
+
+  const handleExternalDrop = useCallback(
+    (event: DragEvent<HTMLDivElement>) => {
+      if (!hasExternalFiles(event.dataTransfer)) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const sourcePaths = getDataTransferFilePaths(event.dataTransfer);
+      void handleExternalFileDropPaths(sourcePaths, event.clientX, event.clientY, event.target);
+    },
+    [handleExternalFileDropPaths],
+  );
+
   const handleFileClick = useCallback(
     (entry: FileTreeEntry) => {
       if (!entry.isDirectory && entry.assetId) {
@@ -183,8 +569,25 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
 
   const handleContextMenu = useCallback((event: MouseEvent, entry: FileTreeEntry) => {
     event.preventDefault();
+    event.stopPropagation();
     setContextMenu({ entry, position: { x: event.clientX, y: event.clientY } });
   }, []);
+
+  const handleWorkspaceRootContextMenu = useCallback(
+    (event: MouseEvent<HTMLDivElement>) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(WORKSPACE_ENTRY_PATH_SELECTOR)) {
+        return;
+      }
+
+      event.preventDefault();
+      setContextMenu({
+        entry: createWorkspaceRootEntry(fileTree),
+        position: { x: event.clientX, y: event.clientY },
+      });
+    },
+    [fileTree],
+  );
 
   const handleCloseContextMenu = useCallback(() => {
     setContextMenu(null);
@@ -196,13 +599,13 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
 
   const handleCreateFolder = useCallback(
     (parentPath: string) => {
-      const folderName = 'New Folder';
+      const folderName = getUniqueFolderName(findDirectoryEntries(fileTree, parentPath));
       const fullPath = parentPath ? `${parentPath}/${folderName}` : folderName;
       createFolder(fullPath).catch((error) => {
         logger.error('Failed to create folder', { error });
       });
     },
-    [createFolder],
+    [createFolder, fileTree],
   );
 
   const handleRename = useCallback((entry: FileTreeEntry) => {
@@ -389,18 +792,14 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
           return;
         }
 
-        for (const segment of captionSegments) {
-          await executeCommand({
-            type: 'CreateCaption',
-            payload: {
-              sequenceId: activeSequence.id,
-              trackId: captionTrackId,
-              startSec: segment.startSec,
-              endSec: segment.endSec,
-              text: segment.text,
-            },
-          });
-        }
+        await executeCommand({
+          type: 'ImportGeneratedCaptions',
+          payload: {
+            sequenceId: activeSequence.id,
+            trackId: captionTrackId,
+            segments: captionSegments,
+          },
+        });
       } finally {
         setTranscribingAssets((prev) => {
           const next = new Set(prev);
@@ -447,6 +846,10 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
     handleCreateFolder('');
   }, [handleCreateFolder]);
 
+  const handleHeaderImportFiles = useCallback(() => {
+    void handleImportExternalFilesToTarget('');
+  }, [handleImportExternalFilesToTarget]);
+
   const renameTrimmedValue = renameValue.trim();
   const isRenameConfirmDisabled =
     renamingEntry == null ||
@@ -459,10 +862,15 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
 
   return (
     <div
+      ref={rootRef}
       data-testid="project-explorer"
+      data-workspace-drop-root="true"
       className="flex flex-col h-full bg-editor-sidebar text-editor-text relative"
       tabIndex={0}
       onKeyDown={handleKeyDown}
+      onDragEnter={handleExternalDragOver}
+      onDragOver={handleExternalDragOver}
+      onDrop={handleExternalDrop}
     >
       {/* Header */}
       <div className="flex items-center justify-between p-3 border-b border-editor-border">
@@ -476,6 +884,15 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
             title="Create folder"
           >
             <FolderPlus className="w-4 h-4" />
+          </button>
+          <button
+            data-testid="import-files-button"
+            className="p-1.5 rounded transition-colors hover:bg-surface-active"
+            onClick={handleHeaderImportFiles}
+            aria-label="Import files"
+            title="Import files"
+          >
+            <Upload className="w-4 h-4" />
           </button>
           <button
             data-testid="scan-workspace-button"
@@ -517,7 +934,11 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
       </div>
 
       {/* File Tree */}
-      <div className="flex-1 overflow-y-auto">
+      <div
+        className="flex-1 overflow-y-auto"
+        data-workspace-drop-root="true"
+        onContextMenu={handleWorkspaceRootContextMenu}
+      >
         <FileTree
           entries={filteredTree}
           isScanning={isScanning}
@@ -613,6 +1034,7 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
           onDelete={handleDelete}
           onRevealInExplorer={handleRevealInExplorer}
           onCopyPath={handleCopyPath}
+          onImportFiles={handleImportFilesForEntry}
           onAddToTimeline={handleAddToTimeline}
           onTranscribe={handleContextTranscribe}
           isTranscribing={

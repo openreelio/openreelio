@@ -154,6 +154,10 @@ describe('CodexReferenceAdapter', () => {
       (tool: any) => tool.name === 'command_execute',
     );
     expect(commandExecuteTool.inputSchema.properties.commandType.enum).toContain('CreateTrack');
+    expect(commandExecuteTool.inputSchema.properties.commandType.enum).toContain('AddTextClip');
+    expect(commandExecuteTool.inputSchema.properties.commandType.enum).toContain(
+      'ImportGeneratedCaptions',
+    );
     expect(commandExecuteTool.inputSchema.properties.commandType.enum).not.toContain('DeleteFile');
     const stockSearchTool = startThreadInput.dynamicTools.find(
       (tool: any) => tool.name === 'stock_media_search',
@@ -556,6 +560,8 @@ describe('CodexReferenceAdapter', () => {
     expect(getFirstTextContent(projectStateResponse)).toContain('"projectState"');
     expect(commandSchemaResponse.success).toBe(true);
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"mutationTool"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"ImportGeneratedCaptions"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"AddTextClip"');
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"vertical_1080"');
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"1080x1920"');
   });
@@ -966,7 +972,7 @@ describe('CodexReferenceAdapter', () => {
         return vi.fn();
       }),
     };
-    vi.mocked(invoke).mockImplementation(async (command) => {
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
       if (command === 'get_project_info') {
         return {
           id: 'project-1',
@@ -996,11 +1002,69 @@ describe('CodexReferenceAdapter', () => {
       if (command === 'validate_command_payload') {
         return null;
       }
-      if (command === 'execute_command') {
+      if (command === 'create_external_agent_approval_token') {
         return {
-          opId: 'op_1',
-          createdIds: ['track_1'],
-          deletedIds: [],
+          token: 'grant-token-command',
+          tokenId: 'grant-command-1',
+          sessionId: 'thr_123',
+          runId: null,
+          planId: 'codex-command-thr_123-13',
+          projectId: 'project-1',
+          runtimeId: 'codex',
+          scopes: ['openreelio.plan.apply'],
+          createdAt: 1,
+          expiresAt: 2,
+        };
+      }
+      if (command === 'execute_agent_plan') {
+        expect(args).toMatchObject({
+          plan: {
+            id: 'codex-command-thr_123-13',
+            goal: 'Add a B-roll track',
+            approvalGranted: true,
+            approvalProof: {
+              token: 'grant-token-command',
+              tokenId: 'grant-command-1',
+              projectId: 'project-1',
+              runtimeId: 'codex',
+              requiredScope: 'openreelio.plan.apply',
+            },
+            sessionId: 'thr_123',
+            steps: [
+              {
+                id: 'step-1',
+                toolName: 'CreateTrack',
+                params: {
+                  sequenceId: 'seq_1',
+                  name: 'B-roll',
+                  kind: 'video',
+                },
+                description: 'Add a B-roll track',
+                riskLevel: 'medium',
+                dependsOn: [],
+                optional: false,
+              },
+            ],
+          },
+        });
+        return {
+          planId: 'codex-command-thr_123-13',
+          success: true,
+          totalSteps: 1,
+          stepsCompleted: 1,
+          stepResults: [
+            {
+              stepId: 'step-1',
+              success: true,
+              data: { createdIds: ['track_1'] },
+              durationMs: 1,
+              operationId: 'op_1',
+            },
+          ],
+          operationIds: ['op_1'],
+          rollbackReport: null,
+          errorMessage: null,
+          executionTimeMs: 1,
         };
       }
       throw new Error(`Unexpected command: ${command}`);
@@ -1078,14 +1142,31 @@ describe('CodexReferenceAdapter', () => {
         kind: 'video',
       },
     });
-    expect(invoke).toHaveBeenCalledWith('execute_command', {
-      commandType: 'CreateTrack',
-      payload: {
-        sequenceId: 'seq_1',
-        name: 'B-roll',
-        kind: 'video',
-      },
+    expect(invoke).toHaveBeenCalledWith('create_external_agent_approval_token', {
+      input: expect.objectContaining({
+        sessionId: 'thr_123',
+        planId: 'codex-command-thr_123-13',
+        projectId: 'project-1',
+        runtimeId: 'codex',
+        scopes: ['openreelio.plan.apply'],
+      }),
     });
+    expect(invoke).toHaveBeenCalledWith(
+      'execute_agent_plan',
+      expect.objectContaining({
+        plan: expect.objectContaining({
+          id: 'codex-command-thr_123-13',
+          approvalGranted: true,
+          approvalProof: expect.objectContaining({
+            token: 'grant-token-command',
+            tokenId: 'grant-command-1',
+            projectId: 'project-1',
+            runtimeId: 'codex',
+          }),
+          sessionId: 'thr_123',
+        }),
+      }),
+    );
     expect(projectStoreMocks.refreshFromBackendMutation).toHaveBeenCalled();
     expect(response).toMatchObject({
       success: true,
@@ -1164,18 +1245,18 @@ describe('CodexReferenceAdapter', () => {
           expiresAt: 2,
         };
       }
-      if (command === 'consume_external_agent_approval_token') {
-        return {
-          valid: true,
-          reason: null,
-          grant: null,
-        };
-      }
       if (command === 'execute_agent_plan') {
         expect(args).toMatchObject({
           plan: {
             id: 'plan_1',
             approvalGranted: true,
+            approvalProof: {
+              token: 'grant-token',
+              tokenId: 'grant-1',
+              projectId: 'project-1',
+              runtimeId: 'codex',
+              requiredScope: 'openreelio.plan.apply',
+            },
             sessionId: 'thr_123',
           },
         });
@@ -1273,22 +1354,18 @@ describe('CodexReferenceAdapter', () => {
         scopes: ['openreelio.plan.apply'],
       }),
     });
-    expect(invoke).toHaveBeenCalledWith('consume_external_agent_approval_token', {
-      input: expect.objectContaining({
-        token: 'grant-token',
-        sessionId: 'thr_123',
-        planId: 'plan_1',
-        projectId: 'project-1',
-        runtimeId: 'codex',
-        requiredScope: 'openreelio.plan.apply',
-      }),
-    });
     expect(invoke).toHaveBeenCalledWith(
       'execute_agent_plan',
       expect.objectContaining({
         plan: expect.objectContaining({
           id: 'plan_1',
           approvalGranted: true,
+          approvalProof: expect.objectContaining({
+            token: 'grant-token',
+            tokenId: 'grant-1',
+            projectId: 'project-1',
+            runtimeId: 'codex',
+          }),
           sessionId: 'thr_123',
         }),
       }),

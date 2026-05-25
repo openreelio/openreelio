@@ -9,16 +9,7 @@
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type {
-  Mask,
-  MaskId,
-  MaskShape,
-  ClipId,
-  EffectId,
-  SequenceId,
-  TrackId,
-  CommandResult,
-} from '@/types';
+import type { Mask, MaskId, MaskShape, ClipId, EffectId, SequenceId, TrackId } from '@/types';
 import {
   createRectangleMask,
   createEllipseMask,
@@ -27,6 +18,7 @@ import {
   createGradientMask,
 } from './useMask';
 import { createLogger } from '@/services/logger';
+import { executeProjectCommandByType } from '@/services/projectMutationGateway';
 
 const logger = createLogger('useMaskEditor');
 
@@ -257,7 +249,7 @@ export function useMaskEditor({
 
   const selectedMask = useMemo(
     () => masks.find((m) => m.id === selectedMaskId) ?? null,
-    [masks, selectedMaskId]
+    [masks, selectedMaskId],
   );
 
   useEffect(() => {
@@ -340,16 +332,13 @@ export function useMaskEditor({
 
         logger.debug('Adding mask', { effectId, type: shape.type, name: maskName });
 
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'AddMask',
-          payload: {
-            sequenceId,
-            trackId,
-            clipId,
-            effectId,
-            shape,
-            name: maskName,
-          },
+        const result = await executeProjectCommandByType('AddMask', {
+          sequenceId,
+          trackId,
+          clipId,
+          effectId,
+          shape,
+          name: maskName,
         });
 
         const newMaskId = result.createdIds?.[0] ?? null;
@@ -385,7 +374,7 @@ export function useMaskEditor({
         endOperation();
       }
     },
-    [effectId, sequenceId, trackId, clipId, beginOperation, endOperation]
+    [effectId, sequenceId, trackId, clipId, beginOperation, endOperation],
   );
 
   // ---------------------------------------------------------------------------
@@ -419,19 +408,14 @@ export function useMaskEditor({
       try {
         logger.debug('Updating mask', { effectId, maskId: id, updates });
 
-        await invoke<CommandResult>('execute_command', {
-          commandType: 'UpdateMask',
-          payload: {
-            effectId,
-            maskId: id,
-            ...payload,
-          },
+        await executeProjectCommandByType('UpdateMask', {
+          effectId,
+          maskId: id,
+          ...payload,
         });
 
         // Update local state
-        setMasks((prev) =>
-          prev.map((m) => (m.id === id ? { ...m, ...payload } : m))
-        );
+        setMasks((prev) => prev.map((m) => (m.id === id ? { ...m, ...payload } : m)));
 
         logger.info('Mask updated', { maskId: id });
         return true;
@@ -444,7 +428,7 @@ export function useMaskEditor({
         endOperation();
       }
     },
-    [effectId, beginOperation, endOperation]
+    [effectId, beginOperation, endOperation],
   );
 
   const updateMaskLocal = useCallback((id: MaskId, updates: Partial<Mask>) => {
@@ -452,9 +436,7 @@ export function useMaskEditor({
     if (!hasOwnProperties(payload)) {
       return;
     }
-    setMasks((prev) =>
-      prev.map((m) => (m.id === id ? { ...m, ...payload } : m))
-    );
+    setMasks((prev) => prev.map((m) => (m.id === id ? { ...m, ...payload } : m)));
   }, []);
 
   // ---------------------------------------------------------------------------
@@ -482,12 +464,9 @@ export function useMaskEditor({
       try {
         logger.debug('Deleting mask', { effectId, maskId: id });
 
-        await invoke<CommandResult>('execute_command', {
-          commandType: 'RemoveMask',
-          payload: {
-            effectId,
-            maskId: id,
-          },
+        await executeProjectCommandByType('RemoveMask', {
+          effectId,
+          maskId: id,
         });
 
         // Remove from local state
@@ -507,7 +486,7 @@ export function useMaskEditor({
         endOperation();
       }
     },
-    [effectId, beginOperation, endOperation]
+    [effectId, beginOperation, endOperation],
   );
 
   // ---------------------------------------------------------------------------
@@ -521,7 +500,7 @@ export function useMaskEditor({
 
       return updateMask(id, { enabled: !mask.enabled });
     },
-    [updateMask]
+    [updateMask],
   );
 
   const toggleLocked = useCallback(
@@ -538,19 +517,14 @@ export function useMaskEditor({
         const newLockedState = !mask.locked;
         logger.debug('Toggling mask lock', { effectId, maskId: id, newLockedState });
 
-        await invoke<CommandResult>('execute_command', {
-          commandType: 'UpdateMask',
-          payload: {
-            effectId,
-            maskId: id,
-            locked: newLockedState,
-          },
+        await executeProjectCommandByType('UpdateMask', {
+          effectId,
+          maskId: id,
+          locked: newLockedState,
         });
 
         // Update local state
-        setMasks((prev) =>
-          prev.map((m) => (m.id === id ? { ...m, locked: newLockedState } : m))
-        );
+        setMasks((prev) => prev.map((m) => (m.id === id ? { ...m, locked: newLockedState } : m)));
 
         logger.info('Mask lock toggled', { maskId: id, locked: newLockedState });
         return true;
@@ -563,7 +537,7 @@ export function useMaskEditor({
         endOperation();
       }
     },
-    [effectId, beginOperation, endOperation]
+    [effectId, beginOperation, endOperation],
   );
 
   // ---------------------------------------------------------------------------

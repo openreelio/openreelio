@@ -39,10 +39,14 @@ import { useInterchangeExport } from '@/hooks/useInterchangeExport';
 import { CommandPalette } from '@/components/features/command-palette';
 import { useToastStore } from '@/hooks/useToast';
 import { useTerminalStore } from '@/stores/terminalStore';
+import { revealWorkspacePanel } from '@/stores/workspaceLayoutStore';
 import { useDockableAIPanel } from './hooks/useDockableAIPanel';
 import { dbToLinear, linearToDb } from '@/utils/audioMeter';
 import { resolveAutoDuckTargets } from '@/utils/audioDucking';
-import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
+import {
+  applyClipTransformToEditableTextData,
+  extractTextDataFromClipWithMap,
+} from '@/utils/textRenderer';
 import { getClipTimelineDurationSec, getClipTimelineEndSec } from '@/utils/clipTiming';
 import {
   getDefaultTrackInsertPosition,
@@ -56,6 +60,7 @@ import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { getSplitTargetsAtTime } from '@/utils/clipLinking';
 import type {
   BlendMode,
+  Clip,
   ClipId,
   Effect,
   EffectId,
@@ -64,6 +69,7 @@ import type {
   SimpleParamValue,
   TextClipData,
   Track,
+  Transform,
 } from '@/types';
 import type { AddTextPayload } from '@/components/features/text';
 import type { TextPlacementCommitPayload } from '@/components/preview/TextPlacementOverlay';
@@ -822,7 +828,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
 
       return {
         id: clip.id,
-        textData,
+        textData: applyClipTransformToEditableTextData(clip, textData),
+        transform: clip.transform,
         timelineInSec: clip.place.timelineInSec,
         durationSec: getClipTimelineDurationSec(clip),
       };
@@ -830,6 +837,17 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
 
     return undefined;
   }, [sequence, selectedClipIds, textClipDataById]);
+
+  const selectedTextClipId = selectedTextClip?.id;
+  const selectedCaptionId = selectedCaption?.id;
+
+  useEffect(() => {
+    if (!selectedTextClipId && !selectedCaptionId) {
+      return;
+    }
+
+    revealWorkspacePanel('inspector', 'right');
+  }, [selectedCaptionId, selectedTextClipId]);
 
   const onTextDataChange = useCallback(
     (clipId: ClipId, textData: TextClipData): void => {
@@ -863,6 +881,106 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       });
     },
     [sequence, updateTextClip],
+  );
+
+  const onTextTransformChange = useCallback(
+    (clipId: ClipId, transform: Transform): void => {
+      if (!sequence) {
+        return;
+      }
+
+      let trackId: string | undefined;
+      for (const track of sequence.tracks) {
+        if (track.clips.some((clip) => clip.id === clipId)) {
+          trackId = track.id;
+          break;
+        }
+      }
+
+      if (!trackId) {
+        return;
+      }
+
+      void executeCommand({
+        type: 'SetClipTransform',
+        payload: {
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+          transform,
+        },
+      }).catch((error) => {
+        logger.error('Failed to update text clip transform from inspector', {
+          error,
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+        });
+      });
+    },
+    [executeCommand, sequence],
+  );
+
+  const onTextTimingChange = useCallback(
+    (clipId: ClipId, timing: { timelineInSec?: number; durationSec?: number }): void => {
+      if (!sequence) {
+        return;
+      }
+
+      let trackId: string | undefined;
+      let selectedClip: Clip | undefined;
+      for (const track of sequence.tracks) {
+        const clip = track.clips.find((candidate) => candidate.id === clipId);
+        if (clip) {
+          trackId = track.id;
+          selectedClip = clip;
+          break;
+        }
+      }
+
+      if (!trackId || !selectedClip) {
+        return;
+      }
+
+      void (async () => {
+        if (timing.timelineInSec !== undefined) {
+          await executeCommand({
+            type: 'MoveClip',
+            payload: {
+              sequenceId: sequence.id,
+              trackId,
+              clipId,
+              newTimelineIn: Math.max(0, timing.timelineInSec),
+            },
+          });
+        }
+
+        if (timing.durationSec !== undefined) {
+          const speed =
+            Number.isFinite(selectedClip.speed) && selectedClip.speed > 0 ? selectedClip.speed : 1;
+          const newSourceOut =
+            selectedClip.range.sourceInSec + Math.max(0.01, timing.durationSec) * speed;
+          await executeCommand({
+            type: 'TrimClip',
+            payload: {
+              sequenceId: sequence.id,
+              trackId,
+              clipId,
+              newSourceOut,
+            },
+          });
+        }
+      })().catch((error) => {
+        logger.error('Failed to update text clip timing from inspector', {
+          error,
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+          timing,
+        });
+      });
+    },
+    [executeCommand, sequence],
   );
 
   // Handle caption updates
@@ -1054,6 +1172,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
 
         if (createdClipId) {
           selectClip(createdClipId);
+          revealWorkspacePanel('inspector', 'right');
           setActiveTool('select');
         }
       } catch (error) {
@@ -1257,6 +1376,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       onClipReverseToggle: handleReverseClip,
       onFreezeFrame: handleCreateFreezeFrame,
       onTextDataChange: onTextDataChange,
+      onTextTransformChange,
+      onTextTimingChange,
       onCaptionChange: onCaptionChange,
       onEffectChange: handleEffectChange,
       onEffectToggle: handleEffectToggle,
@@ -1272,6 +1393,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       handleReverseClip,
       handleCreateFreezeFrame,
       onTextDataChange,
+      onTextTransformChange,
+      onTextTimingChange,
       onCaptionChange,
       handleEffectChange,
       handleEffectToggle,

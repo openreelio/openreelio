@@ -10,7 +10,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { createLogger } from '@/services/logger';
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
-import { applyProjectState, refreshProjectState } from '@/utils/stateRefreshHelper';
+import { runProjectBackendMutation } from '@/services/projectMutationGateway';
 import type { DetectedRegion, CleanupDetectionResult } from '@/types';
 
 const logger = createLogger('useCleanupDetection');
@@ -326,9 +326,8 @@ export function useCleanupDetection(): UseCleanupDetectionReturn {
       setError(null);
 
       try {
-        const result = await invoke<{ success: boolean; removedCount: number }>(
-          'remove_detected_regions',
-          {
+        const result = await runProjectBackendMutation('removeDetectedRegions', () =>
+          invoke<{ success: boolean; removedCount: number }>('remove_detected_regions', {
             args: {
               sequenceId: clipContext.sequenceId,
               trackId: clipContext.trackId,
@@ -336,7 +335,7 @@ export function useCleanupDetection(): UseCleanupDetectionReturn {
               regions: detectedRegions,
               paddingSec,
             },
-          },
+          }),
         );
 
         if (isMountedRef.current) {
@@ -344,14 +343,6 @@ export function useCleanupDetection(): UseCleanupDetectionReturn {
           setDetectedRegions([]);
           setTotalDurationSec(0);
           setMode(null);
-
-          // Refresh project state after timeline modifications
-          const freshState = await refreshProjectState();
-          useProjectStore.setState((state) => {
-            state.isDirty = true;
-            state.stateVersion += 1;
-            applyProjectState(state, freshState);
-          });
         }
       } catch (err) {
         if (isMountedRef.current) {

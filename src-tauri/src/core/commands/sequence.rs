@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
     project::ProjectState,
-    timeline::{Sequence, SequenceFormat, Track, TrackKind},
+    timeline::{Sequence, SequenceFormat, SequenceHdrSettings, Track, TrackKind},
     CoreError, CoreResult, SequenceId,
 };
 
@@ -294,12 +294,90 @@ impl Command for SetMasterVolumeCommand {
 }
 
 // =============================================================================
+// UpdateSequenceHdrSettingsCommand
+// =============================================================================
+
+/// Command to update sequence-level HDR export settings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSequenceHdrSettingsCommand {
+    pub sequence_id: SequenceId,
+    pub settings: SequenceHdrSettings,
+    #[serde(skip)]
+    previous_settings: Option<SequenceHdrSettings>,
+    #[serde(skip)]
+    previous_modified_at: Option<String>,
+}
+
+impl UpdateSequenceHdrSettingsCommand {
+    pub fn new(sequence_id: &str, settings: SequenceHdrSettings) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            settings: settings.normalized(),
+            previous_settings: None,
+            previous_modified_at: None,
+        }
+    }
+}
+
+impl Command for UpdateSequenceHdrSettingsCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        self.settings = self.settings.clone().normalized();
+        self.previous_settings = Some(sequence.hdr_settings.clone());
+        self.previous_modified_at = Some(sequence.modified_at.clone());
+        sequence.hdr_settings = self.settings.clone();
+        sequence.modified_at = chrono::Utc::now().to_rfc3339();
+        state.is_dirty = true;
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::SequenceModified {
+                sequence_id: self.sequence_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(previous) = &self.previous_settings else {
+            return Ok(());
+        };
+
+        if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
+            sequence.hdr_settings = previous.clone();
+            if let Some(previous_modified_at) = &self.previous_modified_at {
+                sequence.modified_at = previous_modified_at.clone();
+            }
+            state.is_dirty = true;
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "UpdateSequenceHdrSettings"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "settings": self.settings,
+        })
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::timeline::SequenceHdrMode;
 
     fn create_test_state() -> ProjectState {
         // Use new_empty for isolated sequence tests
@@ -504,5 +582,59 @@ mod tests {
         // Verify the value is stored on the sequence
         let seq = state.sequences.get(&seq_id).unwrap();
         assert!((seq.master_volume_db - (-3.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_update_sequence_hdr_settings_normalizes_and_undoes() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+        let original_modified_at = "2026-01-01T00:00:00Z".to_string();
+        state.sequences.get_mut(&seq_id).unwrap().modified_at = original_modified_at.clone();
+
+        let mut cmd = UpdateSequenceHdrSettingsCommand::new(
+            &seq_id,
+            SequenceHdrSettings {
+                hdr_mode: SequenceHdrMode::Hdr10,
+                max_cll: Some(20000),
+                max_fall: None,
+                bit_depth: 8,
+            },
+        );
+        cmd.execute(&mut state).unwrap();
+
+        let settings = &state.sequences[&seq_id].hdr_settings;
+        assert_eq!(settings.hdr_mode, SequenceHdrMode::Hdr10);
+        assert_eq!(settings.bit_depth, 10);
+        assert_eq!(settings.max_cll, Some(10000));
+        assert_eq!(settings.max_fall, Some(400));
+        assert_ne!(state.sequences[&seq_id].modified_at, original_modified_at);
+
+        cmd.undo(&mut state).unwrap();
+
+        let settings = &state.sequences[&seq_id].hdr_settings;
+        assert_eq!(settings.hdr_mode, SequenceHdrMode::Sdr);
+        assert_eq!(settings.bit_depth, 8);
+        assert_eq!(settings.max_cll, None);
+        assert_eq!(settings.max_fall, None);
+        assert_eq!(state.sequences[&seq_id].modified_at, original_modified_at);
+    }
+
+    #[test]
+    fn test_update_sequence_hdr_settings_clamps_fall_to_cll() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+
+        let mut cmd = UpdateSequenceHdrSettingsCommand::new(
+            &seq_id,
+            SequenceHdrSettings {
+                hdr_mode: SequenceHdrMode::Hdr10,
+                max_cll: Some(500),
+                max_fall: Some(900),
+                bit_depth: 10,
+            },
+        );
+        cmd.execute(&mut state).unwrap();
+
+        let settings = &state.sequences[&seq_id].hdr_settings;
+        assert_eq!(settings.max_cll, Some(500));
+        assert_eq!(settings.max_fall, Some(500));
     }
 }

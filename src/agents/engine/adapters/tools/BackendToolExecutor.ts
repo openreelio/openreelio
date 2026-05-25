@@ -28,6 +28,7 @@ import { createFailureResult } from '../../ports/IToolExecutor';
 import type { RiskLevel, ValidationResult } from '../../core/types';
 import type { AgentPlan, AgentPlanResult } from '@/bindings';
 import { createLogger } from '@/services/logger';
+import { runProjectBackendMutation } from '@/services/projectMutationGateway';
 import { isMetaToolsEnabled } from '@/config/featureFlags';
 import { normalizeMarkerColor } from '@/agents/tools/markerColor';
 import { getVisibleMetaToolNames } from '@/agents/tools/metaTools';
@@ -40,6 +41,7 @@ import {
 } from './mutationPreflight';
 
 const logger = createLogger('BackendToolExecutor');
+const AGENT_PLAN_MUTATION_TIMEOUT_MS = 5 * 60 * 1000;
 
 // =============================================================================
 // Constants
@@ -521,7 +523,15 @@ export class BackendToolExecutor implements IToolExecutor {
       );
 
       try {
-        const result = await invoke<AgentPlanResult>('execute_agent_plan', { plan });
+        const result = await runProjectBackendMutation(
+          'executeAgentPlan',
+          () => invoke<AgentPlanResult>('execute_agent_plan', { plan }),
+          {
+            refreshProjectState: false,
+            markDirty: false,
+            timeoutMs: AGENT_PLAN_MUTATION_TIMEOUT_MS,
+          },
+        );
         return {
           ok: true,
           result,
@@ -972,7 +982,15 @@ export class BackendToolExecutor implements IToolExecutor {
         };
 
         try {
-          const planResult = await invoke<AgentPlanResult>('execute_agent_plan', { plan });
+          const planResult = await runProjectBackendMutation(
+            'executeAgentPlanBatch',
+            () => invoke<AgentPlanResult>('execute_agent_plan', { plan }),
+            {
+              refreshProjectState: false,
+              markDirty: false,
+              timeoutMs: AGENT_PLAN_MUTATION_TIMEOUT_MS,
+            },
+          );
           const syncWarning = await this.syncProjectState(context.sessionId);
 
           // If the plan failed atomically (with rollback), all tools must be

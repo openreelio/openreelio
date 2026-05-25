@@ -5,13 +5,20 @@
  * Manages drag state, drop position calculation, and track targeting.
  */
 
-import { useState, useCallback, useRef, type DragEvent } from 'react';
+import { useState, useCallback, useEffect, useRef, type DragEvent, type RefObject } from 'react';
 import type { Sequence, Asset, AssetKind } from '@/types';
 import type { AssetDropData } from '@/components/timeline/types';
 import { useEditorToolStore } from '@/stores/editorToolStore';
 import { isAssetCompatibleWithTrack } from '@/utils/dropValidity';
 import { resolveTrackDropTarget } from '@/utils/trackDropTarget';
 import { createLogger } from '@/services/logger';
+import {
+  TIMELINE_ASSET_DRAG_CANCEL_EVENT,
+  TIMELINE_ASSET_DRAG_END_EVENT,
+  TIMELINE_ASSET_DRAG_MOVE_EVENT,
+  isTimelineAssetDragCustomEvent,
+  type TimelineAssetDragPayload,
+} from '@/utils/timelineAssetDrag';
 
 const logger = createLogger('useAssetDrop');
 const SOURCE_MONITOR_DRAG_TYPE = 'application/x-openreelio-source';
@@ -36,6 +43,8 @@ export interface UseAssetDropOptions {
   onAssetDrop?: (data: AssetDropData) => void;
   /** Project assets map for asset-kind lookup by ID */
   assets?: Map<string, Asset>;
+  /** Timeline drop container used by pointer-driven in-app drags */
+  dropContainerRef?: RefObject<HTMLElement | null>;
 }
 
 export interface UseAssetDropResult {
@@ -184,6 +193,33 @@ function resolveAssetKind(
   return assets?.get(parsedData.assetId)?.kind;
 }
 
+function parseTimelineAssetDragPayload(
+  payload: TimelineAssetDragPayload,
+): ParsedAssetDragData | null {
+  const assetId = payload.assetId?.trim();
+  const workspaceRelativePath = payload.workspaceRelativePath?.trim();
+
+  if (!assetId && !workspaceRelativePath) {
+    return null;
+  }
+
+  return {
+    ...(assetId ? { assetId } : {}),
+    ...(workspaceRelativePath ? { workspaceRelativePath } : {}),
+    ...(payload.assetKind ? { kind: payload.assetKind } : {}),
+    ...(payload.editMode ? { editMode: payload.editMode } : {}),
+    ...(payload.sourceIn !== undefined ? { sourceIn: payload.sourceIn } : {}),
+    ...(payload.sourceOut !== undefined ? { sourceOut: payload.sourceOut } : {}),
+  };
+}
+
+function isPointInsideElement(element: HTMLElement, clientX: number, clientY: number): boolean {
+  const rect = element.getBoundingClientRect();
+  return (
+    clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom
+  );
+}
+
 // =============================================================================
 // Hook Implementation
 // =============================================================================
@@ -217,9 +253,217 @@ export function useAssetDrop({
   trackHeight,
   onAssetDrop,
   assets,
+  dropContainerRef,
 }: UseAssetDropOptions): UseAssetDropResult {
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const dragCounterRef = useRef(0);
+
+  const applyParsedAssetDrop = useCallback(
+    (
+      parsedData: ParsedAssetDragData,
+      container: HTMLElement,
+      clientX: number,
+      clientY: number,
+      source: 'html5' | 'pointer',
+    ) => {
+      if (!sequence) {
+        logger.warn('Drop ignored: no sequence loaded');
+        return false;
+      }
+
+      if (!onAssetDrop) {
+        logger.warn('Drop ignored: no onAssetDrop callback');
+        return false;
+      }
+
+      if (!parsedData.assetId && !parsedData.workspaceRelativePath) {
+        logger.warn(
+          'Drop ignored: parsed drop data missing both assetId and workspaceRelativePath',
+        );
+        return false;
+      }
+
+      const rect = container.getBoundingClientRect();
+      if (!rect || rect.width === 0) {
+        logger.warn('Drop ignored: invalid target rect', { rect });
+        return false;
+      }
+
+      const relativeX = clientX - rect.left - trackHeaderWidth + scrollX;
+      const timelinePosition = Math.max(0, relativeX / zoom);
+
+      const dropTarget = resolveTrackDropTarget({
+        sequence,
+        container,
+        clientY,
+        scrollY,
+        fallbackTrackHeight: trackHeight,
+      });
+
+      if (!dropTarget) {
+        logger.warn('Drop ignored: unable to resolve target track', {
+          clientY,
+          trackCount: sequence.tracks.length,
+          source,
+        });
+        return false;
+      }
+
+      const { track, trackIndex } = dropTarget;
+
+      logger.debug('Drop position calculated', {
+        clientX,
+        clientY,
+        relativeX,
+        timelinePosition,
+        trackIndex,
+        trackId: track.id,
+        scrollX,
+        scrollY,
+        trackCount: sequence.tracks.length,
+        source,
+      });
+
+      if (track.locked) {
+        logger.warn('Drop ignored: track is locked', { trackId: track.id, source });
+        return false;
+      }
+
+      const assetKind = resolveAssetKind(parsedData, assets);
+      if (assetKind && !isAssetCompatibleWithTrack(assetKind, track.kind)) {
+        logger.warn('Drop ignored: incompatible asset type for target track', {
+          assetId: parsedData.assetId,
+          workspaceRelativePath: parsedData.workspaceRelativePath,
+          assetKind,
+          trackId: track.id,
+          trackKind: track.kind,
+          source,
+        });
+        return false;
+      }
+
+      logger.info('Asset drop accepted', {
+        assetId: parsedData.assetId,
+        workspaceRelativePath: parsedData.workspaceRelativePath,
+        assetKind,
+        trackId: track.id,
+        timelinePosition,
+        source,
+      });
+
+      const effectiveEditMode = parsedData.editMode ?? useEditorToolStore.getState().editMode;
+
+      if (parsedData.workspaceRelativePath) {
+        onAssetDrop({
+          ...(parsedData.assetId ? { assetId: parsedData.assetId } : {}),
+          ...(assetKind ? { assetKind } : {}),
+          workspaceRelativePath: parsedData.workspaceRelativePath,
+          trackId: track.id,
+          timelinePosition,
+          editMode: effectiveEditMode,
+          ...(parsedData.sourceIn !== undefined ? { sourceIn: parsedData.sourceIn } : {}),
+          ...(parsedData.sourceOut !== undefined ? { sourceOut: parsedData.sourceOut } : {}),
+        });
+        return true;
+      }
+
+      if (!parsedData.assetId) {
+        logger.warn('Drop ignored: asset drop has no assetId', { source });
+        return false;
+      }
+
+      onAssetDrop({
+        ...(assetKind ? { assetKind } : {}),
+        assetId: parsedData.assetId,
+        trackId: track.id,
+        timelinePosition,
+        editMode: effectiveEditMode,
+        ...(parsedData.sourceIn !== undefined ? { sourceIn: parsedData.sourceIn } : {}),
+        ...(parsedData.sourceOut !== undefined ? { sourceOut: parsedData.sourceOut } : {}),
+      });
+      return true;
+    },
+    [assets, onAssetDrop, scrollX, scrollY, sequence, trackHeaderWidth, trackHeight, zoom],
+  );
+
+  useEffect(() => {
+    const handlePointerDragMove = (event: Event) => {
+      if (!isTimelineAssetDragCustomEvent(event)) {
+        return;
+      }
+
+      const container = dropContainerRef?.current;
+      if (!container || !sequence || !onAssetDrop) {
+        setIsDraggingOver(false);
+        return;
+      }
+
+      const { clientX, clientY, payload } = event.detail;
+      if (!isPointInsideElement(container, clientX, clientY)) {
+        setIsDraggingOver(false);
+        return;
+      }
+
+      const dropTarget = resolveTrackDropTarget({
+        sequence,
+        container,
+        clientY,
+        scrollY,
+        fallbackTrackHeight: trackHeight,
+      });
+
+      if (!dropTarget || dropTarget.track.locked) {
+        setIsDraggingOver(false);
+        return;
+      }
+
+      const assetKind =
+        payload.assetKind ?? (payload.assetId ? assets?.get(payload.assetId)?.kind : undefined);
+      setIsDraggingOver(!assetKind || isAssetCompatibleWithTrack(assetKind, dropTarget.track.kind));
+    };
+
+    const handlePointerDragEnd = (event: Event) => {
+      if (!isTimelineAssetDragCustomEvent(event)) {
+        return;
+      }
+
+      dragCounterRef.current = 0;
+      setIsDraggingOver(false);
+
+      const container = dropContainerRef?.current;
+      if (!container) {
+        return;
+      }
+
+      const { clientX, clientY, payload } = event.detail;
+      if (!isPointInsideElement(container, clientX, clientY)) {
+        return;
+      }
+
+      const parsedData = parseTimelineAssetDragPayload(payload);
+      if (!parsedData) {
+        logger.warn('Pointer drop ignored: no valid asset payload');
+        return;
+      }
+
+      applyParsedAssetDrop(parsedData, container, clientX, clientY, 'pointer');
+    };
+
+    const handlePointerDragCancel = () => {
+      dragCounterRef.current = 0;
+      setIsDraggingOver(false);
+    };
+
+    document.addEventListener(TIMELINE_ASSET_DRAG_MOVE_EVENT, handlePointerDragMove);
+    document.addEventListener(TIMELINE_ASSET_DRAG_END_EVENT, handlePointerDragEnd);
+    document.addEventListener(TIMELINE_ASSET_DRAG_CANCEL_EVENT, handlePointerDragCancel);
+
+    return () => {
+      document.removeEventListener(TIMELINE_ASSET_DRAG_MOVE_EVENT, handlePointerDragMove);
+      document.removeEventListener(TIMELINE_ASSET_DRAG_END_EVENT, handlePointerDragEnd);
+      document.removeEventListener(TIMELINE_ASSET_DRAG_CANCEL_EVENT, handlePointerDragCancel);
+    };
+  }, [applyParsedAssetDrop, assets, dropContainerRef, onAssetDrop, scrollY, sequence, trackHeight]);
 
   const handleDragEnter = useCallback((e: DragEvent) => {
     e.preventDefault();
@@ -296,16 +540,6 @@ export function useAssetDrop({
         dataTypes: Array.from(e.dataTransfer.types),
       });
 
-      if (!sequence) {
-        logger.warn('Drop ignored: no sequence loaded');
-        return;
-      }
-
-      if (!onAssetDrop) {
-        logger.warn('Drop ignored: no onAssetDrop callback');
-        return;
-      }
-
       const parsedData = parseDraggedAssetData(e.dataTransfer);
 
       logger.debug('Drop data parsed', {
@@ -317,113 +551,10 @@ export function useAssetDrop({
         return;
       }
 
-      if (!parsedData.assetId && !parsedData.workspaceRelativePath) {
-        logger.warn(
-          'Drop ignored: parsed drop data missing both assetId and workspaceRelativePath',
-        );
-        return;
-      }
-
-      // Calculate timeline position from X coordinate
       const target = e.currentTarget as HTMLElement;
-      const rect = target.getBoundingClientRect();
-      if (!rect || rect.width === 0) {
-        logger.warn('Drop ignored: invalid target rect', { rect });
-        return;
-      }
-
-      const relativeX = e.clientX - rect.left - trackHeaderWidth + scrollX;
-      const timelinePosition = Math.max(0, relativeX / zoom);
-
-      const dropTarget = resolveTrackDropTarget({
-        sequence,
-        container: target,
-        clientY: e.clientY,
-        scrollY,
-        fallbackTrackHeight: trackHeight,
-      });
-
-      if (!dropTarget) {
-        logger.warn('Drop ignored: unable to resolve target track', {
-          clientY: e.clientY,
-          trackCount: sequence.tracks.length,
-        });
-        return;
-      }
-
-      const { track, trackIndex } = dropTarget;
-
-      logger.debug('Drop position calculated', {
-        clientX: e.clientX,
-        clientY: e.clientY,
-        relativeX,
-        timelinePosition,
-        trackIndex,
-        trackId: track.id,
-        scrollX,
-        scrollY,
-        trackCount: sequence.tracks.length,
-      });
-
-      // Don't allow drop on locked tracks
-      if (track.locked) {
-        logger.warn('Drop ignored: track is locked', { trackId: track.id });
-        return;
-      }
-
-      const assetKind = resolveAssetKind(parsedData, assets);
-      if (assetKind && !isAssetCompatibleWithTrack(assetKind, track.kind)) {
-        logger.warn('Drop ignored: incompatible asset type for target track', {
-          assetId: parsedData.assetId,
-          workspaceRelativePath: parsedData.workspaceRelativePath,
-          assetKind,
-          trackId: track.id,
-          trackKind: track.kind,
-        });
-        return;
-      }
-
-      logger.info('Asset drop accepted', {
-        assetId: parsedData.assetId,
-        workspaceRelativePath: parsedData.workspaceRelativePath,
-        assetKind,
-        trackId: track.id,
-        timelinePosition,
-      });
-
-      // Use drag data editMode if present, otherwise fall back to toolbar setting
-      const effectiveEditMode = parsedData.editMode ?? useEditorToolStore.getState().editMode;
-
-      if (parsedData.workspaceRelativePath) {
-        onAssetDrop({
-          ...(parsedData.assetId ? { assetId: parsedData.assetId } : {}),
-          ...(assetKind ? { assetKind } : {}),
-          workspaceRelativePath: parsedData.workspaceRelativePath,
-          trackId: track.id,
-          timelinePosition,
-          editMode: effectiveEditMode,
-          ...(parsedData.sourceIn !== undefined ? { sourceIn: parsedData.sourceIn } : {}),
-          ...(parsedData.sourceOut !== undefined ? { sourceOut: parsedData.sourceOut } : {}),
-        });
-        return;
-      }
-
-      if (!parsedData.assetId) {
-        logger.warn('Drop ignored: asset drop has no assetId');
-        return;
-      }
-
-      onAssetDrop({
-        ...(assetKind ? { assetKind } : {}),
-        assetId: parsedData.assetId,
-        trackId: track.id,
-        timelinePosition,
-        editMode: effectiveEditMode,
-        ...(parsedData.sourceIn !== undefined ? { sourceIn: parsedData.sourceIn } : {}),
-        ...(parsedData.sourceOut !== undefined ? { sourceOut: parsedData.sourceOut } : {}),
-      });
+      applyParsedAssetDrop(parsedData, target, e.clientX, e.clientY, 'html5');
     },
-    [sequence, onAssetDrop, scrollX, scrollY, zoom, trackHeaderWidth, trackHeight, assets],
+    [applyParsedAssetDrop, sequence, onAssetDrop],
   );
 
   return {

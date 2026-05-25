@@ -820,3 +820,51 @@ pub async fn get_sequence_text_clip_data(
 
     Ok(text_clips)
 }
+
+/// Returns saved HDR export settings for a sequence.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_sequence_hdr_settings(
+    sequence_id: String,
+    state: State<'_, AppState>,
+) -> Result<crate::core::timeline::SequenceHdrSettings, String> {
+    let guard = state.project.lock().await;
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let sequence = project
+        .state
+        .sequences
+        .get(&sequence_id)
+        .ok_or_else(|| CoreError::SequenceNotFound(sequence_id.clone()).to_ipc_error())?;
+
+    Ok(sequence.hdr_settings.clone())
+}
+
+/// Returns the renderer-agnostic graph for a sequence.
+///
+/// Preview, export, and future worker renderers should consume this graph
+/// instead of independently parsing timeline clips and text payloads.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_sequence_render_graph(
+    sequence_id: String,
+    state: State<'_, AppState>,
+) -> Result<crate::core::render::RenderGraph, String> {
+    let guard = state.project.lock().await;
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    crate::core::render::build_render_graph(&project.state, &sequence_id)
+        .map_err(|error| error.to_ipc_error())
+}
+
+/// Returns the backend effect capability contract used by export validation.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_effect_capabilities(
+) -> Result<Vec<crate::core::effects::EffectCapabilityDto>, String> {
+    Ok(crate::core::effects::all_effect_capabilities())
+}

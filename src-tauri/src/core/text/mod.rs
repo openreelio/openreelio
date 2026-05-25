@@ -6,9 +6,10 @@
 //!
 //! # Architecture
 //!
-//! Text is implemented as a special clip type that renders via FFmpeg's
-//! `drawtext` filter. The text data is stored in `TextClipData` which
-//! contains all styling and positioning information.
+//! Text is implemented as a special clip type with renderer-agnostic
+//! `TextClipData`. Preview, export, CLI, and future AI caption generation can
+//! consume the same styling and positioning data. FFmpeg export uses ASS/libass
+//! overlays when available and falls back to drawtext-compatible parameters.
 //!
 //! # Example
 //!
@@ -23,6 +24,8 @@
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
+
+pub mod fonts;
 
 // =============================================================================
 // Text Alignment
@@ -58,6 +61,10 @@ pub struct TextStyle {
 
     /// Font size in points (12-200 typical range)
     pub font_size: u32,
+
+    /// Numeric font weight (100-900, CSS/OpenType style)
+    #[serde(default = "default_font_weight")]
+    pub font_weight: u16,
 
     /// Text color in hex format (#RRGGBB or #RRGGBBAA)
     pub color: String,
@@ -99,6 +106,10 @@ fn default_background_padding() -> u32 {
     10
 }
 
+fn default_font_weight() -> u16 {
+    400
+}
+
 fn default_line_height() -> f64 {
     1.2
 }
@@ -108,6 +119,7 @@ impl Default for TextStyle {
         Self {
             font_family: "Arial".to_string(),
             font_size: 48,
+            font_weight: default_font_weight(),
             color: "#FFFFFF".to_string(),
             background_color: None,
             background_padding: default_background_padding(),
@@ -139,6 +151,13 @@ impl TextStyle {
         self
     }
 
+    /// Sets the numeric font weight.
+    pub fn with_font_weight(mut self, weight: u16) -> Self {
+        self.font_weight = weight.clamp(100, 900);
+        self.bold = self.font_weight >= 600;
+        self
+    }
+
     /// Sets the text color.
     pub fn with_color(mut self, color: impl Into<String>) -> Self {
         self.color = color.into();
@@ -148,6 +167,7 @@ impl TextStyle {
     /// Sets bold formatting.
     pub fn with_bold(mut self, bold: bool) -> Self {
         self.bold = bold;
+        self.font_weight = if bold { 700 } else { 400 };
         self
     }
 
@@ -190,9 +210,9 @@ pub struct TextShadow {
     /// Vertical offset in pixels (positive = down)
     pub offset_y: i32,
 
-    /// Shadow blur radius (0 = sharp shadow)
-    /// Note: FFmpeg drawtext doesn't support blur, so this is for future use
-    /// or canvas-based preview rendering.
+    /// Shadow blur radius (0 = sharp shadow).
+    /// Canvas preview and ASS/libass export preserve this value; legacy drawtext
+    /// fallback paths may approximate it.
     #[serde(default)]
     pub blur: u32,
 }
@@ -545,6 +565,10 @@ impl TextClipData {
             return Err("Font size too large (max 500)".to_string());
         }
 
+        if !(100..=900).contains(&self.style.font_weight) {
+            return Err("Font weight must be between 100 and 900".to_string());
+        }
+
         // Color validation (basic hex check)
         if !is_valid_hex_color(&self.style.color) {
             return Err(format!("Invalid text color format: {}", self.style.color));
@@ -665,6 +689,7 @@ mod tests {
         let style = TextStyle::default();
         assert_eq!(style.font_family, "Arial");
         assert_eq!(style.font_size, 48);
+        assert_eq!(style.font_weight, 400);
         assert_eq!(style.color, "#FFFFFF");
         assert_eq!(style.alignment, TextAlignment::Center);
         assert!(!style.bold);
@@ -678,6 +703,7 @@ mod tests {
         let style = TextStyle::new()
             .with_font_family("Helvetica")
             .with_font_size(72)
+            .with_font_weight(600)
             .with_color("#FF0000")
             .with_bold(true)
             .with_italic(true)
@@ -686,6 +712,7 @@ mod tests {
 
         assert_eq!(style.font_family, "Helvetica");
         assert_eq!(style.font_size, 72);
+        assert_eq!(style.font_weight, 700);
         assert_eq!(style.color, "#FF0000");
         assert!(style.bold);
         assert!(style.italic);
@@ -700,6 +727,17 @@ mod tests {
 
         let style = TextStyle::new().with_font_size(0);
         assert_eq!(style.font_size, 1); // Min clamp
+    }
+
+    #[test]
+    fn test_text_style_font_weight_clamped() {
+        let style = TextStyle::new().with_font_weight(1000);
+        assert_eq!(style.font_weight, 900);
+        assert!(style.bold);
+
+        let style = TextStyle::new().with_font_weight(0);
+        assert_eq!(style.font_weight, 100);
+        assert!(!style.bold);
     }
 
     #[test]

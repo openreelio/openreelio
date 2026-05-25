@@ -21,6 +21,7 @@ import {
   Square,
   Box,
   Sun,
+  Clock,
 } from 'lucide-react';
 import type {
   TextClipData,
@@ -30,6 +31,7 @@ import type {
   TextPosition,
   TextClipAlignment,
   ClipId,
+  Transform,
 } from '@/types';
 import {
   DEFAULT_TEXT_STYLE,
@@ -39,7 +41,9 @@ import {
   isValidHexColor,
 } from '@/types';
 import { TextPresetPicker } from '@/components/features/text';
+import { useSystemFonts } from '@/hooks/useSystemFonts';
 import type { TextPreset } from '@/data/textPresets';
+import { getTextFontWeightNumber } from '@/utils/textRenderer';
 
 // =============================================================================
 // Types
@@ -51,6 +55,8 @@ export interface SelectedTextClip {
   id: ClipId;
   /** Text content and styling */
   textData: TextClipData;
+  /** Clip transform used by preview drag/resize handles */
+  transform?: Transform;
   /** Timeline position */
   timelineInSec: number;
   /** Duration */
@@ -63,6 +69,13 @@ export interface TextInspectorProps {
   selectedTextClip: SelectedTextClip;
   /** Callback when text data changes */
   onTextDataChange: (clipId: ClipId, textData: TextClipData) => void;
+  /** Callback when clip transform changes */
+  onTextTransformChange?: (clipId: ClipId, transform: Transform) => void;
+  /** Callback when clip timing changes */
+  onTextTimingChange?: (
+    clipId: ClipId,
+    timing: { timelineInSec?: number; durationSec?: number },
+  ) => void;
   /** Whether the panel is read-only */
   readOnly?: boolean;
 }
@@ -70,27 +83,6 @@ export interface TextInspectorProps {
 // =============================================================================
 // Sub-components
 // =============================================================================
-
-const TEXT_FONT_FAMILIES = [
-  'Arial',
-  'Helvetica',
-  'Verdana',
-  'Inter',
-  'Roboto',
-  'Noto Sans',
-  'Noto Sans KR',
-  'Pretendard',
-  'Apple SD Gothic Neo',
-  'Malgun Gothic',
-  'Nanum Gothic',
-  'Georgia',
-  'Times New Roman',
-  'Courier New',
-  'Impact',
-  'Montserrat',
-  'Poppins',
-  'Oswald',
-];
 
 interface SectionProps {
   title: string;
@@ -223,6 +215,7 @@ function NumberInput({
       <div className="flex items-center gap-1">
         <input
           type="number"
+          aria-label={label}
           value={localValue}
           onChange={(e) => handleChange(e.target.value)}
           min={min}
@@ -283,6 +276,8 @@ function SliderInput({
 export function TextInspector({
   selectedTextClip,
   onTextDataChange,
+  onTextTransformChange,
+  onTextTimingChange,
   readOnly = false,
 }: TextInspectorProps): JSX.Element {
   // ===========================================================================
@@ -290,11 +285,24 @@ export function TextInspector({
   // ===========================================================================
 
   const [localTextData, setLocalTextData] = useState<TextClipData>(selectedTextClip.textData);
+  const [localTransform, setLocalTransform] = useState<Transform | undefined>(
+    selectedTextClip.transform,
+  );
+  const [localTimelineInSec, setLocalTimelineInSec] = useState(selectedTextClip.timelineInSec);
+  const [localDurationSec, setLocalDurationSec] = useState(selectedTextClip.durationSec);
 
   // Sync local state with prop changes
   useEffect(() => {
     setLocalTextData(selectedTextClip.textData);
-  }, [selectedTextClip.textData]);
+    setLocalTransform(selectedTextClip.transform);
+    setLocalTimelineInSec(selectedTextClip.timelineInSec);
+    setLocalDurationSec(selectedTextClip.durationSec);
+  }, [
+    selectedTextClip.durationSec,
+    selectedTextClip.textData,
+    selectedTextClip.timelineInSec,
+    selectedTextClip.transform,
+  ]);
 
   // ===========================================================================
   // Computed Values
@@ -306,11 +314,9 @@ export function TextInspector({
     () => !!localTextData.style.backgroundColor,
     [localTextData.style.backgroundColor],
   );
-  const fontFamilyOptions = useMemo(() => {
-    return TEXT_FONT_FAMILIES.includes(localTextData.style.fontFamily)
-      ? TEXT_FONT_FAMILIES
-      : [localTextData.style.fontFamily, ...TEXT_FONT_FAMILIES];
-  }, [localTextData.style.fontFamily]);
+  const fontWeightValue = getTextFontWeightNumber(localTextData.style);
+  const fontFamilyOptions = useSystemFonts(localTextData.style.fontFamily);
+  const displayPosition = localTransform?.position ?? localTextData.position;
 
   // ===========================================================================
   // Update Handlers
@@ -334,13 +340,85 @@ export function TextInspector({
     [localTextData.style, updateTextData],
   );
 
+  const updateTiming = useCallback(
+    (updates: { timelineInSec?: number; durationSec?: number }) => {
+      if (updates.timelineInSec !== undefined) {
+        const nextTimelineInSec = Math.max(0, updates.timelineInSec);
+        setLocalTimelineInSec(nextTimelineInSec);
+        onTextTimingChange?.(selectedTextClip.id, { timelineInSec: nextTimelineInSec });
+      }
+
+      if (updates.durationSec !== undefined) {
+        const nextDurationSec = Math.max(0.01, updates.durationSec);
+        setLocalDurationSec(nextDurationSec);
+        onTextTimingChange?.(selectedTextClip.id, { durationSec: nextDurationSec });
+      }
+    },
+    [onTextTimingChange, selectedTextClip.id],
+  );
+
   const updatePosition = useCallback(
     (updates: Partial<TextPosition>) => {
-      updateTextData({
-        position: { ...localTextData.position, ...updates },
-      });
+      const currentPosition = localTransform?.position ?? localTextData.position;
+      const nextPosition = { ...currentPosition, ...updates };
+
+      if (onTextTransformChange) {
+        const nextTransform: Transform = {
+          position: nextPosition,
+          scale: localTransform?.scale ?? { x: 1, y: 1 },
+          rotationDeg:
+            localTransform?.rotationDeg ??
+            (Number.isFinite(localTextData.rotation) ? localTextData.rotation : 0),
+          anchor: localTransform?.anchor ?? { x: 0.5, y: 0.5 },
+        };
+        setLocalTransform(nextTransform);
+        setLocalTextData((current) => ({
+          ...current,
+          position: nextPosition,
+        }));
+        onTextTransformChange(selectedTextClip.id, nextTransform);
+        return;
+      }
+
+      updateTextData({ position: nextPosition });
     },
-    [localTextData.position, updateTextData],
+    [
+      localTextData.position,
+      localTextData.rotation,
+      localTransform,
+      onTextTransformChange,
+      selectedTextClip.id,
+      updateTextData,
+    ],
+  );
+
+  const updateTransform = useCallback(
+    (updates: Partial<Transform>) => {
+      const nextTransform: Transform = {
+        position: updates.position ?? localTransform?.position ?? localTextData.position,
+        scale: updates.scale ?? localTransform?.scale ?? { x: 1, y: 1 },
+        rotationDeg:
+          updates.rotationDeg ??
+          localTransform?.rotationDeg ??
+          (Number.isFinite(localTextData.rotation) ? localTextData.rotation : 0),
+        anchor: updates.anchor ?? localTransform?.anchor ?? { x: 0.5, y: 0.5 },
+      };
+
+      setLocalTransform(nextTransform);
+      setLocalTextData((current) => ({
+        ...current,
+        position: nextTransform.position,
+        rotation: nextTransform.rotationDeg,
+      }));
+      onTextTransformChange?.(selectedTextClip.id, nextTransform);
+    },
+    [
+      localTextData.position,
+      localTextData.rotation,
+      localTransform,
+      onTextTransformChange,
+      selectedTextClip.id,
+    ],
   );
 
   const updateShadow = useCallback(
@@ -403,9 +481,23 @@ export function TextInspector({
       rotation: 0,
       opacity: 1.0,
     };
+    const resetTransform: Transform = {
+      position: { ...DEFAULT_TEXT_POSITION },
+      scale: { x: 1, y: 1 },
+      rotationDeg: 0,
+      anchor: localTransform?.anchor ?? { x: 0.5, y: 0.5 },
+    };
     setLocalTextData(resetData);
+    setLocalTransform(resetTransform);
     onTextDataChange(selectedTextClip.id, resetData);
-  }, [localTextData.content, selectedTextClip.id, onTextDataChange]);
+    onTextTransformChange?.(selectedTextClip.id, resetTransform);
+  }, [
+    localTextData.content,
+    localTransform?.anchor,
+    selectedTextClip.id,
+    onTextDataChange,
+    onTextTransformChange,
+  ]);
 
   // ===========================================================================
   // Preset Handler
@@ -422,10 +514,24 @@ export function TextInspector({
         rotation: preset.rotation,
         opacity: preset.opacity,
       };
+      const presetTransform: Transform = {
+        position: { ...preset.position },
+        scale: { x: 1, y: 1 },
+        rotationDeg: Number.isFinite(preset.rotation) ? preset.rotation : 0,
+        anchor: localTransform?.anchor ?? { x: 0.5, y: 0.5 },
+      };
       setLocalTextData(newTextData);
+      setLocalTransform(presetTransform);
       onTextDataChange(selectedTextClip.id, newTextData);
+      onTextTransformChange?.(selectedTextClip.id, presetTransform);
     },
-    [localTextData.content, selectedTextClip.id, onTextDataChange],
+    [
+      localTextData.content,
+      localTransform?.anchor,
+      selectedTextClip.id,
+      onTextDataChange,
+      onTextTransformChange,
+    ],
   );
 
   // ===========================================================================
@@ -473,6 +579,29 @@ export function TextInspector({
         <TextPresetPicker onSelect={handlePresetSelect} disabled={readOnly} compact />
       </Section>
 
+      <Section title="Timing" icon={<Clock className="w-4 h-4" />} defaultExpanded={false}>
+        <div className="space-y-3">
+          <NumberInput
+            label="Start"
+            value={localTimelineInSec}
+            onChange={(value) => updateTiming({ timelineInSec: value })}
+            min={0}
+            step={0.01}
+            unit="s"
+            disabled={readOnly || !onTextTimingChange}
+          />
+          <NumberInput
+            label="Duration"
+            value={localDurationSec}
+            onChange={(value) => updateTiming({ durationSec: value })}
+            min={0.01}
+            step={0.01}
+            unit="s"
+            disabled={readOnly || !onTextTimingChange}
+          />
+        </div>
+      </Section>
+
       {/* Font Section */}
       <Section title="Font" icon={<Type className="w-4 h-4" />}>
         <div className="space-y-3">
@@ -516,13 +645,29 @@ export function TextInspector({
             disabled={readOnly}
           />
 
+          <NumberInput
+            label="Weight"
+            value={fontWeightValue}
+            onChange={(value) => {
+              const fontWeight = Math.round(Math.max(100, Math.min(900, value)));
+              updateStyle({ fontWeight, bold: fontWeight >= 600 });
+            }}
+            min={100}
+            max={900}
+            step={100}
+            disabled={readOnly}
+          />
+
           {/* Font Style Toggles */}
           <div className="flex items-center justify-between">
             <label className="text-xs text-editor-text-muted">Style</label>
             <div className="flex gap-1">
               <button
                 type="button"
-                onClick={() => updateStyle({ bold: !localTextData.style.bold })}
+                onClick={() => {
+                  const bold = !localTextData.style.bold;
+                  updateStyle({ bold, fontWeight: bold ? Math.max(fontWeightValue, 700) : 400 });
+                }}
                 disabled={readOnly}
                 className={`p-1.5 rounded border transition-colors ${
                   localTextData.style.bold
@@ -666,28 +811,86 @@ export function TextInspector({
         <div className="space-y-3">
           <SliderInput
             label="Horizontal (X)"
-            value={localTextData.position.x}
+            value={displayPosition.x}
             onChange={(value) => updatePosition({ x: value })}
             min={0}
             max={1}
             disabled={readOnly}
           />
+          <NumberInput
+            label="X"
+            value={Math.round(displayPosition.x * 1000) / 10}
+            onChange={(value) => updatePosition({ x: Math.max(0, Math.min(100, value)) / 100 })}
+            min={0}
+            max={100}
+            step={0.1}
+            unit="%"
+            disabled={readOnly}
+          />
           <SliderInput
             label="Vertical (Y)"
-            value={localTextData.position.y}
+            value={displayPosition.y}
             onChange={(value) => updatePosition({ y: value })}
             min={0}
             max={1}
             disabled={readOnly}
           />
           <NumberInput
+            label="Y"
+            value={Math.round(displayPosition.y * 1000) / 10}
+            onChange={(value) => updatePosition({ y: Math.max(0, Math.min(100, value)) / 100 })}
+            min={0}
+            max={100}
+            step={0.1}
+            unit="%"
+            disabled={readOnly}
+          />
+          <NumberInput
             label="Rotation"
             value={localTextData.rotation}
-            onChange={(value) => updateTextData({ rotation: value })}
+            onChange={(value) => {
+              if (onTextTransformChange) {
+                updateTransform({ rotationDeg: value });
+              } else {
+                updateTextData({ rotation: value });
+              }
+            }}
             min={-180}
             max={180}
             unit="deg"
             disabled={readOnly}
+          />
+          <NumberInput
+            label="Scale X"
+            value={Math.round((localTransform?.scale.x ?? 1) * 100)}
+            onChange={(value) =>
+              updateTransform({
+                scale: {
+                  x: Math.max(1, Math.min(1000, value)) / 100,
+                  y: localTransform?.scale.y ?? 1,
+                },
+              })
+            }
+            min={1}
+            max={1000}
+            unit="%"
+            disabled={readOnly || !onTextTransformChange}
+          />
+          <NumberInput
+            label="Scale Y"
+            value={Math.round((localTransform?.scale.y ?? 1) * 100)}
+            onChange={(value) =>
+              updateTransform({
+                scale: {
+                  x: localTransform?.scale.x ?? 1,
+                  y: Math.max(1, Math.min(1000, value)) / 100,
+                },
+              })
+            }
+            min={1}
+            max={1000}
+            unit="%"
+            disabled={readOnly || !onTextTransformChange}
           />
           <SliderInput
             label="Opacity"

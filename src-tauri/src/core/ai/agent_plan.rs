@@ -22,9 +22,30 @@ pub struct AgentPlan {
     pub steps: Vec<PlanStep>,
     /// Whether user approval was granted before execution
     pub approval_granted: bool,
+    /// Backend-verifiable proof that the approved plan may be executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_proof: Option<AgentPlanApprovalProof>,
     /// Session ID for tracing
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+}
+
+/// One-time approval proof consumed by the backend before plan execution.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPlanApprovalProof {
+    /// Bearer approval token issued by the backend approval token store.
+    pub token: String,
+    /// Human-readable token ID for audit/debug output. Not used as a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<String>,
+    /// Project ID that was approved by the user.
+    pub project_id: String,
+    /// Runtime that requested approval, such as "codex" or "tpao".
+    pub runtime_id: String,
+    /// Scope required for this proof. Defaults to openreelio.plan.apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_scope: Option<String>,
 }
 
 /// A single step within an agent plan.
@@ -164,6 +185,13 @@ mod tests {
                 optional: false,
             }],
             approval_granted: true,
+            approval_proof: Some(AgentPlanApprovalProof {
+                token: "or_mcp_test".to_string(),
+                token_id: Some("token-1".to_string()),
+                project_id: "project-1".to_string(),
+                runtime_id: "codex".to_string(),
+                required_scope: Some("openreelio.plan.apply".to_string()),
+            }),
             session_id: Some("session-1".to_string()),
         };
 
@@ -174,6 +202,9 @@ mod tests {
         assert_eq!(deserialized.steps.len(), 1);
         assert_eq!(deserialized.steps[0].tool_name, "split_clip");
         assert!(deserialized.approval_granted);
+        let proof = deserialized.approval_proof.expect("approval proof");
+        assert_eq!(proof.token_id.as_deref(), Some("token-1"));
+        assert_eq!(proof.project_id, "project-1");
     }
 
     #[test]

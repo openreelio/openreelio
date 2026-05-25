@@ -14,6 +14,8 @@ import {
   deleteFileInBackend,
   renameFileInBackend,
   moveFileInBackend,
+  importExternalFilesToWorkspaceFromBackend,
+  revealInExplorerFromBackend,
   listWorkspaceDocumentsFromBackend,
   createFolderInBackend,
 } from './workspaceGateway';
@@ -75,9 +77,7 @@ describe('validateRelativePath', () => {
     });
 
     it('should reject directory traversal in middle of path', () => {
-      expect(() => validateRelativePath('docs/../../../etc/passwd')).toThrow(
-        'directory traversal',
-      );
+      expect(() => validateRelativePath('docs/../../../etc/passwd')).toThrow('directory traversal');
     });
 
     it('should reject directory traversal at end', () => {
@@ -464,6 +464,91 @@ describe('IPC wrapper functions', () => {
         'directory traversal',
       );
       expect(mockInvoke).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // revealInExplorerFromBackend
+  // ---------------------------------------------------------------------------
+
+  describe('revealInExplorerFromBackend', () => {
+    it('should allow revealing the workspace root', async () => {
+      mockInvoke.mockResolvedValueOnce(undefined);
+
+      await revealInExplorerFromBackend('');
+
+      expect(mockInvoke).toHaveBeenCalledWith('reveal_in_explorer', {
+        relativePath: '',
+      });
+    });
+
+    it('should validate non-root paths before calling invoke', async () => {
+      await expect(revealInExplorerFromBackend('../escape')).rejects.toThrow('directory traversal');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // importExternalFilesToWorkspaceFromBackend
+  // ---------------------------------------------------------------------------
+
+  describe('importExternalFilesToWorkspaceFromBackend', () => {
+    it('should require at least one source path', async () => {
+      await expect(importExternalFilesToWorkspaceFromBackend([])).rejects.toThrow(
+        'At least one source path is required',
+      );
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should reject null bytes in source paths before calling invoke', async () => {
+      await expect(importExternalFilesToWorkspaceFromBackend(['/tmp/file\0.mp4'])).rejects.toThrow(
+        'null bytes',
+      );
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should validate target directories before calling invoke', async () => {
+      await expect(
+        importExternalFilesToWorkspaceFromBackend(['/tmp/file.mp4'], '../escape'),
+      ).rejects.toThrow('directory traversal');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should call invoke and parse imported files', async () => {
+      const response = {
+        importedFiles: [
+          {
+            sourcePath: '/tmp/file.mp4',
+            relativePath: 'footage/file.mp4',
+            name: 'file.mp4',
+            kind: 'video',
+            fileSize: 42,
+            assetId: 'asset-1',
+            alreadyInWorkspace: false,
+          },
+        ],
+        failedFiles: [],
+      };
+      mockInvoke.mockResolvedValueOnce(response);
+
+      const result = await importExternalFilesToWorkspaceFromBackend(['/tmp/file.mp4'], 'footage');
+
+      expect(mockInvoke).toHaveBeenCalledWith('import_external_files_to_workspace', {
+        sourcePaths: ['/tmp/file.mp4'],
+        targetDir: 'footage',
+      });
+      expect(result).toEqual(response);
+    });
+
+    it('should reject malformed import responses', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        importedFiles: [{ sourcePath: '/tmp/file.mp4', kind: 'unknown' }],
+        failedFiles: [],
+      });
+
+      await expect(importExternalFilesToWorkspaceFromBackend(['/tmp/file.mp4'])).rejects.toThrow(
+        'Invalid external workspace import asset kind',
+      );
     });
   });
 

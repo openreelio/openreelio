@@ -26,6 +26,7 @@ import type {
   TextClipData,
   ClipId,
   SimpleParamValue,
+  Transform,
 } from '@/types';
 
 // =============================================================================
@@ -106,6 +107,13 @@ export interface InspectorProps {
   onFreezeFrame?: (clipId: string, trackId: string) => void;
   /** Callback when text clip data changes */
   onTextDataChange?: (clipId: ClipId, textData: TextClipData) => void;
+  /** Callback when text clip transform changes */
+  onTextTransformChange?: (clipId: ClipId, transform: Transform) => void;
+  /** Callback when text clip timing changes */
+  onTextTimingChange?: (
+    clipId: ClipId,
+    timing: { timelineInSec?: number; durationSec?: number },
+  ) => void;
   /** Callback when caption property changes */
   onCaptionChange?: (captionId: string, property: string, value: unknown) => void;
   /** Callback when an effect is toggled */
@@ -135,6 +143,8 @@ export function Inspector({
   onClipReverseToggle,
   onFreezeFrame,
   onTextDataChange,
+  onTextTransformChange,
+  onTextTimingChange,
   onCaptionChange,
   onEffectToggle,
   onEffectChange,
@@ -305,6 +315,8 @@ export function Inspector({
       <TextInspector
         selectedTextClip={selectedTextClip}
         onTextDataChange={onTextDataChange ?? (() => {})}
+        onTextTransformChange={onTextTransformChange}
+        onTextTimingChange={onTextTimingChange}
         readOnly={readOnly}
       />
     );
