@@ -5,13 +5,19 @@ use crate::{
     output,
 };
 use clap::Args;
-use openreelio_core::commands::{get_text_data, is_text_clip};
+use openreelio_core::assets::AssetKind;
+use openreelio_core::commands::{
+    get_text_data, is_text_clip, AddTrackCommand, InsertClipCommand, LinkClipsCommand,
+    SetClipMuteCommand,
+};
 use openreelio_core::ipc::CommandPayload;
 use openreelio_core::timeline::TrackKind;
 use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+const DEFAULT_MEDIA_INSERT_DURATION_SEC: f64 = 10.0;
 
 #[derive(Args)]
 pub struct McpAction {
@@ -343,9 +349,22 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
             serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false }),
         ),
         tool(
+            "openreelio.annotation.read",
+            "OpenReelio asset annotation",
+            "Read cached objects/faces/OCR/shot annotations for one asset before choosing safe text or caption placement.",
+            serde_json::json!({
+                "type": "object",
+                "required": ["assetId"],
+                "properties": {
+                    "assetId": { "type": "string" }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool(
             "openreelio.command.schema",
             "OpenReelio command schema",
-            "Read the command schema available to external agents.",
+            "Read the command schema, text/caption workflows, and payload conventions available to external agents.",
             serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false }),
         ),
         tool(
@@ -385,9 +404,36 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
 
     if state.has_active_approval_token() {
         tools.push(tool(
+            "openreelio.media.insert",
+            "OpenReelio media insert",
+            "Insert a media asset through the drag-and-drop parity path: validates visible track placement, preserves source ranges, and creates linked audio for video assets.",
+            serde_json::json!({
+                "type": "object",
+                "required": ["approvalToken", "sequenceId", "trackId", "assetId", "timelineStart"],
+                "properties": {
+                    "approvalToken": { "type": "string" },
+                    "sequenceId": { "type": "string" },
+                    "trackId": { "type": "string" },
+                    "assetId": { "type": "string" },
+                    "timelineStart": { "type": "number" },
+                    "sourceIn": { "type": "number" },
+                    "sourceOut": { "type": "number" },
+                    "audioOnly": {
+                        "type": "boolean",
+                        "description": "Set true only when intentionally placing a video asset as audio-only on an audio track."
+                    },
+                    "autoExtractLinkedAudio": {
+                        "type": "boolean",
+                        "description": "Defaults true for video assets on visual tracks."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        ));
+        tools.push(tool(
             "openreelio.plan.apply",
             "OpenReelio approved plan apply",
-            "Apply a validated edit plan through the OpenReelio command log path using an approval token.",
+            "Apply a validated edit plan, including text/caption commands, through the OpenReelio command log path using an approval token.",
             serde_json::json!({
                 "type": "object",
                 "required": ["approvalToken", "plan"],
@@ -468,9 +514,11 @@ fn call_tool(state: &McpServerState, name: &str, arguments: Value) -> Result<Val
         "openreelio.diagnostics.read" => build_diagnostics(state),
         "openreelio.timeline.snapshot" => build_timeline_snapshot(state),
         "openreelio.assets.list" => build_assets_list(state),
+        "openreelio.annotation.read" => build_annotation_read(state, arguments),
         "openreelio.command.schema" => Ok(build_command_schema()),
         "openreelio.command.validate" => validate_command(arguments),
         "openreelio.plan.validate" => validate_plan(arguments),
+        "openreelio.media.insert" => apply_media_insert(state, arguments),
         "openreelio.plan.apply" => apply_plan(state, arguments),
         "openreelio.preview.describe" => Ok(build_preview_state()),
         other => Err(ToolError::UnknownTool(format!(
@@ -509,6 +557,7 @@ fn build_host_context(state: &McpServerState) -> Value {
             "timelineRead": true,
             "commandValidate": true,
             "planValidate": true,
+            "mediaInsertWithApproval": state.has_active_approval_token(),
             "planApplyWithApproval": state.has_active_approval_token(),
             "previewFrameRead": false,
             "diagnosticsRead": true,
@@ -774,6 +823,7 @@ fn build_assets_list(state: &McpServerState) -> Result<Value, ToolError> {
         .assets
         .values()
         .map(|asset| {
+            let annotation_path = annotation_path(path, &asset.id);
             serde_json::json!({
                 "id": asset.id,
                 "name": asset.name,
@@ -782,6 +832,7 @@ fn build_assets_list(state: &McpServerState) -> Result<Value, ToolError> {
                 "fileSize": asset.file_size,
                 "missing": asset.missing,
                 "workspaceManaged": asset.workspace_managed,
+                "hasAnnotation": annotation_path.exists(),
                 "tags": asset.tags,
             })
         })
@@ -794,16 +845,517 @@ fn build_assets_list(state: &McpServerState) -> Result<Value, ToolError> {
     }))
 }
 
+fn build_annotation_read(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
+    let Some(path) = &state.project else {
+        return Ok(serde_json::json!({
+            "status": "error",
+            "message": "No project path was provided"
+        }));
+    };
+    let asset_id = arguments
+        .get("assetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::InvalidArguments("assetId is required".to_string()))?;
+
+    let annotation = load_annotation_for_asset(path, asset_id)?;
+    Ok(serde_json::json!({
+        "status": "ok",
+        "assetId": asset_id,
+        "available": annotation.is_some(),
+        "annotation": annotation,
+    }))
+}
+
+fn annotation_path(project_dir: &std::path::Path, asset_id: &str) -> PathBuf {
+    project_dir
+        .join(".openreelio")
+        .join("annotations")
+        .join(format!("{asset_id}.json"))
+}
+
+fn load_annotation_for_asset(
+    project_dir: &std::path::Path,
+    asset_id: &str,
+) -> Result<Option<Value>, ToolError> {
+    let path = annotation_path(project_dir, asset_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(&path).map_err(|error| {
+        ToolError::Execution(format!(
+            "Failed to read annotation '{}': {error}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_str::<Value>(&content)
+        .map(Some)
+        .map_err(|error| {
+            ToolError::Execution(format!(
+                "Failed to deserialize annotation '{}': {error}",
+                path.display()
+            ))
+        })
+}
+
 fn build_command_schema() -> Value {
     serde_json::json!({
         "commands": CommandPayload::SUPPORTED_COMMAND_TYPES,
         "count": CommandPayload::SUPPORTED_COMMAND_TYPES.len(),
         "cli": help_json::build_schema(),
+        "payloadHints": {
+            "CreateTrack": {
+                "required": ["sequenceId", "kind", "name"],
+                "optional": ["position"],
+                "note": "Use kind video or overlay for editable text clips. AddTextClip requires a target video/overlay track; create one first when no suitable upper text track exists."
+            },
+            "InsertClip": {
+                "required": ["sequenceId", "trackId", "assetId", "timelineStart"],
+                "optional": ["sourceIn", "sourceOut"],
+                "note": "Raw InsertClip is primitive and does not auto-create linked audio. Use openreelio.media.insert for normal media placement so video remains visible and linked audio stays in sync."
+            },
+            "ImportGeneratedCaptions": {
+                "required": ["sequenceId", "trackId", "segments"],
+                "optional": ["style", "position", "replaceExisting"],
+                "segmentShape": { "startSec": "number", "endSec": "number", "text": "string" },
+                "styleShape": "Caption style may include fontFamily, fontSize, fontWeight, bold, italic, underline, color, opacity, backgroundColor, backgroundPadding, outlineColor, outlineWidth, shadowColor, shadowOffsetX, shadowOffsetY, shadowBlur, alignment, lineHeight, and letterSpacing.",
+                "positionShape": "Caption position supports preset top/center/bottom or custom xPercent/yPercent.",
+                "note": "Use this for AI/STT transcript segments so generated captions are imported atomically and remain undoable as one command."
+            },
+            "AddTextClip": {
+                "required": ["sequenceId", "trackId", "timelineIn", "duration", "textData"],
+                "textDataShape": "TextClipData includes content, style(fontFamily/fontSize/fontWeight/color/backgroundColor/backgroundPadding/alignment/bold/italic/underline/lineHeight/letterSpacing), position(x/y 0..1), shadow(color/offsetX/offsetY/blur), outline(color/width), rotation, and opacity.",
+                "note": "Text clips must be placed on a video or overlay track. Use SetClipTransform after creation when scale or anchor must be exact."
+            },
+            "UpdateTextClip": {
+                "required": ["sequenceId", "trackId", "clipId", "textData"],
+                "note": "Send the full updated TextClipData so style, position, shadow, outline, rotation, and opacity remain deterministic."
+            },
+            "SetClipTransform": {
+                "required": ["sequenceId", "trackId", "clipId", "transform"],
+                "transformShape": "transform includes position{x,y}, scale{x,y}, rotationDeg, and anchor{x,y}; text clips use this for preview drag/resize/rotate parity."
+            }
+        },
+        "mediaWorkflows": {
+            "timelinePlacement": [
+                "Use openreelio.media.insert when approval is available and the task places a media asset on the timeline.",
+                "Target video/image assets to video or overlay tracks and audio assets to audio tracks.",
+                "Do not put a video asset on an audio track unless audioOnly=true is intentional; that creates an audio-only clip and will not show in preview.",
+                "Let autoExtractLinkedAudio default to true for video assets with audio."
+            ]
+        },
+        "textWorkflows": {
+            "editableOverlay": [
+                "Read timeline.snapshot to find the active sequence, existing text clips, and usable video/overlay tracks.",
+                "Read annotation.read for overlapping source assets when placement should avoid faces, objects, or OCR text.",
+                "CreateTrack(kind=\"video\" or \"overlay\") when there is no unlocked non-overlapping text track above the media.",
+                "AddTextClip with complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity.",
+                "SetClipTransform for exact preview drag/resize/rotate parity using normalized position, scale, rotationDeg, and anchor."
+            ],
+            "timedSubtitles": [
+                "Use ImportGeneratedCaptions for AI transcript segments or CreateCaption/UpdateCaption for individual caption lines.",
+                "Use caption style/position metadata for subtitle readability instead of editable overlay text when the user wants semantic subtitles."
+            ],
+            "placementDefaults": {
+                "subtitle": "Bottom center around y=0.85 with outline/shadow unless it covers important visual content.",
+                "title": "Center or upper third depending on the shot composition.",
+                "lowerThird": "Lower-left or lower-center with enough safe margin and readable contrast."
+            }
+        },
         "payloadFormat": {
             "commandType": "PascalCase backend command type",
             "payload": "camelCase JSON object matching the command payload"
         }
     })
+}
+
+fn required_string_argument(arguments: &Value, key: &str) -> Result<String, ToolError> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| ToolError::InvalidArguments(format!("{key} is required")))
+}
+
+fn required_non_negative_number(arguments: &Value, key: &str) -> Result<f64, ToolError> {
+    let value = arguments
+        .get(key)
+        .and_then(Value::as_f64)
+        .ok_or_else(|| ToolError::InvalidArguments(format!("{key} is required")))?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(ToolError::InvalidArguments(format!(
+            "{key} must be a finite non-negative number"
+        )));
+    }
+    Ok(value)
+}
+
+fn optional_non_negative_number(arguments: &Value, key: &str) -> Result<Option<f64>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(number) = value.as_f64() else {
+        return Err(ToolError::InvalidArguments(format!(
+            "{key} must be a number"
+        )));
+    };
+    if !number.is_finite() || number < 0.0 {
+        return Err(ToolError::InvalidArguments(format!(
+            "{key} must be a finite non-negative number"
+        )));
+    }
+    Ok(Some(number))
+}
+
+fn media_insert_source_range(
+    asset_id: &str,
+    asset_duration_sec: Option<f64>,
+    source_in: Option<f64>,
+    source_out: Option<f64>,
+) -> Result<(Option<(f64, f64)>, f64), ToolError> {
+    let has_explicit_range = source_in.is_some() || source_out.is_some();
+    let source_start = source_in.unwrap_or(0.0);
+
+    if !has_explicit_range && asset_duration_sec.is_none() {
+        return Ok((None, DEFAULT_MEDIA_INSERT_DURATION_SEC));
+    }
+
+    let source_end = source_out
+        .or(asset_duration_sec)
+        .unwrap_or(source_start + DEFAULT_MEDIA_INSERT_DURATION_SEC);
+    let clamped_source_end = asset_duration_sec
+        .map(|duration| source_end.min(duration))
+        .unwrap_or(source_end);
+
+    if source_start >= clamped_source_end {
+        return Err(ToolError::InvalidArguments(format!(
+            "Invalid source range for asset '{asset_id}': sourceOut must be greater than sourceIn"
+        )));
+    }
+
+    Ok((
+        Some((source_start, clamped_source_end)),
+        clamped_source_end - source_start,
+    ))
+}
+
+fn validate_media_track_compatibility(
+    asset_id: &str,
+    asset_kind: &AssetKind,
+    track_id: &str,
+    track_kind: &TrackKind,
+    audio_only: bool,
+) -> Result<(), ToolError> {
+    match asset_kind {
+        AssetKind::Video => {
+            if matches!(track_kind, TrackKind::Audio) {
+                if audio_only {
+                    return Ok(());
+                }
+                return Err(ToolError::InvalidArguments(format!(
+                    "Video asset '{asset_id}' was targeted at audio track '{track_id}'. That creates an audio-only clip and will not show in preview. Use a video/overlay track, or set audioOnly true intentionally."
+                )));
+            }
+            if matches!(track_kind, TrackKind::Video | TrackKind::Overlay) {
+                return Ok(());
+            }
+        }
+        AssetKind::Audio if matches!(track_kind, TrackKind::Audio) => return Ok(()),
+        AssetKind::Image if matches!(track_kind, TrackKind::Video | TrackKind::Overlay) => {
+            return Ok(())
+        }
+        AssetKind::Subtitle if matches!(track_kind, TrackKind::Caption) => return Ok(()),
+        _ => {}
+    }
+
+    Err(ToolError::InvalidArguments(format!(
+        "Cannot place {asset_kind:?} asset '{asset_id}' on {track_kind:?} track '{track_id}'"
+    )))
+}
+
+fn track_has_overlap(
+    track: &openreelio_core::timeline::Track,
+    timeline_start: f64,
+    duration_sec: f64,
+) -> bool {
+    let timeline_end = timeline_start + duration_sec;
+    track.clips.iter().any(|clip| {
+        let clip_start = clip.place.timeline_in_sec;
+        let clip_end = clip.place.timeline_in_sec + clip.place.duration_sec;
+        timeline_start < clip_end && timeline_end > clip_start
+    })
+}
+
+fn find_available_audio_track_id(
+    sequence: &openreelio_core::timeline::Sequence,
+    timeline_start: f64,
+    duration_sec: f64,
+) -> Option<String> {
+    sequence
+        .tracks
+        .iter()
+        .find(|track| {
+            matches!(track.kind, TrackKind::Audio)
+                && !track.locked
+                && !track_has_overlap(track, timeline_start, duration_sec)
+        })
+        .map(|track| track.id.clone())
+}
+
+fn next_audio_track_name(sequence: &openreelio_core::timeline::Sequence) -> String {
+    let mut highest_index = 0usize;
+    for track in &sequence.tracks {
+        if !matches!(track.kind, TrackKind::Audio) {
+            continue;
+        }
+        let name = track.name.trim();
+        if name == "Audio" {
+            highest_index = highest_index.max(1);
+        } else if let Some(index) = name
+            .strip_prefix("Audio ")
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            highest_index = highest_index.max(index);
+        }
+    }
+    format!("Audio {}", highest_index + 1)
+}
+
+fn default_audio_track_position(sequence: &openreelio_core::timeline::Sequence) -> usize {
+    sequence
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, track)| matches!(track.kind, TrackKind::Audio))
+        .map(|(index, _)| index + 1)
+        .last()
+        .unwrap_or(sequence.tracks.len())
+}
+
+fn apply_source_range(
+    mut command: InsertClipCommand,
+    source_range: Option<(f64, f64)>,
+) -> InsertClipCommand {
+    if let Some((source_in, source_out)) = source_range {
+        command = command.with_source_range(source_in, source_out);
+    }
+    command
+}
+
+fn rollback_media_insert(
+    project: &mut openreelio_core::ActiveProject,
+    applied_count: usize,
+) -> Result<(), ToolError> {
+    for _ in 0..applied_count {
+        project.executor.undo(&mut project.state).map_err(|error| {
+            ToolError::Execution(format!("Media insert rollback failed: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
+fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
+    let expected_token = state.active_approval_token(None)?;
+    let actual_token = arguments
+        .get("approvalToken")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::PermissionDenied("approvalToken is required".to_string()))?;
+    if actual_token != expected_token {
+        return Err(ToolError::PermissionDenied(
+            "approvalToken is invalid".to_string(),
+        ));
+    }
+
+    let sequence_id = required_string_argument(&arguments, "sequenceId")?;
+    let track_id = required_string_argument(&arguments, "trackId")?;
+    let asset_id = required_string_argument(&arguments, "assetId")?;
+    let timeline_start = required_non_negative_number(&arguments, "timelineStart")?;
+    let source_in = optional_non_negative_number(&arguments, "sourceIn")?;
+    let source_out = optional_non_negative_number(&arguments, "sourceOut")?;
+    let audio_only = arguments
+        .get("audioOnly")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let auto_extract_linked_audio = arguments
+        .get("autoExtractLinkedAudio")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let project_path = state.project.as_ref().ok_or_else(|| {
+        ToolError::InvalidArguments("A project path is required to insert media".to_string())
+    })?;
+    let mut project = super::load_project(project_path)
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
+
+    let asset = project
+        .state
+        .assets
+        .get(&asset_id)
+        .ok_or_else(|| ToolError::InvalidArguments(format!("Asset '{asset_id}' not found")))?;
+    let asset_kind = asset.kind.clone();
+    let asset_duration_sec = asset.duration_sec;
+    let asset_has_audio = asset.audio.is_some();
+    let sequence = project.state.sequences.get(&sequence_id).ok_or_else(|| {
+        ToolError::InvalidArguments(format!("Sequence '{sequence_id}' not found"))
+    })?;
+    let track = sequence
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+        .ok_or_else(|| ToolError::InvalidArguments(format!("Track '{track_id}' not found")))?;
+    let target_track_kind = track.kind.clone();
+    validate_media_track_compatibility(
+        &asset_id,
+        &asset_kind,
+        &track_id,
+        &target_track_kind,
+        audio_only,
+    )?;
+    let (source_range, duration_sec) =
+        media_insert_source_range(&asset_id, asset_duration_sec, source_in, source_out)?;
+
+    state.consume_approval_token()?;
+
+    let mut applied_count = 0usize;
+    let operation = (|| -> Result<Value, ToolError> {
+        let primary_command = apply_source_range(
+            InsertClipCommand::new(&sequence_id, &track_id, &asset_id, timeline_start),
+            source_range,
+        );
+        let primary_result = project
+            .executor
+            .execute(Box::new(primary_command), &mut project.state)
+            .map_err(|error| ToolError::Execution(format!("Media InsertClip failed: {error}")))?;
+        applied_count += 1;
+        let primary_clip_id = primary_result.created_ids.first().cloned().ok_or_else(|| {
+            ToolError::Execution("InsertClip did not return a created clip id".to_string())
+        })?;
+
+        let mut linked_audio = Value::Null;
+        let should_extract_linked_audio = auto_extract_linked_audio
+            && matches!(asset_kind, AssetKind::Video)
+            && !audio_only
+            && matches!(target_track_kind, TrackKind::Video | TrackKind::Overlay)
+            && asset_has_audio;
+
+        if should_extract_linked_audio {
+            let sequence = project.state.sequences.get(&sequence_id).ok_or_else(|| {
+                ToolError::Execution(format!("Sequence '{sequence_id}' not found after insert"))
+            })?;
+            let (audio_track_id, created_track) = if let Some(audio_track_id) =
+                find_available_audio_track_id(sequence, timeline_start, duration_sec)
+            {
+                (audio_track_id, false)
+            } else {
+                let track_name = next_audio_track_name(sequence);
+                let position = default_audio_track_position(sequence);
+                let create_result = project
+                    .executor
+                    .execute(
+                        Box::new(
+                            AddTrackCommand::new(&sequence_id, &track_name, TrackKind::Audio)
+                                .at_position(position),
+                        ),
+                        &mut project.state,
+                    )
+                    .map_err(|error| {
+                        ToolError::Execution(format!("Create linked audio track failed: {error}"))
+                    })?;
+                applied_count += 1;
+                let created_track_id =
+                    create_result.created_ids.first().cloned().ok_or_else(|| {
+                        ToolError::Execution(
+                            "Create linked audio track did not return an id".to_string(),
+                        )
+                    })?;
+                (created_track_id, true)
+            };
+
+            let audio_command = apply_source_range(
+                InsertClipCommand::new(&sequence_id, &audio_track_id, &asset_id, timeline_start),
+                source_range,
+            );
+            let audio_result = project
+                .executor
+                .execute(Box::new(audio_command), &mut project.state)
+                .map_err(|error| {
+                    ToolError::Execution(format!("Linked audio InsertClip failed: {error}"))
+                })?;
+            applied_count += 1;
+            let audio_clip_id = audio_result.created_ids.first().cloned().ok_or_else(|| {
+                ToolError::Execution("Linked audio InsertClip did not return a clip id".to_string())
+            })?;
+
+            project
+                .executor
+                .execute(
+                    Box::new(LinkClipsCommand::new(
+                        &sequence_id,
+                        vec![
+                            (track_id.clone(), primary_clip_id.clone()),
+                            (audio_track_id.clone(), audio_clip_id.clone()),
+                        ],
+                    )),
+                    &mut project.state,
+                )
+                .map_err(|error| ToolError::Execution(format!("LinkClips failed: {error}")))?;
+            applied_count += 1;
+
+            project
+                .executor
+                .execute(
+                    Box::new(SetClipMuteCommand::new(
+                        &sequence_id,
+                        &track_id,
+                        &primary_clip_id,
+                        true,
+                    )),
+                    &mut project.state,
+                )
+                .map_err(|error| ToolError::Execution(format!("SetClipMute failed: {error}")))?;
+            applied_count += 1;
+
+            linked_audio = serde_json::json!({
+                "trackId": audio_track_id,
+                "clipId": audio_clip_id,
+                "createdTrack": created_track
+            });
+        }
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "message": "Media inserted through the drag-and-drop parity path.",
+            "opId": primary_result.op_id,
+            "createdIds": primary_result.created_ids,
+            "clipId": primary_clip_id,
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "assetId": asset_id,
+            "timelineStart": timeline_start,
+            "sourceIn": source_range.map(|range| range.0),
+            "sourceOut": source_range.map(|range| range.1),
+            "durationSec": duration_sec,
+            "linkedAudio": linked_audio
+        }))
+    })();
+
+    let result = match operation {
+        Ok(value) => value,
+        Err(error) => {
+            if applied_count > 0 {
+                rollback_media_insert(&mut project, applied_count)?;
+            }
+            return Err(error);
+        }
+    };
+
+    super::save_project(&mut project).map_err(|error| ToolError::Execution(error.to_string()))?;
+    Ok(result)
 }
 
 fn validate_command(arguments: Value) -> Result<Value, ToolError> {
@@ -1162,8 +1714,87 @@ mod tests {
 
         assert!(names.contains(&"openreelio.host.context"));
         assert!(names.contains(&"openreelio.timeline.snapshot"));
+        assert!(names.contains(&"openreelio.annotation.read"));
         assert!(names.contains(&"openreelio.command.schema"));
         assert!(!names.contains(&"openreelio.plan.apply"));
+    }
+
+    #[test]
+    fn should_explain_text_workflows_in_command_schema() {
+        let schema = build_command_schema();
+
+        assert!(schema["payloadHints"]["AddTextClip"].is_object());
+        assert!(schema["payloadHints"]["UpdateTextClip"].is_object());
+        assert!(schema["payloadHints"]["SetClipTransform"].is_object());
+        assert_eq!(
+            schema["textWorkflows"]["placementDefaults"]["subtitle"],
+            "Bottom center around y=0.85 with outline/shadow unless it covers important visual content."
+        );
+    }
+
+    #[test]
+    fn should_read_cached_annotation_for_asset() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("annotation_project");
+        let project =
+            openreelio_core::ActiveProject::create("Annotation Project", project_path.clone())
+                .expect("project");
+        let asset_id = "asset-annotation-1";
+        drop(project);
+
+        let annotation_dir = project_path.join(".openreelio").join("annotations");
+        std::fs::create_dir_all(&annotation_dir).expect("annotation dir");
+        std::fs::write(
+            annotation_dir.join(format!("{asset_id}.json")),
+            serde_json::json!({
+                "version": "1",
+                "assetId": asset_id,
+                "assetHash": "hash",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:00Z",
+                "analysis": {
+                    "faces": {
+                        "provider": "google_cloud",
+                        "analyzedAt": "2026-01-01T00:00:00Z",
+                        "config": {},
+                        "results": [{
+                            "timeSec": 1.0,
+                            "confidence": 0.9,
+                            "boundingBox": { "left": 0.25, "top": 0.7, "width": 0.5, "height": 0.2 },
+                            "emotions": []
+                        }]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write annotation");
+
+        let state = McpServerState {
+            project: Some(project_path),
+            ..Default::default()
+        };
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.annotation.read",
+                    "arguments": { "assetId": asset_id }
+                }),
+            ),
+        );
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text content");
+        let value: Value = serde_json::from_str(text).expect("annotation JSON");
+
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["available"], true);
+        assert_eq!(
+            value["annotation"]["analysis"]["faces"]["results"][0]["confidence"],
+            0.9
+        );
     }
 
     #[test]
