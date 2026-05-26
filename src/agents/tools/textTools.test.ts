@@ -1,8 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { commands } from '@/bindings';
 import { globalToolRegistry, type AgentContext } from '@/agents';
 import { registerTextTools, unregisterTextTools } from './textTools';
 import { useProjectStore } from '@/stores/projectStore';
 import { TEXT_ASSET_PREFIX, type Clip, type Effect, type Sequence, type Track } from '@/types';
+
+vi.mock('@/bindings', () => ({
+  commands: {
+    getAnnotation: vi.fn(),
+  },
+}));
 
 vi.mock('@/stores/projectStore', () => ({
   useProjectStore: {
@@ -125,6 +132,10 @@ describe('textTools', () => {
       deletedIds: [],
       changes: [],
     });
+    vi.mocked(commands.getAnnotation).mockResolvedValue({
+      status: 'ok',
+      data: { annotation: null, status: 'notAnalyzed' },
+    });
   });
 
   afterEach(() => {
@@ -238,6 +249,121 @@ describe('textTools', () => {
           scale: { x: 1.25, y: 1.1 },
           rotationDeg: -8,
         },
+      },
+    });
+  });
+
+  it('should add editable text through an alias using the active sequence from context', async () => {
+    mockProject(createSequence({ tracks: [createTrack()] }));
+
+    const result = await globalToolRegistry.execute(
+      'create_title',
+      {
+        content: 'Context title',
+        startTime: 0.5,
+        duration: 2.5,
+        preset: 'title',
+        position: { x: 0.5, y: 0.22 },
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeCommandMock).toHaveBeenCalledTimes(1);
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({
+      type: 'AddTextClip',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-video-1',
+        timelineIn: 0.5,
+        duration: 2.5,
+        textData: {
+          content: 'Context title',
+          position: { x: 0.5, y: 0.22 },
+        },
+      },
+    });
+  });
+
+  it('should auto-place new subtitle-style text away from detected faces', async () => {
+    const mediaClip = createClip({
+      id: 'clip-video-1',
+      assetId: 'asset-video-1',
+      place: { timelineInSec: 0, durationSec: 8 },
+      range: { sourceInSec: 0, sourceOutSec: 8 },
+    });
+    mockProject(createSequence({ tracks: [createTrack({ clips: [mediaClip] })] }));
+    vi.mocked(commands.getAnnotation).mockResolvedValue({
+      status: 'ok',
+      data: {
+        status: 'completed',
+        annotation: {
+          version: '1',
+          assetId: 'asset-video-1',
+          assetHash: 'hash',
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+          analysis: {
+            faces: {
+              provider: 'google_cloud',
+              analyzedAt: '2026-01-01T00:00:00Z',
+              config: {},
+              results: [
+                {
+                  timeSec: 1,
+                  confidence: 0.95,
+                  boundingBox: { left: 0.25, top: 0.72, width: 0.5, height: 0.2 },
+                  emotions: [],
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+    executeCommandMock
+      .mockResolvedValueOnce({
+        opId: 'op-track',
+        createdIds: ['track-video-created'],
+        deletedIds: [],
+        changes: [],
+      })
+      .mockResolvedValueOnce({
+        opId: 'op-add',
+        createdIds: ['clip-text-created', 'effect-text-created'],
+        deletedIds: [],
+        changes: [],
+      });
+
+    const tool = globalToolRegistry.get('add_text_clip');
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        text: 'Auto placed subtitle',
+        startTime: 1,
+        duration: 2,
+        preset: 'subtitle',
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeCommandMock.mock.calls[1][0]).toMatchObject({
+      type: 'AddTextClip',
+      payload: {
+        textData: {
+          position: { x: 0.5, y: expect.any(Number) },
+        },
+      },
+    });
+    const addPayload = executeCommandMock.mock.calls[1][0].payload as {
+      textData: { position: { y: number } };
+    };
+    expect(addPayload.textData.position.y).toBeLessThan(0.3);
+    expect(result.result).toMatchObject({
+      placement: {
+        candidate: 'upper_center',
+        obstacleCount: 1,
       },
     });
   });

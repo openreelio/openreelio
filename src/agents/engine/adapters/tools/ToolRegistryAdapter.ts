@@ -15,7 +15,11 @@ import type {
   BatchExecutionResult,
 } from '../../ports/IToolExecutor';
 import type { RiskLevel, ValidationResult, SideEffect } from '../../core/types';
-import { ToolRegistry, type ToolDefinition as LegacyToolDef } from '@/agents/ToolRegistry';
+import {
+  ToolRegistry,
+  describeExpectedJsonTypes,
+  type ToolDefinition as LegacyToolDef,
+} from '@/agents/ToolRegistry';
 import { isMetaToolsEnabled } from '@/config/featureFlags';
 import {
   getVisibleMetaToolNames,
@@ -505,46 +509,56 @@ export class ToolRegistryAdapter implements IToolExecutor {
   private validateType(
     name: string,
     value: unknown,
-    schema: { type?: string; enum?: unknown[] },
+    schema: { type?: string | string[]; enum?: unknown[] },
   ): string | undefined {
+    if (!schema.type) {
+      return undefined;
+    }
+
     const actualType = typeof value;
+    const acceptedTypes = Array.isArray(schema.type) ? schema.type : [schema.type];
+    const matchesType = acceptedTypes.some((type) => {
+      if (type === 'null') {
+        return value === null;
+      }
+      if (type === 'array') {
+        return Array.isArray(value);
+      }
+      if (type === 'object') {
+        return actualType === 'object' && value !== null && !Array.isArray(value);
+      }
+      if (type === 'integer') {
+        return actualType === 'number';
+      }
+      return actualType === type;
+    });
+
+    if (!matchesType) {
+      return `Parameter '${name}' must be ${describeExpectedJsonTypes(acceptedTypes)}, got ${value === null ? 'null' : actualType}`;
+    }
+
+    if (
+      acceptedTypes.includes('integer') &&
+      !acceptedTypes.includes('number') &&
+      actualType === 'number' &&
+      !Number.isInteger(value)
+    ) {
+      return `Parameter '${name}' must be an integer`;
+    }
+
+    if (schema.enum && !schema.enum.includes(value)) {
+      return `Parameter '${name}' must be one of: ${schema.enum.join(', ')}`;
+    }
 
     switch (schema.type) {
       case 'string':
-        if (actualType !== 'string') {
-          return `Parameter '${name}' must be a string, got ${actualType}`;
-        }
-        if (schema.enum && !schema.enum.includes(value)) {
-          return `Parameter '${name}' must be one of: ${schema.enum.join(', ')}`;
-        }
         break;
 
       case 'number':
       case 'integer':
-        if (actualType !== 'number') {
-          return `Parameter '${name}' must be a number, got ${actualType}`;
-        }
-        if (schema.type === 'integer' && !Number.isInteger(value)) {
-          return `Parameter '${name}' must be an integer`;
-        }
-        break;
-
       case 'boolean':
-        if (actualType !== 'boolean') {
-          return `Parameter '${name}' must be a boolean, got ${actualType}`;
-        }
-        break;
-
       case 'array':
-        if (!Array.isArray(value)) {
-          return `Parameter '${name}' must be an array`;
-        }
-        break;
-
       case 'object':
-        if (actualType !== 'object' || value === null || Array.isArray(value)) {
-          return `Parameter '${name}' must be an object`;
-        }
         break;
     }
 

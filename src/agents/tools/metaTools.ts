@@ -31,7 +31,10 @@ import { getCaptionToolNames } from './captionTools';
 import { getTextToolNames } from './textTools';
 import { getGenerationToolNames } from './generationTools';
 import { getGenerativeTimelineToolNames } from './generativeTimelineTools';
-import { canonicalizeToolNameCandidate } from '../toolNameNormalization';
+import {
+  canonicalizeToolNameCandidate,
+  getSemanticToolAliasesForTargets,
+} from '../toolNameNormalization';
 
 const logger = createLogger('MetaTools');
 
@@ -209,6 +212,17 @@ const EFFECTS_ACTIONS = [...getEffectToolNames(), ...getTransitionToolNames()];
 const TEXT_ACTIONS = [...getCaptionToolNames(), ...getTextToolNames()];
 const GENERATE_ACTIONS = [...getGenerativeTimelineToolNames(), ...getGenerationToolNames()];
 
+function buildPromptActionEnum(actions: readonly string[]): string[] {
+  return Array.from(new Set([...actions, ...getSemanticToolAliasesForTargets(actions)]));
+}
+
+const QUERY_ACTION_ENUM = buildPromptActionEnum(QUERY_ACTIONS);
+const EDIT_ACTION_ENUM = buildPromptActionEnum(EDIT_ACTIONS);
+const AUDIO_ACTION_ENUM = buildPromptActionEnum(AUDIO_ACTIONS);
+const EFFECTS_ACTION_ENUM = buildPromptActionEnum(EFFECTS_ACTIONS);
+const TEXT_ACTION_ENUM = buildPromptActionEnum(TEXT_ACTIONS);
+const GENERATE_ACTION_ENUM = buildPromptActionEnum(GENERATE_ACTIONS);
+
 // =============================================================================
 // 6. Execute Plan Meta-Tool (batch execution)
 // =============================================================================
@@ -233,7 +247,7 @@ const META_TOOLS: ToolDefinition[] = [
         action: {
           type: 'string',
           description: 'The query action to perform',
-          enum: [...QUERY_ACTIONS],
+          enum: QUERY_ACTION_ENUM,
         },
         sequenceId: { type: 'string', description: 'Sequence ID' },
         trackId: { type: 'string', description: 'Track ID' },
@@ -349,7 +363,7 @@ const META_TOOLS: ToolDefinition[] = [
         action: {
           type: 'string',
           description: 'The editing action to perform',
-          enum: [...EDIT_ACTIONS],
+          enum: EDIT_ACTION_ENUM,
         },
         sequenceId: { type: 'string', description: 'Sequence ID' },
         trackId: { type: 'string', description: 'Track ID' },
@@ -417,7 +431,7 @@ const META_TOOLS: ToolDefinition[] = [
         action: {
           type: 'string',
           description: 'The audio action to perform',
-          enum: [...AUDIO_ACTIONS],
+          enum: AUDIO_ACTION_ENUM,
         },
         sequenceId: { type: 'string', description: 'Sequence ID' },
         trackId: { type: 'string', description: 'Track ID' },
@@ -449,7 +463,7 @@ const META_TOOLS: ToolDefinition[] = [
         action: {
           type: 'string',
           description: 'The effect/transition action to perform',
-          enum: [...EFFECTS_ACTIONS],
+          enum: EFFECTS_ACTION_ENUM,
         },
         sequenceId: { type: 'string', description: 'Sequence ID' },
         trackId: { type: 'string', description: 'Track ID' },
@@ -477,7 +491,7 @@ const META_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   {
     name: 'text',
-    description: `Create and edit on-screen text, captions, and subtitles. Use when the user asks for subtitles, captions, or text styling. Actions: ${TEXT_ACTIONS.join(', ')}. Note: auto_transcribe uses local Whisper when available and falls back to a configured transcript analysis provider; for on-screen text or lyrics, use the query meta-tool with analyze_asset action and analysisTypes ["textOcr"] instead.`,
+    description: `Create and edit editable on-video text overlays, titles, lower thirds, captions, and subtitles. Use add_text_clip/update_text_clip/set_text_transform/delete_text_clip for preview-positioned text clips with font, size, weight, color, shadow, outline, background, opacity, rotation, and drag/resize transform data. Use add_caption/update_caption/style_caption/import_captions_from_file/add_captions_from_transcription for timed subtitle tracks. Actions: ${TEXT_ACTIONS.join(', ')}. Note: auto_transcribe uses local Whisper when available and falls back to a configured transcript analysis provider; for on-screen text or lyrics, use the query meta-tool with analyze_asset action and analysisTypes ["textOcr"] instead.`,
     category: 'clip',
     parameters: {
       type: 'object',
@@ -485,15 +499,35 @@ const META_TOOLS: ToolDefinition[] = [
         action: {
           type: 'string',
           description: 'The text/caption action to perform',
-          enum: [...TEXT_ACTIONS],
+          enum: TEXT_ACTION_ENUM,
         },
-        sequenceId: { type: 'string', description: 'Sequence ID' },
-        trackId: { type: 'string', description: 'Track ID' },
-        captionId: { type: 'string', description: 'Caption ID' },
+        sequenceId: {
+          type: 'string',
+          description:
+            'Sequence ID. Editable text overlay tools can default to the active sequence; caption-track tools require it.',
+        },
+        trackId: {
+          type: 'string',
+          description:
+            'Track ID. Text overlays use video/overlay tracks and auto-create one when omitted for add_text_clip; captions use caption tracks.',
+        },
+        clipId: { type: 'string', description: 'Editable text clip ID' },
+        captionId: { type: 'string', description: 'Caption ID for caption-track actions' },
         assetId: { type: 'string', description: 'Asset ID for transcription' },
-        text: { type: 'string', description: 'Caption text content' },
+        text: { type: 'string', description: 'Text or caption content' },
+        content: { type: 'string', description: 'Legacy alias for editable text content' },
         startTime: { type: 'number', description: 'Start time in seconds' },
         endTime: { type: 'number', description: 'End time in seconds' },
+        duration: {
+          type: 'number',
+          description: 'Editable text clip duration in seconds; use endTime for captions',
+        },
+        preset: {
+          type: 'string',
+          description:
+            'Editable text starter preset: default, title, lower_third, or subtitle',
+          enum: ['default', 'title', 'lower_third', 'subtitle'],
+        },
         segments: {
           type: 'array',
           description: 'Timed text segments for batch caption creation',
@@ -507,11 +541,105 @@ const META_TOOLS: ToolDefinition[] = [
             required: ['startTime', 'endTime', 'text'],
           },
         },
-        fontSize: { type: 'number', description: 'Font size' },
-        fontFamily: { type: 'string', description: 'Font family' },
-        color: { type: 'string', description: 'Text color (hex)' },
-        backgroundColor: { type: 'string', description: 'Background color (hex)' },
-        position: { type: 'string', description: 'Position: top, center, bottom' },
+        replaceExisting: {
+          type: 'boolean',
+          description: 'When importing generated captions, replace existing captions on the track',
+        },
+        style: {
+          type: 'object',
+          description:
+            'Editable text style object: fontFamily, fontSize, fontWeight, color, backgroundColor, backgroundPadding, alignment, bold, italic, underline, lineHeight, letterSpacing',
+        },
+        fontSize: { type: 'number', description: 'Font size in pixels' },
+        fontFamily: { type: 'string', description: 'Font family name' },
+        fontWeight: { type: 'number', description: 'Numeric font weight, 100 to 900' },
+        bold: { type: 'boolean', description: 'Enable bold styling' },
+        italic: { type: 'boolean', description: 'Enable italic styling' },
+        underline: { type: 'boolean', description: 'Enable underline styling' },
+        color: { type: 'string', description: 'Text color (hex, optional alpha)' },
+        opacity: { type: 'number', description: 'Text opacity from 0 to 1' },
+        backgroundColor: {
+          type: ['string', 'null'],
+          description: 'Background color (hex, optional alpha), or null to remove it',
+        },
+        backgroundPadding: { type: 'number', description: 'Background padding in pixels' },
+        clearBackground: {
+          type: 'boolean',
+          description: 'Remove editable text background fill',
+        },
+        alignment: {
+          type: 'string',
+          description: 'Text alignment',
+          enum: ['left', 'center', 'right'],
+        },
+        lineHeight: { type: 'number', description: 'Line-height multiplier' },
+        letterSpacing: { type: 'number', description: 'Letter spacing in pixels' },
+        position: {
+          type: ['string', 'object'],
+          description:
+            'Position preset (top, center, bottom, lower_third) or object with x/y 0..1 or xPercent/yPercent. Use bottom for normal subtitles.',
+        },
+        x: { type: 'number', description: 'Editable text normalized X position, 0 to 1' },
+        y: { type: 'number', description: 'Editable text normalized Y position, 0 to 1' },
+        xPercent: { type: 'number', description: 'Custom X position as percent from left' },
+        yPercent: { type: 'number', description: 'Custom Y position as percent from top' },
+        shadow: {
+          type: ['object', 'null'],
+          description:
+            'Editable text shadow object { color, offsetX, offsetY, blur }, or null to disable',
+        },
+        shadowColor: { type: 'string', description: 'Shadow color hex with optional alpha' },
+        shadowOffsetX: { type: 'number', description: 'Shadow horizontal offset in pixels' },
+        shadowOffsetY: { type: 'number', description: 'Shadow vertical offset in pixels' },
+        shadowBlur: { type: 'number', description: 'Shadow blur radius in pixels' },
+        clearShadow: { type: 'boolean', description: 'Remove editable text shadow' },
+        outline: {
+          type: ['object', 'null'],
+          description: 'Editable text outline object { color, width }, or null to disable',
+        },
+        outlineColor: { type: 'string', description: 'Outline color hex with optional alpha' },
+        outlineWidth: { type: 'number', description: 'Outline width in pixels' },
+        clearOutline: { type: 'boolean', description: 'Remove editable text outline' },
+        rotation: { type: 'number', description: 'Editable text rotation in degrees' },
+        transform: {
+          type: 'object',
+          description:
+            'Clip transform object with position{x,y}, scale{x,y}, rotationDeg, and anchor{x,y}',
+        },
+        transformX: { type: 'number', description: 'Normalized transform X position, 0 to 1' },
+        transformY: { type: 'number', description: 'Normalized transform Y position, 0 to 1' },
+        scaleX: { type: 'number', description: 'Horizontal scale multiplier' },
+        scaleY: { type: 'number', description: 'Vertical scale multiplier' },
+        rotationDeg: { type: 'number', description: 'Transform rotation in degrees' },
+        anchorX: { type: 'number', description: 'Normalized transform anchor X, 0 to 1' },
+        anchorY: { type: 'number', description: 'Normalized transform anchor Y, 0 to 1' },
+        autoPlacement: {
+          type: 'boolean',
+          description:
+            'Automatically choose a safe preview text position using timeline context and available faces/objects/OCR annotations',
+        },
+        placement: {
+          type: ['string', 'object', 'boolean'],
+          description:
+            'Placement intent or options. String values: default, title, subtitle, lower_third, callout. False disables auto-placement.',
+        },
+        placementIntent: {
+          type: 'string',
+          description: 'Placement intent: default, title, subtitle, lower_third, callout',
+        },
+        safeMargin: {
+          type: 'number',
+          description: 'Normalized safe-area margin for automatic placement, 0.02 to 0.2',
+        },
+        avoidFaces: { type: 'boolean', description: 'Avoid detected face boxes when auto-placing' },
+        avoidObjects: {
+          type: 'boolean',
+          description: 'Avoid detected object boxes when auto-placing',
+        },
+        avoidText: {
+          type: 'boolean',
+          description: 'Avoid detected OCR text and existing editable text clips when auto-placing',
+        },
         language: { type: 'string', description: 'Language code for transcription' },
         model: { type: 'string', description: 'Transcription model name' },
         provider: { type: 'string', description: 'Optional transcript analysis provider fallback' },
@@ -540,7 +668,7 @@ const META_TOOLS: ToolDefinition[] = [
         action: {
           type: 'string',
           description: 'The generation orchestration action to perform',
-          enum: [...GENERATE_ACTIONS],
+          enum: GENERATE_ACTION_ENUM,
         },
         prompt: { type: 'string', description: 'Generation or discovery prompt' },
         mediaType: { type: 'string', description: 'Media type: video, image, music, or sfx' },

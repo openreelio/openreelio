@@ -67,8 +67,8 @@ const QUERY_ACTIONS = `## Query Actions (meta-tool: query)
 - compare_edit_structure(sequenceId?, esdId) → compare current cut structure to a reference style`;
 
 const EDIT_ACTIONS = `## Edit Actions (meta-tool: edit, all require sequenceId)
-- insert_clip(trackId, assetId, timelineStart) → place asset on timeline; result exposes data.clipId
-- insert_clip_from_file(file, trackId, timelineStart) → insert by filename (auto-imports); result exposes data.clipId
+- insert_clip(trackId, assetId, timelineStart, sourceIn?, sourceOut?, audioOnly?) → place asset on timeline through drag-and-drop parity; video/image assets must target video/overlay tracks, result exposes data.clipId and data.linkedAudio
+- insert_clip_from_file(file, trackId, timelineStart, sourceIn?, sourceOut?, audioOnly?) → insert by filename (auto-imports) through drag-and-drop parity; result exposes data.clipId and data.linkedAudio
 - move_clip(trackId, clipId, newTimelineIn, newTrackId?) → reposition or cross-track move
 - trim_clip(trackId, clipId, newSourceIn?, newSourceOut?) → adjust source boundaries
 - split_clip(trackId, clipId, splitTime) → divide into two clips at time point; result exposes data.newClipId for the right-hand segment
@@ -108,19 +108,23 @@ const EFFECTS_ACTIONS = `## Effects Actions (meta-tool: effects)
 - remove_transition(transitionId) → remove transition
 - set_transition_duration(transitionId, duration) → change transition length`;
 
-const TEXT_ACTIONS = `## Text Actions (meta-tool: text, require sequenceId)
+const TEXT_ACTIONS = `## Text Actions (meta-tool: text)
+Editable text overlays default to the active sequence when sequenceId is omitted. Caption-track actions require sequenceId unless the context already supplies one.
+- Use editable text overlay actions for titles, lower thirds, callouts, burned-in subtitle-style text, and anything the user may drag/resize in the preview.
+- Use caption-track actions for semantic timed subtitles/captions and AI transcript import.
 - list_text_clips() → inspect editable text overlay clips with textData, style, transform, trackId, and clipId
-- add_text_clip(text, startTime, duration?, endTime?, trackId?, preset?, style?, position?, shadow?, outline?, transform?) → add editable on-video text; video text track auto-created if needed
-- update_text_clip(clipId, text?, style?, position?, shadow?, outline?, transform?) → edit text content, font, size, weight, color, outline, shadow, rotation, opacity, and transform
-- set_text_transform(clipId, transform? or transformX/transformY/scaleX/scaleY/rotationDeg) → move, resize, or rotate a text clip
+- add_text_clip(text, startTime, duration?, endTime?, trackId?, preset?, style?, position?, x?, y?, xPercent?, yPercent?, shadow?, outline?, transform?, autoPlacement?, placementIntent?) → add editable on-video text; video text track auto-created if needed. Auto-placement is on by default when no explicit position is supplied.
+- update_text_clip(clipId, text?, style?, fontFamily?, fontSize?, fontWeight?, color?, backgroundColor?, backgroundPadding?, alignment?, bold?, italic?, underline?, lineHeight?, letterSpacing?, position?, x?, y?, shadow?, outline?, clearShadow?, clearOutline?, clearBackground?, opacity?, rotation?, transform?, autoPlacement?) → edit text content, font, size, weight, color, outline, shadow, background, rotation, opacity, and transform
+- set_text_transform(clipId, transform? or transformX/transformY/scaleX/scaleY/rotationDeg/anchorX/anchorY) → move, resize, rotate, or re-anchor a text clip
 - delete_text_clip(clipId) → remove an editable text overlay clip
 - add_caption(text, startTime, endTime) → add subtitle (track auto-created if needed)
 - update_caption(captionId, text?, startTime?, endTime?) → edit caption
 - delete_caption(captionId) → remove caption
-- style_caption(captionId, fontSize?, fontFamily?, color?, backgroundColor?, position?) → style caption
+- style_caption(captionId, fontSize?, fontFamily?, fontWeight?, bold?, italic?, underline?, color?, opacity?, backgroundColor?, backgroundPadding?, outlineColor?, outlineWidth?, shadowColor?, shadowOffsetX?, shadowOffsetY?, shadowBlur?, alignment?, lineHeight?, letterSpacing?, position?, xPercent?, yPercent?) → style caption metadata
 - auto_transcribe(assetId, language?, model?, provider?, async?) → transcribe audio/video into timed text segments; uses local Whisper when available, otherwise a configured transcript analysis provider
 - add_captions_from_transcription(segments, trackId?, replaceExisting?) → create captions from timed transcript segments as one atomic caption import
-- import_captions_from_file(relativePath, format?, trackId?) → import SRT/VTT subtitle files from the workspace`;
+- import_captions_from_file(relativePath, format?, trackId?) → import SRT/VTT subtitle files from the workspace
+- Placement defaults: add_text_clip auto-places when no exact position is supplied, scoring default candidate regions against available faces/objects/OCR annotations and existing text. Use autoPlacement:false only when the user explicitly wants the preset's raw position.`;
 
 const GENERATE_ACTIONS = `## Generate Actions (meta-tool: generate)
 - generate_timeline_media(prompt, mediaType?, provider?, sequenceId?, trackId?, timelineStart?) → submit provider-neutral generation or SFX discovery; video jobs can create a pending marker and auto-place when ready
@@ -171,12 +175,15 @@ const COMMON_WORKFLOWS = `## Common Workflows
 9. Deep source inspection/editing: find_workspace_file or get_asset_catalog → read_source_analysis_report (this already writes the default ".analysis.md" report beside the asset) → check data.quality.status and do not silently edit from an insufficient/partial report; refresh or use build_source_selects with analyzeMissing=true when source selection depends on transcript or frame semantics → search_source_analysis_report / search_source_library → build_source_selects or edit actions
 10. Generative edit: generate_timeline_media with sequenceId/trackId/timelineStart creates a pending timeline marker and stores placement intent; the generation store imports and places the asset when the provider job completes. Use resolve_generation_job for explicit status checks.
 11. SFX discovery/import: search_sound_for_scene → present usable candidates and license policy → import_asset_candidate only with licenseAck=true → insert_clip on an audio track.
-12. If the user asks to save the analysis as a file but does not specify a location, do not add a separate write step: source-analysis tools already save "<asset-name>.analysis.md" beside the asset by default. Use write_workspace_document only for a custom second copy/path.`;
+12. AI subtitles: auto_transcribe(assetId) → inspect returned segments → add_captions_from_transcription(segments, replaceExisting?) → style_caption for readable typography when needed.
+13. Editable on-video text: list_text_clips when editing existing text, otherwise add_text_clip with preset and style → set_text_transform for exact preview position/size/rotation.
+14. If the user asks to save the analysis as a file but does not specify a location, do not add a separate write step: source-analysis tools already save "<asset-name>.analysis.md" beside the asset by default. Use write_workspace_document only for a custom second copy/path.`;
 
 const CLI_REFERENCE = `## CLI (headless alternative)
 openreelio-cli <group> <command> --path <dir> [--args]
-Groups: project, asset, analysis, timeline, caption, plan, state, render
+Groups: project, asset, analysis, timeline, caption, text, plan, state, render
 Key analysis commands: analysis report --path <dir> --id <asset_id>, analysis search --path <dir> --id <asset_id> --query "crowd cheer", analysis search-library --path <dir> --query "crowd cheer", analysis build-selects --path <dir> --query "crowd cheer"
+Key text commands: text add --text "Title" --start 0 --duration 3 --preset title --font-family Inter --font-size 72 --x 0.5 --y 0.2, text update --id <clip_id> --font-weight 700 --color "#FFFFFF", text transform --id <clip_id> --x 0.5 --y 0.82 --scale-x 1.1 --scale-y 1.1
 Key: plan execute --file <plan.json> for atomic batch operations
 Run help-json for machine-readable full schema.`;
 
