@@ -36,6 +36,9 @@ use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use crate::core::process::configure_std_command;
+
 /// Credential type identifier for logging and validation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -346,7 +349,9 @@ impl CredentialVault {
         #[cfg(target_os = "windows")]
         {
             // Use Windows machine GUID if available
-            if let Ok(output) = std::process::Command::new("powershell")
+            let mut command = std::process::Command::new("powershell");
+            configure_std_command(&mut command);
+            if let Ok(output) = command
                 .args([
                     "-Command",
                     "(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Cryptography' -Name MachineGuid).MachineGuid",
@@ -362,7 +367,9 @@ impl CredentialVault {
         #[cfg(target_os = "macos")]
         {
             // Use macOS hardware UUID
-            if let Ok(output) = std::process::Command::new("ioreg")
+            let mut command = std::process::Command::new("ioreg");
+            configure_std_command(&mut command);
+            if let Ok(output) = command
                 .args(["-rd1", "-c", "IOPlatformExpertDevice"])
                 .output()
             {

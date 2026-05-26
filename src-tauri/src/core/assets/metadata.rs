@@ -7,6 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::core::assets::{AudioInfo, VideoInfo};
+use crate::core::process::configure_std_command;
 use crate::core::{CoreError, CoreResult, Ratio};
 
 // =============================================================================
@@ -97,7 +98,9 @@ impl MetadataExtractor {
         }
 
         // Run FFprobe
-        let output = Command::new("ffprobe")
+        let mut command = Command::new("ffprobe");
+        configure_std_command(&mut command);
+        let output = command
             .args([
                 "-v",
                 "quiet",
@@ -227,7 +230,9 @@ impl MetadataExtractor {
 
     /// Check if FFprobe is available on the system
     pub fn is_available() -> bool {
-        Command::new("ffprobe")
+        let mut command = Command::new("ffprobe");
+        configure_std_command(&mut command);
+        command
             .arg("-version")
             .output()
             .map(|o| o.status.success())

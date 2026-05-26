@@ -21,6 +21,7 @@ use crate::core::fs::{
     validate_local_input_path, validate_scoped_output_path, validate_workspace_relative_path,
     write_bytes_atomic_no_symlink,
 };
+use crate::core::process::configure_std_command;
 use crate::core::project::{OpKind, Operation};
 use crate::core::workspace::{
     ignore::IgnoreRules,
@@ -691,6 +692,7 @@ pub async fn reveal_in_explorer(
     {
         let path_str = abs_path.to_string_lossy().to_string();
         let mut command = std::process::Command::new("explorer");
+        configure_std_command(&mut command);
         if abs_path.is_file() {
             command.args(["/select,", &path_str]);
         } else {
@@ -703,7 +705,9 @@ pub async fn reveal_in_explorer(
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        let mut command = std::process::Command::new("open");
+        configure_std_command(&mut command);
+        command
             .args(["-R", &abs_path.to_string_lossy()])
             .spawn()
             .map_err(|e| format!("Failed to open Finder: {}", e))?;
@@ -717,7 +721,9 @@ pub async fn reveal_in_explorer(
         } else {
             abs_path.clone()
         };
-        std::process::Command::new("xdg-open")
+        let mut command = std::process::Command::new("xdg-open");
+        configure_std_command(&mut command);
+        command
             .arg(&target)
             .spawn()
             .map_err(|e| format!("Failed to open file manager: {}", e))?;
