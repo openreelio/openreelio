@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { insertAgentMediaClip } from '@/agents/tools/mediaInsertion';
 import { CodexReferenceAdapter } from './CodexReferenceAdapter';
 import {
   isCodexDynamicToolCallOutputTextItem,
@@ -23,10 +24,15 @@ vi.mock('@/stores/projectStore', () => ({
   },
 }));
 
+vi.mock('@/agents/tools/mediaInsertion', () => ({
+  insertAgentMediaClip: vi.fn(),
+}));
+
 describe('CodexReferenceAdapter', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     projectStoreMocks.refreshFromBackendMutation.mockResolvedValue(1);
+    vi.mocked(insertAgentMediaClip).mockReset();
   });
 
   afterEach(() => {
@@ -145,6 +151,7 @@ describe('CodexReferenceAdapter', () => {
           expect.objectContaining({ namespace: 'openreelio', name: 'host_context' }),
           expect.objectContaining({ namespace: 'openreelio', name: 'stock_media_search' }),
           expect.objectContaining({ namespace: 'openreelio', name: 'stock_media_import' }),
+          expect.objectContaining({ namespace: 'openreelio', name: 'media_insert' }),
           expect.objectContaining({ namespace: 'openreelio', name: 'command_execute' }),
         ]),
       }),
@@ -197,6 +204,33 @@ describe('CodexReferenceAdapter', () => {
     });
     expect(appServerClient.interruptTurn).toHaveBeenCalledWith('thr_123', 'turn_2');
     expect(appServerClient.unsubscribeThread).toHaveBeenCalledWith('thr_123');
+  });
+
+  it('should steer an active Codex turn instead of starting a queued follow-up turn', async () => {
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      steerTurn: vi.fn().mockResolvedValue({ turnId: 'turn_1' }),
+      interruptTurn: vi.fn().mockResolvedValue(undefined),
+      unsubscribeThread: vi.fn().mockResolvedValue(undefined),
+    };
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+    const session = await adapter.startSession({ projectId: 'project-1' });
+
+    await adapter.sendMessage(session.sessionId, { content: 'Add captions', cwd: '/project' });
+    await adapter.sendMessage(session.sessionId, {
+      content: 'Actually keep them in the lower third',
+      cwd: '/project',
+    });
+    await adapter.interrupt(session.sessionId);
+
+    expect(appServerClient.startTurn).toHaveBeenCalledTimes(1);
+    expect(appServerClient.steerTurn).toHaveBeenCalledWith(
+      'thr_123',
+      'turn_1',
+      'Actually keep them in the lower third',
+    );
+    expect(appServerClient.interruptTurn).toHaveBeenCalledWith('thr_123', 'turn_1');
   });
 
   it('should resume a persisted Codex thread before sending a follow-up message', async () => {
@@ -448,6 +482,26 @@ describe('CodexReferenceAdapter', () => {
           isDirty: false,
         };
       }
+      if (command === 'get_annotation') {
+        return {
+          status: 'completed',
+          annotation: {
+            version: '1',
+            assetId: 'asset-1',
+            assetHash: 'hash',
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+            analysis: {
+              faces: {
+                provider: 'google_cloud',
+                analyzedAt: '2026-01-01T00:00:00Z',
+                config: {},
+                results: [],
+              },
+            },
+          },
+        };
+      }
       throw new Error(`Unexpected command: ${command}`);
     });
     const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
@@ -521,6 +575,26 @@ describe('CodexReferenceAdapter', () => {
           isDirty: false,
         };
       }
+      if (command === 'get_annotation') {
+        return {
+          status: 'completed',
+          annotation: {
+            version: '1',
+            assetId: 'asset-1',
+            assetHash: 'hash',
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+            analysis: {
+              faces: {
+                provider: 'google_cloud',
+                analyzedAt: '2026-01-01T00:00:00Z',
+                config: {},
+                results: [],
+              },
+            },
+          },
+        };
+      }
       throw new Error(`Unexpected command: ${command}`);
     });
     const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
@@ -554,6 +628,17 @@ describe('CodexReferenceAdapter', () => {
         input: '{}',
       },
     })) as any;
+    const annotationResponse = (await respondToRequest({
+      id: 16,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_annotation_read',
+        tool: 'openreelio.annotation_read',
+        input: '{"assetId":"asset-1"}',
+      },
+    })) as any;
 
     expect(projectStateResponse.success).toBe(true);
     expect(getFirstTextContent(projectStateResponse)).toContain('"contextToken"');
@@ -562,8 +647,13 @@ describe('CodexReferenceAdapter', () => {
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"mutationTool"');
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"ImportGeneratedCaptions"');
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"AddTextClip"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"textWorkflows"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"SetClipTransform"');
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"vertical_1080"');
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"1080x1920"');
+    expect(annotationResponse.success).toBe(true);
+    expect(getFirstTextContent(annotationResponse)).toContain('"analysisStatus"');
+    expect(getFirstTextContent(annotationResponse)).toContain('"asset-1"');
   });
 
   it('should expose stock media search through the Codex bridge', async () => {
@@ -760,6 +850,132 @@ describe('CodexReferenceAdapter', () => {
       }),
     );
     expect(projectStoreMocks.refreshFromBackendMutation).toHaveBeenCalled();
+  });
+
+  it('should place media through the Codex bridge using the drag-and-drop parity path', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const approvalDecisionProvider = vi.fn().mockResolvedValue('accept');
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_project_state') {
+        return {
+          meta: { name: 'Project' },
+          activeSequenceId: 'seq-1',
+          assets: [],
+          sequences: [],
+          isDirty: false,
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    vi.mocked(insertAgentMediaClip).mockResolvedValue({
+      insertResult: {
+        opId: 'op-video',
+        changes: [],
+        createdIds: ['clip-video'],
+        deletedIds: [],
+      },
+      clipId: 'clip-video',
+      sequenceId: 'seq-1',
+      trackId: 'video-1',
+      assetId: 'asset-video',
+      timelineStart: 4,
+      sourceIn: 1,
+      sourceOut: 6,
+      durationSec: 5,
+      linkedAudio: {
+        trackId: 'audio-1',
+        clipId: 'clip-audio',
+        createdTrack: false,
+      },
+    });
+    projectStoreMocks.refreshFromBackendMutation.mockResolvedValue(11);
+    const adapter = new CodexReferenceAdapter(undefined, {
+      appServerClient,
+      approvalDecisionProvider,
+    });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const contextResponse = (await respondToRequest({
+      id: 19,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_context',
+        namespace: 'openreelio',
+        tool: 'project_state',
+        arguments: {},
+      },
+    })) as any;
+    const contextToken = JSON.parse(getFirstTextContent(contextResponse)).contextToken;
+
+    const response = (await respondToRequest({
+      id: 20,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_media_insert',
+        namespace: 'openreelio',
+        tool: 'media_insert',
+        arguments: {
+          sequenceId: 'seq-1',
+          trackId: 'video-1',
+          assetId: 'asset-video',
+          timelineStart: 4,
+          sourceIn: 1,
+          sourceOut: 6,
+          reason: 'Place the selected interview range on the timeline.',
+          contextToken,
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(true);
+    expect(approvalDecisionProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalType: 'openreelio_edit_command',
+        tool: 'OpenReelio edit',
+        args: expect.objectContaining({
+          commandType: 'MediaInsert',
+          payload: expect.objectContaining({
+            sequenceId: 'seq-1',
+            trackId: 'video-1',
+            assetId: 'asset-video',
+            sourceIn: 1,
+            sourceOut: 6,
+          }),
+        }),
+      }),
+    );
+    expect(insertAgentMediaClip).toHaveBeenCalledWith({
+      sequenceId: 'seq-1',
+      trackId: 'video-1',
+      assetId: 'asset-video',
+      timelineStart: 4,
+      sourceIn: 1,
+      sourceOut: 6,
+      audioOnly: false,
+      autoExtractLinkedAudio: undefined,
+    });
+    expect(getFirstTextContent(response)).toContain('drag-and-drop parity path');
+    expect(getFirstTextContent(response)).toContain('"clip-audio"');
+    expect(getFirstTextContent(response)).toContain('"stateVersion": 11');
   });
 
   it('should reject stock media search without a query before invoking Tauri', async () => {

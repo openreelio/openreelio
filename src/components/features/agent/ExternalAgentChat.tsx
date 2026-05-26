@@ -94,6 +94,7 @@ export const ExternalAgentChat = forwardRef<AgentRuntimeChatHandle, ExternalAgen
       enabled: ready,
       approvalBroker,
       sessionPersistence,
+      retainAcrossUnmount: true,
       onComplete,
       onAbort,
       onError,
@@ -136,7 +137,7 @@ export const ExternalAgentChat = forwardRef<AgentRuntimeChatHandle, ExternalAgen
         onToolAllowAlways={() => runtime.resolveApproval('acceptForSession')}
         onToolDeny={() => runtime.resolveApproval('decline')}
         clearQueueOnProjectSwitch
-        clearQueueOnUnmount
+        submitWhileRunning="steer"
       />
     );
   },

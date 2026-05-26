@@ -228,6 +228,72 @@ describe('ExternalAgentChatRuntimeController', () => {
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
+  it('should keep active-turn steering output ordered after the steering user message', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+    });
+
+    await controller.sendMessage('Add captions');
+    adapter.emit({
+      type: 'tool_started',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'tool_1',
+      tool: 'openreelio.command_execute',
+      description: 'Add text clip',
+      args: { commandType: 'AddTextClip' },
+    });
+
+    await controller.sendMessage('Keep the captions lower');
+    adapter.emit({
+      type: 'assistant_delta',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'item_2',
+      content: 'Adjusted placement.',
+    });
+    adapter.emit({
+      type: 'tool_completed',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'tool_1',
+      tool: 'openreelio.command_execute',
+      success: true,
+      result: { ok: true },
+      durationMs: 12,
+    });
+    adapter.emit({
+      type: 'turn_completed',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      turnId: 'turn_1',
+      status: 'completed',
+    });
+
+    expect(adapter.sendMessage).toHaveBeenCalledTimes(2);
+    expect(conversation.getMessageParts('assistant-1')).toEqual([
+      expect.objectContaining({
+        type: 'tool_call',
+        stepId: 'tool_1',
+        status: 'completed',
+      }),
+      expect.objectContaining({
+        type: 'tool_result',
+        stepId: 'tool_1',
+        success: true,
+      }),
+    ]);
+    expect(conversation.getMessageParts('assistant-2')).toEqual([
+      { type: 'text', content: 'Adjusted placement.' },
+    ]);
+    expect(conversation.finalizeMessage).toHaveBeenCalledWith('assistant-1');
+    expect(conversation.finalizeMessage).toHaveBeenCalledWith('assistant-2');
+  });
+
   it('should keep external runtime state isolated per conversation session', async () => {
     const conversation = new FakeConversationGateway();
     const adapter = new FakeExternalAgentAdapter();
@@ -312,6 +378,37 @@ describe('ExternalAgentChatRuntimeController', () => {
     await controller.interrupt();
 
     expect(adapter.interrupt).toHaveBeenCalledWith('thr_123');
+  });
+
+  it('should clear running state when interrupt succeeds before Codex emits completion', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const onAbort = vi.fn();
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+      onAbort,
+    });
+
+    await controller.sendMessage('Long task');
+    await controller.interrupt();
+
+    expect(controller.getState()).toMatchObject({
+      phase: 'aborted',
+      isRunning: false,
+    });
+    expect(conversation.finalizeMessage).toHaveBeenCalledWith('assistant-1');
+    expect(onAbort).toHaveBeenCalledTimes(1);
+
+    adapter.emit({
+      type: 'turn_completed',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      turnId: 'turn_1',
+      status: 'interrupted',
+    });
+    expect(onAbort).toHaveBeenCalledTimes(1);
   });
 
   it('should resume a persisted external session instead of creating a duplicate runtime session', async () => {
@@ -576,7 +673,7 @@ describe('ExternalAgentChatRuntimeController', () => {
     expect(conversation.finalizeMessage).not.toHaveBeenCalled();
   });
 
-  it('should shut down tracked runtime sessions before switching adapters', async () => {
+  it('should defer adapter replacement while a runtime session is still running', async () => {
     const conversation = new FakeConversationGateway();
     const adapter = new FakeExternalAgentAdapter();
     const nextAdapter = new FakeExternalAgentAdapter();
@@ -587,6 +684,21 @@ describe('ExternalAgentChatRuntimeController', () => {
     });
 
     await controller.sendMessage('Start a session');
+    controller.updateContext({
+      adapter: nextAdapter,
+      projectId: 'project-1',
+    });
+
+    expect(adapter.shutdown).not.toHaveBeenCalled();
+    expect(nextAdapter.shutdown).not.toHaveBeenCalled();
+
+    adapter.emit({
+      type: 'turn_completed',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      turnId: 'turn_1',
+      status: 'completed',
+    });
     controller.updateContext({
       adapter: nextAdapter,
       projectId: 'project-1',

@@ -72,6 +72,13 @@ export interface ExternalAgentChatRuntimeControllerOptions {
   onError?: (error: Error) => void;
 }
 
+interface ExternalAgentRuntimeCallbackUpdate {
+  onStateChange?: ((state: ExternalAgentChatRuntimeState) => void) | null;
+  onComplete?: () => void;
+  onAbort?: () => void;
+  onError?: (error: Error) => void;
+}
+
 const INITIAL_STATE: ExternalAgentChatRuntimeState = {
   phase: 'idle',
   isRunning: false,
@@ -100,9 +107,10 @@ export class ExternalAgentChatRuntimeController {
   private readonly sessionByConversationSessionId = new Map<string, ExternalAgentSessionHandle>();
   private readonly conversationSessionIdByExternalSessionId = new Map<string, string>();
   private readonly messageIdByExternalSessionId = new Map<string, string>();
+  private readonly messageIdsByExternalSessionId = new Map<string, Set<string>>();
   private readonly textDeltaMessages = new Set<string>();
-  private readonly itemPartIndex = new Map<string, number>();
-  private readonly patchPartIndex = new Map<string, number>();
+  private readonly itemPartIndex = new Map<string, { messageId: string; partIndex: number }>();
+  private readonly patchPartIndex = new Map<string, { messageId: string; partIndex: number }>();
   private readonly approvalPartIndex = new Map<string, { messageId: string; partIndex: number }>();
   private readonly conversationSessionsPendingPersistence = new Set<string>();
   private activeConversationSessionId: string | null = null;
@@ -155,11 +163,20 @@ export class ExternalAgentChatRuntimeController {
     projectId: string | null;
     cwd?: string | null;
     enabled?: boolean;
+    onStateChange?: ((state: ExternalAgentChatRuntimeState) => void) | null;
     onComplete?: () => void;
     onAbort?: () => void;
     onError?: (error: Error) => void;
   }): void {
     if (input.adapter && input.adapter !== this.options.adapter) {
+      if (this.hasRunningState()) {
+        this.projectId = input.projectId;
+        this.cwd = input.cwd ?? null;
+        this.enabled = input.enabled ?? true;
+        this.updateCallbacks(input);
+        return;
+      }
+
       const previousAdapter = this.options.adapter;
       this.shutdownTrackedExternalSessions(previousAdapter);
       this.unsubscribe?.();
@@ -171,12 +188,31 @@ export class ExternalAgentChatRuntimeController {
     this.projectId = input.projectId;
     this.cwd = input.cwd ?? null;
     this.enabled = input.enabled ?? true;
+    this.updateCallbacks(input);
+  }
+
+  updateCallbacks(input: ExternalAgentRuntimeCallbackUpdate): void {
     this.callbacks = {
       ...this.callbacks,
-      onComplete: input.onComplete,
-      onAbort: input.onAbort,
-      onError: input.onError,
+      ...('onStateChange' in input ? { onStateChange: input.onStateChange ?? undefined } : {}),
+      ...('onComplete' in input ? { onComplete: input.onComplete } : {}),
+      ...('onAbort' in input ? { onAbort: input.onAbort } : {}),
+      ...('onError' in input ? { onError: input.onError } : {}),
     };
+  }
+
+  hasRunningState(): boolean {
+    if (this.fallbackState.isRunning) {
+      return true;
+    }
+
+    for (const state of this.stateByConversationSessionId.values()) {
+      if (state.isRunning) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   getState(
@@ -205,14 +241,17 @@ export class ExternalAgentChatRuntimeController {
       return;
     }
 
-    this.setState(
-      {
-        phase: 'starting',
-        isRunning: true,
-        error: null,
-      },
-      this.options.conversation.getActiveSessionId(),
-    );
+    const initialConversationSessionId = this.options.conversation.getActiveSessionId();
+    if (!this.getState(initialConversationSessionId).isRunning) {
+      this.setState(
+        {
+          phase: 'starting',
+          isRunning: true,
+          error: null,
+        },
+        initialConversationSessionId,
+      );
+    }
 
     const conversationSessionId = await this.options.conversation.ensureSession(
       this.options.adapter.id,
@@ -222,17 +261,16 @@ export class ExternalAgentChatRuntimeController {
       return;
     }
 
+    let targetExternalSessionId: string | null = null;
     try {
       const externalSession = await this.ensureExternalSession(conversationSessionId);
+      targetExternalSessionId = externalSession.sessionId;
       this.activeConversationSessionId = conversationSessionId;
       this.conversationSessionIdByExternalSessionId.set(
         externalSession.sessionId,
         conversationSessionId,
       );
-      this.messageIdByExternalSessionId.set(
-        externalSession.sessionId,
-        this.options.conversation.startAssistantMessage(conversationSessionId),
-      );
+      this.startExternalAssistantMessage(externalSession.sessionId, conversationSessionId);
       this.setState({ phase: 'running', isRunning: true, error: null }, conversationSessionId);
       await this.options.adapter.sendMessage(externalSession.sessionId, {
         content,
@@ -240,7 +278,10 @@ export class ExternalAgentChatRuntimeController {
       });
       await this.persistExternalSessionAfterTurnStart(conversationSessionId, externalSession);
     } catch (error) {
-      this.fail(error instanceof Error ? error : new Error(String(error)));
+      this.fail(
+        error instanceof Error ? error : new Error(String(error)),
+        targetExternalSessionId ?? undefined,
+      );
     }
   }
 
@@ -258,8 +299,12 @@ export class ExternalAgentChatRuntimeController {
 
     try {
       await this.options.adapter.interrupt(externalSession.sessionId);
+      this.finishActiveMessage('aborted', externalSession.sessionId);
     } catch (error) {
-      this.fail(error instanceof Error ? error : new Error(String(error)));
+      this.fail(
+        error instanceof Error ? error : new Error(String(error)),
+        externalSession.sessionId,
+      );
     }
   }
 
@@ -467,7 +512,10 @@ export class ExternalAgentChatRuntimeController {
       status: 'running',
       startedAt: Date.now(),
     });
-    this.itemPartIndex.set(this.itemKey(event.sessionId, event.itemId), partIndex);
+    this.itemPartIndex.set(this.itemKey(event.sessionId, event.itemId), {
+      messageId,
+      partIndex,
+    });
     const sessionState = this.getStateForExternalSession(event.sessionId);
     this.setState(
       {
@@ -481,7 +529,9 @@ export class ExternalAgentChatRuntimeController {
   private handleToolCompleted(
     event: Extract<ExternalAgentRuntimeEvent, { type: 'tool_completed' }>,
   ): void {
-    const messageId = this.messageIdByExternalSessionId.get(event.sessionId);
+    const indexedPart = this.itemPartIndex.get(this.itemKey(event.sessionId, event.itemId));
+    const messageId =
+      indexedPart?.messageId ?? this.messageIdByExternalSessionId.get(event.sessionId);
     if (!messageId) {
       return;
     }
@@ -525,13 +575,13 @@ export class ExternalAgentChatRuntimeController {
     };
 
     if (existingIndex !== undefined) {
-      this.options.conversation.updatePart(messageId, existingIndex, patch);
+      this.options.conversation.updatePart(existingIndex.messageId, existingIndex.partIndex, patch);
       return;
     }
 
     const partIndex = this.options.conversation.getMessageParts(messageId)?.length ?? 0;
     this.options.conversation.appendPart(messageId, patch);
-    this.patchPartIndex.set(key, partIndex);
+    this.patchPartIndex.set(key, { messageId, partIndex });
   }
 
   private handleApprovalRequest(
@@ -641,13 +691,12 @@ export class ExternalAgentChatRuntimeController {
     itemId: string,
     update: Partial<MessagePart>,
   ): void {
-    const messageId = this.messageIdByExternalSessionId.get(externalSessionId);
-    const partIndex = this.itemPartIndex.get(this.itemKey(externalSessionId, itemId));
-    if (!messageId || partIndex === undefined) {
+    const indexedPart = this.itemPartIndex.get(this.itemKey(externalSessionId, itemId));
+    if (!indexedPart) {
       return;
     }
 
-    this.options.conversation.updatePart(messageId, partIndex, update);
+    this.options.conversation.updatePart(indexedPart.messageId, indexedPart.partIndex, update);
   }
 
   private fail(error: Error, externalSessionId?: string): void {
@@ -660,7 +709,11 @@ export class ExternalAgentChatRuntimeController {
         messageId,
         createErrorPart('EXTERNAL_AGENT_ERROR', error.message, 'external_agent', true),
       );
-      this.options.conversation.finalizeMessage(messageId);
+      if (externalSessionId) {
+        this.finalizeMessagesForExternalSession(externalSessionId);
+      } else {
+        this.options.conversation.finalizeMessage(messageId);
+      }
     }
 
     this.setState(
@@ -676,24 +729,64 @@ export class ExternalAgentChatRuntimeController {
     phase: 'completed' | 'aborted',
     externalSessionId?: string | null,
   ): void {
+    const conversationSessionId = externalSessionId
+      ? this.getConversationSessionIdForExternalSession(externalSessionId)
+      : this.activeConversationSessionId;
+    const previousState = this.getState(conversationSessionId);
+    const shouldNotify =
+      previousState.isRunning ||
+      previousState.phase === 'starting' ||
+      previousState.phase === 'running';
+
     const messageId = externalSessionId
       ? this.messageIdByExternalSessionId.get(externalSessionId)
       : this.getActiveMessageId();
 
-    if (messageId) {
+    if (externalSessionId) {
+      this.finalizeMessagesForExternalSession(externalSessionId);
+    } else if (messageId) {
       this.options.conversation.finalizeMessage(messageId);
     }
 
-    this.setState(
-      { phase, isRunning: false, error: null },
-      externalSessionId
-        ? this.getConversationSessionIdForExternalSession(externalSessionId)
-        : this.activeConversationSessionId,
-    );
+    this.setState({ phase, isRunning: false, error: null }, conversationSessionId);
+    if (!shouldNotify) {
+      return;
+    }
+
     if (phase === 'aborted') {
       this.callbacks.onAbort?.();
     } else {
       this.callbacks.onComplete?.();
+    }
+  }
+
+  private startExternalAssistantMessage(
+    externalSessionId: string,
+    conversationSessionId: string,
+  ): string {
+    const messageId = this.options.conversation.startAssistantMessage(conversationSessionId);
+    this.messageIdByExternalSessionId.set(externalSessionId, messageId);
+    let messageIds = this.messageIdsByExternalSessionId.get(externalSessionId);
+    if (!messageIds) {
+      messageIds = new Set<string>();
+      this.messageIdsByExternalSessionId.set(externalSessionId, messageIds);
+    }
+    messageIds.add(messageId);
+    return messageId;
+  }
+
+  private finalizeMessagesForExternalSession(externalSessionId: string): void {
+    const messageIds = this.messageIdsByExternalSessionId.get(externalSessionId);
+    if (!messageIds?.size) {
+      const messageId = this.messageIdByExternalSessionId.get(externalSessionId);
+      if (messageId) {
+        this.options.conversation.finalizeMessage(messageId);
+      }
+      return;
+    }
+
+    for (const messageId of messageIds) {
+      this.options.conversation.finalizeMessage(messageId);
     }
   }
 
@@ -775,6 +868,7 @@ export class ExternalAgentChatRuntimeController {
     this.sessionByConversationSessionId.clear();
     this.conversationSessionIdByExternalSessionId.clear();
     this.messageIdByExternalSessionId.clear();
+    this.messageIdsByExternalSessionId.clear();
     this.textDeltaMessages.clear();
     this.itemPartIndex.clear();
     this.patchPartIndex.clear();

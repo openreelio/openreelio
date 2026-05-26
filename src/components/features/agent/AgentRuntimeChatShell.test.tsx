@@ -16,12 +16,14 @@ function renderRuntimeShell({
   abort = vi.fn(),
   phase = 'executing',
   isRunning = true,
+  submitWhileRunning,
   pendingToolPermissionRequest = null,
 }: {
   executeMessage?: ReturnType<typeof vi.fn>;
   abort?: ReturnType<typeof vi.fn>;
   phase?: ComponentProps<typeof AgentRuntimeChatShell>['phase'];
   isRunning?: boolean;
+  submitWhileRunning?: ComponentProps<typeof AgentRuntimeChatShell>['submitWhileRunning'];
   pendingToolPermissionRequest?: ComponentProps<
     typeof AgentRuntimeChatShell
   >['pendingToolPermissionRequest'];
@@ -49,6 +51,7 @@ function renderRuntimeShell({
       onToolAllow={() => {}}
       onToolAllowAlways={() => {}}
       onToolDeny={() => {}}
+      submitWhileRunning={submitWhileRunning}
     />,
   );
 }
@@ -147,6 +150,48 @@ describe('AgentRuntimeChatShell', () => {
 
     expect(messageArea).toContainElement(overlay);
     expect(screen.getByTestId('chat-input-area')).toBeInTheDocument();
+  });
+
+  it('submits immediately instead of queueing when running submissions steer the active turn', async () => {
+    const user = userEvent.setup();
+    const executeMessage = vi.fn().mockResolvedValue(undefined);
+    const onSubmit = vi.fn();
+
+    render(
+      <AgentRuntimeChatShell
+        chatTestId="agent-runtime-shell"
+        executeMessage={executeMessage}
+        abort={vi.fn()}
+        phase="executing"
+        isRunning={true}
+        isEnabled={true}
+        error={null}
+        runtimeSummary={{ startedTools: 1, completedTools: 0, latestIteration: 0 }}
+        plan={null}
+        pendingClarificationQuestion={null}
+        pendingToolPermissionRequest={null}
+        onSubmit={onSubmit}
+        onApprove={() => {}}
+        onReject={() => {}}
+        onRetry={() => {}}
+        onToolAllow={() => {}}
+        onToolAllowAlways={() => {}}
+        onToolDeny={() => {}}
+        submitWhileRunning="steer"
+      />,
+    );
+
+    await user.type(screen.getByTestId('chat-input-field'), 'Keep it lower');
+    await user.click(screen.getByTestId('chat-input-submit-btn'));
+
+    expect(onSubmit).toHaveBeenCalledWith('Keep it lower');
+    await waitFor(() => {
+      expect(executeMessage).toHaveBeenCalledWith('Keep it lower');
+    });
+    expect(useMessageQueueStore.getState().queue).toHaveLength(0);
+    expect(useConversationStore.getState().activeConversation?.messages[0]).toMatchObject({
+      role: 'user',
+    });
   });
 
   it('does not dequeue queued prompts after the user stops execution', async () => {
