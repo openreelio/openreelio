@@ -80,6 +80,13 @@ function matchesInsertClipPath(path: string): boolean {
   return (
     path === 'data' ||
     path === 'data.clipId' ||
+    path === 'data.linkedAudio' ||
+    path === 'data.linkedAudio.trackId' ||
+    path === 'data.linkedAudio.clipId' ||
+    path === 'data.linkedAudio.createdTrack' ||
+    path === 'data.sourceIn' ||
+    path === 'data.sourceOut' ||
+    path === 'data.durationSec' ||
     path === 'data.operationId' ||
     path === 'data.createdIds' ||
     /^data\.createdIds\[\d+\]$/.test(path)
