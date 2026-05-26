@@ -7,6 +7,7 @@
 
 import { useRef, useMemo, useCallback, useEffect, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import type { VisualRenderLayer } from '@/bindings';
 import {
   PLAYBACK_EVENTS,
   type PlaybackSeekEventDetail,
@@ -17,7 +18,6 @@ import { useTimelineStore } from '@/stores/timelineStore';
 import { createLogger } from '@/services/logger';
 import { PlayerControls } from './PlayerControls';
 import { normalizeFileUriToPath } from '@/utils/uri';
-import { getActiveMediaVisualLayers } from '@/utils/renderGraphLayers';
 import { useSequenceRenderGraph } from '@/hooks/useSequenceRenderGraph';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 import { textRenderSpecToTextClipData } from '@/utils/renderGraphText';
@@ -34,6 +34,7 @@ import {
   resolveCaptionAnchor as resolveCaptionAnchorValue,
 } from '@/utils/captionStyle';
 import {
+  getClipTimelineEndSec,
   getClipSourceTimeAtTimelineTime,
   getSafeClipSpeed,
   isClipActiveAtTime,
@@ -75,6 +76,7 @@ interface ActiveClip {
   asset: Asset;
   trackId: string;
   trackIndex: number;
+  isActive: boolean;
 }
 
 interface RenderableClip extends ActiveClip {
@@ -112,6 +114,8 @@ const PRECISE_SEEK_TOLERANCE = 0.008; // ~0.5 frame at 60fps for paused scrubbin
 const DRIFT_SEEK_TOLERANCE = 0.12; // reduce micro-stutter from overly frequent drift seeks
 const HARD_SEEK_DETECTION_DELTA = 0.25; // Treat as explicit jump when delta exceeds this
 const TIME_CHANGE_EPSILON = 0.001;
+const CLIP_BOUNDARY_PRELOAD_SEC = 0.5;
+const CLIP_BOUNDARY_RETAIN_SEC = 0.15;
 const TRACK_LAYER_Z_INDEX_STEP = 10;
 const CAPTION_LAYER_Z_INDEX_OFFSET = 5;
 const TEXT_LAYER_Z_INDEX_OFFSET = 6;
@@ -126,6 +130,50 @@ function isWindowsAbsolutePath(path: string): boolean {
 
 function isClipEnabled(clip: Clip): boolean {
   return clip.enabled !== false;
+}
+
+function getFiniteClipTimelineStartSec(clip: Clip): number | null {
+  const timelineInSec = clip.place?.timelineInSec;
+  return Number.isFinite(timelineInSec) ? timelineInSec : null;
+}
+
+function isTimelineRangeActive(startSec: number, endSec: number, timeSec: number): boolean {
+  return (
+    Number.isFinite(timeSec) &&
+    Number.isFinite(startSec) &&
+    Number.isFinite(endSec) &&
+    endSec > startSec &&
+    timeSec >= startSec &&
+    timeSec < endSec
+  );
+}
+
+function isTimelineRangeInVideoMountWindow(
+  startSec: number,
+  endSec: number,
+  timeSec: number,
+): boolean {
+  return (
+    Number.isFinite(timeSec) &&
+    Number.isFinite(startSec) &&
+    Number.isFinite(endSec) &&
+    endSec > startSec &&
+    timeSec >= startSec - CLIP_BOUNDARY_PRELOAD_SEC &&
+    timeSec < endSec + CLIP_BOUNDARY_RETAIN_SEC
+  );
+}
+
+function shouldMountClipNearPlaybackTime(clip: Clip, timeSec: number): boolean {
+  const startSec = getFiniteClipTimelineStartSec(clip);
+  if (startSec == null) {
+    return false;
+  }
+
+  return isTimelineRangeInVideoMountWindow(startSec, getClipTimelineEndSec(clip), timeSec);
+}
+
+function shouldMountLayerNearPlaybackTime(layer: VisualRenderLayer, timeSec: number): boolean {
+  return isTimelineRangeInVideoMountWindow(layer.timelineInSec, layer.timelineOutSec, timeSec);
 }
 
 function clampTimelineTime(time: number, duration: number): number {
@@ -418,41 +466,45 @@ export function ProxyPreviewPlayer({
   // Cache previous active clip result to stabilize the reference when the same
   // clips are active across consecutive frames. This prevents unnecessary
   // downstream re-renders and effect re-fires during steady-state playback.
-  const prevActiveClipsRef = useRef<ActiveClip[]>([]);
+  const prevPreviewClipsRef = useRef<ActiveClip[]>([]);
 
-  // Find active clips at current time (sorted by layer/track)
-  const activeClips = useMemo((): ActiveClip[] => {
+  // Keep clips mounted slightly before/after cut boundaries so the browser can
+  // load and seek the next video before it becomes visible.
+  const previewClips = useMemo((): ActiveClip[] => {
     if (!sequence) {
-      if (prevActiveClipsRef.current.length === 0) return prevActiveClipsRef.current;
-      prevActiveClipsRef.current = [];
-      return prevActiveClipsRef.current;
+      if (prevPreviewClipsRef.current.length === 0) return prevPreviewClipsRef.current;
+      prevPreviewClipsRef.current = [];
+      return prevPreviewClipsRef.current;
     }
 
     const graphForSequence = renderGraph?.sequenceId === sequence.id ? renderGraph : null;
-    const graphLayers = getActiveMediaVisualLayers(graphForSequence, assets, currentTime, {
-      trackKinds: ['video'],
-    });
-    const clips: ActiveClip[] =
-      graphLayers.length > 0
-        ? graphLayers
-            .filter(({ asset }) => asset?.kind === 'video')
-            .map(({ layer, asset }) => {
-              const clip = clipById.get(layer.clipId);
-              if (!clip || !asset) {
-                return null;
-              }
+    const clips: ActiveClip[] = [];
 
-              return {
-                clip,
-                asset,
-                trackId: layer.trackId,
-                trackIndex: layer.trackIndex,
-              };
-            })
-            .filter((clip): clip is ActiveClip => clip !== null)
-        : [];
+    if (graphForSequence) {
+      for (const layer of graphForSequence.visualLayers) {
+        if (
+          layer.trackKind !== 'video' ||
+          layer.source.type !== 'media' ||
+          !shouldMountLayerNearPlaybackTime(layer, currentTime)
+        ) {
+          continue;
+        }
 
-    if (clips.length === 0 && !graphForSequence) {
+        const clip = clipById.get(layer.clipId);
+        const asset = assets.get(layer.source.assetId);
+        if (!clip || !asset || asset.kind !== 'video' || !isClipEnabled(clip)) {
+          continue;
+        }
+
+        clips.push({
+          clip,
+          asset,
+          trackId: layer.trackId,
+          trackIndex: layer.trackIndex,
+          isActive: isTimelineRangeActive(layer.timelineInSec, layer.timelineOutSec, currentTime),
+        });
+      }
+    } else {
       sequence.tracks.forEach((track, trackIndex) => {
         if (track.muted || !track.visible) return;
 
@@ -464,19 +516,22 @@ export function ProxyPreviewPlayer({
             continue;
           }
 
-          if (isClipActiveAtTime(clip, currentTime)) {
-            const asset = assets.get(clip.assetId);
-            if (!asset || asset.kind !== 'video') {
-              continue;
-            }
-
-            clips.push({
-              clip,
-              asset,
-              trackId: track.id,
-              trackIndex,
-            });
+          if (!shouldMountClipNearPlaybackTime(clip, currentTime)) {
+            continue;
           }
+
+          const asset = assets.get(clip.assetId);
+          if (!asset || asset.kind !== 'video') {
+            continue;
+          }
+
+          clips.push({
+            clip,
+            asset,
+            trackId: track.id,
+            trackIndex,
+            isActive: isClipActiveAtTime(clip, currentTime),
+          });
         }
       });
 
@@ -485,9 +540,9 @@ export function ProxyPreviewPlayer({
       clips.sort((a, b) => b.trackIndex - a.trackIndex);
     }
 
-    // Return the same reference if the active clip set hasn't changed.
+    // Return the same reference if the mounted clip set hasn't changed.
     // This avoids cascading re-renders when playhead moves within the same clip.
-    const prev = prevActiveClipsRef.current;
+    const prev = prevPreviewClipsRef.current;
     if (
       clips.length === prev.length &&
       clips.every(
@@ -495,13 +550,14 @@ export function ProxyPreviewPlayer({
           clipInfo.clip === prev[index].clip &&
           clipInfo.asset === prev[index].asset &&
           clipInfo.trackId === prev[index].trackId &&
-          clipInfo.trackIndex === prev[index].trackIndex,
+          clipInfo.trackIndex === prev[index].trackIndex &&
+          clipInfo.isActive === prev[index].isActive,
       )
     ) {
       return prev;
     }
 
-    prevActiveClipsRef.current = clips;
+    prevPreviewClipsRef.current = clips;
     return clips;
   }, [sequence, renderGraph, currentTime, assets, clipById]);
 
@@ -568,14 +624,14 @@ export function ProxyPreviewPlayer({
   const renderableClips = useMemo((): RenderableClip[] => {
     const clips: RenderableClip[] = [];
 
-    for (const clipInfo of activeClips) {
+    for (const clipInfo of previewClips) {
       const src = getVideoSrc(clipInfo.asset);
       if (!src) continue;
       clips.push({ ...clipInfo, src });
     }
 
     return clips;
-  }, [activeClips, getVideoSrc]);
+  }, [previewClips, getVideoSrc]);
 
   const activeCaptions = useMemo((): ActiveCaption[] => {
     if (!sequence) {
@@ -932,11 +988,12 @@ export function ProxyPreviewPlayer({
 
         const clampedSourceTime = getClampedSourceTime(clip, safeTimelineTime);
         const safeSpeed = getSafeClipSpeed(clip);
+        const shouldPlayClip = isClipActiveAtTime(clip, safeTimelineTime);
 
         const tolerance = forceSeek || !isPlaying ? PRECISE_SEEK_TOLERANCE : DRIFT_SEEK_TOLERANCE;
         // During active playback, avoid forcing currentTime while the element is
         // already seeking. Re-seeking a seeking element can cause visible jitter.
-        if (!forceSeek && isPlaying && video.seeking) {
+        if (!forceSeek && isPlaying && shouldPlayClip && video.seeking) {
           return;
         }
 
@@ -950,6 +1007,13 @@ export function ProxyPreviewPlayer({
         // ProxyPreviewPlayer video elements stay muted; Web Audio owns timeline audio output.
         // Keep volume at zero as a defensive fallback even if browser muted state changes.
         video.volume = 0;
+
+        if (!shouldPlayClip) {
+          if (!video.paused) {
+            video.pause();
+          }
+          return;
+        }
 
         // Sync play state
         if (isPlaying && video.paused) {
@@ -1384,6 +1448,8 @@ export function ProxyPreviewPlayer({
     );
   }
 
+  const hasActiveRenderableClip = renderableClips.some((clipInfo) => clipInfo.isActive);
+
   return (
     <div
       ref={containerRef}
@@ -1397,67 +1463,73 @@ export function ProxyPreviewPlayer({
     >
       {/* Video Layers */}
       <div className="absolute inset-0 pointer-events-none" data-testid="proxy-video-layer">
-        {renderableClips.length === 0 ? (
+        {!hasActiveRenderableClip && (
           <div className="w-full h-full flex items-center justify-center text-gray-500">
             <p>No clips at current time</p>
           </div>
-        ) : (
-          renderableClips.map(({ clip, asset, trackIndex, src }) => {
-            const error = videoErrors.get(clip.id);
+        )}
+        {renderableClips.map(({ clip, asset, trackIndex, src, isActive }) => {
+          const error = videoErrors.get(clip.id);
 
-            // Show error state if video failed to load
-            if (error) {
-              return (
-                <div
-                  key={clip.id}
-                  data-testid={`proxy-video-error-${clip.id}`}
-                  className="absolute inset-0 flex items-center justify-center bg-gray-900 pointer-events-none"
-                  style={{
-                    zIndex: (sequence.tracks.length - trackIndex) * TRACK_LAYER_Z_INDEX_STEP,
-                  }}
-                >
-                  <div className="text-center text-red-400">
-                    <svg
-                      className="w-12 h-12 mx-auto mb-2"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={1.5}
-                        d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                      />
-                    </svg>
-                    <p className="text-sm">Failed to load video</p>
-                    <p className="text-xs text-gray-500 mt-1">{asset.name}</p>
-                  </div>
-                </div>
-              );
-            }
-
+          // Show error state if video failed to load
+          if (error && isActive) {
             return (
-              <video
+              <div
                 key={clip.id}
-                ref={(el) => setVideoRef(clip.id, el)}
-                data-testid={`proxy-video-${clip.id}`}
-                src={src}
-                className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+                data-testid={`proxy-video-error-${clip.id}`}
+                className="absolute inset-0 flex items-center justify-center bg-gray-900 pointer-events-none"
                 style={{
-                  opacity: clip.opacity,
                   zIndex: (sequence.tracks.length - trackIndex) * TRACK_LAYER_Z_INDEX_STEP,
                 }}
-                playsInline
-                muted
-                onLoadedData={() => handleVideoLoaded(clip.id)}
-                onError={(e) =>
-                  handleVideoError(clip.id, e.currentTarget.error?.message || 'Unknown error')
-                }
-              />
+              >
+                <div className="text-center text-red-400">
+                  <svg
+                    className="w-12 h-12 mx-auto mb-2"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={1.5}
+                      d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                    />
+                  </svg>
+                  <p className="text-sm">Failed to load video</p>
+                  <p className="text-xs text-gray-500 mt-1">{asset.name}</p>
+                </div>
+              </div>
             );
-          })
-        )}
+          }
+
+          if (error) {
+            return null;
+          }
+
+          return (
+            <video
+              key={clip.id}
+              ref={(el) => setVideoRef(clip.id, el)}
+              data-testid={`proxy-video-${clip.id}`}
+              src={src}
+              className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+              style={{
+                opacity: isActive ? clip.opacity : 0,
+                visibility: isActive ? 'visible' : 'hidden',
+                zIndex: (sequence.tracks.length - trackIndex) * TRACK_LAYER_Z_INDEX_STEP,
+              }}
+              aria-hidden={!isActive}
+              playsInline
+              muted
+              preload="auto"
+              onLoadedData={() => handleVideoLoaded(clip.id)}
+              onError={(e) =>
+                handleVideoError(clip.id, e.currentTarget.error?.message || 'Unknown error')
+              }
+            />
+          );
+        })}
       </div>
 
       {/* Caption overlays (rendered in proxy mode to avoid canvas fallback for captions) */}

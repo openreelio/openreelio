@@ -185,6 +185,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   onTextPlacementCommit,
 }: TimelinePreviewPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const frameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width, height });
   const [isMultiFrameLoading, setIsMultiFrameLoading] = useState(false);
@@ -618,6 +619,12 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         return true;
       };
 
+      if (!activeSequence) {
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        return;
+      }
+
       const activeClips = getActiveClipsAtTime(activeSequence, time);
 
       if (activeClips.length === 0) {
@@ -627,9 +634,22 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         return;
       }
 
-      if (!activeSequence) {
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      let frameCanvas = frameCanvasRef.current;
+      if (!frameCanvas || frameCanvas.ownerDocument !== canvas.ownerDocument) {
+        frameCanvas = canvas.ownerDocument.createElement('canvas');
+        frameCanvasRef.current = frameCanvas;
+      }
+
+      if (frameCanvas.width !== canvas.width) {
+        frameCanvas.width = canvas.width;
+      }
+      if (frameCanvas.height !== canvas.height) {
+        frameCanvas.height = canvas.height;
+      }
+
+      const frameCtx = frameCanvas.getContext('2d');
+      if (!frameCtx) {
+        console.error('TimelinePreviewPlayer: Failed to get 2D canvas context');
         return;
       }
 
@@ -641,11 +661,12 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         setIsMultiFrameLoading(true);
       }
 
-      // Clear canvas before compositing
-      ctx.fillStyle = '#000000';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // Compose into an offscreen canvas first. Clearing the visible canvas
+      // before async frame extraction completes exposes the black background at cuts.
+      frameCtx.fillStyle = '#000000';
+      frameCtx.fillRect(0, 0, frameCanvas.width, frameCanvas.height);
       const completed = await renderSequenceToCanvas(
-        ctx,
+        frameCtx,
         activeSequence,
         time,
         time,
@@ -656,6 +677,9 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       if (!completed) {
         return;
       }
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(frameCanvas, 0, 0);
 
       // Clear multi-frame loading state (only if mounted and was loading)
       const wasLoadingAtEnd = isLoadingRef.current;

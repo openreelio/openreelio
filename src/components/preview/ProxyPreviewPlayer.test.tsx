@@ -192,6 +192,136 @@ describe('ProxyPreviewPlayer', () => {
     expect(screen.getByTestId('proxy-video-clip-bottom')).toBeInTheDocument();
   });
 
+  it('preloads the next adjacent video clip before a cut without showing it', () => {
+    usePlaybackStore.setState({ currentTime: 9.75 });
+    const firstClip = createClip('clip-first', 'asset-first');
+    const secondClip = createClip('clip-second', 'asset-second');
+    secondClip.place = { timelineInSec: 10, durationSec: 10 };
+
+    const sequence = {
+      ...createSequence(),
+      tracks: [createVideoTrack('track-main', firstClip)],
+    };
+    sequence.tracks[0].clips.push(secondClip);
+
+    const assets = new Map<string, Asset>([
+      ['asset-first', createVideoAsset('asset-first', 'https://example.com/first.mp4')],
+      ['asset-second', createVideoAsset('asset-second', 'https://example.com/second.mp4')],
+    ]);
+
+    render(<ProxyPreviewPlayer sequence={sequence} assets={assets} showControls />);
+
+    const firstVideo = screen.getByTestId('proxy-video-clip-first') as HTMLVideoElement;
+    const secondVideo = screen.getByTestId('proxy-video-clip-second') as HTMLVideoElement;
+
+    expect(firstVideo.style.visibility).toBe('visible');
+    expect(firstVideo.style.opacity).toBe('1');
+    expect(secondVideo.style.visibility).toBe('hidden');
+    expect(secondVideo.style.opacity).toBe('0');
+  });
+
+  it('uses render graph timing to preload adjacent cut clips', async () => {
+    runtimeMocks.isTauriRuntime.mockReturnValue(true);
+    usePlaybackStore.setState({ currentTime: 9.75 });
+
+    const firstClip = createClip('clip-first', 'asset-first');
+    const secondClip = createClip('clip-second', 'asset-second');
+    secondClip.place = { timelineInSec: 10, durationSec: 10 };
+    const track = createVideoTrack('track-main', firstClip);
+    track.visible = false;
+    track.clips.push(secondClip);
+    const sequence = {
+      ...createSequence(),
+      tracks: [track],
+    };
+
+    const renderGraph: RenderGraph = {
+      graphVersion: 1,
+      sequenceId: sequence.id,
+      format: sequence.format,
+      durationSec: 20,
+      durationFrames: 600,
+      visualLayers: [
+        {
+          layerIndex: 0,
+          trackId: track.id,
+          trackKind: 'video',
+          trackIndex: 0,
+          clipId: firstClip.id,
+          timelineInSec: 0,
+          timelineOutSec: 10,
+          timelineInFrame: 0,
+          timelineOutFrame: 300,
+          durationFrames: 300,
+          sourceInSec: 0,
+          sourceOutSec: 10,
+          sourceInFrame: 0,
+          sourceOutFrame: 300,
+          transform: firstClip.transform,
+          opacity: 1,
+          blendMode: 'normal',
+          effects: [],
+          source: {
+            type: 'media',
+            assetId: firstClip.assetId,
+          },
+        },
+        {
+          layerIndex: 1,
+          trackId: track.id,
+          trackKind: 'video',
+          trackIndex: 0,
+          clipId: secondClip.id,
+          timelineInSec: 10,
+          timelineOutSec: 20,
+          timelineInFrame: 300,
+          timelineOutFrame: 600,
+          durationFrames: 300,
+          sourceInSec: 0,
+          sourceOutSec: 10,
+          sourceInFrame: 0,
+          sourceOutFrame: 300,
+          transform: secondClip.transform,
+          opacity: 1,
+          blendMode: 'normal',
+          effects: [],
+          source: {
+            type: 'media',
+            assetId: secondClip.assetId,
+          },
+        },
+      ],
+      audioLayers: [],
+    };
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'get_sequence_render_graph') {
+        return renderGraph;
+      }
+
+      return [];
+    });
+
+    const assets = new Map<string, Asset>([
+      ['asset-first', createVideoAsset('asset-first', 'https://example.com/first.mp4')],
+      ['asset-second', createVideoAsset('asset-second', 'https://example.com/second.mp4')],
+    ]);
+
+    render(<ProxyPreviewPlayer sequence={sequence} assets={assets} showControls />);
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('get_sequence_render_graph', {
+        sequenceId: sequence.id,
+      });
+    });
+
+    await waitFor(() => {
+      const firstVideo = screen.getByTestId('proxy-video-clip-first') as HTMLVideoElement;
+      const secondVideo = screen.getByTestId('proxy-video-clip-second') as HTMLVideoElement;
+      expect(firstVideo.style.visibility).toBe('visible');
+      expect(secondVideo.style.visibility).toBe('hidden');
+    });
+  });
+
   it('ignores a stale render graph from a different sequence and keeps raw-track fallback', async () => {
     runtimeMocks.isTauriRuntime.mockReturnValue(true);
     const sequence = createSequence();
