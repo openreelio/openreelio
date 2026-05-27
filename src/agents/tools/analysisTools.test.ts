@@ -4402,11 +4402,26 @@ describe('reference style transfer analysis tools', () => {
         .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
 
       vi.mocked(executeAgentCommand)
-        .mockResolvedValueOnce({
+        .mockImplementationOnce(async (_commandType, payload) => {
+          const createdTrack = createTrack({
+            id: 'new-track-id',
+            name:
+              typeof payload.name === 'string'
+                ? payload.name
+                : 'Source Selects',
+          });
+          useProjectStore.setState((state) => {
+            const sequence = state.sequences.get('seq_001');
+            if (sequence) {
+              sequence.tracks.push(createdTrack);
+            }
+          });
+          return {
           opId: 'op-create-track',
           changes: [],
           createdIds: ['new-track-id'],
           deletedIds: [],
+          };
         })
         .mockResolvedValueOnce({
           opId: 'op-insert-1',

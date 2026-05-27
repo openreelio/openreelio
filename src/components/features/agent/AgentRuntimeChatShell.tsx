@@ -65,6 +65,7 @@ export interface AgentRuntimeChatShellProps extends MessageActionProps {
   className?: string;
   clearQueueOnProjectSwitch?: boolean;
   clearQueueOnUnmount?: boolean;
+  submitWhileRunning?: 'queue' | 'steer';
   onUnmount?: () => void;
 }
 
@@ -93,6 +94,7 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
       className = '',
       clearQueueOnProjectSwitch = false,
       clearQueueOnUnmount = false,
+      submitWhileRunning = 'queue',
       onUnmount,
       onApprove,
       onReject,
@@ -166,7 +168,7 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
 
       setInput('');
 
-      if (isRunning) {
+      if (isRunning && submitWhileRunning === 'queue') {
         const currentState = useConversationStore.getState();
         const queuedMessageId = addUserMessage(userInput, { persist: false });
         enqueue(userInput, {
@@ -197,6 +199,7 @@ export const AgentRuntimeChatShell = forwardRef<AgentRuntimeChatHandle, AgentRun
       loadForProject,
       onSubmit,
       stopState,
+      submitWhileRunning,
     ]);
 
     const handleStop = useCallback(() => {

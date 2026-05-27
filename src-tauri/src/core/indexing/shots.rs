@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::db::IndexDb;
-use crate::core::process::configure_tokio_command;
+use crate::core::process::{configure_std_command, configure_tokio_command};
 use crate::core::{AssetId, CoreError, CoreResult};
 
 // =============================================================================
@@ -635,7 +635,9 @@ impl ShotDetector {
 
     /// Checks if FFmpeg is available on the system
     pub fn is_ffmpeg_available() -> bool {
-        std::process::Command::new("ffmpeg")
+        let mut command = std::process::Command::new("ffmpeg");
+        configure_std_command(&mut command);
+        command
             .arg("-version")
             .output()
             .map(|o| o.status.success())

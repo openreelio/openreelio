@@ -301,4 +301,28 @@ describe('CodexAppServerClient', () => {
 
     await expect(interruptPromise).resolves.toBeUndefined();
   });
+
+  it('sends turn steering with the expected active turn precondition', async () => {
+    const transport = new MockCodexTransport();
+    const client = new CodexAppServerClient(transport);
+    const initPromise = client.initialize();
+    transport.receive({ id: 1, result: {} });
+    await initPromise;
+
+    const steerPromise = client.steerTurn('thr_123', 'turn_456', 'Also keep the captions lower');
+    await waitForSent(transport, 3);
+
+    expect(transport.sent[2]).toEqual({
+      method: 'turn/steer',
+      id: 2,
+      params: {
+        threadId: 'thr_123',
+        expectedTurnId: 'turn_456',
+        input: [{ type: 'text', text: 'Also keep the captions lower' }],
+      },
+    });
+    transport.receive({ id: 2, result: { turnId: 'turn_456' } });
+
+    await expect(steerPromise).resolves.toEqual({ turnId: 'turn_456' });
+  });
 });

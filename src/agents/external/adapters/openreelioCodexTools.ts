@@ -1,13 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
 
-import type {
-  AgentPlan,
-  AgentPlanResult,
-  PlanRiskLevel,
-  ProjectInfo,
-  ProjectStateDto,
-  StockMediaImportResult,
-  StockMediaSearchResult,
+import {
+  commands,
+  type AgentPlan,
+  type AgentPlanResult,
+  type PlanRiskLevel,
+  type ProjectInfo,
+  type ProjectStateDto,
+  type StockMediaImportResult,
+  type StockMediaSearchResult,
 } from '@/bindings';
 
 import type { ExternalAgentApprovalDecisionProvider, ExternalAgentApprovalRequest } from '../types';
@@ -19,6 +20,7 @@ import type {
 } from './CodexAppServerClient';
 import { runProjectBackendMutation } from '@/services/projectMutationGateway';
 import { issueAgentPlanApprovalProof } from '@/services/agentPlanApprovalProof';
+import { insertAgentMediaClip } from '@/agents/tools/mediaInsertion';
 
 export interface OpenReelioCodexSessionContext {
   projectId: string;
@@ -144,6 +146,19 @@ const EMPTY_OBJECT_SCHEMA: CodexJsonObject = {
   additionalProperties: false,
 };
 
+const ANNOTATION_READ_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  required: ['assetId'],
+  properties: {
+    assetId: {
+      type: 'string',
+      description:
+        'Project asset ID whose cached analysis annotation should be read for placement or edit planning.',
+    },
+  },
+  additionalProperties: false,
+};
+
 const COMMAND_EXECUTE_SCHEMA: CodexJsonObject = {
   type: 'object',
   required: ['commandType', 'payload', 'reason', 'contextToken'],
@@ -210,6 +225,58 @@ const PLAN_APPLY_SCHEMA: CodexJsonObject = {
     reason: {
       type: 'string',
       description: 'Short user-facing reason for the plan approval prompt.',
+    },
+    contextToken: {
+      type: 'string',
+      description:
+        'Fresh mutation context token returned by openreelio.project_state, timeline_snapshot, assets_list, or selection_read in this session.',
+    },
+  },
+  additionalProperties: false,
+};
+
+const MEDIA_INSERT_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  required: ['sequenceId', 'trackId', 'assetId', 'timelineStart', 'reason', 'contextToken'],
+  properties: {
+    sequenceId: {
+      type: 'string',
+      description: 'Target sequence ID.',
+    },
+    trackId: {
+      type: 'string',
+      description:
+        'Target visible video/overlay track for video/image media, or audio track for audio media.',
+    },
+    assetId: {
+      type: 'string',
+      description: 'Project asset ID to place on the timeline.',
+    },
+    timelineStart: {
+      type: 'number',
+      description: 'Timeline start in seconds.',
+    },
+    sourceIn: {
+      type: 'number',
+      description: 'Optional source media in point in seconds.',
+    },
+    sourceOut: {
+      type: 'number',
+      description: 'Optional source media out point in seconds.',
+    },
+    audioOnly: {
+      type: 'boolean',
+      description:
+        'Set true only when intentionally placing the audio stream from a video asset onto an audio track.',
+    },
+    autoExtractLinkedAudio: {
+      type: 'boolean',
+      description:
+        'Defaults true for video on visual tracks: create matching linked audio, link clips, and mute source video audio.',
+    },
+    reason: {
+      type: 'string',
+      description: 'Short user-facing reason for the edit approval prompt.',
     },
     contextToken: {
       type: 'string',
@@ -337,6 +404,13 @@ export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
   },
   {
     namespace: 'openreelio',
+    name: 'annotation_read',
+    description:
+      'Read cached objects/faces/OCR/shot annotations for one asset. Use this before choosing safe text/caption placement when exact visual position matters.',
+    inputSchema: ANNOTATION_READ_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
     name: 'stock_media_search',
     description:
       'Search configured stock providers for video, image, or audio candidates. Returns provider references, previews, license info, and license policy decisions. Does not import or place media.',
@@ -374,7 +448,7 @@ export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
     namespace: 'openreelio',
     name: 'command_schema',
     description:
-      'Read the supported OpenReelio event-sourced edit command types and payload conventions.',
+      'Read the supported OpenReelio event-sourced edit command types, text/caption workflows, and payload conventions.',
     inputSchema: EMPTY_OBJECT_SCHEMA,
   },
   {
@@ -397,6 +471,13 @@ export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
     description:
       'Preview a non-mutating structural summary of an OpenReelio AgentPlan after validation.',
     inputSchema: PLAN_VALIDATE_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'media_insert',
+    description:
+      'Insert a media asset like the OpenReelio UI drag-and-drop path: validates track/asset compatibility, supports sourceIn/sourceOut, and auto-creates linked audio for video clips.',
+    inputSchema: MEDIA_INSERT_SCHEMA,
   },
   {
     namespace: 'openreelio',
@@ -442,9 +523,12 @@ export function buildOpenReelioCodexDeveloperInstructions(
     '- Use OpenReelio dynamic tools before claiming project, timeline, asset, or selection facts.',
     '- Use openreelio.host_context first when the user asks where you are, what you can use, or what environment this is.',
     '- Use openreelio.timeline_snapshot, openreelio.assets_list, openreelio.selection_read, and openreelio.command_schema before proposing concrete edits.',
+    '- Use openreelio.annotation_read for the source asset before deciding exact text placement that should avoid faces, objects, or existing OCR text.',
     '- Use openreelio.stock_media_search for stock video, image, BGM, or SFX candidates before falling back to generic web links.',
     '- Use openreelio.stock_media_import to bring a selected stock candidate into the project before placing it on the timeline. Do not pass stock URLs directly to ImportAsset.',
-    '- Prefer openreelio.plan_validate and openreelio.plan_apply for multi-step edits. Use openreelio.command_execute only for a narrow single-command edit.',
+    '- Use openreelio.media_insert when placing media assets on the timeline. It is the drag-and-drop parity path for source ranges, visible video placement, linked audio, clip linking, muting, undo, and UI refresh.',
+    '- For editable on-video text, titles, lower thirds, and callouts, use AddTextClip/UpdateTextClip/SetClipTransform with full TextClipData and preview transform data. For timed subtitles from speech or files, use CreateCaption/UpdateCaption/ImportGeneratedCaptions.',
+    '- Prefer openreelio.plan_validate and openreelio.plan_apply for multi-step non-media edits. Use openreelio.command_execute only for a narrow single-command edit; do not use raw InsertClip for normal asset placement.',
     '- Apply edits with the fresh contextToken returned by openreelio.project_state, openreelio.timeline_snapshot, openreelio.assets_list, or openreelio.selection_read so the app can validate, approve, persist, undo, and refresh the UI.',
     '- Do not manually edit .openreelio state files or invent command payloads without checking the schema and current IDs.',
     '- Do not use shell or filesystem tools to mutate OpenReelio project state; OpenReelio edits must go through the command log.',
@@ -485,6 +569,10 @@ export async function handleOpenReelioCodexDynamicToolCall(
         return toolResponse(buildTimelineSnapshot(await readProjectState(), context));
       case 'assets_list':
         return toolResponse(buildAssetsList(await readProjectState(), context));
+      case 'annotation_read': {
+        const result = await readAnnotationToolCall(toolCall.arguments);
+        return toolResponse(result, result.status === 'ok');
+      }
       case 'stock_media_search': {
         const result = await searchStockMediaToolCall(toolCall.arguments);
         return toolResponse(result, result.status === 'ok');
@@ -511,6 +599,10 @@ export async function handleOpenReelioCodexDynamicToolCall(
       }
       case 'diff_preview': {
         const result = await previewPlanDiff(toolCall.arguments);
+        return toolResponse(result, result.status === 'ok');
+      }
+      case 'media_insert': {
+        const result = await insertMediaToolCall(toolCall.arguments, request, context);
         return toolResponse(result, result.status === 'ok');
       }
       case 'plan_apply': {
@@ -664,10 +756,12 @@ async function buildHostContext(context: OpenReelioCodexToolContext): Promise<Co
       projectStateRead: true,
       timelineRead: true,
       assetRead: true,
+      annotationRead: true,
       commandSchemaRead: true,
       commandValidate: true,
       stockMediaSearch: true,
       stockMediaImport: true,
+      mediaInsert: true,
       planValidate: true,
       planApplyWithApproval: true,
       diffPreview: true,
@@ -678,7 +772,7 @@ async function buildHostContext(context: OpenReelioCodexToolContext): Promise<Co
       undoableCommandLog: true,
     },
     policy: {
-      mutationPath: 'openreelio.plan_apply',
+      mutationPath: 'openreelio.media_insert or openreelio.plan_apply',
       approvalRequiredForMutations: true,
       directStateFileEdits: 'forbidden',
       contextTokenRequiredForMutations: true,
@@ -823,6 +917,104 @@ async function buildPreviewDescription(): Promise<CodexJsonObject> {
   };
 }
 
+async function insertMediaToolCall(
+  args: CodexJsonObject | null,
+  request: CodexAppServerRequest,
+  context: OpenReelioCodexToolContext,
+): Promise<CodexJsonObject> {
+  if (!args) {
+    throw new Error('OpenReelio media_insert requires object arguments.');
+  }
+
+  const sequenceId = getRequiredStringArg(args, 'sequenceId', 'media_insert');
+  const trackId = getRequiredStringArg(args, 'trackId', 'media_insert');
+  const assetId = getRequiredStringArg(args, 'assetId', 'media_insert');
+  const timelineStart = getFiniteNonNegativeNumberArg(args, 'timelineStart', 'media_insert', true);
+  if (timelineStart === undefined) {
+    throw new Error('OpenReelio media_insert requires timelineStart.');
+  }
+  const sourceIn = getFiniteNonNegativeNumberArg(args, 'sourceIn', 'media_insert');
+  const sourceOut = getFiniteNonNegativeNumberArg(args, 'sourceOut', 'media_insert');
+  const audioOnly = args.audioOnly === true;
+  const autoExtractLinkedAudio =
+    typeof args.autoExtractLinkedAudio === 'boolean' ? args.autoExtractLinkedAudio : undefined;
+  const reason =
+    getString(args, 'reason')?.trim() || `Insert media asset ${assetId} on the timeline`;
+  const contextToken = getString(args, 'contextToken')?.trim() ?? null;
+  const tokenValidation = validateContextToken(context, contextToken);
+  if (!tokenValidation.valid) {
+    return {
+      status: 'error',
+      message: tokenValidation.message.replace(/command_execute/g, 'media_insert'),
+    };
+  }
+
+  const payload: CodexJsonObject = {
+    sequenceId,
+    trackId,
+    assetId,
+    timelineStart,
+    ...(sourceIn !== undefined ? { sourceIn } : {}),
+    ...(sourceOut !== undefined ? { sourceOut } : {}),
+    ...(audioOnly ? { audioOnly } : {}),
+    ...(autoExtractLinkedAudio !== undefined ? { autoExtractLinkedAudio } : {}),
+  };
+  const decision = context.approvalDecisionProvider
+    ? await context.approvalDecisionProvider(
+        buildCommandApprovalRequest({
+          request,
+          context,
+          commandType: 'MediaInsert',
+          payload,
+          reason,
+        }),
+      )
+    : 'decline';
+
+  if (decision !== 'accept' && decision !== 'acceptForSession') {
+    return {
+      status: 'denied',
+      message:
+        'The OpenReelio media insert was not approved. Approve it with the chat approval card; plain chat replies do not grant tool execution.',
+    };
+  }
+
+  try {
+    const insert = await insertAgentMediaClip({
+      sequenceId,
+      trackId,
+      assetId,
+      timelineStart,
+      sourceIn,
+      sourceOut,
+      audioOnly,
+      autoExtractLinkedAudio,
+    });
+    const refresh = await refreshProjectStoreAfterMutation();
+
+    return {
+      status: 'ok',
+      message: 'Media inserted through the drag-and-drop parity path.',
+      result: {
+        opId: insert.insertResult.opId,
+        createdIds: insert.insertResult.createdIds,
+        clipId: insert.clipId,
+        sequenceId: insert.sequenceId,
+        trackId: insert.trackId,
+        assetId: insert.assetId,
+        timelineStart: insert.timelineStart,
+        sourceIn: insert.sourceIn ?? null,
+        sourceOut: insert.sourceOut ?? null,
+        durationSec: insert.durationSec,
+        linkedAudio: insert.linkedAudio ?? null,
+      },
+      refresh,
+    };
+  } finally {
+    contextTokensBySessionId.delete(context.sessionId);
+  }
+}
+
 async function executeApprovedCommand(
   args: CodexJsonObject | null,
   request: CodexAppServerRequest,
@@ -868,6 +1060,19 @@ async function executeApprovedCommand(
       commandType,
       message: tokenValidation.message,
     };
+  }
+
+  if (commandType === 'InsertClip') {
+    const mediaArgs: CodexJsonObject = {
+      ...payload,
+      reason,
+      contextToken,
+    };
+    if (mediaArgs.timelineStart === undefined && mediaArgs.timelineIn !== undefined) {
+      mediaArgs.timelineStart = mediaArgs.timelineIn;
+    }
+
+    return insertMediaToolCall(mediaArgs, request, context);
   }
 
   const payloadValidation = await validateCommandPayload(commandType, payload);
@@ -1752,6 +1957,40 @@ function buildAssetsList(
   };
 }
 
+async function readAnnotationToolCall(args: CodexJsonObject | null): Promise<CodexJsonObject> {
+  const assetId = getString(args, 'assetId')?.trim();
+  if (!assetId) {
+    return {
+      status: 'error',
+      message: 'assetId is required.',
+    };
+  }
+
+  try {
+    const result = await commands.getAnnotation(assetId);
+    if (result.status === 'error') {
+      return {
+        status: 'error',
+        assetId,
+        message: String(result.error),
+      };
+    }
+
+    return {
+      status: 'ok',
+      assetId,
+      analysisStatus: result.data.status,
+      annotation: result.data.annotation,
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      assetId,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 function issueContextToken(
   context: OpenReelioCodexToolContext,
   state: ProjectStateDto | null,
@@ -1848,16 +2087,30 @@ function buildCommandSchema(): CodexJsonObject {
         ],
         note: 'Use youtube_shorts or 1080x1920 for Shorts/vertical edits. A newly created sequence becomes the active timeline.',
       },
+      CreateTrack: {
+        required: ['sequenceId', 'kind', 'name'],
+        optional: ['position'],
+        note: 'Use kind video or overlay for editable text clips. AddTextClip requires a target video/overlay track; create one first when no suitable upper text track exists.',
+      },
+      InsertClip: {
+        required: ['sequenceId', 'trackId', 'assetId', 'timelineStart'],
+        optional: ['sourceIn', 'sourceOut'],
+        note: 'Raw InsertClip is a primitive command and does not auto-create linked audio. Use openreelio.media_insert for normal asset placement so video stays visible and linked audio stays in sync.',
+      },
       ImportGeneratedCaptions: {
         required: ['sequenceId', 'trackId', 'segments'],
         optional: ['style', 'position', 'replaceExisting'],
         segmentShape: { startSec: 'number', endSec: 'number', text: 'string' },
+        styleShape:
+          'Caption style may include fontFamily, fontSize, fontWeight, bold, italic, underline, color, opacity, backgroundColor, backgroundPadding, outlineColor, outlineWidth, shadowColor, shadowOffsetX, shadowOffsetY, shadowBlur, alignment, lineHeight, and letterSpacing.',
+        positionShape:
+          'Caption position supports preset top/center/bottom or custom xPercent/yPercent.',
         note: 'Use this for AI/STT transcript segments so generated captions are imported atomically and remain undoable as one command.',
       },
       AddTextClip: {
         required: ['sequenceId', 'trackId', 'timelineIn', 'duration', 'textData'],
         textDataShape:
-          'TextClipData includes content, style(fontFamily/fontSize/fontWeight/color/backgroundColor/alignment/bold/italic/underline/lineHeight/letterSpacing), position(x/y 0..1), shadow, outline, rotation, and opacity.',
+          'TextClipData includes content, style(fontFamily/fontSize/fontWeight/color/backgroundColor/backgroundPadding/alignment/bold/italic/underline/lineHeight/letterSpacing), position(x/y 0..1), shadow(color/offsetX/offsetY/blur), outline(color/width), rotation, and opacity.',
         note: 'Text clips must be placed on a video or overlay track. Use SetClipTransform after creation when scale or anchor must be exact.',
       },
       UpdateTextClip: {
@@ -1875,15 +2128,47 @@ function buildCommandSchema(): CodexJsonObject {
       payload: 'CamelCase JSON object matching the selected command type',
       contextToken:
         'Fresh mutation contextToken returned by project_state, timeline_snapshot, or assets_list',
-      mutationTool: 'openreelio.command_execute',
+      mutationTool:
+        'Use openreelio.media_insert for asset placement; use openreelio.command_execute for primitive single-command edits.',
+      mediaMutationTool: 'openreelio.media_insert',
+      commandMutationTool: 'openreelio.command_execute',
     },
     rules: [
       'Read project_state or timeline_snapshot before using IDs and before every mutation.',
-      'Pass the returned contextToken to command_execute.',
+      'Pass the returned contextToken to media_insert, plan_apply, or command_execute.',
+      'Use media_insert instead of raw InsertClip when placing video, image, or audio assets on the timeline.',
       'Never edit .openreelio state files directly.',
       'command_execute prompts the user for approval and persists through the OpenReelio command log.',
       'Workspace filesystem commands are intentionally not exposed through command_execute.',
     ],
+    mediaWorkflows: {
+      timelinePlacement: [
+        'Read timeline_snapshot and assets_list to copy exact sequence, track, and asset IDs.',
+        'Choose a visible video or overlay track for video/image assets and an audio track for audio assets.',
+        'Call openreelio.media_insert with timelineStart and optional sourceIn/sourceOut.',
+        'Do not put a video asset on an audio track unless audioOnly=true is intentional; that creates an audio-only clip and will not show in preview.',
+        'For video assets, let autoExtractLinkedAudio default to true so the matching audio clip is created, linked, and the source video clip is muted.',
+      ],
+    },
+    textWorkflows: {
+      editableOverlay: [
+        'Read timeline_snapshot to find active sequence, existing text clips, and usable video/overlay tracks.',
+        'Read annotation_read for overlapping source assets when placement should avoid faces, objects, or OCR text.',
+        'CreateTrack(kind="video" or "overlay") when there is no unlocked non-overlapping text track above the media.',
+        'AddTextClip with complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity.',
+        'SetClipTransform for exact preview drag/resize/rotate parity using normalized position, scale, rotationDeg, and anchor.',
+      ],
+      timedSubtitles: [
+        'Use ImportGeneratedCaptions for AI transcript segments or CreateCaption/UpdateCaption for individual caption lines.',
+        'Use caption style/position metadata for subtitle readability instead of editable overlay text when the user wants semantic subtitles.',
+      ],
+      placementDefaults: {
+        subtitle:
+          'Bottom center around y=0.85 with outline/shadow unless it covers important visual content.',
+        title: 'Center or upper third depending on the shot composition.',
+        lowerThird: 'Lower-left or lower-center with enough safe margin and readable contrast.',
+      },
+    },
   };
 }
 
@@ -1925,6 +2210,35 @@ function asObject(value: unknown): CodexJsonObject | null {
 function getString(input: CodexJsonObject | null | undefined, key: string): string | null {
   const value = input?.[key];
   return typeof value === 'string' ? value : null;
+}
+
+function getRequiredStringArg(input: CodexJsonObject, key: string, toolName: string): string {
+  const value = getString(input, key)?.trim();
+  if (!value) {
+    throw new Error(`OpenReelio ${toolName} requires ${key}.`);
+  }
+  return value;
+}
+
+function getFiniteNonNegativeNumberArg(
+  input: CodexJsonObject,
+  key: string,
+  toolName: string,
+  required = false,
+): number | undefined {
+  const value = input[key];
+  if (value === undefined || value === null) {
+    if (required) {
+      throw new Error(`OpenReelio ${toolName} requires ${key}.`);
+    }
+    return undefined;
+  }
+
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`OpenReelio ${toolName} requires ${key} to be a finite non-negative number.`);
+  }
+
+  return value;
 }
 
 function getFirstProperty(input: CodexJsonObject, keys: string[]): unknown {

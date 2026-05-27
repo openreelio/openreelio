@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { executeAgentCommand } from '@/agents/tools/commandExecutor';
+import { insertAgentMediaClip } from '@/agents/tools/mediaInsertion';
 import { useVideoGenStore, type VideoGenJob, type VideoGenPlacementRequest } from './videoGenStore';
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -11,8 +12,13 @@ vi.mock('@/agents/tools/commandExecutor', () => ({
   executeAgentCommand: vi.fn(),
 }));
 
+vi.mock('@/agents/tools/mediaInsertion', () => ({
+  insertAgentMediaClip: vi.fn(),
+}));
+
 const mockedInvoke = vi.mocked(invoke);
 const mockedExecuteAgentCommand = vi.mocked(executeAgentCommand);
+const mockedInsertAgentMediaClip = vi.mocked(insertAgentMediaClip);
 
 function createJob(overrides: Partial<VideoGenJob> = {}): VideoGenJob {
   return {
@@ -41,6 +47,7 @@ describe('videoGenStore placement sync', () => {
   beforeEach(() => {
     mockedInvoke.mockReset();
     mockedExecuteAgentCommand.mockReset();
+    mockedInsertAgentMediaClip.mockReset();
     useVideoGenStore.getState().stopPolling();
     useVideoGenStore.setState({
       jobs: new Map(),
@@ -75,10 +82,24 @@ describe('videoGenStore placement sync', () => {
       if (command === 'generate_asset_thumbnail') return null;
       throw new Error(`Unhandled invoke: ${command}`);
     });
+    mockedInsertAgentMediaClip.mockResolvedValue({
+      insertResult: {
+        opId: 'op-insert',
+        changes: [],
+        createdIds: ['clip-generated'],
+        deletedIds: [],
+      },
+      clipId: 'clip-generated',
+      sequenceId: 'seq-1',
+      trackId: 'video-1',
+      assetId: 'asset-generated',
+      timelineStart: 3,
+      durationSec: 6,
+    });
     mockedExecuteAgentCommand.mockImplementation(async (commandType) => ({
-      opId: commandType === 'InsertClip' ? 'op-insert' : 'op-marker',
+      opId: commandType === 'RemoveMarker' ? 'op-marker' : 'op-command',
       changes: [],
-      createdIds: commandType === 'InsertClip' ? ['clip-generated'] : [],
+      createdIds: [],
       deletedIds: commandType === 'RemoveMarker' ? ['marker-1'] : [],
     }));
 
@@ -91,7 +112,7 @@ describe('videoGenStore placement sync', () => {
       placedClipId: 'clip-generated',
       placementError: null,
     });
-    expect(mockedExecuteAgentCommand).toHaveBeenCalledWith('InsertClip', {
+    expect(mockedInsertAgentMediaClip).toHaveBeenCalledWith({
       sequenceId: 'seq-1',
       trackId: 'video-1',
       assetId: 'asset-generated',
@@ -146,7 +167,7 @@ describe('videoGenStore placement sync', () => {
       if (command === 'generate_asset_thumbnail') return null;
       throw new Error(`Unhandled invoke: ${command}`);
     });
-    mockedExecuteAgentCommand.mockRejectedValue(new Error('track is locked'));
+    mockedInsertAgentMediaClip.mockRejectedValue(new Error('track is locked'));
 
     await useVideoGenStore.getState().onJobCompleted('job-1');
 

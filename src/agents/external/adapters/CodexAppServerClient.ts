@@ -99,6 +99,10 @@ export interface CodexTurnStartResult {
   turn: CodexTurn;
 }
 
+export interface CodexTurnSteerResult {
+  turnId: string;
+}
+
 export interface CodexAppServerNotification {
   method: string;
   params?: CodexJsonObject;
@@ -280,6 +284,19 @@ export class CodexAppServerClient {
     );
 
     return result.turn;
+  }
+
+  async steerTurn(
+    threadId: string,
+    expectedTurnId: string,
+    text: string,
+  ): Promise<CodexTurnSteerResult> {
+    await this.initialize();
+    return await this.request<CodexTurnSteerResult>('turn/steer', {
+      threadId,
+      expectedTurnId,
+      input: [{ type: 'text', text }],
+    });
   }
 
   async interruptTurn(threadId: string, turnId: string): Promise<void> {

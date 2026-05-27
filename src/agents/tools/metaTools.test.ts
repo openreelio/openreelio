@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { globalToolRegistry, type ToolDefinition } from '@/agents';
 import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
 import { registerCaptionTools, unregisterCaptionTools } from './captionTools';
+import { registerTextTools, unregisterTextTools } from './textTools';
 import {
   normalizeMetaToolArgsForValidation,
   registerMetaTools,
@@ -12,11 +13,13 @@ describe('metaTools', () => {
   beforeEach(() => {
     globalToolRegistry.clear();
     registerCaptionTools();
+    registerTextTools();
     registerMetaTools();
   });
 
   afterEach(() => {
     unregisterMetaTools();
+    unregisterTextTools();
     unregisterCaptionTools();
     globalToolRegistry.clear();
   });
@@ -52,6 +55,86 @@ describe('metaTools', () => {
 
     expect(aliased.valid).toBe(false);
     expect(aliased.errors.some((error) => error.includes('sequenceId'))).toBe(true);
+  });
+
+  it('exposes rich editable text overlay fields through the text meta-tool schema', () => {
+    const textTool = globalToolRegistry.get('text');
+    const properties = textTool?.parameters.properties ?? {};
+
+    expect(properties.clipId).toBeDefined();
+    expect(properties.duration).toBeDefined();
+    expect(properties.preset).toBeDefined();
+    expect(properties.style).toBeDefined();
+    expect(properties.fontWeight).toBeDefined();
+    expect(properties.backgroundPadding).toBeDefined();
+    expect(properties.alignment).toBeDefined();
+    expect(properties.shadow).toBeDefined();
+    expect(properties.outline).toBeDefined();
+    expect(properties.clearShadow).toBeDefined();
+    expect(properties.clearOutline).toBeDefined();
+    expect(properties.transform).toBeDefined();
+    expect(properties.transformX).toBeDefined();
+    expect(properties.scaleX).toBeDefined();
+    expect(properties.anchorX).toBeDefined();
+    expect(properties.autoPlacement).toBeDefined();
+    expect(properties.placementIntent).toBeDefined();
+    expect(properties.safeMargin).toBeDefined();
+  });
+
+  it('allows rich editable text creation without explicit sequenceId when context can supply it', () => {
+    const adapter = createToolRegistryAdapter(globalToolRegistry);
+
+    const valid = adapter.validateArgs('text', {
+      action: 'create_title',
+      text: 'Launch title',
+      startTime: 0,
+      duration: 3,
+      preset: 'title',
+      style: {
+        fontFamily: 'Inter',
+        fontSize: 72,
+        fontWeight: 800,
+        color: '#FFFFFF',
+        alignment: 'center',
+      },
+      position: { x: 0.5, y: 0.2 },
+      shadow: { color: '#00000099', offsetX: 2, offsetY: 4, blur: 8 },
+      outline: { color: '#000000', width: 3 },
+      transform: {
+        position: { x: 0.5, y: 0.2 },
+        scale: { x: 1.1, y: 1.1 },
+        rotationDeg: -4,
+        anchor: { x: 0.5, y: 0.5 },
+      },
+      autoPlacement: true,
+      placementIntent: 'title',
+    });
+
+    expect(valid.valid).toBe(true);
+  });
+
+  it('allows nullable effect clears and transform aliases for editable text updates', () => {
+    const adapter = createToolRegistryAdapter(globalToolRegistry);
+
+    const valid = adapter.validateArgs('text', {
+      action: 'move_text',
+      clipId: 'clip-text-1',
+      transformX: 0.45,
+      transformY: 0.82,
+      scaleX: 1.2,
+      scaleY: 1.2,
+      rotationDeg: 8,
+    });
+    const update = adapter.validateArgs('text', {
+      action: 'modify_text',
+      clipId: 'clip-text-1',
+      shadow: null,
+      outline: null,
+      clearBackground: true,
+    });
+
+    expect(valid.valid).toBe(true);
+    expect(update.valid).toBe(true);
   });
 
   it('normalizes asset discovery query aliases for validation', () => {

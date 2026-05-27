@@ -10,6 +10,19 @@
 use std::env;
 use std::path::PathBuf;
 
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+fn configure_build_command(command: &mut std::process::Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = command;
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=icons");
     println!("cargo:rerun-if-changed=tauri.conf.json");
@@ -654,7 +667,9 @@ fn verify_binary(path: &Path) -> BundlerResult<()> {
         )));
     }
 
-    let output = std::process::Command::new(path)
+    let mut command = std::process::Command::new(path);
+    configure_build_command(&mut command);
+    let output = command
         .arg("-version")
         .output()
         .map_err(|e| BundlerError::VerificationFailed(format!("Failed to execute binary: {e}")))?;

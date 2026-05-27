@@ -11,6 +11,7 @@ import { enableMapSet } from 'immer';
 import { invoke } from '@tauri-apps/api/core';
 import { createLogger } from '@/services/logger';
 import { executeAgentCommand } from '@/agents/tools/commandExecutor';
+import { insertAgentMediaClip } from '@/agents/tools/mediaInsertion';
 
 enableMapSet();
 
@@ -540,13 +541,13 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
 
         if (placement) {
           try {
-            const placementResult = await executeAgentCommand('InsertClip', {
+            const placementResult = await insertAgentMediaClip({
               sequenceId: placement.sequenceId,
               trackId: placement.trackId,
               assetId: importResult.id,
               timelineStart: placement.timelineStart,
             });
-            placedClipId = placementResult.createdIds[0] ?? null;
+            placedClipId = placementResult.clipId;
 
             if (placement.markerId && placement.removeMarkerOnPlace) {
               try {

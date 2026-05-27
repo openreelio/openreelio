@@ -489,7 +489,7 @@ export class Planner {
       '11. Use canonical argument names from the validation schemas. Important: insert_clip and insert_clip_from_file require timelineStart, split_clip requires splitTime, and insert_clip_from_file requires file. Do not emit timelineIn, atTimelineSec, or filePath in plan JSON.',
     );
     parts.push(
-      '12. Tool output contracts: insert_clip exposes data.clipId; split_clip exposes data.newClipId for the newly created right-hand segment. For repeated segmentation, first reference data.clipId from insert_clip, then chain later split_clip steps through data.newClipId.',
+      '12. Tool output contracts: insert_clip exposes data.clipId and may expose data.linkedAudio; split_clip exposes data.newClipId for the newly created right-hand segment. For repeated segmentation, first reference data.clipId from insert_clip, then chain later split_clip steps through data.newClipId.',
     );
     parts.push(
       '13. Match near-synonyms to the exact available tool or action name. Example: splitClip -> split_clip, add_subtitle -> add_caption, remove_clip -> delete_clip.',
@@ -502,6 +502,9 @@ export class Planner {
     );
     parts.push(
       '16. When the target track is known, prefer get_track_clips(trackId) over get_clips_at_time(time) so later steps can reference data.clips[n].id without cross-track ambiguity.',
+    );
+    parts.push(
+      '17. For media placement, target video/image assets to video or overlay tracks and audio assets to audio tracks. insert_clip and insert_clip_from_file automatically preserve sourceIn/sourceOut and linked audio parity; set audioOnly=true only when intentionally extracting audio from a video asset.',
     );
     parts.push('');
     parts.push(...ORCHESTRATION_PLAYBOOK_LINES);

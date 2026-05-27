@@ -44,11 +44,14 @@ type CodexAppServerClientPort = Pick<
   CodexAppServerClient,
   'startThread' | 'startTurn' | 'interruptTurn' | 'unsubscribeThread'
 > &
-  Partial<Pick<CodexAppServerClient, 'resumeThread' | 'onNotification' | 'onServerRequest'>>;
+  Partial<
+    Pick<CodexAppServerClient, 'resumeThread' | 'steerTurn' | 'onNotification' | 'onServerRequest'>
+  >;
 
 interface CodexSessionState {
   threadId: string;
   lastTurnId: string | null;
+  activeTurnId: string | null;
   projectId: string;
   cwd: string | null;
 }
@@ -133,6 +136,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     this.sessions.set(sessionId, {
       threadId: thread.id,
       lastTurnId: null,
+      activeTurnId: null,
       projectId: input.projectId,
       cwd: input.cwd ?? null,
     });
@@ -170,6 +174,7 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     this.sessions.set(thread.id, {
       threadId: thread.id,
       lastTurnId: null,
+      activeTurnId: null,
       projectId: input.projectId,
       cwd: input.cwd ?? null,
     });
@@ -181,6 +186,16 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     const client = await this.getAppServerClient();
     const session = this.requireSession(sessionId);
     session.cwd = message.cwd ?? session.cwd;
+    if (session.activeTurnId && client.steerTurn) {
+      const result = await client.steerTurn(
+        session.threadId,
+        session.activeTurnId,
+        message.content,
+      );
+      this.rememberSteeredTurn(sessionId, result.turnId);
+      return;
+    }
+
     const turn = await client.startTurn(session.threadId, message.content, {
       model: this.resolveModel(),
       effort: this.resolveReasoningEffort(),
@@ -193,11 +208,15 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
   async interrupt(sessionId: string): Promise<void> {
     const client = await this.getAppServerClient();
     const session = this.requireSession(sessionId);
-    if (!session.lastTurnId) {
+    const turnId = session.activeTurnId ?? session.lastTurnId;
+    if (!turnId) {
       throw new Error(`Codex session ${sessionId} has no active turn to interrupt`);
     }
 
-    await client.interruptTurn(session.threadId, session.lastTurnId);
+    await client.interruptTurn(session.threadId, turnId);
+    if (session.activeTurnId === turnId) {
+      session.activeTurnId = null;
+    }
   }
 
   async shutdown(sessionId: string): Promise<void> {
@@ -208,6 +227,9 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     clearOpenReelioCodexSession(sessionId);
     if (session.lastTurnId) {
       this.turnSessionIds.delete(session.lastTurnId);
+    }
+    if (session.activeTurnId) {
+      this.turnSessionIds.delete(session.activeTurnId);
     }
   }
 
@@ -279,7 +301,15 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
   private rememberTurn(sessionId: string, turn: CodexTurn): void {
     const session = this.requireSession(sessionId);
     session.lastTurnId = turn.id;
+    session.activeTurnId = isTerminalCodexTurnStatus(turn.status) ? null : turn.id;
     this.turnSessionIds.set(turn.id, sessionId);
+  }
+
+  private rememberSteeredTurn(sessionId: string, turnId: string): void {
+    const session = this.requireSession(sessionId);
+    session.lastTurnId = turnId;
+    session.activeTurnId = turnId;
+    this.turnSessionIds.set(turnId, sessionId);
   }
 
   private attachClientHandlers(client: CodexAppServerClientPort): void {
@@ -428,7 +458,16 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     this.turnSessionIds.set(turnId, threadId);
     const session = this.sessions.get(threadId);
     if (session) {
+      const status = getString(turn, 'status') ?? getString(params, 'status');
       session.lastTurnId = turnId;
+      if (notification.method === 'turn/started') {
+        session.activeTurnId = turnId;
+      } else if (
+        session.activeTurnId === turnId &&
+        isTerminalCodexTurnNotification(notification.method, status)
+      ) {
+        session.activeTurnId = null;
+      }
     }
   }
 
@@ -523,6 +562,22 @@ function isDangerousOsCommand(command: string): boolean {
   ];
 
   return dangerousPatterns.some((pattern) => pattern.test(normalized));
+}
+
+function isTerminalCodexTurnStatus(status: string | null | undefined): boolean {
+  return status === 'completed' || status === 'failed' || status === 'interrupted';
+}
+
+function isTerminalCodexTurnNotification(
+  method: string,
+  status: string | null | undefined,
+): boolean {
+  return (
+    method === 'turn/completed' ||
+    method === 'turn/failed' ||
+    method === 'turn/interrupted' ||
+    isTerminalCodexTurnStatus(status)
+  );
 }
 
 function getString(input: CodexJsonObject | null | undefined, key: string): string | null {

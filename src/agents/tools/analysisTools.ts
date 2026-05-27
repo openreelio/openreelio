@@ -41,6 +41,7 @@ import { calculatePearsonCorrelation, getPrimaryTrackClips } from '@/utils/refer
 import { getClipTimelineEndSec } from '@/utils/clipTiming';
 import { useProjectStore } from '@/stores/projectStore';
 import { executeAgentCommand } from './commandExecutor';
+import { insertAgentMediaClip } from './mediaInsertion';
 import {
   readWorkspaceDocumentFromBackend,
   writeWorkspaceDocumentToBackend,
@@ -3443,12 +3444,11 @@ async function ensureSelectsTrack(options: {
 
 async function rollbackInsertedSelectClips(
   sequenceId: string,
-  trackId: string,
-  clipIds: string[],
+  clipRefs: Array<{ trackId: string; clipId: string }>,
 ): Promise<string[]> {
   const rollbackFailures: string[] = [];
 
-  for (const clipId of [...clipIds].reverse()) {
+  for (const { trackId, clipId } of [...clipRefs].reverse()) {
     try {
       await executeAgentCommand('RemoveClip', {
         sequenceId,
@@ -5935,11 +5935,12 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
                       ),
                     )
                   : 0;
-            const createdClipIds: string[] = [];
+            const createdClipRefs: Array<{ trackId: string; clipId: string }> = [];
+            const createdAudioTrackIds: string[] = [];
 
             try {
               for (const select of selects) {
-                const result = await executeAgentCommand('InsertClip', {
+                const insert = await insertAgentMediaClip({
                   sequenceId,
                   trackId: ensuredTrack.trackId,
                   assetId: select.assetId,
@@ -5947,18 +5948,34 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
                   sourceIn: select.sourceInSec,
                   sourceOut: select.sourceOutSec,
                 });
-                const createdClipId = result.createdIds[0];
-                if (!createdClipId) {
-                  throw new Error('InsertClip did not return a created clip id');
+                createdClipRefs.push({
+                  trackId: ensuredTrack.trackId,
+                  clipId: insert.clipId,
+                });
+                if (insert.linkedAudio) {
+                  createdClipRefs.push({
+                    trackId: insert.linkedAudio.trackId,
+                    clipId: insert.linkedAudio.clipId,
+                  });
+                  if (insert.linkedAudio.createdTrack) {
+                    createdAudioTrackIds.push(insert.linkedAudio.trackId);
+                  }
                 }
-                createdClipIds.push(createdClipId);
               }
             } catch (error) {
               const rollbackFailures = await rollbackInsertedSelectClips(
                 sequenceId,
-                ensuredTrack.trackId,
-                createdClipIds,
+                createdClipRefs,
               );
+              for (const audioTrackId of [...createdAudioTrackIds].reverse()) {
+                const trackRollbackFailure = await rollbackCreatedSelectsTrack(
+                  sequenceId,
+                  audioTrackId,
+                );
+                if (trackRollbackFailure) {
+                  rollbackFailures.push(trackRollbackFailure);
+                }
+              }
               if (ensuredTrack.createdTrack) {
                 const trackRollbackFailure = await rollbackCreatedSelectsTrack(
                   sequenceId,
@@ -5975,7 +5992,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
                 );
               }
               throw new Error(
-                `Failed to apply source selects: ${message}. Rolled back ${createdClipIds.length} clip(s).`,
+                `Failed to apply source selects: ${message}. Rolled back ${createdClipRefs.length} clip(s).`,
               );
             }
 

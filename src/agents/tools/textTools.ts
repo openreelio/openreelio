@@ -6,6 +6,7 @@
  */
 
 import { globalToolRegistry, type AgentContext, type ToolDefinition } from '../ToolRegistry';
+import { commands, type AssetAnnotation } from '@/bindings';
 import { createLogger } from '@/services/logger';
 import { executeAgentCommand } from './commandExecutor';
 import { useProjectStore } from '@/stores/projectStore';
@@ -28,6 +29,15 @@ import {
   type Track,
   type Transform,
 } from '@/types';
+import {
+  annotationToTextPlacementObstacles,
+  parseTextPlacementOptions,
+  resolveSmartTextPlacement,
+  shouldAutoPlaceText,
+  type ExistingTextPlacement,
+  type TextPlacementDecision,
+  type TextPlacementObstacle,
+} from './textPlacement';
 
 const logger = createLogger('TextTools');
 
@@ -42,6 +52,86 @@ const TEXT_TOOL_NAMES = [
 const HEX_COLOR_PATTERN = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 
 type TextPresetName = 'default' | 'title' | 'lower_third' | 'subtitle';
+
+const TEXT_STYLE_PARAMETER_PROPERTIES = {
+  fontFamily: { type: 'string', description: 'Font family name' },
+  fontSize: { type: 'number', description: 'Font size in pixels' },
+  fontWeight: { type: 'number', description: 'Numeric font weight, 100 to 900' },
+  color: { type: 'string', description: 'Text color hex with optional alpha' },
+  backgroundColor: {
+    type: ['string', 'null'],
+    description: 'Background color hex with optional alpha, or null to remove it',
+  },
+  backgroundPadding: { type: 'number', description: 'Background padding in pixels' },
+  clearBackground: { type: 'boolean', description: 'Remove the text background fill' },
+  alignment: {
+    type: 'string',
+    description: 'Text alignment',
+    enum: ['left', 'center', 'right'],
+  },
+  bold: { type: 'boolean', description: 'Enable bold styling' },
+  italic: { type: 'boolean', description: 'Enable italic styling' },
+  underline: { type: 'boolean', description: 'Enable underline styling' },
+  lineHeight: { type: 'number', description: 'Line-height multiplier' },
+  letterSpacing: { type: 'number', description: 'Letter spacing in pixels' },
+} satisfies NonNullable<ToolDefinition['parameters']['properties']>;
+
+const TEXT_POSITION_PARAMETER_PROPERTIES = {
+  x: { type: 'number', description: 'Normalized text X position, 0 to 1' },
+  y: { type: 'number', description: 'Normalized text Y position, 0 to 1' },
+  xPercent: { type: 'number', description: 'Text X position as percent from left' },
+  yPercent: { type: 'number', description: 'Text Y position as percent from top' },
+} satisfies NonNullable<ToolDefinition['parameters']['properties']>;
+
+const TEXT_EFFECT_PARAMETER_PROPERTIES = {
+  shadowColor: { type: 'string', description: 'Shadow color hex with optional alpha' },
+  shadowOffsetX: { type: 'number', description: 'Shadow horizontal offset in pixels' },
+  shadowOffsetY: { type: 'number', description: 'Shadow vertical offset in pixels' },
+  shadowBlur: { type: 'number', description: 'Shadow blur radius in pixels' },
+  clearShadow: { type: 'boolean', description: 'Remove the text shadow' },
+  outlineColor: { type: 'string', description: 'Outline color hex with optional alpha' },
+  outlineWidth: { type: 'number', description: 'Outline width in pixels' },
+  clearOutline: { type: 'boolean', description: 'Remove the text outline' },
+  rotation: { type: 'number', description: 'Text data rotation in degrees' },
+  opacity: { type: 'number', description: 'Text opacity from 0 to 1' },
+} satisfies NonNullable<ToolDefinition['parameters']['properties']>;
+
+const TEXT_TRANSFORM_PARAMETER_PROPERTIES = {
+  transformX: { type: 'number', description: 'Normalized transform X position, 0 to 1' },
+  transformY: { type: 'number', description: 'Normalized transform Y position, 0 to 1' },
+  scaleX: { type: 'number', description: 'Horizontal scale multiplier' },
+  scaleY: { type: 'number', description: 'Vertical scale multiplier' },
+  rotationDeg: { type: 'number', description: 'Transform rotation in degrees' },
+  anchorX: { type: 'number', description: 'Normalized transform anchor X, 0 to 1' },
+  anchorY: { type: 'number', description: 'Normalized transform anchor Y, 0 to 1' },
+} satisfies NonNullable<ToolDefinition['parameters']['properties']>;
+
+const TEXT_AUTO_PLACEMENT_PARAMETER_PROPERTIES = {
+  autoPlacement: {
+    type: 'boolean',
+    description:
+      'Automatically select a safe preview position using timeline context and available faces/objects/OCR annotations',
+  },
+  placement: {
+    type: ['string', 'object', 'boolean'],
+    description:
+      'Placement intent or options. String values: default, title, subtitle, lower_third, callout. False disables auto-placement.',
+  },
+  placementIntent: {
+    type: 'string',
+    description: 'Placement intent: default, title, subtitle, lower_third, callout',
+  },
+  safeMargin: {
+    type: 'number',
+    description: 'Normalized safe-area margin for automatic placement, 0.02 to 0.2',
+  },
+  avoidFaces: { type: 'boolean', description: 'Avoid detected face boxes when auto-placing' },
+  avoidObjects: { type: 'boolean', description: 'Avoid detected object boxes when auto-placing' },
+  avoidText: {
+    type: 'boolean',
+    description: 'Avoid detected OCR text and existing editable text clips when auto-placing',
+  },
+} satisfies NonNullable<ToolDefinition['parameters']['properties']>;
 
 interface ResolvedTextClip {
   sequence: Sequence;
@@ -414,7 +504,7 @@ function mergeTextStyle(base: TextStyle, args: Record<string, unknown>): TextSty
   const color = normalizeHexColor(get('color'), 'color');
   const backgroundColorValue = get('backgroundColor');
   const backgroundColor =
-    backgroundColorValue === null
+    args.clearBackground === true || backgroundColorValue === null
       ? null
       : normalizeHexColor(backgroundColorValue, 'backgroundColor');
   const alignment = get('alignment');
@@ -533,7 +623,7 @@ function mergeTextShadow(
   base: TextShadow | undefined,
   args: Record<string, unknown>,
 ): TextShadow | undefined {
-  if (args.shadow === null) {
+  if (args.clearShadow === true || args.shadow === null) {
     return undefined;
   }
 
@@ -576,7 +666,7 @@ function mergeTextOutline(
   base: TextOutline | undefined,
   args: Record<string, unknown>,
 ): TextOutline | undefined {
-  if (args.outline === null) {
+  if (args.clearOutline === true || args.outline === null) {
     return undefined;
   }
 
@@ -749,6 +839,164 @@ function serializeTextClip(resolved: ResolvedTextClip): Record<string, unknown> 
   };
 }
 
+function rangesOverlap(start: number, duration: number, clip: Clip): boolean {
+  const end = start + duration;
+  const clipStart = clip.place.timelineInSec;
+  const clipEnd = clipStart + clip.place.durationSec;
+  return start < clipEnd && end > clipStart;
+}
+
+function resolveSourceTimeAtTimeline(clip: Clip, timelineTime: number): number {
+  const clipStart = clip.place.timelineInSec;
+  const clipEnd = clipStart + clip.place.durationSec;
+  const clampedTimeline = clampFinite(timelineTime, clipStart, clipEnd, clipStart);
+  const localOffset = Math.max(0, clampedTimeline - clipStart) * Math.max(0.01, clip.speed || 1);
+  if (clip.reverse) {
+    return Math.max(clip.range.sourceInSec, clip.range.sourceOutSec - localOffset);
+  }
+
+  return Math.min(clip.range.sourceOutSec, clip.range.sourceInSec + localOffset);
+}
+
+async function readAnnotationForPlacement(
+  assetId: string,
+  cache: Map<string, AssetAnnotation | null>,
+): Promise<AssetAnnotation | null> {
+  if (cache.has(assetId)) {
+    return cache.get(assetId) ?? null;
+  }
+
+  try {
+    const result = await commands.getAnnotation(assetId);
+    const annotation = result.status === 'ok' ? result.data.annotation : null;
+    cache.set(assetId, annotation);
+    return annotation;
+  } catch (error) {
+    logger.debug('Text auto-placement could not read annotation', {
+      assetId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    cache.set(assetId, null);
+    return null;
+  }
+}
+
+async function collectPlacementObstacles(
+  sequence: Sequence,
+  timelineIn: number,
+  duration: number,
+): Promise<TextPlacementObstacle[]> {
+  const midpoint = timelineIn + duration / 2;
+  const toleranceSec = Math.max(0.75, Math.min(3, duration / 2 + 0.25));
+  const annotationCache = new Map<string, AssetAnnotation | null>();
+  const obstacles: TextPlacementObstacle[] = [];
+
+  for (const track of sequence.tracks) {
+    if (track.visible === false) {
+      continue;
+    }
+
+    if (track.kind !== 'video' && track.kind !== 'overlay') {
+      continue;
+    }
+
+    for (const clip of track.clips) {
+      if (
+        clip.enabled === false ||
+        !rangesOverlap(timelineIn, duration, clip) ||
+        isTextClip(clip.assetId)
+      ) {
+        continue;
+      }
+
+      const annotation = await readAnnotationForPlacement(clip.assetId, annotationCache);
+      const sourceTime = resolveSourceTimeAtTimeline(clip, midpoint);
+      obstacles.push(...annotationToTextPlacementObstacles(annotation, sourceTime, toleranceSec));
+    }
+  }
+
+  return obstacles;
+}
+
+function collectExistingTextPlacements(
+  sequence: Sequence,
+  timelineIn: number,
+  duration: number,
+  excludeClipId?: string,
+): ExistingTextPlacement[] {
+  const placements: ExistingTextPlacement[] = [];
+
+  for (const track of sequence.tracks) {
+    if (track.visible === false) {
+      continue;
+    }
+
+    for (const clip of track.clips) {
+      if (
+        clip.enabled === false ||
+        clip.id === excludeClipId ||
+        !rangesOverlap(timelineIn, duration, clip) ||
+        !isTextClip(clip.assetId)
+      ) {
+        continue;
+      }
+
+      placements.push({ textData: parseEffectTextData(clip), weight: 4 });
+    }
+  }
+
+  return placements;
+}
+
+async function applyAutomaticTextPlacement(
+  textData: TextClipData,
+  args: Record<string, unknown>,
+  options: {
+    sequence: Sequence;
+    timelineIn: number;
+    duration: number;
+    isCreate: boolean;
+    preset?: TextPresetName;
+    excludeClipId?: string;
+  },
+): Promise<{ textData: TextClipData; placement: TextPlacementDecision | null }> {
+  if (!shouldAutoPlaceText(args, options.isCreate)) {
+    return { textData, placement: null };
+  }
+
+  const placementArgs =
+    args.placementIntent === undefined && args.intent === undefined && args.placement === undefined
+      ? { ...args, placementIntent: options.preset }
+      : args;
+  const placementOptions = parseTextPlacementOptions(placementArgs);
+  const [obstacles, existingText] = await Promise.all([
+    collectPlacementObstacles(options.sequence, options.timelineIn, options.duration),
+    Promise.resolve(
+      collectExistingTextPlacements(
+        options.sequence,
+        options.timelineIn,
+        options.duration,
+        options.excludeClipId,
+      ),
+    ),
+  ]);
+  const decision = resolveSmartTextPlacement({
+    textData,
+    sequence: options.sequence,
+    options: placementOptions,
+    obstacles,
+    existingText,
+  });
+
+  return {
+    textData: {
+      ...textData,
+      position: decision.position,
+    },
+    placement: decision,
+  };
+}
+
 const TEXT_TOOLS: ToolDefinition[] = [
   {
     name: 'list_text_clips',
@@ -791,14 +1039,18 @@ const TEXT_TOOLS: ToolDefinition[] = [
   {
     name: 'add_text_clip',
     description:
-      'Create an editable text overlay clip, auto-creating a video text track when no usable track is provided',
-    category: 'utility',
+      'Create an editable on-video text overlay clip with full style, position, shadow, outline, and transform data; auto-creates a video text track when no usable track is provided',
+    category: 'clip',
     parameters: {
       type: 'object',
       properties: {
-        sequenceId: { type: 'string', description: 'Sequence ID' },
+        sequenceId: {
+          type: 'string',
+          description: 'Optional sequence ID. Defaults to active sequence.',
+        },
         trackId: { type: 'string', description: 'Optional video or overlay track ID' },
         text: { type: 'string', description: 'Text content' },
+        content: { type: 'string', description: 'Legacy alias for text content' },
         startTime: { type: 'number', description: 'Timeline start in seconds' },
         duration: { type: 'number', description: 'Duration in seconds' },
         endTime: { type: 'number', description: 'Optional end time in seconds' },
@@ -808,12 +1060,21 @@ const TEXT_TOOLS: ToolDefinition[] = [
           description: 'Optional starter text preset',
         },
         style: { type: 'object', description: 'Text style overrides' },
-        position: { type: 'object', description: 'Text position object or preset string' },
-        shadow: { type: 'object', description: 'Shadow object, or null to disable' },
-        outline: { type: 'object', description: 'Outline object, or null to disable' },
+        ...TEXT_STYLE_PARAMETER_PROPERTIES,
+        position: {
+          type: ['string', 'object'],
+          description:
+            'Text position preset (top, center, bottom, lower_third) or object with x/y 0..1 or xPercent/yPercent',
+        },
+        ...TEXT_POSITION_PARAMETER_PROPERTIES,
+        shadow: { type: ['object', 'null'], description: 'Shadow object, or null to disable' },
+        outline: { type: ['object', 'null'], description: 'Outline object, or null to disable' },
+        ...TEXT_EFFECT_PARAMETER_PROPERTIES,
         transform: { type: 'object', description: 'Optional clip transform including scale' },
+        ...TEXT_TRANSFORM_PARAMETER_PROPERTIES,
+        ...TEXT_AUTO_PLACEMENT_PARAMETER_PROPERTIES,
       },
-      required: ['sequenceId', 'text', 'startTime'],
+      required: ['startTime'],
     },
     handler: async (args, context) => {
       let createdClipId: string | undefined;
@@ -823,7 +1084,8 @@ const TEXT_TOOLS: ToolDefinition[] = [
       try {
         const sequenceId = resolveSequenceId(args, context);
         const sequence = getSequence(sequenceId);
-        const text = typeof args.text === 'string' ? args.text.trim() : '';
+        const rawText = args.text ?? args.content;
+        const text = typeof rawText === 'string' ? rawText.trim() : '';
         if (!text) {
           throw new Error('text must be a non-empty string.');
         }
@@ -854,7 +1116,18 @@ const TEXT_TOOLS: ToolDefinition[] = [
           args.preset === 'title' || args.preset === 'lower_third' || args.preset === 'subtitle'
             ? args.preset
             : 'default';
-        const textData = buildTextData(textDataFromPreset(preset, text), args);
+        const placementResult = await applyAutomaticTextPlacement(
+          buildTextData(textDataFromPreset(preset, text), args),
+          args,
+          {
+            sequence,
+            timelineIn: startTime,
+            duration,
+            isCreate: true,
+            preset,
+          },
+        );
+        const textData = placementResult.textData;
         const track = await ensureTextTrack(
           sequenceId,
           sequence,
@@ -900,6 +1173,7 @@ const TEXT_TOOLS: ToolDefinition[] = [
             createdTrack,
             textData,
             transform: transform ?? null,
+            placement: placementResult.placement,
           },
         };
       } catch (error) {
@@ -925,21 +1199,34 @@ const TEXT_TOOLS: ToolDefinition[] = [
     name: 'update_text_clip',
     description:
       'Update a text overlay clip content, style, position, effects, and optional transform',
-    category: 'utility',
+    category: 'clip',
     parameters: {
       type: 'object',
       properties: {
-        sequenceId: { type: 'string', description: 'Sequence ID' },
+        sequenceId: {
+          type: 'string',
+          description: 'Optional sequence ID. Defaults to active sequence.',
+        },
         trackId: { type: 'string', description: 'Optional track ID' },
         clipId: { type: 'string', description: 'Text clip ID' },
         text: { type: 'string', description: 'New text content' },
+        content: { type: 'string', description: 'Legacy alias for new text content' },
         style: { type: 'object', description: 'Text style overrides' },
-        position: { type: 'object', description: 'Text data position object or preset string' },
-        shadow: { type: 'object', description: 'Shadow object, or null to disable' },
-        outline: { type: 'object', description: 'Outline object, or null to disable' },
+        ...TEXT_STYLE_PARAMETER_PROPERTIES,
+        position: {
+          type: ['string', 'object'],
+          description:
+            'Text position preset (top, center, bottom, lower_third) or object with x/y 0..1 or xPercent/yPercent',
+        },
+        ...TEXT_POSITION_PARAMETER_PROPERTIES,
+        shadow: { type: ['object', 'null'], description: 'Shadow object, or null to disable' },
+        outline: { type: ['object', 'null'], description: 'Outline object, or null to disable' },
+        ...TEXT_EFFECT_PARAMETER_PROPERTIES,
         transform: { type: 'object', description: 'Optional clip transform including scale' },
+        ...TEXT_TRANSFORM_PARAMETER_PROPERTIES,
+        ...TEXT_AUTO_PLACEMENT_PARAMETER_PROPERTIES,
       },
-      required: ['sequenceId', 'clipId'],
+      required: ['clipId'],
     },
     handler: async (args, context) => {
       const appliedResults: CommandResult[] = [];
@@ -955,7 +1242,18 @@ const TEXT_TOOLS: ToolDefinition[] = [
           clipId,
           typeof args.trackId === 'string' ? args.trackId : undefined,
         );
-        const nextTextData = buildTextData(resolved.textData, args);
+        const placementResult = await applyAutomaticTextPlacement(
+          buildTextData(resolved.textData, args),
+          args,
+          {
+            sequence: resolved.sequence,
+            timelineIn: resolved.clip.place.timelineInSec,
+            duration: resolved.clip.place.durationSec,
+            isCreate: false,
+            excludeClipId: clipId,
+          },
+        );
+        const nextTextData = placementResult.textData;
         const transform = mergeTransform(resolved.clip.transform, args);
 
         const updateResult = await executeAgentCommand('UpdateTextClip', {
@@ -983,6 +1281,7 @@ const TEXT_TOOLS: ToolDefinition[] = [
             trackId: resolved.track.id,
             textData: nextTextData,
             transform: transform ?? null,
+            placement: placementResult.placement,
           },
         };
       } catch (error) {
@@ -1001,11 +1300,14 @@ const TEXT_TOOLS: ToolDefinition[] = [
   {
     name: 'set_text_transform',
     description: 'Move, scale, rotate, or change the anchor of a timeline text clip',
-    category: 'utility',
+    category: 'clip',
     parameters: {
       type: 'object',
       properties: {
-        sequenceId: { type: 'string', description: 'Sequence ID' },
+        sequenceId: {
+          type: 'string',
+          description: 'Optional sequence ID. Defaults to active sequence.',
+        },
         trackId: { type: 'string', description: 'Optional track ID' },
         clipId: { type: 'string', description: 'Text clip ID' },
         transform: { type: 'object', description: 'Full or partial transform' },
@@ -1014,8 +1316,10 @@ const TEXT_TOOLS: ToolDefinition[] = [
         scaleX: { type: 'number', description: 'Scale X multiplier' },
         scaleY: { type: 'number', description: 'Scale Y multiplier' },
         rotationDeg: { type: 'number', description: 'Rotation in degrees' },
+        anchorX: { type: 'number', description: 'Normalized anchor X, 0 to 1' },
+        anchorY: { type: 'number', description: 'Normalized anchor Y, 0 to 1' },
       },
-      required: ['sequenceId', 'clipId'],
+      required: ['clipId'],
     },
     handler: async (args, context) => {
       try {
@@ -1062,15 +1366,18 @@ const TEXT_TOOLS: ToolDefinition[] = [
     name: 'delete_text_clip',
     aliases: ['remove_text_clip'],
     description: 'Remove a timeline text overlay clip',
-    category: 'utility',
+    category: 'clip',
     parameters: {
       type: 'object',
       properties: {
-        sequenceId: { type: 'string', description: 'Sequence ID' },
+        sequenceId: {
+          type: 'string',
+          description: 'Optional sequence ID. Defaults to active sequence.',
+        },
         trackId: { type: 'string', description: 'Optional track ID' },
         clipId: { type: 'string', description: 'Text clip ID' },
       },
-      required: ['sequenceId', 'clipId'],
+      required: ['clipId'],
     },
     handler: async (args, context) => {
       try {

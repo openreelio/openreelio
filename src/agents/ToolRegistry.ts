@@ -15,7 +15,7 @@ import type { ToolOutputContract } from './toolOutputContracts';
 
 /** JSON Schema for tool parameters */
 export interface JsonSchema {
-  type: string;
+  type: string | string[];
   properties?: Record<string, JsonSchema>;
   required?: string[];
   items?: JsonSchema;
@@ -42,6 +42,14 @@ export interface AgentContext {
 }
 
 const logger = createLogger('ToolRegistry');
+
+export function describeExpectedJsonTypes(types: readonly string[]): string {
+  if (types.length === 1) {
+    return types[0] === 'integer' ? 'a number' : `a ${types[0]}`;
+  }
+
+  return `one of: ${types.join(', ')}`;
+}
 
 // =============================================================================
 // Types
@@ -407,43 +415,49 @@ export class ToolRegistry {
   private validateType(name: string, value: unknown, schema: JsonSchema): string | undefined {
     const actualType = typeof value;
 
+    const acceptedTypes = Array.isArray(schema.type) ? schema.type : [schema.type];
+    const matchesType = acceptedTypes.some((type) => {
+      if (type === 'null') {
+        return value === null;
+      }
+      if (type === 'array') {
+        return Array.isArray(value);
+      }
+      if (type === 'object') {
+        return actualType === 'object' && value !== null && !Array.isArray(value);
+      }
+      if (type === 'integer') {
+        return actualType === 'number';
+      }
+      return actualType === type;
+    });
+
+    if (!matchesType) {
+      return `Parameter '${name}' must be ${describeExpectedJsonTypes(acceptedTypes)}, got ${value === null ? 'null' : actualType}`;
+    }
+
+    if (
+      acceptedTypes.includes('integer') &&
+      !acceptedTypes.includes('number') &&
+      actualType === 'number' &&
+      !Number.isInteger(value)
+    ) {
+      return `Parameter '${name}' must be an integer`;
+    }
+
+    if (schema.enum && !schema.enum.includes(value)) {
+      return `Parameter '${name}' must be one of: ${schema.enum.join(', ')}`;
+    }
+
     switch (schema.type) {
       case 'string':
-        if (actualType !== 'string') {
-          return `Parameter '${name}' must be a string, got ${actualType}`;
-        }
-        // Check enum
-        if (schema.enum && !schema.enum.includes(value)) {
-          return `Parameter '${name}' must be one of: ${schema.enum.join(', ')}`;
-        }
         break;
 
       case 'number':
       case 'integer':
-        if (actualType !== 'number') {
-          return `Parameter '${name}' must be a number, got ${actualType}`;
-        }
-        if (schema.type === 'integer' && !Number.isInteger(value)) {
-          return `Parameter '${name}' must be an integer`;
-        }
-        break;
-
       case 'boolean':
-        if (actualType !== 'boolean') {
-          return `Parameter '${name}' must be a boolean, got ${actualType}`;
-        }
-        break;
-
       case 'array':
-        if (!Array.isArray(value)) {
-          return `Parameter '${name}' must be an array`;
-        }
-        break;
-
       case 'object':
-        if (actualType !== 'object' || value === null || Array.isArray(value)) {
-          return `Parameter '${name}' must be an object`;
-        }
         break;
     }
 

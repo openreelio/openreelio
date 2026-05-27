@@ -17,6 +17,7 @@ export interface UseExternalAgentChatRuntimeOptions {
   enabled?: boolean;
   approvalBroker?: ExternalAgentApprovalBroker;
   sessionPersistence?: ExternalAgentSessionPersistence;
+  retainAcrossUnmount?: boolean;
   onComplete?: () => void;
   onAbort?: () => void;
   onError?: (error: Error) => void;
@@ -38,29 +39,71 @@ const INITIAL_STATE: ExternalAgentChatRuntimeState = {
   pendingToolPermissionRequest: null,
 };
 
+const retainedRuntimeControllers = new Map<string, ExternalAgentChatRuntimeController>();
+
+function getRetainedRuntimeKey(
+  options: UseExternalAgentChatRuntimeOptions,
+  activeSessionId: string | null,
+): string | null {
+  if (!options.retainAcrossUnmount || !options.projectId || !activeSessionId) {
+    return null;
+  }
+
+  return `${options.adapter.id}:${options.projectId}:${activeSessionId}`;
+}
+
 export function useExternalAgentChatRuntime(
   options: UseExternalAgentChatRuntimeOptions,
 ): UseExternalAgentChatRuntimeResult {
   const [state, setState] = useState<ExternalAgentChatRuntimeState>(INITIAL_STATE);
   const conversation = useMemo(() => createConversationStoreExternalAgentGateway(), []);
   const controllerRef = useRef<ExternalAgentChatRuntimeController | null>(null);
+  const retainKeyRef = useRef<string | null>(null);
   const activeSessionId = useConversationStore((store) => store.activeSessionId);
+  const retainKey = getRetainedRuntimeKey(options, activeSessionId);
 
   if (!controllerRef.current) {
-    controllerRef.current = new ExternalAgentChatRuntimeController({
-      adapter: options.adapter,
-      conversation,
-      projectId: options.projectId,
-      cwd: options.cwd,
-      enabled: options.enabled,
-      approvalBroker: options.approvalBroker,
-      sessionPersistence: options.sessionPersistence,
-      onStateChange: setState,
-      onComplete: options.onComplete,
-      onAbort: options.onAbort,
-      onError: options.onError,
-    });
+    controllerRef.current =
+      retainKey !== null ? (retainedRuntimeControllers.get(retainKey) ?? null) : null;
+
+    if (!controllerRef.current) {
+      controllerRef.current = new ExternalAgentChatRuntimeController({
+        adapter: options.adapter,
+        conversation,
+        projectId: options.projectId,
+        cwd: options.cwd,
+        enabled: options.enabled,
+        approvalBroker: options.approvalBroker,
+        sessionPersistence: options.sessionPersistence,
+        onStateChange: setState,
+        onComplete: options.onComplete,
+        onAbort: options.onAbort,
+        onError: options.onError,
+      });
+    }
+
+    if (retainKey !== null) {
+      retainedRuntimeControllers.set(retainKey, controllerRef.current);
+      retainKeyRef.current = retainKey;
+    }
   }
+
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller || retainKey === retainKeyRef.current) {
+      return;
+    }
+
+    const previousKey = retainKeyRef.current;
+    if (previousKey && retainedRuntimeControllers.get(previousKey) === controller) {
+      retainedRuntimeControllers.delete(previousKey);
+    }
+
+    if (retainKey !== null) {
+      retainedRuntimeControllers.set(retainKey, controller);
+    }
+    retainKeyRef.current = retainKey;
+  }, [retainKey]);
 
   useEffect(() => {
     controllerRef.current?.updateContext({
@@ -68,6 +111,7 @@ export function useExternalAgentChatRuntime(
       projectId: options.projectId,
       cwd: options.cwd,
       enabled: options.enabled,
+      onStateChange: setState,
       onComplete: options.onComplete,
       onAbort: options.onAbort,
       onError: options.onError,
@@ -84,7 +128,18 @@ export function useExternalAgentChatRuntime(
 
   useEffect(() => {
     return () => {
-      controllerRef.current?.dispose();
+      const controller = controllerRef.current;
+      controller?.updateCallbacks({ onStateChange: null });
+      const retainedKey = retainKeyRef.current;
+      if (controller && retainedKey && controller.hasRunningState()) {
+        controllerRef.current = null;
+        return;
+      }
+
+      controller?.dispose();
+      if (retainedKey && retainedRuntimeControllers.get(retainedKey) === controller) {
+        retainedRuntimeControllers.delete(retainedKey);
+      }
       controllerRef.current = null;
     };
   }, []);
