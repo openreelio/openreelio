@@ -661,34 +661,36 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         setIsMultiFrameLoading(true);
       }
 
-      // Compose into an offscreen canvas first. Clearing the visible canvas
-      // before async frame extraction completes exposes the black background at cuts.
-      frameCtx.fillStyle = '#000000';
-      frameCtx.fillRect(0, 0, frameCanvas.width, frameCanvas.height);
-      const completed = await renderSequenceToCanvas(
-        frameCtx,
-        activeSequence,
-        time,
-        time,
-        new Set([activeSequence.id]),
-        0,
-      );
+      try {
+        // Compose into an offscreen canvas first. Clearing the visible canvas
+        // before async frame extraction completes exposes the black background at cuts.
+        frameCtx.fillStyle = '#000000';
+        frameCtx.fillRect(0, 0, frameCanvas.width, frameCanvas.height);
+        const completed = await renderSequenceToCanvas(
+          frameCtx,
+          activeSequence,
+          time,
+          time,
+          new Set([activeSequence.id]),
+          0,
+        );
 
-      if (!completed) {
-        return;
+        if (!completed) {
+          return;
+        }
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(frameCanvas, 0, 0);
+
+        onFrameRender?.(time);
+      } finally {
+        // Clear multi-frame loading state even when a stale render exits early.
+        const wasLoadingAtEnd = isLoadingRef.current;
+        isLoadingRef.current = false;
+        if (wasLoadingAtEnd && isMountedRef.current) {
+          setIsMultiFrameLoading(false);
+        }
       }
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(frameCanvas, 0, 0);
-
-      // Clear multi-frame loading state (only if mounted and was loading)
-      const wasLoadingAtEnd = isLoadingRef.current;
-      isLoadingRef.current = false;
-      if (wasLoadingAtEnd && isMountedRef.current) {
-        setIsMultiFrameLoading(false);
-      }
-
-      onFrameRender?.(time);
     },
     [
       activeSequence,

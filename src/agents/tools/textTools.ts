@@ -892,20 +892,26 @@ async function collectPlacementObstacles(
   const obstacles: TextPlacementObstacle[] = [];
 
   for (const track of sequence.tracks) {
+    if (track.visible === false) {
+      continue;
+    }
+
     if (track.kind !== 'video' && track.kind !== 'overlay') {
       continue;
     }
 
     for (const clip of track.clips) {
-      if (!rangesOverlap(timelineIn, duration, clip) || isTextClip(clip.assetId)) {
+      if (
+        clip.enabled === false ||
+        !rangesOverlap(timelineIn, duration, clip) ||
+        isTextClip(clip.assetId)
+      ) {
         continue;
       }
 
       const annotation = await readAnnotationForPlacement(clip.assetId, annotationCache);
       const sourceTime = resolveSourceTimeAtTimeline(clip, midpoint);
-      obstacles.push(
-        ...annotationToTextPlacementObstacles(annotation, sourceTime, toleranceSec),
-      );
+      obstacles.push(...annotationToTextPlacementObstacles(annotation, sourceTime, toleranceSec));
     }
   }
 
@@ -921,8 +927,13 @@ function collectExistingTextPlacements(
   const placements: ExistingTextPlacement[] = [];
 
   for (const track of sequence.tracks) {
+    if (track.visible === false) {
+      continue;
+    }
+
     for (const clip of track.clips) {
       if (
+        clip.enabled === false ||
         clip.id === excludeClipId ||
         !rangesOverlap(timelineIn, duration, clip) ||
         !isTextClip(clip.assetId)
@@ -1033,7 +1044,10 @@ const TEXT_TOOLS: ToolDefinition[] = [
     parameters: {
       type: 'object',
       properties: {
-        sequenceId: { type: 'string', description: 'Optional sequence ID. Defaults to active sequence.' },
+        sequenceId: {
+          type: 'string',
+          description: 'Optional sequence ID. Defaults to active sequence.',
+        },
         trackId: { type: 'string', description: 'Optional video or overlay track ID' },
         text: { type: 'string', description: 'Text content' },
         content: { type: 'string', description: 'Legacy alias for text content' },
@@ -1189,7 +1203,10 @@ const TEXT_TOOLS: ToolDefinition[] = [
     parameters: {
       type: 'object',
       properties: {
-        sequenceId: { type: 'string', description: 'Optional sequence ID. Defaults to active sequence.' },
+        sequenceId: {
+          type: 'string',
+          description: 'Optional sequence ID. Defaults to active sequence.',
+        },
         trackId: { type: 'string', description: 'Optional track ID' },
         clipId: { type: 'string', description: 'Text clip ID' },
         text: { type: 'string', description: 'New text content' },
@@ -1287,7 +1304,10 @@ const TEXT_TOOLS: ToolDefinition[] = [
     parameters: {
       type: 'object',
       properties: {
-        sequenceId: { type: 'string', description: 'Optional sequence ID. Defaults to active sequence.' },
+        sequenceId: {
+          type: 'string',
+          description: 'Optional sequence ID. Defaults to active sequence.',
+        },
         trackId: { type: 'string', description: 'Optional track ID' },
         clipId: { type: 'string', description: 'Text clip ID' },
         transform: { type: 'object', description: 'Full or partial transform' },
@@ -1350,7 +1370,10 @@ const TEXT_TOOLS: ToolDefinition[] = [
     parameters: {
       type: 'object',
       properties: {
-        sequenceId: { type: 'string', description: 'Optional sequence ID. Defaults to active sequence.' },
+        sequenceId: {
+          type: 'string',
+          description: 'Optional sequence ID. Defaults to active sequence.',
+        },
         trackId: { type: 'string', description: 'Optional track ID' },
         clipId: { type: 'string', description: 'Text clip ID' },
       },

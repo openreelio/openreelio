@@ -153,4 +153,73 @@ describe('useExternalAgentChatRuntime', () => {
 
     expect(adapter.shutdown).toHaveBeenCalledWith('thr_123');
   });
+
+  it('should dispose a retained Codex controller after it becomes idle', async () => {
+    const adapter = new FakeExternalAgentAdapter();
+    const firstHook = renderHook(() =>
+      useExternalAgentChatRuntime({
+        adapter,
+        projectId: 'project-1',
+        cwd: '/project',
+        enabled: true,
+        retainAcrossUnmount: true,
+      }),
+    );
+
+    await act(async () => {
+      await firstHook.result.current.executeMessage('Short edit');
+    });
+    act(() => {
+      adapter.emit({
+        type: 'turn_completed',
+        runtimeId: 'codex',
+        sessionId: 'thr_123',
+        turnId: 'turn_1',
+        status: 'completed',
+      });
+    });
+    await waitFor(() => {
+      expect(firstHook.result.current.isRunning).toBe(false);
+    });
+
+    firstHook.unmount();
+
+    expect(adapter.shutdown).toHaveBeenCalledWith('thr_123');
+
+    const nextAdapter = new FakeExternalAgentAdapter();
+    const secondHook = renderHook(() =>
+      useExternalAgentChatRuntime({
+        adapter: nextAdapter,
+        projectId: 'project-1',
+        cwd: '/project',
+        enabled: true,
+        retainAcrossUnmount: true,
+      }),
+    );
+
+    await act(async () => {
+      await secondHook.result.current.executeMessage('Fresh edit');
+    });
+
+    expect(nextAdapter.startSession).toHaveBeenCalledTimes(1);
+    expect(nextAdapter.sendMessage).toHaveBeenCalledWith('thr_123', {
+      content: 'Fresh edit',
+      cwd: '/project',
+    });
+    expect(adapter.sendMessage).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      nextAdapter.emit({
+        type: 'turn_completed',
+        runtimeId: 'codex',
+        sessionId: 'thr_123',
+        turnId: 'turn_2',
+        status: 'completed',
+      });
+    });
+    await waitFor(() => {
+      expect(secondHook.result.current.isRunning).toBe(false);
+    });
+    secondHook.unmount();
+  });
 });

@@ -458,10 +458,14 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
     this.turnSessionIds.set(turnId, threadId);
     const session = this.sessions.get(threadId);
     if (session) {
+      const status = getString(turn, 'status') ?? getString(params, 'status');
       session.lastTurnId = turnId;
       if (notification.method === 'turn/started') {
         session.activeTurnId = turnId;
-      } else if (notification.method === 'turn/completed' && session.activeTurnId === turnId) {
+      } else if (
+        session.activeTurnId === turnId &&
+        isTerminalCodexTurnNotification(notification.method, status)
+      ) {
         session.activeTurnId = null;
       }
     }
@@ -562,6 +566,18 @@ function isDangerousOsCommand(command: string): boolean {
 
 function isTerminalCodexTurnStatus(status: string | null | undefined): boolean {
   return status === 'completed' || status === 'failed' || status === 'interrupted';
+}
+
+function isTerminalCodexTurnNotification(
+  method: string,
+  status: string | null | undefined,
+): boolean {
+  return (
+    method === 'turn/completed' ||
+    method === 'turn/failed' ||
+    method === 'turn/interrupted' ||
+    isTerminalCodexTurnStatus(status)
+  );
 }
 
 function getString(input: CodexJsonObject | null | undefined, key: string): string | null {

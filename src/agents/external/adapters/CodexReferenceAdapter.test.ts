@@ -233,6 +233,52 @@ describe('CodexReferenceAdapter', () => {
     expect(appServerClient.interruptTurn).toHaveBeenCalledWith('thr_123', 'turn_1');
   });
 
+  it('should start a new Codex turn after a terminal failure notification', async () => {
+    const notificationHandlers: Array<(notification: any) => void> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi
+        .fn()
+        .mockResolvedValueOnce({ id: 'turn_1', status: 'inProgress' })
+        .mockResolvedValueOnce({ id: 'turn_2', status: 'inProgress' }),
+      steerTurn: vi.fn().mockResolvedValue({ turnId: 'turn_1' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onNotification: vi.fn((handler: (notification: any) => void) => {
+        notificationHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+
+    const session = await adapter.startSession({
+      projectId: 'project-1',
+      prompt: 'Initial request',
+    });
+    const emitNotification = notificationHandlers[0];
+    if (!emitNotification) {
+      throw new Error('Expected Codex notification handler to be registered');
+    }
+
+    emitNotification({
+      method: 'turn/failed',
+      params: {
+        threadId: 'thr_123',
+        turn: { id: 'turn_1', status: 'failed' },
+      },
+    });
+    await adapter.sendMessage(session.sessionId, { content: 'Try again', cwd: '/project' });
+
+    expect(appServerClient.startTurn).toHaveBeenCalledTimes(2);
+    expect(appServerClient.startTurn).toHaveBeenLastCalledWith('thr_123', 'Try again', {
+      model: 'gpt-5.5',
+      effort: 'medium',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+    });
+    expect(appServerClient.steerTurn).not.toHaveBeenCalled();
+  });
+
   it('should resume a persisted Codex thread before sending a follow-up message', async () => {
     const appServerClient = {
       startThread: vi.fn(),
@@ -976,6 +1022,127 @@ describe('CodexReferenceAdapter', () => {
     expect(getFirstTextContent(response)).toContain('drag-and-drop parity path');
     expect(getFirstTextContent(response)).toContain('"clip-audio"');
     expect(getFirstTextContent(response)).toContain('"stateVersion": 11');
+  });
+
+  it('should route command_execute InsertClip approvals through the media insert surface', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const approvalDecisionProvider = vi.fn().mockResolvedValue('accept');
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_project_state') {
+        return {
+          meta: { name: 'Project' },
+          activeSequenceId: 'seq-1',
+          assets: [],
+          sequences: [],
+          isDirty: false,
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    vi.mocked(insertAgentMediaClip).mockResolvedValue({
+      insertResult: {
+        opId: 'op-video',
+        changes: [],
+        createdIds: ['clip-video'],
+        deletedIds: [],
+      },
+      clipId: 'clip-video',
+      sequenceId: 'seq-1',
+      trackId: 'video-1',
+      assetId: 'asset-video',
+      timelineStart: 4,
+      sourceIn: 1,
+      sourceOut: 6,
+      durationSec: 5,
+    });
+    projectStoreMocks.refreshFromBackendMutation.mockResolvedValue(12);
+    const adapter = new CodexReferenceAdapter(undefined, {
+      appServerClient,
+      approvalDecisionProvider,
+    });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const contextResponse = (await respondToRequest({
+      id: 21,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_context',
+        namespace: 'openreelio',
+        tool: 'project_state',
+        arguments: {},
+      },
+    })) as any;
+    const contextToken = JSON.parse(getFirstTextContent(contextResponse)).contextToken;
+
+    const response = (await respondToRequest({
+      id: 22,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_insert_clip',
+        namespace: 'openreelio',
+        tool: 'command_execute',
+        arguments: {
+          commandType: 'InsertClip',
+          payload: {
+            sequenceId: 'seq-1',
+            trackId: 'video-1',
+            assetId: 'asset-video',
+            timelineStart: 4,
+            sourceIn: 1,
+            sourceOut: 6,
+          },
+          reason: 'Place the selected interview range on the timeline.',
+          contextToken,
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(true);
+    expect(approvalDecisionProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalType: 'openreelio_edit_command',
+        args: expect.objectContaining({
+          commandType: 'MediaInsert',
+          payload: expect.objectContaining({
+            sequenceId: 'seq-1',
+            trackId: 'video-1',
+            assetId: 'asset-video',
+          }),
+        }),
+      }),
+    );
+    expect(invoke).not.toHaveBeenCalledWith('validate_command_payload', expect.anything());
+    expect(insertAgentMediaClip).toHaveBeenCalledWith({
+      sequenceId: 'seq-1',
+      trackId: 'video-1',
+      assetId: 'asset-video',
+      timelineStart: 4,
+      sourceIn: 1,
+      sourceOut: 6,
+      audioOnly: false,
+      autoExtractLinkedAudio: undefined,
+    });
+    expect(getFirstTextContent(response)).toContain('drag-and-drop parity path');
+    expect(getFirstTextContent(response)).toContain('"stateVersion": 12');
   });
 
   it('should reject stock media search without a query before invoking Tauri', async () => {

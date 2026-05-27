@@ -41,12 +41,15 @@ const INITIAL_STATE: ExternalAgentChatRuntimeState = {
 
 const retainedRuntimeControllers = new Map<string, ExternalAgentChatRuntimeController>();
 
-function getRetainedRuntimeKey(options: UseExternalAgentChatRuntimeOptions): string | null {
-  if (!options.retainAcrossUnmount) {
+function getRetainedRuntimeKey(
+  options: UseExternalAgentChatRuntimeOptions,
+  activeSessionId: string | null,
+): string | null {
+  if (!options.retainAcrossUnmount || !options.projectId || !activeSessionId) {
     return null;
   }
 
-  return options.adapter.id;
+  return `${options.adapter.id}:${options.projectId}:${activeSessionId}`;
 }
 
 export function useExternalAgentChatRuntime(
@@ -57,7 +60,7 @@ export function useExternalAgentChatRuntime(
   const controllerRef = useRef<ExternalAgentChatRuntimeController | null>(null);
   const retainKeyRef = useRef<string | null>(null);
   const activeSessionId = useConversationStore((store) => store.activeSessionId);
-  const retainKey = getRetainedRuntimeKey(options);
+  const retainKey = getRetainedRuntimeKey(options, activeSessionId);
 
   if (!controllerRef.current) {
     controllerRef.current =
@@ -84,6 +87,23 @@ export function useExternalAgentChatRuntime(
       retainKeyRef.current = retainKey;
     }
   }
+
+  useEffect(() => {
+    const controller = controllerRef.current;
+    if (!controller || retainKey === retainKeyRef.current) {
+      return;
+    }
+
+    const previousKey = retainKeyRef.current;
+    if (previousKey && retainedRuntimeControllers.get(previousKey) === controller) {
+      retainedRuntimeControllers.delete(previousKey);
+    }
+
+    if (retainKey !== null) {
+      retainedRuntimeControllers.set(retainKey, controller);
+    }
+    retainKeyRef.current = retainKey;
+  }, [retainKey]);
 
   useEffect(() => {
     controllerRef.current?.updateContext({

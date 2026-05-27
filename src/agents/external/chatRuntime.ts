@@ -241,24 +241,23 @@ export class ExternalAgentChatRuntimeController {
       return;
     }
 
-    const initialConversationSessionId = this.options.conversation.getActiveSessionId();
-    if (!this.getState(initialConversationSessionId).isRunning) {
-      this.setState(
-        {
-          phase: 'starting',
-          isRunning: true,
-          error: null,
-        },
-        initialConversationSessionId,
-      );
-    }
-
     const conversationSessionId = await this.options.conversation.ensureSession(
       this.options.adapter.id,
     );
     if (!conversationSessionId) {
       this.fail(new Error('Unable to create an OpenReelio AI session'));
       return;
+    }
+
+    if (!this.getState(conversationSessionId).isRunning) {
+      this.setState(
+        {
+          phase: 'starting',
+          isRunning: true,
+          error: null,
+        },
+        conversationSessionId,
+      );
     }
 
     let targetExternalSessionId: string | null = null;

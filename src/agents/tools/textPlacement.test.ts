@@ -5,6 +5,7 @@ import {
   annotationToTextPlacementObstacles,
   parseTextPlacementOptions,
   resolveSmartTextPlacement,
+  type TextPlacementObstacle,
 } from './textPlacement';
 
 function sequence(): Sequence {
@@ -78,5 +79,26 @@ describe('textPlacement', () => {
     });
 
     expect(decision.candidate).not.toBe('center');
+  });
+
+  it('should ignore OCR and existing text obstacles when avoidText is disabled', () => {
+    const textData = createTitleTextClipData('Readable title');
+    const obstacle: TextPlacementObstacle = {
+      type: 'ocr',
+      box: { left: 0.25, top: 0.35, width: 0.5, height: 0.3 },
+      weight: 8,
+      confidence: 0.95,
+    };
+
+    const decision = resolveSmartTextPlacement({
+      textData,
+      sequence: sequence(),
+      options: parseTextPlacementOptions({ placementIntent: 'title', avoidText: false }),
+      obstacles: [obstacle],
+      existingText: [{ textData: createTitleTextClipData('Existing title'), weight: 8 }],
+    });
+
+    expect(decision.candidate).toBe('center');
+    expect(decision.obstacleCount).toBe(0);
   });
 });

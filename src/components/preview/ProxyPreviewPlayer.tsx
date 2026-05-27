@@ -76,6 +76,8 @@ interface ActiveClip {
   asset: Asset;
   trackId: string;
   trackIndex: number;
+  timelineInSec: number;
+  timelineOutSec: number;
   isActive: boolean;
 }
 
@@ -501,6 +503,8 @@ export function ProxyPreviewPlayer({
           asset,
           trackId: layer.trackId,
           trackIndex: layer.trackIndex,
+          timelineInSec: layer.timelineInSec,
+          timelineOutSec: layer.timelineOutSec,
           isActive: isTimelineRangeActive(layer.timelineInSec, layer.timelineOutSec, currentTime),
         });
       }
@@ -530,6 +534,8 @@ export function ProxyPreviewPlayer({
             asset,
             trackId: track.id,
             trackIndex,
+            timelineInSec: clip.place.timelineInSec,
+            timelineOutSec: getClipTimelineEndSec(clip),
             isActive: isClipActiveAtTime(clip, currentTime),
           });
         }
@@ -551,6 +557,8 @@ export function ProxyPreviewPlayer({
           clipInfo.asset === prev[index].asset &&
           clipInfo.trackId === prev[index].trackId &&
           clipInfo.trackIndex === prev[index].trackIndex &&
+          clipInfo.timelineInSec === prev[index].timelineInSec &&
+          clipInfo.timelineOutSec === prev[index].timelineOutSec &&
           clipInfo.isActive === prev[index].isActive,
       )
     ) {
@@ -982,13 +990,17 @@ export function ProxyPreviewPlayer({
     (timelineTime: number, forceSeek: boolean = false) => {
       const safeTimelineTime = clampTimelineTime(timelineTime, duration);
 
-      renderableClips.forEach(({ clip }) => {
+      renderableClips.forEach(({ clip, timelineInSec, timelineOutSec }) => {
         const video = videoRefs.current.get(clip.id);
         if (!video) return;
 
         const clampedSourceTime = getClampedSourceTime(clip, safeTimelineTime);
         const safeSpeed = getSafeClipSpeed(clip);
-        const shouldPlayClip = isClipActiveAtTime(clip, safeTimelineTime);
+        const shouldPlayClip = isTimelineRangeActive(
+          timelineInSec,
+          timelineOutSec,
+          safeTimelineTime,
+        );
 
         const tolerance = forceSeek || !isPlaying ? PRECISE_SEEK_TOLERANCE : DRIFT_SEEK_TOLERANCE;
         // During active playback, avoid forcing currentTime while the element is

@@ -196,4 +196,41 @@ describe('insertAgentMediaClip', () => {
 
     expect(executeCommand).not.toHaveBeenCalled();
   });
+
+  it('should reject invalid timeline starts before executing commands', async () => {
+    await expect(
+      insertAgentMediaClip({
+        sequenceId: 'seq-1',
+        trackId: 'video-1',
+        assetId: 'asset-video',
+        timelineStart: Number.NaN,
+      }),
+    ).rejects.toThrow('timelineStart must be a finite non-negative number');
+
+    expect(executeCommand).not.toHaveBeenCalled();
+  });
+
+  it('should rollback already-applied media commands when linked audio insertion fails', async () => {
+    const undo = vi.fn(async () => ({ success: true, canUndo: false, canRedo: false }));
+    useProjectStore.setState({ undo });
+    executeCommand
+      .mockResolvedValueOnce({
+        opId: 'op-video',
+        changes: [],
+        createdIds: ['clip-video'],
+        deletedIds: [],
+      })
+      .mockRejectedValueOnce(new Error('linked audio insert failed'));
+
+    await expect(
+      insertAgentMediaClip({
+        sequenceId: 'seq-1',
+        trackId: 'video-1',
+        assetId: 'asset-video',
+        timelineStart: 2,
+      }),
+    ).rejects.toThrow('linked audio insert failed');
+
+    expect(undo).toHaveBeenCalledTimes(1);
+  });
 });

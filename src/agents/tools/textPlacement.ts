@@ -123,26 +123,26 @@ export function resolveSmartTextPlacement({
     right: 1 - options.safeMargin,
     bottom: 1 - options.safeMargin,
   };
-  const existingObstacles = existingText.map((entry): TextPlacementObstacle => ({
-    type: 'existing_text',
-    box: rectToBox(estimateTextRect(entry.textData, sequence)),
-    weight: entry.weight ?? 4,
-    label: 'existing text',
-  }));
+  const existingObstacles = existingText.map(
+    (entry): TextPlacementObstacle => ({
+      type: 'existing_text',
+      box: rectToBox(estimateTextRect(entry.textData, sequence)),
+      weight: entry.weight ?? 4,
+      label: 'existing text',
+    }),
+  );
   const effectiveObstacles = [
     ...obstacles.filter((obstacle) => shouldUseObstacle(obstacle, options)),
     ...(options.avoidText ? existingObstacles : []),
   ];
 
   const candidates = buildPlacementCandidates(options.intent, textData.style.alignment);
-  let best:
-    | {
-        candidate: PlacementCandidate;
-        rect: Rect;
-        score: number;
-        reason: string;
-      }
-    | null = null;
+  let best: {
+    candidate: PlacementCandidate;
+    rect: Rect;
+    score: number;
+    reason: string;
+  } | null = null;
 
   for (const candidate of candidates) {
     const rect = rectAtPosition(
@@ -233,7 +233,14 @@ export function annotationToTextPlacementObstacles(
 
   for (const text of annotation.analysis.textOcr?.results ?? []) {
     const detection = text as TextDetection;
-    addDetection('ocr', detection.timeSec, detection.boundingBox, detection.confidence, 5, detection.text);
+    addDetection(
+      'ocr',
+      detection.timeSec,
+      detection.boundingBox,
+      detection.confidence,
+      5,
+      detection.text,
+    );
   }
 
   return obstacles;
@@ -364,18 +371,27 @@ function clampPositionForRect(
   };
 }
 
-function shouldUseObstacle(obstacle: TextPlacementObstacle, options: TextPlacementOptions): boolean {
+function shouldUseObstacle(
+  obstacle: TextPlacementObstacle,
+  options: TextPlacementOptions,
+): boolean {
   if (obstacle.type === 'face') {
     return options.avoidFaces;
   }
   if (obstacle.type === 'object') {
     return options.avoidObjects;
   }
+  if (obstacle.type === 'ocr' || obstacle.type === 'existing_text') {
+    return options.avoidText;
+  }
   return true;
 }
 
 function normalizePlacementIntent(value: string | undefined): TextPlacementIntent {
-  const normalized = value?.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const normalized = value
+    ?.trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
   if (normalized === 'title') return 'title';
   if (normalized === 'subtitle' || normalized === 'caption') return 'subtitle';
   if (normalized === 'lower_third' || normalized === 'lowerthird') return 'lower_third';

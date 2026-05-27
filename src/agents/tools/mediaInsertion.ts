@@ -131,7 +131,7 @@ function trackHasOverlap(track: Track, timelineIn: number, durationSec: number):
 }
 
 function canInsertClipOnTrack(track: Track, timelineIn: number, durationSec: number): boolean {
-  return !track.locked && !trackHasOverlap(track, timelineIn, durationSec);
+  return !track.locked && !track.muted && !trackHasOverlap(track, timelineIn, durationSec);
 }
 
 function findAvailableAudioTrack(
@@ -397,6 +397,10 @@ export async function insertAgentMediaClip(
   };
 
   try {
+    if (!Number.isFinite(options.timelineStart) || options.timelineStart < 0) {
+      throw new Error('timelineStart must be a finite non-negative number.');
+    }
+
     const project = useProjectStore.getState();
     const sequence = project.sequences.get(options.sequenceId);
     if (!sequence) {

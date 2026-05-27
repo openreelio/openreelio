@@ -158,6 +158,17 @@ describe('textTools', () => {
     } as unknown as ReturnType<typeof useProjectStore.getState>);
   }
 
+  function findExecutedCommand(commandType: string): { type: string; payload: unknown } {
+    const command = executeCommandMock.mock.calls
+      .map(([executedCommand]) => executedCommand as { type?: string; payload?: unknown })
+      .find((executedCommand) => executedCommand.type === commandType);
+    if (!command?.type) {
+      throw new Error(`Expected ${commandType} command to be executed`);
+    }
+
+    return { type: command.type, payload: command.payload };
+  }
+
   it('should add a styled text clip and auto-create a video text track when needed', async () => {
     mockProject(createSequence());
     executeCommandMock
@@ -270,7 +281,7 @@ describe('textTools', () => {
 
     expect(result.success).toBe(true);
     expect(executeCommandMock).toHaveBeenCalledTimes(1);
-    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({
+    expect(findExecutedCommand('AddTextClip')).toMatchObject({
       type: 'AddTextClip',
       payload: {
         sequenceId: 'seq-1',
@@ -348,7 +359,7 @@ describe('textTools', () => {
     );
 
     expect(result.success).toBe(true);
-    expect(executeCommandMock.mock.calls[1][0]).toMatchObject({
+    expect(findExecutedCommand('AddTextClip')).toMatchObject({
       type: 'AddTextClip',
       payload: {
         textData: {
@@ -356,7 +367,7 @@ describe('textTools', () => {
         },
       },
     });
-    const addPayload = executeCommandMock.mock.calls[1][0].payload as {
+    const addPayload = findExecutedCommand('AddTextClip').payload as {
       textData: { position: { y: number } };
     };
     expect(addPayload.textData.position.y).toBeLessThan(0.3);
@@ -366,6 +377,46 @@ describe('textTools', () => {
         obstacleCount: 1,
       },
     });
+  });
+
+  it('should ignore hidden tracks and disabled clips when collecting placement obstacles', async () => {
+    const hiddenClip = createClip({
+      id: 'clip-hidden',
+      assetId: 'asset-hidden',
+      place: { timelineInSec: 0, durationSec: 8 },
+      range: { sourceInSec: 0, sourceOutSec: 8 },
+    });
+    const disabledClip = createClip({
+      id: 'clip-disabled',
+      assetId: 'asset-disabled',
+      enabled: false,
+      place: { timelineInSec: 0, durationSec: 8 },
+      range: { sourceInSec: 0, sourceOutSec: 8 },
+    });
+    mockProject(
+      createSequence({
+        tracks: [
+          createTrack({ id: 'track-hidden', visible: false, clips: [hiddenClip] }),
+          createTrack({ id: 'track-disabled', clips: [disabledClip] }),
+          createTrack({ id: 'track-visible', clips: [] }),
+        ],
+      }),
+    );
+
+    const tool = globalToolRegistry.get('add_text_clip');
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        text: 'Visible placement',
+        startTime: 1,
+        duration: 2,
+        preset: 'subtitle',
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(commands.getAnnotation).not.toHaveBeenCalled();
   });
 
   it('should update text data and clip transform while preserving existing style fields', async () => {

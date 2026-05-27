@@ -14,7 +14,7 @@ use openreelio_core::ipc::CommandPayload;
 use openreelio_core::timeline::TrackKind;
 use serde_json::Value;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const DEFAULT_MEDIA_INSERT_DURATION_SEC: f64 = 10.0;
@@ -138,6 +138,24 @@ impl McpServerState {
             ));
         }
         *consumed = true;
+        Ok(())
+    }
+
+    fn ensure_media_insert_token_scope(&self, project_id: &str) -> Result<(), ToolError> {
+        if let Some(plan_id) = self.approval_plan_id.as_deref() {
+            return Err(ToolError::PermissionDenied(format!(
+                "approvalToken is scoped to plan '{plan_id}' and cannot be used for openreelio.media.insert"
+            )));
+        }
+
+        if let Some(expected_project_id) = self.approval_project_id.as_deref() {
+            if expected_project_id != project_id {
+                return Err(ToolError::PermissionDenied(format!(
+                    "approvalToken is scoped to project '{expected_project_id}', not '{project_id}'"
+                )));
+            }
+        }
+
         Ok(())
     }
 }
@@ -823,7 +841,9 @@ fn build_assets_list(state: &McpServerState) -> Result<Value, ToolError> {
         .assets
         .values()
         .map(|asset| {
-            let annotation_path = annotation_path(path, &asset.id);
+            let has_annotation = annotation_path(path, &asset.id)
+                .map(|annotation_path| annotation_path.exists())
+                .unwrap_or(false);
             serde_json::json!({
                 "id": asset.id,
                 "name": asset.name,
@@ -832,7 +852,7 @@ fn build_assets_list(state: &McpServerState) -> Result<Value, ToolError> {
                 "fileSize": asset.file_size,
                 "missing": asset.missing,
                 "workspaceManaged": asset.workspace_managed,
-                "hasAnnotation": annotation_path.exists(),
+                "hasAnnotation": has_annotation,
                 "tags": asset.tags,
             })
         })
@@ -857,6 +877,7 @@ fn build_annotation_read(state: &McpServerState, arguments: Value) -> Result<Val
         .and_then(Value::as_str)
         .ok_or_else(|| ToolError::InvalidArguments("assetId is required".to_string()))?;
 
+    let asset_id = validate_annotation_asset_id(asset_id)?;
     let annotation = load_annotation_for_asset(path, asset_id)?;
     Ok(serde_json::json!({
         "status": "ok",
@@ -866,18 +887,39 @@ fn build_annotation_read(state: &McpServerState, arguments: Value) -> Result<Val
     }))
 }
 
-fn annotation_path(project_dir: &std::path::Path, asset_id: &str) -> PathBuf {
-    project_dir
+fn validate_annotation_asset_id(asset_id: &str) -> Result<&str, ToolError> {
+    let trimmed = asset_id.trim();
+    if trimmed.is_empty() {
+        return Err(ToolError::InvalidArguments(
+            "assetId is required".to_string(),
+        ));
+    }
+
+    if !trimmed
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    {
+        return Err(ToolError::InvalidArguments(
+            "assetId may only contain ASCII letters, numbers, hyphens, and underscores".to_string(),
+        ));
+    }
+
+    Ok(trimmed)
+}
+
+fn annotation_path(project_dir: &Path, asset_id: &str) -> Result<PathBuf, ToolError> {
+    let asset_id = validate_annotation_asset_id(asset_id)?;
+    Ok(project_dir
         .join(".openreelio")
         .join("annotations")
-        .join(format!("{asset_id}.json"))
+        .join(format!("{asset_id}.json")))
 }
 
 fn load_annotation_for_asset(
     project_dir: &std::path::Path,
     asset_id: &str,
 ) -> Result<Option<Value>, ToolError> {
-    let path = annotation_path(project_dir, asset_id);
+    let path = annotation_path(project_dir, asset_id)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -1102,6 +1144,7 @@ fn find_available_audio_track_id(
         .find(|track| {
             matches!(track.kind, TrackKind::Audio)
                 && !track.locked
+                && !track.muted
                 && !track_has_overlap(track, timeline_start, duration_sec)
         })
         .map(|track| track.id.clone())
@@ -1171,6 +1214,12 @@ fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value,
         ));
     }
 
+    if let Some(plan_id) = state.approval_plan_id.as_deref() {
+        return Err(ToolError::PermissionDenied(format!(
+            "approvalToken is scoped to plan '{plan_id}' and cannot be used for openreelio.media.insert"
+        )));
+    }
+
     let sequence_id = required_string_argument(&arguments, "sequenceId")?;
     let track_id = required_string_argument(&arguments, "trackId")?;
     let asset_id = required_string_argument(&arguments, "assetId")?;
@@ -1191,6 +1240,7 @@ fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value,
     })?;
     let mut project = super::load_project(project_path)
         .map_err(|error| ToolError::Execution(error.to_string()))?;
+    state.ensure_media_insert_token_scope(&project.state.meta.id)?;
 
     let asset = project
         .state
@@ -1798,6 +1848,32 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_annotation_asset_id_path_traversal() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let state = McpServerState {
+            project: Some(temp_dir.path().join("annotation_project")),
+            ..Default::default()
+        };
+
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.annotation.read",
+                    "arguments": { "assetId": "../secret" }
+                }),
+            ),
+        );
+
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(response["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("assetId"));
+    }
+
+    #[test]
     fn should_return_openreelio_host_context_when_agent_calls_context_tool() {
         let state = McpServerState::default();
         let response = handle_jsonrpc_request(
@@ -1943,6 +2019,63 @@ mod tests {
             .as_str()
             .expect("error message")
             .contains("expected-plan"));
+    }
+
+    #[test]
+    fn should_reject_media_insert_when_approval_token_is_plan_scoped() {
+        let state = McpServerState {
+            approval_token: Some("scoped-token".to_string()),
+            approval_plan_id: Some("plan-1".to_string()),
+            ..Default::default()
+        };
+
+        let error = apply_media_insert(
+            &state,
+            serde_json::json!({
+                "approvalToken": "scoped-token",
+                "sequenceId": "seq-1",
+                "trackId": "track-1",
+                "assetId": "asset-1",
+                "timelineStart": 0
+            }),
+        )
+        .expect_err("plan-scoped token should be rejected");
+
+        assert!(error.to_string().contains("plan-1"));
+        assert!(error.to_string().contains("openreelio.media.insert"));
+    }
+
+    #[test]
+    fn should_reject_media_insert_when_approval_token_project_scope_differs() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("wrong_media_project_scope");
+        let project =
+            openreelio_core::ActiveProject::create("Wrong Media Scope", project_path.clone())
+                .expect("project");
+        let actual_project_id = project.state.meta.id.clone();
+        drop(project);
+
+        let state = McpServerState {
+            project: Some(project_path),
+            approval_token: Some("project-token".to_string()),
+            approval_project_id: Some("expected-project".to_string()),
+            ..Default::default()
+        };
+
+        let error = apply_media_insert(
+            &state,
+            serde_json::json!({
+                "approvalToken": "project-token",
+                "sequenceId": "seq-1",
+                "trackId": "track-1",
+                "assetId": "asset-1",
+                "timelineStart": 0
+            }),
+        )
+        .expect_err("wrong project-scoped token should be rejected");
+
+        assert!(error.to_string().contains("expected-project"));
+        assert!(error.to_string().contains(&actual_project_id));
     }
 
     #[test]

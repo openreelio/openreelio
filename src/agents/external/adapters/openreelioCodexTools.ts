@@ -1062,6 +1062,19 @@ async function executeApprovedCommand(
     };
   }
 
+  if (commandType === 'InsertClip') {
+    const mediaArgs: CodexJsonObject = {
+      ...payload,
+      reason,
+      contextToken,
+    };
+    if (mediaArgs.timelineStart === undefined && mediaArgs.timelineIn !== undefined) {
+      mediaArgs.timelineStart = mediaArgs.timelineIn;
+    }
+
+    return insertMediaToolCall(mediaArgs, request, context);
+  }
+
   const payloadValidation = await validateCommandPayload(commandType, payload);
   if (!payloadValidation.valid) {
     return {
@@ -1090,10 +1103,6 @@ async function executeApprovedCommand(
       message:
         'The OpenReelio command was not approved. Approve it with the chat approval card; plain chat replies do not grant tool execution.',
     };
-  }
-
-  if (commandType === 'InsertClip') {
-    return executeApprovedInsertClipViaMediaPath(payload, context);
   }
 
   const plan: AgentPlan = {
@@ -1142,71 +1151,6 @@ async function executeApprovedCommand(
     result,
     refresh,
   };
-}
-
-async function executeApprovedInsertClipViaMediaPath(
-  payload: CodexJsonObject,
-  context: OpenReelioCodexToolContext,
-): Promise<CodexJsonObject> {
-  const sequenceId = getRequiredStringArg(payload, 'sequenceId', 'command_execute InsertClip');
-  const trackId = getRequiredStringArg(payload, 'trackId', 'command_execute InsertClip');
-  const assetId = getRequiredStringArg(payload, 'assetId', 'command_execute InsertClip');
-  const timelineStartValue = payload.timelineStart ?? payload.timelineIn;
-  if (
-    typeof timelineStartValue !== 'number' ||
-    !Number.isFinite(timelineStartValue) ||
-    timelineStartValue < 0
-  ) {
-    throw new Error(
-      'OpenReelio command_execute InsertClip requires timelineStart to be a finite non-negative number.',
-    );
-  }
-  const sourceIn = getFiniteNonNegativeNumberArg(
-    payload,
-    'sourceIn',
-    'command_execute InsertClip',
-  );
-  const sourceOut = getFiniteNonNegativeNumberArg(
-    payload,
-    'sourceOut',
-    'command_execute InsertClip',
-  );
-
-  try {
-    const insert = await insertAgentMediaClip({
-      sequenceId,
-      trackId,
-      assetId,
-      timelineStart: timelineStartValue,
-      sourceIn,
-      sourceOut,
-    });
-    const refresh = await refreshProjectStoreAfterMutation();
-
-    return {
-      status: 'ok',
-      commandType: 'InsertClip',
-      routedThrough: 'openreelio.media_insert',
-      message:
-        'Raw InsertClip was executed through the media insertion path to preserve preview visibility and linked audio parity.',
-      result: {
-        opId: insert.insertResult.opId,
-        createdIds: insert.insertResult.createdIds,
-        clipId: insert.clipId,
-        sequenceId: insert.sequenceId,
-        trackId: insert.trackId,
-        assetId: insert.assetId,
-        timelineStart: insert.timelineStart,
-        sourceIn: insert.sourceIn ?? null,
-        sourceOut: insert.sourceOut ?? null,
-        durationSec: insert.durationSec,
-        linkedAudio: insert.linkedAudio ?? null,
-      },
-      refresh,
-    };
-  } finally {
-    contextTokensBySessionId.delete(context.sessionId);
-  }
 }
 
 async function validateCommandToolCall(args: CodexJsonObject | null): Promise<CodexJsonObject> {
@@ -2219,7 +2163,8 @@ function buildCommandSchema(): CodexJsonObject {
         'Use caption style/position metadata for subtitle readability instead of editable overlay text when the user wants semantic subtitles.',
       ],
       placementDefaults: {
-        subtitle: 'Bottom center around y=0.85 with outline/shadow unless it covers important visual content.',
+        subtitle:
+          'Bottom center around y=0.85 with outline/shadow unless it covers important visual content.',
         title: 'Center or upper third depending on the shot composition.',
         lowerThird: 'Lower-left or lower-center with enough safe margin and readable contrast.',
       },
