@@ -560,7 +560,9 @@ pub struct CredentialStatusDto {
 // Update DTOs
 // =============================================================================
 
-use crate::core::update::{UpdateCheckResult, UpdateStatus};
+use crate::core::update::{
+    updater_disabled_message, updater_enabled_from_env, UpdateCheckResult, UpdateStatus,
+};
 
 /// DTO for update status
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
@@ -1157,6 +1159,13 @@ pub async fn get_credential_status(app: tauri::AppHandle) -> Result<CredentialSt
 pub async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateCheckResultDto, String> {
     use tauri_plugin_updater::UpdaterExt;
 
+    if !updater_runtime_enabled() {
+        return Ok(UpdateCheckResult::Error {
+            message: updater_disabled_message(),
+        }
+        .into());
+    }
+
     let updater = app
         .updater()
         .map_err(|e| format!("Updater not available: {}", e))?;
@@ -1203,6 +1212,10 @@ pub fn relaunch_app(app: tauri::AppHandle) {
 pub async fn download_and_install_update(app: tauri::AppHandle) -> Result<bool, String> {
     use tauri_plugin_updater::UpdaterExt;
 
+    if !updater_runtime_enabled() {
+        return Err(updater_disabled_message());
+    }
+
     let updater = app
         .updater()
         .map_err(|e| format!("Updater not available: {}", e))?;
@@ -1235,6 +1248,13 @@ pub async fn download_and_install_update(app: tauri::AppHandle) -> Result<bool, 
 
     tracing::info!("Update installed successfully, restart required");
     Ok(true)
+}
+
+fn updater_runtime_enabled() -> bool {
+    updater_enabled_from_env(
+        std::env::var("OPENREELIO_ENABLE_UPDATER").ok().as_deref(),
+        cfg!(debug_assertions),
+    )
 }
 
 // =============================================================================
