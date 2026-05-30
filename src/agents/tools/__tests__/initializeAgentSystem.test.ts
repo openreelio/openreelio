@@ -47,6 +47,7 @@ describe('initializeAgentSystem', () => {
 
     // Effect tools
     expect(toolNames).toContain('add_effect');
+    expect(toolNames).toContain('add_mask');
 
     // Transition tools
     expect(toolNames).toContain('add_transition');
