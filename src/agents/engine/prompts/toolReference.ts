@@ -58,6 +58,16 @@ const QUERY_ACTIONS = `## Query Actions (meta-tool: query)
 - analyze_reference_video(assetId) → extract edit/style signals from a reference video
 - read_source_analysis_report(assetId|file, outputPath?) → read the canonical Markdown source-analysis report for a source video; the report leads with quality status plus semantic scene-by-scene understanding, frame observations, timed transcript, visible text, likely setting, and useful moments. It auto-generates/refreshes analysis and saves "<asset-name>.analysis.md" beside the asset by default, or to outputPath when provided. Key outputs: data.content, data.relativePath, data.quality
 - generate_source_analysis_report(assetId, outputPath?) → build/reuse the structured source-footage report (JSON + Markdown) with quality gate, semantic overview, full transcript, frame observations, scene timeline, useful moments, and supporting signals, then persist the Markdown report beside the asset by default. Key outputs: data.content, data.reportPath, data.quality
+- analyze_timeline_clip(sequenceId?, trackId?, clipId?, mode?, rangeStartSec?, rangeEndSec?) → build a clip-local bundle for an existing timeline clip with timeline→source mapping, frame indices, extracted frame image paths, cache fingerprint, and quality. Defaults to the only selected clip when IDs are omitted. Use before precise visual edits.
+- sample_clip_frames(sequenceId?, trackId?, clipId?, targetIntervalSec?, maxSamples?) → dense frame sampling for close inspection of a small timeline clip/range. Key outputs: data.fingerprint, data.samples[n].imagePath, data.mapping[n].sourceSec
+- read_clip_analysis(fingerprint) → reload a cached clip-local analysis bundle without extracting frames again
+- map_timeline_to_source(sequenceId?, trackId?, clipId?, timelineTimes?|timelineTime?) → map timeline seconds to source seconds and frameIndex while respecting speed, reverse, freeze-frame, and time-remap
+- inspect_timeline_range(sequenceId?, startSec, endSec, trackId?) → analyze every visible video clip overlapping a timeline range and return clip-local bundles under data.clips[n]
+- describe_clip_frames(sequenceId?, trackId?, clipId?, fingerprint?, allowCloud?, reuseSourceAnalysis?) → semantically describe clip-local frame samples with per-frame description, subjects/actions/OCR/objects, confidence, evidence source/provider, quality, and perceptionFingerprint. Cloud vision is off unless allowCloud=true; source-analysis reuse is on by default.
+- read_clip_perception(perceptionFingerprint) → reload cached semantic clip-local observations without extracting or calling providers again
+- describe_timeline_range(sequenceId?, startSec, endSec, trackId?, allowCloud?) → semantically describe every visible video clip overlapping a small timeline range and return perception bundles under data.clips[n]
+- search_clip_evidence(query, limit?, sequenceId?) → search cached clip-local semantic observations by description, subjects/actions, visible text, objects, setting, or edit usefulness
+- plan_semantic_clip_edit(perceptionFingerprint, query, action?, paddingSec?, minConfidence?) → read-only plan that converts semantic observations into timeline ranges plus command drafts for blur/highlight/remove/marker/addText. When source annotations have bounding boxes, data.ranges[n].spatialTargets can draft AddMask after AddEffect; unresolved IDs such as isolatedClipId/effectId must be resolved before execution. Review data.ranges[n].warnings before editing.
 - import_external_diarization(assetId, inputPath) → import external diarization JSON and merge true speaker IDs into the cached transcript bundle
 - search_source_analysis_report(assetId, query) → search report moments/chapters/highlights/speaker turns/visual breakdown/frame-observation entries and return ranked source ranges
 - search_source_library(query) → search report moments/chapters/highlights/speaker turns/visual breakdown/frame-observation entries across multiple source assets and return ranked ranges
@@ -100,6 +110,9 @@ const AUDIO_ACTIONS = `## Audio Actions (meta-tool: audio, require sequenceId + 
 
 const EFFECTS_ACTIONS = `## Effects Actions (meta-tool: effects)
 - add_effect(trackId, clipId, effectType, parameters?) → apply blur/brightness/contrast/saturation
+- add_mask(trackId, clipId, effectId, shape, feather?, inverted?) → apply a spatial power-window mask to an effect, commonly after plan_semantic_clip_edit returns AddMask drafts
+- update_mask(effectId, maskId, shape?/feather?/opacity?/expansion?/enabled?) → refine a mask after visual review
+- remove_mask(effectId, maskId) → remove one mask from an effect
 - remove_effect(trackId, clipId, effectId) → remove one effect
 - adjust_effect_param(trackId, clipId, effectId, paramName, paramValue) → tune effect parameter
 - copy_effects(sourceTrackId, sourceClipId, targetTrackId, targetClipId) → copy all effects between clips
@@ -121,7 +134,10 @@ Editable text overlays default to the active sequence when sequenceId is omitted
 - update_caption(captionId, text?, startTime?, endTime?) → edit caption
 - delete_caption(captionId) → remove caption
 - style_caption(captionId, fontSize?, fontFamily?, fontWeight?, bold?, italic?, underline?, color?, opacity?, backgroundColor?, backgroundPadding?, outlineColor?, outlineWidth?, shadowColor?, shadowOffsetX?, shadowOffsetY?, shadowBlur?, alignment?, lineHeight?, letterSpacing?, position?, xPercent?, yPercent?) → style caption metadata
-- auto_transcribe(assetId, language?, model?, provider?, async?) → transcribe audio/video into timed text segments; uses local Whisper when available, otherwise a configured transcript analysis provider
+- transcription_status() → inspect local Whisper availability and installed models before automatic subtitles
+- install_whisper_model(model?, force?) → install a local Whisper model after user approval; default install target is large-v3-turbo
+- auto_transcribe(assetId, language?, model?, provider?, async?) → transcribe audio/video into timed text segments; defaults to language auto-detection and the best installed local Whisper model, otherwise a configured transcript analysis provider
+- auto_transcribe_sequence(sequenceId?, language?, model?) → transcribe the audible edited timeline mix into timeline-relative segments
 - add_captions_from_transcription(segments, trackId?, replaceExisting?) → create captions from timed transcript segments as one atomic caption import
 - import_captions_from_file(relativePath, format?, trackId?) → import SRT/VTT subtitle files from the workspace
 - Placement defaults: add_text_clip auto-places when no exact position is supplied, scoring default candidate regions against available faces/objects/OCR annotations and existing text. Use autoPlacement:false only when the user explicitly wants the preset's raw position.`;
@@ -148,6 +164,16 @@ const TOOL_OUTPUT_CONTRACTS = buildToolOutputContractSection([
   'get_selected_clips',
   'read_source_analysis_report',
   'generate_source_analysis_report',
+  'analyze_timeline_clip',
+  'sample_clip_frames',
+  'read_clip_analysis',
+  'map_timeline_to_source',
+  'inspect_timeline_range',
+  'describe_clip_frames',
+  'read_clip_perception',
+  'describe_timeline_range',
+  'search_clip_evidence',
+  'plan_semantic_clip_edit',
   'insert_clip',
   'insert_clip_from_file',
   'split_clip',
@@ -173,17 +199,19 @@ const COMMON_WORKFLOWS = `## Common Workflows
 7. Track-specific clip lookup: get_track_clips(trackId) → reference clip IDs via data.clips[n].id
 8. Time-based clip lookup across tracks: get_clips_at_time(time) → reference clip IDs via data[n].id (never data[n].clipId)
 9. Deep source inspection/editing: find_workspace_file or get_asset_catalog → read_source_analysis_report (this already writes the default ".analysis.md" report beside the asset) → check data.quality.status and do not silently edit from an insufficient/partial report; refresh or use build_source_selects with analyzeMissing=true when source selection depends on transcript or frame semantics → search_source_analysis_report / search_source_library → build_source_selects or edit actions
-10. Generative edit: generate_timeline_media with sequenceId/trackId/timelineStart creates a pending timeline marker and stores placement intent; the generation store imports and places the asset when the provider job completes. Use resolve_generation_job for explicit status checks.
-11. SFX discovery/import: search_sound_for_scene → present usable candidates and license policy → import_asset_candidate only with licenseAck=true → insert_clip on an audio track.
-12. AI subtitles: auto_transcribe(assetId) → inspect returned segments → add_captions_from_transcription(segments, replaceExisting?) → style_caption for readable typography when needed.
-13. Editable on-video text: list_text_clips when editing existing text, otherwise add_text_clip with preset and style → set_text_transform for exact preview position/size/rotation.
-14. If the user asks to save the analysis as a file but does not specify a location, do not add a separate write step: source-analysis tools already save "<asset-name>.analysis.md" beside the asset by default. Use write_workspace_document only for a custom second copy/path.`;
+10. Precise timeline clip editing: get_selected_clips or get_clip_info → analyze_timeline_clip for a broad clip-local map → sample_clip_frames with rangeStartSec/rangeEndSec for exact timing evidence → describe_clip_frames for semantic per-frame evidence before meaning-based edits → inspect data.observations[n].description/visibleText/objects/confidence plus data.quality.status → plan_semantic_clip_edit when converting evidence into blur/highlight/remove/marker/addText ranges. Execute drafts through edit/effect tools, not by copying backend payloads blindly: SplitClip maps to split_clip, AddEffect maps to add_effect, AddMask maps to add_mask after resolving effectId from the AddEffect result, and isolatedClipId must come from split_clip result IDs. For object-specific blur/highlight, prefer plan ranges with data.ranges[n].spatialTargets and AddMask drafts; if plan quality is partial/insufficient, warnings mention missing bbox/mask bounds, or semanticCoverage is localFallback, fall back to read_source_analysis_report/search_source_analysis_report and/or ask for mask refinement before executing split/effect commands.
+11. Generative edit: generate_timeline_media with sequenceId/trackId/timelineStart creates a pending timeline marker and stores placement intent; the generation store imports and places the asset when the provider job completes. Use resolve_generation_job for explicit status checks.
+12. SFX discovery/import: search_sound_for_scene → present usable candidates and license policy → import_asset_candidate only with licenseAck=true → insert_clip on an audio track.
+13. AI subtitles: transcription_status() → install_whisper_model(model?) when approved and needed → auto_transcribe_sequence(sequenceId?) for edited timeline audio or auto_transcribe(assetId) for source assets → inspect returned segments → add_captions_from_transcription(segments, replaceExisting?) → style_caption for readable typography when needed.
+14. Editable on-video text: list_text_clips when editing existing text, otherwise add_text_clip with preset and style → set_text_transform for exact preview position/size/rotation.
+15. If the user asks to save the analysis as a file but does not specify a location, do not add a separate write step: source-analysis tools already save "<asset-name>.analysis.md" beside the asset by default. Use write_workspace_document only for a custom second copy/path.`;
 
 const CLI_REFERENCE = `## CLI (headless alternative)
 openreelio-cli <group> <command> --path <dir> [--args]
-Groups: project, asset, analysis, timeline, caption, text, plan, state, render
+Groups: project, asset, analysis, timeline, caption, text, transcription, plan, state, render
 Key analysis commands: analysis report --path <dir> --id <asset_id>, analysis search --path <dir> --id <asset_id> --query "crowd cheer", analysis search-library --path <dir> --query "crowd cheer", analysis build-selects --path <dir> --query "crowd cheer"
 Key text commands: text add --text "Title" --start 0 --duration 3 --preset title --font-family Inter --font-size 72 --x 0.5 --y 0.2, text update --id <clip_id> --font-weight 700 --color "#FFFFFF", text transform --id <clip_id> --x 0.5 --y 0.82 --scale-x 1.1 --scale-y 1.1
+Key transcription commands: transcription status, transcription install --model large-v3-turbo, transcription generate --path <dir> --asset <asset_id> --language auto --model auto --import, transcription generate-sequence --path <dir> --sequence <seq_id> --language auto --model auto --import
 Key: plan execute --file <plan.json> for atomic batch operations
 Run help-json for machine-readable full schema.`;
 

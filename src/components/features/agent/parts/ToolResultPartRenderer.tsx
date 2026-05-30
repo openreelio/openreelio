@@ -7,6 +7,10 @@
 
 import { useState } from 'react';
 import type { ToolResultPart } from '@/agents/engine/core/conversation';
+import {
+  canRenderClipAnalysisResult,
+  ClipAnalysisResultCard,
+} from './ClipAnalysisResultCard';
 
 interface ToolResultPartRendererProps {
   part: ToolResultPart;
@@ -16,6 +20,7 @@ interface ToolResultPartRendererProps {
 export function ToolResultPartRenderer({ part, className = '' }: ToolResultPartRendererProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const hasData = part.data !== undefined || part.error !== undefined;
+  const canRenderClipEvidence = canRenderClipAnalysisResult(part.tool, part.data);
 
   return (
     <div
@@ -44,9 +49,14 @@ export function ToolResultPartRenderer({ part, className = '' }: ToolResultPartR
             <p className="text-xs text-red-400 mt-1">{part.error}</p>
           )}
           {part.data !== undefined && (
-            <pre className="text-xs text-text-tertiary mt-1 overflow-x-auto whitespace-pre-wrap font-mono max-h-32 overflow-y-auto">
-              {JSON.stringify(part.data, null, 2)}
-            </pre>
+            <>
+              {canRenderClipEvidence && (
+                <ClipAnalysisResultCard tool={part.tool} data={part.data} />
+              )}
+              <pre className="text-xs text-text-tertiary mt-1 overflow-x-auto whitespace-pre-wrap font-mono max-h-32 overflow-y-auto">
+                {JSON.stringify(part.data, null, 2)}
+              </pre>
+            </>
           )}
         </div>
       )}
