@@ -24,6 +24,8 @@
 
 pub mod audio;
 pub mod cleanup;
+pub mod clip_analysis;
+pub mod clip_perception;
 pub mod color_match;
 pub mod diarization_import;
 pub mod diarization_runner;
@@ -33,11 +35,15 @@ pub mod esd;
 #[cfg(feature = "ai-providers")]
 pub mod openai_perception;
 pub mod segmentation;
+pub mod semantic_edit_plan;
 pub mod speaker_turns;
 pub mod style_planner;
 pub mod types;
 pub mod visual;
 
+pub use clip_analysis::*;
+pub use clip_perception::*;
+pub use semantic_edit_plan::*;
 pub use types::*;
 
 use std::path::{Path, PathBuf};
@@ -45,9 +51,7 @@ use std::path::{Path, PathBuf};
 use crate::core::annotations::models::{estimate_word_timings, ShotResult, TranscriptSegment};
 use crate::core::captions::{
     audio::{extract_audio_for_transcription, load_audio_samples},
-    whisper::{
-        default_models_dir, is_whisper_available, TranscriptionOptions, WhisperEngine, WhisperModel,
-    },
+    whisper::{default_models_dir, is_whisper_available, TranscriptionOptions, WhisperEngine},
 };
 use crate::core::indexing::shots::{ShotDetector, ShotDetectorConfig};
 use crate::core::{CoreError, CoreResult};
@@ -65,8 +69,6 @@ const BUNDLE_FILENAME: &str = "bundle.json";
 
 /// Name of the generated contact-sheet image
 const CONTACT_SHEET_FILENAME: &str = "contact-sheet.jpg";
-
-const LOCAL_WHISPER_MODEL: WhisperModel = WhisperModel::Base;
 
 // =============================================================================
 // Analysis Job Runner
@@ -278,10 +280,14 @@ impl AnalysisJobRunner {
                 );
                 bundle.transcript = Some(transcript.clone());
                 if !transcript.is_empty() {
+                    let transcript_model =
+                        crate::core::captions::whisper::WhisperModel::default_for_dir(
+                            &default_models_dir(),
+                        );
                     bundle.transcript_detail = Some(build_transcript_detail_from_segments(
                         &transcript,
                         "whisper",
-                        LOCAL_WHISPER_MODEL.name(),
+                        transcript_model.name(),
                     ));
                 }
                 emit_progress(
@@ -520,8 +526,9 @@ impl AnalysisJobRunner {
             ));
         }
 
-        let model = LOCAL_WHISPER_MODEL;
-        let model_path = default_models_dir().join(model.filename());
+        let models_dir = default_models_dir();
+        let model = crate::core::captions::whisper::WhisperModel::default_for_dir(&models_dir);
+        let model_path = models_dir.join(model.filename());
         if !model_path.exists() {
             return Err(CoreError::NotFound(format!(
                 "Whisper model not found at {}",

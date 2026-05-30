@@ -13,6 +13,13 @@
 //! - `delete_esd`: Delete an ESD by ID
 //! - `apply_editing_style`: Apply an ESD's style to source footage
 //! - `auto_color_match`: Automatically match target clip color to reference clip
+//! - `analyze_timeline_clip`: Build clip-local timeline/source frame evidence
+//! - `sample_clip_frames`: Extract dense clip-local frame samples
+//! - `inspect_timeline_range`: Analyze enabled visible clips in a timeline range
+//! - `describe_timeline_clip`: Add semantic frame observations to clip evidence
+//! - `describe_timeline_range`: Add semantic frame observations to clips in a range
+//! - `search_clip_evidence`: Search cached clip-local semantic observations
+//! - `plan_semantic_clip_edit`: Plan temporal edit ranges from semantic evidence
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,6 +27,17 @@ use std::time::Duration;
 
 use tauri::State;
 
+use crate::core::analysis::clip_analysis::{
+    analyze_timeline_clip_bundle, inspect_timeline_range_bundles,
+    load_clip_analysis_bundle_optional, map_timeline_times_for_clip, ClipAnalysisBundle,
+    ClipAnalysisOptions, ClipAnalysisResponse, TimelineSourceMappingEntry,
+};
+use crate::core::analysis::clip_perception::{
+    describe_timeline_clip_perception, describe_timeline_range_perception,
+    enrich_clip_perception_bundle, load_clip_perception_bundle_optional,
+    search_clip_perception_bundles, ClipEvidenceSearchHit, ClipPerceptionBundle,
+    ClipPerceptionOptions, ClipPerceptionProvider, ClipPerceptionResponse,
+};
 use crate::core::analysis::color_match::{
     analyze_frame_color, compute_color_correction, ColorCorrection,
 };
@@ -28,13 +46,18 @@ use crate::core::analysis::diarization_import::{
 };
 use crate::core::analysis::esd::{self, EditingStyleDocument, EsdGenerator, EsdSummary};
 use crate::core::analysis::style_planner::{StylePlanResult, StylePlanner, StylePlanningContext};
+use crate::core::analysis::{
+    plan_semantic_clip_edit as plan_semantic_clip_edit_bundle, SemanticTemporalEditAction,
+    SemanticTemporalEditPlan, SemanticTemporalEditPlanOptions,
+};
 use crate::core::analysis::{AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata};
 use crate::core::commands::AddEffectCommand;
 #[cfg(feature = "ai-providers")]
 use crate::core::credentials::{CredentialType, CredentialVault};
 use crate::core::effects::{curve_points_to_json, CurvePoint, EffectType, ParamValue};
-use crate::core::ffmpeg::{MediaInfo, SharedFFmpegState};
+use crate::core::ffmpeg::{FFmpegRunner, MediaInfo, SharedFFmpegState};
 use crate::core::jobs::{Job, JobStatus, JobType, Priority};
+use crate::core::project::ProjectState;
 #[cfg(feature = "ai-providers")]
 use crate::core::settings::{ProviderType, SettingsManager};
 #[cfg(feature = "ai-providers")]
@@ -45,6 +68,8 @@ use crate::AppState;
 use crate::core::analysis::openai_perception::{
     analyze_keyframes_with_openai, transcribe_with_openai, OpenAiPerceptionConfig,
 };
+#[cfg(feature = "ai-providers")]
+use crate::core::analysis::OpenAiResponsesClipPerceptionProvider;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +96,27 @@ struct ResolvedAssetContext {
     asset_path: String,
     metadata: VideoMetadata,
     active_sequence_id: Option<String>,
+}
+
+async fn resolve_project_snapshot(
+    state: &State<'_, AppState>,
+) -> Result<(PathBuf, ProjectState), String> {
+    let guard = state.project.lock().await;
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| "No project is currently open".to_string())?;
+
+    Ok((project.path.clone(), project.state.clone()))
+}
+
+async fn resolve_ffmpeg_runner(
+    ffmpeg_state: &State<'_, SharedFFmpegState>,
+) -> Result<FFmpegRunner, String> {
+    let ffmpeg = ffmpeg_state.read().await;
+    ffmpeg
+        .runner()
+        .cloned()
+        .ok_or_else(|| "FFmpeg is not available for clip analysis".to_string())
 }
 
 async fn resolve_asset_context(
@@ -284,6 +330,38 @@ async fn resolve_openai_perception_config(
 }
 
 #[cfg(feature = "ai-providers")]
+async fn resolve_clip_perception_provider(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+    options: &ClipPerceptionOptions,
+) -> Result<Option<OpenAiResponsesClipPerceptionProvider>, String> {
+    if !options.allow_cloud {
+        return Ok(None);
+    }
+    if options
+        .provider
+        .as_ref()
+        .is_some_and(|provider| !provider.eq_ignore_ascii_case("openai"))
+    {
+        return Ok(None);
+    }
+
+    let config = match resolve_openai_perception_config(app, state).await? {
+        Some(config) => config,
+        None => return Ok(None),
+    };
+
+    Ok(Some(OpenAiResponsesClipPerceptionProvider::new(
+        config.api_key,
+        options
+            .model
+            .clone()
+            .unwrap_or_else(|| config.vision_model.clone()),
+        config.base_url,
+    )))
+}
+
+#[cfg(feature = "ai-providers")]
 async fn maybe_enhance_bundle_with_openai(
     app: &tauri::AppHandle,
     state: &State<'_, AppState>,
@@ -489,6 +567,283 @@ pub async fn get_analysis_bundle(
     runner
         .load_bundle_optional(&asset_id)
         .map_err(|e| format!("Failed to load analysis bundle: {}", e))
+}
+
+/// Analyzes one timeline clip at clip-local frame sample granularity.
+/// The command returns a cacheable bundle that maps timeline seconds to source
+/// seconds/frame indices and extracts representative or dense frame samples.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state, ffmpeg_state, options))]
+pub async fn analyze_timeline_clip(
+    sequence_id: String,
+    track_id: String,
+    clip_id: String,
+    options: ClipAnalysisOptions,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, SharedFFmpegState>,
+) -> Result<ClipAnalysisResponse, String> {
+    let (project_path, project_state) = resolve_project_snapshot(&state).await?;
+    let runner = resolve_ffmpeg_runner(&ffmpeg_state).await?;
+
+    analyze_timeline_clip_bundle(
+        &project_path,
+        &project_state,
+        &runner,
+        &sequence_id,
+        &track_id,
+        &clip_id,
+        options,
+    )
+    .await
+    .map_err(|error| format!("Failed to analyze timeline clip: {}", error))
+}
+
+/// Loads a cached clip analysis bundle by fingerprint.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state))]
+pub async fn get_clip_analysis(
+    fingerprint: String,
+    state: State<'_, AppState>,
+) -> Result<Option<ClipAnalysisBundle>, String> {
+    let (project_path, _) = resolve_project_snapshot(&state).await?;
+    load_clip_analysis_bundle_optional(&project_path, &fingerprint)
+        .map_err(|error| format!("Failed to load clip analysis bundle: {}", error))
+}
+
+/// Maps timeline positions inside a clip to the corresponding source positions.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state, timeline_times))]
+pub async fn map_timeline_to_source(
+    sequence_id: String,
+    track_id: String,
+    clip_id: String,
+    timeline_times: Vec<f64>,
+    state: State<'_, AppState>,
+) -> Result<Vec<TimelineSourceMappingEntry>, String> {
+    let (_, project_state) = resolve_project_snapshot(&state).await?;
+    map_timeline_times_for_clip(
+        &project_state,
+        &sequence_id,
+        &track_id,
+        &clip_id,
+        &timeline_times,
+    )
+    .map_err(|error| format!("Failed to map timeline times to source: {}", error))
+}
+
+/// Extracts clip frame samples and returns the same bundle shape as clip analysis.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state, ffmpeg_state, options))]
+pub async fn sample_clip_frames(
+    sequence_id: String,
+    track_id: String,
+    clip_id: String,
+    options: ClipAnalysisOptions,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, SharedFFmpegState>,
+) -> Result<ClipAnalysisResponse, String> {
+    analyze_timeline_clip(sequence_id, track_id, clip_id, options, state, ffmpeg_state).await
+}
+
+/// Analyzes all visible video clips overlapping a timeline range.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state, ffmpeg_state, options))]
+pub async fn inspect_timeline_range(
+    sequence_id: String,
+    start_sec: f64,
+    end_sec: f64,
+    track_id: Option<String>,
+    options: ClipAnalysisOptions,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, SharedFFmpegState>,
+) -> Result<Vec<ClipAnalysisResponse>, String> {
+    let (project_path, project_state) = resolve_project_snapshot(&state).await?;
+    let runner = resolve_ffmpeg_runner(&ffmpeg_state).await?;
+
+    inspect_timeline_range_bundles(
+        &project_path,
+        &project_state,
+        &runner,
+        &sequence_id,
+        track_id.as_deref(),
+        start_sec,
+        end_sec,
+        options,
+    )
+    .await
+    .map_err(|error| format!("Failed to inspect timeline range: {}", error))
+}
+
+/// Enriches a cached clip-analysis bundle with semantic frame observations.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(app, state, options))]
+pub async fn enrich_clip_perception(
+    app: tauri::AppHandle,
+    fingerprint: String,
+    options: ClipPerceptionOptions,
+    state: State<'_, AppState>,
+) -> Result<ClipPerceptionResponse, String> {
+    let (project_path, _) = resolve_project_snapshot(&state).await?;
+    #[cfg(feature = "ai-providers")]
+    let provider = resolve_clip_perception_provider(&app, &state, &options).await?;
+    #[cfg(feature = "ai-providers")]
+    let provider_ref = provider
+        .as_ref()
+        .map(|provider| provider as &(dyn ClipPerceptionProvider + Send + Sync));
+    #[cfg(not(feature = "ai-providers"))]
+    let provider_ref: Option<&(dyn ClipPerceptionProvider + Send + Sync)> = {
+        let _ = &app;
+        None
+    };
+
+    enrich_clip_perception_bundle(&project_path, &fingerprint, options, provider_ref)
+        .await
+        .map_err(|error| format!("Failed to enrich clip perception: {}", error))
+}
+
+/// Loads a cached semantic clip-perception bundle by perception fingerprint.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state))]
+pub async fn get_clip_perception(
+    perception_fingerprint: String,
+    state: State<'_, AppState>,
+) -> Result<Option<ClipPerceptionBundle>, String> {
+    let (project_path, _) = resolve_project_snapshot(&state).await?;
+    load_clip_perception_bundle_optional(&project_path, &perception_fingerprint)
+        .map_err(|error| format!("Failed to load clip perception bundle: {}", error))
+}
+
+/// Builds clip-local frame evidence and semantic observations for one timeline clip.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(app, state, ffmpeg_state, analysis_options, perception_options))]
+pub async fn describe_timeline_clip(
+    app: tauri::AppHandle,
+    sequence_id: String,
+    track_id: String,
+    clip_id: String,
+    analysis_options: ClipAnalysisOptions,
+    perception_options: ClipPerceptionOptions,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, SharedFFmpegState>,
+) -> Result<ClipPerceptionResponse, String> {
+    let (project_path, project_state) = resolve_project_snapshot(&state).await?;
+    let runner = resolve_ffmpeg_runner(&ffmpeg_state).await?;
+    #[cfg(feature = "ai-providers")]
+    let provider = resolve_clip_perception_provider(&app, &state, &perception_options).await?;
+    #[cfg(feature = "ai-providers")]
+    let provider_ref = provider
+        .as_ref()
+        .map(|provider| provider as &(dyn ClipPerceptionProvider + Send + Sync));
+    #[cfg(not(feature = "ai-providers"))]
+    let provider_ref: Option<&(dyn ClipPerceptionProvider + Send + Sync)> = {
+        let _ = &app;
+        None
+    };
+
+    describe_timeline_clip_perception(
+        &project_path,
+        &project_state,
+        &runner,
+        &sequence_id,
+        &track_id,
+        &clip_id,
+        analysis_options,
+        perception_options,
+        provider_ref,
+    )
+    .await
+    .map_err(|error| format!("Failed to describe timeline clip: {}", error))
+}
+
+/// Builds clip-local frame evidence and semantic observations for visible clips in a range.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(app, state, ffmpeg_state, analysis_options, perception_options))]
+pub async fn describe_timeline_range(
+    app: tauri::AppHandle,
+    sequence_id: String,
+    start_sec: f64,
+    end_sec: f64,
+    track_id: Option<String>,
+    analysis_options: ClipAnalysisOptions,
+    perception_options: ClipPerceptionOptions,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, SharedFFmpegState>,
+) -> Result<Vec<ClipPerceptionResponse>, String> {
+    let (project_path, project_state) = resolve_project_snapshot(&state).await?;
+    let runner = resolve_ffmpeg_runner(&ffmpeg_state).await?;
+    #[cfg(feature = "ai-providers")]
+    let provider = resolve_clip_perception_provider(&app, &state, &perception_options).await?;
+    #[cfg(feature = "ai-providers")]
+    let provider_ref = provider
+        .as_ref()
+        .map(|provider| provider as &(dyn ClipPerceptionProvider + Send + Sync));
+    #[cfg(not(feature = "ai-providers"))]
+    let provider_ref: Option<&(dyn ClipPerceptionProvider + Send + Sync)> = {
+        let _ = &app;
+        None
+    };
+
+    describe_timeline_range_perception(
+        &project_path,
+        &project_state,
+        &runner,
+        &sequence_id,
+        start_sec,
+        end_sec,
+        track_id.as_deref(),
+        analysis_options,
+        perception_options,
+        provider_ref,
+    )
+    .await
+    .map_err(|error| format!("Failed to describe timeline range: {}", error))
+}
+
+/// Searches cached semantic clip-perception bundles.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state))]
+pub async fn search_clip_evidence(
+    query: String,
+    limit: Option<u32>,
+    sequence_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<ClipEvidenceSearchHit>, String> {
+    let (project_path, _) = resolve_project_snapshot(&state).await?;
+    let limit = limit.unwrap_or(10).clamp(1, 100) as usize;
+    search_clip_perception_bundles(&project_path, &query, limit, sequence_id.as_deref())
+        .map_err(|error| format!("Failed to search clip evidence: {}", error))
+}
+
+/// Plans temporal edit ranges and command drafts from cached semantic clip evidence.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state, options))]
+pub async fn plan_semantic_clip_edit(
+    perception_fingerprint: String,
+    query: String,
+    action: SemanticTemporalEditAction,
+    options: SemanticTemporalEditPlanOptions,
+    state: State<'_, AppState>,
+) -> Result<SemanticTemporalEditPlan, String> {
+    let (project_path, _) = resolve_project_snapshot(&state).await?;
+    plan_semantic_clip_edit_bundle(
+        &project_path,
+        &perception_fingerprint,
+        &query,
+        action,
+        options,
+    )
+    .map_err(|error| format!("Failed to plan semantic clip edit: {}", error))
 }
 
 /// Imports external diarization JSON and merges speaker IDs into the cached transcript bundle.
