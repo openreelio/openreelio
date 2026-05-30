@@ -84,6 +84,49 @@ describe('mapCodexNotificationToExternalEvents', () => {
     ]);
   });
 
+  it('should map direct failed and interrupted turn notifications as terminal events', () => {
+    const failedEvents = mapCodexNotificationToExternalEvents({
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      notification: {
+        method: 'turn/failed',
+        params: {
+          turnId: 'turn_failed',
+          error: { message: 'Network disconnected' },
+        },
+      },
+    });
+    const interruptedEvents = mapCodexNotificationToExternalEvents({
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      notification: {
+        method: 'turn/interrupted',
+        params: { turn: { id: 'turn_interrupted' } },
+      },
+    });
+
+    expect(failedEvents).toEqual([
+      {
+        type: 'turn_completed',
+        runtimeId: 'codex',
+        sessionId: 'thr_123',
+        turnId: 'turn_failed',
+        status: 'failed',
+        error: 'Network disconnected',
+      },
+    ]);
+    expect(interruptedEvents).toEqual([
+      {
+        type: 'turn_completed',
+        runtimeId: 'codex',
+        sessionId: 'thr_123',
+        turnId: 'turn_interrupted',
+        status: 'interrupted',
+        error: null,
+      },
+    ]);
+  });
+
   it('should format dynamic OpenReelio tool calls with their namespace', () => {
     const events = mapCodexNotificationToExternalEvents({
       runtimeId: 'codex',

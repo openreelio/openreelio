@@ -35,10 +35,15 @@ export function mapCodexNotificationToExternalEvents(
       return turnId ? [{ type: 'turn_started', runtimeId, sessionId, turnId }] : [];
     }
 
-    case 'turn/completed': {
+    case 'turn/completed':
+    case 'turn/failed':
+    case 'turn/interrupted': {
       const turn = asObject(params.turn);
       const turnId = getString(turn, 'id') ?? getString(params, 'turnId');
-      const status = getString(turn, 'status') ?? getString(params, 'status') ?? 'completed';
+      const status =
+        getString(turn, 'status') ??
+        getString(params, 'status') ??
+        getTurnStatus(notification.method);
       const error = getErrorMessage(turn?.error ?? params.error);
       return [
         {
@@ -112,6 +117,17 @@ export function mapCodexNotificationToExternalEvents(
     default:
       return [];
   }
+}
+
+function getTurnStatus(method: string): string {
+  if (method === 'turn/failed') {
+    return 'failed';
+  }
+  if (method === 'turn/interrupted') {
+    return 'interrupted';
+  }
+
+  return 'completed';
 }
 
 function mapStartedItem(

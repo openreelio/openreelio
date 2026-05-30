@@ -635,7 +635,9 @@ function buildSoundEffectSearchPlaybook(
   }
 
   const sceneDescription =
-    extractSearchQuery(thought) || sanitizePrompt(thought.understanding) || 'cinematic sound effect';
+    extractSearchQuery(thought) ||
+    sanitizePrompt(thought.understanding) ||
+    'cinematic sound effect';
   const steps: PlanStep[] = [
     {
       id: 'playbook_search_sound_effect',
@@ -791,7 +793,16 @@ function buildAutoCaptionPlaybook(
     return null;
   }
 
-  if (!hasTools(toolExecutor, ['auto_transcribe', 'add_captions_from_transcription'])) {
+  const canTranscribeSequence = hasTools(toolExecutor, [
+    'auto_transcribe_sequence',
+    'add_captions_from_transcription',
+  ]);
+  const canTranscribeAsset = hasTools(toolExecutor, [
+    'auto_transcribe',
+    'add_captions_from_transcription',
+  ]);
+
+  if (!canTranscribeSequence && !canTranscribeAsset) {
     return null;
   }
 
@@ -800,20 +811,25 @@ function buildAutoCaptionPlaybook(
     return null;
   }
 
-  // Find a target asset to transcribe: prefer selected clips' assets, then any video asset
-  const targetAssetId = pickAssetId(context, 'video') ?? pickAssetId(context, 'audio');
-  if (!targetAssetId) {
+  const targetAssetId = canTranscribeAsset
+    ? (pickAssetId(context, 'video') ?? pickAssetId(context, 'audio'))
+    : null;
+  if (!canTranscribeSequence && !targetAssetId) {
     return null;
   }
 
   const steps: PlanStep[] = [
     {
       id: 'playbook_auto_transcribe',
-      tool: 'auto_transcribe',
-      args: {
-        assetId: targetAssetId,
-      },
-      description: 'Transcribe audio from asset using speech-to-text',
+      tool: canTranscribeSequence ? 'auto_transcribe_sequence' : 'auto_transcribe',
+      args: canTranscribeSequence
+        ? { sequenceId }
+        : {
+            assetId: targetAssetId,
+          },
+      description: canTranscribeSequence
+        ? 'Transcribe the edited timeline audio mix using speech-to-text'
+        : 'Transcribe audio from asset using speech-to-text',
       riskLevel: 'low',
       estimatedDuration: 5000,
     },

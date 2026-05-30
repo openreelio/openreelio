@@ -4,11 +4,21 @@ import {
   commands,
   type AgentPlan,
   type AgentPlanResult,
+  type ClipAnalysisOptions,
+  type ClipAnalysisResponse,
+  type ClipPerceptionOptions,
+  type ClipPerceptionResponse,
   type PlanRiskLevel,
   type ProjectInfo,
   type ProjectStateDto,
+  type SemanticTemporalEditAction,
+  type SemanticTemporalEditPlan,
+  type SemanticTemporalEditPlanOptions,
   type StockMediaImportResult,
   type StockMediaSearchResult,
+  type TranscriptionOptionsDto,
+  type TranscriptionResultDto,
+  type TranscriptionStatusDto,
 } from '@/bindings';
 
 import type { ExternalAgentApprovalDecisionProvider, ExternalAgentApprovalRequest } from '../types';
@@ -124,6 +134,28 @@ const OPENREELIO_EXECUTABLE_COMMAND_TYPES = OPENREELIO_COMMAND_TYPES.filter(
 );
 
 const CONTEXT_TOKEN_TTL_MS = 10 * 60 * 1000;
+const FULL_TEXT_PREVIEW_LIMIT = 12_000;
+
+const WHISPER_MODEL_FILES: Record<string, string> = {
+  tiny: 'ggml-tiny.bin',
+  base: 'ggml-base.bin',
+  small: 'ggml-small.bin',
+  medium: 'ggml-medium.bin',
+  large: 'ggml-large.bin',
+  'large-v3': 'ggml-large-v3.bin',
+  'large-v3-turbo': 'ggml-large-v3-turbo.bin',
+};
+
+const WHISPER_MODEL_NAME_SET = new Set(Object.keys(WHISPER_MODEL_FILES));
+const WHISPER_MODEL_SELECTION_PREFERENCE = [
+  'large-v3',
+  'large-v3-turbo',
+  'large',
+  'medium',
+  'small',
+  'base',
+  'tiny',
+];
 
 interface ContextTokenRecord {
   token: string;
@@ -132,6 +164,29 @@ interface ContextTokenRecord {
   issuedAt: number;
   activeSequenceId: string | null;
   source: 'project_state' | 'timeline_snapshot' | 'assets_list' | 'selection_read';
+}
+
+interface CaptionSegmentForImport {
+  startSec: number;
+  endSec: number;
+  text: string;
+  partial?: boolean;
+  sourceStartSec?: number;
+  sourceEndSec?: number;
+}
+
+interface ClipTimeMapping {
+  sequenceId: string;
+  trackId: string;
+  clipId: string;
+  assetId: string;
+  timelineInSec: number;
+  timelineOutSec: number;
+  durationSec: number;
+  sourceInSec: number;
+  sourceOutSec: number;
+  speed: number;
+  reverse: boolean;
 }
 
 const contextTokensBySessionId = new Map<string, ContextTokenRecord>();
@@ -154,6 +209,122 @@ const ANNOTATION_READ_SCHEMA: CodexJsonObject = {
       type: 'string',
       description:
         'Project asset ID whose cached analysis annotation should be read for placement or edit planning.',
+    },
+  },
+  additionalProperties: false,
+};
+
+const CLIP_ANALYZE_SCHEMA_PROPERTIES: CodexJsonObject = {
+  sequenceId: { type: 'string', description: 'Target sequence ID.' },
+  trackId: { type: 'string', description: 'Timeline track ID containing the clip.' },
+  clipId: { type: 'string', description: 'Timeline clip ID to sample.' },
+  mode: {
+    type: 'string',
+    enum: ['representative', 'dense'],
+    description: 'Frame sampling mode. Defaults to dense for close inspection.',
+  },
+  targetIntervalSec: {
+    type: 'number',
+    description: 'Dense sampling interval in timeline seconds.',
+  },
+  maxSamples: { type: 'number', description: 'Maximum frame samples to extract.' },
+  includeEdges: { type: 'boolean', description: 'Include clip/range edge samples.' },
+  rangeStartSec: {
+    type: 'number',
+    description: 'Optional absolute timeline range start inside the target clip.',
+  },
+  rangeEndSec: {
+    type: 'number',
+    description: 'Optional absolute timeline range end inside the target clip.',
+  },
+  forceRefresh: { type: 'boolean', description: 'Ignore compatible cached analysis.' },
+};
+
+const CLIP_ANALYZE_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  required: ['sequenceId', 'trackId', 'clipId'],
+  properties: CLIP_ANALYZE_SCHEMA_PROPERTIES,
+  additionalProperties: false,
+};
+
+const CLIP_DESCRIBE_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  required: ['sequenceId', 'trackId', 'clipId'],
+  properties: {
+    ...CLIP_ANALYZE_SCHEMA_PROPERTIES,
+    maxFrames: {
+      type: 'number',
+      description: 'Maximum sampled frames to semantically describe.',
+    },
+    detail: {
+      type: 'string',
+      enum: ['low', 'auto', 'high'],
+      description: 'Vision detail level. Defaults to low.',
+    },
+    provider: { type: 'string', description: 'Optional perception provider, such as openai.' },
+    model: { type: 'string', description: 'Optional provider model override.' },
+    reuseSourceAnalysis: {
+      type: 'boolean',
+      description: 'Reuse cached source-analysis frame observations before provider calls.',
+    },
+    allowCloud: {
+      type: 'boolean',
+      description: 'Allow configured cloud vision calls. Defaults to false.',
+    },
+    includeContactSheet: {
+      type: 'boolean',
+      description: 'Include contact sheet context where supported.',
+    },
+  },
+  additionalProperties: false,
+};
+
+const SEMANTIC_EDIT_PLAN_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  required: ['perceptionFingerprint', 'query'],
+  properties: {
+    perceptionFingerprint: {
+      type: 'string',
+      description: 'Perception fingerprint returned by openreelio.clip_describe.',
+    },
+    query: {
+      type: 'string',
+      description: 'Semantic target query, such as logo, face, chart, text, or product.',
+    },
+    action: {
+      type: 'string',
+      enum: ['blur', 'highlight', 'remove', 'marker', 'addText'],
+      description: 'Planned edit action. Defaults to blur.',
+    },
+    paddingSec: {
+      type: 'number',
+      description: 'Seconds to pad before and after each matched sample.',
+    },
+    mergeGapSec: {
+      type: 'number',
+      description: 'Merge planned ranges separated by this many seconds or less.',
+    },
+    minConfidence: {
+      type: 'number',
+      description: 'Minimum semantic evidence confidence from 0 to 1.',
+    },
+    maxRanges: { type: 'number', description: 'Maximum planned ranges to return.' },
+    text: { type: 'string', description: 'Text content when action is addText.' },
+    effectStrength: {
+      type: 'number',
+      description: 'Effect strength, such as blur radius or brightness amount.',
+    },
+    includeCommandDrafts: {
+      type: 'boolean',
+      description: 'Include command draft payloads. Defaults to true.',
+    },
+    spatialTimeToleranceSec: {
+      type: 'number',
+      description: 'Source-time tolerance for matching annotation bounding boxes.',
+    },
+    includeSpatialTargets: {
+      type: 'boolean',
+      description: 'Include object/face/OCR bounding boxes when available. Defaults to true.',
     },
   },
   additionalProperties: false,
@@ -287,6 +458,73 @@ const MEDIA_INSERT_SCHEMA: CodexJsonObject = {
   additionalProperties: false,
 };
 
+const TRANSCRIPTION_GENERATE_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  properties: {
+    assetId: {
+      type: 'string',
+      description:
+        'Project asset ID whose audio should be transcribed when sequenceAudio is false.',
+    },
+    sequenceAudio: {
+      type: 'boolean',
+      description:
+        'Set true to transcribe the audible audio mix of an edited sequence instead of one source asset.',
+    },
+    language: {
+      type: 'string',
+      description:
+        'BCP-47/Whisper language code such as auto, en, ko, ja, or zh. Defaults to auto.',
+    },
+    model: {
+      type: 'string',
+      enum: ['auto', 'tiny', 'base', 'small', 'medium', 'large', 'large-v3', 'large-v3-turbo'],
+      description: 'Installed Whisper model to use. Defaults to the best installed model.',
+    },
+    translate: {
+      type: 'boolean',
+      description: 'Translate recognized speech to English when supported by the model.',
+    },
+    async: {
+      type: 'boolean',
+      description:
+        'Submit the transcription to the worker queue and return a job ID instead of waiting for segments.',
+    },
+    sequenceId: {
+      type: 'string',
+      description:
+        'Optional sequence ID for clip-time mapping. Provide with clipId when captions must align to a timeline clip.',
+    },
+    trackId: {
+      type: 'string',
+      description:
+        'Optional track ID for clip-time mapping. Provide with clipId when multiple clips share an ID namespace.',
+    },
+    clipId: {
+      type: 'string',
+      description:
+        'Optional timeline clip ID. When present, returned timelineCaptionSegments are clipped and remapped from source time to timeline time.',
+    },
+  },
+  additionalProperties: false,
+};
+
+const TRANSCRIPTION_INSTALL_MODEL_SCHEMA: CodexJsonObject = {
+  type: 'object',
+  properties: {
+    model: {
+      type: 'string',
+      enum: ['tiny', 'base', 'small', 'medium', 'large', 'large-v3', 'large-v3-turbo'],
+      description: 'Whisper model to install. Defaults to large-v3-turbo.',
+    },
+    force: {
+      type: 'boolean',
+      description: 'Replace an existing local model file.',
+    },
+  },
+  additionalProperties: false,
+};
+
 const STOCK_MEDIA_SEARCH_SCHEMA: CodexJsonObject = {
   type: 'object',
   required: ['query'],
@@ -404,10 +642,52 @@ export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
   },
   {
     namespace: 'openreelio',
+    name: 'transcription_status',
+    description:
+      'Read local Whisper transcription readiness, model directory, and installed model inventory.',
+    inputSchema: EMPTY_OBJECT_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'transcription_install_model',
+    description:
+      'Download and install a local Whisper model. Use only after the user approves downloading a model.',
+    inputSchema: TRANSCRIPTION_INSTALL_MODEL_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'transcription_generate',
+    description:
+      'Generate speech-to-text transcript segments from a project audio/video asset. Can also remap source-time segments onto a timeline clip for caption import.',
+    inputSchema: TRANSCRIPTION_GENERATE_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
     name: 'annotation_read',
     description:
       'Read cached objects/faces/OCR/shot annotations for one asset. Use this before choosing safe text/caption placement when exact visual position matters.',
     inputSchema: ANNOTATION_READ_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'clip_analyze',
+    description:
+      'Extract indexed clip-local frame samples for one timeline clip. Use this before detailed edits, highlight selection, or timing-sensitive SFX placement.',
+    inputSchema: CLIP_ANALYZE_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'clip_describe',
+    description:
+      'Build semantic per-frame evidence for one timeline clip using cached source analysis or configured vision providers. Returns observations, confidence, image paths, and a perceptionFingerprint.',
+    inputSchema: CLIP_DESCRIBE_SCHEMA,
+  },
+  {
+    namespace: 'openreelio',
+    name: 'semantic_edit_plan',
+    description:
+      'Convert a perceptionFingerprint plus semantic query into read-only timeline ranges and command drafts, including spatial AddMask drafts when annotations have bounding boxes.',
+    inputSchema: SEMANTIC_EDIT_PLAN_SCHEMA,
   },
   {
     namespace: 'openreelio',
@@ -524,10 +804,15 @@ export function buildOpenReelioCodexDeveloperInstructions(
     '- Use openreelio.host_context first when the user asks where you are, what you can use, or what environment this is.',
     '- Use openreelio.timeline_snapshot, openreelio.assets_list, openreelio.selection_read, and openreelio.command_schema before proposing concrete edits.',
     '- Use openreelio.annotation_read for the source asset before deciding exact text placement that should avoid faces, objects, or existing OCR text.',
+    '- Use openreelio.clip_analyze and openreelio.clip_describe for detailed clip-local frame evidence before choosing a highlight clip, placing timing-sensitive SFX, or making semantic visual edits.',
+    '- Use openreelio.semantic_edit_plan after clip_describe when a semantic target needs ranges, draft edits, or spatial mask guidance.',
+    '- Use openreelio.transcription_status to check local Whisper readiness before promising automatic subtitles.',
+    '- Use openreelio.transcription_generate before creating or replacing subtitles from speech. Pass clipId with sequenceId/trackId when captions must align to a timeline clip rather than the full source asset.',
+    '- After openreelio.transcription_install_model or any other long-running tool, read openreelio.project_state or openreelio.timeline_snapshot again before the next mutation. Do not reuse a contextToken captured before that long-running operation.',
     '- Use openreelio.stock_media_search for stock video, image, BGM, or SFX candidates before falling back to generic web links.',
     '- Use openreelio.stock_media_import to bring a selected stock candidate into the project before placing it on the timeline. Do not pass stock URLs directly to ImportAsset.',
     '- Use openreelio.media_insert when placing media assets on the timeline. It is the drag-and-drop parity path for source ranges, visible video placement, linked audio, clip linking, muting, undo, and UI refresh.',
-    '- For editable on-video text, titles, lower thirds, and callouts, use AddTextClip/UpdateTextClip/SetClipTransform with full TextClipData and preview transform data. For timed subtitles from speech or files, use CreateCaption/UpdateCaption/ImportGeneratedCaptions.',
+    '- For editable on-video text, titles, lower thirds, and callouts, use AddTextClip/UpdateTextClip/SetClipTransform with full TextClipData and preview transform data. For timed subtitles from speech, call openreelio.transcription_generate first, then use CreateCaption/UpdateCaption/ImportGeneratedCaptions with the returned caption segments.',
     '- Prefer openreelio.plan_validate and openreelio.plan_apply for multi-step non-media edits. Use openreelio.command_execute only for a narrow single-command edit; do not use raw InsertClip for normal asset placement.',
     '- Apply edits with the fresh contextToken returned by openreelio.project_state, openreelio.timeline_snapshot, openreelio.assets_list, or openreelio.selection_read so the app can validate, approve, persist, undo, and refresh the UI.',
     '- Do not manually edit .openreelio state files or invent command payloads without checking the schema and current IDs.',
@@ -569,8 +854,33 @@ export async function handleOpenReelioCodexDynamicToolCall(
         return toolResponse(buildTimelineSnapshot(await readProjectState(), context));
       case 'assets_list':
         return toolResponse(buildAssetsList(await readProjectState(), context));
+      case 'transcription_status': {
+        const result = await buildTranscriptionStatusToolCall();
+        return toolResponse(result, result.status === 'ok');
+      }
+      case 'transcription_install_model': {
+        const result = await installTranscriptionModelToolCall(toolCall.arguments);
+        contextTokensBySessionId.delete(context.sessionId);
+        return toolResponse(result, result.status === 'ok');
+      }
+      case 'transcription_generate': {
+        const result = await generateTranscriptionToolCall(toolCall.arguments);
+        return toolResponse(result, result.status === 'ok');
+      }
       case 'annotation_read': {
         const result = await readAnnotationToolCall(toolCall.arguments);
+        return toolResponse(result, result.status === 'ok');
+      }
+      case 'clip_analyze': {
+        const result = await analyzeClipToolCall(toolCall.arguments);
+        return toolResponse(result, result.status === 'ok');
+      }
+      case 'clip_describe': {
+        const result = await describeClipToolCall(toolCall.arguments);
+        return toolResponse(result, result.status === 'ok');
+      }
+      case 'semantic_edit_plan': {
+        const result = await planSemanticEditToolCall(toolCall.arguments);
         return toolResponse(result, result.status === 'ok');
       }
       case 'stock_media_search': {
@@ -727,8 +1037,11 @@ function parseDynamicToolArguments(params: CodexJsonObject): CodexJsonObject | n
 }
 
 async function buildHostContext(context: OpenReelioCodexToolContext): Promise<CodexJsonObject> {
-  const projectInfo = await readOptionalProjectInfo();
-  const projectState = await readOptionalProjectState();
+  const [projectInfo, projectState, transcriptionReady] = await Promise.all([
+    readOptionalProjectInfo(),
+    readOptionalProjectState(),
+    readTranscriptionAvailability(),
+  ]);
   return {
     host: {
       appId: 'openreelio',
@@ -749,14 +1062,19 @@ async function buildHostContext(context: OpenReelioCodexToolContext): Promise<Co
     },
     ui: {
       activePanel: 'agent-chat',
-      previewFrameAccess: false,
-      rawMediaAccess: 'not-exposed',
+      previewFrameAccess: true,
+      rawMediaAccess: 'clip-analysis-tools',
     },
     capabilities: {
       projectStateRead: true,
       timelineRead: true,
       assetRead: true,
+      transcriptionGenerate: true,
+      transcriptionReady,
       annotationRead: true,
+      clipAnalyze: true,
+      clipDescribe: true,
+      semanticEditPlan: true,
       commandSchemaRead: true,
       commandValidate: true,
       stockMediaSearch: true,
@@ -882,10 +1200,11 @@ async function buildDiagnosticsResponse(): Promise<CodexJsonObject> {
 }
 
 async function buildPreviewDescription(): Promise<CodexJsonObject> {
-  const [state, playbackModule, previewModule] = await Promise.all([
+  const [state, playbackModule, previewModule, transcriptionAvailable] = await Promise.all([
     readOptionalProjectState(),
     import('@/stores/playbackStore'),
     import('@/stores/previewStore'),
+    readTranscriptionAvailability(),
   ]);
   const playbackState = playbackModule.usePlaybackStore.getState();
   const previewState = previewModule.usePreviewStore.getState();
@@ -908,11 +1227,11 @@ async function buildPreviewDescription(): Promise<CodexJsonObject> {
       panY: previewState.panY,
     },
     mediaInspection: {
-      rawFrameAccess: false,
-      transcriptAccess: false,
+      rawFrameAccess: true,
+      transcriptAccess: transcriptionAvailable,
       waveformAccess: false,
       message:
-        'Raw frame, transcript, and waveform analysis are not exposed through this Codex bridge yet.',
+        'Use openreelio.clip_analyze for indexed frame samples, openreelio.clip_describe for semantic clip-local frame evidence, and openreelio.transcription_generate for speech-to-text subtitle timing. Waveform inspection is not exposed through this Codex bridge yet.',
     },
   };
 }
@@ -1122,19 +1441,12 @@ async function executeApprovedCommand(
     approvalGranted: true,
     sessionId: context.sessionId,
   };
-  const approval = await issuePlanApplyApprovalProof(context, plan.id);
-  plan.approvalProof = approval.proof;
-
-  let result: AgentPlanResult;
+  let execution: ApprovedAgentPlanExecution;
   try {
-    result = await runProjectBackendMutation(
+    execution = await executeAgentPlanWithApprovalProof(
+      context,
+      plan,
       `externalAgentPlan:${commandType}`,
-      () => invoke<AgentPlanResult>('execute_agent_plan', { plan }),
-      {
-        refreshProjectState: false,
-        markDirty: false,
-        timeoutMs: EXTERNAL_AGENT_MUTATION_TIMEOUT_MS,
-      },
     );
   } finally {
     contextTokensBySessionId.delete(context.sessionId);
@@ -1142,13 +1454,10 @@ async function executeApprovedCommand(
   const refresh = await refreshProjectStoreAfterMutation();
 
   return {
-    status: result.success ? 'ok' : 'error',
+    status: execution.result.success ? 'ok' : 'error',
     commandType,
-    approval: {
-      tokenId: approval.grant.tokenId,
-      consumedBy: 'execute_agent_plan',
-    },
-    result,
+    approval: buildApprovalExecutionSummary(execution),
+    result: execution.result,
     refresh,
   };
 }
@@ -1291,34 +1600,117 @@ async function applyApprovedPlan(
     };
   }
 
-  const approval = await issuePlanApplyApprovalProof(context, validation.plan.id);
-  const plan: AgentPlan = {
-    ...validation.plan,
+  let execution: ApprovedAgentPlanExecution;
+  try {
+    execution = await executeAgentPlanWithApprovalProof(
+      context,
+      validation.plan,
+      'externalAgentPlan',
+    );
+  } finally {
+    contextTokensBySessionId.delete(context.sessionId);
+  }
+  const refresh = await refreshProjectStoreAfterMutation();
+
+  return {
+    status: execution.result.success ? 'ok' : 'error',
+    planId: validation.plan.id,
+    approval: buildApprovalExecutionSummary(execution),
+    result: execution.result,
+    refresh,
+  };
+}
+
+interface ApprovedAgentPlanExecution {
+  result: AgentPlanResult;
+  approval: Awaited<ReturnType<typeof issuePlanApplyApprovalProof>>;
+  retryApproval: Awaited<ReturnType<typeof issuePlanApplyApprovalProof>> | null;
+  retriedApprovalProof: boolean;
+}
+
+async function executeAgentPlanWithApprovalProof(
+  context: OpenReelioCodexToolContext,
+  plan: AgentPlan,
+  operationName: string,
+): Promise<ApprovedAgentPlanExecution> {
+  const approval = await issuePlanApplyApprovalProof(context, plan.id);
+  let result = await executeAgentPlanOnceWithApprovalProof(context, plan, approval, operationName);
+
+  if (!shouldRetryPlanApprovalProof(result)) {
+    return {
+      result,
+      approval,
+      retryApproval: null,
+      retriedApprovalProof: false,
+    };
+  }
+
+  const retryApproval = await issuePlanApplyApprovalProof(context, plan.id);
+  result = await executeAgentPlanOnceWithApprovalProof(
+    context,
+    plan,
+    retryApproval,
+    `${operationName}:approvalRetry`,
+  );
+
+  return {
+    result,
+    approval,
+    retryApproval,
+    retriedApprovalProof: true,
+  };
+}
+
+async function executeAgentPlanOnceWithApprovalProof(
+  context: OpenReelioCodexToolContext,
+  plan: AgentPlan,
+  approval: Awaited<ReturnType<typeof issuePlanApplyApprovalProof>>,
+  operationName: string,
+): Promise<AgentPlanResult> {
+  const approvedPlan: AgentPlan = {
+    ...plan,
     approvalGranted: true,
     approvalProof: approval.proof,
     sessionId: context.sessionId,
   };
-  const result = await runProjectBackendMutation(
-    'externalAgentPlan',
-    () => invoke<AgentPlanResult>('execute_agent_plan', { plan }),
+
+  return await runProjectBackendMutation(
+    operationName,
+    () => invoke<AgentPlanResult>('execute_agent_plan', { plan: approvedPlan }),
     {
       refreshProjectState: false,
       markDirty: false,
       timeoutMs: EXTERNAL_AGENT_MUTATION_TIMEOUT_MS,
     },
   );
-  contextTokensBySessionId.delete(context.sessionId);
-  const refresh = await refreshProjectStoreAfterMutation();
+}
+
+function shouldRetryPlanApprovalProof(result: AgentPlanResult): boolean {
+  const errorMessage = result.errorMessage ?? '';
+
+  return (
+    !result.success &&
+    result.stepsCompleted === 0 &&
+    result.operationIds.length === 0 &&
+    /approvalToken is invalid or expired|approvalToken is expired|Plan approval proof was rejected/i.test(
+      errorMessage,
+    )
+  );
+}
+
+function buildApprovalExecutionSummary(execution: ApprovedAgentPlanExecution): CodexJsonObject {
+  if (!execution.retryApproval) {
+    return {
+      tokenId: execution.approval.grant.tokenId,
+      consumedBy: 'execute_agent_plan',
+    };
+  }
 
   return {
-    status: result.success ? 'ok' : 'error',
-    planId: validation.plan.id,
-    approval: {
-      tokenId: approval.grant.tokenId,
-      consumedBy: 'execute_agent_plan',
-    },
-    result,
-    refresh,
+    tokenId: execution.retryApproval.grant.tokenId,
+    consumedBy: 'execute_agent_plan',
+    retried: execution.retriedApprovalProof,
+    initialTokenId: execution.approval.grant.tokenId,
   };
 }
 
@@ -1640,6 +2032,687 @@ async function readOptionalProjectInfo(): Promise<ProjectInfo | null> {
     return await invoke<ProjectInfo | null>('get_project_info');
   } catch {
     return null;
+  }
+}
+
+async function readTranscriptionAvailability(): Promise<boolean> {
+  const status = await readTranscriptionStatus();
+  if (status) {
+    return status.ready;
+  }
+
+  try {
+    const result = await commands.isTranscriptionAvailable();
+    return result.status === 'ok' && result.data === true;
+  } catch {
+    return false;
+  }
+}
+
+async function readTranscriptionStatus(): Promise<TranscriptionStatusDto | null> {
+  try {
+    const result = await commands.getTranscriptionStatus();
+    return result.status === 'ok' ? result.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeWhisperModelName(
+  value: string | null,
+  fallback = 'large-v3-turbo',
+): { valid: true; model: string } | { valid: false; message: string } {
+  const raw = value?.trim().toLowerCase() || '';
+  const requested =
+    raw.length === 0 || raw === 'auto' || raw === 'default' || raw === 'best' ? fallback : raw;
+  const model =
+    requested === 'turbo' || requested === 'largev3turbo'
+      ? 'large-v3-turbo'
+      : requested === 'largev3'
+        ? 'large-v3'
+        : requested;
+  if (!WHISPER_MODEL_NAME_SET.has(model)) {
+    return {
+      valid: false,
+      message: `Unknown Whisper model '${value}'. Supported models: ${Object.keys(
+        WHISPER_MODEL_FILES,
+      ).join(', ')}.`,
+    };
+  }
+
+  return { valid: true, model };
+}
+
+function selectDefaultWhisperModel(status: TranscriptionStatusDto | null): string {
+  if (status?.defaultModel && WHISPER_MODEL_NAME_SET.has(status.defaultModel)) {
+    return status.defaultModel;
+  }
+  const installed = new Set(
+    status?.models.filter((candidate) => candidate.installed).map((candidate) => candidate.id) ??
+      [],
+  );
+  return (
+    WHISPER_MODEL_SELECTION_PREFERENCE.find((candidate) => installed.has(candidate)) ??
+    'large-v3-turbo'
+  );
+}
+
+function buildTranscriptionModelHint(model: string): CodexJsonObject {
+  return {
+    model,
+    filename: WHISPER_MODEL_FILES[model] ?? null,
+    installLocation:
+      'OpenReelio local app data directory under models/whisper, for example openreelio/models/whisper.',
+  };
+}
+
+function truncateFullText(fullText: string): CodexJsonObject {
+  return {
+    fullTextPreview:
+      fullText.length > FULL_TEXT_PREVIEW_LIMIT
+        ? `${fullText.slice(0, FULL_TEXT_PREVIEW_LIMIT)}...`
+        : fullText,
+    fullTextTruncated: fullText.length > FULL_TEXT_PREVIEW_LIMIT,
+    fullTextLength: fullText.length,
+  };
+}
+
+async function buildTranscriptionStatusToolCall(): Promise<CodexJsonObject> {
+  const transcriptionStatus = await readTranscriptionStatus();
+  if (!transcriptionStatus) {
+    return {
+      status: 'error',
+      message: 'Unable to read OpenReelio transcription status.',
+    };
+  }
+
+  return {
+    status: 'ok',
+    ...transcriptionStatus,
+    installedModels: transcriptionStatus.models
+      .filter((model) => model.installed)
+      .map((model) => model.id),
+  } as unknown as CodexJsonObject;
+}
+
+async function installTranscriptionModelToolCall(
+  args: CodexJsonObject | null,
+): Promise<CodexJsonObject> {
+  const modelResult = normalizeWhisperModelName(getString(args ?? {}, 'model'), 'large-v3-turbo');
+  if (!modelResult.valid) {
+    return {
+      status: 'error',
+      message: modelResult.message,
+    };
+  }
+
+  const model = modelResult.model;
+  const force = args?.force === true;
+  const transcriptionStatus = await readTranscriptionStatus();
+  const existingModel = transcriptionStatus?.models.find((candidate) => candidate.id === model);
+  if (existingModel?.installed && !force) {
+    return {
+      status: 'ok',
+      model,
+      alreadyInstalled: true,
+      modelStatus: existingModel as unknown as CodexJsonObject,
+      mutationContextStale: true,
+      nextStep:
+        'Read openreelio.project_state or openreelio.timeline_snapshot again before media_insert, plan_apply, or command_execute. Do not reuse a contextToken captured before this model check.',
+    };
+  }
+
+  try {
+    const result = await commands.downloadWhisperModel(model, force);
+    if (result.status === 'error') {
+      return {
+        status: 'error',
+        model,
+        message: result.error,
+        modelHint: buildTranscriptionModelHint(model),
+      };
+    }
+
+    const updatedStatus = await readTranscriptionStatus();
+    return {
+      status: 'ok',
+      model,
+      alreadyInstalled: false,
+      modelStatus: result.data as unknown as CodexJsonObject,
+      transcriptionReady: updatedStatus?.ready ?? result.data.installed,
+      installedModels: updatedStatus?.models
+        .filter((candidate) => candidate.installed)
+        .map((candidate) => candidate.id) ?? [model],
+      mutationContextStale: true,
+      nextStep:
+        'Read openreelio.project_state or openreelio.timeline_snapshot again before media_insert, plan_apply, or command_execute. Do not reuse a contextToken captured before model installation.',
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      model,
+      message: error instanceof Error ? error.message : String(error),
+      modelHint: buildTranscriptionModelHint(model),
+    };
+  }
+}
+
+async function generateTranscriptionToolCall(
+  args: CodexJsonObject | null,
+): Promise<CodexJsonObject> {
+  if (!args) {
+    throw new Error('OpenReelio transcription_generate requires object arguments.');
+  }
+
+  const sequenceAudio = args.sequenceAudio === true;
+  const assetId = sequenceAudio
+    ? (getString(args, 'assetId')?.trim() ?? 'sequence-audio')
+    : getRequiredStringArg(args, 'assetId', 'transcription_generate');
+  const language = getString(args, 'language')?.trim() || 'auto';
+  const transcriptionStatus = await readTranscriptionStatus();
+  const modelResult = normalizeWhisperModelName(
+    getString(args, 'model'),
+    selectDefaultWhisperModel(transcriptionStatus),
+  );
+  if (!modelResult.valid) {
+    return {
+      status: 'error',
+      assetId,
+      message: modelResult.message,
+    };
+  }
+
+  const model = modelResult.model;
+  const translate = typeof args.translate === 'boolean' ? args.translate : false;
+  const asyncJob = args.async === true;
+  const sequenceId = getString(args, 'sequenceId')?.trim() || null;
+  const trackId = getString(args, 'trackId')?.trim() || null;
+  const clipId = getString(args, 'clipId')?.trim() || null;
+  let clipMapping: ClipTimeMapping | null = null;
+
+  if (clipId && !sequenceAudio) {
+    const state = await readProjectState();
+    clipMapping = findClipTimeMapping(state, {
+      clipId,
+      sequenceId,
+      trackId,
+      assetId,
+    });
+    if (!clipMapping) {
+      return {
+        status: 'error',
+        assetId,
+        clipId,
+        message:
+          'Could not find a timeline clip with the requested clipId, sequenceId, trackId, and assetId.',
+      };
+    }
+  }
+
+  if (transcriptionStatus && !transcriptionStatus.featureAvailable) {
+    return {
+      status: 'error',
+      assetId,
+      message:
+        'Whisper transcription is not available in this OpenReelio build. Rebuild with the whisper feature enabled or use an AI provider transcript fallback.',
+      modelHint: buildTranscriptionModelHint(model),
+    };
+  }
+  if (transcriptionStatus) {
+    const modelStatus = transcriptionStatus.models.find((candidate) => candidate.id === model);
+    if (!modelStatus?.installed) {
+      return {
+        status: 'error',
+        assetId,
+        model,
+        message: `Whisper model '${model}' is not installed. Add ${WHISPER_MODEL_FILES[model]} to ${transcriptionStatus.modelsDir} or choose an installed model.`,
+        modelHint: {
+          ...buildTranscriptionModelHint(model),
+          modelsDir: transcriptionStatus.modelsDir,
+          installedModels: transcriptionStatus.models
+            .filter((candidate) => candidate.installed)
+            .map((candidate) => candidate.id),
+        },
+      };
+    }
+  } else {
+    const transcriptionAvailable = await readTranscriptionAvailability();
+    if (!transcriptionAvailable) {
+      return {
+        status: 'error',
+        assetId,
+        message:
+          'Whisper transcription is not available in this OpenReelio build. Rebuild with the whisper feature enabled or use an AI provider transcript fallback.',
+        modelHint: buildTranscriptionModelHint(model),
+      };
+    }
+  }
+
+  const options: TranscriptionOptionsDto = {
+    language,
+    translate,
+    model,
+  };
+
+  if (asyncJob) {
+    if (sequenceAudio) {
+      return {
+        status: 'error',
+        assetId,
+        sequenceId,
+        model,
+        message: 'Async transcription jobs currently support asset transcription only.',
+        modelHint: buildTranscriptionModelHint(model),
+      };
+    }
+
+    const jobResult = await commands.submitTranscriptionJob(assetId, options);
+    if (jobResult.status === 'error') {
+      return {
+        status: 'error',
+        assetId,
+        model,
+        message: String(jobResult.error),
+        modelHint: buildTranscriptionModelHint(model),
+      };
+    }
+
+    return {
+      status: 'ok',
+      mode: 'async',
+      assetId,
+      jobId: jobResult.data,
+      options,
+      modelHint: buildTranscriptionModelHint(model),
+      message:
+        'Transcription job submitted. Listen for OpenReelio job completion before importing generated captions.',
+    };
+  }
+
+  const transcriptionResult = sequenceAudio
+    ? await commands.transcribeSequence(sequenceId, options)
+    : await commands.transcribeAsset(assetId, options);
+  if (transcriptionResult.status === 'error') {
+    return {
+      status: 'error',
+      assetId,
+      model,
+      message: String(transcriptionResult.error),
+      modelHint: buildTranscriptionModelHint(model),
+    };
+  }
+
+  const response = buildTranscriptionResponse(
+    assetId,
+    model,
+    options,
+    transcriptionResult.data,
+    clipMapping,
+  );
+  if (sequenceAudio) {
+    response.sequenceAudio = true;
+    response.sequenceId = sequenceId;
+    response.importHint =
+      'Use captionSegments as ImportGeneratedCaptions.segments for the target sequence. Timings are already timeline-relative.';
+  }
+  return response;
+}
+
+function buildTranscriptionResponse(
+  assetId: string,
+  model: string,
+  options: TranscriptionOptionsDto,
+  transcription: TranscriptionResultDto,
+  clipMapping: ClipTimeMapping | null,
+): CodexJsonObject {
+  const captionSegments = transcription.segments
+    .map((segment) => ({
+      startSec: segment.startTime,
+      endSec: segment.endTime,
+      text: segment.text.trim(),
+    }))
+    .filter((segment) => segment.text.length > 0 && segment.endSec > segment.startSec);
+  const fullText = truncateFullText(transcription.fullText);
+  const response: CodexJsonObject = {
+    status: 'ok',
+    mode: 'sync',
+    assetId,
+    model,
+    language: transcription.language,
+    durationSec: transcription.duration,
+    segmentCount: captionSegments.length,
+    ...fullText,
+    captionSegments,
+    importHint:
+      'Use captionSegments as ImportGeneratedCaptions.segments for full-asset captions. Use timelineCaptionSegments instead when a clipMapping is present.',
+    modelHint: buildTranscriptionModelHint(model),
+    options,
+  };
+
+  if (clipMapping) {
+    const timelineCaptionSegments = mapCaptionSegmentsToClipTimeline(captionSegments, clipMapping);
+    response.clipMapping = clipMapping as unknown as CodexJsonObject;
+    response.timelineSegmentCount = timelineCaptionSegments.length;
+    response.skippedTimelineSegmentCount = captionSegments.length - timelineCaptionSegments.length;
+    response.timelineCaptionSegments = timelineCaptionSegments as unknown as CodexJsonObject[];
+    response.importHint =
+      'Use timelineCaptionSegments as ImportGeneratedCaptions.segments when creating subtitles for this timeline clip.';
+  }
+
+  return response;
+}
+
+function mapCaptionSegmentsToClipTimeline(
+  segments: CaptionSegmentForImport[],
+  mapping: ClipTimeMapping,
+): CaptionSegmentForImport[] {
+  const speed =
+    Number.isFinite(mapping.speed) && Math.abs(mapping.speed) > 0 ? Math.abs(mapping.speed) : 1;
+
+  return segments
+    .map((segment): CaptionSegmentForImport | null => {
+      const sourceStartSec = Math.max(segment.startSec, mapping.sourceInSec);
+      const sourceEndSec = Math.min(segment.endSec, mapping.sourceOutSec);
+      if (sourceEndSec <= sourceStartSec) {
+        return null;
+      }
+
+      const timelineStartSec = mapping.reverse
+        ? mapping.timelineInSec + (mapping.sourceOutSec - sourceEndSec) / speed
+        : mapping.timelineInSec + (sourceStartSec - mapping.sourceInSec) / speed;
+      const timelineEndSec = mapping.reverse
+        ? mapping.timelineInSec + (mapping.sourceOutSec - sourceStartSec) / speed
+        : mapping.timelineInSec + (sourceEndSec - mapping.sourceInSec) / speed;
+      const startSec = Math.max(mapping.timelineInSec, timelineStartSec);
+      const endSec = Math.min(mapping.timelineOutSec, timelineEndSec);
+      if (endSec <= startSec) {
+        return null;
+      }
+
+      return {
+        startSec,
+        endSec,
+        text: segment.text,
+        partial: sourceStartSec > segment.startSec || sourceEndSec < segment.endSec,
+        sourceStartSec,
+        sourceEndSec,
+      };
+    })
+    .filter((segment): segment is CaptionSegmentForImport => segment !== null);
+}
+
+function findClipTimeMapping(
+  state: ProjectStateDto,
+  filters: {
+    clipId: string;
+    sequenceId: string | null;
+    trackId: string | null;
+    assetId: string;
+  },
+): ClipTimeMapping | null {
+  for (const sequence of state.sequences) {
+    const sequenceObject = asObject(sequence) ?? {};
+    const sequenceId = getString(sequenceObject, 'id');
+    if (!sequenceId || (filters.sequenceId && sequenceId !== filters.sequenceId)) {
+      continue;
+    }
+
+    const tracks = Array.isArray(sequenceObject.tracks) ? sequenceObject.tracks : [];
+    for (const track of tracks) {
+      const trackObject = asObject(track) ?? {};
+      const trackId = getString(trackObject, 'id');
+      if (!trackId || (filters.trackId && trackId !== filters.trackId)) {
+        continue;
+      }
+
+      const clips = Array.isArray(trackObject.clips) ? trackObject.clips : [];
+      for (const clip of clips) {
+        const clipObject = asObject(clip) ?? {};
+        if (getString(clipObject, 'id') !== filters.clipId) {
+          continue;
+        }
+
+        const assetId = getString(clipObject, 'assetId');
+        if (!assetId || assetId !== filters.assetId) {
+          continue;
+        }
+
+        const place = asObject(clipObject.place) ?? {};
+        const range = asObject(clipObject.range) ?? {};
+        const timelineInSec = asFiniteNumber(place.timelineInSec);
+        const durationSec = asFiniteNumber(place.durationSec);
+        const sourceInSec = asFiniteNumber(range.sourceInSec);
+        const sourceOutSec = asFiniteNumber(range.sourceOutSec);
+        if (
+          timelineInSec === null ||
+          durationSec === null ||
+          sourceInSec === null ||
+          sourceOutSec === null
+        ) {
+          return null;
+        }
+
+        return {
+          sequenceId,
+          trackId,
+          clipId: filters.clipId,
+          assetId,
+          timelineInSec,
+          timelineOutSec: timelineInSec + durationSec,
+          durationSec,
+          sourceInSec,
+          sourceOutSec,
+          speed: asFiniteNumber(clipObject.speed) ?? 1,
+          reverse: clipObject.reverse === true,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function normalizeClipAnalysisOptions(
+  args: CodexJsonObject,
+  toolName = 'clip_analyze',
+): ClipAnalysisOptions {
+  const rawMode = getString(args, 'mode');
+  const mode = rawMode === 'representative' || rawMode === 'dense' ? rawMode : 'dense';
+  const targetIntervalSec = getFiniteNonNegativeNumberArg(args, 'targetIntervalSec', toolName);
+  const maxSamples = getFiniteNonNegativeNumberArg(args, 'maxSamples', toolName);
+  const rangeStartSec = getFiniteNonNegativeNumberArg(args, 'rangeStartSec', toolName);
+  const rangeEndSec = getFiniteNonNegativeNumberArg(args, 'rangeEndSec', toolName);
+
+  return {
+    mode,
+    ...(targetIntervalSec !== undefined ? { targetIntervalSec } : {}),
+    ...(maxSamples !== undefined ? { maxSamples: Math.max(1, Math.trunc(maxSamples)) } : {}),
+    includeEdges: typeof args.includeEdges === 'boolean' ? args.includeEdges : true,
+    ...(rangeStartSec !== undefined ? { rangeStartSec } : {}),
+    ...(rangeEndSec !== undefined ? { rangeEndSec } : {}),
+    forceRefresh: args.forceRefresh === true,
+  };
+}
+
+function normalizeClipPerceptionOptions(args: CodexJsonObject): ClipPerceptionOptions {
+  const rawDetail = getString(args, 'detail');
+  const detail =
+    rawDetail === 'auto' || rawDetail === 'high' || rawDetail === 'low' ? rawDetail : 'low';
+  const maxFrames = getFiniteNonNegativeNumberArg(args, 'maxFrames', 'clip_describe');
+  const provider = getString(args, 'provider')?.trim();
+  const model = getString(args, 'model')?.trim();
+
+  return {
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+    detail,
+    ...(maxFrames !== undefined ? { maxFrames: Math.max(1, Math.trunc(maxFrames)) } : {}),
+    reuseSourceAnalysis:
+      typeof args.reuseSourceAnalysis === 'boolean' ? args.reuseSourceAnalysis : true,
+    allowCloud: args.allowCloud === true,
+    forceRefresh: args.forceRefresh === true,
+    includeContactSheet: args.includeContactSheet === true,
+  };
+}
+
+async function analyzeClipToolCall(args: CodexJsonObject | null): Promise<CodexJsonObject> {
+  if (!args) {
+    throw new Error('OpenReelio clip_analyze requires object arguments.');
+  }
+
+  const sequenceId = getRequiredStringArg(args, 'sequenceId', 'clip_analyze');
+  const trackId = getRequiredStringArg(args, 'trackId', 'clip_analyze');
+  const clipId = getRequiredStringArg(args, 'clipId', 'clip_analyze');
+  const options = normalizeClipAnalysisOptions(args);
+
+  try {
+    const response = await invoke<ClipAnalysisResponse>('sample_clip_frames', {
+      sequenceId,
+      trackId,
+      clipId,
+      options,
+    });
+    return {
+      status: 'ok',
+      source: response.source,
+      fingerprint: response.bundle.fingerprint,
+      sequenceId: response.bundle.sequenceId,
+      trackId: response.bundle.trackId,
+      clipId: response.bundle.clipId,
+      assetId: response.bundle.assetId,
+      sampleCount: response.bundle.samples.length,
+      readySampleCount: response.bundle.samples.filter(
+        (sample) => sample.extractionStatus === 'ready',
+      ).length,
+      quality: response.bundle.quality,
+      samples: response.bundle.samples,
+      mapping: response.bundle.mapping,
+      errors: response.bundle.errors,
+      bundle: response.bundle as unknown as CodexJsonObject,
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function describeClipToolCall(args: CodexJsonObject | null): Promise<CodexJsonObject> {
+  if (!args) {
+    throw new Error('OpenReelio clip_describe requires object arguments.');
+  }
+
+  const sequenceId = getRequiredStringArg(args, 'sequenceId', 'clip_describe');
+  const trackId = getRequiredStringArg(args, 'trackId', 'clip_describe');
+  const clipId = getRequiredStringArg(args, 'clipId', 'clip_describe');
+  const analysisOptions = normalizeClipAnalysisOptions(args, 'clip_describe');
+  const perceptionOptions = normalizeClipPerceptionOptions(args);
+
+  try {
+    const response = await invoke<ClipPerceptionResponse>('describe_timeline_clip', {
+      sequenceId,
+      trackId,
+      clipId,
+      analysisOptions,
+      perceptionOptions,
+    });
+    return {
+      status: 'ok',
+      source: response.source,
+      perceptionFingerprint: response.bundle.perceptionFingerprint,
+      clipFingerprint: response.bundle.clipFingerprint,
+      sequenceId: response.bundle.sequenceId,
+      trackId: response.bundle.trackId,
+      clipId: response.bundle.clipId,
+      assetId: response.bundle.assetId,
+      observationCount: response.bundle.observations.length,
+      observations: response.bundle.observations,
+      quality: response.bundle.quality,
+      errors: response.bundle.errors,
+      bundle: response.bundle as unknown as CodexJsonObject,
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function normalizeSemanticTemporalAction(value: unknown): SemanticTemporalEditAction {
+  return value === 'highlight' ||
+    value === 'remove' ||
+    value === 'marker' ||
+    value === 'addText' ||
+    value === 'blur'
+    ? value
+    : 'blur';
+}
+
+function normalizeSemanticEditPlanOptions(args: CodexJsonObject): SemanticTemporalEditPlanOptions {
+  const paddingSec = getFiniteNonNegativeNumberArg(args, 'paddingSec', 'semantic_edit_plan');
+  const mergeGapSec = getFiniteNonNegativeNumberArg(args, 'mergeGapSec', 'semantic_edit_plan');
+  const minConfidence = getFiniteNonNegativeNumberArg(args, 'minConfidence', 'semantic_edit_plan');
+  const maxRanges = getFiniteNonNegativeNumberArg(args, 'maxRanges', 'semantic_edit_plan');
+  const effectStrength = getFiniteNumberArg(args, 'effectStrength', 'semantic_edit_plan');
+  const spatialTimeToleranceSec = getFiniteNonNegativeNumberArg(
+    args,
+    'spatialTimeToleranceSec',
+    'semantic_edit_plan',
+  );
+  const text = getString(args, 'text')?.trim();
+
+  return {
+    ...(paddingSec !== undefined ? { paddingSec } : {}),
+    ...(mergeGapSec !== undefined ? { mergeGapSec } : {}),
+    ...(minConfidence !== undefined ? { minConfidence } : {}),
+    ...(maxRanges !== undefined ? { maxRanges: Math.max(1, Math.trunc(maxRanges)) } : {}),
+    ...(text ? { text } : {}),
+    ...(effectStrength !== undefined ? { effectStrength } : {}),
+    includeCommandDrafts:
+      typeof args.includeCommandDrafts === 'boolean' ? args.includeCommandDrafts : true,
+    ...(spatialTimeToleranceSec !== undefined ? { spatialTimeToleranceSec } : {}),
+    includeSpatialTargets:
+      typeof args.includeSpatialTargets === 'boolean' ? args.includeSpatialTargets : true,
+  };
+}
+
+async function planSemanticEditToolCall(args: CodexJsonObject | null): Promise<CodexJsonObject> {
+  if (!args) {
+    throw new Error('OpenReelio semantic_edit_plan requires object arguments.');
+  }
+
+  const perceptionFingerprint = getRequiredStringArg(
+    args,
+    'perceptionFingerprint',
+    'semantic_edit_plan',
+  );
+  const query = getRequiredStringArg(args, 'query', 'semantic_edit_plan');
+  const action = normalizeSemanticTemporalAction(args.action);
+  const options = normalizeSemanticEditPlanOptions(args);
+
+  try {
+    const plan = await invoke<SemanticTemporalEditPlan>('plan_semantic_clip_edit', {
+      perceptionFingerprint,
+      query,
+      action,
+      options,
+    });
+    return {
+      status: 'ok',
+      plan: plan as unknown as CodexJsonObject,
+      planId: plan.planId,
+      rangeCount: plan.ranges.length,
+      ranges: plan.ranges as unknown as CodexJsonObject[],
+      quality: plan.quality,
+      summary: plan.summary,
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      message: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -2045,7 +3118,8 @@ function validateContextToken(
   if (!record || record.token !== token) {
     return {
       valid: false,
-      message: 'OpenReelio command_execute rejected a missing or stale contextToken.',
+      message:
+        'OpenReelio command_execute rejected a missing or stale contextToken. Read openreelio.project_state or openreelio.timeline_snapshot again and retry with the new contextToken.',
     };
   }
 
@@ -2060,7 +3134,8 @@ function validateContextToken(
     contextTokensBySessionId.delete(context.sessionId);
     return {
       valid: false,
-      message: 'OpenReelio command_execute rejected an expired contextToken.',
+      message:
+        'OpenReelio command_execute rejected an expired contextToken. Read openreelio.project_state or openreelio.timeline_snapshot again and retry with the new contextToken.',
     };
   }
 
@@ -2107,6 +3182,22 @@ function buildCommandSchema(): CodexJsonObject {
           'Caption position supports preset top/center/bottom or custom xPercent/yPercent.',
         note: 'Use this for AI/STT transcript segments so generated captions are imported atomically and remain undoable as one command.',
       },
+      transcriptionGenerate: {
+        tool: 'openreelio.transcription_generate',
+        required: [],
+        optional: [
+          'sequenceAudio',
+          'sequenceId',
+          'assetId',
+          'language',
+          'model',
+          'translate',
+          'clipId',
+          'trackId',
+          'async',
+        ],
+        note: 'Use this read-only tool before ImportGeneratedCaptions when subtitles should come from source audio. Set sequenceAudio=true for the edited timeline mix, or pass clipId plus sequenceId/trackId to receive timelineCaptionSegments aligned to a timeline clip.',
+      },
       AddTextClip: {
         required: ['sequenceId', 'trackId', 'timelineIn', 'duration', 'textData'],
         textDataShape:
@@ -2127,7 +3218,7 @@ function buildCommandSchema(): CodexJsonObject {
       commandType: 'PascalCase OpenReelio backend command type',
       payload: 'CamelCase JSON object matching the selected command type',
       contextToken:
-        'Fresh mutation contextToken returned by project_state, timeline_snapshot, or assets_list',
+        'Fresh mutation contextToken returned by project_state, timeline_snapshot, assets_list, or selection_read',
       mutationTool:
         'Use openreelio.media_insert for asset placement; use openreelio.command_execute for primitive single-command edits.',
       mediaMutationTool: 'openreelio.media_insert',
@@ -2149,6 +3240,24 @@ function buildCommandSchema(): CodexJsonObject {
         'Do not put a video asset on an audio track unless audioOnly=true is intentional; that creates an audio-only clip and will not show in preview.',
         'For video assets, let autoExtractLinkedAudio default to true so the matching audio clip is created, linked, and the source video clip is muted.',
       ],
+      highlightSfxPlacement: [
+        'Read timeline_snapshot to identify candidate highlight clips, then call clip_analyze or clip_describe on the specific clip before selecting precise SFX timings.',
+        'Use dense clip_analyze with a small targetIntervalSec for short highlight clips so frame samples are indexed inside the clip instead of inferred from the whole timeline.',
+        'Use clip_describe when visual semantics matter, then place imported SFX on dedicated audio tracks with media_insert and sourceIn/sourceOut trims.',
+        'Do not spread one SFX across every cut when the user asks for the highlight clip itself; constrain placements to the selected clip-local timeline range.',
+      ],
+    },
+    analysisWorkflows: {
+      clipPrecision: [
+        'Use clip_analyze(sequenceId, trackId, clipId, mode="dense") for indexed clip-local frame samples, timeline/source mapping, extraction status, and sample image paths.',
+        'Use clip_describe after clip_analyze when an edit depends on visual content, object presence, faces, text, motion beats, or highlight evidence.',
+        'Use semantic_edit_plan with the perceptionFingerprint from clip_describe to derive target ranges, confidence, command drafts, and optional spatial AddMask drafts.',
+      ],
+      semanticVisualEdits: [
+        'For blur/highlight/remove/marker/addText requests, first gather clip-local evidence with clip_describe.',
+        'Call semantic_edit_plan with a concrete query such as logo, face, text, product, chart, or screen.',
+        'Validate and apply returned commandDrafts through plan_validate and plan_apply, resolving IDs from earlier split/effect steps when a draft references an isolated clip or effect.',
+      ],
     },
     textWorkflows: {
       editableOverlay: [
@@ -2159,6 +3268,12 @@ function buildCommandSchema(): CodexJsonObject {
         'SetClipTransform for exact preview drag/resize/rotate parity using normalized position, scale, rotationDeg, and anchor.',
       ],
       timedSubtitles: [
+        'Call openreelio.transcription_status first and explain missing model installation before attempting automatic subtitles.',
+        'If no model is installed and the user approves a download, call openreelio.transcription_install_model before transcription_generate.',
+        'After transcription_install_model returns, refresh project_state or timeline_snapshot before any mutation because older contextTokens are intentionally invalidated.',
+        'Call openreelio.transcription_generate(assetId, language="auto", model="auto") for speech-to-text segments before creating generated subtitles.',
+        'For edited timeline audio, call openreelio.transcription_generate(sequenceAudio=true, sequenceId, language="auto", model="auto"); returned captionSegments are already timeline-relative.',
+        'When captioning an edited timeline clip, pass clipId with sequenceId and trackId, then use timelineCaptionSegments for ImportGeneratedCaptions.',
         'Use ImportGeneratedCaptions for AI transcript segments or CreateCaption/UpdateCaption for individual caption lines.',
         'Use caption style/position metadata for subtitle readability instead of editable overlay text when the user wants semantic subtitles.',
       ],
@@ -2207,6 +3322,10 @@ function asObject(value: unknown): CodexJsonObject | null {
   return value as CodexJsonObject;
 }
 
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
 function getString(input: CodexJsonObject | null | undefined, key: string): string | null {
   const value = input?.[key];
   return typeof value === 'string' ? value : null;
@@ -2236,6 +3355,27 @@ function getFiniteNonNegativeNumberArg(
 
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
     throw new Error(`OpenReelio ${toolName} requires ${key} to be a finite non-negative number.`);
+  }
+
+  return value;
+}
+
+function getFiniteNumberArg(
+  input: CodexJsonObject,
+  key: string,
+  toolName: string,
+  required = false,
+): number | undefined {
+  const value = input[key];
+  if (value === undefined || value === null) {
+    if (required) {
+      throw new Error(`OpenReelio ${toolName} requires ${key}.`);
+    }
+    return undefined;
+  }
+
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`OpenReelio ${toolName} requires ${key} to be a finite number.`);
   }
 
   return value;

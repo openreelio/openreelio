@@ -72,6 +72,8 @@ describe('CodexReferenceAdapter', () => {
       available: false,
       version: null,
       reason: 'codex executable not found',
+      runtimeSource: null,
+      codexHome: null,
     });
   });
 
@@ -112,6 +114,8 @@ describe('CodexReferenceAdapter', () => {
       available: true,
       version: '0.130.0-alpha.5',
       reason: null,
+      runtimeSource: null,
+      codexHome: null,
     });
     expect(appServerClientFactory).not.toHaveBeenCalled();
   });
@@ -149,6 +153,12 @@ describe('CodexReferenceAdapter', () => {
         developerInstructions: expect.stringContaining('OpenReelio'),
         dynamicTools: expect.arrayContaining([
           expect.objectContaining({ namespace: 'openreelio', name: 'host_context' }),
+          expect.objectContaining({ namespace: 'openreelio', name: 'clip_analyze' }),
+          expect.objectContaining({ namespace: 'openreelio', name: 'clip_describe' }),
+          expect.objectContaining({ namespace: 'openreelio', name: 'semantic_edit_plan' }),
+          expect.objectContaining({ namespace: 'openreelio', name: 'transcription_status' }),
+          expect.objectContaining({ namespace: 'openreelio', name: 'transcription_install_model' }),
+          expect.objectContaining({ namespace: 'openreelio', name: 'transcription_generate' }),
           expect.objectContaining({ namespace: 'openreelio', name: 'stock_media_search' }),
           expect.objectContaining({ namespace: 'openreelio', name: 'stock_media_import' }),
           expect.objectContaining({ namespace: 'openreelio', name: 'media_insert' }),
@@ -174,6 +184,22 @@ describe('CodexReferenceAdapter', () => {
       'image',
       'audio',
     ]);
+    const clipAnalyzeTool = startThreadInput.dynamicTools.find(
+      (tool: any) => tool.name === 'clip_analyze',
+    );
+    expect(clipAnalyzeTool.inputSchema.required).toEqual(['sequenceId', 'trackId', 'clipId']);
+    expect(clipAnalyzeTool.inputSchema.properties.mode.enum).toEqual(['representative', 'dense']);
+    const clipDescribeTool = startThreadInput.dynamicTools.find(
+      (tool: any) => tool.name === 'clip_describe',
+    );
+    expect(clipDescribeTool.inputSchema.properties.maxFrames.type).toBe('number');
+    expect(clipDescribeTool.inputSchema.properties.allowCloud.type).toBe('boolean');
+    const semanticEditPlanTool = startThreadInput.dynamicTools.find(
+      (tool: any) => tool.name === 'semantic_edit_plan',
+    );
+    expect(semanticEditPlanTool.inputSchema.properties.action.enum).toContain('highlight');
+    expect(startThreadInput.developerInstructions).toContain('openreelio.clip_describe');
+    expect(startThreadInput.developerInstructions).toContain('openreelio.semantic_edit_plan');
     expect(appServerClient.startTurn).toHaveBeenCalledWith('thr_123', 'Inspect this timeline', {
       model: 'gpt-5.5',
       effort: 'medium',
@@ -695,11 +721,383 @@ describe('CodexReferenceAdapter', () => {
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"AddTextClip"');
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"textWorkflows"');
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"SetClipTransform"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('openreelio.transcription_status');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain(
+      'openreelio.transcription_install_model',
+    );
+    expect(getFirstTextContent(commandSchemaResponse)).toContain(
+      'openreelio.transcription_generate',
+    );
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"vertical_1080"');
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"1080x1920"');
     expect(annotationResponse.success).toBe(true);
     expect(getFirstTextContent(annotationResponse)).toContain('"analysisStatus"');
     expect(getFirstTextContent(annotationResponse)).toContain('"asset-1"');
+  });
+
+  it('should generate transcript segments and remap them to a timeline clip', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_project_state') {
+        return {
+          meta: {
+            name: 'Launch Cut',
+            version: '1',
+            createdAt: '2026-05-13T00:00:00Z',
+            modifiedAt: '2026-05-13T00:00:00Z',
+            description: null,
+            author: null,
+          },
+          assets: [{ id: 'asset-1', name: 'dialogue.mp4', kind: 'video' }],
+          sequences: [
+            {
+              id: 'seq-1',
+              name: 'Main',
+              tracks: [
+                {
+                  id: 'track-1',
+                  name: 'V1',
+                  kind: 'video',
+                  clips: [
+                    {
+                      id: 'clip-1',
+                      assetId: 'asset-1',
+                      range: { sourceInSec: 5, sourceOutSec: 10 },
+                      place: { timelineInSec: 20, durationSec: 5 },
+                      speed: 1,
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+          effects: [],
+          activeSequenceId: 'seq-1',
+          textClips: [],
+          isDirty: false,
+        };
+      }
+      if (command === 'is_transcription_available') {
+        return true;
+      }
+      if (command === 'get_transcription_status') {
+        return {
+          featureAvailable: true,
+          ready: true,
+          modelsDir: '/models/whisper',
+          defaultModel: 'base',
+          installedCount: 1,
+          models: [
+            {
+              id: 'base',
+              displayName: 'Base',
+              filename: 'ggml-base.bin',
+              installed: true,
+              path: '/models/whisper/ggml-base.bin',
+              sizeBytes: 1,
+              isDefault: true,
+              recommended: true,
+              downloadUrl:
+                'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
+              estimatedSizeBytes: 148000000,
+              source: 'ggerganov/whisper.cpp',
+              license: 'MIT',
+            },
+          ],
+        };
+      }
+      if (command === 'transcribe_asset') {
+        return {
+          language: 'ko',
+          duration: 12,
+          fullText: 'before clip words after',
+          segments: [
+            { startTime: 1, endTime: 3, text: 'before' },
+            { startTime: 4, endTime: 7, text: 'clip words' },
+            { startTime: 8, endTime: 11, text: 'after' },
+          ],
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const response = (await respondToRequest({
+      id: 18,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_transcription_generate',
+        tool: 'openreelio.transcription_generate',
+        arguments: {
+          assetId: 'asset-1',
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          clipId: 'clip-1',
+          language: 'ko',
+          model: 'base',
+        },
+      },
+    })) as any;
+    const text = getFirstTextContent(response);
+
+    expect(response.success).toBe(true);
+    expect(text).toContain('"timelineSegmentCount": 2');
+    expect(text).toContain('"timelineCaptionSegments"');
+    expect(text).toContain('"startSec": 20');
+    expect(text).toContain('"sourceStartSec": 5');
+    expect(invoke).toHaveBeenCalledWith('transcribe_asset', {
+      assetId: 'asset-1',
+      options: { language: 'ko', translate: false, model: 'base' },
+    });
+  });
+
+  it('should expose clip-local analysis and semantic edit planning through the Codex bridge', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'sample_clip_frames') {
+        return {
+          source: 'generated',
+          bundle: {
+            fingerprint: 'clip-analysis-fp',
+            sequenceId: 'seq-1',
+            trackId: 'video-1',
+            clipId: 'clip-highlight',
+            assetId: 'asset-1',
+            samples: [
+              {
+                id: 'sample-1',
+                index: 0,
+                timelineSec: 2.25,
+                sourceSec: 10,
+                extractionStatus: 'ready',
+                imagePath: '/tmp/openreelio/sample-1.jpg',
+              },
+              {
+                id: 'sample-2',
+                index: 1,
+                timelineSec: 2.75,
+                sourceSec: 10.5,
+                extractionStatus: 'ready',
+                imagePath: '/tmp/openreelio/sample-2.jpg',
+              },
+            ],
+            mapping: {
+              timelineInSec: 2.25,
+              timelineOutSec: 3.25,
+              sourceInSec: 10,
+              sourceOutSec: 11,
+              speed: 1,
+            },
+            quality: { status: 'ready', score: 1, warnings: [] },
+            errors: [],
+          },
+        };
+      }
+      if (command === 'describe_timeline_clip') {
+        return {
+          source: 'generated',
+          bundle: {
+            perceptionFingerprint: 'perception-fp',
+            clipFingerprint: 'clip-analysis-fp',
+            sequenceId: 'seq-1',
+            trackId: 'video-1',
+            clipId: 'clip-highlight',
+            assetId: 'asset-1',
+            observations: [
+              {
+                sampleId: 'sample-1',
+                timelineSec: 2.25,
+                sourceSec: 10,
+                summary: 'A surprised reaction starts as the subject turns toward camera.',
+                labels: ['surprised face', 'reaction'],
+                confidence: 0.92,
+              },
+            ],
+            quality: { status: 'ready', score: 0.92, warnings: [] },
+            errors: [],
+          },
+        };
+      }
+      if (command === 'plan_semantic_clip_edit') {
+        return {
+          planId: 'semantic-plan-1',
+          perceptionFingerprint: 'perception-fp',
+          clipFingerprint: 'clip-analysis-fp',
+          sequenceId: 'seq-1',
+          trackId: 'video-1',
+          clipId: 'clip-highlight',
+          assetId: 'asset-1',
+          query: 'surprised face',
+          action: 'highlight',
+          ranges: [
+            {
+              id: 'range-1',
+              startSec: 2.2,
+              endSec: 2.8,
+              confidence: 0.92,
+              observations: ['sample-1'],
+              commandDrafts: [
+                {
+                  commandType: 'AddEffect',
+                  payload: { effectKind: 'brightnessContrast' },
+                  reason: 'Highlight the reaction beat.',
+                },
+              ],
+            },
+          ],
+          quality: {
+            status: 'ready',
+            score: 0.92,
+            matchedSampleCount: 1,
+            rangeCount: 1,
+            warnings: [],
+            recommendedActions: [],
+          },
+          summary: 'Matched one reaction beat.',
+          createdAt: '2026-05-29T04:00:00Z',
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const analysisResponse = (await respondToRequest({
+      id: 40,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_clip_analyze',
+        namespace: 'openreelio',
+        tool: 'clip_analyze',
+        arguments: {
+          sequenceId: 'seq-1',
+          trackId: 'video-1',
+          clipId: 'clip-highlight',
+          targetIntervalSec: 0.1,
+          maxSamples: 6,
+          rangeStartSec: 2.25,
+          rangeEndSec: 3.25,
+        },
+      },
+    })) as any;
+    const perceptionResponse = (await respondToRequest({
+      id: 41,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_clip_describe',
+        namespace: 'openreelio',
+        tool: 'clip_describe',
+        arguments: {
+          sequenceId: 'seq-1',
+          trackId: 'video-1',
+          clipId: 'clip-highlight',
+          targetIntervalSec: 0.1,
+          maxSamples: 6,
+          maxFrames: 4,
+        },
+      },
+    })) as any;
+    const planResponse = (await respondToRequest({
+      id: 42,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_semantic_plan',
+        namespace: 'openreelio',
+        tool: 'semantic_edit_plan',
+        arguments: {
+          perceptionFingerprint: 'perception-fp',
+          query: 'surprised face',
+          action: 'highlight',
+          paddingSec: 0.05,
+          effectStrength: -0.2,
+          includeCommandDrafts: true,
+          includeSpatialTargets: true,
+        },
+      },
+    })) as any;
+
+    expect(analysisResponse.success).toBe(true);
+    expect(getFirstTextContent(analysisResponse)).toContain('"sampleCount": 2');
+    expect(getFirstTextContent(analysisResponse)).toContain('"readySampleCount": 2');
+    expect(perceptionResponse.success).toBe(true);
+    expect(getFirstTextContent(perceptionResponse)).toContain('"perceptionFingerprint"');
+    expect(getFirstTextContent(perceptionResponse)).toContain('"perception-fp"');
+    expect(planResponse.success).toBe(true);
+    expect(getFirstTextContent(planResponse)).toContain('"rangeCount": 1');
+    expect(getFirstTextContent(planResponse)).toContain('"semantic-plan-1"');
+    expect(invoke).toHaveBeenCalledWith(
+      'describe_timeline_clip',
+      expect.objectContaining({
+        analysisOptions: expect.objectContaining({
+          mode: 'dense',
+          targetIntervalSec: 0.1,
+          maxSamples: 6,
+          includeEdges: true,
+          forceRefresh: false,
+        }),
+        perceptionOptions: expect.objectContaining({
+          detail: 'low',
+          maxFrames: 4,
+          reuseSourceAnalysis: true,
+          allowCloud: false,
+          includeContactSheet: false,
+          forceRefresh: false,
+        }),
+      }),
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      'plan_semantic_clip_edit',
+      expect.objectContaining({
+        perceptionFingerprint: 'perception-fp',
+        query: 'surprised face',
+        action: 'highlight',
+        options: expect.objectContaining({
+          paddingSec: 0.05,
+          effectStrength: -0.2,
+          includeCommandDrafts: true,
+          includeSpatialTargets: true,
+        }),
+      }),
+    );
   });
 
   it('should expose stock media search through the Codex bridge', async () => {
@@ -1759,6 +2157,177 @@ describe('CodexReferenceAdapter', () => {
     expect(getFirstTextContent(response)).toContain('"tokenId": "grant-1"');
   });
 
+  it('should retry OpenReelio plan execution once when the approval proof is rejected before any step runs', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    let approvalTokenRequestCount = 0;
+    let executePlanRequestCount = 0;
+    const executePlanArgs: any[] = [];
+
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'get_project_state') {
+        return {
+          meta: {
+            name: 'Launch Cut',
+            version: '1',
+            createdAt: '2026-05-13T00:00:00Z',
+            modifiedAt: '2026-05-13T00:00:00Z',
+            description: null,
+            author: null,
+          },
+          assets: [],
+          sequences: [],
+          effects: [],
+          activeSequenceId: 'seq_1',
+          textClips: [],
+          isDirty: false,
+        };
+      }
+      if (command === 'validate_command_payload') {
+        return null;
+      }
+      if (command === 'create_external_agent_approval_token') {
+        approvalTokenRequestCount += 1;
+        return {
+          token: `grant-token-${approvalTokenRequestCount}`,
+          tokenId: `grant-${approvalTokenRequestCount}`,
+          sessionId: 'thr_123',
+          runId: null,
+          planId: 'plan_retry',
+          projectId: 'project-1',
+          runtimeId: 'codex',
+          scopes: ['openreelio.plan.apply'],
+          createdAt: 1,
+          expiresAt: 2,
+        };
+      }
+      if (command === 'execute_agent_plan') {
+        executePlanRequestCount += 1;
+        executePlanArgs.push(args);
+
+        if (executePlanRequestCount === 1) {
+          return {
+            planId: 'plan_retry',
+            success: false,
+            totalSteps: 1,
+            stepsCompleted: 0,
+            stepResults: [],
+            operationIds: [],
+            rollbackReport: null,
+            errorMessage: 'approvalToken is invalid or expired',
+            executionTimeMs: 1,
+          };
+        }
+
+        return {
+          planId: 'plan_retry',
+          success: true,
+          totalSteps: 1,
+          stepsCompleted: 1,
+          stepResults: [],
+          operationIds: ['op_1'],
+          rollbackReport: null,
+          errorMessage: null,
+          executionTimeMs: 3,
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    projectStoreMocks.refreshFromBackendMutation.mockResolvedValue(9);
+    const approvalDecisionProvider = vi.fn().mockResolvedValue('accept');
+    const adapter = new CodexReferenceAdapter(undefined, {
+      appServerClient,
+      approvalDecisionProvider,
+    });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+    const contextResponse = (await respondToRequest({
+      id: 40,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_context',
+        namespace: 'openreelio',
+        tool: 'project_state',
+        arguments: {},
+      },
+    })) as any;
+    const contextToken = JSON.parse(getFirstTextContent(contextResponse)).contextToken;
+
+    const plan = {
+      id: 'plan_retry',
+      goal: 'Add a B-roll track',
+      approvalGranted: false,
+      steps: [
+        {
+          id: 'step_1',
+          toolName: 'CreateTrack',
+          params: {
+            sequenceId: 'seq_1',
+            name: 'B-roll',
+            kind: 'video',
+          },
+          description: 'Add a B-roll video track',
+          riskLevel: 'medium',
+        },
+      ],
+    };
+    const response = (await respondToRequest({
+      id: 41,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_plan_apply_retry',
+        namespace: 'openreelio',
+        tool: 'plan_apply',
+        arguments: {
+          plan,
+          reason: 'Apply a one-step B-roll track plan',
+          contextToken,
+        },
+      },
+    })) as any;
+
+    expect(approvalTokenRequestCount).toBe(2);
+    expect(executePlanRequestCount).toBe(2);
+    expect(executePlanArgs[0]).toMatchObject({
+      plan: {
+        approvalProof: {
+          token: 'grant-token-1',
+          tokenId: 'grant-1',
+        },
+      },
+    });
+    expect(executePlanArgs[1]).toMatchObject({
+      plan: {
+        approvalProof: {
+          token: 'grant-token-2',
+          tokenId: 'grant-2',
+        },
+      },
+    });
+    expect(response.success).toBe(true);
+    expect(getFirstTextContent(response)).toContain('"status": "ok"');
+    expect(getFirstTextContent(response)).toContain('"tokenId": "grant-2"');
+    expect(getFirstTextContent(response)).toContain('"retried": true');
+    expect(getFirstTextContent(response)).toContain('"initialTokenId": "grant-1"');
+  });
+
   it('should reject OpenReelio dynamic plans with cyclic dependencies', async () => {
     const requestHandlers: Array<(request: any) => unknown> = [];
     const appServerClient = {
@@ -1817,6 +2386,85 @@ describe('CodexReferenceAdapter', () => {
       'Plan contains cyclic dependency: step_a -> step_b -> step_a',
     );
     expect(invoke).not.toHaveBeenCalledWith('validate_command_payload', expect.anything());
+  });
+
+  it('should surface state-aware caption track validation errors before plan approval', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'validate_command_payload') {
+        throw new Error(
+          'ImportGeneratedCaptions requires a caption track, but track video_1 is Video',
+        );
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const approvalDecisionProvider = vi.fn().mockResolvedValue('accept');
+    const adapter = new CodexReferenceAdapter(undefined, {
+      appServerClient,
+      approvalDecisionProvider,
+    });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const response = (await respondToRequest({
+      id: 33,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_plan_validate_caption_track',
+        namespace: 'openreelio',
+        tool: 'plan_validate',
+        arguments: {
+          plan: {
+            id: 'caption-plan',
+            goal: 'Import generated captions',
+            steps: [
+              {
+                id: 'import_captions',
+                toolName: 'ImportGeneratedCaptions',
+                params: {
+                  sequenceId: 'seq_1',
+                  trackId: 'video_1',
+                  segments: [{ startSec: 0, endSec: 1, text: 'Caption' }],
+                },
+              },
+            ],
+          },
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(false);
+    expect(getFirstTextContent(response)).toContain('"status": "error"');
+    expect(getFirstTextContent(response)).toContain('requires a caption track');
+    expect(approvalDecisionProvider).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith('validate_command_payload', {
+      commandType: 'ImportGeneratedCaptions',
+      payload: {
+        sequenceId: 'seq_1',
+        trackId: 'video_1',
+        segments: [{ startSec: 0, endSec: 1, text: 'Caption' }],
+      },
+    });
+    expect(invoke).not.toHaveBeenCalledWith(
+      'create_external_agent_approval_token',
+      expect.anything(),
+    );
   });
 
   it('should reject OpenReelio dynamic tool calls for unknown Codex sessions', async () => {
