@@ -611,7 +611,7 @@ fn get_sequence<'a>(project: &'a ActiveProject, sequence_id: &str) -> anyhow::Re
         .ok_or_else(|| anyhow::anyhow!("Sequence '{}' not found", sequence_id))
 }
 
-fn ensure_caption_track(
+pub(crate) fn ensure_caption_track(
     project: &mut ActiveProject,
     sequence_id: &str,
     explicit_track_id: Option<&str>,
