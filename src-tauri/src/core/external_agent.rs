@@ -86,11 +86,21 @@ pub struct ConfigureCodexAgentRuntimeResult {
     pub plugin_marketplace_configured: bool,
     pub mcp_configured: bool,
     pub message: Option<String>,
+    pub runtime_source: Option<String>,
+    pub codex_home: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexAgentLoginResult {
+    pub success: bool,
+    pub auth_status: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAgentLogoutResult {
     pub success: bool,
     pub auth_status: String,
     pub message: Option<String>,
@@ -161,7 +171,7 @@ pub fn build_external_agent_setup_info(
     input: ExternalAgentSetupInfoInput,
 ) -> ExternalAgentSetupInfo {
     let marketplace_root = find_repo_agents_root();
-    let codex_command = quote_command_arg(&crate::core::codex::codex_command_label());
+    let codex_command = crate::core::codex::codex_shell_command_prefix();
     let codex_plugin_marketplace_command = marketplace_root.as_ref().map(|root| {
         format!(
             "{codex_command} plugin marketplace add {}",
@@ -213,6 +223,8 @@ pub async fn configure_codex_agent_runtime(
             message: status
                 .reason
                 .or_else(|| Some("Codex CLI is not installed.".to_string())),
+            runtime_source: status.runtime_source,
+            codex_home: status.codex_home,
         };
     }
 
@@ -228,6 +240,8 @@ pub async fn configure_codex_agent_runtime(
         plugin_marketplace_configured: false,
         mcp_configured: false,
         message,
+        runtime_source: status.runtime_source,
+        codex_home: status.codex_home,
     }
 }
 
@@ -238,7 +252,7 @@ fn resolve_codex_configuration_readiness(
     let ready = authenticated;
     let message = if ready {
         Some(
-            "Codex is signed in. App-server tools will start when a session begins. No global Codex config was changed."
+            "Codex is signed in. OpenReelio is using its managed Codex profile for auth, logs, and sessions."
                 .to_string(),
         )
     } else if !authenticated {
@@ -281,6 +295,37 @@ pub async fn start_codex_login() -> CodexAgentLoginResult {
         } else {
             Some(match login_result {
                 Ok(output) if output.is_empty() => "Codex sign-in did not complete.".to_string(),
+                Ok(output) => output,
+                Err(error) => error,
+            })
+        },
+    }
+}
+
+pub async fn logout_codex_agent_runtime() -> CodexAgentLogoutResult {
+    let before = crate::core::codex::probe_codex_status().await;
+    if !before.installed {
+        return CodexAgentLogoutResult {
+            success: false,
+            auth_status: before.auth_status,
+            message: before
+                .reason
+                .or_else(|| Some("Codex CLI is not installed.".to_string())),
+        };
+    }
+
+    let logout_result = run_codex_command(&["logout"], &[], Duration::from_secs(60)).await;
+    let after = crate::core::codex::probe_codex_status().await;
+    let success = after.auth_status == "signed-out";
+
+    CodexAgentLogoutResult {
+        success,
+        auth_status: after.auth_status,
+        message: if success {
+            Some("Codex sign-out completed for the OpenReelio managed profile.".to_string())
+        } else {
+            Some(match logout_result {
+                Ok(output) if output.is_empty() => "Codex sign-out did not complete.".to_string(),
                 Ok(output) => output,
                 Err(error) => error,
             })
@@ -563,14 +608,18 @@ fn is_authenticated(auth_status: &str) -> bool {
     matches!(auth_status, "signed-in" | "api-key")
 }
 
+fn is_managed_codex_runtime(status: &crate::core::codex::CodexStatusProbeResult) -> bool {
+    status.runtime_source.as_deref() == Some("managed")
+}
+
 pub async fn install_codex_cli() -> CodexCliInstallResult {
     let before = crate::core::codex::probe_codex_status().await;
-    if before.installed {
+    if before.installed && is_managed_codex_runtime(&before) {
         return CodexCliInstallResult {
             success: true,
             version: before.version,
             attempted_command: None,
-            message: Some("Codex CLI is already installed.".to_string()),
+            message: Some("OpenReelio-managed Codex CLI is already installed.".to_string()),
         };
     }
 
@@ -580,35 +629,29 @@ pub async fn install_codex_cli() -> CodexCliInstallResult {
             return CodexCliInstallResult {
                 success: false,
                 version: None,
-                attempted_command: Some("npm install -g @openai/codex@latest".to_string()),
+                attempted_command: Some(format_managed_npm_install_command("npm")),
                 message: Some(
-                    "npm was not found. Install Node.js with npm, then install Codex from OpenReelio again."
+                    "npm was not found. Install Node.js with npm, then install the OpenReelio-managed Codex runtime again."
                         .to_string(),
                 ),
             };
         }
     };
-    let attempted_command = format!("{npm} install -g @openai/codex@latest");
-    let install_result = run_external_command(
-        &npm,
-        &["install", "-g", "@openai/codex@latest"],
-        Duration::from_secs(300),
-    )
-    .await;
+    let attempted_command = format_managed_npm_install_command(&npm);
+    let install_result = run_managed_npm_codex_install(&npm).await;
     let after = crate::core::codex::probe_codex_status().await;
-    let success = after.installed;
+    let success = after.installed && is_managed_codex_runtime(&after);
 
     CodexCliInstallResult {
         success,
         version: after.version,
         attempted_command: Some(attempted_command),
         message: if success {
-            Some("Codex CLI installation completed.".to_string())
+            Some("OpenReelio-managed Codex CLI installation completed.".to_string())
         } else {
             Some(match install_result {
-                Ok(output) if output.is_empty() => {
-                    "Codex CLI installation did not complete.".to_string()
-                }
+                Ok(output) if output.is_empty() && after.installed => "OpenReelio-managed Codex CLI installation did not complete. A system Codex CLI is still available as fallback.".to_string(),
+                Ok(output) if output.is_empty() => "OpenReelio-managed Codex CLI installation did not complete.".to_string(),
                 Ok(output) => output,
                 Err(error) => error,
             })
@@ -627,6 +670,43 @@ pub async fn update_codex_cli() -> CodexCliUpdateResult {
             message: before
                 .reason
                 .or_else(|| Some("Codex CLI is not installed.".to_string())),
+        };
+    }
+
+    if !is_managed_codex_runtime(&before) {
+        let Some((attempted_command, install_result)) = run_npm_codex_install().await else {
+            return CodexCliUpdateResult {
+                success: false,
+                before_version: before.version,
+                after_version: None,
+                attempted_command: Some(format_managed_npm_install_command("npm")),
+                message: Some(
+                    "npm was not found. Install Node.js with npm, then install the OpenReelio-managed Codex runtime again."
+                        .to_string(),
+                ),
+            };
+        };
+        let after = crate::core::codex::probe_codex_status().await;
+        let success = after.installed
+            && is_managed_codex_runtime(&after)
+            && !codex_cli_version_needs_update(&after.version);
+        return CodexCliUpdateResult {
+            success,
+            before_version: before.version,
+            after_version: after.version.clone(),
+            attempted_command: Some(attempted_command),
+            message: if success {
+                Some("OpenReelio-managed Codex CLI update completed.".to_string())
+            } else {
+                Some(match install_result {
+                    Ok(output) if output.is_empty() && after.installed => "OpenReelio-managed Codex CLI update did not complete. A system Codex CLI is still available as fallback.".to_string(),
+                    Ok(output) if output.is_empty() => {
+                        "OpenReelio-managed Codex CLI update did not complete.".to_string()
+                    }
+                    Ok(output) => output,
+                    Err(error) => error,
+                })
+            },
         };
     }
 
@@ -651,9 +731,9 @@ pub async fn update_codex_cli() -> CodexCliUpdateResult {
                 after = crate::core::codex::probe_codex_status().await;
             }
             None if update_result.is_err() => {
-                attempted_commands.push("npm install -g @openai/codex@latest".to_string());
+                attempted_commands.push(format_managed_npm_install_command("npm"));
                 update_result = Err(
-                    "npm was not found. Install Node.js with npm, then update Codex from OpenReelio again."
+                    "npm was not found. Install Node.js with npm, then update the OpenReelio-managed Codex runtime again."
                         .to_string(),
                 );
             }
@@ -661,8 +741,10 @@ pub async fn update_codex_cli() -> CodexCliUpdateResult {
         }
     }
 
-    let success =
-        update_result.is_ok() && after.installed && !codex_cli_version_needs_update(&after.version);
+    let success = update_result.is_ok()
+        && after.installed
+        && is_managed_codex_runtime(&after)
+        && !codex_cli_version_needs_update(&after.version);
     let before_version = before.version.clone();
     let after_version = after.version.clone();
 
@@ -672,17 +754,19 @@ pub async fn update_codex_cli() -> CodexCliUpdateResult {
         after_version: after_version.clone(),
         attempted_command: Some(attempted_commands.join(" -> ")),
         message: if success {
-            Some("Codex CLI update completed.".to_string())
+            Some("OpenReelio-managed Codex CLI update completed.".to_string())
         } else if update_result.is_ok() && after.installed {
             Some(format!(
-                "Codex update command completed, but OpenReelio still detects {}. A different Codex launcher may be earlier in OpenReelio's search path.",
+                "Codex update command completed, but OpenReelio still detects {}. Reconnect Codex or reinstall the managed runtime if this persists.",
                 after_version
                     .as_deref()
                     .unwrap_or("the same Codex CLI version")
             ))
         } else {
             Some(match update_result {
-                Ok(output) if output.is_empty() => "Codex CLI update did not complete.".to_string(),
+                Ok(output) if output.is_empty() => {
+                    "OpenReelio-managed Codex CLI update did not complete.".to_string()
+                }
                 Ok(output) => output,
                 Err(error) => error,
             })
@@ -692,14 +776,38 @@ pub async fn update_codex_cli() -> CodexCliUpdateResult {
 
 async fn run_npm_codex_install() -> Option<(String, Result<String, String>)> {
     let npm = find_npm_command().await?;
-    let attempted_command = format!("{npm} install -g @openai/codex@latest");
-    let result = run_external_command(
-        &npm,
-        &["install", "-g", "@openai/codex@latest"],
+    let attempted_command = format_managed_npm_install_command(&npm);
+    let result = run_managed_npm_codex_install(&npm).await;
+    Some((attempted_command, result))
+}
+
+fn format_managed_npm_install_command(npm: &str) -> String {
+    format!(
+        "{} install --prefix {} @openai/codex@latest",
+        quote_command_arg(npm),
+        quote_command_arg(
+            &crate::core::codex::managed_codex_runtime_dir()
+                .display()
+                .to_string()
+        )
+    )
+}
+
+async fn run_managed_npm_codex_install(npm: &str) -> Result<String, String> {
+    let runtime_dir = crate::core::codex::managed_codex_runtime_dir();
+    std::fs::create_dir_all(&runtime_dir)
+        .map_err(|error| format!("Failed to create OpenReelio Codex runtime directory: {error}"))?;
+    run_external_command_owned(
+        npm,
+        vec![
+            "install".to_string(),
+            "--prefix".to_string(),
+            runtime_dir.display().to_string(),
+            "@openai/codex@latest".to_string(),
+        ],
         Duration::from_secs(300),
     )
-    .await;
-    Some((attempted_command, result))
+    .await
 }
 
 fn detected_codex_version_still_needs_update(
@@ -800,6 +908,19 @@ async fn run_external_command(
     args: &[&str],
     timeout_duration: Duration,
 ) -> Result<String, String> {
+    run_external_command_owned(
+        executable,
+        args.iter().map(|arg| (*arg).to_string()).collect(),
+        timeout_duration,
+    )
+    .await
+}
+
+async fn run_external_command_owned(
+    executable: &str,
+    args: Vec<String>,
+    timeout_duration: Duration,
+) -> Result<String, String> {
     let mut command = tokio::process::Command::new(executable);
     crate::core::process::configure_tokio_command(&mut command);
     command.args(args).stdin(std::process::Stdio::null());
@@ -885,8 +1006,10 @@ mod tests {
         });
 
         assert!(info.codex_login_command.ends_with(" login"));
+        assert!(info.codex_login_command.contains("CODEX_HOME="));
         assert_eq!(info.codex_mcp_command_reason, None);
         let command = info.codex_mcp_command.expect("mcp command");
+        assert!(command.contains("CODEX_HOME="));
         assert!(command.contains(" mcp add openreelio"));
         assert!(command.contains("'OPENREELIO_PROJECT_PATH=/tmp/OpenReelio Project'"));
         assert!(command.contains(" mcp --stdio --project '/tmp/OpenReelio Project'"));
@@ -912,7 +1035,7 @@ mod tests {
         assert_eq!(
             message,
             Some(
-                "Codex is signed in. App-server tools will start when a session begins. No global Codex config was changed."
+                "Codex is signed in. OpenReelio is using its managed Codex profile for auth, logs, and sessions."
                     .to_string()
             )
         );

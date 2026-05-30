@@ -96,6 +96,13 @@ describe('ExternalAgentRuntimeSettings', () => {
           message: 'Codex sign-in completed.',
         });
       }
+      if (command === 'logout_codex_agent_runtime') {
+        return Promise.resolve({
+          success: true,
+          authStatus: 'signed-out',
+          message: 'Codex sign-out completed for the OpenReelio managed profile.',
+        });
+      }
       if (command === 'install_codex_cli') {
         return Promise.resolve({
           success: true,
@@ -154,9 +161,7 @@ describe('ExternalAgentRuntimeSettings', () => {
       />,
     );
 
-    expect(
-      screen.queryByRole('button', { name: /built-in api model/i }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /built-in api model/i })).not.toBeInTheDocument();
     expect(screen.getByText('Codex Model')).toBeInTheDocument();
     await waitFor(() => expect(onUpdate).toHaveBeenCalledWith({ assistantRuntime: 'codex' }));
   });
@@ -276,6 +281,139 @@ describe('ExternalAgentRuntimeSettings', () => {
     await userEvent.click(signInButton);
 
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('start_codex_login');
+  });
+
+  it('should sign out of the OpenReelio-managed Codex profile', async () => {
+    render(
+      <ExternalAgentRuntimeSettings
+        settings={{ ...defaultSettings, assistantRuntime: 'codex' }}
+        onUpdate={vi.fn()}
+        disabled={false}
+      />,
+    );
+
+    const signOutButton = await screen.findByRole('button', { name: /sign out/i });
+    await userEvent.click(signOutButton);
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('logout_codex_agent_runtime');
+  });
+
+  it('should keep Codex sign-out failures visible', async () => {
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === 'get_codex_status') {
+        return Promise.resolve({
+          installed: true,
+          version: 'codex-cli 0.130.0',
+          authStatus: 'signed-in',
+          reason: null,
+        });
+      }
+      if (command === 'configure_codex_agent_runtime') {
+        return Promise.resolve({
+          installed: true,
+          version: 'codex-cli 0.130.0',
+          authStatus: 'signed-in',
+          ready: true,
+          requiresLogin: false,
+          pluginMarketplaceConfigured: true,
+          mcpConfigured: true,
+          message: 'Codex is signed in.',
+        });
+      }
+      if (command === 'get_codex_model_catalog') {
+        return Promise.resolve({
+          installed: true,
+          defaultModel: 'gpt-5.5',
+          defaultReasoningEffort: 'medium',
+          models: [],
+          reason: null,
+        });
+      }
+      if (command === 'logout_codex_agent_runtime') {
+        return Promise.resolve({
+          success: false,
+          authStatus: 'signed-in',
+          message: 'Codex sign-out did not complete.',
+        });
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+
+    render(
+      <ExternalAgentRuntimeSettings
+        settings={{ ...defaultSettings, assistantRuntime: 'codex' }}
+        onUpdate={vi.fn()}
+        disabled={false}
+      />,
+    );
+
+    const signOutButton = await screen.findByRole('button', { name: /sign out/i });
+    await userEvent.click(signOutButton);
+
+    await waitFor(() =>
+      expect(screen.getByText('Codex sign-out did not complete.')).toBeInTheDocument(),
+    );
+  });
+
+  it('should show signed-out state when sign-out succeeds but reconfigure fails', async () => {
+    let configureCalls = 0;
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === 'get_codex_status') {
+        return Promise.resolve({
+          installed: true,
+          version: 'codex-cli 0.130.0',
+          authStatus: 'signed-in',
+          reason: null,
+        });
+      }
+      if (command === 'configure_codex_agent_runtime') {
+        configureCalls += 1;
+        if (configureCalls > 1) {
+          return Promise.reject(new Error('Codex status refresh failed.'));
+        }
+        return Promise.resolve({
+          installed: true,
+          version: 'codex-cli 0.130.0',
+          authStatus: 'signed-in',
+          ready: true,
+          requiresLogin: false,
+          pluginMarketplaceConfigured: true,
+          mcpConfigured: true,
+          message: 'Codex is signed in.',
+        });
+      }
+      if (command === 'get_codex_model_catalog') {
+        return Promise.resolve({
+          installed: true,
+          defaultModel: 'gpt-5.5',
+          defaultReasoningEffort: 'medium',
+          models: [],
+          reason: null,
+        });
+      }
+      if (command === 'logout_codex_agent_runtime') {
+        return Promise.resolve({
+          success: true,
+          authStatus: 'signed-out',
+          message: 'Codex sign-out completed for the OpenReelio managed profile.',
+        });
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+
+    render(
+      <ExternalAgentRuntimeSettings
+        settings={{ ...defaultSettings, assistantRuntime: 'codex' }}
+        onUpdate={vi.fn()}
+        disabled={false}
+      />,
+    );
+
+    const signOutButton = await screen.findByRole('button', { name: /sign out/i });
+    await userEvent.click(signOutButton);
+
+    expect(await screen.findByRole('button', { name: /sign in with codex/i })).toBeInTheDocument();
+    expect(screen.getByText('Codex status refresh failed.')).toBeInTheDocument();
   });
 
   it('should install Codex CLI from the settings panel when it is missing', async () => {
