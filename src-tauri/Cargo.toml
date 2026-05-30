@@ -141,8 +141,8 @@ xz2 = { version = "0.1", optional = true }
 
 [features]
 # ADR-033: Enable remote AI providers by default.
-# Heavy local features (e.g. Whisper) stay opt-in to keep builds portable across platforms.
-default = ["gui", "ai-providers"]
+# Whisper is a product-default capability because captions must work in release builds.
+default = ["gui", "ai-providers", "whisper"]
 # GUI feature: enables Tauri runtime, IPC command handlers, and TypeScript binding generation.
 # Disable this feature to build the core library without any GUI or webview dependency.
 gui = [
@@ -164,8 +164,8 @@ bundled-ffmpeg = [
     "dep:tar",
     "dep:xz2",
 ]
-# Enable Whisper transcription support
-whisper = ["dep:whisper-rs"]
+# Enable Whisper transcription support and local model downloads
+whisper = ["dep:whisper-rs", "dep:reqwest"]
 # Enable Meilisearch full-text search
 meilisearch = ["dep:meilisearch-sdk", "dep:futures", "dep:reqwest"]
 # Enable AI providers (OpenAI, Anthropic, Ollama)

@@ -1408,7 +1408,10 @@ mod tauri_app {
                 $crate::ipc::trigger_memory_cleanup,
                 // Transcription commands
                 $crate::ipc::is_transcription_available,
+                $crate::ipc::get_transcription_status,
+                $crate::ipc::download_whisper_model,
                 $crate::ipc::transcribe_asset,
+                $crate::ipc::transcribe_sequence,
                 $crate::ipc::submit_transcription_job,
                 $crate::ipc::export_captions,
                 $crate::ipc::get_captions_as_string,
@@ -1891,7 +1894,10 @@ mod tauri_app {
             ipc::trigger_memory_cleanup,
             // Transcription commands
             ipc::is_transcription_available,
+            ipc::get_transcription_status,
+            ipc::download_whisper_model,
             ipc::transcribe_asset,
+            ipc::transcribe_sequence,
             ipc::submit_transcription_job,
             ipc::export_captions,
             ipc::get_captions_as_string,

@@ -8,6 +8,8 @@ use std::process::Command;
 use thiserror::Error;
 
 use crate::core::process::configure_std_command;
+use crate::core::project::ProjectState;
+use crate::core::render::build_render_graph;
 
 // =============================================================================
 // Error Types
@@ -39,6 +41,15 @@ pub enum AudioExtractionError {
 
 /// Result type for audio extraction operations
 pub type AudioResult<T> = Result<T, AudioExtractionError>;
+
+/// Result metadata for sequence audio mixdown.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SequenceAudioMixdownResult {
+    /// Sequence duration in seconds.
+    pub duration_sec: f64,
+    /// Number of audible timeline audio layers mixed into the output.
+    pub layer_count: usize,
+}
 
 // =============================================================================
 // Audio Extraction Functions
@@ -113,6 +124,209 @@ pub fn extract_audio_for_transcription(
     }
 
     Ok(())
+}
+
+/// Renders the audible audio layers of a sequence to a 16kHz mono WAV for transcription.
+pub fn mix_sequence_audio_for_transcription(
+    state: &ProjectState,
+    sequence_id: &str,
+    output_path: &Path,
+    ffmpeg_path: Option<&str>,
+) -> AudioResult<SequenceAudioMixdownResult> {
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            return Err(AudioExtractionError::OutputDirNotFound(
+                parent.to_string_lossy().to_string(),
+            ));
+        }
+    }
+
+    let graph = build_render_graph(state, sequence_id)
+        .map_err(|error| AudioExtractionError::FFmpegFailed(error.to_string()))?;
+    if graph.duration_sec <= 0.0 {
+        return Err(AudioExtractionError::FFmpegFailed(
+            "Sequence duration is empty; nothing to transcribe".to_string(),
+        ));
+    }
+
+    let mut audible_layers = Vec::new();
+    for layer in &graph.audio_layers {
+        if layer.audio.muted {
+            continue;
+        }
+        if layer.timeline_out_sec <= layer.timeline_in_sec
+            || layer.source_out_sec <= layer.source_in_sec
+        {
+            continue;
+        }
+        let asset = state.assets.get(&layer.asset_id).ok_or_else(|| {
+            AudioExtractionError::InputNotFound(format!("Missing asset {}", layer.asset_id))
+        })?;
+        let asset_path = Path::new(&asset.uri);
+        if !asset_path.exists() {
+            return Err(AudioExtractionError::InputNotFound(asset.uri.clone()));
+        }
+        audible_layers.push((layer, asset_path.to_path_buf()));
+    }
+
+    if audible_layers.is_empty() {
+        return Err(AudioExtractionError::FFmpegFailed(
+            "Sequence has no audible audio clips to transcribe".to_string(),
+        ));
+    }
+
+    let ffmpeg = ffmpeg_path.unwrap_or("ffmpeg");
+    let mut cmd = Command::new(ffmpeg);
+    configure_std_command(&mut cmd);
+    cmd.arg("-y").arg("-hide_banner");
+
+    for (_, asset_path) in &audible_layers {
+        cmd.arg("-i").arg(asset_path);
+    }
+
+    let filter_complex = build_sequence_mixdown_filter(&audible_layers);
+    let duration_arg = format_filter_seconds(graph.duration_sec);
+    cmd.args([
+        "-filter_complex",
+        &filter_complex,
+        "-map",
+        "[aout]",
+        "-t",
+        &duration_arg,
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-c:a",
+        "pcm_s16le",
+        output_path.to_str().unwrap_or_default(),
+    ]);
+
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AudioExtractionError::ProcessError(stderr.to_string()));
+    }
+
+    Ok(SequenceAudioMixdownResult {
+        duration_sec: graph.duration_sec,
+        layer_count: audible_layers.len(),
+    })
+}
+
+fn build_sequence_mixdown_filter(
+    audible_layers: &[(&crate::core::render::AudioRenderLayer, std::path::PathBuf)],
+) -> String {
+    let mut filters = Vec::new();
+
+    for (index, (layer, _)) in audible_layers.iter().enumerate() {
+        let mut chain = vec![
+            format!(
+                "[{index}:a]atrim=start={}:end={}",
+                format_filter_seconds(layer.source_in_sec),
+                format_filter_seconds(layer.source_out_sec)
+            ),
+            "asetpts=PTS-STARTPTS".to_string(),
+            "aresample=16000".to_string(),
+            "aformat=channel_layouts=mono".to_string(),
+        ];
+
+        if layer.reverse {
+            chain.push("areverse".to_string());
+        }
+
+        let speed = if layer.speed.is_finite() && layer.speed > 0.0 {
+            layer.speed as f64
+        } else {
+            1.0
+        };
+        for tempo in atempo_chain(speed) {
+            chain.push(format!("atempo={}", format_filter_seconds(tempo)));
+        }
+
+        let clip_duration = (layer.timeline_out_sec - layer.timeline_in_sec).max(0.0);
+        let fade_in = layer.audio.fade_in_sec.clamp(0.0, clip_duration);
+        if fade_in > 0.0 {
+            chain.push(format!(
+                "afade=t=in:st=0:d={}",
+                format_filter_seconds(fade_in)
+            ));
+        }
+        let fade_out = layer.audio.fade_out_sec.clamp(0.0, clip_duration);
+        if fade_out > 0.0 {
+            let fade_start = (clip_duration - fade_out).max(0.0);
+            chain.push(format!(
+                "afade=t=out:st={}:d={}",
+                format_filter_seconds(fade_start),
+                format_filter_seconds(fade_out)
+            ));
+        }
+
+        let volume = db_to_linear(layer.audio.volume_db);
+        chain.push(format!("volume={}", format_filter_seconds(volume)));
+
+        let delay_ms = (layer.timeline_in_sec.max(0.0) * 1000.0).round() as u64;
+        if delay_ms > 0 {
+            chain.push(format!("adelay={delay_ms}:all=1"));
+        }
+
+        filters.push(format!("{}[a{index}]", chain.join(",")));
+    }
+
+    let output_filter = if audible_layers.len() == 1 {
+        "[a0]anull[aout]".to_string()
+    } else {
+        let inputs = (0..audible_layers.len())
+            .map(|index| format!("[a{index}]"))
+            .collect::<Vec<_>>()
+            .join("");
+        format!(
+            "{inputs}amix=inputs={}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]",
+            audible_layers.len()
+        )
+    };
+    filters.push(output_filter);
+
+    filters.join(";")
+}
+
+fn atempo_chain(speed: f64) -> Vec<f64> {
+    if !speed.is_finite() || (speed - 1.0).abs() < f64::EPSILON {
+        return Vec::new();
+    }
+
+    let mut remaining = speed.clamp(0.01, 100.0);
+    let mut chain = Vec::new();
+    while remaining > 2.0 {
+        chain.push(2.0);
+        remaining /= 2.0;
+    }
+    while remaining < 0.5 {
+        chain.push(0.5);
+        remaining /= 0.5;
+    }
+    if (remaining - 1.0).abs() > 0.001 {
+        chain.push(remaining);
+    }
+    chain
+}
+
+fn db_to_linear(db: f32) -> f64 {
+    if !db.is_finite() {
+        return 1.0;
+    }
+    10_f64.powf(db.clamp(-60.0, 24.0) as f64 / 20.0)
+}
+
+fn format_filter_seconds(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    let rounded = (value * 1_000_000.0).round() / 1_000_000.0;
+    format!("{rounded:.6}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 /// Extracts audio asynchronously using Tokio's spawn_blocking.
@@ -413,5 +627,19 @@ mod tests {
         let result = load_audio_samples(&wav_path);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("mono"));
+    }
+
+    #[test]
+    fn test_atempo_chain_splits_extreme_speeds() {
+        assert_eq!(atempo_chain(1.0), Vec::<f64>::new());
+        assert_eq!(atempo_chain(4.0), vec![2.0, 2.0]);
+        assert_eq!(atempo_chain(0.25), vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn test_format_filter_seconds_trims_noise() {
+        assert_eq!(format_filter_seconds(1.5), "1.5");
+        assert_eq!(format_filter_seconds(0.0), "0");
+        assert_eq!(format_filter_seconds(f64::NAN), "0");
     }
 }

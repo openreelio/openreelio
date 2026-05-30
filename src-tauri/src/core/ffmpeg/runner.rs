@@ -310,7 +310,7 @@ impl FFmpegRunner {
                 "error",
                 "-nostdin",
                 "-ss",
-                &format!("{:.3}", time_sec),
+                &format!("{:.6}", time_sec),
                 "-i",
                 &input.to_string_lossy(),
                 "-frames:v",
@@ -372,7 +372,7 @@ impl FFmpegRunner {
         let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
         configure_tokio_command(&mut cmd);
 
-        let time_str = format!("{:.3}", time_sec);
+        let time_str = format!("{:.6}", time_sec);
         let input_str = input.to_string_lossy().to_string();
         let output_str = output.to_string_lossy().to_string();
 
@@ -484,7 +484,7 @@ impl FFmpegRunner {
         let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
         configure_tokio_command(&mut cmd);
 
-        let time_str = format!("{:.3}", time_sec);
+        let time_str = format!("{:.6}", time_sec);
         let input_str = input.to_string_lossy().to_string();
         let output_str = output.to_string_lossy().to_string();
 

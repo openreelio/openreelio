@@ -149,7 +149,7 @@ impl TranscriptionJobPayload {
         let model = w
             .model
             .or_else(|| w.options.as_ref().and_then(|o| o.model.clone()))
-            .unwrap_or_else(|| "base".to_string());
+            .unwrap_or_else(|| "auto".to_string());
         let language = w
             .language
             .or_else(|| w.options.as_ref().and_then(|o| o.language.clone()));
