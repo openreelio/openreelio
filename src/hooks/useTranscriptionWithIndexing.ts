@@ -6,7 +6,14 @@
  */
 
 import { useCallback } from 'react';
-import { useTranscription, type TranscriptionOptions, type TranscriptionResult } from './useTranscription';
+import {
+  useTranscription,
+  type TranscriptionOptions,
+  type TranscriptionModelDownloadProgress,
+  type TranscriptionModelStatus,
+  type TranscriptionResult,
+  type TranscriptionStatus,
+} from './useTranscription';
 import { useSearch } from './useSearch';
 import { createLogger } from '@/services/logger';
 
@@ -29,20 +36,29 @@ export interface UseTranscriptionWithIndexingReturn {
   /** Transcribe an asset and optionally index results */
   transcribeAndIndex: (
     assetId: string,
-    options?: TranscriptionOptions & { skipIndexing?: boolean }
+    options?: TranscriptionOptions & { skipIndexing?: boolean },
+  ) => Promise<TranscriptionResult | null>;
+  /** Transcribe the audible audio mix of a sequence */
+  transcribeSequence: (
+    sequenceId?: string | null,
+    options?: TranscriptionOptions,
   ) => Promise<TranscriptionResult | null>;
   /** Submit a transcription job (indexing will happen when job completes) */
-  submitTranscriptionJob: (
-    assetId: string,
-    options?: TranscriptionOptions
-  ) => Promise<string>;
+  submitTranscriptionJob: (assetId: string, options?: TranscriptionOptions) => Promise<string>;
   /** Index existing transcription results */
-  indexTranscription: (
-    assetId: string,
-    result: TranscriptionResult
-  ) => Promise<void>;
+  indexTranscription: (assetId: string, result: TranscriptionResult) => Promise<void>;
   /** Check if transcription is available */
   isTranscriptionAvailable: () => Promise<boolean>;
+  /** Read local Whisper readiness and installed model status */
+  getTranscriptionStatus: () => Promise<TranscriptionStatus | null>;
+  /** Download and install a local Whisper model */
+  downloadTranscriptionModel: (
+    model: string,
+    options?: {
+      overwrite?: boolean;
+      onProgress?: (progress: TranscriptionModelDownloadProgress) => void;
+    },
+  ) => Promise<TranscriptionModelStatus | null>;
   /** Check if search indexing is available */
   isSearchAvailable: () => Promise<boolean>;
   /** Get cached transcription */
@@ -63,7 +79,7 @@ export interface UseTranscriptionWithIndexingReturn {
  * const { transcribeAndIndex, isTranscriptionAvailable } = useTranscriptionWithIndexing();
  *
  * // Transcribe and automatically index for search
- * const result = await transcribeAndIndex(assetId, { language: 'en' });
+ * const result = await transcribeAndIndex(assetId, { language: 'auto' });
  *
  * // Now the transcript is searchable
  * const { search } = useSearch();
@@ -71,15 +87,18 @@ export interface UseTranscriptionWithIndexingReturn {
  * ```
  */
 export function useTranscriptionWithIndexing(
-  options: UseTranscriptionWithIndexingOptions = {}
+  options: UseTranscriptionWithIndexingOptions = {},
 ): UseTranscriptionWithIndexingReturn {
   const { autoIndex = true, cacheResults = true, maxCacheSize = 50 } = options;
 
   // Use the transcription hook
   const {
     transcribeAsset,
+    transcribeSequence,
     submitTranscriptionJob,
     isTranscriptionAvailable,
+    getTranscriptionStatus,
+    downloadTranscriptionModel,
     getCachedTranscription,
     state: transcriptionState,
   } = useTranscription({ cacheResults, maxCacheSize });
@@ -120,7 +139,7 @@ export function useTranscriptionWithIndexing(
         });
       }
     },
-    [indexTranscripts]
+    [indexTranscripts],
   );
 
   /**
@@ -129,7 +148,7 @@ export function useTranscriptionWithIndexing(
   const transcribeAndIndex = useCallback(
     async (
       assetId: string,
-      transcriptionOptions?: TranscriptionOptions & { skipIndexing?: boolean }
+      transcriptionOptions?: TranscriptionOptions & { skipIndexing?: boolean },
     ): Promise<TranscriptionResult | null> => {
       const { skipIndexing, ...options } = transcriptionOptions ?? {};
 
@@ -148,14 +167,17 @@ export function useTranscriptionWithIndexing(
 
       return result;
     },
-    [transcribeAsset, autoIndex, isSearchAvailable, indexTranscription]
+    [transcribeAsset, autoIndex, isSearchAvailable, indexTranscription],
   );
 
   return {
     transcribeAndIndex,
+    transcribeSequence,
     submitTranscriptionJob,
     indexTranscription,
     isTranscriptionAvailable,
+    getTranscriptionStatus,
+    downloadTranscriptionModel,
     isSearchAvailable,
     getCachedTranscription,
     transcriptionState,

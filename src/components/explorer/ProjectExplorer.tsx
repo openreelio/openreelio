@@ -21,7 +21,7 @@ import { Search, X, FolderPlus, RefreshCw, Upload } from 'lucide-react';
 import { useProjectStore, useWorkspaceStore } from '@/stores';
 import { useTranscriptionWithIndexing } from '@/hooks';
 import { useFileOperations } from '@/hooks/useFileOperations';
-import { commands } from '@/bindings';
+import { commands, type TranscriptionModelDto } from '@/bindings';
 import { createLogger } from '@/services/logger';
 import { FileTree } from './FileTree';
 import { FileTreeContextMenu } from './FileTreeContextMenu';
@@ -307,9 +307,25 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
 
   // Transcription dialog state
   const [transcriptionAsset, setTranscriptionAsset] = useState<AssetData | null>(null);
-  const { transcribeAndIndex, transcriptionState } = useTranscriptionWithIndexing();
+  const {
+    transcribeAndIndex,
+    transcriptionState,
+    getTranscriptionStatus,
+    downloadTranscriptionModel,
+  } = useTranscriptionWithIndexing();
   const isTranscribing = transcriptionState.isTranscribing;
   const [transcribingAssets, setTranscribingAssets] = useState<Set<string>>(new Set());
+  const [availableTranscriptionModels, setAvailableTranscriptionModels] = useState<string[]>([]);
+  const [transcriptionModels, setTranscriptionModels] = useState<TranscriptionModelDto[]>([]);
+  const [transcriptionModelStatusMessage, setTranscriptionModelStatusMessage] = useState<
+    string | null
+  >(null);
+  const [installingTranscriptionModel, setInstallingTranscriptionModel] = useState<string | null>(
+    null,
+  );
+  const [transcriptionInstallProgress, setTranscriptionInstallProgress] = useState<number | null>(
+    null,
+  );
 
   // Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -324,6 +340,72 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
       renameInputRef.current?.select();
     }
   }, [renamingEntry]);
+
+  const applyTranscriptionStatus = useCallback(
+    (status: Awaited<ReturnType<typeof getTranscriptionStatus>>) => {
+      if (!status) {
+        setTranscriptionModels([]);
+        setAvailableTranscriptionModels([]);
+        setTranscriptionModelStatusMessage('Unable to read local transcription model status.');
+        return;
+      }
+
+      const installedModels = status.models
+        .filter((model) => model.installed)
+        .map((model) => model.id);
+      setTranscriptionModels(status.models);
+      setAvailableTranscriptionModels(installedModels);
+
+      if (!status.featureAvailable) {
+        setTranscriptionModelStatusMessage(
+          'This OpenReelio build does not include local Whisper transcription.',
+        );
+      } else if (installedModels.length === 0) {
+        setTranscriptionModelStatusMessage('No installed Whisper model was found.');
+      } else {
+        setTranscriptionModelStatusMessage(null);
+      }
+    },
+    [],
+  );
+
+  const refreshTranscriptionStatus = useCallback(async (): Promise<void> => {
+    const status = await getTranscriptionStatus();
+    applyTranscriptionStatus(status);
+  }, [applyTranscriptionStatus, getTranscriptionStatus]);
+
+  useEffect(() => {
+    if (!transcriptionAsset) {
+      setAvailableTranscriptionModels([]);
+      setTranscriptionModels([]);
+      setTranscriptionModelStatusMessage(null);
+      setInstallingTranscriptionModel(null);
+      setTranscriptionInstallProgress(null);
+      return;
+    }
+
+    let cancelled = false;
+    setAvailableTranscriptionModels([]);
+    setTranscriptionModels([]);
+    setTranscriptionModelStatusMessage('Checking installed Whisper models...');
+
+    void getTranscriptionStatus()
+      .then((status) => {
+        if (cancelled) return;
+        applyTranscriptionStatus(status);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        logger.warn('Failed to load transcription model status', { error });
+        setTranscriptionModels([]);
+        setAvailableTranscriptionModels([]);
+        setTranscriptionModelStatusMessage('Unable to read local transcription model status.');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [transcriptionAsset, getTranscriptionStatus, applyTranscriptionStatus]);
 
   // ===========================================================================
   // Handlers
@@ -815,6 +897,29 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
     setTranscriptionAsset(null);
   }, []);
 
+  const handleInstallTranscriptionModel = useCallback(
+    async (modelId: string) => {
+      setInstallingTranscriptionModel(modelId);
+      setTranscriptionInstallProgress(null);
+      setTranscriptionModelStatusMessage(null);
+
+      const installed = await downloadTranscriptionModel(modelId, {
+        onProgress: (progress) => {
+          setTranscriptionInstallProgress(progress.percent ?? null);
+        },
+      });
+
+      if (!installed) {
+        setTranscriptionModelStatusMessage(`Failed to install Whisper model '${modelId}'.`);
+      }
+
+      await refreshTranscriptionStatus();
+      setInstallingTranscriptionModel(null);
+      setTranscriptionInstallProgress(null);
+    },
+    [downloadTranscriptionModel, refreshTranscriptionStatus],
+  );
+
   // ===========================================================================
   // Filtered Tree
   // ===========================================================================
@@ -1050,6 +1155,12 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
           isOpen={true}
           onConfirm={handleTranscriptionConfirm}
           onCancel={handleTranscriptionCancel}
+          availableModels={availableTranscriptionModels}
+          models={transcriptionModels}
+          modelStatusMessage={transcriptionModelStatusMessage ?? undefined}
+          onInstallModel={handleInstallTranscriptionModel}
+          installingModel={installingTranscriptionModel}
+          installProgress={transcriptionInstallProgress}
           isProcessing={isTranscribing}
         />
       )}

@@ -28,6 +28,7 @@ const createTestAsset = (overrides?: Partial<AssetData>): AssetData => ({
 
 const mockOnConfirm = vi.fn();
 const mockOnCancel = vi.fn();
+const mockOnInstallModel = vi.fn();
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -47,7 +48,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       expect(screen.getByTestId('transcription-dialog')).toBeInTheDocument();
@@ -62,7 +63,7 @@ describe('TranscriptionDialog', () => {
           isOpen={false}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       expect(screen.queryByTestId('transcription-dialog')).not.toBeInTheDocument();
@@ -76,7 +77,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       expect(screen.getByText(/my-video\.mp4/)).toBeInTheDocument();
@@ -90,7 +91,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       expect(screen.getByLabelText(/language/i)).toBeInTheDocument();
@@ -105,7 +106,7 @@ describe('TranscriptionDialog', () => {
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
           availableModels={['tiny', 'base', 'small', 'medium']}
-        />
+        />,
       );
 
       expect(screen.getByLabelText(/model/i)).toBeInTheDocument();
@@ -113,7 +114,7 @@ describe('TranscriptionDialog', () => {
   });
 
   describe('Language Selection', () => {
-    it('has English as default language', () => {
+    it('uses language auto-detection by default', () => {
       const asset = createTestAsset();
       render(
         <TranscriptionDialog
@@ -121,11 +122,11 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       const languageSelect = screen.getByLabelText(/language/i);
-      expect(languageSelect).toHaveValue('en');
+      expect(languageSelect).toHaveValue('auto');
     });
 
     it('allows changing language', async () => {
@@ -138,7 +139,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       const languageSelect = screen.getByLabelText(/language/i);
@@ -155,7 +156,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       const languageSelect = screen.getByLabelText(/language/i);
@@ -176,7 +177,7 @@ describe('TranscriptionDialog', () => {
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
           availableModels={['tiny', 'base', 'small']}
-        />
+        />,
       );
 
       const modelSelect = screen.getByLabelText(/model/i);
@@ -187,7 +188,7 @@ describe('TranscriptionDialog', () => {
       expect(options.map((o) => o.value)).toContain('small');
     });
 
-    it('defaults to base model', () => {
+    it('defaults to the best installed model', () => {
       const asset = createTestAsset();
       render(
         <TranscriptionDialog
@@ -196,11 +197,11 @@ describe('TranscriptionDialog', () => {
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
           availableModels={['tiny', 'base', 'small']}
-        />
+        />,
       );
 
       const modelSelect = screen.getByLabelText(/model/i);
-      expect(modelSelect).toHaveValue('base');
+      expect(modelSelect).toHaveValue('small');
     });
   });
 
@@ -215,7 +216,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       // Change language
@@ -229,7 +230,7 @@ describe('TranscriptionDialog', () => {
       expect(mockOnConfirm).toHaveBeenCalledWith(
         expect.objectContaining({
           language: 'ko',
-        })
+        }),
       );
     });
 
@@ -243,7 +244,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       const cancelButton = screen.getByRole('button', { name: /cancel/i });
@@ -262,7 +263,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       await user.keyboard('{Escape}');
@@ -279,11 +280,62 @@ describe('TranscriptionDialog', () => {
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
           isProcessing={true}
-        />
+        />,
       );
 
       const confirmButton = screen.getByRole('button', { name: /starting/i });
       expect(confirmButton).toBeDisabled();
+    });
+
+    it('disables confirm button when no local model is installed', () => {
+      const asset = createTestAsset();
+      render(
+        <TranscriptionDialog
+          asset={asset}
+          isOpen={true}
+          onConfirm={mockOnConfirm}
+          onCancel={mockOnCancel}
+          availableModels={[]}
+          modelStatusMessage="No installed Whisper model was found."
+        />,
+      );
+
+      expect(screen.getByText(/no installed whisper model/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /start transcription/i })).toBeDisabled();
+    });
+
+    it('offers model installation when model status is available', async () => {
+      const user = userEvent.setup();
+      const asset = createTestAsset();
+      render(
+        <TranscriptionDialog
+          asset={asset}
+          isOpen={true}
+          onConfirm={mockOnConfirm}
+          onCancel={mockOnCancel}
+          models={[
+            {
+              id: 'base',
+              displayName: 'Base',
+              filename: 'ggml-base.bin',
+              installed: false,
+              sizeBytes: null,
+              estimatedSizeBytes: 148000000,
+              isDefault: true,
+              recommended: true,
+              source: 'ggerganov/whisper.cpp',
+              license: 'MIT',
+            },
+          ]}
+          modelStatusMessage="No installed Whisper model was found."
+          onInstallModel={mockOnInstallModel}
+        />,
+      );
+
+      await user.click(screen.getByRole('button', { name: /install/i }));
+
+      expect(mockOnInstallModel).toHaveBeenCalledWith('base');
+      expect(screen.getByRole('button', { name: /start transcription/i })).toBeDisabled();
     });
   });
 
@@ -296,7 +348,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       expect(screen.getByLabelText(/add to timeline/i)).toBeInTheDocument();
@@ -312,7 +364,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       // Toggle option
@@ -326,7 +378,7 @@ describe('TranscriptionDialog', () => {
       expect(mockOnConfirm).toHaveBeenCalledWith(
         expect.objectContaining({
           addToTimeline: true,
-        })
+        }),
       );
     });
   });
@@ -340,7 +392,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       expect(screen.getByText(/may take a while/i)).toBeInTheDocument();
@@ -354,7 +406,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       expect(screen.queryByText(/may take a while/i)).not.toBeInTheDocument();
@@ -370,7 +422,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       const dialog = screen.getByRole('dialog');
@@ -386,7 +438,7 @@ describe('TranscriptionDialog', () => {
           isOpen={true}
           onConfirm={mockOnConfirm}
           onCancel={mockOnCancel}
-        />
+        />,
       );
 
       const languageSelect = screen.getByLabelText(/language/i);

@@ -19,6 +19,8 @@ const mockState = vi.hoisted(() => ({
   deleteFile: vi.fn(),
   revealInExplorer: vi.fn(),
   transcribeAndIndex: vi.fn(),
+  getTranscriptionStatus: vi.fn(),
+  downloadTranscriptionModel: vi.fn(),
   fileTree: [] as FileTreeEntry[],
   assets: new Map<string, Asset>(),
 }));
@@ -48,6 +50,8 @@ vi.mock('@/stores', () => ({
 vi.mock('@/hooks', () => ({
   useTranscriptionWithIndexing: () => ({
     transcribeAndIndex: mockState.transcribeAndIndex,
+    getTranscriptionStatus: mockState.getTranscriptionStatus,
+    downloadTranscriptionModel: mockState.downloadTranscriptionModel,
     transcriptionState: { isTranscribing: false },
   }),
 }));
@@ -64,6 +68,8 @@ vi.mock('@/hooks/useFileOperations', () => ({
 vi.mock('@/bindings', () => ({
   commands: {
     setSourceAsset: mockState.setSourceAsset,
+    getTranscriptionStatus: mockState.getTranscriptionStatus,
+    downloadWhisperModel: mockState.downloadTranscriptionModel,
   },
 }));
 
@@ -178,6 +184,43 @@ describe('ProjectExplorer', () => {
     mockState.importExternalFiles.mockResolvedValue({
       importedFiles: [],
       failedFiles: [],
+    });
+    mockState.getTranscriptionStatus.mockResolvedValue({
+      featureAvailable: true,
+      ready: true,
+      modelsDir: '/models/whisper',
+      defaultModel: 'base',
+      installedCount: 1,
+      models: [
+        {
+          id: 'base',
+          displayName: 'Base',
+          filename: 'ggml-base.bin',
+          installed: true,
+          path: '/models/whisper/ggml-base.bin',
+          sizeBytes: 1,
+          isDefault: true,
+          recommended: true,
+          downloadUrl: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
+          estimatedSizeBytes: 148000000,
+          source: 'ggerganov/whisper.cpp',
+          license: 'MIT',
+        },
+      ],
+    });
+    mockState.downloadTranscriptionModel.mockResolvedValue({
+      id: 'base',
+      displayName: 'Base',
+      filename: 'ggml-base.bin',
+      installed: true,
+      path: '/models/whisper/ggml-base.bin',
+      sizeBytes: 1,
+      isDefault: true,
+      recommended: true,
+      downloadUrl: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
+      estimatedSizeBytes: 148000000,
+      source: 'ggerganov/whisper.cpp',
+      license: 'MIT',
     });
     mockState.setSourceAsset.mockResolvedValue({
       status: 'ok',
