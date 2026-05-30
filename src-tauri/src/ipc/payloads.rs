@@ -1,7 +1,10 @@
 use crate::core::effects::{EffectType, ParamValue};
 use crate::core::masks::{MaskBlendMode, MaskShape};
+use crate::core::project::ProjectState;
 use crate::core::text::TextClipData;
-use crate::core::timeline::{BlendMode, MarkerType, SequenceHdrSettings, TrackKind, Transform};
+use crate::core::timeline::{
+    BlendMode, MarkerType, SequenceHdrSettings, Track, TrackKind, Transform,
+};
 use crate::core::{AssetId, ClipId, Color, EffectId, MaskId, SequenceId, TimeSec, TrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1929,10 +1932,192 @@ impl CommandPayload {
     }
 }
 
+pub fn validate_command_payload_against_project_state(
+    command_type: &str,
+    payload: &CommandPayload,
+    state: &ProjectState,
+) -> Result<(), String> {
+    match payload {
+        CommandPayload::CreateCaption(payload) => validate_track_kind(
+            state,
+            command_type,
+            &payload.sequence_id,
+            &payload.track_id,
+            "caption",
+            |track| track.is_caption(),
+        ),
+        CommandPayload::ImportGeneratedCaptions(payload) => validate_track_kind(
+            state,
+            command_type,
+            &payload.sequence_id,
+            &payload.track_id,
+            "caption",
+            |track| track.is_caption(),
+        ),
+        CommandPayload::DeleteCaption(payload) => validate_track_kind(
+            state,
+            command_type,
+            &payload.sequence_id,
+            &payload.track_id,
+            "caption",
+            |track| track.is_caption(),
+        ),
+        CommandPayload::UpdateCaption(payload) => validate_track_kind(
+            state,
+            command_type,
+            &payload.sequence_id,
+            &payload.track_id,
+            "caption",
+            |track| track.is_caption(),
+        ),
+        CommandPayload::AddTextClip(payload) => validate_track_kind(
+            state,
+            command_type,
+            &payload.sequence_id,
+            &payload.track_id,
+            "video or overlay",
+            |track| track.is_video(),
+        ),
+        CommandPayload::UpdateTextClip(payload) => validate_track_kind(
+            state,
+            command_type,
+            &payload.sequence_id,
+            &payload.track_id,
+            "video or overlay",
+            |track| track.is_video(),
+        ),
+        CommandPayload::RemoveTextClip(payload) => validate_track_kind(
+            state,
+            command_type,
+            &payload.sequence_id,
+            &payload.track_id,
+            "video or overlay",
+            |track| track.is_video(),
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn validate_track_kind(
+    state: &ProjectState,
+    command_type: &str,
+    sequence_id: &str,
+    track_id: &str,
+    expected_kind: &str,
+    predicate: impl Fn(&Track) -> bool,
+) -> Result<(), String> {
+    let sequence = state
+        .sequences
+        .get(sequence_id)
+        .ok_or_else(|| format!("{command_type} references missing sequence: {sequence_id}"))?;
+    let track = sequence
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+        .ok_or_else(|| format!("{command_type} references missing track: {track_id}"))?;
+
+    if predicate(track) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{command_type} requires a {expected_kind} track, but track {track_id} is {:?}",
+            track.kind
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::timeline::SequenceHdrMode;
+    use crate::core::{
+        project::ProjectState,
+        timeline::{Sequence, SequenceFormat, SequenceHdrMode, Track, TrackKind},
+    };
+
+    fn state_with_video_and_caption_tracks() -> (ProjectState, String, String, String) {
+        let mut state = ProjectState::new_empty("Validation Test");
+        let mut sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
+        let sequence_id = sequence.id.clone();
+        let video_track = Track::new("Video", TrackKind::Video);
+        let video_track_id = video_track.id.clone();
+        let caption_track = Track::new("Captions", TrackKind::Caption);
+        let caption_track_id = caption_track.id.clone();
+
+        sequence.add_track(video_track);
+        sequence.add_track(caption_track);
+        state.sequences.insert(sequence_id.clone(), sequence);
+
+        (state, sequence_id, video_track_id, caption_track_id)
+    }
+
+    #[test]
+    fn validate_project_state_rejects_import_generated_captions_on_video_track() {
+        let (state, sequence_id, video_track_id, _) = state_with_video_and_caption_tracks();
+        let payload = CommandPayload::parse(
+            "ImportGeneratedCaptions".to_string(),
+            serde_json::json!({
+                "sequenceId": sequence_id,
+                "trackId": video_track_id,
+                "segments": [{ "startSec": 0.0, "endSec": 1.0, "text": "Caption" }]
+            }),
+        )
+        .expect("payload should parse");
+
+        let error = validate_command_payload_against_project_state(
+            "ImportGeneratedCaptions",
+            &payload,
+            &state,
+        )
+        .expect_err("video track should be rejected");
+
+        assert!(error.contains("requires a caption track"));
+    }
+
+    #[test]
+    fn validate_project_state_accepts_import_generated_captions_on_caption_track() {
+        let (state, sequence_id, _, caption_track_id) = state_with_video_and_caption_tracks();
+        let payload = CommandPayload::parse(
+            "ImportGeneratedCaptions".to_string(),
+            serde_json::json!({
+                "sequenceId": sequence_id,
+                "trackId": caption_track_id,
+                "segments": [{ "startSec": 0.0, "endSec": 1.0, "text": "Caption" }]
+            }),
+        )
+        .expect("payload should parse");
+
+        validate_command_payload_against_project_state("ImportGeneratedCaptions", &payload, &state)
+            .expect("caption track should be accepted");
+    }
+
+    #[test]
+    fn validate_project_state_rejects_add_text_clip_on_caption_track() {
+        let (state, sequence_id, _, caption_track_id) = state_with_video_and_caption_tracks();
+        let payload = CommandPayload::parse(
+            "AddTextClip".to_string(),
+            serde_json::json!({
+                "sequenceId": sequence_id,
+                "trackId": caption_track_id,
+                "timelineIn": 0.0,
+                "duration": 1.0,
+                "textData": {
+                    "content": "Overlay",
+                    "style": {
+                        "fontFamily": "Arial",
+                        "fontSize": 48,
+                        "color": "#FFFFFF"
+                    },
+                    "position": { "x": 0.5, "y": 0.5 }
+                }
+            }),
+        )
+        .expect("payload should parse");
+
+        let error = validate_command_payload_against_project_state("AddTextClip", &payload, &state)
+            .expect_err("caption track should be rejected");
+
+        assert!(error.contains("requires a video or overlay track"));
+    }
     use std::collections::HashSet;
 
     #[test]

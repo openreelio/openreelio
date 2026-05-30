@@ -1769,9 +1769,11 @@ impl CommandExecutor {
                 }))
             }
 
-            OpKind::CompoundClipUnnest | OpKind::ClipGroup | OpKind::ClipUngroup => {
-                Ok(command_json)
-            }
+            OpKind::CompoundClipUnnest
+            | OpKind::ClipGroup
+            | OpKind::ClipUngroup
+            | OpKind::ClipLink
+            | OpKind::ClipUnlink => Ok(command_json),
 
             // Bin operations (deprecated - pass through command JSON for backward compatibility)
             OpKind::BinCreate
@@ -1907,6 +1909,8 @@ impl CommandExecutor {
             "UnnestCompoundClip" => OpKind::CompoundClipUnnest,
             "GroupClips" => OpKind::ClipGroup,
             "UngroupClips" => OpKind::ClipUngroup,
+            "LinkClips" => OpKind::ClipLink,
+            "UnlinkClips" => OpKind::ClipUnlink,
             "CreateAdjustmentLayer" => OpKind::ClipAdd,
             "AddTrack" | "InsertTrack" => OpKind::TrackAdd,
             "RemoveTrack" | "DeleteTrack" => OpKind::TrackRemove,
@@ -2086,10 +2090,10 @@ mod tests {
         CreateCompoundClipCommand, CreateSequenceCommand, ExtractEditCommand,
         GeneratedCaptionSegment, GroupClipsCommand, ImportAssetCommand,
         ImportGeneratedCaptionsCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
-        MoveClipCommand, OverwriteEditCommand, RippleDeleteCommand, SetAudioFadeInCommand,
-        SetAudioFadeOutCommand, SetClipBlendModeCommand, SetMasterVolumeCommand,
-        SetTrackBlendModeCommand, SplitClipCommand, StateChange, TrimClipCommand,
-        UngroupClipsCommand, UnnestCompoundClipCommand,
+        LinkClipsCommand, MoveClipCommand, OverwriteEditCommand, RippleDeleteCommand,
+        SetAudioFadeInCommand, SetAudioFadeOutCommand, SetClipBlendModeCommand,
+        SetMasterVolumeCommand, SetTrackBlendModeCommand, SplitClipCommand, StateChange,
+        TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
     };
     use crate::core::effects::{EffectType, ParamValue};
     use crate::core::masks::{MaskShape, RectMask};
@@ -3622,6 +3626,14 @@ mod tests {
             OpKind::ClipUngroup
         );
         assert_eq!(
+            CommandExecutor::type_name_to_op_kind("LinkClips"),
+            OpKind::ClipLink
+        );
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("UnlinkClips"),
+            OpKind::ClipUnlink
+        );
+        assert_eq!(
             CommandExecutor::type_name_to_op_kind("CreateAdjustmentLayer"),
             OpKind::ClipAdd
         );
@@ -3909,6 +3921,106 @@ mod tests {
             .iter()
             .all(|clip| clip.group_id.is_none()));
         assert_track_has_no_overlap(replayed_track);
+    }
+
+    #[test]
+    fn test_executor_replays_link_clips_and_unlink_clips() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+        let ops_log = OpsLog::new(&ops_path);
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let (seq_id, video_track_id, video_clip_ids) =
+            seed_replayable_video_track_with_clips(&ops_log, &mut state, &[(0.0, 5.0)]);
+        let video_clip_id = video_clip_ids[0].clone();
+
+        let audio_track = Track::new("Audio Track", TrackKind::Audio);
+        let audio_track_id = audio_track.id.clone();
+        let track_op = Operation::new(
+            OpKind::TrackAdd,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "track": audio_track,
+                "position": 1,
+            }),
+        );
+        ops_log.append(&track_op).unwrap();
+        state.apply_operation(&track_op).unwrap();
+
+        let audio_clip = Clip::with_range("asset_001", 0.0, 5.0).place_at(0.0);
+        let audio_clip_id = audio_clip.id.clone();
+        let clip_op = Operation::new(
+            OpKind::ClipAdd,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "trackId": audio_track_id,
+                "clip": audio_clip,
+            }),
+        );
+        ops_log.append(&clip_op).unwrap();
+        state.apply_operation(&clip_op).unwrap();
+
+        let mut executor = CommandExecutor::with_ops_log(ops_log);
+        executor
+            .execute(
+                Box::new(LinkClipsCommand::new(
+                    &seq_id,
+                    vec![
+                        (video_track_id.clone(), video_clip_id.clone()),
+                        (audio_track_id.clone(), audio_clip_id.clone()),
+                    ],
+                )),
+                &mut state,
+            )
+            .unwrap();
+
+        let linked_sequence = state.get_sequence(&seq_id).unwrap();
+        let link_group_id = linked_sequence
+            .get_track(&video_track_id)
+            .unwrap()
+            .get_clip(&video_clip_id)
+            .unwrap()
+            .link_group_id
+            .clone()
+            .unwrap();
+
+        let persisted_link = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted_link.kind, OpKind::ClipLink);
+        assert_eq!(
+            persisted_link.payload["linkGroupId"].as_str(),
+            Some(link_group_id.as_str())
+        );
+
+        executor
+            .execute(
+                Box::new(UnlinkClipsCommand::new(
+                    &seq_id,
+                    vec![(video_track_id.clone(), video_clip_id.clone())],
+                )),
+                &mut state,
+            )
+            .unwrap();
+
+        let persisted_unlink = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted_unlink.kind, OpKind::ClipUnlink);
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_sequence = replayed.get_sequence(&seq_id).unwrap();
+        let replayed_video_clip = replayed_sequence
+            .get_track(&video_track_id)
+            .unwrap()
+            .get_clip(&video_clip_id)
+            .unwrap();
+        let replayed_audio_clip = replayed_sequence
+            .get_track(&audio_track_id)
+            .unwrap()
+            .get_clip(&audio_clip_id)
+            .unwrap();
+
+        assert_eq!(replayed_video_clip.link_group_id.as_deref(), Some(""));
+        assert_eq!(replayed_audio_clip.link_group_id.as_deref(), Some(""));
     }
 
     #[test]

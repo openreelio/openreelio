@@ -96,6 +96,8 @@ impl ActiveProject {
             crate::core::project::OpKind::CompoundClipUnnest => "UnnestCompoundClip",
             crate::core::project::OpKind::ClipGroup => "GroupClips",
             crate::core::project::OpKind::ClipUngroup => "UngroupClips",
+            crate::core::project::OpKind::ClipLink => "LinkClips",
+            crate::core::project::OpKind::ClipUnlink => "UnlinkClips",
             crate::core::project::OpKind::TrackAdd => "AddTrack",
             crate::core::project::OpKind::TrackRemove => "RemoveTrack",
             crate::core::project::OpKind::TrackReorder => "ReorderTracks",

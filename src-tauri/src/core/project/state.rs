@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{
     assets::Asset,
-    commands::{Command as _, GroupClipsCommand, UngroupClipsCommand},
+    commands::{
+        Command as _, GroupClipsCommand, LinkClipsCommand, UngroupClipsCommand, UnlinkClipsCommand,
+    },
     effects::Effect,
     masks::MaskGroup,
     project::{OpKind, Operation, OpsLog},
@@ -240,6 +242,8 @@ impl ProjectState {
             OpKind::CompoundClipUnnest => self.apply_compound_clip_unnest(op)?,
             OpKind::ClipGroup => self.apply_clip_group(op)?,
             OpKind::ClipUngroup => self.apply_clip_ungroup(op)?,
+            OpKind::ClipLink => self.apply_clip_link(op)?,
+            OpKind::ClipUnlink => self.apply_clip_unlink(op)?,
 
             // Effect operations
             OpKind::EffectAdd => self.apply_effect_add(op)?,
@@ -2156,6 +2160,36 @@ impl ProjectState {
         let clip_refs = Self::parse_clip_refs_from_payload(&op.payload)?;
 
         let mut command = UngroupClipsCommand::new(seq_id, clip_refs);
+        let was_dirty = self.is_dirty;
+        let result = command.execute(self).map(|_| ());
+        self.is_dirty = was_dirty;
+        result
+    }
+
+    fn apply_clip_link(&mut self, op: &Operation) -> CoreResult<()> {
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let clip_refs = Self::parse_clip_refs_from_payload(&op.payload)?;
+        let link_group_id = op.payload["linkGroupId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing linkGroupId".to_string()))?;
+
+        let mut command = LinkClipsCommand::new(seq_id, clip_refs);
+        command.link_group_id = link_group_id.to_string();
+        let was_dirty = self.is_dirty;
+        let result = command.execute(self).map(|_| ());
+        self.is_dirty = was_dirty;
+        result
+    }
+
+    fn apply_clip_unlink(&mut self, op: &Operation) -> CoreResult<()> {
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let clip_refs = Self::parse_clip_refs_from_payload(&op.payload)?;
+
+        let mut command = UnlinkClipsCommand::new(seq_id, clip_refs);
         let was_dirty = self.is_dirty;
         let result = command.execute(self).map(|_| ());
         self.is_dirty = was_dirty;

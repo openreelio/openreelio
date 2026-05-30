@@ -15,7 +15,7 @@ use crate::core::{
     timeline::Sequence,
     CoreError,
 };
-use crate::ipc::payloads::CommandPayload;
+use crate::ipc::payloads::{validate_command_payload_against_project_state, CommandPayload};
 use crate::AppState;
 
 // =============================================================================
@@ -124,8 +124,18 @@ pub async fn get_sequence(
 pub async fn validate_command_payload(
     command_type: String,
     payload: serde_json::Value,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    CommandPayload::parse(command_type, payload).map(|_| ())
+    let typed_payload = CommandPayload::parse(command_type.clone(), payload)?;
+    let guard = state.project.lock().await;
+    if let Some(project) = guard.as_ref() {
+        validate_command_payload_against_project_state(
+            &command_type,
+            &typed_payload,
+            &project.state,
+        )?;
+    }
+    Ok(())
 }
 
 /// Executes an edit command
