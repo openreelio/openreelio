@@ -328,11 +328,11 @@ jobs:
         working-directory: src-tauri
         env:
           OPENREELIO_ALLOW_UNVERIFIED_FFMPEG: "1"
-        run: cargo test --locked bundler --features bundled-ffmpeg -- --nocapture
+        run: cargo test --locked bundler --no-default-features --features bundled-ffmpeg -- --nocapture
 
       - name: Run detection tests
         working-directory: src-tauri
-        run: cargo test --locked detection -- --nocapture
+        run: cargo test --locked detection --no-default-features -- --nocapture
 
   # ==========================================================================
   # E2E Tests
