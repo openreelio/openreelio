@@ -2344,6 +2344,61 @@ mod tests {
     }
 
     #[test]
+    fn test_active_project_discard_preserves_created_active_sequence() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir
+            .path()
+            .join("history_discard_active_sequence_project");
+
+        let mut project = ActiveProject::create("History Active", project_path).unwrap();
+        let default_sequence_id = project.state.active_sequence_id.clone().unwrap();
+
+        let create_result = project
+            .executor
+            .execute(
+                Box::new(crate::core::commands::CreateSequenceCommand::new(
+                    "Shorts Timeline",
+                    "youtube_shorts",
+                )),
+                &mut project.state,
+            )
+            .unwrap();
+        let shorts_sequence_id = create_result.created_ids[0].clone();
+        assert_ne!(default_sequence_id, shorts_sequence_id);
+        assert_eq!(
+            project.state.active_sequence_id.as_deref(),
+            Some(shorts_sequence_id.as_str())
+        );
+
+        let track_result = project
+            .executor
+            .execute(
+                Box::new(crate::core::commands::AddTrackCommand::new(
+                    &shorts_sequence_id,
+                    "Temporary Captions",
+                    crate::core::timeline::TrackKind::Caption,
+                )),
+                &mut project.state,
+            )
+            .unwrap();
+
+        project
+            .discard_persisted_operations(std::slice::from_ref(&track_result.op_id))
+            .unwrap();
+
+        assert_eq!(
+            project.state.active_sequence_id.as_deref(),
+            Some(shorts_sequence_id.as_str())
+        );
+        assert!(project.state.sequences.contains_key(&default_sequence_id));
+        let shorts_sequence = project.state.sequences.get(&shorts_sequence_id).unwrap();
+        assert!(!shorts_sequence
+            .tracks
+            .iter()
+            .any(|track| track.name == "Temporary Captions"));
+    }
+
+    #[test]
     fn test_active_project_sync_appends_new_ops_after_discarded_operations() {
         let temp_dir = TempDir::new().unwrap();
         let project_path = temp_dir.path().join("history_discard_future_project");

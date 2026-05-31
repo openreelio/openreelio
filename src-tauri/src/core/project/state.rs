@@ -510,10 +510,8 @@ impl ProjectState {
         let id = sequence.id.clone();
         self.sequences.insert(id.clone(), sequence);
 
-        // Set as active if it's the first sequence
-        if self.active_sequence_id.is_none() {
-            self.active_sequence_id = Some(id);
-        }
+        // Replays CreateSequenceCommand semantics: newly created sequences become active.
+        self.active_sequence_id = Some(id);
         Ok(())
     }
 
@@ -2394,6 +2392,35 @@ mod tests {
         assert_eq!(state.sequences.len(), 1);
         assert!(state.active_sequence_id.is_some());
         assert_eq!(state.active_sequence_id.as_ref().unwrap(), &sequence.id);
+    }
+
+    #[test]
+    fn test_apply_sequence_create_makes_latest_sequence_active() {
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let first_sequence = Sequence::new("First Sequence", SequenceFormat::youtube_1080());
+        let first_sequence_id = first_sequence.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&first_sequence).unwrap(),
+            ))
+            .unwrap();
+
+        let second_sequence = Sequence::new("Second Sequence", SequenceFormat::youtube_shorts());
+        let second_sequence_id = second_sequence.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&second_sequence).unwrap(),
+            ))
+            .unwrap();
+
+        assert_ne!(first_sequence_id, second_sequence_id);
+        assert_eq!(
+            state.active_sequence_id.as_deref(),
+            Some(second_sequence_id.as_str())
+        );
     }
 
     #[test]
