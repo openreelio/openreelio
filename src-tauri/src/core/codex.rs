@@ -1080,17 +1080,58 @@ fn collect_node_version_bin_dirs(
             [path.join("bin"), path.join("installation").join("bin")]
                 .into_iter()
                 .find(|candidate| directory_has_codex_executable(candidate, platform))
+                .map(|candidate| {
+                    let modified_at = latest_codex_executable_modified_at(&candidate, platform);
+                    (
+                        candidate,
+                        modified_at,
+                        node_version_sort_key(&path),
+                        path.file_name()
+                            .map(|name| name.to_os_string())
+                            .unwrap_or_default(),
+                    )
+                })
         })
         .collect::<Vec<_>>();
-    dirs.sort_by_key(|path| latest_codex_executable_modified_at(path, platform));
-    dirs.reverse();
-    dirs
+    dirs.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| right.3.cmp(&left.3))
+            .then_with(|| right.0.cmp(&left.0))
+    });
+    dirs.into_iter()
+        .map(|(directory, _, _, _)| directory)
+        .collect()
 }
 
 fn directory_has_codex_executable(directory: &Path, platform: CodexExecutablePlatform) -> bool {
     codex_executable_names(platform)
         .iter()
         .any(|executable_name| directory.join(executable_name).is_file())
+}
+
+fn node_version_sort_key(directory: &Path) -> [u64; 3] {
+    let Some(name) = directory.file_name().and_then(|name| name.to_str()) else {
+        return [0, 0, 0];
+    };
+    let mut parts = name.trim_start_matches('v').split(['.', '-']);
+
+    [
+        parts
+            .next()
+            .and_then(|part| part.parse::<u64>().ok())
+            .unwrap_or_default(),
+        parts
+            .next()
+            .and_then(|part| part.parse::<u64>().ok())
+            .unwrap_or_default(),
+        parts
+            .next()
+            .and_then(|part| part.parse::<u64>().ok())
+            .unwrap_or_default(),
+    ]
 }
 
 fn latest_codex_executable_modified_at(
