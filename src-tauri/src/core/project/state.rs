@@ -590,9 +590,22 @@ impl ProjectState {
 
         // Clear active if removed
         if self.active_sequence_id.as_deref() == Some(seq_id) {
-            self.active_sequence_id = self.sequences.keys().next().cloned();
+            self.active_sequence_id = self.latest_created_sequence_id();
         }
         Ok(())
+    }
+
+    fn latest_created_sequence_id(&self) -> Option<SequenceId> {
+        self.sequences
+            .iter()
+            .max_by(|(left_id, left), (right_id, right)| {
+                let left_created = chrono::DateTime::parse_from_rfc3339(&left.created_at).ok();
+                let right_created = chrono::DateTime::parse_from_rfc3339(&right.created_at).ok();
+                left_created
+                    .cmp(&right_created)
+                    .then_with(|| left_id.cmp(right_id))
+            })
+            .map(|(id, _)| id.clone())
     }
 
     // =========================================================================
@@ -2417,6 +2430,54 @@ mod tests {
             .unwrap();
 
         assert_ne!(first_sequence_id, second_sequence_id);
+        assert_eq!(
+            state.active_sequence_id.as_deref(),
+            Some(second_sequence_id.as_str())
+        );
+    }
+
+    #[test]
+    fn test_apply_sequence_remove_promotes_latest_remaining_sequence() {
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let mut first_sequence = Sequence::new("First Sequence", SequenceFormat::youtube_1080());
+        first_sequence.created_at = "2026-05-29T00:00:00Z".to_string();
+        let first_sequence_id = first_sequence.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&first_sequence).unwrap(),
+            ))
+            .unwrap();
+
+        let mut second_sequence = Sequence::new("Second Sequence", SequenceFormat::youtube_1080());
+        second_sequence.created_at = "2026-05-30T00:00:00Z".to_string();
+        let second_sequence_id = second_sequence.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&second_sequence).unwrap(),
+            ))
+            .unwrap();
+
+        let mut third_sequence = Sequence::new("Third Sequence", SequenceFormat::youtube_1080());
+        third_sequence.created_at = "2026-05-31T00:00:00Z".to_string();
+        let third_sequence_id = third_sequence.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&third_sequence).unwrap(),
+            ))
+            .unwrap();
+
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceRemove,
+                serde_json::json!({ "sequenceId": third_sequence_id }),
+            ))
+            .unwrap();
+
+        assert!(state.sequences.contains_key(&first_sequence_id));
         assert_eq!(
             state.active_sequence_id.as_deref(),
             Some(second_sequence_id.as_str())
