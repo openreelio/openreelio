@@ -30,13 +30,14 @@ use tauri::State;
 use crate::core::analysis::clip_analysis::{
     analyze_timeline_clip_bundle, inspect_timeline_range_bundles,
     load_clip_analysis_bundle_optional, map_timeline_times_for_clip, ClipAnalysisBundle,
-    ClipAnalysisOptions, ClipAnalysisResponse, TimelineSourceMappingEntry,
+    ClipAnalysisOptions, ClipAnalysisResponse, TimelineRangeSelection, TimelineSourceMappingEntry,
 };
 use crate::core::analysis::clip_perception::{
     describe_timeline_clip_perception, describe_timeline_range_perception,
     enrich_clip_perception_bundle, load_clip_perception_bundle_optional,
     search_clip_perception_bundles, ClipEvidenceSearchHit, ClipPerceptionBundle,
     ClipPerceptionOptions, ClipPerceptionProvider, ClipPerceptionResponse,
+    TimelineClipPerceptionInput, TimelineRangePerceptionInput,
 };
 use crate::core::analysis::color_match::{
     analyze_frame_color, compute_color_correction, ColorCorrection,
@@ -669,10 +670,12 @@ pub async fn inspect_timeline_range(
         &project_path,
         &project_state,
         &runner,
-        &sequence_id,
-        track_id.as_deref(),
-        start_sec,
-        end_sec,
+        TimelineRangeSelection {
+            sequence_id: &sequence_id,
+            track_id: track_id.as_deref(),
+            start_sec,
+            end_sec,
+        },
         options,
     )
     .await
@@ -723,6 +726,7 @@ pub async fn get_clip_perception(
 /// Builds clip-local frame evidence and semantic observations for one timeline clip.
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip(app, state, ffmpeg_state, analysis_options, perception_options))]
 pub async fn describe_timeline_clip(
     app: tauri::AppHandle,
@@ -752,11 +756,13 @@ pub async fn describe_timeline_clip(
         &project_path,
         &project_state,
         &runner,
-        &sequence_id,
-        &track_id,
-        &clip_id,
-        analysis_options,
-        perception_options,
+        TimelineClipPerceptionInput {
+            sequence_id: &sequence_id,
+            track_id: &track_id,
+            clip_id: &clip_id,
+            analysis_options,
+            perception_options,
+        },
         provider_ref,
     )
     .await
@@ -766,6 +772,7 @@ pub async fn describe_timeline_clip(
 /// Builds clip-local frame evidence and semantic observations for visible clips in a range.
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip(app, state, ffmpeg_state, analysis_options, perception_options))]
 pub async fn describe_timeline_range(
     app: tauri::AppHandle,
@@ -796,12 +803,16 @@ pub async fn describe_timeline_range(
         &project_path,
         &project_state,
         &runner,
-        &sequence_id,
-        start_sec,
-        end_sec,
-        track_id.as_deref(),
-        analysis_options,
-        perception_options,
+        TimelineRangePerceptionInput {
+            selection: TimelineRangeSelection {
+                sequence_id: &sequence_id,
+                track_id: track_id.as_deref(),
+                start_sec,
+                end_sec,
+            },
+            analysis_options,
+            perception_options,
+        },
         provider_ref,
     )
     .await

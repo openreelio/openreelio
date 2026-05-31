@@ -1750,7 +1750,7 @@ mod tests {
         };
 
         assert_eq!(
-            select_codex_command_spec(Some(&cached), &[current.clone()]),
+            select_codex_command_spec(Some(&cached), std::slice::from_ref(&current)),
             Some(current)
         );
     }

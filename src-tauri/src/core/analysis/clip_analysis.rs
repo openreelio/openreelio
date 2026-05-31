@@ -597,22 +597,32 @@ pub async fn analyze_timeline_clip_bundle(
     })
 }
 
+pub struct TimelineRangeSelection<'a> {
+    pub sequence_id: &'a str,
+    pub track_id: Option<&'a str>,
+    pub start_sec: f64,
+    pub end_sec: f64,
+}
+
 pub async fn inspect_timeline_range_bundles(
     project_path: &Path,
     state: &ProjectState,
     ffmpeg: &FFmpegRunner,
-    sequence_id: &str,
-    track_id: Option<&str>,
-    start_sec: f64,
-    end_sec: f64,
+    selection: TimelineRangeSelection<'_>,
     mut options: ClipAnalysisOptions,
 ) -> CoreResult<Vec<ClipAnalysisResponse>> {
-    let targets = resolve_clip_analysis_targets(state, sequence_id, track_id, start_sec, end_sec)?;
+    let targets = resolve_clip_analysis_targets(
+        state,
+        selection.sequence_id,
+        selection.track_id,
+        selection.start_sec,
+        selection.end_sec,
+    )?;
     let mut responses = Vec::new();
 
     for target in targets {
-        options.range_start_sec = Some(start_sec);
-        options.range_end_sec = Some(end_sec);
+        options.range_start_sec = Some(selection.start_sec);
+        options.range_end_sec = Some(selection.end_sec);
         responses.push(
             analyze_timeline_clip_bundle(
                 project_path,

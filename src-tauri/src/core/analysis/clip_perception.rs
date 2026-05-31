@@ -16,7 +16,7 @@ use specta::Type;
 use crate::core::analysis::clip_analysis::{
     analyze_timeline_clip_bundle, inspect_timeline_range_bundles,
     load_clip_analysis_bundle_optional, ClipAnalysisBundle, ClipAnalysisOptions,
-    FrameExtractionStatus, FrameSample,
+    FrameExtractionStatus, FrameSample, TimelineRangeSelection,
 };
 use crate::core::analysis::types::{AnalysisBundle, FrameObservation, PerceptionProviderMetadata};
 use crate::core::analysis::AnalysisJobRunner;
@@ -358,31 +358,41 @@ pub async fn enrich_clip_perception_bundle(
     enrich_loaded_clip_perception_bundle(project_path, clip_bundle, options, provider).await
 }
 
+pub struct TimelineClipPerceptionInput<'a> {
+    pub sequence_id: &'a str,
+    pub track_id: &'a str,
+    pub clip_id: &'a str,
+    pub analysis_options: ClipAnalysisOptions,
+    pub perception_options: ClipPerceptionOptions,
+}
+
+pub struct TimelineRangePerceptionInput<'a> {
+    pub selection: TimelineRangeSelection<'a>,
+    pub analysis_options: ClipAnalysisOptions,
+    pub perception_options: ClipPerceptionOptions,
+}
+
 pub async fn describe_timeline_clip_perception(
     project_path: &Path,
     state: &ProjectState,
     ffmpeg: &FFmpegRunner,
-    sequence_id: &str,
-    track_id: &str,
-    clip_id: &str,
-    analysis_options: ClipAnalysisOptions,
-    perception_options: ClipPerceptionOptions,
+    input: TimelineClipPerceptionInput<'_>,
     provider: Option<&(dyn ClipPerceptionProvider + Send + Sync)>,
 ) -> CoreResult<ClipPerceptionResponse> {
     let analysis = analyze_timeline_clip_bundle(
         project_path,
         state,
         ffmpeg,
-        sequence_id,
-        track_id,
-        clip_id,
-        analysis_options,
+        input.sequence_id,
+        input.track_id,
+        input.clip_id,
+        input.analysis_options,
     )
     .await?;
     enrich_loaded_clip_perception_bundle(
         project_path,
         analysis.bundle,
-        perception_options,
+        input.perception_options,
         provider,
     )
     .await
@@ -392,23 +402,15 @@ pub async fn describe_timeline_range_perception(
     project_path: &Path,
     state: &ProjectState,
     ffmpeg: &FFmpegRunner,
-    sequence_id: &str,
-    start_sec: f64,
-    end_sec: f64,
-    track_id: Option<&str>,
-    analysis_options: ClipAnalysisOptions,
-    perception_options: ClipPerceptionOptions,
+    input: TimelineRangePerceptionInput<'_>,
     provider: Option<&(dyn ClipPerceptionProvider + Send + Sync)>,
 ) -> CoreResult<Vec<ClipPerceptionResponse>> {
     let responses = inspect_timeline_range_bundles(
         project_path,
         state,
         ffmpeg,
-        sequence_id,
-        track_id,
-        start_sec,
-        end_sec,
-        analysis_options,
+        input.selection,
+        input.analysis_options,
     )
     .await?;
     let mut perception = Vec::new();
@@ -417,7 +419,7 @@ pub async fn describe_timeline_range_perception(
             enrich_loaded_clip_perception_bundle(
                 project_path,
                 response.bundle,
-                perception_options.clone(),
+                input.perception_options.clone(),
                 provider,
             )
             .await?,

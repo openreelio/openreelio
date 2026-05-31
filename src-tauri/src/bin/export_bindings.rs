@@ -115,9 +115,7 @@ fn normalize_unstable_type_line_spacing(input: &str) -> String {
                 "visualLayers: VisualRenderLayer[];"
             } else if in_text_style && line == "fontWeight?: number; " {
                 "fontWeight?: number;"
-            } else if in_stock_media_import_result {
-                line.trim_end()
-            } else if in_trimmed_generated_type {
+            } else if in_stock_media_import_result || in_trimmed_generated_type {
                 line.trim_end()
             } else {
                 line

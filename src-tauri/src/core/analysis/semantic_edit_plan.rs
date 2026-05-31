@@ -213,6 +213,15 @@ struct PlanPolicy {
     include_spatial_targets: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CommandDraftClipContext<'a> {
+    sequence_id: &'a str,
+    track_id: &'a str,
+    clip_id: &'a str,
+    clip_start: f64,
+    clip_end: Option<f64>,
+}
+
 pub fn plan_semantic_clip_edit(
     project_path: &Path,
     perception_fingerprint: &str,
@@ -267,11 +276,13 @@ pub fn plan_semantic_clip_edit(
             range.command_drafts = build_command_drafts(
                 range,
                 &action,
-                &bundle.sequence_id,
-                &bundle.track_id,
-                &bundle.clip_id,
-                clip_start,
-                clip_end,
+                CommandDraftClipContext {
+                    sequence_id: &bundle.sequence_id,
+                    track_id: &bundle.track_id,
+                    clip_id: &bundle.clip_id,
+                    clip_start,
+                    clip_end,
+                },
                 &policy,
             );
         }
@@ -688,16 +699,14 @@ fn mask_shape_for_bbox(bounding_box: &BoundingBox) -> serde_json::Value {
 fn build_command_drafts(
     range: &SemanticTemporalEditRange,
     action: &SemanticTemporalEditAction,
-    sequence_id: &str,
-    track_id: &str,
-    clip_id: &str,
-    clip_start: f64,
-    clip_end: Option<f64>,
+    clip_context: CommandDraftClipContext<'_>,
     policy: &PlanPolicy,
 ) -> Vec<SemanticTemporalEditCommandDraft> {
     let mut drafts = Vec::new();
-    let needs_start_split = range.timeline_start_sec > clip_start + 0.001;
-    let needs_end_split = clip_end.is_some_and(|end| range.timeline_end_sec < end - 0.001);
+    let needs_start_split = range.timeline_start_sec > clip_context.clip_start + 0.001;
+    let needs_end_split = clip_context
+        .clip_end
+        .is_some_and(|end| range.timeline_end_sec < end - 0.001);
     let needs_range_isolation = matches!(
         action,
         SemanticTemporalEditAction::Blur
@@ -707,16 +716,16 @@ fn build_command_drafts(
     let isolated_clip_id = if needs_start_split || needs_end_split {
         "<isolatedClipId>"
     } else {
-        clip_id
+        clip_context.clip_id
     };
 
     if needs_range_isolation && needs_start_split {
         drafts.push(SemanticTemporalEditCommandDraft {
             command_type: "SplitClip".to_string(),
             payload: serde_json::json!({
-                "sequenceId": sequence_id,
-                "trackId": track_id,
-                "clipId": clip_id,
+                "sequenceId": clip_context.sequence_id,
+                "trackId": clip_context.track_id,
+                "clipId": clip_context.clip_id,
                 "splitTime": range.timeline_start_sec,
             }),
             reason: "Create the leading boundary for the semantic target range.".to_string(),
@@ -729,8 +738,8 @@ fn build_command_drafts(
         drafts.push(SemanticTemporalEditCommandDraft {
             command_type: "SplitClip".to_string(),
             payload: serde_json::json!({
-                "sequenceId": sequence_id,
-                "trackId": track_id,
+                "sequenceId": clip_context.sequence_id,
+                "trackId": clip_context.track_id,
                 "clipId": isolated_clip_id,
                 "splitTime": range.timeline_end_sec,
             }),
@@ -745,8 +754,8 @@ fn build_command_drafts(
             drafts.push(SemanticTemporalEditCommandDraft {
                 command_type: "AddEffect".to_string(),
                 payload: serde_json::json!({
-                    "sequenceId": sequence_id,
-                    "trackId": track_id,
+                    "sequenceId": clip_context.sequence_id,
+                    "trackId": clip_context.track_id,
                     "clipId": isolated_clip_id,
                     "effectType": "gaussian_blur",
                     "params": {
@@ -761,8 +770,8 @@ fn build_command_drafts(
             });
             drafts.extend(mask_command_drafts_for_range(
                 range,
-                sequence_id,
-                track_id,
+                clip_context.sequence_id,
+                clip_context.track_id,
                 isolated_clip_id,
                 needs_start_split || needs_end_split,
             ));
@@ -771,8 +780,8 @@ fn build_command_drafts(
             drafts.push(SemanticTemporalEditCommandDraft {
                 command_type: "AddEffect".to_string(),
                 payload: serde_json::json!({
-                    "sequenceId": sequence_id,
-                    "trackId": track_id,
+                    "sequenceId": clip_context.sequence_id,
+                    "trackId": clip_context.track_id,
                     "clipId": isolated_clip_id,
                     "effectType": "brightness",
                     "params": {
@@ -788,8 +797,8 @@ fn build_command_drafts(
             });
             drafts.extend(mask_command_drafts_for_range(
                 range,
-                sequence_id,
-                track_id,
+                clip_context.sequence_id,
+                clip_context.track_id,
                 isolated_clip_id,
                 needs_start_split || needs_end_split,
             ));
@@ -798,8 +807,8 @@ fn build_command_drafts(
             drafts.push(SemanticTemporalEditCommandDraft {
                 command_type: "RemoveClip".to_string(),
                 payload: serde_json::json!({
-                    "sequenceId": sequence_id,
-                    "trackId": track_id,
+                    "sequenceId": clip_context.sequence_id,
+                    "trackId": clip_context.track_id,
                     "clipId": isolated_clip_id,
                 }),
                 reason: "Remove the isolated semantic target range.".to_string(),
@@ -813,7 +822,7 @@ fn build_command_drafts(
             drafts.push(SemanticTemporalEditCommandDraft {
                 command_type: "AddMarker".to_string(),
                 payload: serde_json::json!({
-                    "sequenceId": sequence_id,
+                    "sequenceId": clip_context.sequence_id,
                     "timeSec": range.evidence.first().map(|entry| entry.timeline_sec).unwrap_or(range.timeline_start_sec),
                     "label": format!("Semantic match: {}", range.evidence.first().map(|entry| entry.description.as_str()).unwrap_or("target")),
                     "color": "#F59E0B"
@@ -827,8 +836,8 @@ fn build_command_drafts(
             drafts.push(SemanticTemporalEditCommandDraft {
                 command_type: "AddTextClip".to_string(),
                 payload: serde_json::json!({
-                    "sequenceId": sequence_id,
-                    "trackId": track_id,
+                    "sequenceId": clip_context.sequence_id,
+                    "trackId": clip_context.track_id,
                     "timelineIn": range.timeline_start_sec,
                     "duration": (range.timeline_end_sec - range.timeline_start_sec).max(0.1),
                     "textData": {
@@ -1208,11 +1217,13 @@ mod tests {
         range.command_drafts = build_command_drafts(
             range,
             &SemanticTemporalEditAction::Blur,
-            "seq-1",
-            "track-1",
-            "clip-1",
-            0.0,
-            Some(20.0),
+            CommandDraftClipContext {
+                sequence_id: "seq-1",
+                track_id: "track-1",
+                clip_id: "clip-1",
+                clip_start: 0.0,
+                clip_end: Some(20.0),
+            },
             &policy,
         );
 
@@ -1318,11 +1329,13 @@ mod tests {
         ranges[0].command_drafts = build_command_drafts(
             &ranges[0],
             &SemanticTemporalEditAction::Highlight,
-            "seq-1",
-            "track-1",
-            "clip-1",
-            0.0,
-            Some(20.0),
+            CommandDraftClipContext {
+                sequence_id: "seq-1",
+                track_id: "track-1",
+                clip_id: "clip-1",
+                clip_start: 0.0,
+                clip_end: Some(20.0),
+            },
             &policy,
         );
 
