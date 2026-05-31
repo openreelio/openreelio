@@ -187,7 +187,7 @@ describe('CodexReferenceAdapter', () => {
     const clipAnalyzeTool = startThreadInput.dynamicTools.find(
       (tool: any) => tool.name === 'clip_analyze',
     );
-    expect(clipAnalyzeTool.inputSchema.required).toEqual(['sequenceId', 'trackId', 'clipId']);
+    expect(clipAnalyzeTool.inputSchema.required).toEqual(['clipId']);
     expect(clipAnalyzeTool.inputSchema.properties.mode.enum).toEqual(['representative', 'dense']);
     const clipDescribeTool = startThreadInput.dynamicTools.find(
       (tool: any) => tool.name === 'clip_describe',
@@ -1100,6 +1100,98 @@ describe('CodexReferenceAdapter', () => {
     );
   });
 
+  it('should resolve clip analysis targets on the active timeline when sequence or track IDs are stale', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'get_project_state') {
+        return {
+          meta: { name: 'Project' },
+          activeSequenceId: 'seq-active',
+          assets: [],
+          sequences: [
+            {
+              id: 'seq-active',
+              name: 'Active Timeline',
+              tracks: [
+                {
+                  id: 'video-active',
+                  name: 'Video 1',
+                  kind: 'video',
+                  clips: [{ id: 'clip-target', assetId: 'asset-1' }],
+                  locked: false,
+                  muted: false,
+                  visible: true,
+                },
+              ],
+              markers: [],
+            },
+          ],
+          isDirty: false,
+        };
+      }
+      if (command === 'sample_clip_frames') {
+        expect(args).toMatchObject({
+          sequenceId: 'seq-active',
+          trackId: 'video-active',
+          clipId: 'clip-target',
+        });
+        return {
+          source: 'cache',
+          bundle: {
+            fingerprint: 'fp-active',
+            sequenceId: 'seq-active',
+            trackId: 'video-active',
+            clipId: 'clip-target',
+            assetId: 'asset-1',
+            samples: [],
+            mapping: {},
+            quality: { status: 'ready', score: 1, warnings: [] },
+            errors: [],
+          },
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const adapter = new CodexReferenceAdapter(undefined, { appServerClient });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const response = (await respondToRequest({
+      id: 43,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_clip_analyze_active',
+        namespace: 'openreelio',
+        tool: 'clip_analyze',
+        arguments: {
+          sequenceId: 'seq-stale',
+          trackId: 'track-stale',
+          clipId: 'clip-target',
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(true);
+    expect(getFirstTextContent(response)).toContain('active_sequence_defaulted');
+    expect(getFirstTextContent(response)).toContain('clip_track_resolved');
+  });
+
   it('should expose stock media search through the Codex bridge', async () => {
     const requestHandlers: Array<(request: any) => unknown> = [];
     const appServerClient = {
@@ -1420,6 +1512,148 @@ describe('CodexReferenceAdapter', () => {
     expect(getFirstTextContent(response)).toContain('drag-and-drop parity path');
     expect(getFirstTextContent(response)).toContain('"clip-audio"');
     expect(getFirstTextContent(response)).toContain('"stateVersion": 11');
+  });
+
+  it('should default media insertion to the active sequence and base video track', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const approvalDecisionProvider = vi.fn().mockResolvedValue('accept');
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_project_state') {
+        return {
+          meta: { name: 'Project' },
+          activeSequenceId: 'seq-active',
+          assets: [{ id: 'asset-video', kind: 'video', name: 'Interview' }],
+          sequences: [
+            {
+              id: 'seq-active',
+              name: 'Active Timeline',
+              tracks: [
+                {
+                  id: 'overlay-top',
+                  name: 'Text Overlay',
+                  kind: 'overlay',
+                  clips: [],
+                  locked: false,
+                  muted: false,
+                  visible: true,
+                },
+                {
+                  id: 'video-base',
+                  name: 'Video 1',
+                  kind: 'video',
+                  clips: [],
+                  isBaseTrack: true,
+                  locked: false,
+                  muted: false,
+                  visible: true,
+                },
+              ],
+              markers: [],
+            },
+            {
+              id: 'seq-inactive',
+              name: 'Old Cut',
+              tracks: [{ id: 'old-video', name: 'Video 1', kind: 'video', clips: [] }],
+              markers: [],
+            },
+          ],
+          isDirty: false,
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    vi.mocked(insertAgentMediaClip).mockResolvedValue({
+      insertResult: {
+        opId: 'op-video',
+        changes: [],
+        createdIds: ['clip-video'],
+        deletedIds: [],
+      },
+      clipId: 'clip-video',
+      sequenceId: 'seq-active',
+      trackId: 'video-base',
+      assetId: 'asset-video',
+      timelineStart: 2,
+      sourceIn: undefined,
+      sourceOut: undefined,
+      durationSec: 5,
+    });
+    projectStoreMocks.refreshFromBackendMutation.mockResolvedValue(13);
+    const adapter = new CodexReferenceAdapter(undefined, {
+      appServerClient,
+      approvalDecisionProvider,
+    });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const contextResponse = (await respondToRequest({
+      id: 201,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_context',
+        namespace: 'openreelio',
+        tool: 'project_state',
+        arguments: {},
+      },
+    })) as any;
+    const contextToken = JSON.parse(getFirstTextContent(contextResponse)).contextToken;
+
+    const response = (await respondToRequest({
+      id: 202,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_media_insert_active',
+        namespace: 'openreelio',
+        tool: 'media_insert',
+        arguments: {
+          sequenceId: 'seq-inactive',
+          trackId: 'old-video',
+          assetId: 'asset-video',
+          timelineStart: 2,
+          reason: 'Place this media on the current timeline.',
+          contextToken,
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(true);
+    expect(insertAgentMediaClip).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sequenceId: 'seq-active',
+        trackId: 'video-base',
+        assetId: 'asset-video',
+      }),
+    );
+    expect(approvalDecisionProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        args: expect.objectContaining({
+          payload: expect.objectContaining({
+            sequenceId: 'seq-active',
+            trackId: 'video-base',
+          }),
+        }),
+      }),
+    );
+    expect(getFirstTextContent(response)).toContain('active_sequence_defaulted');
+    expect(getFirstTextContent(response)).toContain('main_video_track_defaulted');
   });
 
   it('should route command_execute InsertClip approvals through the media insert surface', async () => {
@@ -1819,6 +2053,7 @@ describe('CodexReferenceAdapter', () => {
                   sequenceId: 'seq_1',
                   name: 'B-roll',
                   kind: 'video',
+                  position: 0,
                 },
                 description: 'Add a B-roll track',
                 riskLevel: 'medium',
@@ -1921,6 +2156,7 @@ describe('CodexReferenceAdapter', () => {
         sequenceId: 'seq_1',
         name: 'B-roll',
         kind: 'video',
+        position: 0,
       },
     });
     expect(invoke).toHaveBeenCalledWith('create_external_agent_approval_token', {
@@ -1965,6 +2201,357 @@ describe('CodexReferenceAdapter', () => {
         },
       ],
     });
+  });
+
+  it('should default text overlays to the active sequence top visual track', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'get_project_state') {
+        return {
+          meta: { name: 'Launch Cut' },
+          assets: [],
+          sequences: [
+            {
+              id: 'seq-active',
+              name: 'Active Timeline',
+              tracks: [
+                {
+                  id: 'text-top',
+                  name: 'Text Overlay',
+                  kind: 'overlay',
+                  clips: [],
+                  locked: false,
+                  muted: false,
+                  visible: true,
+                },
+                {
+                  id: 'video-base',
+                  name: 'Video 1',
+                  kind: 'video',
+                  clips: [{ id: 'clip-base', assetId: 'asset-video' }],
+                  isBaseTrack: true,
+                  locked: false,
+                  muted: false,
+                  visible: true,
+                },
+              ],
+              markers: [],
+            },
+            {
+              id: 'seq-inactive',
+              name: 'Inactive Timeline',
+              tracks: [{ id: 'old-video', name: 'Video 1', kind: 'video', clips: [] }],
+              markers: [],
+            },
+          ],
+          effects: [],
+          activeSequenceId: 'seq-active',
+          textClips: [],
+          isDirty: false,
+        };
+      }
+      if (command === 'validate_command_payload') {
+        expect(args).toMatchObject({
+          commandType: 'AddTextClip',
+          payload: {
+            sequenceId: 'seq-active',
+            trackId: 'text-top',
+          },
+        });
+        return null;
+      }
+      if (command === 'create_external_agent_approval_token') {
+        return {
+          token: 'grant-token-text',
+          tokenId: 'grant-text-1',
+          sessionId: 'thr_123',
+          runId: null,
+          planId: 'codex-command-thr_123-302',
+          projectId: 'project-1',
+          runtimeId: 'codex',
+          scopes: ['openreelio.plan.apply'],
+          createdAt: 1,
+          expiresAt: 2,
+        };
+      }
+      if (command === 'execute_agent_plan') {
+        expect(args).toMatchObject({
+          plan: {
+            steps: [
+              {
+                toolName: 'AddTextClip',
+                params: {
+                  sequenceId: 'seq-active',
+                  trackId: 'text-top',
+                },
+              },
+            ],
+          },
+        });
+        return {
+          planId: 'codex-command-thr_123-302',
+          success: true,
+          totalSteps: 1,
+          stepsCompleted: 1,
+          stepResults: [],
+          operationIds: ['op_text'],
+          rollbackReport: null,
+          errorMessage: null,
+          executionTimeMs: 1,
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    projectStoreMocks.refreshFromBackendMutation.mockResolvedValue(14);
+    const approvalDecisionProvider = vi.fn().mockResolvedValue('accept');
+    const adapter = new CodexReferenceAdapter(undefined, {
+      appServerClient,
+      approvalDecisionProvider,
+    });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const contextResponse = (await respondToRequest({
+      id: 301,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_context',
+        namespace: 'openreelio',
+        tool: 'timeline_snapshot',
+        arguments: {},
+      },
+    })) as any;
+    const contextToken = JSON.parse(getFirstTextContent(contextResponse)).contextToken;
+
+    const response = (await respondToRequest({
+      id: 302,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_add_text',
+        namespace: 'openreelio',
+        tool: 'command_execute',
+        arguments: {
+          commandType: 'AddTextClip',
+          payload: {
+            sequenceId: 'seq-inactive',
+            trackId: 'old-video',
+            timelineIn: 1,
+            duration: 2,
+            textData: {
+              content: 'Current timeline caption',
+              style: { fontSize: 64, color: { r: 255, g: 255, b: 255, a: 255 } },
+              position: { x: 0.5, y: 0.82 },
+              opacity: 1,
+            },
+          },
+          reason: 'Add visible text to this timeline.',
+          contextToken,
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(true);
+    expect(approvalDecisionProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        args: expect.objectContaining({
+          commandType: 'AddTextClip',
+          payload: expect.objectContaining({
+            sequenceId: 'seq-active',
+            trackId: 'text-top',
+          }),
+        }),
+      }),
+    );
+    expect(getFirstTextContent(response)).toContain('active_sequence_defaulted');
+    expect(getFirstTextContent(response)).toContain('text_overlay_track_defaulted');
+  });
+
+  it('should normalize raw plan InsertClip media to a preview-compatible video track', async () => {
+    const requestHandlers: Array<(request: any) => unknown> = [];
+    const appServerClient = {
+      startThread: vi.fn().mockResolvedValue({ id: 'thr_123' }),
+      startTurn: vi.fn().mockResolvedValue({ id: 'turn_1', status: 'inProgress' }),
+      interruptTurn: vi.fn(),
+      unsubscribeThread: vi.fn(),
+      onServerRequest: vi.fn((handler: (request: any) => unknown) => {
+        requestHandlers.push(handler);
+        return vi.fn();
+      }),
+    };
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'get_project_state') {
+        return {
+          meta: { name: 'Project' },
+          activeSequenceId: 'seq-active',
+          assets: [{ id: 'asset-video', kind: 'video', name: 'Interview' }],
+          sequences: [
+            {
+              id: 'seq-active',
+              name: 'Active Timeline',
+              tracks: [
+                {
+                  id: 'overlay-track',
+                  name: 'Overlay 1',
+                  kind: 'overlay',
+                  clips: [],
+                  locked: false,
+                  muted: false,
+                  visible: true,
+                },
+                {
+                  id: 'video-base',
+                  name: 'Video 1',
+                  kind: 'video',
+                  clips: [],
+                  isBaseTrack: true,
+                  locked: false,
+                  muted: false,
+                  visible: true,
+                },
+              ],
+              markers: [],
+            },
+          ],
+          effects: [],
+          textClips: [],
+          isDirty: false,
+        };
+      }
+      if (command === 'validate_command_payload') {
+        expect(args).toMatchObject({
+          commandType: 'InsertClip',
+          payload: {
+            sequenceId: 'seq-active',
+            trackId: 'video-base',
+            assetId: 'asset-video',
+            timelineStart: 0,
+          },
+        });
+        return null;
+      }
+      if (command === 'create_external_agent_approval_token') {
+        return {
+          token: 'grant-token-insert',
+          tokenId: 'grant-insert-1',
+          sessionId: 'thr_123',
+          runId: null,
+          planId: 'plan_insert_media',
+          projectId: 'project-1',
+          runtimeId: 'codex',
+          scopes: ['openreelio.plan.apply'],
+          createdAt: 1,
+          expiresAt: 2,
+        };
+      }
+      if (command === 'execute_agent_plan') {
+        expect(args).toMatchObject({
+          plan: {
+            steps: [
+              {
+                toolName: 'InsertClip',
+                params: {
+                  sequenceId: 'seq-active',
+                  trackId: 'video-base',
+                  assetId: 'asset-video',
+                  timelineStart: 0,
+                },
+              },
+            ],
+          },
+        });
+        return {
+          planId: 'plan_insert_media',
+          success: true,
+          totalSteps: 1,
+          stepsCompleted: 1,
+          stepResults: [],
+          operationIds: ['op_insert'],
+          rollbackReport: null,
+          errorMessage: null,
+          executionTimeMs: 1,
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    projectStoreMocks.refreshFromBackendMutation.mockResolvedValue(15);
+    const approvalDecisionProvider = vi.fn().mockResolvedValue('accept');
+    const adapter = new CodexReferenceAdapter(undefined, {
+      appServerClient,
+      approvalDecisionProvider,
+    });
+
+    await adapter.startSession({ projectId: 'project-1', cwd: '/project' });
+    const respondToRequest = requestHandlers[0];
+    if (!respondToRequest) {
+      throw new Error('Expected Codex server request handler to be registered');
+    }
+
+    const contextResponse = (await respondToRequest({
+      id: 401,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_context',
+        namespace: 'openreelio',
+        tool: 'timeline_snapshot',
+        arguments: {},
+      },
+    })) as any;
+    const contextToken = JSON.parse(getFirstTextContent(contextResponse)).contextToken;
+
+    const response = (await respondToRequest({
+      id: 402,
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thr_123',
+        turnId: 'turn_1',
+        callId: 'tool_plan_insert_media',
+        namespace: 'openreelio',
+        tool: 'plan_apply',
+        arguments: {
+          plan: {
+            id: 'plan_insert_media',
+            goal: 'Place media on the current edit',
+            steps: [
+              {
+                id: 'insert_video',
+                toolName: 'InsertClip',
+                params: {
+                  sequenceId: 'seq-active',
+                  trackId: 'overlay-track',
+                  assetId: 'asset-video',
+                  timelineStart: 0,
+                },
+              },
+            ],
+          },
+          reason: 'Place video on the current edit',
+          contextToken,
+        },
+      },
+    })) as any;
+
+    expect(response.success).toBe(true);
+    expect(getFirstTextContent(response)).toContain('main_video_track_defaulted');
   });
 
   it('should validate, approve, token-gate, and atomically apply OpenReelio dynamic plans', async () => {
@@ -2124,6 +2711,7 @@ describe('CodexReferenceAdapter', () => {
         sequenceId: 'seq_1',
         name: 'B-roll',
         kind: 'video',
+        position: 0,
       },
     });
     expect(invoke).toHaveBeenCalledWith('create_external_agent_approval_token', {
@@ -2588,7 +3176,7 @@ describe('CodexReferenceAdapter', () => {
         };
       }
       if (command === 'validate_command_payload') {
-        throw new Error('Invalid command payload: missing field `sequenceId`');
+        throw new Error('Invalid command payload: track name is reserved');
       }
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -2644,8 +3232,10 @@ describe('CodexReferenceAdapter', () => {
     expect(invoke).toHaveBeenCalledWith('validate_command_payload', {
       commandType: 'CreateTrack',
       payload: {
+        sequenceId: 'seq_1',
         name: 'B-roll',
         kind: 'video',
+        position: 0,
       },
     });
     expect(invoke).not.toHaveBeenCalledWith('execute_command', expect.anything());

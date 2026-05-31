@@ -157,6 +157,136 @@ const WHISPER_MODEL_SELECTION_PREFERENCE = [
   'tiny',
 ];
 
+const ACTIVE_TIMELINE_SCOPED_COMMAND_TYPES = new Set<string>([
+  'InsertClip',
+  'InsertEdit',
+  'OverwriteEdit',
+  'RippleDelete',
+  'Lift',
+  'ExtractEdit',
+  'CloseGap',
+  'CloseAllGaps',
+  'RemoveClip',
+  'MoveClip',
+  'TrimClip',
+  'SplitClip',
+  'SetClipTransform',
+  'SetClipSpeed',
+  'ReverseClip',
+  'SetClipEnabled',
+  'LinkClips',
+  'UnlinkClips',
+  'GroupClips',
+  'UngroupClips',
+  'DetachAudio',
+  'CreateFreezeFrame',
+  'SetTimeRemap',
+  'ClearTimeRemap',
+  'SetClipMute',
+  'SetClipAudio',
+  'AddAudioKeyframe',
+  'RemoveAudioKeyframe',
+  'MoveAudioKeyframe',
+  'SetAudioKeyframeValue',
+  'SetAudioFadeIn',
+  'SetAudioFadeOut',
+  'SetTrackBlendMode',
+  'SetClipBlendMode',
+  'SetMasterVolume',
+  'CreateTrack',
+  'RemoveTrack',
+  'RenameTrack',
+  'ReorderTracks',
+  'ToggleTrackMute',
+  'ToggleTrackLock',
+  'ToggleTrackVisibility',
+  'AddMarker',
+  'RemoveMarker',
+  'CreateCaption',
+  'ImportGeneratedCaptions',
+  'DeleteCaption',
+  'UpdateCaption',
+  'AddEffect',
+  'RemoveEffect',
+  'UpdateEffect',
+  'AddMask',
+  'UpdateMask',
+  'RemoveMask',
+  'AddTextClip',
+  'UpdateTextClip',
+  'RemoveTextClip',
+  'ApplyAudioDucking',
+  'CreateCompoundClip',
+  'UnnestCompoundClip',
+  'CreateAdjustmentLayer',
+  'PasteEffects',
+  'PasteAttributes',
+  'RemoveAttributes',
+]);
+
+const CLIP_TARGET_COMMAND_TYPES = new Set<string>([
+  'RemoveClip',
+  'MoveClip',
+  'TrimClip',
+  'SplitClip',
+  'SetClipTransform',
+  'SetClipSpeed',
+  'ReverseClip',
+  'SetClipEnabled',
+  'DetachAudio',
+  'CreateFreezeFrame',
+  'SetTimeRemap',
+  'ClearTimeRemap',
+  'SetClipMute',
+  'SetClipAudio',
+  'AddAudioKeyframe',
+  'RemoveAudioKeyframe',
+  'MoveAudioKeyframe',
+  'SetAudioKeyframeValue',
+  'SetAudioFadeIn',
+  'SetAudioFadeOut',
+  'AddEffect',
+  'RemoveEffect',
+  'UpdateEffect',
+  'AddMask',
+  'UpdateMask',
+  'RemoveMask',
+  'UpdateTextClip',
+  'RemoveTextClip',
+  'ApplyAudioDucking',
+  'UnnestCompoundClip',
+]);
+
+const TEXT_OVERLAY_COMMAND_TYPES = new Set<string>(['AddTextClip']);
+const CAPTION_TRACK_COMMAND_TYPES = new Set<string>([
+  'CreateCaption',
+  'ImportGeneratedCaptions',
+  'UpdateCaption',
+]);
+const PRIMITIVE_MEDIA_INSERT_COMMAND_TYPES = new Set<string>([
+  'InsertClip',
+  'InsertEdit',
+  'OverwriteEdit',
+]);
+const VISUAL_TRACK_KINDS = new Set<string>(['video', 'overlay', 'caption']);
+const TEXT_OVERLAY_TRACK_KINDS = new Set<string>(['video', 'overlay']);
+
+interface TimelineTargetNormalization {
+  payload: CodexJsonObject;
+  notes: CodexJsonObject[];
+}
+
+interface MediaInsertTargetNormalization {
+  sequenceId: string;
+  trackId: string;
+  notes: CodexJsonObject[];
+}
+
+interface TrackWithIndex {
+  track: ProjectStateDto['sequences'][number]['tracks'][number];
+  index: number;
+}
+
 interface ContextTokenRecord {
   token: string;
   sessionId: string;
@@ -215,8 +345,14 @@ const ANNOTATION_READ_SCHEMA: CodexJsonObject = {
 };
 
 const CLIP_ANALYZE_SCHEMA_PROPERTIES: CodexJsonObject = {
-  sequenceId: { type: 'string', description: 'Target sequence ID.' },
-  trackId: { type: 'string', description: 'Timeline track ID containing the clip.' },
+  sequenceId: {
+    type: 'string',
+    description: 'Optional target sequence ID. Defaults to the active timeline when omitted or stale.',
+  },
+  trackId: {
+    type: 'string',
+    description: 'Optional timeline track ID. The active timeline clip location is resolved when omitted or stale.',
+  },
   clipId: { type: 'string', description: 'Timeline clip ID to sample.' },
   mode: {
     type: 'string',
@@ -242,14 +378,14 @@ const CLIP_ANALYZE_SCHEMA_PROPERTIES: CodexJsonObject = {
 
 const CLIP_ANALYZE_SCHEMA: CodexJsonObject = {
   type: 'object',
-  required: ['sequenceId', 'trackId', 'clipId'],
+  required: ['clipId'],
   properties: CLIP_ANALYZE_SCHEMA_PROPERTIES,
   additionalProperties: false,
 };
 
 const CLIP_DESCRIBE_SCHEMA: CodexJsonObject = {
   type: 'object',
-  required: ['sequenceId', 'trackId', 'clipId'],
+  required: ['clipId'],
   properties: {
     ...CLIP_ANALYZE_SCHEMA_PROPERTIES,
     maxFrames: {
@@ -803,6 +939,8 @@ export function buildOpenReelioCodexDeveloperInstructions(
     '- Use OpenReelio dynamic tools before claiming project, timeline, asset, or selection facts.',
     '- Use openreelio.host_context first when the user asks where you are, what you can use, or what environment this is.',
     '- Use openreelio.timeline_snapshot, openreelio.assets_list, openreelio.selection_read, and openreelio.command_schema before proposing concrete edits.',
+    '- Unless the user explicitly switched to a named sequence, "the timeline", "current edit", "this part", and similar edit requests mean the active OpenReelio timeline from timeline_snapshot.activeSequenceId.',
+    '- Track order is front-to-back for visual output: tracks[0] is the top/front video layer. Create video/overlay/caption/text tracks at position 0 so they appear above the base video. Audio tracks can remain below/end.',
     '- Use openreelio.annotation_read for the source asset before deciding exact text placement that should avoid faces, objects, or existing OCR text.',
     '- Use openreelio.clip_analyze and openreelio.clip_describe for detailed clip-local frame evidence before choosing a highlight clip, placing timing-sensitive SFX, or making semantic visual edits.',
     '- Use openreelio.semantic_edit_plan after clip_describe when a semantic target needs ranges, draft edits, or spatial mask guidance.',
@@ -1245,8 +1383,8 @@ async function insertMediaToolCall(
     throw new Error('OpenReelio media_insert requires object arguments.');
   }
 
-  const sequenceId = getRequiredStringArg(args, 'sequenceId', 'media_insert');
-  const trackId = getRequiredStringArg(args, 'trackId', 'media_insert');
+  let sequenceId = getRequiredStringArg(args, 'sequenceId', 'media_insert');
+  let trackId = getRequiredStringArg(args, 'trackId', 'media_insert');
   const assetId = getRequiredStringArg(args, 'assetId', 'media_insert');
   const timelineStart = getFiniteNonNegativeNumberArg(args, 'timelineStart', 'media_insert', true);
   if (timelineStart === undefined) {
@@ -1267,6 +1405,13 @@ async function insertMediaToolCall(
       message: tokenValidation.message.replace(/command_execute/g, 'media_insert'),
     };
   }
+
+  const targetNormalization = await normalizeMediaInsertTarget(
+    { sequenceId, trackId, assetId, audioOnly },
+    tokenValidation.record,
+  );
+  sequenceId = targetNormalization.sequenceId;
+  trackId = targetNormalization.trackId;
 
   const payload: CodexJsonObject = {
     sequenceId,
@@ -1327,6 +1472,7 @@ async function insertMediaToolCall(
         durationSec: insert.durationSec,
         linkedAudio: insert.linkedAudio ?? null,
       },
+      targeting: targetNormalization.notes.length > 0 ? targetNormalization.notes : undefined,
       refresh,
     };
   } finally {
@@ -1365,8 +1511,8 @@ async function executeApprovedCommand(
     };
   }
 
-  const payload = asObject(args.payload);
-  if (!payload) {
+  const rawPayload = asObject(args.payload);
+  if (!rawPayload) {
     throw new Error('OpenReelio command_execute requires an object payload.');
   }
 
@@ -1380,6 +1526,13 @@ async function executeApprovedCommand(
       message: tokenValidation.message,
     };
   }
+
+  const payloadNormalization = await normalizeCommandPayloadForExternalMutation(
+    commandType,
+    rawPayload,
+    tokenValidation.record,
+  );
+  const payload = payloadNormalization.payload;
 
   if (commandType === 'InsertClip') {
     const mediaArgs: CodexJsonObject = {
@@ -1458,6 +1611,7 @@ async function executeApprovedCommand(
     commandType,
     approval: buildApprovalExecutionSummary(execution),
     result: execution.result,
+    targeting: payloadNormalization.notes.length > 0 ? payloadNormalization.notes : undefined,
     refresh,
   };
 }
@@ -1561,21 +1715,23 @@ async function applyApprovedPlan(
     throw new Error('OpenReelio plan_apply requires object arguments.');
   }
 
-  const validation = await validateAgentPlanArgument(args);
-  if (!validation.valid) {
-    return {
-      status: 'error',
-      message: validation.message,
-    };
-  }
-
+  const rawPlan = asObject(args.plan);
+  const rawPlanId = getString(rawPlan, 'id')?.trim() ?? null;
   const contextToken = getString(args, 'contextToken')?.trim() ?? null;
   const tokenValidation = validateContextToken(context, contextToken);
   if (!tokenValidation.valid) {
     return {
       status: 'error',
-      planId: validation.plan.id,
+      planId: rawPlanId,
       message: tokenValidation.message.replace(/command_execute/g, 'plan_apply'),
+    };
+  }
+
+  const validation = await validateAgentPlanArgument(args, { tokenRecord: tokenValidation.record });
+  if (!validation.valid) {
+    return {
+      status: 'error',
+      message: validation.message,
     };
   }
 
@@ -1617,6 +1773,7 @@ async function applyApprovedPlan(
     planId: validation.plan.id,
     approval: buildApprovalExecutionSummary(execution),
     result: execution.result,
+    targeting: validation.normalizationNotes.length > 0 ? validation.normalizationNotes : undefined,
     refresh,
   };
 }
@@ -1744,7 +1901,11 @@ function getUnsupportedExecutableCommandMessage(commandType: string): string | n
 
 async function validateAgentPlanArgument(
   args: CodexJsonObject | null,
-): Promise<{ valid: true; plan: AgentPlan } | { valid: false; message: string }> {
+  options?: { tokenRecord?: ContextTokenRecord },
+): Promise<
+  | { valid: true; plan: AgentPlan; normalizationNotes: CodexJsonObject[] }
+  | { valid: false; message: string }
+> {
   if (!args) {
     return { valid: false, message: 'OpenReelio plan validation requires object arguments.' };
   }
@@ -1763,7 +1924,27 @@ async function validateAgentPlanArgument(
     return dependencyValidation;
   }
 
-  for (const step of normalized.plan.steps) {
+  const createSequenceBoundaryValidation = validateCreateSequencePlanBoundary(normalized.plan);
+  if (!createSequenceBoundaryValidation.valid) {
+    return createSequenceBoundaryValidation;
+  }
+
+  let planForValidation = normalized.plan;
+  let normalizationNotes: CodexJsonObject[] = [];
+  if (options?.tokenRecord) {
+    const state = planRequiresProjectStateForTargeting(normalized.plan)
+      ? await readOptionalProjectState()
+      : null;
+    const normalizedForMutation = normalizeAgentPlanForExternalMutation(
+      normalized.plan,
+      options.tokenRecord,
+      state,
+    );
+    planForValidation = normalizedForMutation.plan;
+    normalizationNotes = normalizedForMutation.notes;
+  }
+
+  for (const step of planForValidation.steps) {
     const unsupported = getUnsupportedExecutableCommandMessage(step.toolName);
     if (unsupported) {
       return {
@@ -1787,7 +1968,7 @@ async function validateAgentPlanArgument(
     }
   }
 
-  return normalized;
+  return { valid: true, plan: planForValidation, normalizationNotes };
 }
 
 function normalizeAgentPlan(
@@ -2229,22 +2410,26 @@ async function generateTranscriptionToolCall(
   const trackId = getString(args, 'trackId')?.trim() || null;
   const clipId = getString(args, 'clipId')?.trim() || null;
   let clipMapping: ClipTimeMapping | null = null;
+  let clipMappingNotes: CodexJsonObject[] = [];
 
   if (clipId && !sequenceAudio) {
     const state = await readProjectState();
-    clipMapping = findClipTimeMapping(state, {
+    const mappingResolution = findActiveClipTimeMapping(state, {
       clipId,
       sequenceId,
       trackId,
       assetId,
     });
+    clipMapping = mappingResolution.mapping;
+    clipMappingNotes = mappingResolution.notes;
     if (!clipMapping) {
       return {
         status: 'error',
         assetId,
         clipId,
+        activeSequenceId: state.activeSequenceId,
         message:
-          'Could not find a timeline clip with the requested clipId, sequenceId, trackId, and assetId.',
+          'Could not find the requested clip on the active timeline or with the provided clipId, sequenceId, trackId, and assetId.',
       };
     }
   }
@@ -2349,6 +2534,9 @@ async function generateTranscriptionToolCall(
     transcriptionResult.data,
     clipMapping,
   );
+  if (clipMappingNotes.length > 0) {
+    response.targeting = clipMappingNotes;
+  }
   if (sequenceAudio) {
     response.sequenceAudio = true;
     response.sequenceId = sequenceId;
@@ -2512,6 +2700,100 @@ function findClipTimeMapping(
   return null;
 }
 
+function findActiveClipTimeMapping(
+  state: ProjectStateDto,
+  filters: {
+    clipId: string;
+    sequenceId: string | null;
+    trackId: string | null;
+    assetId: string;
+  },
+): { mapping: ClipTimeMapping | null; notes: CodexJsonObject[] } {
+  const notes: CodexJsonObject[] = [];
+  if (state.activeSequenceId) {
+    const activeMapping = findClipTimeMapping(state, {
+      ...filters,
+      sequenceId: state.activeSequenceId,
+      trackId: null,
+    });
+    if (activeMapping) {
+      if (filters.sequenceId !== state.activeSequenceId) {
+        notes.push({
+          type: 'active_sequence_defaulted',
+          tool: 'transcription_generate',
+          previousSequenceId: filters.sequenceId,
+          sequenceId: activeMapping.sequenceId,
+          reason: 'Clip-based transcription mapping defaults to the active timeline.',
+        });
+      }
+      if (filters.trackId && filters.trackId !== activeMapping.trackId) {
+        notes.push({
+          type: 'clip_track_resolved',
+          tool: 'transcription_generate',
+          clipId: filters.clipId,
+          previousTrackId: filters.trackId,
+          trackId: activeMapping.trackId,
+          reason: 'The clip was found on the active timeline track.',
+        });
+      }
+      return { mapping: activeMapping, notes };
+    }
+  }
+
+  return { mapping: findClipTimeMapping(state, filters), notes };
+}
+
+async function resolveClipReadTarget(
+  args: CodexJsonObject,
+  toolName: 'clip_analyze' | 'clip_describe',
+): Promise<{ sequenceId: string; trackId: string; clipId: string; notes: CodexJsonObject[] }> {
+  const requestedSequenceId = getString(args, 'sequenceId')?.trim() || null;
+  const requestedTrackId = getString(args, 'trackId')?.trim() || null;
+  const clipId = getRequiredStringArg(args, 'clipId', toolName);
+  const state = await readOptionalProjectState();
+
+  if (state?.activeSequenceId) {
+    const activeSequence = findSequenceById(state, state.activeSequenceId);
+    const activeLocation = activeSequence ? findClipLocationInSequence(activeSequence, clipId) : null;
+    if (activeLocation) {
+      const notes: CodexJsonObject[] = [];
+      if (requestedSequenceId !== state.activeSequenceId) {
+        notes.push({
+          type: 'active_sequence_defaulted',
+          tool: toolName,
+          previousSequenceId: requestedSequenceId,
+          sequenceId: state.activeSequenceId,
+          reason: 'Clip analysis defaults to the active OpenReelio timeline.',
+        });
+      }
+      if (requestedTrackId && requestedTrackId !== activeLocation.track.id) {
+        notes.push({
+          type: 'clip_track_resolved',
+          tool: toolName,
+          clipId,
+          previousTrackId: requestedTrackId,
+          trackId: activeLocation.track.id,
+          reason: 'The clip was found on the active timeline track.',
+        });
+      }
+
+      return {
+        sequenceId: state.activeSequenceId,
+        trackId: activeLocation.track.id,
+        clipId,
+        notes,
+      };
+    }
+  }
+
+  return {
+    sequenceId: requestedSequenceId ?? getRequiredStringArg(args, 'sequenceId', toolName),
+    trackId: requestedTrackId ?? getRequiredStringArg(args, 'trackId', toolName),
+    clipId,
+    notes: [],
+  };
+}
+
 function normalizeClipAnalysisOptions(
   args: CodexJsonObject,
   toolName = 'clip_analyze',
@@ -2560,16 +2842,14 @@ async function analyzeClipToolCall(args: CodexJsonObject | null): Promise<CodexJ
     throw new Error('OpenReelio clip_analyze requires object arguments.');
   }
 
-  const sequenceId = getRequiredStringArg(args, 'sequenceId', 'clip_analyze');
-  const trackId = getRequiredStringArg(args, 'trackId', 'clip_analyze');
-  const clipId = getRequiredStringArg(args, 'clipId', 'clip_analyze');
+  const target = await resolveClipReadTarget(args, 'clip_analyze');
   const options = normalizeClipAnalysisOptions(args);
 
   try {
     const response = await invoke<ClipAnalysisResponse>('sample_clip_frames', {
-      sequenceId,
-      trackId,
-      clipId,
+      sequenceId: target.sequenceId,
+      trackId: target.trackId,
+      clipId: target.clipId,
       options,
     });
     return {
@@ -2588,6 +2868,7 @@ async function analyzeClipToolCall(args: CodexJsonObject | null): Promise<CodexJ
       samples: response.bundle.samples,
       mapping: response.bundle.mapping,
       errors: response.bundle.errors,
+      targeting: target.notes.length > 0 ? target.notes : undefined,
       bundle: response.bundle as unknown as CodexJsonObject,
     };
   } catch (error) {
@@ -2603,17 +2884,15 @@ async function describeClipToolCall(args: CodexJsonObject | null): Promise<Codex
     throw new Error('OpenReelio clip_describe requires object arguments.');
   }
 
-  const sequenceId = getRequiredStringArg(args, 'sequenceId', 'clip_describe');
-  const trackId = getRequiredStringArg(args, 'trackId', 'clip_describe');
-  const clipId = getRequiredStringArg(args, 'clipId', 'clip_describe');
+  const target = await resolveClipReadTarget(args, 'clip_describe');
   const analysisOptions = normalizeClipAnalysisOptions(args, 'clip_describe');
   const perceptionOptions = normalizeClipPerceptionOptions(args);
 
   try {
     const response = await invoke<ClipPerceptionResponse>('describe_timeline_clip', {
-      sequenceId,
-      trackId,
-      clipId,
+      sequenceId: target.sequenceId,
+      trackId: target.trackId,
+      clipId: target.clipId,
       analysisOptions,
       perceptionOptions,
     });
@@ -2630,6 +2909,7 @@ async function describeClipToolCall(args: CodexJsonObject | null): Promise<Codex
       observations: response.bundle.observations,
       quality: response.bundle.quality,
       errors: response.bundle.errors,
+      targeting: target.notes.length > 0 ? target.notes : undefined,
       bundle: response.bundle as unknown as CodexJsonObject,
     };
   } catch (error) {
@@ -2907,7 +3187,40 @@ function buildTimelineSnapshot(
     available: true,
     activeSequenceId: state.activeSequenceId,
     activeSequence: activeSequence ? summarizeSequence(activeSequence) : null,
+    editingDefaults: activeSequence ? buildTimelineEditingDefaults(activeSequence) : null,
     sequences: state.sequences.map(summarizeSequence),
+  };
+}
+
+function buildTimelineEditingDefaults(
+  sequence: ProjectStateDto['sequences'][number],
+): CodexJsonObject {
+  return {
+    targetSequenceId: sequence.id,
+    targetSequenceName: sequence.name,
+    targetSequenceRule:
+      'Implicit edit requests target this active sequence. Do not place edits in inactive sequences unless the user explicitly switches the active timeline first.',
+    visualLayerOrder:
+      'Visual tracks are front-to-back: tracks[0] is the top/front layer; larger indexes render lower/behind. Audio track order does not affect visual stacking.',
+    createTrackDefaults:
+      'For text, subtitles, captions, callouts, B-roll overlays, and other visual overlays, create video/overlay/caption tracks at position 0. Audio tracks may be appended at the end.',
+    recommendedTracks: buildRecommendedTimelineTracks(sequence),
+  };
+}
+
+function buildRecommendedTimelineTracks(
+  sequence: ProjectStateDto['sequences'][number],
+): CodexJsonObject {
+  const textTrack = chooseTextOverlayTrack(sequence);
+  const captionTrack = chooseCaptionTrack(sequence);
+  const mainVideoTrack = chooseMainMediaVideoTrack(sequence);
+  const audioTrack = chooseAudioTrack(sequence);
+
+  return {
+    mainVideoTrackId: mainVideoTrack?.track.id ?? null,
+    textOverlayTrackId: textTrack?.track.id ?? null,
+    captionTrackId: captionTrack?.track.id ?? null,
+    audioTrackId: audioTrack?.track.id ?? null,
   };
 }
 
@@ -2919,12 +3232,18 @@ function summarizeSequence(sequence: unknown): CodexJsonObject {
     name: sequenceObject.name,
     trackCount: tracks.length,
     markerCount: Array.isArray(sequenceObject.markers) ? sequenceObject.markers.length : 0,
-    tracks: tracks.map((track) => {
+    tracks: tracks.map((track, index) => {
       const trackObject = asObject(track) ?? {};
       const clips = Array.isArray(trackObject.clips) ? trackObject.clips : [];
       return {
         id: trackObject.id,
         name: trackObject.name,
+        index,
+        visualLayer: VISUAL_TRACK_KINDS.has(String(trackObject.kind))
+          ? index === 0
+            ? 'top/front'
+            : `below ${index} visual track(s) in array order`
+          : null,
         kind: trackObject.kind,
         muted: trackObject.muted,
         locked: trackObject.locked,
@@ -3006,6 +3325,105 @@ function findTrackSummary(state: ProjectStateDto, trackId: string): CodexJsonObj
   }
 
   return null;
+}
+
+function findSequenceById(
+  state: ProjectStateDto | null,
+  sequenceId: string | null | undefined,
+): ProjectStateDto['sequences'][number] | null {
+  if (!state || !sequenceId) {
+    return null;
+  }
+
+  return state.sequences.find((sequence) => sequence.id === sequenceId) ?? null;
+}
+
+function getTrackWithIndex(
+  sequence: ProjectStateDto['sequences'][number],
+  trackId: string | null | undefined,
+): TrackWithIndex | null {
+  if (!trackId) {
+    return null;
+  }
+
+  const index = sequence.tracks.findIndex((track) => track.id === trackId);
+  if (index < 0) {
+    return null;
+  }
+
+  return { track: sequence.tracks[index], index };
+}
+
+function findClipLocationInSequence(
+  sequence: ProjectStateDto['sequences'][number],
+  clipId: string,
+): TrackWithIndex | null {
+  for (const [index, track] of sequence.tracks.entries()) {
+    if (track.clips.some((clip) => clip.id === clipId)) {
+      return { track, index };
+    }
+  }
+
+  return null;
+}
+
+function isUsableTrack(track: ProjectStateDto['sequences'][number]['tracks'][number]): boolean {
+  return track.locked !== true && track.muted !== true && track.visible !== false;
+}
+
+function isTextOverlayTrack(
+  track: ProjectStateDto['sequences'][number]['tracks'][number],
+): boolean {
+  return TEXT_OVERLAY_TRACK_KINDS.has(track.kind) && isUsableTrack(track);
+}
+
+function chooseTextOverlayTrack(
+  sequence: ProjectStateDto['sequences'][number],
+): TrackWithIndex | null {
+  const candidates = sequence.tracks
+    .map((track, index) => ({ track, index }))
+    .filter((candidate) => isTextOverlayTrack(candidate.track));
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  return candidates[0];
+}
+
+function chooseCaptionTrack(sequence: ProjectStateDto['sequences'][number]): TrackWithIndex | null {
+  return (
+    sequence.tracks
+      .map((track, index) => ({ track, index }))
+      .find((candidate) => candidate.track.kind === 'caption' && isUsableTrack(candidate.track)) ??
+    null
+  );
+}
+
+function chooseMainMediaVideoTrack(
+  sequence: ProjectStateDto['sequences'][number],
+): TrackWithIndex | null {
+  const candidates = sequence.tracks
+    .map((track, index) => ({ track, index }))
+    .filter((candidate) => candidate.track.kind === 'video' && isUsableTrack(candidate.track));
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  return (
+    candidates.find((candidate) => candidate.track.isBaseTrack === true) ??
+    candidates[candidates.length - 1]
+  );
+}
+
+function chooseAudioTrack(sequence: ProjectStateDto['sequences'][number]): TrackWithIndex | null {
+  return (
+    sequence.tracks
+      .map((track, index) => ({ track, index }))
+      .find((candidate) => candidate.track.kind === 'audio' && candidate.track.locked !== true) ??
+    null
+  );
 }
 
 function buildAssetsList(
@@ -3102,10 +3520,366 @@ function createContextToken(): string {
   return `orctx:${Date.now()}:${Math.random().toString(36).slice(2)}`;
 }
 
+function normalizeCreateTrackLayering(
+  commandType: string,
+  payload: CodexJsonObject,
+  notes: CodexJsonObject[],
+): void {
+  if (commandType !== 'CreateTrack') {
+    return;
+  }
+
+  const kind = getString(payload, 'kind')?.trim().toLowerCase();
+  if (!kind || !VISUAL_TRACK_KINDS.has(kind)) {
+    return;
+  }
+
+  if (payload.position === 0) {
+    return;
+  }
+
+  const previousPosition = payload.position ?? null;
+  payload.position = 0;
+  notes.push({
+    type: 'visual_track_position_defaulted',
+    commandType,
+    previousPosition,
+    position: 0,
+    reason: 'Visual/text/caption tracks must be created at the front/top layer.',
+  });
+}
+
+function normalizeActiveSequenceTarget(
+  commandType: string,
+  payload: CodexJsonObject,
+  tokenRecord: ContextTokenRecord,
+  notes: CodexJsonObject[],
+): void {
+  if (!ACTIVE_TIMELINE_SCOPED_COMMAND_TYPES.has(commandType) || !tokenRecord.activeSequenceId) {
+    return;
+  }
+
+  const previousSequenceId = getString(payload, 'sequenceId')?.trim() || null;
+  if (previousSequenceId === tokenRecord.activeSequenceId) {
+    return;
+  }
+
+  payload.sequenceId = tokenRecord.activeSequenceId;
+  notes.push({
+    type: 'active_sequence_defaulted',
+    commandType,
+    previousSequenceId,
+    sequenceId: tokenRecord.activeSequenceId,
+    reason: 'Implicit timeline edits target the active OpenReelio timeline.',
+  });
+}
+
+function normalizeClipTargetLocation(
+  commandType: string,
+  payload: CodexJsonObject,
+  state: ProjectStateDto | null,
+  notes: CodexJsonObject[],
+): void {
+  if (!CLIP_TARGET_COMMAND_TYPES.has(commandType)) {
+    return;
+  }
+
+  const sequenceId = getString(payload, 'sequenceId')?.trim() || null;
+  const clipId = getString(payload, 'clipId')?.trim() || null;
+  const sequence = findSequenceById(state, sequenceId);
+  if (!sequence || !clipId) {
+    return;
+  }
+
+  const location = findClipLocationInSequence(sequence, clipId);
+  if (!location) {
+    return;
+  }
+
+  const previousTrackId = getString(payload, 'trackId')?.trim() || null;
+  if (previousTrackId === location.track.id) {
+    return;
+  }
+
+  payload.trackId = location.track.id;
+  notes.push({
+    type: 'clip_track_resolved',
+    commandType,
+    clipId,
+    previousTrackId,
+    trackId: location.track.id,
+    reason: 'The clip was found on the active timeline track before mutation.',
+  });
+}
+
+function normalizeTextAndCaptionTrackTarget(
+  commandType: string,
+  payload: CodexJsonObject,
+  state: ProjectStateDto | null,
+  notes: CodexJsonObject[],
+): void {
+  const sequenceId = getString(payload, 'sequenceId')?.trim() || null;
+  const sequence = findSequenceById(state, sequenceId);
+  if (!sequence) {
+    return;
+  }
+
+  const currentTrackId = getString(payload, 'trackId')?.trim() || null;
+  const currentTrack = getTrackWithIndex(sequence, currentTrackId);
+
+  if (TEXT_OVERLAY_COMMAND_TYPES.has(commandType)) {
+    const targetTrack = chooseTextOverlayTrack(sequence);
+    if (!targetTrack) {
+      return;
+    }
+
+    if (
+      currentTrack &&
+      isTextOverlayTrack(currentTrack.track) &&
+      currentTrack.index <= targetTrack.index
+    ) {
+      return;
+    }
+
+    payload.trackId = targetTrack.track.id;
+    notes.push({
+      type: 'text_overlay_track_defaulted',
+      commandType,
+      previousTrackId: currentTrackId,
+      trackId: targetTrack.track.id,
+      reason: 'Editable text must be placed on the top/front visual layer so it is visible.',
+    });
+    return;
+  }
+
+  if (!CAPTION_TRACK_COMMAND_TYPES.has(commandType)) {
+    return;
+  }
+
+  const targetTrack = chooseCaptionTrack(sequence);
+  if (!targetTrack) {
+    return;
+  }
+
+  if (currentTrack?.track.kind === 'caption' && currentTrack.index <= targetTrack.index) {
+    return;
+  }
+
+  payload.trackId = targetTrack.track.id;
+  notes.push({
+    type: 'caption_track_defaulted',
+    commandType,
+    previousTrackId: currentTrackId,
+    trackId: targetTrack.track.id,
+    reason: 'Generated captions must target a caption track on the top/front visual layer.',
+  });
+}
+
+function normalizePrimitiveMediaTrackTarget(
+  commandType: string,
+  payload: CodexJsonObject,
+  state: ProjectStateDto | null,
+  notes: CodexJsonObject[],
+): void {
+  if (!PRIMITIVE_MEDIA_INSERT_COMMAND_TYPES.has(commandType)) {
+    return;
+  }
+
+  const sequenceId = getString(payload, 'sequenceId')?.trim() || null;
+  const assetId = getString(payload, 'assetId')?.trim() || null;
+  const sequence = findSequenceById(state, sequenceId);
+  const asset = state?.assets.find((candidate) => candidate.id === assetId) ?? null;
+  if (!sequence || !asset) {
+    return;
+  }
+
+  const currentTrackId = getString(payload, 'trackId')?.trim() || null;
+  const currentTrack = getTrackWithIndex(sequence, currentTrackId);
+  const expectsAudioTrack = asset.kind === 'audio';
+  const currentTrackMatches = expectsAudioTrack
+    ? currentTrack?.track.kind === 'audio' && currentTrack.track.locked !== true
+    : currentTrack?.track.kind === 'video' && isUsableTrack(currentTrack.track);
+
+  if (currentTrackMatches) {
+    return;
+  }
+
+  const fallbackTrack = expectsAudioTrack ? chooseAudioTrack(sequence) : chooseMainMediaVideoTrack(sequence);
+  if (!fallbackTrack) {
+    return;
+  }
+
+  payload.trackId = fallbackTrack.track.id;
+  notes.push({
+    type: expectsAudioTrack ? 'audio_track_defaulted' : 'main_video_track_defaulted',
+    commandType,
+    previousTrackId: currentTrackId,
+    trackId: fallbackTrack.track.id,
+    reason: expectsAudioTrack
+      ? 'Audio assets must target an unlocked audio track.'
+      : 'Raw media inserts must use a video track for preview compatibility; text and captions use separate top visual layers.',
+  });
+}
+
+function commandNeedsProjectStateForTargeting(
+  commandType: string,
+  payload: CodexJsonObject,
+): boolean {
+  return (
+    PRIMITIVE_MEDIA_INSERT_COMMAND_TYPES.has(commandType) ||
+    TEXT_OVERLAY_COMMAND_TYPES.has(commandType) ||
+    CAPTION_TRACK_COMMAND_TYPES.has(commandType) ||
+    (CLIP_TARGET_COMMAND_TYPES.has(commandType) && Boolean(getString(payload, 'clipId')?.trim()))
+  );
+}
+
+async function normalizeCommandPayloadForExternalMutation(
+  commandType: string,
+  payload: CodexJsonObject,
+  tokenRecord: ContextTokenRecord,
+): Promise<TimelineTargetNormalization> {
+  const normalizedPayload: CodexJsonObject = { ...payload };
+  const notes: CodexJsonObject[] = [];
+
+  normalizeActiveSequenceTarget(commandType, normalizedPayload, tokenRecord, notes);
+  normalizeCreateTrackLayering(commandType, normalizedPayload, notes);
+
+  const state = commandNeedsProjectStateForTargeting(commandType, normalizedPayload)
+    ? await readOptionalProjectState()
+    : null;
+  normalizePrimitiveMediaTrackTarget(commandType, normalizedPayload, state, notes);
+  normalizeClipTargetLocation(commandType, normalizedPayload, state, notes);
+  normalizeTextAndCaptionTrackTarget(commandType, normalizedPayload, state, notes);
+
+  return { payload: normalizedPayload, notes };
+}
+
+function planRequiresProjectStateForTargeting(plan: AgentPlan): boolean {
+  return plan.steps.some((step) => {
+    const params = asObject(step.params);
+    return params ? commandNeedsProjectStateForTargeting(step.toolName, params) : false;
+  });
+}
+
+function normalizeAgentPlanForExternalMutation(
+  plan: AgentPlan,
+  tokenRecord: ContextTokenRecord,
+  state: ProjectStateDto | null,
+): { plan: AgentPlan; notes: CodexJsonObject[] } {
+  const notes: CodexJsonObject[] = [];
+  const steps = plan.steps.map((step) => {
+    const params = asObject(step.params) ?? {};
+    const normalizedParams: CodexJsonObject = { ...params };
+    normalizeActiveSequenceTarget(step.toolName, normalizedParams, tokenRecord, notes);
+    normalizeCreateTrackLayering(step.toolName, normalizedParams, notes);
+    normalizePrimitiveMediaTrackTarget(step.toolName, normalizedParams, state, notes);
+    normalizeClipTargetLocation(step.toolName, normalizedParams, state, notes);
+    normalizeTextAndCaptionTrackTarget(step.toolName, normalizedParams, state, notes);
+
+    return {
+      ...step,
+      params: normalizedParams as AgentPlan['steps'][number]['params'],
+    };
+  });
+
+  return {
+    plan: {
+      ...plan,
+      steps,
+    },
+    notes,
+  };
+}
+
+function validateCreateSequencePlanBoundary(
+  plan: AgentPlan,
+): { valid: true } | { valid: false; message: string } {
+  const createSequenceStep = plan.steps.find((step) => step.toolName === 'CreateSequence');
+  if (!createSequenceStep) {
+    return { valid: true };
+  }
+
+  const hasAdditionalTimelineMutation = plan.steps.some(
+    (step) =>
+      step.id !== createSequenceStep.id && ACTIVE_TIMELINE_SCOPED_COMMAND_TYPES.has(step.toolName),
+  );
+  if (!hasAdditionalTimelineMutation) {
+    return { valid: true };
+  }
+
+  return {
+    valid: false,
+    message:
+      `Plan step '${createSequenceStep.id}' creates a new sequence. Create the sequence first, read openreelio.timeline_snapshot again, then apply timeline edits to the newly active sequence with fresh track IDs.`,
+  };
+}
+
+async function normalizeMediaInsertTarget(
+  input: {
+    sequenceId: string;
+    trackId: string;
+    assetId: string;
+    audioOnly: boolean;
+  },
+  tokenRecord: ContextTokenRecord,
+): Promise<MediaInsertTargetNormalization> {
+  const notes: CodexJsonObject[] = [];
+  let sequenceId = input.sequenceId;
+  let trackId = input.trackId;
+  let state: ProjectStateDto | null = null;
+
+  if (tokenRecord.activeSequenceId && sequenceId !== tokenRecord.activeSequenceId) {
+    notes.push({
+      type: 'active_sequence_defaulted',
+      commandType: 'MediaInsert',
+      previousSequenceId: sequenceId,
+      sequenceId: tokenRecord.activeSequenceId,
+      reason: 'Implicit media placement targets the active OpenReelio timeline.',
+    });
+    sequenceId = tokenRecord.activeSequenceId;
+    state = await readOptionalProjectState();
+  }
+
+  state = state ?? (await readOptionalProjectState());
+  const sequence = findSequenceById(state, sequenceId);
+  if (!sequence) {
+    return { sequenceId, trackId, notes };
+  }
+
+  const assetKind = state?.assets.find((asset) => asset.id === input.assetId)?.kind ?? null;
+  const expectsAudioTrack = input.audioOnly || assetKind === 'audio';
+  const currentTrack = getTrackWithIndex(sequence, trackId);
+  const currentTrackMatches = expectsAudioTrack
+    ? currentTrack?.track.kind === 'audio' && currentTrack.track.locked !== true
+    : currentTrack?.track.kind === 'video' && isUsableTrack(currentTrack.track);
+
+  if (currentTrackMatches) {
+    return { sequenceId, trackId, notes };
+  }
+
+  const fallbackTrack = expectsAudioTrack ? chooseAudioTrack(sequence) : chooseMainMediaVideoTrack(sequence);
+  if (!fallbackTrack) {
+    return { sequenceId, trackId, notes };
+  }
+
+  notes.push({
+    type: expectsAudioTrack ? 'audio_track_defaulted' : 'main_video_track_defaulted',
+    commandType: 'MediaInsert',
+    previousTrackId: trackId,
+    trackId: fallbackTrack.track.id,
+    reason: expectsAudioTrack
+      ? 'Audio media must target an unlocked audio track.'
+      : 'Primary media placement targets the base visible video track; overlays/text use top visual tracks.',
+  });
+  trackId = fallbackTrack.track.id;
+
+  return { sequenceId, trackId, notes };
+}
+
 function validateContextToken(
   context: OpenReelioCodexToolContext,
   token: string | null,
-): { valid: true } | { valid: false; message: string } {
+): { valid: true; record: ContextTokenRecord } | { valid: false; message: string } {
   if (!token) {
     return {
       valid: false,
@@ -3139,7 +3913,7 @@ function validateContextToken(
     };
   }
 
-  return { valid: true };
+  return { valid: true, record };
 }
 
 function buildCommandSchema(): CodexJsonObject {
@@ -3165,7 +3939,7 @@ function buildCommandSchema(): CodexJsonObject {
       CreateTrack: {
         required: ['sequenceId', 'kind', 'name'],
         optional: ['position'],
-        note: 'Use kind video or overlay for editable text clips. AddTextClip requires a target video/overlay track; create one first when no suitable upper text track exists.',
+        note: 'Use kind video or overlay for editable text clips. Visual track order is front-to-back, so use position 0 for text, captions, B-roll overlays, and any visual layer that must appear above the base video. Audio tracks can be appended.',
       },
       InsertClip: {
         required: ['sequenceId', 'trackId', 'assetId', 'timelineStart'],
@@ -3202,7 +3976,7 @@ function buildCommandSchema(): CodexJsonObject {
         required: ['sequenceId', 'trackId', 'timelineIn', 'duration', 'textData'],
         textDataShape:
           'TextClipData includes content, style(fontFamily/fontSize/fontWeight/color/backgroundColor/backgroundPadding/alignment/bold/italic/underline/lineHeight/letterSpacing), position(x/y 0..1), shadow(color/offsetX/offsetY/blur), outline(color/width), rotation, and opacity.',
-        note: 'Text clips must be placed on a video or overlay track. Use SetClipTransform after creation when scale or anchor must be exact.',
+        note: 'Text clips must be placed on a top/front video or overlay track above the base video. The Codex bridge will correct below-base text tracks when possible. Use SetClipTransform after creation when scale or anchor must be exact.',
       },
       UpdateTextClip: {
         required: ['sequenceId', 'trackId', 'clipId', 'textData'],
@@ -3227,6 +4001,8 @@ function buildCommandSchema(): CodexJsonObject {
     rules: [
       'Read project_state or timeline_snapshot before using IDs and before every mutation.',
       'Pass the returned contextToken to media_insert, plan_apply, or command_execute.',
+      'When the user says the timeline/current edit/this part without naming another sequence, use the activeSequenceId from the latest timeline_snapshot or selection_read.',
+      'Visual tracks are ordered front-to-back: tracks[0] is top/front. Create visual overlay/text/caption tracks at position 0 so they render above the base video.',
       'Use media_insert instead of raw InsertClip when placing video, image, or audio assets on the timeline.',
       'Never edit .openreelio state files directly.',
       'command_execute prompts the user for approval and persists through the OpenReelio command log.',
@@ -3235,7 +4011,8 @@ function buildCommandSchema(): CodexJsonObject {
     mediaWorkflows: {
       timelinePlacement: [
         'Read timeline_snapshot and assets_list to copy exact sequence, track, and asset IDs.',
-        'Choose a visible video or overlay track for video/image assets and an audio track for audio assets.',
+        'Use activeSequenceId as the target sequence unless the user explicitly switches to another sequence.',
+        'Choose the base visible video track for primary video/image assets, a top/front overlay track for visual overlays, and an audio track for audio assets.',
         'Call openreelio.media_insert with timelineStart and optional sourceIn/sourceOut.',
         'Do not put a video asset on an audio track unless audioOnly=true is intentional; that creates an audio-only clip and will not show in preview.',
         'For video assets, let autoExtractLinkedAudio default to true so the matching audio clip is created, linked, and the source video clip is muted.',
@@ -3263,7 +4040,7 @@ function buildCommandSchema(): CodexJsonObject {
       editableOverlay: [
         'Read timeline_snapshot to find active sequence, existing text clips, and usable video/overlay tracks.',
         'Read annotation_read for overlapping source assets when placement should avoid faces, objects, or OCR text.',
-        'CreateTrack(kind="video" or "overlay") when there is no unlocked non-overlapping text track above the media.',
+        'CreateTrack(kind="video" or "overlay", position=0) when there is no unlocked non-overlapping text track above the media.',
         'AddTextClip with complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity.',
         'SetClipTransform for exact preview drag/resize/rotate parity using normalized position, scale, rotationDeg, and anchor.',
       ],
