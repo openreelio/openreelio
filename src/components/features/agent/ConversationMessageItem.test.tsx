@@ -198,7 +198,7 @@ describe('ConversationMessageItem', () => {
       render(<ConversationMessageItem message={message} />);
 
       expect(screen.getByTestId('assistant-artifact-group')).toBeInTheDocument();
-      expect(screen.getByText('Work Details')).toBeInTheDocument();
+      expect(screen.getByText('Activity')).toBeInTheDocument();
       expect(screen.queryByTestId('tool-call-part')).not.toBeInTheDocument();
       expect(screen.queryByTestId('tool-result-part')).not.toBeInTheDocument();
 
@@ -237,7 +237,7 @@ describe('ConversationMessageItem', () => {
       render(<ConversationMessageItem message={message} />);
 
       expect(screen.getByTestId('assistant-artifact-group')).toBeInTheDocument();
-      expect(screen.getByText('Work Details')).toBeInTheDocument();
+      expect(screen.getByText('Activity')).toBeInTheDocument();
       expect(screen.getByText('1 action')).toBeInTheDocument();
       expect(screen.queryByTestId('tool-call-part')).not.toBeInTheDocument();
 
@@ -286,8 +286,38 @@ describe('ConversationMessageItem', () => {
       };
       rerender(<ConversationMessageItem message={failedMessage} />);
 
-      expect(screen.getByText('Attention')).toBeInTheDocument();
+      expect(screen.getByText('Retried')).toBeInTheDocument();
+      expect(screen.getByText('retry history')).toBeInTheDocument();
       expect(screen.queryByTestId('tool-result-part')).not.toBeInTheDocument();
+    });
+
+    it('should reserve attention status for final assistant errors', () => {
+      const message: ConversationMessage = {
+        id: 'msg-7e',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool_result',
+            stepId: 's1',
+            tool: 'render_preview',
+            success: false,
+            error: 'Render failed',
+            duration: 100,
+          },
+          {
+            type: 'error',
+            code: 'EXTERNAL_AGENT_ERROR',
+            message: 'Codex turn failed',
+            phase: 'external_agent',
+            recoverable: true,
+          },
+        ],
+        timestamp: Date.now(),
+      };
+
+      render(<ConversationMessageItem message={message} />);
+
+      expect(screen.getByText('Attention')).toBeInTheDocument();
     });
   });
 

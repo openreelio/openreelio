@@ -72,7 +72,7 @@ export function AgentArtifactDetailPanel({
     <div className={containerClassName} data-testid="agent-artifact-detail-panel">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-text-tertiary">
-          Work Details
+          Activity Details
         </span>
         <span className="rounded-full border border-border-subtle bg-surface-base px-2 py-0.5 text-[11px] text-text-secondary">
           {new Date(detail.timestamp).toLocaleTimeString()}

@@ -50,6 +50,6 @@ describe('ChatInputArea', () => {
 
     expect(screen.queryByTestId('tool-approval-part')).not.toBeInTheDocument();
     expect(screen.getByTestId('prompt-input')).toBeDisabled();
-    expect(screen.getByText('Permission: OpenReelio edit')).toBeInTheDocument();
+    expect(screen.getByText('Waiting for approval: OpenReelio edit')).toBeInTheDocument();
   });
 });

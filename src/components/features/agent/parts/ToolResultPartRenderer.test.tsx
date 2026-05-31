@@ -53,7 +53,7 @@ describe('ToolResultPartRenderer', () => {
 
     await user.click(screen.getByText('split_clip'));
 
-    expect(screen.getByText('Clip not found')).toBeInTheDocument();
+    expect(screen.getAllByText('Clip not found')).toHaveLength(2);
   });
 
   it('should expand to show data when clicked', async () => {
@@ -70,7 +70,31 @@ describe('ToolResultPartRenderer', () => {
 
     await user.click(screen.getByText('split_clip'));
 
+    await user.click(screen.getByTestId('tool-result-raw-toggle'));
+
     expect(screen.getByText(/"result": "ok"/)).toBeInTheDocument();
+  });
+
+  it('keeps raw result data behind a nested disclosure', async () => {
+    const part: ToolResultPart = {
+      type: 'tool_result',
+      stepId: 'step-1',
+      tool: 'timeline_snapshot',
+      success: true,
+      duration: 100,
+      data: { status: 'ok', payload: { large: true } },
+    };
+    const user = userEvent.setup();
+    render(<ToolResultPartRenderer part={part} />);
+
+    await user.click(screen.getByText('timeline_snapshot'));
+
+    expect(screen.getByText('Raw data')).toBeInTheDocument();
+    expect(screen.queryByText(/"large": true/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId('tool-result-raw-toggle'));
+
+    expect(screen.getByText(/"large": true/)).toBeInTheDocument();
   });
 
   it('should render clip analysis evidence when expanded', async () => {

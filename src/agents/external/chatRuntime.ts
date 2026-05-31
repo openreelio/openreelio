@@ -39,6 +39,9 @@ export interface ExternalAgentChatRuntimeState {
   startedTools: number;
   completedTools: number;
   latestIteration: number;
+  currentActivity: string | null;
+  runStartedAt: number | null;
+  lastActivityAt: number | null;
   pendingToolPermissionRequest: {
     id: string;
     tool: string;
@@ -86,6 +89,9 @@ const INITIAL_STATE: ExternalAgentChatRuntimeState = {
   startedTools: 0,
   completedTools: 0,
   latestIteration: 0,
+  currentActivity: null,
+  runStartedAt: null,
+  lastActivityAt: null,
   pendingToolPermissionRequest: null,
 };
 
@@ -154,7 +160,7 @@ export class ExternalAgentChatRuntimeController {
     this.unsubscribeApprovalDecisions =
       options.approvalBroker?.subscribeDecision((request, decision) => {
         this.persistApprovalDecision(request, decision);
-        this.updateApprovalPartStatus(request.id, decision === 'decline' || decision === 'cancel');
+        this.updateApprovalPartStatus(request, decision === 'decline' || decision === 'cancel');
       }) ?? null;
   }
 
@@ -250,11 +256,15 @@ export class ExternalAgentChatRuntimeController {
     }
 
     if (!this.getState(conversationSessionId).isRunning) {
+      const startedAt = Date.now();
       this.setState(
         {
           phase: 'starting',
           isRunning: true,
           error: null,
+          currentActivity: 'Starting Codex session',
+          runStartedAt: startedAt,
+          lastActivityAt: startedAt,
         },
         conversationSessionId,
       );
@@ -270,7 +280,16 @@ export class ExternalAgentChatRuntimeController {
         conversationSessionId,
       );
       this.startExternalAssistantMessage(externalSession.sessionId, conversationSessionId);
-      this.setState({ phase: 'running', isRunning: true, error: null }, conversationSessionId);
+      this.setState(
+        {
+          phase: 'running',
+          isRunning: true,
+          error: null,
+          currentActivity: 'Thinking',
+          lastActivityAt: Date.now(),
+        },
+        conversationSessionId,
+      );
       await this.options.adapter.sendMessage(externalSession.sessionId, {
         content,
         cwd: this.cwd,
@@ -437,6 +456,7 @@ export class ExternalAgentChatRuntimeController {
     switch (event.type) {
       case 'assistant_delta':
         this.updateTrailingPart(event.sessionId, 'text', event.content);
+        this.markActivityForExternalSession(event.sessionId, 'Writing response');
         break;
 
       case 'assistant_completed':
@@ -445,6 +465,7 @@ export class ExternalAgentChatRuntimeController {
 
       case 'reasoning_delta':
         this.updateTrailingPart(event.sessionId, 'reasoning', event.content);
+        this.markActivityForExternalSession(event.sessionId, 'Reasoning');
         break;
 
       case 'tool_started':
@@ -468,6 +489,8 @@ export class ExternalAgentChatRuntimeController {
           phase: 'running',
           isRunning: true,
           error: null,
+          currentActivity: 'Thinking',
+          lastActivityAt: Date.now(),
         });
         break;
 
@@ -520,6 +543,8 @@ export class ExternalAgentChatRuntimeController {
       {
         startedTools: sessionState.startedTools + 1,
         latestIteration: sessionState.latestIteration + 1,
+        currentActivity: formatToolActivity(event.tool, event.description),
+        lastActivityAt: Date.now(),
       },
       this.getConversationSessionIdForExternalSession(event.sessionId),
     );
@@ -552,6 +577,10 @@ export class ExternalAgentChatRuntimeController {
     this.setState(
       {
         completedTools: this.getStateForExternalSession(event.sessionId).completedTools + 1,
+        currentActivity: event.success
+          ? `Finished ${formatToolNameForActivity(event.tool)}`
+          : `Retrying after ${formatToolNameForActivity(event.tool)}`,
+        lastActivityAt: Date.now(),
       },
       this.getConversationSessionIdForExternalSession(event.sessionId),
     );
@@ -612,6 +641,10 @@ export class ExternalAgentChatRuntimeController {
       status: 'pending',
     });
     this.approvalPartIndex.set(approvalId, { messageId, partIndex });
+    this.markActivityForExternalSession(
+      event.sessionId,
+      `Waiting for approval: ${event.tool ?? formatApprovalTool(event.approvalType)}`,
+    );
   }
 
   private handleBrokerApprovalRequest(request: ExternalAgentApprovalRequest): void {
@@ -640,6 +673,7 @@ export class ExternalAgentChatRuntimeController {
       status: 'pending',
     });
     this.approvalPartIndex.set(request.id, { messageId, partIndex });
+    this.markActivityForExternalSession(request.sessionId, `Waiting for approval: ${request.tool}`);
   }
 
   private handleTurnCompleted(
@@ -704,6 +738,9 @@ export class ExternalAgentChatRuntimeController {
       : this.getActiveMessageId();
 
     if (messageId) {
+      if (externalSessionId) {
+        this.settleUnresolvedToolCalls(externalSessionId, 'failed');
+      }
       this.options.conversation.appendPart(
         messageId,
         createErrorPart('EXTERNAL_AGENT_ERROR', error.message, 'external_agent', true),
@@ -716,7 +753,14 @@ export class ExternalAgentChatRuntimeController {
     }
 
     this.setState(
-      { phase: 'failed', isRunning: false, error },
+      {
+        phase: 'failed',
+        isRunning: false,
+        error,
+        currentActivity: null,
+        lastActivityAt: Date.now(),
+        pendingToolPermissionRequest: null,
+      },
       externalSessionId
         ? this.getConversationSessionIdForExternalSession(externalSessionId)
         : this.activeConversationSessionId,
@@ -742,12 +786,26 @@ export class ExternalAgentChatRuntimeController {
       : this.getActiveMessageId();
 
     if (externalSessionId) {
+      this.settleUnresolvedToolCalls(
+        externalSessionId,
+        phase === 'completed' ? 'completed' : 'failed',
+      );
       this.finalizeMessagesForExternalSession(externalSessionId);
     } else if (messageId) {
       this.options.conversation.finalizeMessage(messageId);
     }
 
-    this.setState({ phase, isRunning: false, error: null }, conversationSessionId);
+    this.setState(
+      {
+        phase,
+        isRunning: false,
+        error: null,
+        currentActivity: null,
+        lastActivityAt: Date.now(),
+        pendingToolPermissionRequest: null,
+      },
+      conversationSessionId,
+    );
     if (!shouldNotify) {
       return;
     }
@@ -807,6 +865,13 @@ export class ExternalAgentChatRuntimeController {
     return this.getState(this.getConversationSessionIdForExternalSession(externalSessionId));
   }
 
+  private markActivityForExternalSession(externalSessionId: string, currentActivity: string): void {
+    this.setStateForExternalSession(externalSessionId, {
+      currentActivity,
+      lastActivityAt: Date.now(),
+    });
+  }
+
   private setStateForExternalSession(
     externalSessionId: string,
     update: Partial<ExternalAgentChatRuntimeState>,
@@ -854,6 +919,27 @@ export class ExternalAgentChatRuntimeController {
     return `${sessionId}:${itemId}`;
   }
 
+  private settleUnresolvedToolCalls(
+    externalSessionId: string,
+    status: 'completed' | 'failed',
+  ): void {
+    const keyPrefix = `${externalSessionId}:`;
+    for (const [key, indexedPart] of this.itemPartIndex.entries()) {
+      if (!key.startsWith(keyPrefix)) {
+        continue;
+      }
+
+      const part = this.options.conversation.getMessageParts(indexedPart.messageId)?.[
+        indexedPart.partIndex
+      ];
+      if (part?.type === 'tool_call' && (part.status === 'pending' || part.status === 'running')) {
+        this.options.conversation.updatePart(indexedPart.messageId, indexedPart.partIndex, {
+          status,
+        });
+      }
+    }
+  }
+
   private shutdownTrackedExternalSessions(adapter: ExternalAgentRuntimeAdapter): void {
     const externalSessionIds = new Set(
       [...this.sessionByConversationSessionId.values()].map((session) => session.sessionId),
@@ -878,13 +964,18 @@ export class ExternalAgentChatRuntimeController {
     this.activeConversationSessionId = null;
   }
 
-  private updateApprovalPartStatus(requestId: string, denied: boolean): void {
+  private updateApprovalPartStatus(request: ExternalAgentApprovalRequest, denied: boolean): void {
+    const requestId = request.id;
     const target = this.approvalPartIndex.get(requestId);
     if (target) {
       this.options.conversation.updatePart(target.messageId, target.partIndex, {
         status: denied ? 'denied' : 'approved',
       });
       this.approvalPartIndex.delete(requestId);
+      this.markActivityForExternalSession(
+        request.sessionId,
+        denied ? 'Approval denied' : 'Continuing after approval',
+      );
       return;
     }
 
@@ -900,6 +991,10 @@ export class ExternalAgentChatRuntimeController {
         status: denied ? 'denied' : 'approved',
       });
     }
+    this.markActivityForExternalSession(
+      request.sessionId,
+      denied ? 'Approval denied' : 'Continuing after approval',
+    );
   }
 
   private persistApprovalDecision(
@@ -974,6 +1069,23 @@ function inferApprovalRiskLevel(
     return 'medium';
   }
   return 'high';
+}
+
+function formatToolActivity(tool: string, description: string): string {
+  const toolName = formatToolNameForActivity(tool);
+  const trimmedDescription = description.trim();
+
+  if (!trimmedDescription || trimmedDescription === `Run ${tool}`) {
+    return `Running ${toolName}`;
+  }
+
+  return trimmedDescription.length > 80
+    ? `${trimmedDescription.slice(0, 77).trimEnd()}...`
+    : trimmedDescription;
+}
+
+function formatToolNameForActivity(tool: string): string {
+  return tool.replace(/^openreelio\./, '').replace(/^functions\./, '');
 }
 
 function formatApprovalTool(

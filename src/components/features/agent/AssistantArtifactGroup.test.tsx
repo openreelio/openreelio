@@ -14,6 +14,7 @@ describe('AssistantArtifactGroup', () => {
         hasCompaction={false}
         hasRunningArtifacts={false}
         hasFailedArtifacts={false}
+        hasError={false}
         defaultOpen={true}
       >
         <div data-testid="artifact-child">artifact</div>
@@ -31,6 +32,7 @@ describe('AssistantArtifactGroup', () => {
         hasCompaction={false}
         hasRunningArtifacts={false}
         hasFailedArtifacts={false}
+        hasError={false}
         defaultOpen={false}
       >
         <div data-testid="artifact-child">artifact</div>
@@ -51,6 +53,7 @@ describe('AssistantArtifactGroup', () => {
         hasCompaction={false}
         hasRunningArtifacts={false}
         hasFailedArtifacts={false}
+        hasError={false}
         defaultOpen={false}
       >
         <div data-testid="artifact-child">artifact</div>
@@ -71,6 +74,7 @@ describe('AssistantArtifactGroup', () => {
         hasCompaction={false}
         hasRunningArtifacts={false}
         hasFailedArtifacts={false}
+        hasError={false}
         defaultOpen={false}
       >
         <div data-testid="artifact-child">artifact</div>
@@ -91,6 +95,7 @@ describe('AssistantArtifactGroup', () => {
         hasCompaction={false}
         hasRunningArtifacts={false}
         hasFailedArtifacts={false}
+        hasError={false}
         defaultOpen={true}
         highlighted={false}
       >
@@ -110,6 +115,7 @@ describe('AssistantArtifactGroup', () => {
         hasCompaction={false}
         hasRunningArtifacts={false}
         hasFailedArtifacts={false}
+        hasError={false}
         defaultOpen={false}
         highlighted
       >
@@ -132,6 +138,7 @@ describe('AssistantArtifactGroup', () => {
         hasCompaction={false}
         hasRunningArtifacts
         hasFailedArtifacts={false}
+        hasError={false}
         defaultOpen={true}
       >
         <div data-testid="artifact-child">artifact</div>
@@ -150,6 +157,7 @@ describe('AssistantArtifactGroup', () => {
         hasCompaction={false}
         hasRunningArtifacts
         hasFailedArtifacts={false}
+        hasError={false}
         defaultOpen={true}
       >
         <div data-testid="artifact-child">artifact</div>
@@ -170,6 +178,7 @@ describe('AssistantArtifactGroup', () => {
         hasCompaction={false}
         hasRunningArtifacts
         hasFailedArtifacts
+        hasError={false}
         defaultOpen={false}
       >
         {Array.from({ length: 80 }, (_, index) => (
@@ -181,7 +190,7 @@ describe('AssistantArtifactGroup', () => {
     await user.click(screen.getByTestId('assistant-artifact-toggle'));
 
     expect(screen.getByTestId('assistant-artifact-group-body')).toHaveClass(
-      'max-h-72',
+      'max-h-56',
       'overflow-y-auto',
     );
   });

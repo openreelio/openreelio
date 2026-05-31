@@ -85,6 +85,65 @@ describe('AgentComposerTray', () => {
       />,
     );
 
-    expect(screen.getByTestId('agent-runtime-pill')).toHaveTextContent('Permission: delete_clip');
+    expect(screen.getByTestId('agent-runtime-pill')).toHaveTextContent(
+      'Waiting for approval: delete_clip',
+    );
+  });
+
+  it('labels external startup and running phases instead of falling back to ready', () => {
+    const { rerender } = render(
+      <AgentComposerTray
+        currentAgentName="Codex"
+        isExperimentalSession={false}
+        isRunning
+        stopState="idle"
+        phase="starting"
+        queueSize={0}
+        runtimeSummary={{ startedTools: 0, completedTools: 0, latestIteration: 0 }}
+        specialistDefinitions={[]}
+      />,
+    );
+
+    expect(screen.getByTestId('agent-runtime-pill')).toHaveTextContent('Starting Codex');
+
+    rerender(
+      <AgentComposerTray
+        currentAgentName="Codex"
+        isExperimentalSession={false}
+        isRunning
+        stopState="idle"
+        phase="running"
+        queueSize={0}
+        runtimeSummary={{ startedTools: 0, completedTools: 0, latestIteration: 0 }}
+        specialistDefinitions={[]}
+      />,
+    );
+
+    expect(screen.getByTestId('agent-runtime-pill')).toHaveTextContent('Working');
+  });
+
+  it('shows current activity from the runtime summary', () => {
+    render(
+      <AgentComposerTray
+        currentAgentName="Codex"
+        isExperimentalSession={false}
+        isRunning
+        stopState="idle"
+        phase="running"
+        queueSize={0}
+        runtimeSummary={{
+          startedTools: 2,
+          completedTools: 1,
+          latestIteration: 2,
+          currentActivity: 'Analyzing clip frames',
+          runStartedAt: Date.now(),
+          lastActivityAt: Date.now(),
+        }}
+        specialistDefinitions={[]}
+      />,
+    );
+
+    expect(screen.getByTestId('agent-runtime-pill')).toHaveTextContent('Analyzing clip frames');
+    expect(screen.getByTestId('agent-runtime-pill')).toHaveTextContent('1/2');
   });
 });

@@ -36,6 +36,9 @@ const INITIAL_STATE: ExternalAgentChatRuntimeState = {
   startedTools: 0,
   completedTools: 0,
   latestIteration: 0,
+  currentActivity: null,
+  runStartedAt: null,
+  lastActivityAt: null,
   pendingToolPermissionRequest: null,
 };
 

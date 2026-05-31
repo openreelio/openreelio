@@ -9,6 +9,7 @@ interface AssistantArtifactGroupProps {
   hasCompaction: boolean;
   hasRunningArtifacts: boolean;
   hasFailedArtifacts: boolean;
+  hasError: boolean;
   defaultOpen: boolean;
   highlighted?: boolean;
   children: React.ReactNode;
@@ -27,6 +28,7 @@ export function AssistantArtifactGroup({
   hasCompaction,
   hasRunningArtifacts,
   hasFailedArtifacts,
+  hasError,
   defaultOpen,
   highlighted = false,
   children,
@@ -54,15 +56,28 @@ export function AssistantArtifactGroup({
     if (hasCompaction) {
       result.push('earlier context');
     }
+    if (hasFailedArtifacts && !hasError) {
+      result.push('retry history');
+    }
 
     return result;
-  }, [hasCompaction, patchFileCount, patchPartCount, toolCallCount, toolResultCount]);
+  }, [
+    hasCompaction,
+    hasError,
+    hasFailedArtifacts,
+    patchFileCount,
+    patchPartCount,
+    toolCallCount,
+    toolResultCount,
+  ]);
 
-  const status = hasFailedArtifacts
-    ? { label: 'Attention', tone: 'border-red-500/20 bg-red-500/10 text-red-300' }
-    : hasRunningArtifacts
-      ? { label: 'Running', tone: 'border-primary-500/20 bg-primary-500/10 text-primary-300' }
-      : { label: 'Completed', tone: 'border-green-500/20 bg-green-500/10 text-green-300' };
+  const status = hasRunningArtifacts
+    ? { label: 'Running', tone: 'border-primary-500/20 bg-primary-500/10 text-primary-300' }
+    : hasError
+      ? { label: 'Attention', tone: 'border-red-500/20 bg-red-500/10 text-red-300' }
+      : hasFailedArtifacts
+        ? { label: 'Retried', tone: 'border-yellow-500/20 bg-yellow-500/10 text-yellow-300' }
+        : { label: 'Completed', tone: 'border-green-500/20 bg-green-500/10 text-green-300' };
 
   return (
     <div
@@ -89,7 +104,7 @@ export function AssistantArtifactGroup({
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-[11px] font-medium text-text-secondary">Work Details</span>
+            <span className="text-[11px] font-medium text-text-secondary">Activity</span>
             <span
               className={`rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${status.tone}`}
             >
@@ -113,7 +128,7 @@ export function AssistantArtifactGroup({
 
       {isOpen && (
         <div
-          className="max-h-72 space-y-2 overflow-y-auto overscroll-contain border-t border-border-subtle px-2.5 py-2"
+          className="max-h-56 space-y-1.5 overflow-y-auto overscroll-contain border-t border-border-subtle px-2.5 py-2"
           data-testid="assistant-artifact-group-body"
         >
           {children}

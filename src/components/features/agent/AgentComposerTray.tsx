@@ -7,6 +7,9 @@ export interface AgentRuntimeSummary {
   startedTools: number;
   completedTools: number;
   latestIteration: number;
+  currentActivity?: string | null;
+  runStartedAt?: number | null;
+  lastActivityAt?: number | null;
 }
 
 export interface AgentRuntimePermissionRequest {
@@ -34,6 +37,12 @@ interface AgentComposerTrayProps {
 
 function getPhaseLabel(phase: string): string {
   switch (phase) {
+    case 'idle':
+      return 'Ready';
+    case 'starting':
+      return 'Starting Codex';
+    case 'running':
+      return 'Working';
     case 'thinking':
       return 'Thinking';
     case 'planning':
@@ -53,6 +62,21 @@ function getPhaseLabel(phase: string): string {
     default:
       return 'Ready';
   }
+}
+
+function formatElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+}
+
+function trimActivityLabel(label: string): string {
+  return label.length > 64 ? `${label.slice(0, 61).trimEnd()}...` : label;
 }
 
 function getRuntimeTone(input: {
@@ -99,6 +123,7 @@ export function AgentComposerTray({
   onStartSession,
 }: AgentComposerTrayProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
   const trayRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -116,6 +141,15 @@ export function AgentComposerTray({
     return () => document.removeEventListener('mousedown', handlePointerDown);
   }, [menuOpen]);
 
+  useEffect(() => {
+    if (!isRunning && !pendingToolPermissionRequest) {
+      return undefined;
+    }
+
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [isRunning, pendingToolPermissionRequest]);
+
   const startedTools = runtimeSummary.startedTools;
   const completedTools = runtimeSummary.completedTools;
 
@@ -124,13 +158,16 @@ export function AgentComposerTray({
       return 'Stopping';
     }
     if (pendingToolPermissionRequest) {
-      return `Permission: ${pendingToolPermissionRequest.tool}`;
+      return `Waiting for approval: ${pendingToolPermissionRequest.tool}`;
     }
     if (pendingClarificationQuestion) {
       return 'Waiting for clarification';
     }
     if (queueSize > 0 && !isRunning) {
       return `${queueSize} queued`;
+    }
+    if (isRunning && runtimeSummary.currentActivity) {
+      return trimActivityLabel(runtimeSummary.currentActivity);
     }
     return getPhaseLabel(phase);
   }, [
@@ -139,8 +176,32 @@ export function AgentComposerTray({
     pendingToolPermissionRequest,
     phase,
     queueSize,
+    runtimeSummary.currentActivity,
     stopState,
   ]);
+
+  const activityAgeLabel = useMemo(() => {
+    if (!isRunning || !runtimeSummary.lastActivityAt) {
+      return null;
+    }
+
+    const elapsedMs = now - runtimeSummary.lastActivityAt;
+    if (elapsedMs < 5000) {
+      return null;
+    }
+
+    const prefix = elapsedMs >= 30000 ? 'No update' : 'Updated';
+    return `${prefix} ${formatElapsed(elapsedMs)} ago`;
+  }, [isRunning, now, runtimeSummary.lastActivityAt]);
+
+  const runAgeLabel = useMemo(() => {
+    if (!isRunning || !runtimeSummary.runStartedAt || activityAgeLabel) {
+      return null;
+    }
+
+    const elapsedMs = now - runtimeSummary.runStartedAt;
+    return elapsedMs >= 10000 ? `Running ${formatElapsed(elapsedMs)}` : null;
+  }, [activityAgeLabel, isRunning, now, runtimeSummary.runStartedAt]);
 
   const showRuntime =
     isRunning ||
@@ -183,6 +244,11 @@ export function AgentComposerTray({
             data-testid="agent-runtime-pill"
           >
             <span className="truncate">{runtimeLabel}</span>
+            {(activityAgeLabel || runAgeLabel) && (
+              <span className="hidden shrink-0 text-text-tertiary sm:inline">
+                {activityAgeLabel ?? runAgeLabel}
+              </span>
+            )}
             {startedTools > 0 && (
               <span className="flex-shrink-0 text-text-tertiary">
                 {completedTools}/{startedTools}
