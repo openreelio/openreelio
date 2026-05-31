@@ -20,7 +20,6 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { usePlaybackLoop } from '@/hooks/usePlaybackLoop';
-import { useAssetFrameExtractor } from '@/hooks/useFrameExtractor';
 import { useSequenceRenderGraph } from '@/hooks/useSequenceRenderGraph';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 import { videoFrameBuffer } from '@/services/videoFrameBuffer';
@@ -193,17 +192,15 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   // Ref to track latest render request time (for race condition prevention)
   const lastRenderTimeRef = useRef<number>(0);
 
-  // Ref to track last prefetch time (to avoid thrashing)
-  const lastPrefetchTimeRef = useRef<number>(0);
-
-  // Track pending extractions to prevent duplicate requests
-  const pendingExtractions = useRef<Map<string, Promise<string | null>>>(new Map());
-
   // Track component mount state to prevent state updates after unmount
   const isMountedRef = useRef(true);
 
   // Ref to track last seek render time (for avoiding duplicate renders)
   const lastSeekRenderTimeRef = useRef<number>(-1);
+
+  // Keep frame extraction bounded: one render in flight and one latest request queued.
+  const renderPumpActiveRef = useRef(false);
+  const queuedRenderTimeRef = useRef<number | null>(null);
 
   // Store state
   const { isPlaying, currentTime, duration, syncWithTimeline, play, pause, seek } =
@@ -327,44 +324,6 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     [assets, renderGraph, timelineLookup],
   );
 
-  // Get active clip info for the legacy single-asset frame extractor
-  // (used for prefetching on the topmost visible clip)
-  const getClipAtTime = useCallback(
-    (time: number): { clip: Clip; sourceTime: number } | null => {
-      if (!activeSequence) {
-        return null;
-      }
-
-      const activeClips = getActiveClipsAtTime(activeSequence, time);
-      if (activeClips.length === 0) return null;
-      // Return the topmost clip (last in sorted array)
-      const topClip = activeClips[activeClips.length - 1];
-      return { clip: topClip.clip, sourceTime: topClip.sourceTime };
-    },
-    [activeSequence, getActiveClipsAtTime],
-  );
-
-  // Get active clip info for frame extraction (legacy hook compatibility)
-  const clipInfo = getClipAtTime(currentTime);
-  const activeAsset = clipInfo ? assets.get(clipInfo.clip.assetId) : null;
-
-  // Frame extractor for the topmost active asset (for prefetching)
-  // Note: extractFrame is not destructured as we use extractFrameForAsset for multi-layer rendering
-  const {
-    prefetchFrames,
-    isLoading: extractorLoading,
-    error: extractorError,
-  } = useAssetFrameExtractor({
-    assetId: activeAsset?.id || '',
-    assetPath: activeAsset?.uri || '',
-    enabled: !!activeAsset,
-  });
-
-  // Derive frame loading/error state directly from extractor
-  // (Removed useEffect syncing - per Vercel best practices, derive state during render)
-  const isFrameLoadingDerived = extractorLoading;
-  const frameErrorDerived = extractorError;
-
   // ===========================================================================
   // Frame Extraction (Multi-Asset Support)
   // ===========================================================================
@@ -449,7 +408,11 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
             return false;
           }
 
-          return !isCaptionLikeClip(track, clip, asset) && !isTextClip(clip.assetId);
+          return (
+            !isCaptionLikeClip(track, clip, asset) &&
+            !isTextClip(clip.assetId) &&
+            (asset?.kind === 'video' || asset?.kind === 'image')
+          );
         });
 
         const frameResults = await Promise.all(
@@ -702,12 +665,41 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     ],
   );
 
+  const requestRenderFrame = useCallback(
+    (time: number) => {
+      lastRenderTimeRef.current = time;
+      queuedRenderTimeRef.current = time;
+
+      if (renderPumpActiveRef.current) {
+        return;
+      }
+
+      renderPumpActiveRef.current = true;
+      void (async () => {
+        try {
+          while (isMountedRef.current) {
+            const nextTime = queuedRenderTimeRef.current;
+            if (nextTime === null) {
+              break;
+            }
+
+            queuedRenderTimeRef.current = null;
+            await renderFrame(nextTime);
+          }
+        } finally {
+          renderPumpActiveRef.current = false;
+        }
+      })();
+    },
+    [renderFrame],
+  );
+
   // Playback loop integration
   const handleFrame = useCallback(
     (time: number) => {
-      void renderFrame(time);
+      requestRenderFrame(time);
     },
-    [renderFrame],
+    [requestRenderFrame],
   );
 
   const handleEnded = useCallback(() => {
@@ -736,22 +728,9 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
     if (isSignificantChange) {
       lastSeekRenderTimeRef.current = currentTime;
-      void renderFrame(currentTime);
+      requestRenderFrame(currentTime);
     }
-  }, [currentTime, renderFrame]);
-
-  // Prefetch frames ahead during playback (throttled to avoid thrashing)
-  useEffect(() => {
-    if (isPlaying && activeAsset) {
-      // Only prefetch if we've moved significantly (> 1 second) to avoid thrashing
-      if (Math.abs(currentTime - lastPrefetchTimeRef.current) > 1) {
-        const prefetchStart = currentTime;
-        const prefetchEnd = Math.min(currentTime + 2, duration);
-        prefetchFrames(prefetchStart, prefetchEnd);
-        lastPrefetchTimeRef.current = currentTime;
-      }
-    }
-  }, [isPlaying, currentTime, duration, activeAsset, prefetchFrames]);
+  }, [currentTime, requestRenderFrame]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -839,12 +818,10 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     // Mark as mounted
     isMountedRef.current = true;
 
-    // Capture ref value for cleanup (required by react-hooks/exhaustive-deps)
-    const extractionsMap = pendingExtractions.current;
-
     return () => {
       // Mark as unmounted to prevent state updates
       isMountedRef.current = false;
+      queuedRenderTimeRef.current = null;
       // Stop playback on unmount only when this component owns the playback loop.
       // In timeline-synced mode, playback ownership belongs to TimelineEngine.
       // Use the ref so this cleanup only runs on actual unmount (not when
@@ -852,9 +829,6 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       if (!syncWithTimelineRef.current) {
         pause();
       }
-      // Clear pending extractions to prevent memory leaks
-      // and stale updates after unmount
-      extractionsMap.clear();
     };
   }, [pause]);
 
@@ -942,37 +916,12 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       />
 
       {/* Loading Indicator */}
-      {(isFrameLoadingDerived || isMultiFrameLoading) && (
+      {isMultiFrameLoading && (
         <div
           data-testid="preview-loading"
           className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50"
         >
           <div className="w-8 h-8 border-2 border-white border-t-transparent rounded-full animate-spin" />
-        </div>
-      )}
-
-      {/* Error State */}
-      {frameErrorDerived && !isFrameLoadingDerived && (
-        <div
-          data-testid="preview-error"
-          className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50"
-        >
-          <div className="text-red-400 text-center">
-            <svg
-              className="w-8 h-8 mx-auto mb-1"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-              />
-            </svg>
-            <span className="text-sm">Error loading frame</span>
-          </div>
         </div>
       )}
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { TimelinePreviewPlayer } from './TimelinePreviewPlayer';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
@@ -92,6 +92,21 @@ function installCanvasMock(): void {
 
     return context as unknown as CanvasRenderingContext2D;
   }) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+}
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+
+  return { promise, resolve, reject };
 }
 
 function createClip(id: string, assetId: string): Clip {
@@ -204,5 +219,65 @@ describe('TimelinePreviewPlayer', () => {
     expect(visibleContext!.fillRect).not.toHaveBeenCalled();
     expect(visibleContext!.clearRect).not.toHaveBeenCalled();
     expect(visibleContext!.drawImage).not.toHaveBeenCalled();
+  });
+
+  it('uses the underlying media clip for frame extraction when a text clip is on the top track', async () => {
+    const textClip = createClip('text-clip', '__text__title');
+    const baseClip = createClip('base-clip', 'asset-1');
+    const sequence = {
+      ...createSequence(),
+      tracks: [createVideoTrack('text-track', textClip), createVideoTrack('base-track', baseClip)],
+    };
+
+    useProjectStore.setState({
+      activeSequenceId: sequence.id,
+      sequences: new Map([[sequence.id, sequence]]),
+    });
+
+    render(<TimelinePreviewPlayer showControls={false} />);
+
+    await waitFor(() => {
+      expect(frameBufferMock.getFrame).toHaveBeenCalledWith('asset-1', '/tmp/asset-1.mp4', 2);
+    });
+
+    expect(frameBufferMock.getFrame).not.toHaveBeenCalledWith(
+      '__text__title',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('coalesces rapid render requests while frame extraction is pending', async () => {
+    const firstExtraction = createDeferred<string | null>();
+    frameBufferMock.getFrame
+      .mockImplementationOnce(() => firstExtraction.promise)
+      .mockReturnValue(new Promise<string | null>(() => {}));
+
+    render(<TimelinePreviewPlayer showControls={false} />);
+
+    await waitFor(() => {
+      expect(frameBufferMock.getFrame).toHaveBeenCalledWith('asset-1', '/tmp/asset-1.mp4', 2);
+    });
+
+    act(() => {
+      usePlaybackStore.setState({ currentTime: 3 });
+    });
+    act(() => {
+      usePlaybackStore.setState({ currentTime: 4 });
+    });
+
+    expect(frameBufferMock.getFrame).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      firstExtraction.resolve(null);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(frameBufferMock.getFrame).toHaveBeenCalledTimes(2);
+    });
+
+    expect(frameBufferMock.getFrame).toHaveBeenLastCalledWith('asset-1', '/tmp/asset-1.mp4', 4);
+    expect(frameBufferMock.getFrame).not.toHaveBeenCalledWith('asset-1', '/tmp/asset-1.mp4', 3);
   });
 });
