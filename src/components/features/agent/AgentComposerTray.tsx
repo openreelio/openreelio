@@ -35,12 +35,12 @@ interface AgentComposerTrayProps {
   onStartSession?: (agentProfileId?: string) => void;
 }
 
-function getPhaseLabel(phase: string): string {
+function getPhaseLabel(phase: string, agentName: string): string {
   switch (phase) {
     case 'idle':
       return 'Ready';
     case 'starting':
-      return 'Starting Codex';
+      return `Starting ${agentName}`;
     case 'running':
       return 'Working';
     case 'thinking':
@@ -169,8 +169,9 @@ export function AgentComposerTray({
     if (isRunning && runtimeSummary.currentActivity) {
       return trimActivityLabel(runtimeSummary.currentActivity);
     }
-    return getPhaseLabel(phase);
+    return getPhaseLabel(phase, currentAgentName);
   }, [
+    currentAgentName,
     isRunning,
     pendingClarificationQuestion,
     pendingToolPermissionRequest,

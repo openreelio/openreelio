@@ -736,10 +736,11 @@ export class ExternalAgentChatRuntimeController {
     const messageId = externalSessionId
       ? this.messageIdByExternalSessionId.get(externalSessionId)
       : this.getActiveMessageId();
+    let settledToolCalls = 0;
 
     if (messageId) {
       if (externalSessionId) {
-        this.settleUnresolvedToolCalls(externalSessionId, 'failed');
+        settledToolCalls = this.settleUnresolvedToolCalls(externalSessionId, 'failed');
       }
       this.options.conversation.appendPart(
         messageId,
@@ -760,6 +761,13 @@ export class ExternalAgentChatRuntimeController {
         currentActivity: null,
         lastActivityAt: Date.now(),
         pendingToolPermissionRequest: null,
+        ...(externalSessionId && settledToolCalls > 0
+          ? {
+              completedTools:
+                this.getStateForExternalSession(externalSessionId).completedTools +
+                settledToolCalls,
+            }
+          : {}),
       },
       externalSessionId
         ? this.getConversationSessionIdForExternalSession(externalSessionId)
@@ -784,9 +792,10 @@ export class ExternalAgentChatRuntimeController {
     const messageId = externalSessionId
       ? this.messageIdByExternalSessionId.get(externalSessionId)
       : this.getActiveMessageId();
+    let settledToolCalls = 0;
 
     if (externalSessionId) {
-      this.settleUnresolvedToolCalls(
+      settledToolCalls = this.settleUnresolvedToolCalls(
         externalSessionId,
         phase === 'completed' ? 'completed' : 'failed',
       );
@@ -803,6 +812,13 @@ export class ExternalAgentChatRuntimeController {
         currentActivity: null,
         lastActivityAt: Date.now(),
         pendingToolPermissionRequest: null,
+        ...(externalSessionId && settledToolCalls > 0
+          ? {
+              completedTools:
+                this.getStateForExternalSession(externalSessionId).completedTools +
+                settledToolCalls,
+            }
+          : {}),
       },
       conversationSessionId,
     );
@@ -922,8 +938,9 @@ export class ExternalAgentChatRuntimeController {
   private settleUnresolvedToolCalls(
     externalSessionId: string,
     status: 'completed' | 'failed',
-  ): void {
+  ): number {
     const keyPrefix = `${externalSessionId}:`;
+    let settledCount = 0;
     for (const [key, indexedPart] of this.itemPartIndex.entries()) {
       if (!key.startsWith(keyPrefix)) {
         continue;
@@ -936,8 +953,10 @@ export class ExternalAgentChatRuntimeController {
         this.options.conversation.updatePart(indexedPart.messageId, indexedPart.partIndex, {
           status,
         });
+        settledCount += 1;
       }
     }
+    return settledCount;
   }
 
   private shutdownTrackedExternalSessions(adapter: ExternalAgentRuntimeAdapter): void {

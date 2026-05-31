@@ -93,7 +93,7 @@ describe('AgentComposerTray', () => {
   it('labels external startup and running phases instead of falling back to ready', () => {
     const { rerender } = render(
       <AgentComposerTray
-        currentAgentName="Codex"
+        currentAgentName="Review Agent"
         isExperimentalSession={false}
         isRunning
         stopState="idle"
@@ -104,11 +104,11 @@ describe('AgentComposerTray', () => {
       />,
     );
 
-    expect(screen.getByTestId('agent-runtime-pill')).toHaveTextContent('Starting Codex');
+    expect(screen.getByTestId('agent-runtime-pill')).toHaveTextContent('Starting Review Agent');
 
     rerender(
       <AgentComposerTray
-        currentAgentName="Codex"
+        currentAgentName="Review Agent"
         isExperimentalSession={false}
         isRunning
         stopState="idle"
