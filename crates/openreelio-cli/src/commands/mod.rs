@@ -19,6 +19,7 @@ mod render;
 mod state;
 mod text;
 mod timeline;
+mod transcription;
 
 use clap::{Parser, Subcommand};
 
@@ -70,6 +71,12 @@ pub enum Commands {
         action: caption::CaptionAction,
     },
 
+    /// Speech-to-text transcription and auto-caption generation
+    Transcription {
+        #[command(subcommand)]
+        action: transcription::TranscriptionAction,
+    },
+
     /// Editable text overlay operations
     Text {
         #[command(subcommand)]
@@ -115,6 +122,7 @@ pub fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Analysis { action } => analysis::execute(action),
         Commands::Timeline { action } => timeline::execute(action),
         Commands::Caption { action } => caption::execute(action),
+        Commands::Transcription { action } => transcription::execute(action),
         Commands::Text { action } => text::execute(action),
         Commands::Render { action } => render::execute(action),
         Commands::Plan { action } => plan::execute(action),

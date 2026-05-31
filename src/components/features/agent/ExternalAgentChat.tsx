@@ -116,6 +116,9 @@ export const ExternalAgentChat = forwardRef<AgentRuntimeChatHandle, ExternalAgen
           startedTools: runtime.startedTools,
           completedTools: runtime.completedTools,
           latestIteration: runtime.latestIteration,
+          currentActivity: runtime.currentActivity,
+          runStartedAt: runtime.runStartedAt,
+          lastActivityAt: runtime.lastActivityAt,
         }}
         plan={null}
         pendingClarificationQuestion={null}

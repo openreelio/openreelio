@@ -1,6 +1,6 @@
 //! Codex app-server process transport IPC commands.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tauri::{Emitter, Manager, State};
@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex;
 
+use crate::core::codex::CodexCommandMode;
 use crate::core::codex_app_server::{
     codex_app_server_event_name, decode_json_rpc_line, encode_json_rpc_line,
     normalize_codex_app_server_id, quote_toml_string, CodexAppServerSessionInput,
@@ -86,7 +87,7 @@ pub async fn start_codex_app_server(
     let server_id = normalize_codex_app_server_id(input.server_id)?;
     let event_name = codex_app_server_event_name(&server_id);
     let project_path = resolve_codex_app_server_project_path(input.project_path, &state).await?;
-    let bridge_cwd = resolve_codex_app_server_bridge_cwd(&app)?;
+    let bridge_cwd = resolve_codex_app_server_bridge_cwd(&app, &server_id)?;
 
     {
         let sessions = state.codex_app_server_sessions.lock().await;
@@ -102,16 +103,16 @@ pub async fn start_codex_app_server(
     .await;
     let codex_reasoning_effort = resolve_codex_app_server_reasoning_effort(input.reasoning_effort);
     let codex_log_dir = resolve_codex_app_server_log_dir(&app)?;
+    let codex_command_mode = crate::core::codex::codex_command_mode();
+    let codex_log_dir_value = codex_app_server_path_value(codex_command_mode, &codex_log_dir);
     let history_persistence_arg = "history.persistence=\"none\"".to_string();
-    let log_dir_arg = format!(
-        "log_dir={}",
-        quote_toml_string(&codex_log_dir.display().to_string())
-    );
+    let log_dir_arg = format!("log_dir={}", quote_toml_string(&codex_log_dir_value));
     let mcp_servers_arg = "mcp_servers={}".to_string();
     let hooks_feature_arg = "features.hooks=false".to_string();
     let notify_arg = "notify=[]".to_string();
     let sandbox_mode_arg = "sandbox_mode=\"read-only\"".to_string();
     let approval_policy_arg = "approval_policy=\"on-request\"".to_string();
+    let project_path_env = codex_app_server_path_value(codex_command_mode, &project_path);
     let mut command = crate::core::codex::create_codex_command()?;
     command
         .arg("app-server")
@@ -137,15 +138,12 @@ pub async fn start_codex_app_server(
         .arg("-c")
         .arg(&approval_policy_arg)
         .current_dir(&bridge_cwd)
-        .env(
-            "OPENREELIO_PROJECT_PATH",
-            project_path.display().to_string(),
-        )
+        .env("OPENREELIO_PROJECT_PATH", project_path_env)
         .env("OPENREELIO_APP_SURFACE", "tauri-desktop")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    if let Some(path) = build_codex_app_server_path() {
+    if let Some(path) = build_codex_app_server_path(codex_command_mode) {
         command.env("PATH", path);
     }
 
@@ -329,16 +327,39 @@ async fn resolve_codex_app_server_project_path(
     Ok(canonical_requested_path)
 }
 
-fn resolve_codex_app_server_bridge_cwd(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn resolve_codex_app_server_bridge_cwd(
+    app: &tauri::AppHandle,
+    server_id: &str,
+) -> Result<PathBuf, String> {
     let bridge_cwd = app
         .path()
         .app_data_dir()
         .map_err(|error| format!("Failed to resolve OpenReelio app data directory: {error}"))?
         .join("codex")
-        .join("bridge");
+        .join("bridge")
+        .join(sanitize_bridge_dir_name(server_id));
     std::fs::create_dir_all(&bridge_cwd)
         .map_err(|error| format!("Failed to create Codex app-server bridge directory: {error}"))?;
     Ok(bridge_cwd)
+}
+
+fn sanitize_bridge_dir_name(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if sanitized.is_empty() {
+        "session".to_string()
+    } else {
+        sanitized
+    }
 }
 
 fn spawn_stdout_reader(
@@ -416,7 +437,13 @@ fn spawn_stderr_reader(
     });
 }
 
-fn build_codex_app_server_path() -> Option<std::ffi::OsString> {
+fn build_codex_app_server_path(
+    codex_command_mode: Option<CodexCommandMode>,
+) -> Option<std::ffi::OsString> {
+    if codex_command_mode.is_some_and(|mode| !mode.supports_host_path_extension()) {
+        return None;
+    }
+
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir.parent().unwrap_or(manifest_dir.as_path());
     let mut tool_dirs = crate::core::external_agent::bundled_tool_directories();
@@ -439,6 +466,16 @@ fn build_codex_app_server_path() -> Option<std::ffi::OsString> {
     .ok()
 }
 
+fn codex_app_server_path_value(mode: Option<CodexCommandMode>, path: &Path) -> String {
+    if mode == Some(CodexCommandMode::Wsl) {
+        if let Some(wsl_path) = crate::core::codex::windows_path_to_wsl_mount_path(path) {
+            return wsl_path;
+        }
+    }
+
+    path.display().to_string()
+}
+
 fn resolve_codex_app_server_log_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let log_dir = app
         .path()
@@ -449,6 +486,33 @@ fn resolve_codex_app_server_log_dir(app: &tauri::AppHandle) -> Result<PathBuf, S
     std::fs::create_dir_all(&log_dir)
         .map_err(|error| format!("Failed to create Codex app-server log directory: {error}"))?;
     Ok(log_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::codex_app_server_path_value;
+    use crate::core::codex::CodexCommandMode;
+    use std::path::PathBuf;
+
+    #[test]
+    fn converts_windows_project_path_for_wsl_codex_app_server() {
+        let path = PathBuf::from(r"C:\Users\openreelio\Project");
+
+        assert_eq!(
+            codex_app_server_path_value(Some(CodexCommandMode::Wsl), &path),
+            "/mnt/c/Users/openreelio/Project"
+        );
+    }
+
+    #[test]
+    fn keeps_native_project_path_for_native_codex_app_server() {
+        let path = PathBuf::from("/home/openreelio/project");
+
+        assert_eq!(
+            codex_app_server_path_value(Some(CodexCommandMode::Native), &path),
+            "/home/openreelio/project"
+        );
+    }
 }
 
 fn resolve_codex_app_server_model(requested_model: Option<String>) -> String {

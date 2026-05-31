@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, Download, Loader2, RefreshCw, UploadCloud } from 'lucide-react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  Download,
+  Loader2,
+  LogOut,
+  RefreshCw,
+  UploadCloud,
+} from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 
 import { useExternalAgentHostStatus, EXTERNAL_AGENT_STATUS_REFRESH_EVENT } from '@/agents/external';
@@ -21,9 +29,17 @@ interface ConfigureCodexAgentRuntimeResult {
   pluginMarketplaceConfigured: boolean;
   mcpConfigured: boolean;
   message: string | null;
+  runtimeSource?: string | null;
+  codexHome?: string | null;
 }
 
 interface CodexAgentLoginResult {
+  success: boolean;
+  authStatus: string;
+  message: string | null;
+}
+
+interface CodexAgentLogoutResult {
   success: boolean;
   authStatus: string;
   message: string | null;
@@ -90,9 +106,7 @@ const RUNTIME_OPTIONS: Array<{
   value: AssistantRuntime;
   title: string;
   badge: string;
-}> = [
-  { value: 'codex', title: 'Codex account agent', badge: 'OAuth' },
-];
+}> = [{ value: 'codex', title: 'Codex account agent', badge: 'OAuth' }];
 
 function isAuthenticated(authStatus?: string | null): boolean {
   return authStatus === 'signed-in' || authStatus === 'api-key';
@@ -176,6 +190,7 @@ export function ExternalAgentRuntimeSettings({
   const [modelCatalog, setModelCatalog] = useState<CodexModelCatalogResult | null>(null);
   const [isConfiguring, setIsConfiguring] = useState(false);
   const [isSigningIn, setIsSigningIn] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
   const [isInstalling, setIsInstalling] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const lastAutoConfigureKeyRef = useRef<string | null>(null);
@@ -215,6 +230,8 @@ export function ExternalAgentRuntimeSettings({
     ? selectedCodexModel.supportedReasoningEfforts
     : ['low', 'medium', 'high', 'xhigh'];
   const codexVersion = setupResult?.version ?? codexRuntime?.version ?? null;
+  const codexHome = setupResult?.codexHome ?? codexRuntime?.codexHome ?? null;
+  const runtimeSource = setupResult?.runtimeSource ?? codexRuntime?.runtimeSource ?? null;
   const codexNeedsUpdate = Boolean(codexInstalled && shouldOfferCodexUpdate(codexVersion));
   const launcherExecutableError = isLauncherExecutableError(
     setupResult?.message ?? codexRuntime?.reason,
@@ -223,7 +240,12 @@ export function ExternalAgentRuntimeSettings({
   const canInstallCodex = Boolean(
     codexSelected && codexStatusKnown && !codexInstalled && !launcherExecutableError,
   );
-  const isRuntimeActionPending = isConfiguring || isSigningIn || isInstalling || isUpdating;
+  const isRuntimeActionPending =
+    isConfiguring || isSigningIn || isSigningOut || isInstalling || isUpdating;
+  const showActionError = Boolean(
+    actionError &&
+    (!runtimeReady || codexNeedsUpdate || !codexInstalled || actionError !== setupResult?.message),
+  );
 
   useEffect(() => {
     if (!disabled && settings.assistantRuntime !== 'codex') {
@@ -234,6 +256,26 @@ export function ExternalAgentRuntimeSettings({
   const refreshExternalAgentStatus = useCallback(() => {
     window.dispatchEvent(new Event(EXTERNAL_AGENT_STATUS_REFRESH_EVENT));
   }, []);
+
+  const applySuccessfulCodexAuthResult = useCallback(
+    (result: CodexAgentLoginResult | CodexAgentLogoutResult) => {
+      const resultAuthenticated = isAuthenticated(result.authStatus);
+      lastAutoConfigureKeyRef.current = `${projectPath ?? 'no-project'}:${result.authStatus}`;
+      setSetupResult((current) => ({
+        installed: current?.installed ?? codexInstalled,
+        version: current?.version ?? codexVersion,
+        authStatus: result.authStatus,
+        ready: resultAuthenticated,
+        requiresLogin: !resultAuthenticated,
+        pluginMarketplaceConfigured: current?.pluginMarketplaceConfigured ?? false,
+        mcpConfigured: current?.mcpConfigured ?? false,
+        message: result.message ?? current?.message ?? null,
+        runtimeSource: current?.runtimeSource ?? runtimeSource,
+        codexHome: current?.codexHome ?? codexHome,
+      }));
+    },
+    [codexHome, codexInstalled, codexVersion, projectPath, runtimeSource],
+  );
 
   const applyModelCatalogResult = useCallback(
     (result: CodexModelCatalogResult) => {
@@ -366,7 +408,10 @@ export function ExternalAgentRuntimeSettings({
       const result = await invoke<CodexAgentLoginResult>('start_codex_login');
       if (!result.success) {
         setActionError(result.message ?? 'Codex sign-in did not complete.');
+        refreshExternalAgentStatus();
+        return;
       }
+      applySuccessfulCodexAuthResult(result);
       await configureCodex();
       refreshExternalAgentStatus();
     } catch (error) {
@@ -374,7 +419,27 @@ export function ExternalAgentRuntimeSettings({
     } finally {
       setIsSigningIn(false);
     }
-  }, [configureCodex, refreshExternalAgentStatus]);
+  }, [applySuccessfulCodexAuthResult, configureCodex, refreshExternalAgentStatus]);
+
+  const handleSignOut = useCallback(async () => {
+    setIsSigningOut(true);
+    setActionError(null);
+    try {
+      const result = await invoke<CodexAgentLogoutResult>('logout_codex_agent_runtime');
+      if (!result.success) {
+        setActionError(result.message ?? 'Codex sign-out did not complete.');
+        refreshExternalAgentStatus();
+        return;
+      }
+      applySuccessfulCodexAuthResult(result);
+      await configureCodex();
+      refreshExternalAgentStatus();
+    } catch (error) {
+      setActionError(formatActionError(error));
+    } finally {
+      setIsSigningOut(false);
+    }
+  }, [applySuccessfulCodexAuthResult, configureCodex, refreshExternalAgentStatus]);
 
   const handleInstall = useCallback(async () => {
     setIsInstalling(true);
@@ -383,6 +448,8 @@ export function ExternalAgentRuntimeSettings({
       const result = await invoke<CodexCliInstallResult>('install_codex_cli');
       if (!result.success) {
         setActionError(result.message ?? 'Codex CLI installation did not complete.');
+        refreshExternalAgentStatus();
+        return;
       }
       await loadCodexModels().catch(() => setModelCatalog(null));
       await configureCodex();
@@ -401,6 +468,8 @@ export function ExternalAgentRuntimeSettings({
       const result = await invoke<CodexCliUpdateResult>('update_codex_cli');
       if (!result.success) {
         setActionError(result.message ?? 'Codex CLI update did not complete.');
+        refreshExternalAgentStatus();
+        return;
       }
       await loadCodexModels().catch(() => setModelCatalog(null));
       await configureCodex();
@@ -415,6 +484,7 @@ export function ExternalAgentRuntimeSettings({
   const statusLine = useMemo(() => {
     if (!codexSelected) return 'OpenReelio will use the API provider and model below.';
     if (isSigningIn) return 'Opening the Codex sign-in flow...';
+    if (isSigningOut) return 'Signing out of the OpenReelio Codex profile...';
     if (isInstalling) return 'Installing Codex CLI...';
     if (isUpdating) return 'Updating Codex CLI...';
     if (isConfiguring) return 'Checking Codex account access...';
@@ -440,6 +510,7 @@ export function ExternalAgentRuntimeSettings({
     isConfiguring,
     isInstalling,
     isSigningIn,
+    isSigningOut,
     isUpdating,
     requiresLogin,
     runtimeReady,
@@ -534,6 +605,15 @@ export function ExternalAgentRuntimeSettings({
               {codexVersion && (
                 <p className="mt-1 truncate text-[11px] text-editor-text-muted">{codexVersion}</p>
               )}
+              <p className="mt-1 truncate text-[11px] text-editor-text-muted">
+                Storage: OpenReelio-managed Codex profile
+                {runtimeSource ? ` (${runtimeSource})` : ''}
+              </p>
+              {codexHome && (
+                <p className="mt-1 truncate text-[11px] text-editor-text-muted">
+                  CODEX_HOME: {codexHome}
+                </p>
+              )}
             </div>
 
             <div className="flex shrink-0 items-center gap-2">
@@ -578,6 +658,21 @@ export function ExternalAgentRuntimeSettings({
                   Sign in with Codex
                 </button>
               )}
+              {authenticated && (
+                <button
+                  type="button"
+                  onClick={handleSignOut}
+                  disabled={disabled || isRuntimeActionPending}
+                  className="inline-flex h-8 items-center gap-1.5 rounded border border-editor-border px-2 text-xs text-editor-text hover:bg-editor-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isSigningOut ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <LogOut className="h-3.5 w-3.5" />
+                  )}
+                  Sign out
+                </button>
+              )}
               <button
                 type="button"
                 onClick={configureCodex}
@@ -596,7 +691,7 @@ export function ExternalAgentRuntimeSettings({
             </div>
           </div>
 
-          {actionError && (!runtimeReady || codexNeedsUpdate || !codexInstalled) && (
+          {showActionError && actionError && (
             <p className="mt-2 rounded border border-yellow-600/20 bg-yellow-600/10 px-2 py-1.5 text-xs leading-5 text-yellow-200">
               {actionError}
             </p>

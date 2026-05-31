@@ -31,6 +31,8 @@ export interface ExternalAgentRuntimeSummary {
   authStatus: ExternalAgentAuthStatus;
   version: string | null;
   capabilities: ExternalAgentRuntimeCapabilities;
+  runtimeSource?: string | null;
+  codexHome?: string | null;
 }
 
 export interface ExternalAgentHostSummary {
@@ -106,6 +108,8 @@ export function buildExternalAgentHostSummary(
       authStatus: runtime.status.authStatus,
       version: runtime.status.version,
       capabilities: runtime.capabilities,
+      runtimeSource: runtime.status.runtimeSource ?? null,
+      codexHome: runtime.status.codexHome ?? null,
     };
   });
 

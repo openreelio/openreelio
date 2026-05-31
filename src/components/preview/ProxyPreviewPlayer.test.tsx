@@ -177,6 +177,23 @@ describe('ProxyPreviewPlayer', () => {
     expect(controlsZ).toBeGreaterThan(videoZ);
   });
 
+  it('does not let a failed upper video layer cover a healthy lower video layer', async () => {
+    const sequence = createSequence();
+    const assets = new Map<string, Asset>([
+      ['asset-top', createVideoAsset('asset-top', 'https://example.com/top.mp4')],
+      ['asset-bottom', createVideoAsset('asset-bottom', 'https://example.com/bottom.mp4')],
+    ]);
+
+    render(<ProxyPreviewPlayer sequence={sequence} assets={assets} showControls />);
+
+    fireEvent.error(screen.getByTestId('proxy-video-clip-top'));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('proxy-video-error-clip-top')).not.toBeInTheDocument();
+      expect(screen.getByTestId('proxy-video-clip-bottom')).toBeInTheDocument();
+    });
+  });
+
   it('does not render disabled clips in the preview stack', () => {
     const sequence = createSequence();
     sequence.tracks[0].clips[0].enabled = false;

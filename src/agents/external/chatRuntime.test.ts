@@ -635,6 +635,113 @@ describe('ExternalAgentChatRuntimeController', () => {
     });
   });
 
+  it('should expose current activity and last update time for long-running tools', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+    });
+
+    await controller.sendMessage('Analyze the clip');
+    adapter.emit({
+      type: 'tool_started',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'tool_1',
+      tool: 'openreelio.clip_analyze',
+      args: { clipId: 'clip-1' },
+      description: 'Run openreelio.clip_analyze',
+    });
+
+    expect(controller.getState()).toMatchObject({
+      currentActivity: 'Running clip_analyze',
+      lastActivityAt: expect.any(Number),
+      runStartedAt: expect.any(Number),
+    });
+  });
+
+  it('should mark unresolved tool calls completed when the turn completes', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+    });
+
+    await controller.sendMessage('Apply changes');
+    adapter.emit({
+      type: 'tool_started',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'tool_1',
+      tool: 'openreelio.plan_apply',
+      args: { planId: 'plan-1' },
+      description: 'Run openreelio.plan_apply',
+    });
+    adapter.emit({
+      type: 'turn_completed',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      turnId: 'turn_1',
+      status: 'completed',
+    });
+
+    expect(conversation.getMessageParts('assistant-1')?.[0]).toMatchObject({
+      type: 'tool_call',
+      status: 'completed',
+    });
+    expect(controller.getState()).toMatchObject({
+      phase: 'completed',
+      isRunning: false,
+      startedTools: 1,
+      completedTools: 1,
+      currentActivity: null,
+      pendingToolPermissionRequest: null,
+    });
+  });
+
+  it('should count unresolved tool calls as completed when a turn fails', async () => {
+    const conversation = new FakeConversationGateway();
+    const adapter = new FakeExternalAgentAdapter();
+    const controller = new ExternalAgentChatRuntimeController({
+      adapter,
+      conversation,
+      projectId: 'project-1',
+    });
+
+    await controller.sendMessage('Apply changes');
+    adapter.emit({
+      type: 'tool_started',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      itemId: 'tool_1',
+      tool: 'openreelio.plan_apply',
+      args: { planId: 'plan-1' },
+      description: 'Run openreelio.plan_apply',
+    });
+    adapter.emit({
+      type: 'turn_completed',
+      runtimeId: 'codex',
+      sessionId: 'thr_123',
+      turnId: 'turn_1',
+      status: 'failed',
+      error: 'Tool execution failed',
+    });
+
+    expect(conversation.getMessageParts('assistant-1')?.[0]).toMatchObject({
+      type: 'tool_call',
+      status: 'failed',
+    });
+    expect(controller.getState()).toMatchObject({
+      phase: 'failed',
+      startedTools: 1,
+      completedTools: 1,
+    });
+  });
+
   it('should shut down tracked runtime sessions when disposed', async () => {
     const conversation = new FakeConversationGateway();
     const adapter = new FakeExternalAgentAdapter();
@@ -833,6 +940,10 @@ describe('ExternalAgentChatRuntimeController', () => {
       description: 'Apply approved shorts cleanup plan',
       args: { planId: 'shorts-cleanup-v1', stepCount: 42 },
       riskLevel: 'medium',
+    });
+    expect(controller.getState()).toMatchObject({
+      currentActivity: 'Waiting for approval: OpenReelio plan apply',
+      lastActivityAt: expect.any(Number),
     });
     expect(conversation.getMessageParts('assistant-1')).toEqual([
       {

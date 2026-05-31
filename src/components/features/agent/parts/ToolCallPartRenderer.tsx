@@ -6,6 +6,7 @@
  */
 
 import { useState } from 'react';
+import { CheckCircle2, Circle, LoaderCircle, XCircle } from 'lucide-react';
 import type { ToolCallPart } from '@/agents/engine/core/conversation';
 
 interface ToolCallPartRendererProps {
@@ -13,22 +14,20 @@ interface ToolCallPartRendererProps {
   className?: string;
 }
 
-const statusIcons: Record<string, string> = {
-  pending: '\u23F3',    // hourglass
-  running: '\u25B6',    // play
-  completed: '\u2705',  // check
-  failed: '\u274C',     // cross
-};
-
-const statusColors: Record<string, string> = {
-  pending: 'text-text-tertiary',
-  running: 'text-primary-400',
-  completed: 'text-green-400',
-  failed: 'text-red-400',
+const statusConfig: Record<
+  ToolCallPart['status'],
+  { label: string; color: string; icon: typeof Circle }
+> = {
+  pending: { label: 'Pending', color: 'text-text-tertiary', icon: Circle },
+  running: { label: 'Running', color: 'text-primary-400', icon: LoaderCircle },
+  completed: { label: 'Done', color: 'text-green-400', icon: CheckCircle2 },
+  failed: { label: 'Issue', color: 'text-yellow-400', icon: XCircle },
 };
 
 export function ToolCallPartRenderer({ part, className = '' }: ToolCallPartRendererProps) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const status = statusConfig[part.status];
+  const StatusIcon = status.icon;
 
   return (
     <div
@@ -40,8 +39,12 @@ export function ToolCallPartRenderer({ part, className = '' }: ToolCallPartRende
         className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-surface-elevated transition-colors"
         aria-expanded={isExpanded}
       >
-        <span className={`text-xs ${statusColors[part.status]}`}>
-          {statusIcons[part.status]}
+        <span className={`inline-flex shrink-0 items-center gap-1 text-[11px] ${status.color}`}>
+          <StatusIcon
+            className={`h-3.5 w-3.5 ${part.status === 'running' ? 'animate-spin' : ''}`}
+            aria-hidden="true"
+          />
+          {status.label}
         </span>
         <span className="text-xs font-mono text-text-secondary">{part.tool}</span>
         <span className="text-xs text-text-tertiary truncate flex-1">{part.description}</span>

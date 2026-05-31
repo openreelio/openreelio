@@ -1482,9 +1482,20 @@ export function ProxyPreviewPlayer({
         )}
         {renderableClips.map(({ clip, asset, trackIndex, src, isActive }) => {
           const error = videoErrors.get(clip.id);
+          const hasHealthyLowerVideo = renderableClips.some(
+            (candidate) =>
+              candidate.clip.id !== clip.id &&
+              candidate.isActive &&
+              candidate.trackIndex > trackIndex &&
+              !videoErrors.has(candidate.clip.id),
+          );
 
           // Show error state if video failed to load
           if (error && isActive) {
+            if (hasHealthyLowerVideo) {
+              return null;
+            }
+
             return (
               <div
                 key={clip.id}

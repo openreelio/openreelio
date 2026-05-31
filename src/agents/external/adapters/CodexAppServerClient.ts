@@ -271,7 +271,7 @@ export class CodexAppServerClient {
       'turn/start',
       compactObject({
         threadId,
-        input: [{ type: 'text', text }],
+        input: [buildCodexTextInput(text)],
         model: input.model,
         effort: input.effort,
         approvalPolicy: input.approvalPolicy,
@@ -295,7 +295,7 @@ export class CodexAppServerClient {
     return await this.request<CodexTurnSteerResult>('turn/steer', {
       threadId,
       expectedTurnId,
-      input: [{ type: 'text', text }],
+      input: [buildCodexTextInput(text)],
     });
   }
 
@@ -442,6 +442,10 @@ function compactObject<T extends Record<string, unknown>>(input: T): CodexJsonOb
   return Object.fromEntries(
     Object.entries(input).filter(([, value]) => value !== undefined),
   ) as CodexJsonObject;
+}
+
+function buildCodexTextInput(text: string): CodexJsonObject {
+  return { type: 'text', text, text_elements: [] };
 }
 
 function normalizeCodexAppServerErrorMessage(message: string): string {

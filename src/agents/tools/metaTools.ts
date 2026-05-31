@@ -301,11 +301,119 @@ const META_TOOLS: ToolDefinition[] = [
           type: 'string',
           description: 'Target selects track name when building source selects',
         },
-        paddingSec: { type: 'number', description: 'Extra source padding for matched ranges' },
+        paddingSec: {
+          type: 'number',
+          description: 'Extra padding for source-select matches or semantic edit plan ranges',
+        },
         gapSec: { type: 'number', description: 'Gap between generated selects on the timeline' },
         timelineStart: {
           type: 'number',
           description: 'Timeline start position for generated selects',
+        },
+        startSec: {
+          type: 'number',
+          description: 'Timeline range start in seconds for clip/range inspection',
+        },
+        endSec: {
+          type: 'number',
+          description: 'Timeline range end in seconds for clip/range inspection',
+        },
+        timelineTime: {
+          type: 'number',
+          description: 'Single timeline time to map to source media',
+        },
+        timelineTimes: {
+          type: 'array',
+          description: 'Timeline times to map to source media',
+          items: { type: 'number' },
+        },
+        mode: {
+          type: 'string',
+          description: 'Clip analysis sampling mode: representative or dense',
+        },
+        targetIntervalSec: {
+          type: 'number',
+          description: 'Dense clip-analysis frame sampling interval in seconds',
+        },
+        maxSamples: {
+          type: 'number',
+          description: 'Maximum frame samples for clip analysis',
+        },
+        includeEdges: {
+          type: 'boolean',
+          description: 'Include leading/trailing edge samples for clip analysis',
+        },
+        rangeStartSec: {
+          type: 'number',
+          description: 'Absolute timeline start within the target clip for clip analysis',
+        },
+        rangeEndSec: {
+          type: 'number',
+          description: 'Absolute timeline end within the target clip for clip analysis',
+        },
+        forceRefresh: {
+          type: 'boolean',
+          description: 'Force regeneration instead of cached clip/source analysis data',
+        },
+        fingerprint: {
+          type: 'string',
+          description: 'Clip analysis fingerprint returned by analyze_timeline_clip',
+        },
+        perceptionFingerprint: {
+          type: 'string',
+          description: 'Clip perception fingerprint returned by describe_clip_frames',
+        },
+        maxFrames: {
+          type: 'number',
+          description: 'Maximum clip frame samples to semantically describe',
+        },
+        detail: {
+          type: 'string',
+          description: 'Clip perception vision detail: low, auto, or high',
+        },
+        model: {
+          type: 'string',
+          description: 'Optional model override for analysis/perception providers',
+        },
+        reuseSourceAnalysis: {
+          type: 'boolean',
+          description: 'Reuse cached source analysis before clip-level perception',
+        },
+        allowCloud: {
+          type: 'boolean',
+          description: 'Allow configured cloud perception calls for clip analysis',
+        },
+        includeContactSheet: {
+          type: 'boolean',
+          description: 'Include contact-sheet context where supported by perception tools',
+        },
+        mergeGapSec: {
+          type: 'number',
+          description: 'Merge nearby semantic edit plan ranges separated by this gap',
+        },
+        minConfidence: {
+          type: 'number',
+          description: 'Minimum semantic evidence confidence for planning',
+        },
+        maxRanges: {
+          type: 'number',
+          description: 'Maximum semantic edit plan ranges to return',
+        },
+        effectStrength: {
+          type: 'number',
+          description: 'Semantic edit plan effect strength, such as blur radius',
+        },
+        includeCommandDrafts: {
+          type: 'boolean',
+          description: 'Include command draft payloads in semantic edit plans',
+        },
+        spatialTimeToleranceSec: {
+          type: 'number',
+          description: 'Source-time tolerance for matching semantic edit plan spatial annotations',
+        },
+        includeSpatialTargets: {
+          type: 'boolean',
+          description: 'Include annotation bounding boxes in semantic edit plans when available',
         },
         shots: { type: 'boolean', description: 'Run shot detection' },
         transcript: { type: 'boolean', description: 'Run transcript analysis' },
@@ -491,7 +599,7 @@ const META_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   {
     name: 'text',
-    description: `Create and edit editable on-video text overlays, titles, lower thirds, captions, and subtitles. Use add_text_clip/update_text_clip/set_text_transform/delete_text_clip for preview-positioned text clips with font, size, weight, color, shadow, outline, background, opacity, rotation, and drag/resize transform data. Use add_caption/update_caption/style_caption/import_captions_from_file/add_captions_from_transcription for timed subtitle tracks. Actions: ${TEXT_ACTIONS.join(', ')}. Note: auto_transcribe uses local Whisper when available and falls back to a configured transcript analysis provider; for on-screen text or lyrics, use the query meta-tool with analyze_asset action and analysisTypes ["textOcr"] instead.`,
+    description: `Create and edit editable on-video text overlays, titles, lower thirds, captions, and subtitles. Use add_text_clip/update_text_clip/set_text_transform/delete_text_clip for preview-positioned text clips with font, size, weight, color, shadow, outline, background, opacity, rotation, and drag/resize transform data. Use add_caption/update_caption/style_caption/import_captions_from_file/add_captions_from_transcription for timed subtitle tracks. Actions: ${TEXT_ACTIONS.join(', ')}. Note: auto_transcribe uses the best installed local Whisper model when available and falls back to a configured transcript analysis provider; for on-screen text or lyrics, use the query meta-tool with analyze_asset action and analysisTypes ["textOcr"] instead.`,
     category: 'clip',
     parameters: {
       type: 'object',
@@ -524,8 +632,7 @@ const META_TOOLS: ToolDefinition[] = [
         },
         preset: {
           type: 'string',
-          description:
-            'Editable text starter preset: default, title, lower_third, or subtitle',
+          description: 'Editable text starter preset: default, title, lower_third, or subtitle',
           enum: ['default', 'title', 'lower_third', 'subtitle'],
         },
         segments: {
@@ -711,7 +818,10 @@ const META_TOOLS: ToolDefinition[] = [
         name: { type: 'string', description: 'Imported asset name' },
         assetType: { type: 'string', description: 'Asset type: video, image, or audio' },
         license: { type: 'object', description: 'Normalized LicenseInfo object' },
-        licenseAck: { type: 'boolean', description: 'Required approval acknowledgement for import' },
+        licenseAck: {
+          type: 'boolean',
+          description: 'Required approval acknowledgement for import',
+        },
         providerUrl: { type: 'string', description: 'Provider landing page URL' },
       },
       required: ['action'],

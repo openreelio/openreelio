@@ -75,6 +75,18 @@ pub enum UpdateCheckResult {
     Error { message: String },
 }
 
+pub fn updater_enabled_from_env(value: Option<&str>, debug_build: bool) -> bool {
+    match value {
+        Some("1") | Some("true") | Some("TRUE") => true,
+        Some("0") | Some("false") | Some("FALSE") => false,
+        _ => !debug_build,
+    }
+}
+
+pub fn updater_disabled_message() -> String {
+    "Updater is disabled for this OpenReelio runtime. Set OPENREELIO_ENABLE_UPDATER=1 to enable update checks in development builds.".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +162,23 @@ mod tests {
         assert!(json.contains("1024"));
         assert!(json.contains("2048"));
         assert!(json.contains("50"));
+    }
+
+    #[test]
+    fn disables_updater_by_default_in_debug_builds() {
+        assert!(!updater_enabled_from_env(None, true));
+    }
+
+    #[test]
+    fn enables_updater_by_default_in_release_builds() {
+        assert!(updater_enabled_from_env(None, false));
+    }
+
+    #[test]
+    fn honors_explicit_updater_environment_over_build_mode() {
+        assert!(updater_enabled_from_env(Some("1"), true));
+        assert!(updater_enabled_from_env(Some("true"), true));
+        assert!(!updater_enabled_from_env(Some("0"), false));
+        assert!(!updater_enabled_from_env(Some("false"), false));
     }
 }

@@ -858,8 +858,8 @@ impl JobProcessor {
         use crate::core::captions::{
             audio::extract_audio_for_transcription_async,
             whisper::{
-                default_models_dir, is_whisper_available, TranscriptionOptions, WhisperEngine,
-                WhisperModel,
+                default_models_dir, is_whisper_available, subtitle_ready_segments,
+                TranscriptionOptions, WhisperEngine, WhisperModel,
             },
         };
 
@@ -902,12 +902,11 @@ impl JobProcessor {
             }
         };
 
-        let model_name = job
+        let requested_model = job
             .payload
             .get("model")
             .and_then(|v| v.as_str())
-            .or_else(|| options.and_then(|o| o.get("model").and_then(|v| v.as_str())))
-            .unwrap_or("base");
+            .or_else(|| options.and_then(|o| o.get("model").and_then(|v| v.as_str())));
 
         let language = job
             .payload
@@ -927,6 +926,17 @@ impl JobProcessor {
         if !is_whisper_available() {
             return Err("Whisper feature not enabled. Rebuild with --features whisper".to_string());
         }
+
+        let models_dir = default_models_dir();
+        let model_size = WhisperModel::resolve_requested_or_default(requested_model, &models_dir)
+            .map_err(|error| {
+            format!(
+                "Invalid Whisper model '{}': {}",
+                requested_model.unwrap_or("auto"),
+                error
+            )
+        })?;
+        let model_name = model_size.name().to_string();
 
         tracing::info!(
             "Starting transcription for asset {} using {} model",
@@ -971,13 +981,7 @@ impl JobProcessor {
         // Emit progress after audio extraction
         self.emit_progress(&job.id, 0.3, Some("Loading Whisper model..."));
 
-        // Parse model size
-        let model_size: WhisperModel = model_name
-            .parse()
-            .map_err(|_| format!("Unknown model size: {}", model_name))?;
-
         // Get model path
-        let models_dir = default_models_dir();
         let model_path = models_dir.join(model_size.filename());
 
         if !model_path.exists() {
@@ -1017,9 +1021,12 @@ impl JobProcessor {
         // Emit progress after transcription
         self.emit_progress(&job.id, 0.9, Some("Processing results..."));
 
-        // Convert segments to JSON
-        let segments: Vec<serde_json::Value> = result
-            .segments
+        let full_text = result.full_text();
+        let subtitle_segments = subtitle_ready_segments(&result.segments);
+        let segment_count = subtitle_segments.len();
+
+        // Convert readable subtitle-ready segments to JSON
+        let segments: Vec<serde_json::Value> = subtitle_segments
             .iter()
             .map(|s| {
                 serde_json::json!({
@@ -1033,7 +1040,7 @@ impl JobProcessor {
         tracing::info!(
             "Transcription completed for asset {}: {} segments, {:.1}s duration",
             asset_id,
-            result.segments.len(),
+            segment_count,
             result.duration
         );
 
@@ -1044,7 +1051,7 @@ impl JobProcessor {
             serde_json::json!({
                 "jobId": job.id,
                 "assetId": asset_id,
-                "segmentCount": result.segments.len(),
+                "segmentCount": segment_count,
                 "duration": result.duration,
                 "language": result.language,
             }),
@@ -1054,9 +1061,9 @@ impl JobProcessor {
             "assetId": asset_id,
             "language": result.language,
             "duration": result.duration,
-            "segmentCount": result.segments.len(),
+            "segmentCount": segment_count,
             "segments": segments,
-            "fullText": result.full_text(),
+            "fullText": full_text,
         }))
     }
 

@@ -326,6 +326,14 @@ describe('Tool Execution Diagnostic', () => {
     // Configure mock IPC responses
     const mockResponses: Record<string, unknown> = {
       is_transcription_available: false,
+      get_transcription_status: {
+        featureAvailable: true,
+        ready: false,
+        installedCount: 0,
+        defaultModel: null,
+        models: [],
+        modelsDir: '/models/whisper',
+      },
       transcribe_asset: { error: 'mock: whisper not available' },
       ...HARNESS_INPUT.mockIpc,
     };
@@ -468,6 +476,16 @@ describe('QA Scenarios', () => {
     // Mock: whisper not available
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'is_transcription_available') return false;
+      if (cmd === 'get_transcription_status') {
+        return {
+          featureAvailable: true,
+          ready: false,
+          installedCount: 0,
+          defaultModel: null,
+          models: [],
+          modelsDir: '/models/whisper',
+        };
+      }
       return undefined;
     });
 
@@ -495,6 +513,31 @@ describe('QA Scenarios', () => {
 
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'is_transcription_available') return true;
+      if (cmd === 'get_transcription_status') {
+        return {
+          featureAvailable: true,
+          ready: true,
+          defaultModel: 'base',
+          installedCount: 1,
+          models: [
+            {
+              id: 'base',
+              displayName: 'Base',
+              installed: true,
+              filename: 'ggml-base.bin',
+              path: '/models/whisper/ggml-base.bin',
+              sizeBytes: 0,
+              isDefault: true,
+              recommended: true,
+              downloadUrl: 'https://example.test/ggml-base.bin',
+              estimatedSizeBytes: 0,
+              source: 'local',
+              license: 'MIT',
+            },
+          ],
+          modelsDir: '/models/whisper',
+        };
+      }
       if (cmd === 'transcribe_asset') {
         return {
           language: 'en',

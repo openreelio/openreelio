@@ -948,6 +948,13 @@ async startCodexLogin() : Promise<Result<CodexAgentLoginResult, string>> {
     return { status: "error", error: e  as any };
 }
 },
+async logoutCodexAgentRuntime() : Promise<Result<CodexAgentLogoutResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("logout_codex_agent_runtime") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
 async installCodexCli() : Promise<Result<CodexCliInstallResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("install_codex_cli") };
@@ -1383,6 +1390,26 @@ async isTranscriptionAvailable() : Promise<Result<boolean, string>> {
 }
 },
 /**
+ * Returns local Whisper transcription readiness and installed model status.
+ */
+async getTranscriptionStatus() : Promise<Result<TranscriptionStatusDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_transcription_status") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Downloads and installs a local Whisper model into OpenReelio's model directory.
+ */
+async downloadWhisperModel(model: string, overwrite: boolean | null) : Promise<Result<TranscriptionModelDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("download_whisper_model", { model, overwrite }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Transcribes an asset's audio content
  * 
  * This command extracts audio from the asset, runs Whisper transcription,
@@ -1391,6 +1418,16 @@ async isTranscriptionAvailable() : Promise<Result<boolean, string>> {
 async transcribeAsset(assetId: string, options: TranscriptionOptionsDto | null) : Promise<Result<TranscriptionResultDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("transcribe_asset", { assetId, options }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Transcribes the audible audio mix of a sequence.
+ */
+async transcribeSequence(sequenceId: string | null, options: TranscriptionOptionsDto | null) : Promise<Result<TranscriptionResultDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("transcribe_sequence", { sequenceId, options }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -1679,6 +1716,118 @@ async analyzeVideoFull(assetId: string, options: AnalysisOptions) : Promise<Resu
 async getAnalysisBundle(assetId: string) : Promise<Result<AnalysisBundle | null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_analysis_bundle", { assetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Analyzes one timeline clip at clip-local frame sample granularity.
+ * The command returns a cacheable bundle that maps timeline seconds to source
+ * seconds/frame indices and extracts representative or dense frame samples.
+ */
+async analyzeTimelineClip(sequenceId: string, trackId: string, clipId: string, options: ClipAnalysisOptions) : Promise<Result<ClipAnalysisResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("analyze_timeline_clip", { sequenceId, trackId, clipId, options }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Loads a cached clip analysis bundle by fingerprint.
+ */
+async getClipAnalysis(fingerprint: string) : Promise<Result<ClipAnalysisBundle | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_clip_analysis", { fingerprint }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Maps timeline positions inside a clip to the corresponding source positions.
+ */
+async mapTimelineToSource(sequenceId: string, trackId: string, clipId: string, timelineTimes: number[]) : Promise<Result<TimelineSourceMappingEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("map_timeline_to_source", { sequenceId, trackId, clipId, timelineTimes }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Extracts clip frame samples and returns the same bundle shape as clip analysis.
+ */
+async sampleClipFrames(sequenceId: string, trackId: string, clipId: string, options: ClipAnalysisOptions) : Promise<Result<ClipAnalysisResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sample_clip_frames", { sequenceId, trackId, clipId, options }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Analyzes all visible video clips overlapping a timeline range.
+ */
+async inspectTimelineRange(sequenceId: string, startSec: number, endSec: number, trackId: string | null, options: ClipAnalysisOptions) : Promise<Result<ClipAnalysisResponse[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("inspect_timeline_range", { sequenceId, startSec, endSec, trackId, options }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Enriches a cached clip-analysis bundle with semantic frame observations.
+ */
+async enrichClipPerception(fingerprint: string, options: ClipPerceptionOptions) : Promise<Result<ClipPerceptionResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("enrich_clip_perception", { fingerprint, options }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Loads a cached semantic clip-perception bundle by perception fingerprint.
+ */
+async getClipPerception(perceptionFingerprint: string) : Promise<Result<ClipPerceptionBundle | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_clip_perception", { perceptionFingerprint }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Builds clip-local frame evidence and semantic observations for one timeline clip.
+ */
+async describeTimelineClip(sequenceId: string, trackId: string, clipId: string, analysisOptions: ClipAnalysisOptions, perceptionOptions: ClipPerceptionOptions) : Promise<Result<ClipPerceptionResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("describe_timeline_clip", { sequenceId, trackId, clipId, analysisOptions, perceptionOptions }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Builds clip-local frame evidence and semantic observations for visible clips in a range.
+ */
+async describeTimelineRange(sequenceId: string, startSec: number, endSec: number, trackId: string | null, analysisOptions: ClipAnalysisOptions, perceptionOptions: ClipPerceptionOptions) : Promise<Result<ClipPerceptionResponse[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("describe_timeline_range", { sequenceId, startSec, endSec, trackId, analysisOptions, perceptionOptions }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Searches cached semantic clip-perception bundles.
+ */
+async searchClipEvidence(query: string, limit: number | null, sequenceId: string | null) : Promise<Result<ClipEvidenceSearchHit[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("search_clip_evidence", { query, limit, sequenceId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Plans temporal edit ranges and command drafts from cached semantic clip evidence.
+ */
+async planSemanticClipEdit(perceptionFingerprint: string, query: string, action: SemanticTemporalEditAction, options: SemanticTemporalEditPlanOptions) : Promise<Result<SemanticTemporalEditPlan, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("plan_semantic_clip_edit", { perceptionFingerprint, query, action, options }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -3722,6 +3871,14 @@ isAdjustmentLayer?: boolean;
  * but remain independent for individual operations (trim, effects).
  */
 groupId?: string | null }
+export type ClipAnalysisBundle = { schemaVersion: number; fingerprint: string; sequenceId: string; trackId: string; clipId: string; assetId: string; assetName: string; assetHash: string; sourceRange: SourceRangeSummary; timelineRange: TimelineRangeSummary; playback: ClipPlaybackSummary; samplePolicy: ClipSamplePolicy; mapping: TimelineSourceMappingEntry[]; samples: FrameSample[]; windows: ClipAnalysisWindow[]; quality: ClipAnalysisQuality; artifactDir: string; errors: string[]; analyzedAt: string }
+export type ClipAnalysisBundleSource = "cached" | "generated"
+export type ClipAnalysisMode = "representative" | "dense"
+export type ClipAnalysisOptions = { mode?: ClipAnalysisMode; targetIntervalSec?: number | null; maxSamples?: number | null; includeEdges?: boolean; rangeStartSec?: number | null; rangeEndSec?: number | null; forceRefresh?: boolean }
+export type ClipAnalysisQuality = { status: ClipAnalysisQualityStatus; score: number; criticalSignals: string[]; missingSignals: string[]; degradedSignals: string[]; recommendedActions: string[] }
+export type ClipAnalysisQualityStatus = "ready" | "partial" | "insufficient"
+export type ClipAnalysisResponse = { source: ClipAnalysisBundleSource; bundle: ClipAnalysisBundle }
+export type ClipAnalysisWindow = { windowId: string; timelineStartSec: number; timelineEndSec: number; sourceStartSec: number; sourceEndSec: number; sampleIds: string[] }
 /**
  * Clip event payload.
  */
@@ -3738,6 +3895,15 @@ sequenceId: string | null;
  * Parent track ID
  */
 trackId: string | null }
+export type ClipEvidenceSearchHit = { perceptionFingerprint: string; clipFingerprint: string; sequenceId: string; trackId: string; clipId: string; assetId: string; sampleId: string; timelineSec: number; sourceSec: number; frameIndex?: number | null; imagePath: string; description: string; confidence: number; evidenceSource: ClipPerceptionEvidenceSource; matchedFields: string[] }
+export type ClipPerceptionBundle = { schemaVersion: number; perceptionFingerprint: string; clipFingerprint: string; sequenceId: string; trackId: string; clipId: string; assetId: string; source: ClipPerceptionBundleSource; provider?: string | null; model?: string | null; promptVersion: number; options: ClipPerceptionOptions; observations: ClipSemanticObservation[]; quality: ClipPerceptionQuality; errors: string[]; createdAt: string }
+export type ClipPerceptionBundleSource = "cached" | "generated"
+export type ClipPerceptionDetail = "low" | "auto" | "high"
+export type ClipPerceptionEvidenceSource = "sourceAnalysis" | "providerVision" | "localFallback"
+export type ClipPerceptionOptions = { provider?: string | null; model?: string | null; detail?: ClipPerceptionDetail; maxFrames?: number | null; reuseSourceAnalysis?: boolean; allowCloud?: boolean; forceRefresh?: boolean; includeContactSheet?: boolean }
+export type ClipPerceptionQuality = { status: ClipPerceptionQualityStatus; semanticCoverage: ClipSemanticCoverage; matchedObservationCount: number; providerObservationCount: number; fallbackObservationCount: number; missingSampleIds: string[]; recommendedActions: string[] }
+export type ClipPerceptionQualityStatus = "ready" | "partial" | "insufficient"
+export type ClipPerceptionResponse = { source: ClipPerceptionBundleSource; bundle: ClipPerceptionBundle }
 /**
  * Clip placement on timeline
  */
@@ -3750,6 +3916,7 @@ timelineInSec: number;
  * Duration on timeline (seconds) - may differ from source due to speed
  */
 durationSec: number }
+export type ClipPlaybackSummary = { speed: number; reverse: boolean; freezeFrame: boolean; hasTimeRemap: boolean }
 /**
  * Clip range within source asset
  */
@@ -3762,7 +3929,11 @@ sourceInSec: number;
  * End time within source (seconds)
  */
 sourceOutSec: number }
+export type ClipSamplePolicy = { mode: ClipAnalysisMode; targetIntervalSec: number; maxSamples: number; includeEdges: boolean; requestedTimelineStartSec: number; requestedTimelineEndSec: number; effectiveTimelineStartSec: number; effectiveTimelineEndSec: number }
+export type ClipSemanticCoverage = "semantic" | "sourceReuse" | "localFallback" | "missing"
+export type ClipSemanticObservation = { sampleId: string; timelineSec: number; sourceSec: number; frameIndex?: number | null; imagePath: string; description: string; subjects?: string[]; actions?: string[]; visibleText?: string[]; objects?: string[]; setting?: string | null; editUsefulness?: string | null; confidence: number; evidenceSource: ClipPerceptionEvidenceSource; provider: PerceptionProviderMetadata }
 export type CodexAgentLoginResult = { success: boolean; authStatus: string; message: string | null }
+export type CodexAgentLogoutResult = { success: boolean; authStatus: string; message: string | null }
 export type CodexAppServerSessionInput = { serverId: string }
 export type CodexAppServerStartResult = { serverId: string; eventName: string; command: string; args: string[]; bridgeCwd: string }
 export type CodexAppServerWriteInput = { serverId: string; message: JsonValue }
@@ -3771,7 +3942,7 @@ export type CodexCliUpdateResult = { success: boolean; beforeVersion: string | n
 export type CodexModelCatalogResult = { installed: boolean; defaultModel: string; defaultReasoningEffort: string; models: CodexModelInfo[]; reason: string | null }
 export type CodexModelInfo = { slug: string; displayName: string; defaultReasoningEffort: string; supportedReasoningEfforts: string[] }
 export type CodexReasoningEffortDto = "low" | "medium" | "high" | "xhigh"
-export type CodexStatusProbeResult = { installed: boolean; version: string | null; authStatus: string; reason: string | null }
+export type CodexStatusProbeResult = { installed: boolean; version: string | null; authStatus: string; reason: string | null; runtimeSource: string | null; codexHome: string | null }
 /**
  * Color (RGBA)
  */
@@ -3840,7 +4011,7 @@ deletedIds: string[] }
  */
 export type CompactionRecordDto = { id: string; sessionId: string; runId: string | null; tier: string; trigger: string; summaryMessageId: string | null; sourceMessageCount: number; retainedMessageCount: number; estimatedTokensSaved: number | null; continuationSummaryJson: string | null; stateRehydrationJson: string | null; createdAt: number }
 export type ConfigureCodexAgentRuntimeInput = { projectPath: string | null }
-export type ConfigureCodexAgentRuntimeResult = { installed: boolean; version: string | null; authStatus: string; ready: boolean; requiresLogin: boolean; pluginMarketplaceConfigured: boolean; mcpConfigured: boolean; message: string | null }
+export type ConfigureCodexAgentRuntimeResult = { installed: boolean; version: string | null; authStatus: string; ready: boolean; requiresLogin: boolean; pluginMarketplaceConfigured: boolean; mcpConfigured: boolean; message: string | null; runtimeSource: string | null; codexHome: string | null }
 /**
  * Response for configure_seedance_provider
  */
@@ -4499,6 +4670,7 @@ width: number;
  * Height of the exported image in pixels
  */
 height: number }
+export type FrameExtractionStatus = "ready" | "failed"
 /**
  * Semantic visual observation for a representative frame/keyframe.
  */
@@ -4551,6 +4723,8 @@ confidence: number;
  * Provider/model that produced this observation
  */
 provider: PerceptionProviderMetadata }
+export type FrameSample = { sampleId: string; index: number; timelineSec: number; timelineOffsetSec: number; sourceSec: number; frameIndex?: number | null; imagePath: string; width?: number | null; height?: number | null; samplingReason: string; extractionStatus: FrameExtractionStatus; error?: string | null; signals: FrameSampleSignals }
+export type FrameSampleSignals = { clipProgress: number; sourceProgress: number; nearestBoundary: string; visualComplexity?: number | null; adjacentDifference?: number | null }
 /**
  * Describes a gap (empty region) between clips on a track.
  */
@@ -6048,6 +6222,17 @@ export type SegmentType =
  * Quick-cut montage section
  */
 "montage"
+export type SemanticTemporalEditAction = "blur" | "highlight" | "remove" | "marker" | "addText"
+export type SemanticTemporalEditCommandDraft = { commandType: string; payload: JsonValue; reason: string; requiresResolution: string[]; risk: SemanticTemporalEditDraftRisk }
+export type SemanticTemporalEditDraftRisk = "low" | "needsReview" | "needsResolution"
+export type SemanticTemporalEditEvidence = { sampleId: string; timelineSec: number; sourceSec: number; frameIndex?: number | null; imagePath: string; description: string; confidence: number; evidenceSource: ClipPerceptionEvidenceSource; matchedFields: string[] }
+export type SemanticTemporalEditPlan = { planId: string; perceptionFingerprint: string; clipFingerprint: string; sequenceId: string; trackId: string; clipId: string; assetId: string; query: string; action: SemanticTemporalEditAction; ranges: SemanticTemporalEditRange[]; quality: SemanticTemporalEditPlanQuality; summary: string; createdAt: string }
+export type SemanticTemporalEditPlanOptions = { paddingSec?: number | null; mergeGapSec?: number | null; minConfidence?: number | null; maxRanges?: number | null; text?: string | null; effectStrength?: number | null; includeCommandDrafts?: boolean; spatialTimeToleranceSec?: number | null; includeSpatialTargets?: boolean }
+export type SemanticTemporalEditPlanQuality = { status: SemanticTemporalEditQualityStatus; score: number; matchedSampleCount: number; rangeCount: number; warnings: string[]; recommendedActions: string[] }
+export type SemanticTemporalEditQualityStatus = "ready" | "partial" | "insufficient"
+export type SemanticTemporalEditRange = { rangeId: string; timelineStartSec: number; timelineEndSec: number; sourceStartSec: number; sourceEndSec: number; sampleIds: string[]; confidence: number; matchedFields: string[]; evidence: SemanticTemporalEditEvidence[]; spatialTargets: SemanticTemporalSpatialTarget[]; commandDrafts: SemanticTemporalEditCommandDraft[]; warnings: string[] }
+export type SemanticTemporalSpatialTarget = { targetId: string; kind: SemanticTemporalSpatialTargetKind; label: string; sourceSec: number; timeDeltaSec: number; confidence: number; boundingBox: BoundingBox; maskShape: JsonValue }
+export type SemanticTemporalSpatialTargetKind = "object" | "face" | "textOcr"
 /**
  * Sequence (timeline container)
  * Uses denormalized structure - tracks are stored directly, not as IDs
@@ -6139,35 +6324,35 @@ export type SetSourcePointPayload = {
 timeSec: number }
 export type ShortcutSettingsDto = { customShortcuts: { [key in string]: string } }
 /**
- * Configuration for shot detection
- */
-export type ShotDetectionConfig = { 
-/**
- * Scene change threshold (0.0 - 1.0)
- * Lower = more sensitive (more shots detected)
- */
-threshold?: number; 
-/**
- * Minimum shot duration in seconds
- */
-minDurationSec?: number; 
-/**
- * Generate keyframe thumbnails
- */
-generateKeyframes?: boolean }
-/**
  * Configuration options for shot detection
  */
-export type ShotDetectionConfig = { 
+export type ShotDetectionConfig = {
 /**
  * Scene change detection threshold (0.0 - 1.0)
  * Lower values detect more scene changes
  */
-threshold: number | null; 
+threshold: number | null;
 /**
  * Minimum shot duration in seconds
  */
 minShotDuration: number | null }
+/**
+ * Configuration for shot detection
+ */
+export type ShotDetectionConfig = {
+/**
+ * Scene change threshold (0.0 - 1.0)
+ * Lower = more sensitive (more shots detected)
+ */
+threshold?: number;
+/**
+ * Minimum shot duration in seconds
+ */
+minDurationSec?: number;
+/**
+ * Generate keyframe thumbnails
+ */
+generateKeyframes?: boolean }
 /**
  * Result of shot detection operation
  */
@@ -6304,6 +6489,7 @@ playheadSec: number;
  * Marked duration (out - in) if both points are set, otherwise null.
  */
 markedDuration: number | null }
+export type SourceRangeSummary = { sourceInSec: number; sourceOutSec: number; durationSec: number }
 /**
  * Speaker-aware transcript range used by `TranscriptDetail`.
  */
@@ -7093,6 +7279,8 @@ sourceTime: number;
  * How to interpolate to the next keyframe
  */
 interpolation?: KeyframeInterpolation }
+export type TimelineRangeSummary = { timelineInSec: number; timelineOutSec: number; durationSec: number }
+export type TimelineSourceMappingEntry = { timelineSec: number; timelineOffsetSec: number; sourceSec?: number | null; frameIndex?: number | null; insideClip: boolean; reason: string }
 /**
  * Summary information about a single agent trace file.
  */
@@ -7313,6 +7501,82 @@ speakerId?: string | null;
  */
 speakerTurnId?: string | null }
 /**
+ * Progress emitted while downloading a local Whisper model.
+ */
+export type TranscriptionModelDownloadProgressDto = {
+/**
+ * Stable model ID being downloaded
+ */
+model: string;
+/**
+ * Downloaded bytes so far
+ */
+downloadedBytes: number;
+/**
+ * Total bytes when known
+ */
+totalBytes: number | null;
+/**
+ * Progress percentage when total bytes is known
+ */
+percent: number | null;
+/**
+ * Current stage
+ */
+stage: string }
+/**
+ * Installed/available local Whisper model state.
+ */
+export type TranscriptionModelDto = {
+/**
+ * Stable model ID used in transcription options
+ */
+id: string;
+/**
+ * Human-readable model name
+ */
+displayName: string;
+/**
+ * Expected whisper.cpp model filename
+ */
+filename: string;
+/**
+ * Whether the model file exists and is non-empty
+ */
+installed: boolean;
+/**
+ * Absolute expected model path
+ */
+path: string;
+/**
+ * Model file size in bytes when installed
+ */
+sizeBytes: number | null;
+/**
+ * Whether this is OpenReelio's default model
+ */
+isDefault: boolean;
+/**
+ * Whether this model is a recommended quality/performance choice
+ */
+recommended: boolean;
+/**
+ * Official upstream download URL for the converted ggml model
+ */
+downloadUrl: string;
+/**
+ * Estimated download size in bytes
+ */
+estimatedSizeBytes: number;
+/**
+ * Upstream source repository
+ */
+source: string;
+/**
+ * Upstream license label
+ */
+license: string }
+/**
  * Options for transcription request.
  */
 export type TranscriptionOptionsDto = { 
@@ -7325,7 +7589,7 @@ language: string | null;
  */
 translate: boolean | null; 
 /**
- * Whisper model to use ("tiny", "base", "small", "medium", "large")
+ * Whisper model to use, or "auto" to choose the best installed model
  */
 model: string | null }
 /**
@@ -7364,6 +7628,34 @@ endTime: number;
  * Transcribed text for this segment
  */
 text: string }
+/**
+ * Overall local transcription readiness and model inventory.
+ */
+export type TranscriptionStatusDto = {
+/**
+ * Whether the current build includes local Whisper support
+ */
+featureAvailable: boolean;
+/**
+ * Whether at least one supported local Whisper model is installed
+ */
+ready: boolean;
+/**
+ * Directory where OpenReelio expects whisper.cpp ggml models
+ */
+modelsDir: string;
+/**
+ * Default model ID used when no model is provided
+ */
+defaultModel: string;
+/**
+ * Number of installed supported models
+ */
+installedCount: number;
+/**
+ * Supported models and install status
+ */
+models: TranscriptionModelDto[] }
 /**
  * 2D Transform for clips
  */

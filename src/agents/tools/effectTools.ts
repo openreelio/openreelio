@@ -124,6 +124,145 @@ const EFFECT_TOOLS: ToolDefinition[] = [
   },
 
   // ---------------------------------------------------------------------------
+  // Add Mask
+  // ---------------------------------------------------------------------------
+  {
+    name: 'add_mask',
+    description: 'Add a spatial mask to an effect',
+    category: 'effect',
+    parameters: {
+      type: 'object',
+      properties: {
+        sequenceId: { type: 'string', description: 'The ID of the sequence' },
+        trackId: { type: 'string', description: 'The ID of the track' },
+        clipId: { type: 'string', description: 'The ID of the clip' },
+        effectId: { type: 'string', description: 'The ID of the effect to mask' },
+        shape: {
+          type: 'object',
+          description:
+            'Mask shape, such as { type: "rectangle", x, y, width, height, cornerRadius, rotation }',
+        },
+        name: { type: 'string', description: 'Optional mask name' },
+        feather: { type: 'number', description: 'Mask edge softness from 0 to 1' },
+        inverted: { type: 'boolean', description: 'Whether the mask should be inverted' },
+      },
+      required: ['sequenceId', 'trackId', 'clipId', 'effectId', 'shape'],
+    },
+    handler: async (args) => {
+      try {
+        const result = await executeAgentCommand('AddMask', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
+          effectId: args.effectId as string,
+          shape: args.shape as Record<string, unknown>,
+          ...(typeof args.name === 'string' ? { name: args.name } : {}),
+          ...(typeof args.feather === 'number' ? { feather: args.feather } : {}),
+          ...(typeof args.inverted === 'boolean' ? { inverted: args.inverted } : {}),
+        });
+
+        logger.debug('add_mask executed', { opId: result.opId });
+        return { success: true, result };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('add_mask failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // Update Mask
+  // ---------------------------------------------------------------------------
+  {
+    name: 'update_mask',
+    description: 'Update an existing spatial mask',
+    category: 'effect',
+    parameters: {
+      type: 'object',
+      properties: {
+        effectId: { type: 'string', description: 'The ID of the effect containing the mask' },
+        maskId: { type: 'string', description: 'The ID of the mask to update' },
+        shape: { type: 'object', description: 'New mask shape' },
+        name: { type: 'string', description: 'New mask name' },
+        feather: { type: 'number', description: 'New feather amount from 0 to 1' },
+        opacity: { type: 'number', description: 'New mask opacity from 0 to 1' },
+        expansion: { type: 'number', description: 'New mask expansion from -1 to 1' },
+        inverted: { type: 'boolean', description: 'Toggle mask inversion' },
+        blendMode: { type: 'string', description: 'Mask blend mode' },
+        enabled: { type: 'boolean', description: 'Toggle mask enabled state' },
+        locked: { type: 'boolean', description: 'Toggle mask locked state' },
+      },
+      required: ['effectId', 'maskId'],
+    },
+    handler: async (args) => {
+      try {
+        const optionalPayload: Record<string, unknown> = {};
+        for (const key of [
+          'shape',
+          'name',
+          'feather',
+          'opacity',
+          'expansion',
+          'inverted',
+          'blendMode',
+          'enabled',
+          'locked',
+        ]) {
+          if (args[key] !== undefined) {
+            optionalPayload[key] = args[key];
+          }
+        }
+
+        const result = await executeAgentCommand('UpdateMask', {
+          effectId: args.effectId as string,
+          maskId: args.maskId as string,
+          ...optionalPayload,
+        });
+
+        logger.debug('update_mask executed', { opId: result.opId });
+        return { success: true, result };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('update_mask failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // Remove Mask
+  // ---------------------------------------------------------------------------
+  {
+    name: 'remove_mask',
+    description: 'Remove a spatial mask from an effect',
+    category: 'effect',
+    parameters: {
+      type: 'object',
+      properties: {
+        effectId: { type: 'string', description: 'The ID of the effect containing the mask' },
+        maskId: { type: 'string', description: 'The ID of the mask to remove' },
+      },
+      required: ['effectId', 'maskId'],
+    },
+    handler: async (args) => {
+      try {
+        const result = await executeAgentCommand('RemoveMask', {
+          effectId: args.effectId as string,
+          maskId: args.maskId as string,
+        });
+
+        logger.debug('remove_mask executed', { opId: result.opId });
+        return { success: true, result };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('remove_mask failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
   // Remove Effect
   // ---------------------------------------------------------------------------
   {

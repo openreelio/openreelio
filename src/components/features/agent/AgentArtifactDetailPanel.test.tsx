@@ -42,7 +42,8 @@ describe('AgentArtifactDetailPanel', () => {
 
     expect(panel).toBeInTheDocument();
     expect(within(panel).getByText('Action Details')).toBeInTheDocument();
-    expect(within(panel).getByText('Completed')).toBeInTheDocument();
+    expect(screen.getByTestId('tool-call-part')).toHaveTextContent('Done');
+    expect(screen.getByTestId('tool-result-part')).toHaveTextContent('Completed');
     expect(within(panel).getByText('Medium impact')).toBeInTheDocument();
     expect(screen.getByTestId('tool-call-part')).toBeInTheDocument();
     expect(screen.getByTestId('tool-result-part')).toBeInTheDocument();

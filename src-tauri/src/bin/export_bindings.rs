@@ -46,6 +46,7 @@ fn normalize_unstable_type_line_spacing(input: &str) -> String {
     let mut in_import_stock_media_doc = false;
     let mut in_text_style = false;
     let mut in_stock_media_import_result = false;
+    let mut in_trimmed_generated_type = false;
     let mut normalized = input
         .lines()
         .map(|line| {
@@ -83,6 +84,13 @@ fn normalize_unstable_type_line_spacing(input: &str) -> String {
             if line.starts_with("export type StockMediaImportResult =") {
                 in_stock_media_import_result = true;
             }
+            if line.starts_with("export type ShotDetectionConfig =")
+                || line.starts_with("export type TranscriptionModelDownloadProgressDto =")
+                || line.starts_with("export type TranscriptionModelDto =")
+                || line.starts_with("export type TranscriptionStatusDto =")
+            {
+                in_trimmed_generated_type = true;
+            }
 
             let normalized_line = if in_batch_render_item && line == "outPoint: number | null; " {
                 "outPoint: number | null;"
@@ -107,7 +115,7 @@ fn normalize_unstable_type_line_spacing(input: &str) -> String {
                 "visualLayers: VisualRenderLayer[];"
             } else if in_text_style && line == "fontWeight?: number; " {
                 "fontWeight?: number;"
-            } else if in_stock_media_import_result {
+            } else if in_stock_media_import_result || in_trimmed_generated_type {
                 line.trim_end()
             } else {
                 line
@@ -142,6 +150,9 @@ fn normalize_unstable_type_line_spacing(input: &str) -> String {
             }
             if in_stock_media_import_result && line.starts_with("licenseSnapshotPath:") {
                 in_stock_media_import_result = false;
+            }
+            if in_trimmed_generated_type && line.ends_with('}') {
+                in_trimmed_generated_type = false;
             }
 
             match line {
@@ -184,6 +195,7 @@ fn main() {
         .typ::<openreelio_lib::ipc::JobCompletedEvent>()
         .typ::<openreelio_lib::ipc::JobFailedEvent>()
         .typ::<openreelio_lib::ipc::RenderLifecycleEvent>()
+        .typ::<openreelio_lib::ipc::TranscriptionModelDownloadProgressDto>()
         .typ::<openreelio_lib::core::analysis::dtw::DtwResult>();
 
     let out_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

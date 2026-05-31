@@ -3,7 +3,7 @@
 //! Tauri IPC commands for speech-to-text, caption export, and shot detection.
 
 use specta::Type;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::core::{
     fs::{
@@ -53,8 +53,72 @@ pub struct TranscriptionOptionsDto {
     pub language: Option<String>,
     /// Whether to translate to English
     pub translate: Option<bool>,
-    /// Whisper model to use ("tiny", "base", "small", "medium", "large")
+    /// Whisper model to use, or "auto" to choose the best installed model
     pub model: Option<String>,
+}
+
+/// Installed/available local Whisper model state.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionModelDto {
+    /// Stable model ID used in transcription options
+    pub id: String,
+    /// Human-readable model name
+    pub display_name: String,
+    /// Expected whisper.cpp model filename
+    pub filename: String,
+    /// Whether the model file exists and is non-empty
+    pub installed: bool,
+    /// Absolute expected model path
+    pub path: String,
+    /// Model file size in bytes when installed
+    pub size_bytes: Option<u64>,
+    /// Whether this is OpenReelio's default model
+    pub is_default: bool,
+    /// Whether this model is a recommended quality/performance choice
+    pub recommended: bool,
+    /// Official upstream download URL for the converted ggml model
+    pub download_url: String,
+    /// Estimated download size in bytes
+    pub estimated_size_bytes: u64,
+    /// Upstream source repository
+    pub source: String,
+    /// Upstream license label
+    pub license: String,
+}
+
+/// Overall local transcription readiness and model inventory.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionStatusDto {
+    /// Whether the current build includes local Whisper support
+    pub feature_available: bool,
+    /// Whether at least one supported local Whisper model is installed
+    pub ready: bool,
+    /// Directory where OpenReelio expects whisper.cpp ggml models
+    pub models_dir: String,
+    /// Default model ID used when no model is provided
+    pub default_model: String,
+    /// Number of installed supported models
+    pub installed_count: usize,
+    /// Supported models and install status
+    pub models: Vec<TranscriptionModelDto>,
+}
+
+/// Progress emitted while downloading a local Whisper model.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionModelDownloadProgressDto {
+    /// Stable model ID being downloaded
+    pub model: String,
+    /// Downloaded bytes so far
+    pub downloaded_bytes: u64,
+    /// Total bytes when known
+    pub total_bytes: Option<u64>,
+    /// Progress percentage when total bytes is known
+    pub percent: Option<f32>,
+    /// Current stage
+    pub stage: String,
 }
 
 // =============================================================================
@@ -166,6 +230,170 @@ pub async fn is_transcription_available() -> Result<bool, String> {
     Ok(crate::core::captions::whisper::is_whisper_available())
 }
 
+fn resolve_transcription_model(
+    requested: Option<&str>,
+    models_dir: &std::path::Path,
+) -> Result<crate::core::captions::whisper::WhisperModel, String> {
+    crate::core::captions::whisper::WhisperModel::resolve_requested_or_default(
+        requested, models_dir,
+    )
+    .map_err(|error| {
+        let value = requested.unwrap_or("auto");
+        format!("Invalid Whisper model '{}': {}", value, error)
+    })
+}
+
+fn build_transcription_model_dto(
+    model: crate::core::captions::whisper::WhisperModel,
+    models_dir: &std::path::Path,
+    default_model: crate::core::captions::whisper::WhisperModel,
+) -> TranscriptionModelDto {
+    use crate::core::captions::whisper::WhisperModel;
+
+    let path = models_dir.join(model.filename());
+    let metadata = std::fs::metadata(&path).ok();
+    let installed = metadata
+        .as_ref()
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false);
+
+    TranscriptionModelDto {
+        id: model.name().to_string(),
+        display_name: model.display_name().to_string(),
+        filename: model.filename().to_string(),
+        installed,
+        path: path.display().to_string(),
+        size_bytes: metadata.map(|metadata| metadata.len()),
+        is_default: model == default_model,
+        recommended: matches!(
+            model,
+            WhisperModel::Base
+                | WhisperModel::Small
+                | WhisperModel::LargeV3
+                | WhisperModel::LargeV3Turbo
+        ),
+        download_url: model.download_url().to_string(),
+        estimated_size_bytes: model.estimated_size_bytes(),
+        source: model.source().to_string(),
+        license: model.license().to_string(),
+    }
+}
+
+async fn resolve_transcription_ffmpeg_path(
+    ffmpeg_state: &State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+    app: Option<&tauri::AppHandle>,
+) -> Result<String, String> {
+    let existing_path = {
+        let guard = ffmpeg_state.read().await;
+        guard
+            .info()
+            .map(|info| info.ffmpeg_path.to_string_lossy().into_owned())
+    };
+    if let Some(path) = existing_path {
+        return Ok(path);
+    }
+
+    {
+        let mut guard = ffmpeg_state.write().await;
+        #[cfg(test)]
+        {
+            let _ = guard.initialize();
+        }
+        #[cfg(all(not(test), feature = "gui"))]
+        {
+            let _ = guard.initialize(app);
+        }
+
+        if let Some(info) = guard.info() {
+            return Ok(info.ffmpeg_path.to_string_lossy().into_owned());
+        }
+    }
+
+    Err(
+        "FFmpeg is not available for transcription audio extraction. Install FFmpeg or restart OpenReelio so the bundled FFmpeg runner can initialize."
+            .to_string(),
+    )
+}
+
+/// Returns local Whisper transcription readiness and installed model status.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_transcription_status() -> Result<TranscriptionStatusDto, String> {
+    use crate::core::captions::whisper::WhisperModel;
+
+    let feature_available = crate::core::captions::whisper::is_whisper_available();
+    let models_dir = crate::core::captions::whisper::default_models_dir();
+    let default_model = WhisperModel::default_for_dir(&models_dir);
+    let models = WhisperModel::all()
+        .iter()
+        .map(|model| build_transcription_model_dto(*model, &models_dir, default_model))
+        .collect::<Vec<_>>();
+    let installed_count = models.iter().filter(|model| model.installed).count();
+
+    Ok(TranscriptionStatusDto {
+        feature_available,
+        ready: feature_available && installed_count > 0,
+        models_dir: models_dir.display().to_string(),
+        default_model: default_model.name().to_string(),
+        installed_count,
+        models,
+    })
+}
+
+/// Downloads and installs a local Whisper model into OpenReelio's model directory.
+#[tauri::command]
+#[specta::specta]
+pub async fn download_whisper_model(
+    model: String,
+    overwrite: Option<bool>,
+    app: tauri::AppHandle,
+) -> Result<TranscriptionModelDto, String> {
+    use crate::core::captions::whisper::{
+        default_models_dir, download_whisper_model_blocking, WhisperModel,
+    };
+
+    if !crate::core::captions::whisper::is_whisper_available() {
+        return Err(
+            "Transcription model downloads require a build with the whisper feature enabled."
+                .to_string(),
+        );
+    }
+
+    let model = model
+        .parse::<WhisperModel>()
+        .map_err(|error| format!("Invalid Whisper model '{}': {}", model, error))?;
+    let overwrite = overwrite.unwrap_or(false);
+    let app_for_progress = app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        download_whisper_model_blocking(model, overwrite, |progress| {
+            let payload = TranscriptionModelDownloadProgressDto {
+                model: progress.model.name().to_string(),
+                downloaded_bytes: progress.downloaded_bytes,
+                total_bytes: progress.total_bytes,
+                percent: progress.percent(),
+                stage: progress.stage.to_string(),
+            };
+            if let Err(error) =
+                app_for_progress.emit("transcription:model-download-progress", payload)
+            {
+                tracing::debug!("Failed to emit transcription model download progress: {error}");
+            }
+        })
+    })
+    .await
+    .map_err(|error| format!("Model download task failed: {}", error))?;
+
+    result.map_err(|error| error.to_string())?;
+
+    let models_dir = default_models_dir();
+    let default_model = WhisperModel::default_for_dir(&models_dir);
+    Ok(build_transcription_model_dto(
+        model,
+        &models_dir,
+        default_model,
+    ))
+}
+
 /// Transcribes an asset's audio content
 ///
 /// This command extracts audio from the asset, runs Whisper transcription,
@@ -175,17 +403,22 @@ pub async fn is_transcription_available() -> Result<bool, String> {
 pub async fn transcribe_asset(
     asset_id: String,
     options: Option<TranscriptionOptionsDto>,
+    app: tauri::AppHandle,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
     state: State<'_, AppState>,
 ) -> Result<TranscriptionResultDto, String> {
     use crate::core::captions::{
         audio::{extract_audio_for_transcription, load_audio_samples},
-        whisper::{TranscriptionOptions, WhisperEngine, WhisperModel},
+        whisper::{subtitle_ready_segments, TranscriptionOptions, WhisperEngine},
     };
     use std::path::PathBuf;
 
     // Check if whisper is available
     if !crate::core::captions::whisper::is_whisper_available() {
-        return Err("Transcription is not available. Rebuild with --features whisper".to_string());
+        return Err(
+            "Transcription is not available. Rebuild OpenReelio with the whisper feature enabled."
+                .to_string(),
+        );
     }
 
     // Get asset from project
@@ -211,17 +444,14 @@ pub async fn transcribe_asset(
         asset_id
     );
 
-    // Determine model to use
-    let model_name = options
-        .as_ref()
-        .and_then(|o| o.model.as_deref())
-        .unwrap_or("base");
-    let model = model_name
-        .parse::<WhisperModel>()
-        .unwrap_or(WhisperModel::Base);
-
     // Get model path
     let models_dir = crate::core::captions::whisper::default_models_dir();
+    let model = resolve_transcription_model(
+        options
+            .as_ref()
+            .and_then(|options| options.model.as_deref()),
+        &models_dir,
+    )?;
     let model_path = models_dir.join(model.filename());
 
     if !model_path.exists() {
@@ -231,6 +461,7 @@ pub async fn transcribe_asset(
             model.name()
         ));
     }
+    let ffmpeg_path = resolve_transcription_ffmpeg_path(&ffmpeg_state, Some(&app)).await?;
 
     // Create temp directory for audio extraction
     let temp_dir = std::env::temp_dir()
@@ -265,7 +496,7 @@ pub async fn transcribe_asset(
     let result = tokio::task::spawn_blocking(move || {
         // Extract audio from asset
         tracing::debug!("Extracting audio to: {}", audio_path.display());
-        extract_audio_for_transcription(&asset_path, &audio_path, None)
+        extract_audio_for_transcription(&asset_path, &audio_path, Some(ffmpeg_path.as_str()))
             .map_err(|e| format!("Audio extraction failed: {}", e))?;
 
         // Load audio samples
@@ -295,10 +526,10 @@ pub async fn transcribe_asset(
 
     // Convert to DTO - get full_text before consuming segments
     let full_text = result.full_text();
+    let subtitle_segments = subtitle_ready_segments(&result.segments);
     Ok(TranscriptionResultDto {
         language: result.language,
-        segments: result
-            .segments
+        segments: subtitle_segments
             .into_iter()
             .map(|s| TranscriptionSegmentDto {
                 start_time: s.start_time,
@@ -306,6 +537,134 @@ pub async fn transcribe_asset(
                 text: s.text,
             })
             .collect(),
+        duration: result.duration,
+        full_text,
+    })
+}
+
+/// Transcribes the audible audio mix of a sequence.
+#[tauri::command]
+#[specta::specta]
+pub async fn transcribe_sequence(
+    sequence_id: Option<String>,
+    options: Option<TranscriptionOptionsDto>,
+    app: tauri::AppHandle,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+    state: State<'_, AppState>,
+) -> Result<TranscriptionResultDto, String> {
+    use crate::core::captions::{
+        audio::{load_audio_samples, mix_sequence_audio_for_transcription},
+        whisper::{subtitle_ready_segments, TranscriptionOptions, WhisperEngine},
+    };
+
+    if !crate::core::captions::whisper::is_whisper_available() {
+        return Err(
+            "Transcription is not available. Rebuild OpenReelio with the whisper feature enabled."
+                .to_string(),
+        );
+    }
+
+    let models_dir = crate::core::captions::whisper::default_models_dir();
+    let model = resolve_transcription_model(
+        options
+            .as_ref()
+            .and_then(|options| options.model.as_deref()),
+        &models_dir,
+    )?;
+    let model_path = models_dir.join(model.filename());
+    if !model_path.exists() {
+        return Err(format!(
+            "Whisper model not found at {}. Please download the {} model.",
+            model_path.display(),
+            model.name()
+        ));
+    }
+    let ffmpeg_path = resolve_transcription_ffmpeg_path(&ffmpeg_state, Some(&app)).await?;
+
+    let (project_state, resolved_sequence_id) = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        let resolved_sequence_id = sequence_id
+            .clone()
+            .or_else(|| project.state.active_sequence_id.clone())
+            .ok_or_else(|| "No active sequence is available for transcription.".to_string())?;
+        if !project.state.sequences.contains_key(&resolved_sequence_id) {
+            return Err(format!("Sequence not found: {}", resolved_sequence_id));
+        }
+        (project.state.clone(), resolved_sequence_id)
+    };
+
+    tracing::info!(
+        "Starting sequence transcription for sequence: {}",
+        resolved_sequence_id
+    );
+
+    let temp_dir = std::env::temp_dir()
+        .join("openreelio")
+        .join("transcription");
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    let audio_path = temp_dir.join(format!("sequence-{}.wav", resolved_sequence_id));
+
+    struct TempFileGuard(std::path::PathBuf);
+    impl Drop for TempFileGuard {
+        fn drop(&mut self) {
+            if self.0.exists() {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+    }
+    let _temp_guard = TempFileGuard(audio_path.clone());
+
+    let whisper_options = TranscriptionOptions {
+        language: options.as_ref().and_then(|o| o.language.clone()),
+        translate: options.as_ref().and_then(|o| o.translate).unwrap_or(false),
+        threads: 0,
+        initial_prompt: None,
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        let mixdown = mix_sequence_audio_for_transcription(
+            &project_state,
+            &resolved_sequence_id,
+            &audio_path,
+            Some(ffmpeg_path.as_str()),
+        )
+        .map_err(|e| format!("Sequence audio mixdown failed: {}", e))?;
+        tracing::debug!(
+            "Sequence audio mixdown complete: {} layers, {:.2}s",
+            mixdown.layer_count,
+            mixdown.duration_sec
+        );
+
+        let samples = load_audio_samples(&audio_path)
+            .map_err(|e| format!("Failed to load mixed sequence audio: {}", e))?;
+        let engine = WhisperEngine::new(&model_path)
+            .map_err(|e| format!("Failed to load Whisper model: {}", e))?;
+        engine
+            .transcribe(&samples, &whisper_options)
+            .map_err(|e| format!("Transcription failed: {}", e))
+    })
+    .await
+    .map_err(|e| format!("Transcription task failed: {}", e))??;
+
+    let full_text = result.full_text();
+    let subtitle_segments = subtitle_ready_segments(&result.segments);
+    let segments = subtitle_segments
+        .into_iter()
+        .map(|s| TranscriptionSegmentDto {
+            start_time: s.start_time,
+            end_time: s.end_time,
+            text: s.text,
+        })
+        .collect();
+
+    Ok(TranscriptionResultDto {
+        language: result.language,
+        segments,
         duration: result.duration,
         full_text,
     })

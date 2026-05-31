@@ -36,6 +36,8 @@ export interface CodexStatusProbeResult {
   version?: string | null;
   authStatus: ExternalAgentAuthStatus;
   reason?: string | null;
+  runtimeSource?: string | null;
+  codexHome?: string | null;
 }
 
 export type CodexStatusProbe = () => Promise<CodexStatusProbeResult>;
@@ -105,6 +107,8 @@ export class CodexReferenceAdapter implements ExternalAgentRuntimeAdapter {
       available,
       version: probe.version ?? null,
       reason: available ? null : (probe.reason ?? this.defaultUnavailableReason(probe)),
+      runtimeSource: probe.runtimeSource ?? null,
+      codexHome: probe.codexHome ?? null,
     };
   }
 

@@ -31,6 +31,8 @@ export interface ExternalAgentRuntimeStatus {
   available: boolean;
   version: string | null;
   reason: string | null;
+  runtimeSource?: string | null;
+  codexHome?: string | null;
 }
 
 export interface AgentRuntimeReadiness {

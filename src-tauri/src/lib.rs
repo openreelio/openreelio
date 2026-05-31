@@ -96,6 +96,8 @@ impl ActiveProject {
             crate::core::project::OpKind::CompoundClipUnnest => "UnnestCompoundClip",
             crate::core::project::OpKind::ClipGroup => "GroupClips",
             crate::core::project::OpKind::ClipUngroup => "UngroupClips",
+            crate::core::project::OpKind::ClipLink => "LinkClips",
+            crate::core::project::OpKind::ClipUnlink => "UnlinkClips",
             crate::core::project::OpKind::TrackAdd => "AddTrack",
             crate::core::project::OpKind::TrackRemove => "RemoveTrack",
             crate::core::project::OpKind::TrackReorder => "ReorderTracks",
@@ -1358,6 +1360,7 @@ mod tauri_app {
                 $crate::ipc::get_external_agent_setup_info,
                 $crate::ipc::configure_codex_agent_runtime,
                 $crate::ipc::start_codex_login,
+                $crate::ipc::logout_codex_agent_runtime,
                 $crate::ipc::install_codex_cli,
                 $crate::ipc::update_codex_cli,
                 $crate::ipc::consume_external_agent_approval_token,
@@ -1406,7 +1409,10 @@ mod tauri_app {
                 $crate::ipc::trigger_memory_cleanup,
                 // Transcription commands
                 $crate::ipc::is_transcription_available,
+                $crate::ipc::get_transcription_status,
+                $crate::ipc::download_whisper_model,
                 $crate::ipc::transcribe_asset,
+                $crate::ipc::transcribe_sequence,
                 $crate::ipc::submit_transcription_job,
                 $crate::ipc::export_captions,
                 $crate::ipc::get_captions_as_string,
@@ -1436,6 +1442,17 @@ mod tauri_app {
                 // Analysis pipeline commands (ADR-048)
                 $crate::ipc::analyze_video_full,
                 $crate::ipc::get_analysis_bundle,
+                $crate::ipc::analyze_timeline_clip,
+                $crate::ipc::get_clip_analysis,
+                $crate::ipc::map_timeline_to_source,
+                $crate::ipc::sample_clip_frames,
+                $crate::ipc::inspect_timeline_range,
+                $crate::ipc::enrich_clip_perception,
+                $crate::ipc::get_clip_perception,
+                $crate::ipc::describe_timeline_clip,
+                $crate::ipc::describe_timeline_range,
+                $crate::ipc::search_clip_evidence,
+                $crate::ipc::plan_semantic_clip_edit,
                 $crate::ipc::import_diarization_json,
                 $crate::ipc::run_external_diarization,
                 // ESD commands (ADR-049)
@@ -1841,6 +1858,7 @@ mod tauri_app {
             ipc::get_external_agent_setup_info,
             ipc::configure_codex_agent_runtime,
             ipc::start_codex_login,
+            ipc::logout_codex_agent_runtime,
             ipc::install_codex_cli,
             ipc::update_codex_cli,
             ipc::consume_external_agent_approval_token,
@@ -1889,7 +1907,10 @@ mod tauri_app {
             ipc::trigger_memory_cleanup,
             // Transcription commands
             ipc::is_transcription_available,
+            ipc::get_transcription_status,
+            ipc::download_whisper_model,
             ipc::transcribe_asset,
+            ipc::transcribe_sequence,
             ipc::submit_transcription_job,
             ipc::export_captions,
             ipc::get_captions_as_string,
@@ -1920,6 +1941,17 @@ mod tauri_app {
             // Analysis pipeline commands (ADR-048)
             ipc::analyze_video_full,
             ipc::get_analysis_bundle,
+            ipc::analyze_timeline_clip,
+            ipc::get_clip_analysis,
+            ipc::map_timeline_to_source,
+            ipc::sample_clip_frames,
+            ipc::inspect_timeline_range,
+            ipc::enrich_clip_perception,
+            ipc::get_clip_perception,
+            ipc::describe_timeline_clip,
+            ipc::describe_timeline_range,
+            ipc::search_clip_evidence,
+            ipc::plan_semantic_clip_edit,
             ipc::import_diarization_json,
             ipc::run_external_diarization,
             // ESD commands (ADR-049)
@@ -2309,6 +2341,61 @@ mod tests {
         assert_eq!(reopened.state.meta.name, "History Discard");
         assert!(!reopened.history.applied_op_ids.contains(&result.op_id));
         assert!(reopened.history.discarded_op_ids.contains(&result.op_id));
+    }
+
+    #[test]
+    fn test_active_project_discard_preserves_created_active_sequence() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir
+            .path()
+            .join("history_discard_active_sequence_project");
+
+        let mut project = ActiveProject::create("History Active", project_path).unwrap();
+        let default_sequence_id = project.state.active_sequence_id.clone().unwrap();
+
+        let create_result = project
+            .executor
+            .execute(
+                Box::new(crate::core::commands::CreateSequenceCommand::new(
+                    "Shorts Timeline",
+                    "youtube_shorts",
+                )),
+                &mut project.state,
+            )
+            .unwrap();
+        let shorts_sequence_id = create_result.created_ids[0].clone();
+        assert_ne!(default_sequence_id, shorts_sequence_id);
+        assert_eq!(
+            project.state.active_sequence_id.as_deref(),
+            Some(shorts_sequence_id.as_str())
+        );
+
+        let track_result = project
+            .executor
+            .execute(
+                Box::new(crate::core::commands::AddTrackCommand::new(
+                    &shorts_sequence_id,
+                    "Temporary Captions",
+                    crate::core::timeline::TrackKind::Caption,
+                )),
+                &mut project.state,
+            )
+            .unwrap();
+
+        project
+            .discard_persisted_operations(std::slice::from_ref(&track_result.op_id))
+            .unwrap();
+
+        assert_eq!(
+            project.state.active_sequence_id.as_deref(),
+            Some(shorts_sequence_id.as_str())
+        );
+        assert!(project.state.sequences.contains_key(&default_sequence_id));
+        let shorts_sequence = project.state.sequences.get(&shorts_sequence_id).unwrap();
+        assert!(!shorts_sequence
+            .tracks
+            .iter()
+            .any(|track| track.name == "Temporary Captions"));
     }
 
     #[test]

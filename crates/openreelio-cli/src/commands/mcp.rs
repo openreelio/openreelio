@@ -1,7 +1,7 @@
 //! Read-only MCP server surface for external AI agents.
 
 use crate::{
-    commands::{help_json, plan},
+    commands::{help_json, plan, transcription},
     output,
 };
 use clap::Args;
@@ -367,6 +367,45 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
             serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false }),
         ),
         tool(
+            "openreelio.transcription.status",
+            "OpenReelio transcription status",
+            "Read local Whisper transcription readiness, model directory, and installed model inventory.",
+            serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+        ),
+        tool(
+            "openreelio.transcription.generate",
+            "OpenReelio transcription generation",
+            "Generate speech-to-text transcript segments from a project asset or from the audible mix of a sequence.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "assetId": {
+                        "type": "string",
+                        "description": "Asset ID to transcribe when sequenceAudio is false."
+                    },
+                    "sequenceAudio": {
+                        "type": "boolean",
+                        "description": "Set true to transcribe the audible audio mix of a sequence instead of a single asset."
+                    },
+                    "sequenceId": {
+                        "type": "string",
+                        "description": "Sequence ID for sequenceAudio mode. Defaults to active sequence."
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Language code such as auto, en, ko, ja, or zh. Defaults to auto."
+                    },
+                    "model": {
+                        "type": "string",
+                        "enum": ["auto", "tiny", "base", "small", "medium", "large", "large-v3", "large-v3-turbo"],
+                        "description": "Whisper model to use. Defaults to auto, which selects the best installed model."
+                    },
+                    "translate": { "type": "boolean" }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool(
             "openreelio.annotation.read",
             "OpenReelio asset annotation",
             "Read cached objects/faces/OCR/shot annotations for one asset before choosing safe text or caption placement.",
@@ -532,6 +571,11 @@ fn call_tool(state: &McpServerState, name: &str, arguments: Value) -> Result<Val
         "openreelio.diagnostics.read" => build_diagnostics(state),
         "openreelio.timeline.snapshot" => build_timeline_snapshot(state),
         "openreelio.assets.list" => build_assets_list(state),
+        "openreelio.transcription.status" => Ok(serde_json::to_value(
+            transcription::build_transcription_status(),
+        )
+        .map_err(|error| ToolError::Execution(error.to_string()))?),
+        "openreelio.transcription.generate" => generate_transcription(state, arguments),
         "openreelio.annotation.read" => build_annotation_read(state, arguments),
         "openreelio.command.schema" => Ok(build_command_schema()),
         "openreelio.command.validate" => validate_command(arguments),
@@ -543,6 +587,56 @@ fn call_tool(state: &McpServerState, name: &str, arguments: Value) -> Result<Val
             "Tool '{other}' is not available"
         ))),
     }
+}
+
+fn generate_transcription(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
+    let Some(project_path) = state.project.as_ref() else {
+        return Err(ToolError::InvalidArguments(
+            "openreelio.transcription.generate requires mcp --project <project-path>".to_string(),
+        ));
+    };
+
+    let language =
+        optional_string_argument(&arguments, "language")?.unwrap_or_else(|| "auto".to_string());
+    let model =
+        optional_string_argument(&arguments, "model")?.unwrap_or_else(|| "auto".to_string());
+    let translate = optional_bool_argument(&arguments, "translate")?.unwrap_or(false);
+    let sequence_audio = optional_bool_argument(&arguments, "sequenceAudio")?.unwrap_or(false);
+    let project = super::load_project(project_path).map_err(|error| {
+        ToolError::Execution(format!(
+            "Failed to open project '{}': {error}",
+            project_path.display()
+        ))
+    })?;
+    let output = if sequence_audio {
+        let sequence_id = super::resolve_sequence_id(
+            &project,
+            optional_string_argument(&arguments, "sequenceId")?,
+        )
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
+        serde_json::to_value(
+            transcription::generate_sequence_transcription(
+                &project,
+                &sequence_id,
+                &language,
+                &model,
+                translate,
+            )
+            .map_err(|error| ToolError::Execution(error.to_string()))?,
+        )
+        .map_err(|error| ToolError::Execution(error.to_string()))?
+    } else {
+        let asset_id = required_string_argument(&arguments, "assetId")?;
+        serde_json::to_value(
+            transcription::generate_asset_transcription(
+                &project, &asset_id, &language, &model, translate,
+            )
+            .map_err(|error| ToolError::Execution(error.to_string()))?,
+        )
+        .map_err(|error| ToolError::Execution(error.to_string()))?
+    };
+
+    Ok(output)
 }
 
 fn build_host_context(state: &McpServerState) -> Value {
@@ -575,6 +669,8 @@ fn build_host_context(state: &McpServerState) -> Value {
             "timelineRead": true,
             "commandValidate": true,
             "planValidate": true,
+            "transcriptionGenerate": true,
+            "transcriptionStatus": true,
             "mediaInsertWithApproval": state.has_active_approval_token(),
             "planApplyWithApproval": state.has_active_approval_token(),
             "previewFrameRead": false,
@@ -583,7 +679,7 @@ fn build_host_context(state: &McpServerState) -> Value {
         },
         "policy": {
             "approvalMode": if state.has_active_approval_token() { "approve-mutations" } else { "read-only" },
-            "rawMediaAccess": "none",
+            "rawMediaAccess": if state.project.is_some() { "transcription-generate" } else { "none" },
             "filesystemAccess": if state.project.is_some() { "project-readonly" } else { "none" }
         },
         "approvalGrant": approval_grant
@@ -964,6 +1060,18 @@ fn build_command_schema() -> Value {
                 "positionShape": "Caption position supports preset top/center/bottom or custom xPercent/yPercent.",
                 "note": "Use this for AI/STT transcript segments so generated captions are imported atomically and remain undoable as one command."
             },
+            "transcriptionGenerate": {
+                "tool": "openreelio.transcription.generate",
+                "required": [],
+                "optional": ["assetId", "sequenceAudio", "sequenceId", "language", "model", "translate"],
+                "note": "Use assetId for source asset transcription, or sequenceAudio=true to transcribe the audible edited timeline mix before ImportGeneratedCaptions."
+            },
+            "transcriptionStatus": {
+                "tool": "openreelio.transcription.status",
+                "required": [],
+                "optional": [],
+                "note": "Use this read-only MCP tool to check whether local Whisper is compiled in and which model files are installed."
+            },
             "AddTextClip": {
                 "required": ["sequenceId", "trackId", "timelineIn", "duration", "textData"],
                 "textDataShape": "TextClipData includes content, style(fontFamily/fontSize/fontWeight/color/backgroundColor/backgroundPadding/alignment/bold/italic/underline/lineHeight/letterSpacing), position(x/y 0..1), shadow(color/offsetX/offsetY/blur), outline(color/width), rotation, and opacity.",
@@ -995,6 +1103,10 @@ fn build_command_schema() -> Value {
                 "SetClipTransform for exact preview drag/resize/rotate parity using normalized position, scale, rotationDeg, and anchor."
             ],
             "timedSubtitles": [
+                "Call openreelio.transcription.status first and explain missing model installation before attempting automatic subtitles.",
+                "If no model is installed, tell the user to install one through the OpenReelio UI or `openreelio-cli transcription install --model large-v3-turbo` before transcription.generate.",
+                "Call openreelio.transcription.generate(assetId, language=\"auto\", model=\"auto\") for speech-to-text segments before creating generated subtitles.",
+                "For edited timeline audio, call openreelio.transcription.generate(sequenceAudio=true, sequenceId, language=\"auto\", model=\"auto\") so cuts, trims, overlaps, and volume are reflected.",
                 "Use ImportGeneratedCaptions for AI transcript segments or CreateCaption/UpdateCaption for individual caption lines.",
                 "Use caption style/position metadata for subtitle readability instead of editable overlay text when the user wants semantic subtitles."
             ],
@@ -1019,6 +1131,37 @@ fn required_string_argument(arguments: &Value, key: &str) -> Result<String, Tool
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| ToolError::InvalidArguments(format!("{key} is required")))
+}
+
+fn optional_string_argument(arguments: &Value, key: &str) -> Result<Option<String>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| Ok(Some(value.to_string())))
+        .unwrap_or_else(|| {
+            Err(ToolError::InvalidArguments(format!(
+                "{key} must be a non-empty string when provided"
+            )))
+        })
+}
+
+fn optional_bool_argument(arguments: &Value, key: &str) -> Result<Option<bool>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value.as_bool().map(Some).ok_or_else(|| {
+        ToolError::InvalidArguments(format!("{key} must be a boolean when provided"))
+    })
 }
 
 fn required_non_negative_number(arguments: &Value, key: &str) -> Result<f64, ToolError> {
@@ -1592,8 +1735,10 @@ fn build_preview_state() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openreelio_core::assets::AudioInfo;
     use openreelio_core::commands::{
-        AddTextClipCommand, AddTrackCommand, CreateCaptionCommand, SetClipTransformCommand,
+        AddTextClipCommand, AddTrackCommand, CreateCaptionCommand, ImportAssetCommand,
+        SetClipTransformCommand,
     };
     use openreelio_core::text::{TextClipData, TextOutline, TextPosition, TextShadow, TextStyle};
     use openreelio_core::timeline::Transform;
@@ -1764,8 +1909,11 @@ mod tests {
 
         assert!(names.contains(&"openreelio.host.context"));
         assert!(names.contains(&"openreelio.timeline.snapshot"));
+        assert!(names.contains(&"openreelio.transcription.status"));
+        assert!(names.contains(&"openreelio.transcription.generate"));
         assert!(names.contains(&"openreelio.annotation.read"));
         assert!(names.contains(&"openreelio.command.schema"));
+        assert!(!names.contains(&"openreelio.transcription.install_model"));
         assert!(!names.contains(&"openreelio.plan.apply"));
     }
 
@@ -1774,6 +1922,15 @@ mod tests {
         let schema = build_command_schema();
 
         assert!(schema["payloadHints"]["AddTextClip"].is_object());
+        assert_eq!(
+            schema["payloadHints"]["transcriptionGenerate"]["tool"],
+            "openreelio.transcription.generate"
+        );
+        assert_eq!(
+            schema["payloadHints"]["transcriptionStatus"]["tool"],
+            "openreelio.transcription.status"
+        );
+        assert!(schema["payloadHints"]["transcriptionInstallModel"].is_null());
         assert!(schema["payloadHints"]["UpdateTextClip"].is_object());
         assert!(schema["payloadHints"]["SetClipTransform"].is_object());
         assert_eq!(
@@ -2076,6 +2233,83 @@ mod tests {
 
         assert!(error.to_string().contains("expected-project"));
         assert!(error.to_string().contains(&actual_project_id));
+    }
+
+    #[test]
+    fn should_insert_video_with_linked_audio_through_media_insert() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("linked_media_project");
+        let media_path = temp_dir.path().join("clip.mp4");
+        std::fs::write(&media_path, b"fake video bytes").expect("media fixture");
+
+        let mut project =
+            openreelio_core::ActiveProject::create("Linked Media", project_path.clone())
+                .expect("project");
+        let sequence_id = project.state.active_sequence_id.clone().expect("sequence");
+        let track_id = project.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .find(|track| matches!(track.kind, TrackKind::Video | TrackKind::Overlay))
+            .expect("video track")
+            .id
+            .clone();
+        let import_command = ImportAssetCommand::new("clip.mp4", &media_path.to_string_lossy())
+            .with_duration(8.0)
+            .with_audio_info(AudioInfo::default());
+        let asset_id = import_command.asset_id().to_string();
+        project
+            .executor
+            .execute(Box::new(import_command), &mut project.state)
+            .expect("import video asset");
+        project.save().expect("save project");
+        drop(project);
+
+        let state = McpServerState {
+            project: Some(project_path.clone()),
+            approval_token: Some("media-token".to_string()),
+            ..Default::default()
+        };
+        let result = apply_media_insert(
+            &state,
+            serde_json::json!({
+                "approvalToken": "media-token",
+                "sequenceId": sequence_id,
+                "trackId": track_id,
+                "assetId": asset_id,
+                "timelineStart": 0.0
+            }),
+        )
+        .expect("media insert");
+
+        let linked_audio = result["linkedAudio"].as_object().expect("linked audio");
+        let result_sequence_id = result["sequenceId"].as_str().expect("sequence id");
+        let result_track_id = result["trackId"].as_str().expect("track id");
+        let video_clip_id = result["clipId"].as_str().expect("video clip id");
+        let audio_track_id = linked_audio["trackId"].as_str().expect("audio track id");
+        let audio_clip_id = linked_audio["clipId"].as_str().expect("audio clip id");
+
+        let reopened = openreelio_core::ActiveProject::open(project_path).expect("reopen");
+        let sequence = reopened
+            .state
+            .sequences
+            .get(result_sequence_id)
+            .expect("sequence");
+        let video_clip = sequence
+            .tracks
+            .iter()
+            .find(|track| track.id == result_track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == video_clip_id))
+            .expect("video clip");
+        let audio_clip = sequence
+            .tracks
+            .iter()
+            .find(|track| track.id == audio_track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == audio_clip_id))
+            .expect("audio clip");
+
+        assert!(video_clip.audio.muted);
+        assert!(video_clip.link_group_id.is_some());
+        assert_eq!(video_clip.link_group_id, audio_clip.link_group_id);
     }
 
     #[test]

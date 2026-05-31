@@ -149,6 +149,207 @@ function semanticFrameObservations(shotIndex = 0) {
   ];
 }
 
+function clipAnalysisResponse(overrides: Partial<Record<string, unknown>> = {}) {
+  const bundle = {
+    fingerprint: 'clip_fingerprint',
+    sequenceId: 'seq_001',
+    trackId: 'V1',
+    clipId: 'clip_1',
+    assetId: 'asset_1',
+    assetName: 'source.mp4',
+    quality: { status: 'ready', score: 100 },
+    samplePolicy: { mode: 'representative', maxSamples: 2 },
+    mapping: [
+      {
+        timelineSec: 1,
+        timelineOffsetSec: 0,
+        sourceSec: 5,
+        frameIndex: 150,
+        insideClip: true,
+        reason: 'leadingEdge',
+      },
+    ],
+    samples: [
+      {
+        sampleId: 'f0001',
+        index: 0,
+        timelineSec: 1,
+        timelineOffsetSec: 0,
+        sourceSec: 5,
+        frameIndex: 150,
+        imagePath: '/project/.openreelio/analysis/clips/clip_fingerprint/frames/f0001.jpg',
+        extractionStatus: 'ready',
+      },
+    ],
+    windows: [],
+    errors: [],
+    analyzedAt: '2026-05-29T00:00:00Z',
+    ...overrides,
+  };
+
+  return {
+    source: 'generated',
+    bundle,
+  };
+}
+
+function clipPerceptionResponse(overrides: Partial<Record<string, unknown>> = {}) {
+  const bundle = {
+    schemaVersion: 1,
+    perceptionFingerprint: 'perception_fingerprint',
+    clipFingerprint: 'clip_fingerprint',
+    sequenceId: 'seq_001',
+    trackId: 'V1',
+    clipId: 'clip_1',
+    assetId: 'asset_1',
+    source: 'generated',
+    provider: null,
+    model: null,
+    promptVersion: 1,
+    options: {
+      detail: 'low',
+      reuseSourceAnalysis: true,
+      allowCloud: false,
+      forceRefresh: false,
+      includeContactSheet: false,
+    },
+    observations: [
+      {
+        sampleId: 'f0001',
+        timelineSec: 1,
+        sourceSec: 5,
+        frameIndex: 150,
+        imagePath: '/project/.openreelio/analysis/clips/clip_fingerprint/frames/f0001.jpg',
+        description: 'A presenter points at a Q4 chart.',
+        subjects: ['presenter'],
+        actions: ['pointing'],
+        visibleText: ['Q4'],
+        objects: ['chart'],
+        setting: 'studio',
+        editUsefulness: 'Use for chart emphasis.',
+        confidence: 0.92,
+        evidenceSource: 'sourceAnalysis',
+        provider: {
+          provider: 'openai',
+          model: 'gpt-4.1-mini',
+          analyzedAt: '2026-05-29T00:00:00Z',
+        },
+      },
+    ],
+    quality: {
+      status: 'ready',
+      semanticCoverage: 'sourceReuse',
+      matchedObservationCount: 1,
+      providerObservationCount: 0,
+      fallbackObservationCount: 0,
+      missingSampleIds: [],
+      recommendedActions: [],
+    },
+    errors: [],
+    createdAt: '2026-05-29T00:00:00Z',
+    ...overrides,
+  };
+
+  return {
+    source: 'generated',
+    bundle,
+  };
+}
+
+function semanticEditPlanResponse(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    planId: 'semantic_edit_1',
+    perceptionFingerprint: 'perception_fingerprint',
+    clipFingerprint: 'clip_fingerprint',
+    sequenceId: 'seq_001',
+    trackId: 'V1',
+    clipId: 'clip_1',
+    assetId: 'asset_1',
+    query: 'logo',
+    action: 'blur',
+    ranges: [
+      {
+        rangeId: 'range_001',
+        timelineStartSec: 0.8,
+        timelineEndSec: 1.2,
+        sourceStartSec: 4.8,
+        sourceEndSec: 5.2,
+        sampleIds: ['f0001'],
+        confidence: 0.92,
+        matchedFields: ['visibleText'],
+        evidence: [
+          {
+            sampleId: 'f0001',
+            timelineSec: 1,
+            sourceSec: 5,
+            frameIndex: 150,
+            imagePath: '/frames/f0001.jpg',
+            description: 'The product logo is visible.',
+            confidence: 0.92,
+            evidenceSource: 'sourceAnalysis',
+            matchedFields: ['visibleText'],
+          },
+        ],
+        spatialTargets: [
+          {
+            targetId: 'spatial_001',
+            kind: 'object',
+            label: 'product logo',
+            sourceSec: 5,
+            timeDeltaSec: 0,
+            confidence: 0.95,
+            boundingBox: { left: 0.1, top: 0.2, width: 0.3, height: 0.4 },
+            maskShape: {
+              type: 'rectangle',
+              x: 0.25,
+              y: 0.4,
+              width: 0.33,
+              height: 0.43,
+              cornerRadius: 0.02,
+              rotation: 0,
+            },
+          },
+        ],
+        commandDrafts: [
+          {
+            commandType: 'SplitClip',
+            payload: { clipId: 'clip_1', timeSec: 0.8 },
+            reason: 'Isolate semantic range start.',
+            requiresResolution: [],
+            risk: 'low',
+          },
+          {
+            commandType: 'AddEffect',
+            payload: { clipId: '<isolatedClipId>', effectId: 'gaussian_blur' },
+            reason: 'Apply blur to isolated semantic range.',
+            requiresResolution: ['isolatedClipId'],
+            risk: 'needsResolution',
+          },
+          {
+            commandType: 'AddMask',
+            payload: { effectId: '<effectIdFromAddEffect>' },
+            reason: 'Constrain the effect to detected logo bounds.',
+            requiresResolution: ['isolatedClipId', 'effectId'],
+            risk: 'needsResolution',
+          },
+        ],
+        warnings: ['Spatial annotation boxes are available; verify mask alignment.'],
+      },
+    ],
+    quality: {
+      status: 'partial',
+      score: 92,
+      matchedSampleCount: 1,
+      rangeCount: 1,
+      warnings: ['Spatial masks are drafted from source annotations and need visual review.'],
+      recommendedActions: ['Review mask boxes before executing command drafts.'],
+    },
+    summary: 'Planned blur over 1 semantic range.',
+    createdAt: '2026-05-29T00:00:00Z',
+    ...overrides,
+  };
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -228,11 +429,21 @@ describe('analysisTools', () => {
       expect(globalToolRegistry.has('get_selected_clips')).toBe(true);
       expect(globalToolRegistry.has('get_playhead_position')).toBe(true);
       expect(globalToolRegistry.has('get_track_clips')).toBe(true);
+      expect(globalToolRegistry.has('analyze_timeline_clip')).toBe(true);
+      expect(globalToolRegistry.has('read_clip_analysis')).toBe(true);
+      expect(globalToolRegistry.has('map_timeline_to_source')).toBe(true);
+      expect(globalToolRegistry.has('sample_clip_frames')).toBe(true);
+      expect(globalToolRegistry.has('inspect_timeline_range')).toBe(true);
+      expect(globalToolRegistry.has('describe_clip_frames')).toBe(true);
+      expect(globalToolRegistry.has('read_clip_perception')).toBe(true);
+      expect(globalToolRegistry.has('describe_timeline_range')).toBe(true);
+      expect(globalToolRegistry.has('search_clip_evidence')).toBe(true);
+      expect(globalToolRegistry.has('plan_semantic_clip_edit')).toBe(true);
     });
 
     it('should register tools in analysis category', () => {
       const analysisTools = globalToolRegistry.listByCategory('analysis');
-      expect(analysisTools.length).toBe(28);
+      expect(analysisTools.length).toBe(38);
     });
 
     it('should return correct tool names', () => {
@@ -255,7 +466,17 @@ describe('analysisTools', () => {
       expect(names).toContain('search_indexed_source_library');
       expect(names).toContain('import_external_diarization');
       expect(names).toContain('run_external_diarization');
-      expect(names).toHaveLength(28);
+      expect(names).toContain('analyze_timeline_clip');
+      expect(names).toContain('read_clip_analysis');
+      expect(names).toContain('map_timeline_to_source');
+      expect(names).toContain('sample_clip_frames');
+      expect(names).toContain('inspect_timeline_range');
+      expect(names).toContain('describe_clip_frames');
+      expect(names).toContain('read_clip_perception');
+      expect(names).toContain('describe_timeline_range');
+      expect(names).toContain('search_clip_evidence');
+      expect(names).toContain('plan_semantic_clip_edit');
+      expect(names).toHaveLength(38);
     });
 
     it('should unregister all tools', () => {
@@ -806,6 +1027,341 @@ describe('analysisTools', () => {
       // Only clipA exists; deleted_clip_id should be silently excluded
       expect(clips).toHaveLength(1);
       expect(clips[0].id).toBe('clipA');
+    });
+  });
+
+  // ===========================================================================
+  // clip-local analysis tools: map timeline clips to sampled source evidence
+  // ===========================================================================
+
+  describe('clip-local analysis tools', () => {
+    it('analyze_timeline_clip should default to the selected clip and return indexed samples', async () => {
+      const clip = createClip({ id: 'clip_1', assetId: 'asset_1' });
+      setupStores({
+        tracks: [createTrack({ id: 'V1', clips: [clip] })],
+        selectedClipIds: ['clip_1'],
+      });
+      vi.mocked(invoke).mockResolvedValue(clipAnalysisResponse());
+
+      const result = await globalToolRegistry.execute('analyze_timeline_clip', {});
+      const analysis = getToolResult<{
+        fingerprint: string;
+        sampleCount: number;
+        readySampleCount: number;
+        samples: Array<{ imagePath: string }>;
+      }>(result);
+
+      expect(analysis.fingerprint).toBe('clip_fingerprint');
+      expect(analysis.sampleCount).toBe(1);
+      expect(analysis.readySampleCount).toBe(1);
+      expect(analysis.samples[0].imagePath).toContain('f0001.jpg');
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('analyze_timeline_clip', {
+        sequenceId: 'seq_001',
+        trackId: 'V1',
+        clipId: 'clip_1',
+        options: {
+          mode: 'representative',
+          includeEdges: true,
+          forceRefresh: false,
+        },
+      });
+    });
+
+    it('sample_clip_frames should use dense sampling options for a specified clip', async () => {
+      setupStores({ tracks: [createTrack({ id: 'V1' })] });
+      vi.mocked(invoke).mockResolvedValue(clipAnalysisResponse());
+
+      const result = await globalToolRegistry.execute('sample_clip_frames', {
+        sequenceId: 'seq_001',
+        trackId: 'V1',
+        clipId: 'clip_1',
+        targetIntervalSec: 0.1,
+        maxSamples: 12,
+        rangeStartSec: 2,
+        rangeEndSec: 3,
+        forceRefresh: true,
+      });
+
+      expectToolSuccess(result);
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('sample_clip_frames', {
+        sequenceId: 'seq_001',
+        trackId: 'V1',
+        clipId: 'clip_1',
+        options: {
+          mode: 'dense',
+          targetIntervalSec: 0.1,
+          maxSamples: 12,
+          includeEdges: true,
+          rangeStartSec: 2,
+          rangeEndSec: 3,
+          forceRefresh: true,
+        },
+      });
+    });
+
+    it('map_timeline_to_source should default to playhead time when no time is provided', async () => {
+      const clip = createClip({ id: 'clip_1', assetId: 'asset_1' });
+      setupStores({
+        tracks: [createTrack({ id: 'V1', clips: [clip] })],
+        selectedClipIds: ['clip_1'],
+        currentTime: 3.25,
+      });
+      vi.mocked(invoke).mockResolvedValue([
+        {
+          timelineSec: 3.25,
+          timelineOffsetSec: 2.25,
+          sourceSec: 8.25,
+          frameIndex: 247,
+          insideClip: true,
+          reason: 'requested',
+        },
+      ]);
+
+      const result = await globalToolRegistry.execute('map_timeline_to_source', {});
+      const mapped = getToolResult<{ count: number; mapping: unknown[] }>(result);
+
+      expect(mapped.count).toBe(1);
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('map_timeline_to_source', {
+        sequenceId: 'seq_001',
+        trackId: 'V1',
+        clipId: 'clip_1',
+        timelineTimes: [3.25],
+      });
+    });
+
+    it('read_clip_analysis should load a cached bundle by fingerprint', async () => {
+      setupStores({});
+      vi.mocked(invoke).mockResolvedValue(clipAnalysisResponse().bundle);
+
+      const result = await globalToolRegistry.execute('read_clip_analysis', {
+        fingerprint: 'clip_fingerprint',
+      });
+      const analysis = getToolResult<{ fingerprint: string; source: string }>(result);
+
+      expect(analysis.fingerprint).toBe('clip_fingerprint');
+      expect(analysis.source).toBe('cached');
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('get_clip_analysis', {
+        fingerprint: 'clip_fingerprint',
+      });
+    });
+
+    it('inspect_timeline_range should inspect the active sequence range with dense defaults', async () => {
+      setupStores({ tracks: [createTrack({ id: 'V1' })] });
+      vi.mocked(invoke).mockResolvedValue([clipAnalysisResponse()]);
+
+      const result = await globalToolRegistry.execute('inspect_timeline_range', {
+        startSec: 1,
+        endSec: 2,
+      });
+      const inspected = getToolResult<{ count: number; clips: unknown[] }>(result);
+
+      expect(inspected.count).toBe(1);
+      expect(inspected.clips).toHaveLength(1);
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('inspect_timeline_range', {
+        sequenceId: 'seq_001',
+        startSec: 1,
+        endSec: 2,
+        trackId: null,
+        options: {
+          mode: 'dense',
+          includeEdges: true,
+          rangeStartSec: 1,
+          rangeEndSec: 2,
+          forceRefresh: false,
+        },
+      });
+    });
+
+    it('describe_clip_frames should semantically describe the selected clip with cloud disabled by default', async () => {
+      const clip = createClip({ id: 'clip_1', assetId: 'asset_1' });
+      setupStores({
+        tracks: [createTrack({ id: 'V1', clips: [clip] })],
+        selectedClipIds: ['clip_1'],
+      });
+      vi.mocked(invoke).mockResolvedValue(clipPerceptionResponse());
+
+      const result = await globalToolRegistry.execute('describe_clip_frames', {});
+      const perception = getToolResult<{
+        perceptionFingerprint: string;
+        observationCount: number;
+        observations: Array<{ description: string; visibleText: string[] }>;
+      }>(result);
+
+      expect(perception.perceptionFingerprint).toBe('perception_fingerprint');
+      expect(perception.observationCount).toBe(1);
+      expect(perception.observations[0].description).toContain('Q4 chart');
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('describe_timeline_clip', {
+        sequenceId: 'seq_001',
+        trackId: 'V1',
+        clipId: 'clip_1',
+        analysisOptions: {
+          mode: 'dense',
+          includeEdges: true,
+          forceRefresh: false,
+        },
+        perceptionOptions: {
+          detail: 'low',
+          reuseSourceAnalysis: true,
+          allowCloud: false,
+          forceRefresh: false,
+          includeContactSheet: false,
+        },
+      });
+    });
+
+    it('describe_clip_frames should enrich an existing clip-analysis fingerprint when provided', async () => {
+      setupStores({});
+      vi.mocked(invoke).mockResolvedValue(clipPerceptionResponse());
+
+      const result = await globalToolRegistry.execute('describe_clip_frames', {
+        fingerprint: 'clip_fingerprint',
+        allowCloud: true,
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        detail: 'auto',
+        maxFrames: 8,
+      });
+
+      expectToolSuccess(result);
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('enrich_clip_perception', {
+        fingerprint: 'clip_fingerprint',
+        options: {
+          provider: 'openai',
+          model: 'gpt-4.1-mini',
+          detail: 'auto',
+          maxFrames: 8,
+          reuseSourceAnalysis: true,
+          allowCloud: true,
+          forceRefresh: false,
+          includeContactSheet: false,
+        },
+      });
+    });
+
+    it('read_clip_perception should load a cached semantic bundle by perception fingerprint', async () => {
+      setupStores({});
+      vi.mocked(invoke).mockResolvedValue(clipPerceptionResponse().bundle);
+
+      const result = await globalToolRegistry.execute('read_clip_perception', {
+        perceptionFingerprint: 'perception_fingerprint',
+      });
+      const perception = getToolResult<{ source: string; perceptionFingerprint: string }>(result);
+
+      expect(perception.source).toBe('cached');
+      expect(perception.perceptionFingerprint).toBe('perception_fingerprint');
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('get_clip_perception', {
+        perceptionFingerprint: 'perception_fingerprint',
+      });
+    });
+
+    it('describe_timeline_range should semantically describe visible clips in the active sequence range', async () => {
+      setupStores({ tracks: [createTrack({ id: 'V1' })] });
+      vi.mocked(invoke).mockResolvedValue([clipPerceptionResponse()]);
+
+      const result = await globalToolRegistry.execute('describe_timeline_range', {
+        startSec: 1,
+        endSec: 2,
+        maxFrames: 4,
+      });
+      const described = getToolResult<{ count: number; clips: unknown[] }>(result);
+
+      expect(described.count).toBe(1);
+      expect(described.clips).toHaveLength(1);
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('describe_timeline_range', {
+        sequenceId: 'seq_001',
+        startSec: 1,
+        endSec: 2,
+        trackId: null,
+        analysisOptions: {
+          mode: 'dense',
+          includeEdges: true,
+          rangeStartSec: 1,
+          rangeEndSec: 2,
+          forceRefresh: false,
+        },
+        perceptionOptions: {
+          detail: 'low',
+          maxFrames: 4,
+          reuseSourceAnalysis: true,
+          allowCloud: false,
+          forceRefresh: false,
+          includeContactSheet: false,
+        },
+      });
+    });
+
+    it('search_clip_evidence should search cached semantic observations', async () => {
+      setupStores({});
+      vi.mocked(invoke).mockResolvedValue([
+        {
+          perceptionFingerprint: 'perception_fingerprint',
+          clipFingerprint: 'clip_fingerprint',
+          sequenceId: 'seq_001',
+          trackId: 'V1',
+          clipId: 'clip_1',
+          assetId: 'asset_1',
+          sampleId: 'f0001',
+          timelineSec: 1,
+          sourceSec: 5,
+          frameIndex: 150,
+          imagePath: '/frames/f0001.jpg',
+          description: 'A presenter points at a Q4 chart.',
+          confidence: 0.92,
+          evidenceSource: 'sourceAnalysis',
+          matchedFields: ['description', 'visibleText'],
+        },
+      ]);
+
+      const result = await globalToolRegistry.execute('search_clip_evidence', {
+        query: 'Q4 chart',
+        limit: 5,
+        sequenceId: 'seq_001',
+      });
+      const search = getToolResult<{ count: number; hits: Array<{ sampleId: string }> }>(result);
+
+      expect(search.count).toBe(1);
+      expect(search.hits[0].sampleId).toBe('f0001');
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('search_clip_evidence', {
+        query: 'Q4 chart',
+        limit: 5,
+        sequenceId: 'seq_001',
+      });
+    });
+
+    it('plan_semantic_clip_edit should build semantic edit ranges from cached perception', async () => {
+      setupStores({});
+      vi.mocked(invoke).mockResolvedValue(semanticEditPlanResponse());
+
+      const result = await globalToolRegistry.execute('plan_semantic_clip_edit', {
+        perceptionFingerprint: 'perception_fingerprint',
+        query: 'logo',
+        action: 'blur',
+        paddingSec: 0.3,
+        minConfidence: 0.5,
+        maxRanges: 3,
+        effectStrength: 20,
+      });
+      const plan = getToolResult<{
+        planId: string;
+        ranges: Array<{ rangeId: string; commandDrafts: Array<{ commandType: string }> }>;
+      }>(result);
+
+      expect(plan.planId).toBe('semantic_edit_1');
+      expect(plan.ranges).toHaveLength(1);
+      expect(plan.ranges[0].commandDrafts[1].commandType).toBe('AddEffect');
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('plan_semantic_clip_edit', {
+        perceptionFingerprint: 'perception_fingerprint',
+        query: 'logo',
+        action: 'blur',
+        options: {
+          paddingSec: 0.3,
+          minConfidence: 0.5,
+          maxRanges: 3,
+          effectStrength: 20,
+          includeCommandDrafts: true,
+          includeSpatialTargets: true,
+        },
+      });
     });
   });
 
@@ -4405,10 +4961,7 @@ describe('reference style transfer analysis tools', () => {
         .mockImplementationOnce(async (_commandType, payload) => {
           const createdTrack = createTrack({
             id: 'new-track-id',
-            name:
-              typeof payload.name === 'string'
-                ? payload.name
-                : 'Source Selects',
+            name: typeof payload.name === 'string' ? payload.name : 'Source Selects',
           });
           useProjectStore.setState((state) => {
             const sequence = state.sequences.get('seq_001');
@@ -4417,10 +4970,10 @@ describe('reference style transfer analysis tools', () => {
             }
           });
           return {
-          opId: 'op-create-track',
-          changes: [],
-          createdIds: ['new-track-id'],
-          deletedIds: [],
+            opId: 'op-create-track',
+            changes: [],
+            createdIds: ['new-track-id'],
+            deletedIds: [],
           };
         })
         .mockResolvedValueOnce({

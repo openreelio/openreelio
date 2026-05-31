@@ -114,11 +114,8 @@ export class CommandQueue {
       const wrappedOperation = async (): Promise<void> => {
         const { signal } = abortController;
 
-        // Setup timeout that aborts the operation
-        const timeoutId = setTimeout(() => {
-          logger.error('Operation timeout - aborting', { operationName });
-          abortController.abort(new Error(`Operation timeout: ${operationName}`));
-        }, options?.timeoutMs ?? CommandQueue.OPERATION_TIMEOUT_MS);
+        let timedOut = false;
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
         try {
           // Check if already aborted before starting
@@ -128,10 +125,45 @@ export class CommandQueue {
               : new Error(`Operation aborted: ${operationName}`);
           }
 
-          // Always pass the AbortSignal to the operation.
-          // JS safely ignores extra arguments for functions that don't declare them, and this
-          // keeps cancellation available even when operations are wrapped (e.g. vi.fn()).
-          const result = await (operation as CancellableOperation<T>)(signal);
+          const operationPromise = (async (): Promise<T> => {
+            // Always pass the AbortSignal to the operation.
+            // JS safely ignores extra arguments for functions that don't declare them, and this
+            // keeps cancellation available even when operations are wrapped (e.g. vi.fn()).
+            const operationResult = await (operation as CancellableOperation<T>)(signal);
+
+            // Check if aborted during execution
+            if (signal.aborted) {
+              throw signal.reason instanceof Error
+                ? signal.reason
+                : new Error(`Operation aborted: ${operationName}`);
+            }
+
+            return operationResult;
+          })();
+
+          void operationPromise.catch((error) => {
+            if (!timedOut) {
+              return;
+            }
+
+            logger.debug('Operation rejected after queue timeout', {
+              operationName,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+
+          const timeoutMs = options?.timeoutMs ?? CommandQueue.OPERATION_TIMEOUT_MS;
+          const timeoutPromise = new Promise<never>((_, rejectTimeout) => {
+            timeoutId = setTimeout(() => {
+              const timeoutError = new Error(`Operation timeout: ${operationName}`);
+              timedOut = true;
+              logger.error('Operation timeout - aborting', { operationName, timeoutMs });
+              abortController.abort(timeoutError);
+              rejectTimeout(timeoutError);
+            }, timeoutMs);
+          });
+
+          const result = await Promise.race([operationPromise, timeoutPromise]);
 
           // Check if aborted during execution
           if (signal.aborted) {
@@ -140,10 +172,14 @@ export class CommandQueue {
               : new Error(`Operation aborted: ${operationName}`);
           }
 
-          clearTimeout(timeoutId);
+          if (timeoutId !== null) {
+            clearTimeout(timeoutId);
+          }
           resolve(result);
         } catch (error) {
-          clearTimeout(timeoutId);
+          if (timeoutId !== null) {
+            clearTimeout(timeoutId);
+          }
 
           // Wrap abort errors for clarity
           if (signal.aborted) {

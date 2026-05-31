@@ -9,6 +9,7 @@ import {
   commands,
   type AnalysisProvider,
   type ProviderCapabilities,
+  type TranscriptionStatusDto,
   type TranscriptSegment,
 } from '@/bindings';
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
@@ -27,6 +28,46 @@ const logger = createLogger('CaptionTools');
 
 const AUTO_TRANSCRIBE_ALTERNATIVES =
   'Try analyze_asset with analysisTypes ["transcript"] for provider-based speech analysis, or analysisTypes ["textOcr"] for on-screen text.';
+const WHISPER_MODEL_SELECTION_PREFERENCE = [
+  'large-v3',
+  'large-v3-turbo',
+  'large',
+  'medium',
+  'small',
+  'base',
+  'tiny',
+];
+
+function selectDefaultWhisperModel(status: TranscriptionStatusDto | null): string {
+  if (status?.defaultModel) {
+    return status.defaultModel;
+  }
+  const installed = new Set(
+    status?.models.filter((candidate) => candidate.installed).map((candidate) => candidate.id) ??
+      [],
+  );
+  return (
+    WHISPER_MODEL_SELECTION_PREFERENCE.find((candidate) => installed.has(candidate)) ??
+    'large-v3-turbo'
+  );
+}
+
+function normalizeWhisperModelArg(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || normalized === 'auto' || normalized === 'default' || normalized === 'best') {
+    return fallback;
+  }
+  if (normalized === 'turbo' || normalized === 'largev3turbo') {
+    return 'large-v3-turbo';
+  }
+  if (normalized === 'largev3') {
+    return 'large-v3';
+  }
+  return normalized;
+}
 
 interface TranscriptionSegmentInput {
   startTime: number;
@@ -938,6 +979,66 @@ const CAPTION_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'transcription_status',
+    description:
+      'Read local Whisper transcription readiness, model directory, and installed model inventory.',
+    category: 'utility',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+    handler: async () => {
+      try {
+        const result = await commands.getTranscriptionStatus();
+        if (result.status === 'error') {
+          return { success: false, error: result.error };
+        }
+        return { success: true, result: result.data };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('transcription_status failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+  {
+    name: 'install_whisper_model',
+    description:
+      'Download and install a local Whisper model for automatic captions. Use only after the user approves a model download.',
+    category: 'utility',
+    parameters: {
+      type: 'object',
+      properties: {
+        model: {
+          type: 'string',
+          enum: ['tiny', 'base', 'small', 'medium', 'large', 'large-v3', 'large-v3-turbo'],
+          description: 'Whisper model to install (default: large-v3-turbo)',
+        },
+        force: {
+          type: 'boolean',
+          description: 'Replace an existing model file',
+        },
+      },
+      required: [],
+    },
+    handler: async (args) => {
+      try {
+        const model = normalizeWhisperModelArg(args.model, 'large-v3-turbo');
+        const force = args.force === true;
+        const result = await commands.downloadWhisperModel(model, force);
+        if (result.status === 'error') {
+          return { success: false, error: result.error };
+        }
+        return { success: true, result: result.data };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('install_whisper_model failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+  {
     name: 'auto_transcribe',
     description:
       'Transcribe an asset into timed text segments. Uses local Whisper when available, otherwise falls back to a configured transcript analysis provider. ' +
@@ -956,8 +1057,8 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         },
         model: {
           type: 'string',
-          enum: ['tiny', 'base', 'small', 'medium', 'large'],
-          description: 'Whisper model size (default: base)',
+          enum: ['auto', 'tiny', 'base', 'small', 'medium', 'large', 'large-v3', 'large-v3-turbo'],
+          description: 'Whisper model size (default: best installed model)',
         },
         provider: {
           type: 'string',
@@ -976,10 +1077,19 @@ const CAPTION_TOOLS: ToolDefinition[] = [
       try {
         const assetId = args.assetId as string;
 
-        // Check whisper availability before attempting transcription
+        // Check local Whisper readiness before attempting transcription
         let whisperAvailable = false;
+        let installedModels: string[] = [];
+        let defaultModel = 'large-v3-turbo';
         try {
-          whisperAvailable = await invoke<boolean>('is_transcription_available');
+          const status = await commands.getTranscriptionStatus();
+          if (status.status === 'ok') {
+            whisperAvailable = status.data.ready;
+            defaultModel = selectDefaultWhisperModel(status.data);
+            installedModels = status.data.models
+              .filter((candidate) => candidate.installed)
+              .map((candidate) => candidate.id);
+          }
         } catch {
           // IPC call failed — treat as unavailable
         }
@@ -1023,7 +1133,16 @@ const CAPTION_TOOLS: ToolDefinition[] = [
 
         const options: Record<string, unknown> = {};
         if (args.language) options.language = args.language;
-        if (args.model) options.model = args.model;
+        const requestedModel = normalizeWhisperModelArg(args.model, defaultModel);
+        if (requestedModel) {
+          if (installedModels.length > 0 && !installedModels.includes(requestedModel)) {
+            return {
+              success: false,
+              error: `Whisper model '${requestedModel}' is not installed. Use transcription_status to inspect models or install_whisper_model after user approval.`,
+            };
+          }
+          options.model = requestedModel;
+        }
 
         if (args.async) {
           const jobId = await invoke<string>('submit_transcription_job', {
@@ -1071,6 +1190,93 @@ const CAPTION_TOOLS: ToolDefinition[] = [
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('auto_transcribe failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+  {
+    name: 'auto_transcribe_sequence',
+    description:
+      'Transcribe the audible audio mix of an edited sequence into timeline-relative timed text segments.',
+    category: 'utility',
+    parameters: {
+      type: 'object',
+      properties: {
+        sequenceId: {
+          type: 'string',
+          description: 'Sequence ID. Uses the active sequence if omitted.',
+        },
+        language: {
+          type: 'string',
+          description: 'Language code (e.g., "en", "ko"). Auto-detected if omitted.',
+        },
+        model: {
+          type: 'string',
+          enum: ['auto', 'tiny', 'base', 'small', 'medium', 'large', 'large-v3', 'large-v3-turbo'],
+          description: 'Installed Whisper model size (default: best installed model)',
+        },
+      },
+      required: [],
+    },
+    handler: async (args) => {
+      try {
+        let defaultModel = 'large-v3-turbo';
+        let installedModels: string[] = [];
+        try {
+          const status = await commands.getTranscriptionStatus();
+          if (status.status === 'ok') {
+            defaultModel = selectDefaultWhisperModel(status.data);
+            installedModels = status.data.models
+              .filter((candidate) => candidate.installed)
+              .map((candidate) => candidate.id);
+            if (!status.data.ready) {
+              return {
+                success: false,
+                error:
+                  'No installed Whisper model was found. Use transcription_status to inspect models or install_whisper_model after user approval.',
+              };
+            }
+          }
+        } catch {
+          // Fall through to backend command; it will return the concrete availability error.
+        }
+
+        const model = normalizeWhisperModelArg(args.model, defaultModel);
+        if (installedModels.length > 0 && !installedModels.includes(model)) {
+          return {
+            success: false,
+            error: `Whisper model '${model}' is not installed. Use transcription_status to inspect models or install_whisper_model after user approval.`,
+          };
+        }
+
+        const options = {
+          language: typeof args.language === 'string' ? args.language : null,
+          translate: null,
+          model,
+        };
+
+        const result = await commands.transcribeSequence(
+          typeof args.sequenceId === 'string' ? args.sequenceId : null,
+          options,
+        );
+        if (result.status === 'error') {
+          return { success: false, error: result.error };
+        }
+
+        return {
+          success: true,
+          result: {
+            mode: 'sequence',
+            language: result.data.language,
+            segments: result.data.segments,
+            segmentCount: result.data.segments.length,
+            duration: result.data.duration,
+            fullText: result.data.fullText,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('auto_transcribe_sequence failed', { error: message });
         return { success: false, error: message };
       }
     },

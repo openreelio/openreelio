@@ -132,6 +132,39 @@ describe('CommandQueue', () => {
       expect(signalWasAborted).toBe(true);
     });
 
+    it('should reject on timeout when operation ignores abort signal', async () => {
+      const stuckOp = vi.fn().mockImplementation(() => new Promise(() => {}));
+
+      const resultPromise = queue.enqueue(stuckOp, 'abort-ignoring-op', { timeoutMs: 100 });
+      const rejectionExpectation = expect(resultPromise).rejects.toThrow(/timeout/i);
+
+      await vi.advanceTimersByTimeAsync(101);
+
+      await rejectionExpectation;
+      expect(stuckOp).toHaveBeenCalledOnce();
+    });
+
+    it('should continue processing queue after abort-ignoring operation times out', async () => {
+      const stuckOp = vi.fn().mockImplementation(() => new Promise(() => {}));
+      const nextOp = vi.fn().mockResolvedValue('next result');
+
+      const stuckPromise = queue.enqueue(stuckOp, 'stuck-op', { timeoutMs: 100 });
+      const nextPromise = queue.enqueue(nextOp, 'next-op');
+      const stuckExpectation = expect(stuckPromise).rejects.toThrow(/timeout/i);
+
+      await vi.advanceTimersByTimeAsync(101);
+
+      await stuckExpectation;
+      await expect(nextPromise).resolves.toBe('next result');
+      expect(nextOp).toHaveBeenCalledOnce();
+      expect(queue.getStatus()).toEqual<QueueStatus>({
+        currentOperation: null,
+        pendingOperations: [],
+        totalCount: 0,
+        isProcessing: false,
+      });
+    });
+
     it('should not abort if operation completes before timeout', async () => {
       const fastOp = vi.fn().mockImplementation(async () => {
         await new Promise((resolve) => setTimeout(resolve, 100));

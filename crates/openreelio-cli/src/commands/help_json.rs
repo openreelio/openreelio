@@ -301,6 +301,50 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 },
                 "example": "openreelio-cli caption import --path ./project --file transcript.json --format transcript-json"
             },
+            "transcription.status": {
+                "description": "Show local Whisper transcription readiness and installed model status",
+                "params": {},
+                "example": "openreelio-cli transcription status"
+            },
+            "transcription.install": {
+                "description": "Download and install a local Whisper model",
+                "params": {
+                    "model": { "type": "string", "required": false, "desc": "Whisper model: tiny, base, small, medium, large, large-v3, or large-v3-turbo. Defaults to large-v3-turbo" },
+                    "force": { "type": "boolean", "required": false, "desc": "Replace an existing model file" }
+                },
+                "example": "openreelio-cli transcription install --model large-v3-turbo"
+            },
+            "transcription.generate": {
+                "description": "Generate speech-to-text transcript segments for an audio or video asset, with optional caption import",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "asset": { "type": "string", "required": true, "desc": "Asset ID to transcribe" },
+                    "language": { "type": "string", "required": false, "desc": "Language code, or auto for detection" },
+                    "model": { "type": "string", "required": false, "desc": "Whisper model, or auto to use the best installed model" },
+                    "translate": { "type": "boolean", "required": false, "desc": "Translate recognized speech to English when supported" },
+                    "output": { "type": "string", "required": false, "desc": "Write transcript JSON to this file in addition to stdout" },
+                    "import": { "type": "boolean", "required": false, "desc": "Import generated captions into the active or selected sequence" },
+                    "track": { "type": "string", "required": false, "desc": "Caption track ID for import" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID for import" },
+                    "replace-existing": { "type": "boolean", "required": false, "desc": "Replace existing captions on the target caption track during import" }
+                },
+                "example": "openreelio-cli transcription generate --path ./project --asset asset_001 --language auto --model auto --import"
+            },
+            "transcription.generate-sequence": {
+                "description": "Generate speech-to-text transcript segments from the audible audio mix of a sequence, with optional caption import",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID; defaults to active sequence" },
+                    "language": { "type": "string", "required": false, "desc": "Language code, or auto for detection" },
+                    "model": { "type": "string", "required": false, "desc": "Whisper model, or auto to use the best installed model" },
+                    "translate": { "type": "boolean", "required": false, "desc": "Translate recognized speech to English when supported" },
+                    "output": { "type": "string", "required": false, "desc": "Write transcript JSON to this file in addition to stdout" },
+                    "import": { "type": "boolean", "required": false, "desc": "Import generated captions into the selected sequence" },
+                    "track": { "type": "string", "required": false, "desc": "Caption track ID for import" },
+                    "replace-existing": { "type": "boolean", "required": false, "desc": "Replace existing captions on the target caption track during import" }
+                },
+                "example": "openreelio-cli transcription generate-sequence --path ./project --sequence seq_001 --language auto --model auto --import"
+            },
             "caption.update": {
                 "description": "Update a caption's text, timing, and style",
                 "params": {
@@ -589,6 +633,10 @@ mod tests {
             .expect("schema commands must be an object");
 
         assert!(commands.contains_key("caption.import"));
+        assert!(commands.contains_key("transcription.status"));
+        assert!(commands.contains_key("transcription.install"));
+        assert!(commands.contains_key("transcription.generate"));
+        assert!(commands.contains_key("transcription.generate-sequence"));
         assert!(commands["caption.update"]["params"]["start"].is_object());
         assert!(commands["caption.update"]["params"]["style-json"].is_object());
         assert!(commands["caption.update"]["params"]["position-json"].is_object());

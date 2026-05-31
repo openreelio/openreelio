@@ -126,7 +126,7 @@ describe('CodexAppServerClient', () => {
       id: 2,
       params: {
         threadId: 'thr_123',
-        input: [{ type: 'text', text: 'Trim the intro' }],
+        input: [{ type: 'text', text: 'Trim the intro', text_elements: [] }],
         approvalPolicy: 'unlessTrusted',
       },
     });
@@ -318,7 +318,7 @@ describe('CodexAppServerClient', () => {
       params: {
         threadId: 'thr_123',
         expectedTurnId: 'turn_456',
-        input: [{ type: 'text', text: 'Also keep the captions lower' }],
+        input: [{ type: 'text', text: 'Also keep the captions lower', text_elements: [] }],
       },
     });
     transport.receive({ id: 2, result: { turnId: 'turn_456' } });

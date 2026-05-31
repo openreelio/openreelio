@@ -5,8 +5,8 @@
  * Allows users to select language, model, and other options.
  */
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { X, MessageSquare, AlertTriangle, Loader2 } from 'lucide-react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { X, MessageSquare, AlertTriangle, Loader2, Download, CheckCircle2 } from 'lucide-react';
 import type { AssetData } from '.';
 
 // =============================================================================
@@ -24,6 +24,19 @@ export interface TranscriptionOptions {
   indexForSearch: boolean;
 }
 
+export interface TranscriptionModelInfo {
+  id: string;
+  displayName: string;
+  filename: string;
+  installed: boolean;
+  sizeBytes: number | null;
+  estimatedSizeBytes: number;
+  isDefault: boolean;
+  recommended: boolean;
+  source: string;
+  license: string;
+}
+
 export interface TranscriptionDialogProps {
   /** Asset to transcribe */
   asset: AssetData;
@@ -35,6 +48,16 @@ export interface TranscriptionDialogProps {
   onCancel: () => void;
   /** Available transcription models */
   availableModels?: string[];
+  /** Full local model installation status */
+  models?: TranscriptionModelInfo[];
+  /** Optional model readiness message */
+  modelStatusMessage?: string;
+  /** Install a local model */
+  onInstallModel?: (model: string) => void;
+  /** Model currently being installed */
+  installingModel?: string | null;
+  /** Current model download progress percentage */
+  installProgress?: number | null;
   /** Whether transcription is being started */
   isProcessing?: boolean;
 }
@@ -57,7 +80,16 @@ const LANGUAGES = [
   { code: 'ar', name: 'Arabic' },
 ];
 
-const DEFAULT_MODELS = ['tiny', 'base', 'small', 'medium', 'large'];
+const DEFAULT_MODELS = ['tiny', 'base', 'small', 'medium', 'large', 'large-v3', 'large-v3-turbo'];
+const MODEL_SELECTION_PREFERENCE = [
+  'large-v3',
+  'large-v3-turbo',
+  'large',
+  'medium',
+  'small',
+  'base',
+  'tiny',
+];
 
 /** Duration threshold (in seconds) to show warning */
 const LONG_DURATION_THRESHOLD = 600; // 10 minutes
@@ -77,6 +109,35 @@ function formatDuration(seconds: number): string {
   return `${minutes}m ${secs}s`;
 }
 
+function formatBytes(bytes: number | null | undefined): string {
+  if (!bytes || bytes <= 0) {
+    return 'Unknown size';
+  }
+  if (bytes < 1_000_000) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1_000_000_000) {
+    return `${(bytes / 1_000_000).toFixed(0)} MB`;
+  }
+  return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+}
+
+function formatModelName(model: string): string {
+  if (model === 'large-v3') return 'Large v3';
+  if (model === 'large-v3-turbo') return 'Large v3 Turbo';
+  return model.charAt(0).toUpperCase() + model.slice(1);
+}
+
+function choosePreferredInstalledModel(modelStatuses: TranscriptionModelInfo[]): string {
+  const installed = new Set(
+    modelStatuses.filter((candidate) => candidate.installed).map((candidate) => candidate.id),
+  );
+  const preferred = MODEL_SELECTION_PREFERENCE.find((candidate) => installed.has(candidate));
+  return (
+    preferred ?? modelStatuses.find((candidate) => candidate.installed)?.id ?? 'large-v3-turbo'
+  );
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -87,37 +148,64 @@ export const TranscriptionDialog: React.FC<TranscriptionDialogProps> = ({
   onConfirm,
   onCancel,
   availableModels = DEFAULT_MODELS,
+  models,
+  modelStatusMessage,
+  onInstallModel,
+  installingModel = null,
+  installProgress = null,
   isProcessing = false,
 }) => {
   // Form state
-  const [language, setLanguage] = useState('en');
-  const [model, setModel] = useState('base');
+  const [language, setLanguage] = useState('auto');
+  const [model, setModel] = useState('large-v3-turbo');
   const [addToTimeline, setAddToTimeline] = useState(false);
   const [indexForSearch, setIndexForSearch] = useState(true);
 
   // Refs
   const languageSelectRef = useRef<HTMLSelectElement>(null);
   const titleId = useRef(`transcription-dialog-title-${asset.id}`).current;
+  const modelStatuses = useMemo<TranscriptionModelInfo[]>(
+    () =>
+      models ??
+      availableModels.map((id) => ({
+        id,
+        displayName: formatModelName(id),
+        filename: `ggml-${id}.bin`,
+        installed: true,
+        sizeBytes: null,
+        estimatedSizeBytes: 0,
+        isDefault: id === 'base',
+        recommended:
+          id === 'base' || id === 'small' || id === 'large-v3' || id === 'large-v3-turbo',
+        source: 'ggerganov/whisper.cpp',
+        license: 'MIT',
+      })),
+    [availableModels, models],
+  );
+  const installedModelIds = useMemo(
+    () => modelStatuses.filter((candidate) => candidate.installed).map((candidate) => candidate.id),
+    [modelStatuses],
+  );
 
   // Reset form when dialog opens
   useEffect(() => {
     if (isOpen) {
-      setLanguage('en');
-      setModel(availableModels.includes('base') ? 'base' : availableModels[0] || 'base');
+      setLanguage('auto');
+      setModel(choosePreferredInstalledModel(modelStatuses));
       setAddToTimeline(false);
       setIndexForSearch(true);
     }
-  }, [isOpen, availableModels]);
+  }, [isOpen, modelStatuses]);
 
   // Handle confirm
   const handleConfirm = useCallback(() => {
     onConfirm({
       language,
-      model: availableModels.length > 0 ? model : undefined,
+      model: installedModelIds.length > 0 ? model : undefined,
       addToTimeline,
       indexForSearch,
     });
-  }, [language, model, addToTimeline, indexForSearch, availableModels, onConfirm]);
+  }, [language, model, addToTimeline, indexForSearch, installedModelIds.length, onConfirm]);
 
   // Handle keyboard
   const handleKeyDown = useCallback(
@@ -125,12 +213,12 @@ export const TranscriptionDialog: React.FC<TranscriptionDialogProps> = ({
       if (e.key === 'Escape') {
         e.preventDefault();
         onCancel();
-      } else if (e.key === 'Enter' && !isProcessing) {
+      } else if (e.key === 'Enter' && !isProcessing && installedModelIds.length > 0) {
         e.preventDefault();
         handleConfirm();
       }
     },
-    [onCancel, isProcessing, handleConfirm],
+    [onCancel, isProcessing, installedModelIds.length, handleConfirm],
   );
 
   // Handle backdrop click
@@ -149,6 +237,9 @@ export const TranscriptionDialog: React.FC<TranscriptionDialogProps> = ({
   }
 
   const isLongDuration = (asset.duration ?? 0) > LONG_DURATION_THRESHOLD;
+  const hasAvailableModel = installedModelIds.length > 0;
+  const canStart = !isProcessing && hasAvailableModel;
+  const installableModels = modelStatuses.filter((candidate) => !candidate.installed);
 
   return (
     <div
@@ -202,6 +293,74 @@ export const TranscriptionDialog: React.FC<TranscriptionDialogProps> = ({
             </div>
           )}
 
+          {(!hasAvailableModel || modelStatusMessage) && (
+            <div className="flex items-center gap-2 p-3 rounded bg-red-950/40 border border-red-800/60 text-red-300 text-sm">
+              <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+              <span>
+                {modelStatusMessage ??
+                  'No installed Whisper model was found. Install a local model before starting transcription.'}
+              </span>
+            </div>
+          )}
+
+          {modelStatuses.length > 0 && (
+            <div className="rounded border border-neutral-700 bg-neutral-900">
+              <div className="px-3 py-2 text-sm font-medium text-neutral-200 border-b border-neutral-700">
+                Local Models
+              </div>
+              <div className="divide-y divide-neutral-800">
+                {modelStatuses.map((candidate) => {
+                  const isInstalling = installingModel === candidate.id;
+                  const progressLabel =
+                    isInstalling && installProgress !== null
+                      ? `${Math.round(installProgress)}%`
+                      : null;
+                  return (
+                    <div key={candidate.id} className="flex items-center gap-3 px-3 py-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm text-white">{candidate.displayName}</span>
+                          {candidate.recommended && (
+                            <span className="text-[11px] text-blue-300">Recommended</span>
+                          )}
+                        </div>
+                        <div className="text-xs text-neutral-500 truncate">
+                          {formatBytes(candidate.sizeBytes ?? candidate.estimatedSizeBytes)} ·{' '}
+                          {candidate.license}
+                        </div>
+                      </div>
+                      {candidate.installed ? (
+                        <span className="inline-flex items-center gap-1 text-xs text-emerald-300">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          Installed
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => onInstallModel?.(candidate.id)}
+                          disabled={!onInstallModel || isProcessing || Boolean(installingModel)}
+                          className="inline-flex items-center gap-1.5 rounded border border-neutral-600 px-2 py-1 text-xs text-neutral-200 hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isInstalling ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Download className="w-3.5 h-3.5" />
+                          )}
+                          {isInstalling ? (progressLabel ?? 'Installing') : 'Install'}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {installableModels.length > 0 && (
+                <div className="px-3 py-2 text-xs text-neutral-500 border-t border-neutral-800">
+                  Models download from ggerganov/whisper.cpp and are stored locally.
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Language Selection */}
           <div>
             <label
@@ -229,7 +388,7 @@ export const TranscriptionDialog: React.FC<TranscriptionDialogProps> = ({
           </div>
 
           {/* Model Selection (if multiple models available) */}
-          {availableModels.length > 0 && (
+          {hasAvailableModel && (
             <div>
               <label
                 htmlFor="transcription-model"
@@ -245,9 +404,10 @@ export const TranscriptionDialog: React.FC<TranscriptionDialogProps> = ({
                 className="w-full px-3 py-2 rounded bg-neutral-800 border border-neutral-600 text-white
                   focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
               >
-                {availableModels.map((m) => (
+                {installedModelIds.map((m) => (
                   <option key={m} value={m}>
-                    {m.charAt(0).toUpperCase() + m.slice(1)}
+                    {modelStatuses.find((candidate) => candidate.id === m)?.displayName ??
+                      formatModelName(m)}
                   </option>
                 ))}
               </select>
@@ -299,7 +459,7 @@ export const TranscriptionDialog: React.FC<TranscriptionDialogProps> = ({
           <button
             type="button"
             onClick={handleConfirm}
-            disabled={isProcessing}
+            disabled={!canStart}
             className="px-4 py-2 text-sm rounded bg-blue-600 text-white hover:bg-blue-500
               disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
           >

@@ -206,6 +206,7 @@ export function ConversationMessageItem({
       (part.type === 'tool_call' && part.status === 'failed') ||
       (part.type === 'tool_result' && !part.success),
   );
+  const hasErrorPart = message.parts.some((part) => part.type === 'error');
 
   return (
     <div className={`flex justify-start ${className}`} data-testid="conversation-message-assistant">
@@ -229,6 +230,7 @@ export function ConversationMessageItem({
             hasCompaction={hasCompaction}
             hasRunningArtifacts={hasRunningArtifacts}
             hasFailedArtifacts={hasFailedArtifacts}
+            hasError={hasErrorPart}
             defaultOpen={false}
             highlighted={highlightArtifacts}
           >

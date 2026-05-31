@@ -32,3 +32,7 @@ anyhow = "1"
 
 [dev-dependencies]
 tempfile = "3"
+
+[features]
+default = ["whisper"]
+whisper = ["openreelio-core/whisper"]
