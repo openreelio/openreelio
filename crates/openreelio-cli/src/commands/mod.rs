@@ -40,6 +40,7 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// Project lifecycle operations (create, open, info, save)
     Project {

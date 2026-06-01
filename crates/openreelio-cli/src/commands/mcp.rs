@@ -1319,7 +1319,7 @@ fn default_audio_track_position(sequence: &openreelio_core::timeline::Sequence) 
         .enumerate()
         .filter(|(_, track)| matches!(track.kind, TrackKind::Audio))
         .map(|(index, _)| index + 1)
-        .last()
+        .next_back()
         .unwrap_or(sequence.tracks.len())
 }
 
@@ -1804,10 +1804,12 @@ mod tests {
             .expect("add text clip");
         let text_clip_id = text_result.created_ids[0].clone();
 
-        let mut transform = Transform::default();
-        transform.position = Point2D::new(0.42, 0.66);
-        transform.scale = Point2D::new(1.2, 0.9);
-        transform.rotation_deg = 18.0;
+        let transform = Transform {
+            position: Point2D::new(0.42, 0.66),
+            scale: Point2D::new(1.2, 0.9),
+            rotation_deg: 18.0,
+            ..Default::default()
+        };
         project
             .executor
             .execute(

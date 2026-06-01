@@ -109,7 +109,7 @@ hound = "3.5"
 webrtc-vad = "0.4"
 
 # Whisper transcription (optional - enabled via whisper feature)
-whisper-rs = { version = "0.15", optional = true }
+whisper-rs = { version = "0.16", optional = true }
 
 # Meilisearch client (optional - enabled via meilisearch feature)
 meilisearch-sdk = { version = "0.27", optional = true }
