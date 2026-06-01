@@ -66,6 +66,9 @@ const targets = {
         name: 'ffmpeg',
         format: 'tar.xz',
         url: 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz',
+        fallbackUrls: [
+          'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz',
+        ],
         filename: 'ffmpeg-release-amd64-static.tar.xz',
         binaries: ['ffmpeg', 'ffprobe'],
       },
@@ -115,7 +118,7 @@ async function prepareBundledFfmpeg(releaseTarget, releaseConfig) {
       const extractDir = path.join(downloadRoot, `${source.name}-extracted`);
 
       await mkdir(extractDir, { recursive: true });
-      await downloadFile(source.url, archivePath);
+      await downloadFile(source, archivePath);
       await extractArchive(source.format, archivePath, extractDir);
 
       for (const binaryName of source.binaries) {
@@ -148,14 +151,37 @@ async function prepareBundledFfmpeg(releaseTarget, releaseConfig) {
   }
 }
 
-async function downloadFile(url, outputPath) {
+async function downloadFile(source, outputPath) {
+  const urls = [source.url, ...(source.fallbackUrls ?? [])];
+  let lastError;
+
+  for (const url of urls) {
+    try {
+      await downloadUrl(url, outputPath);
+      return;
+    } catch (error) {
+      lastError = error;
+      console.warn(`Download failed for ${url}: ${error.message}`);
+    }
+  }
+
+  throw lastError ?? new Error(`No download URLs configured for ${source.name}`);
+}
+
+async function downloadUrl(url, outputPath) {
   console.log(`Downloading ${url}`);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
 
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/octet-stream, application/x-xz, application/zip, */*',
+        'User-Agent': 'OpenReelio release asset downloader',
+      },
+    });
     if (!response.ok || !response.body) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }

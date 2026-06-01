@@ -284,6 +284,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+    env:
+      GGML_NATIVE: 'OFF'
 
     strategy:
       fail-fast: false
