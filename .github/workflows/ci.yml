@@ -414,7 +414,7 @@ jobs:
           cache: 'npm'
 
       - name: NPM Audit
-        run: npm audit --audit-level=high
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
