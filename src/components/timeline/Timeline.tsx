@@ -100,6 +100,9 @@ const MIN_PENDING_DROP_WIDTH_PX = 88;
 const DEFAULT_PENDING_DROP_DURATION_SEC = 10;
 const PENDING_DROP_VERTICAL_INSET_PX = 3;
 const PENDING_DROP_HEIGHT_PX = TRACK_HEIGHT - PENDING_DROP_VERTICAL_INSET_PX * 2;
+const MIN_EMPTY_TIMELINE_DURATION_SEC = 10;
+const MIN_EDITING_TAIL_PADDING_SEC = 5;
+const EDITING_TAIL_PADDING_RATIO = 0.2;
 
 interface EmptyAreaPanGesture {
   startX: number;
@@ -379,25 +382,35 @@ export function Timeline({
   // ===========================================================================
   // Derived Values
   // ===========================================================================
-  // Calculate timeline duration based on actual clip content
-  // Add padding for easier editing (20% extra or minimum 5 seconds after last clip)
-  const duration = useMemo(() => {
-    if (!sequence) return DEFAULT_TIMELINE_DURATION;
+  const clipContentDuration = useMemo(() => {
+    if (!sequence) return 0;
 
     const clipEndTimes = sequence.tracks.flatMap((track) =>
       track.clips.map((clip) => clip.place.timelineInSec + getClipTimelineDuration(clip)),
     );
 
     if (clipEndTimes.length === 0) {
-      // Empty timeline: show 10 seconds minimum
-      return 10;
+      return 0;
     }
 
-    const maxEndTime = Math.max(...clipEndTimes);
-    // Add 20% padding or minimum 5 seconds for easier editing
-    const padding = Math.max(maxEndTime * 0.2, 5);
-    return maxEndTime + padding;
+    return Math.max(0, ...clipEndTimes);
   }, [sequence]);
+
+  // Playback duration is the actual sequence content length. Timeline duration
+  // includes tail room for editing but must not leak into player/export timecode.
+  const playbackDuration = sequence
+    ? Math.max(clipContentDuration, MIN_EMPTY_TIMELINE_DURATION_SEC)
+    : DEFAULT_TIMELINE_DURATION;
+  const timelineDuration = useMemo(() => {
+    if (!sequence) return DEFAULT_TIMELINE_DURATION;
+    if (clipContentDuration <= 0) return MIN_EMPTY_TIMELINE_DURATION_SEC;
+
+    const padding = Math.max(
+      clipContentDuration * EDITING_TAIL_PADDING_RATIO,
+      MIN_EDITING_TAIL_PADDING_SEC,
+    );
+    return clipContentDuration + padding;
+  }, [clipContentDuration, sequence]);
 
   // ===========================================================================
   // Playback Engine
@@ -409,7 +422,7 @@ export function Timeline({
     seek: setPlayhead,
     stepForward,
     stepBackward,
-  } = useTimelineEngine({ duration, fps: DEFAULT_FPS });
+  } = useTimelineEngine({ duration: playbackDuration, fps: DEFAULT_FPS });
 
   const seekFromTimelineClick = useCallback(
     (time: number) => setPlayhead(time, 'timeline-click-release'),
@@ -453,7 +466,7 @@ export function Timeline({
     sequence,
     zoom,
     scrollX,
-    duration,
+    duration: timelineDuration,
     snapEnabled,
     playhead,
     trackHeaderWidth: TRACK_HEADER_WIDTH,
@@ -487,7 +500,7 @@ export function Timeline({
     playheadRef,
     zoom,
     scrollX,
-    duration,
+    duration: timelineDuration,
     trackHeaderWidth: TRACK_HEADER_WIDTH,
     playheadTrackHeaderWidth: 0, // Playhead is rendered inside a clipped container offset by the header
     isPlaying,
@@ -507,7 +520,7 @@ export function Timeline({
   // Auto-follow hook handles auto-scrolling during playback
   useAutoFollow({
     viewportWidth,
-    contentWidth: duration * zoom,
+    contentWidth: timelineDuration * zoom,
     trackHeaderWidth: TRACK_HEADER_WIDTH,
     isScrubbing,
     isDraggingPlayhead,
@@ -516,7 +529,7 @@ export function Timeline({
   // ===========================================================================
   // Timeline Panning (Hand Tool / Middle Mouse)
   // ===========================================================================
-  const maxScrollX = Math.max(0, duration * zoom - viewportWidth);
+  const maxScrollX = Math.max(0, timelineDuration * zoom - viewportWidth);
   const maxScrollY = Math.max(0, (sequence?.tracks.length ?? 0) * TRACK_HEIGHT - viewportHeight);
   const isHandToolActive = activeTool === 'hand';
 
@@ -1080,7 +1093,7 @@ export function Timeline({
     isActive: isClipDragging && dragPreview !== null,
     getMouseClientX: () => clipDragMouseXRef.current,
     scrollContainerRef: tracksAreaRef,
-    contentWidth: duration * zoom + TRACK_HEADER_WIDTH,
+    contentWidth: timelineDuration * zoom + TRACK_HEADER_WIDTH,
     // Timeline uses virtual scrolling via Zustand (`scrollX`) + transforms (not native scrollLeft).
     getScrollLeft: () => useTimelineStore.getState().scrollX,
     setScrollLeft: setScrollX,
@@ -1093,7 +1106,7 @@ export function Timeline({
     scrollX,
     scrollY,
     zoom,
-    duration,
+    duration: timelineDuration,
     zoomIn,
     zoomOut,
     setZoom,
@@ -1972,14 +1985,14 @@ export function Timeline({
           hasActiveSequence={sequence !== null}
           hasSelectedClips={selectedClipIds.length > 0}
           fps={DEFAULT_FPS}
-          duration={duration}
+          duration={playbackDuration}
         />
 
         {/* isolation: isolate creates a stacking context so playhead z-index doesn't escape to overlap modals */}
         <div className="flex-1 flex flex-col relative isolate">
           <TimelineHeaderLayer
             cacheSegments={cacheSegments}
-            duration={duration}
+            duration={timelineDuration}
             zoom={zoom}
             scrollX={scrollX}
             viewportWidth={viewportWidth}
@@ -2015,7 +2028,7 @@ export function Timeline({
                 sequence={sequence}
                 zoom={zoom}
                 scrollX={scrollX}
-                duration={duration}
+                duration={timelineDuration}
                 viewportWidth={viewportWidth}
                 selectedClipIds={selectedClipIds}
                 getTrackClips={getTrackClips}
@@ -2074,7 +2087,7 @@ export function Timeline({
               scrollX={scrollX}
               shotMarkers={shotMarkers}
               viewportWidth={viewportWidth}
-              duration={duration}
+              duration={timelineDuration}
               onSeekShotMarker={seekFromShotMarker}
               isDraggingOver={isDraggingOver}
               selectionRect={selectionRect}
