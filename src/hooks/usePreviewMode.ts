@@ -230,20 +230,22 @@ export function usePreviewMode({
     // Find all active clips at current time
     const activeClips = findActiveClips(sequence, currentTime, assets);
 
-    // No clips at playhead = canvas mode (show black frame)
+    // No clips at playhead: preserve the previous renderer when possible.
+    // Switching video -> canvas -> video across short gaps remounts media
+    // elements and can cause visible loading stalls at the next cut.
     if (activeClips.length === 0) {
       const previousResult = previousResultRef.current;
       const previousTime = previousTimeRef.current;
 
-      if (
-        previousResult &&
-        previousTime !== null &&
-        previousResult.mode === 'video' &&
-        Math.abs(currentTime - previousTime) <= NO_CLIP_HYSTERESIS_SEC
-      ) {
+      if (previousResult && previousResult.mode === 'video') {
+        const isNearPreviousFrame =
+          previousTime !== null &&
+          Math.abs(currentTime - previousTime) <= NO_CLIP_HYSTERESIS_SEC;
         const stabilizedResult: PreviewModeResult = {
           ...previousResult,
-          reason: 'Stabilizing mode at clip boundary',
+          reason: isNearPreviousFrame
+            ? 'Stabilizing mode at clip boundary'
+            : 'Keeping video renderer mounted across empty timeline gap',
         };
         previousResultRef.current = stabilizedResult;
         previousTimeRef.current = currentTime;
