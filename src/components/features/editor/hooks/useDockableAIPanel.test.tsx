@@ -69,7 +69,7 @@ describe('useDockableAIPanel', () => {
     expect(useWorkspaceLayoutStore.getState().layout.zones.right.activePanelId).toBe('inspector');
   });
 
-  it('should auto-close the AI panel when the viewport shrinks below the breakpoint', () => {
+  it('should keep the AI panel selected when the viewport shrinks below the breakpoint', () => {
     const { result } = renderHook(() => useDockableAIPanel({ autoCollapseBreakpoint: 1200 }));
 
     act(() => {
@@ -80,8 +80,10 @@ describe('useDockableAIPanel', () => {
 
     setViewportWidth(900);
 
-    expect(result.current.isOpen).toBe(false);
-    expect(useWorkspaceLayoutStore.getState().layout.zones.right.activePanelId).toBe('inspector');
+    expect(result.current.isOpen).toBe(true);
+    expect(useWorkspaceLayoutStore.getState().layout.zones.right.activePanelId).toBe(
+      'ai-assistant',
+    );
   });
 
   it('should allow manually opening the AI panel on a narrow viewport', () => {

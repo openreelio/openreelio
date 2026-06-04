@@ -111,32 +111,6 @@ export function useDockableAIPanel({
     };
   }, [toggle]);
 
-  useEffect(() => {
-    let previousWidth = window.innerWidth;
-
-    const handleResize = () => {
-      const currentWidth = window.innerWidth;
-      const crossedBelowBreakpoint =
-        previousWidth >= autoCollapseBreakpoint && currentWidth < autoCollapseBreakpoint;
-      previousWidth = currentWidth;
-
-      const currentLayout = useWorkspaceLayoutStore.getState().layout;
-      const currentZoneId = findPanelZone(currentLayout, AI_PANEL_ID) ?? DEFAULT_AI_ZONE;
-      const currentZone = currentLayout.zones[currentZoneId];
-      const isCurrentlyOpen = currentZone.activePanelId === AI_PANEL_ID && !currentZone.collapsed;
-
-      if (crossedBelowBreakpoint && isCurrentlyOpen) {
-        closeAiPanel();
-      }
-    };
-
-    window.addEventListener('resize', handleResize);
-
-    return () => {
-      window.removeEventListener('resize', handleResize);
-    };
-  }, [autoCollapseBreakpoint, closeAiPanel]);
-
   return {
     isOpen,
     width,

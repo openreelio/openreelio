@@ -66,6 +66,23 @@ describe('DockZone', () => {
       render(<DockZone {...createDefaultProps({ collapsed: true })} />);
       expect(screen.queryByTestId('panel-content-explorer')).not.toBeInTheDocument();
     });
+
+    it('should keep configured active panel content mounted when collapsed', () => {
+      render(
+        <DockZone
+          {...createDefaultProps({
+            activePanelId: 'explorer',
+            collapsed: true,
+            keepMountedPanelIds: ['explorer'],
+          })}
+        />,
+      );
+
+      const content = screen.getByTestId('panel-content-explorer');
+      expect(content).toBeInTheDocument();
+      expect(content.parentElement).toHaveAttribute('aria-hidden', 'true');
+      expect(content.parentElement).toHaveClass('hidden');
+    });
   });
 
   describe('collapse toggle', () => {
