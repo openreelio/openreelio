@@ -399,7 +399,9 @@ export function Timeline({
   // Playback duration is the actual sequence content length. Timeline duration
   // includes tail room for editing but must not leak into player/export timecode.
   const playbackDuration = sequence
-    ? Math.max(clipContentDuration, MIN_EMPTY_TIMELINE_DURATION_SEC)
+    ? clipContentDuration > 0
+      ? clipContentDuration
+      : MIN_EMPTY_TIMELINE_DURATION_SEC
     : DEFAULT_TIMELINE_DURATION;
   const timelineDuration = useMemo(() => {
     if (!sequence) return DEFAULT_TIMELINE_DURATION;

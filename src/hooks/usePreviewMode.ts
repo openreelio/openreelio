@@ -7,7 +7,7 @@
 
 import { useMemo, useRef } from 'react';
 import { isTextClip, type Sequence, type Asset, type Clip, type Track } from '@/types';
-import { isClipActiveAtTime } from '@/utils/clipTiming';
+import { getClipTimelineDurationSec, isClipActiveAtTime } from '@/utils/clipTiming';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { getEffectiveBlendMode } from '@/utils/blendModes';
 
@@ -50,6 +50,7 @@ interface ActiveClipInfo {
 const FLOAT_EPSILON = 0.0001;
 const ACTIVE_CLIP_EPSILON_SEC = 1 / 240;
 const NO_CLIP_HYSTERESIS_SEC = 1 / 30;
+const MAX_EMPTY_VIDEO_GAP_SEC = 10;
 const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:/;
 
 function nearlyEqual(a: number, b: number): boolean {
@@ -86,6 +87,58 @@ function findActiveClips(
   }
 
   return activeClips;
+}
+
+function isVideoModeCompatibleVisualClip(
+  track: Track,
+  clip: Clip,
+  assets: Map<string, Asset>,
+): boolean {
+  if (track.kind === 'audio') {
+    return false;
+  }
+
+  return getCanvasFallbackReason({
+    clip,
+    track,
+    asset: assets.get(clip.assetId) ?? null,
+  }) === null;
+}
+
+function isWithinVideoModeGap(
+  sequence: Sequence,
+  currentTime: number,
+  assets: Map<string, Asset>,
+): boolean {
+  let previousEnd: number | null = null;
+  let nextStart: number | null = null;
+
+  for (const track of sequence.tracks) {
+    if (track.muted || !track.visible) continue;
+
+    for (const clip of track.clips) {
+      if (clip.enabled === false || !isVideoModeCompatibleVisualClip(track, clip, assets)) {
+        continue;
+      }
+
+      const start = clip.place.timelineInSec;
+      const end = start + getClipTimelineDurationSec(clip);
+
+      if (end <= currentTime + FLOAT_EPSILON) {
+        previousEnd = previousEnd === null ? end : Math.max(previousEnd, end);
+      } else if (start > currentTime + FLOAT_EPSILON) {
+        nextStart = nextStart === null ? start : Math.min(nextStart, start);
+      }
+    }
+  }
+
+  return (
+    previousEnd !== null &&
+    nextStart !== null &&
+    currentTime >= previousEnd - FLOAT_EPSILON &&
+    currentTime <= nextStart + FLOAT_EPSILON &&
+    nextStart - previousEnd <= MAX_EMPTY_VIDEO_GAP_SEC
+  );
 }
 
 /**
@@ -241,6 +294,20 @@ export function usePreviewMode({
         const isNearPreviousFrame =
           previousTime !== null &&
           Math.abs(currentTime - previousTime) <= NO_CLIP_HYSTERESIS_SEC;
+        const isInVideoModeGap = isWithinVideoModeGap(sequence, currentTime, assets);
+
+        if (!isNearPreviousFrame && !isInVideoModeGap) {
+          const result: PreviewModeResult = {
+            mode: 'canvas',
+            reason: 'No clips at playhead',
+            hasGeneratingProxy: false,
+            clipsNeedingProxy: 0,
+          };
+          previousResultRef.current = result;
+          previousTimeRef.current = currentTime;
+          return result;
+        }
+
         const stabilizedResult: PreviewModeResult = {
           ...previousResult,
           reason: isNearPreviousFrame
