@@ -310,6 +310,7 @@ pub fn get_binary_names(platform: Platform) -> (&'static str, &'static str) {
 
 struct DownloadSource {
     url: String,
+    fallback_urls: Vec<String>,
     filename: String,
     sha256: Option<String>,
 }
@@ -318,17 +319,23 @@ fn get_ffmpeg_download_url(platform: Platform, arch: Arch) -> BundlerResult<Down
     match (platform, arch) {
         (Platform::Windows, Arch::X64) => Ok(DownloadSource {
             url: "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip".to_string(),
+            fallback_urls: Vec::new(),
             filename: "ffmpeg-release-essentials.zip".to_string(),
             sha256: None,
         }),
         (Platform::MacOS, Arch::X64) | (Platform::MacOS, Arch::Arm64) => Ok(DownloadSource {
             url: "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip".to_string(),
+            fallback_urls: Vec::new(),
             filename: "ffmpeg.zip".to_string(),
             sha256: None,
         }),
         (Platform::Linux, Arch::X64) => Ok(DownloadSource {
             url: "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
                 .to_string(),
+            fallback_urls: vec![
+                "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+                    .to_string(),
+            ],
             filename: "ffmpeg-release-amd64-static.tar.xz".to_string(),
             sha256: None,
         }),
@@ -345,6 +352,7 @@ fn get_ffprobe_download_url(
     match (platform, arch) {
         (Platform::MacOS, Arch::X64) | (Platform::MacOS, Arch::Arm64) => Ok(Some(DownloadSource {
             url: "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip".to_string(),
+            fallback_urls: Vec::new(),
             filename: "ffprobe.zip".to_string(),
             sha256: None,
         })),
@@ -353,6 +361,7 @@ fn get_ffprobe_download_url(
 }
 
 fn download_file_blocking(url: &str, output: &Path, timeout_secs: u64) -> BundlerResult<()> {
+    use reqwest::header::{ACCEPT, USER_AGENT};
     use std::time::Duration;
 
     let client = reqwest::blocking::Client::builder()
@@ -364,6 +373,8 @@ fn download_file_blocking(url: &str, output: &Path, timeout_secs: u64) -> Bundle
 
     let response = client
         .get(url)
+        .header(USER_AGENT, "OpenReelio release asset downloader")
+        .header(ACCEPT, "application/octet-stream, application/x-xz, */*")
         .send()
         .map_err(|e| BundlerError::DownloadFailed(format!("Request failed: {e}")))?;
 
@@ -389,6 +400,26 @@ fn download_file_blocking(url: &str, output: &Path, timeout_secs: u64) -> Bundle
     );
 
     Ok(())
+}
+
+fn download_source_blocking(
+    source: &DownloadSource,
+    output: &Path,
+    timeout_secs: u64,
+) -> BundlerResult<()> {
+    let mut errors = Vec::new();
+
+    for url in std::iter::once(&source.url).chain(source.fallback_urls.iter()) {
+        match download_file_blocking(url, output, timeout_secs) {
+            Ok(()) => return Ok(()),
+            Err(error) => errors.push(format!("{url}: {error}")),
+        }
+    }
+
+    Err(BundlerError::DownloadFailed(format!(
+        "All FFmpeg download URLs failed: {}",
+        errors.join("; ")
+    )))
 }
 
 fn verify_archive_checksum(path: &Path, expected_sha256: Option<&str>) -> BundlerResult<()> {
@@ -702,7 +733,7 @@ pub fn download_ffmpeg(output_dir: &Path, config: &BundlerConfig) -> BundlerResu
 
     // Download main FFmpeg archive
     let archive_path = temp_dir.join(&source.filename);
-    download_file_blocking(&source.url, &archive_path, config.timeout_seconds)?;
+    download_source_blocking(&source, &archive_path, config.timeout_seconds)?;
     if config.verify_checksums {
         verify_archive_checksum(&archive_path, source.sha256.as_deref())?;
     }
@@ -722,7 +753,7 @@ pub fn download_ffmpeg(output_dir: &Path, config: &BundlerConfig) -> BundlerResu
     if let Some(ffprobe_src) = ffprobe_source {
         // macOS: Download separate ffprobe
         let ffprobe_archive = temp_dir.join(&ffprobe_src.filename);
-        download_file_blocking(&ffprobe_src.url, &ffprobe_archive, config.timeout_seconds)?;
+        download_source_blocking(&ffprobe_src, &ffprobe_archive, config.timeout_seconds)?;
         if config.verify_checksums {
             verify_archive_checksum(&ffprobe_archive, ffprobe_src.sha256.as_deref())?;
         }

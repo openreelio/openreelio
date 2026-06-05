@@ -82,6 +82,17 @@ describe('DockableEditorLayout', () => {
     expect(screen.queryByText('Inspector')).not.toBeInTheDocument();
   });
 
+  it('should keep the AI panel mounted when responsive auto-collapse hides the right zone', () => {
+    const store = useWorkspaceLayoutStore.getState();
+    store.setActivePanel('right', 'ai-assistant');
+    setViewport(900, 800);
+
+    render(<DockableEditorLayout header={<div>Header</div>} panelContent={panelContent} />);
+
+    expect(screen.getByTestId('dock-zone-right').parentElement).toHaveStyle({ width: '40px' });
+    expect(screen.getByText('AI').parentElement).toHaveAttribute('aria-hidden', 'true');
+  });
+
   it('should clamp expanded side widths so the center workspace remains usable', () => {
     const store = useWorkspaceLayoutStore.getState();
     store.setLeftWidth(600);

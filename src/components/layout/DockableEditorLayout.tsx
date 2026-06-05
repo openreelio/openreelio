@@ -49,6 +49,7 @@ const RIGHT_ZONE_AUTO_COLLAPSE_BREAKPOINT = 1100;
 const MAX_SIDE_ZONE_VIEWPORT_SHARE = 0.34;
 /** ResizeHandle thickness from Tailwind w-1 / h-1 */
 const RESIZE_HANDLE_SIZE = 4;
+const KEEP_MOUNTED_PANEL_IDS: readonly PanelId[] = ['ai-assistant'];
 
 interface ViewportSize {
   width: number;
@@ -227,6 +228,7 @@ export function DockableEditorLayout({
     onDragStart: startDrag,
     onDragEnd: endDrag,
     renderPanel,
+    keepMountedPanelIds: KEEP_MOUNTED_PANEL_IDS,
   };
 
   // Filter zone panelIds — hide tabs for panels without renderable content

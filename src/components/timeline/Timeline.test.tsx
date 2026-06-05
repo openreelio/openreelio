@@ -1260,6 +1260,78 @@ describe('Timeline', () => {
       expect(screen.getByTestId('enhanced-timeline-toolbar')).toBeInTheDocument();
     });
 
+    it('should sync playback duration to content length without editing tail padding', async () => {
+      const sequenceWithClip: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [
+              {
+                id: 'clip_duration_001',
+                assetId: 'asset_001',
+                range: { sourceInSec: 0, sourceOutSec: 25 },
+                place: { timelineInSec: 0, durationSec: 25 },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+          mockSequence.tracks[1],
+        ],
+      };
+
+      render(<Timeline sequence={sequenceWithClip} />);
+
+      await waitFor(() => {
+        expect(usePlaybackStore.getState().duration).toBe(25);
+      });
+    });
+
+    it('should not expand short content playback duration to the empty timeline minimum', async () => {
+      const sequenceWithShortClip: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [
+              {
+                id: 'clip_duration_short_001',
+                assetId: 'asset_001',
+                range: { sourceInSec: 0, sourceOutSec: 1 },
+                place: { timelineInSec: 0, durationSec: 1 },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+          mockSequence.tracks[1],
+        ],
+      };
+
+      render(<Timeline sequence={sequenceWithShortClip} />);
+
+      await waitFor(() => {
+        expect(usePlaybackStore.getState().duration).toBe(1);
+      });
+    });
+
     it('should disable split, duplicate, and delete buttons when no clips are selected', () => {
       render(<Timeline sequence={mockSequence} />);
 

@@ -76,6 +76,8 @@ export interface DockZoneProps {
   className?: string;
   /** Optional actions rendered on the right side of the tab bar */
   headerActions?: ReactNode;
+  /** Panels that should stay mounted while this zone is collapsed */
+  keepMountedPanelIds?: readonly PanelId[];
 }
 
 // =============================================================================
@@ -148,6 +150,7 @@ export function DockZone({
   collapseDirection = 'vertical',
   className = '',
   headerActions = null,
+  keepMountedPanelIds = [],
 }: DockZoneProps): JSX.Element {
   const [isDropTarget, setIsDropTarget] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -368,6 +371,8 @@ export function DockZone({
   const actionClasses = isHorizontalCollapsed
     ? 'flex shrink-0 flex-col items-center gap-1'
     : 'flex shrink-0 items-center gap-1';
+  const shouldRenderActivePanel =
+    activePanelId !== null && (!collapsed || keepMountedPanelIds.includes(activePanelId));
 
   return (
     <div
@@ -448,11 +453,16 @@ export function DockZone({
       )}
 
       {/* Panel content */}
-      {!collapsed && activePanelId && (
+      {shouldRenderActivePanel && (
         <div
           id={`dock-panel-${activePanelId}`}
           role="tabpanel"
-          className="min-h-0 flex-1 overflow-hidden bg-editor-bg"
+          className={
+            collapsed
+              ? 'hidden'
+              : 'min-h-0 flex-1 overflow-hidden bg-editor-bg'
+          }
+          aria-hidden={collapsed ? true : undefined}
         >
           {renderPanel(activePanelId)}
         </div>

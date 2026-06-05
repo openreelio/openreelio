@@ -149,6 +149,76 @@ describe('usePreviewMode', () => {
       expect(result.current.reason).toBe('No clips at playhead');
     });
 
+    it('should keep the video renderer mounted across empty gaps after video playback', () => {
+      const track = createMockTrack({
+        clips: [
+          createMockClip({
+            place: { timelineInSec: 0, durationSec: 5 },
+            range: { sourceInSec: 0, sourceOutSec: 5 },
+          }),
+          createMockClip({
+            id: 'clip-2',
+            place: { timelineInSec: 10, durationSec: 5 },
+            range: { sourceInSec: 0, sourceOutSec: 5 },
+          }),
+        ],
+      });
+      const sequence = createMockSequence([track]);
+      const assets = new Map([['asset-1', createMockAsset()]]);
+
+      const { result, rerender } = renderHook(
+        ({ currentTime }: { currentTime: number }) =>
+          usePreviewMode({
+            sequence,
+            assets,
+            currentTime,
+          }),
+        { initialProps: { currentTime: 2 } },
+      );
+
+      expect(result.current.mode).toBe('video');
+
+      rerender({ currentTime: 7 });
+
+      expect(result.current.mode).toBe('video');
+      expect(result.current.reason).toBe('Keeping video renderer mounted across empty timeline gap');
+    });
+
+    it('should switch back to canvas mode when scrubbing into a large empty gap', () => {
+      const track = createMockTrack({
+        clips: [
+          createMockClip({
+            place: { timelineInSec: 0, durationSec: 5 },
+            range: { sourceInSec: 0, sourceOutSec: 5 },
+          }),
+          createMockClip({
+            id: 'clip-2',
+            place: { timelineInSec: 100, durationSec: 5 },
+            range: { sourceInSec: 0, sourceOutSec: 5 },
+          }),
+        ],
+      });
+      const sequence = createMockSequence([track]);
+      const assets = new Map([['asset-1', createMockAsset()]]);
+
+      const { result, rerender } = renderHook(
+        ({ currentTime }: { currentTime: number }) =>
+          usePreviewMode({
+            sequence,
+            assets,
+            currentTime,
+          }),
+        { initialProps: { currentTime: 2 } },
+      );
+
+      expect(result.current.mode).toBe('video');
+
+      rerender({ currentTime: 50 });
+
+      expect(result.current.mode).toBe('canvas');
+      expect(result.current.reason).toBe('No clips at playhead');
+    });
+
     it('should ignore disabled clips when determining active preview content', () => {
       const track = createMockTrack({
         clips: [
