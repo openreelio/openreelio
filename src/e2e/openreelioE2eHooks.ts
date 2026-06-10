@@ -156,6 +156,29 @@ function installInMemoryCommandExecutor(): void {
           return createCommandResult([trackId]);
         }
 
+        case 'SetCaptionTrackLanguage': {
+          const payload = command.payload as {
+            sequenceId: string;
+            trackId: string;
+            language: string;
+          };
+          useProjectStore.setState((state) => {
+            const sequence = state.sequences.get(payload.sequenceId);
+            if (!sequence) return state;
+
+            const tracks = sequence.tracks.map((track) =>
+              track.id === payload.trackId && track.kind === 'caption'
+                ? { ...track, captionLanguage: payload.language }
+                : track,
+            );
+            state.sequences.set(payload.sequenceId, { ...sequence, tracks });
+            state.stateVersion += 1;
+            state.isDirty = true;
+            return state;
+          });
+          return createCommandResult();
+        }
+
         case 'AddTextClip': {
           const payload = command.payload as {
             sequenceId: string;

@@ -193,6 +193,55 @@ describe('useExportDialog', () => {
     });
   });
 
+  it('should merge sequence HDR settings into video export requests', async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_sequence_hdr_settings') {
+        return {
+          hdrMode: 'hdr10',
+          bitDepth: 10,
+          maxCll: 1000,
+          maxFall: 400,
+        };
+      }
+
+      return {
+        jobId: 'job-1',
+        outputPath: '/tmp/out.mp4',
+        status: 'started',
+      };
+    });
+
+    const { result } = renderHook(() =>
+      useExportDialog({
+        isOpen: true,
+        sequenceId: 'sequence-1',
+        sequenceName: 'Sequence',
+      }),
+    );
+
+    act(() => {
+      result.current.setOutputPath('/tmp/out.mp4');
+      result.current.setSelectedPreset('mp4_high');
+    });
+
+    await act(async () => {
+      await result.current.handleExport();
+    });
+
+    expect(invoke).toHaveBeenCalledWith('start_render', {
+      sequenceId: 'sequence-1',
+      outputPath: '/tmp/out.mp4',
+      preset: 'mp4_high',
+      settings: expect.objectContaining({
+        videoCodec: 'h265',
+        hdrMode: 'hdr10',
+        bitDepth: 10,
+        maxCll: 1000,
+        maxFall: 400,
+      }),
+    });
+  });
+
   it('should route editable timeline exports to FCPXML without starting a render job', async () => {
     vi.mocked(invoke).mockResolvedValue({
       format: 'fcpxml',

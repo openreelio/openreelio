@@ -19,9 +19,11 @@ import {
   Layers,
   Settings,
   AlertTriangle,
+  RefreshCw,
 } from 'lucide-react';
 import type { FrameAnalysis } from '@/utils/scopeAnalysis';
 import { calculateExposureLevel, createEmptyAnalysis } from '@/utils/scopeAnalysis';
+import type { VideoScopeSourceStatus } from '@/hooks/useVideoScopes';
 import { HistogramDisplay, type HistogramMode } from './HistogramDisplay';
 import { WaveformDisplay, type WaveformMode } from './WaveformDisplay';
 import { VectorscopeDisplay } from './VectorscopeDisplay';
@@ -44,6 +46,18 @@ export interface VideoScopesPanelProps {
   height?: number;
   /** Whether analysis is active/updating */
   isAnalyzing?: boolean;
+  /** Preview frame connection status */
+  sourceStatus?: VideoScopeSourceStatus;
+  /** Last analyzed source frame width */
+  sourceWidth?: number;
+  /** Last analyzed source frame height */
+  sourceHeight?: number;
+  /** Last successful analysis timestamp */
+  lastAnalyzedAt?: number | null;
+  /** Last analysis error */
+  error?: string | null;
+  /** Callback to force a fresh scope read */
+  onRefresh?: () => void;
   /** Callback when scope type changes */
   onScopeChange?: (scope: ScopeType) => void;
   /** Additional CSS classes */
@@ -60,6 +74,25 @@ const SCOPE_TABS: { id: ScopeType; label: string; icon: typeof BarChart3 }[] = [
   { id: 'vectorscope', label: 'Vectorscope', icon: Circle },
   { id: 'parade', label: 'RGB Parade', icon: Layers },
 ];
+
+const SOURCE_STATUS_LABELS: Record<VideoScopeSourceStatus, string> = {
+  unavailable: 'No preview frame',
+  empty: 'Empty frame',
+  connected: 'Live preview',
+  blocked: 'Frame blocked',
+};
+
+function formatScopeTimestamp(timestamp: number | null | undefined): string {
+  if (!timestamp) {
+    return 'Not analyzed';
+  }
+
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
 
 // =============================================================================
 // Sub-components
@@ -92,18 +125,14 @@ const ExposureIndicator = memo(function ExposureIndicator({ level }: ExposureInd
               backgroundColor: isBalanced
                 ? 'rgb(34, 197, 94)'
                 : isUnderexposed
-                ? 'rgb(59, 130, 246)'
-                : 'rgb(250, 204, 21)',
+                  ? 'rgb(59, 130, 246)'
+                  : 'rgb(250, 204, 21)',
             }}
           />
         </div>
         <span
           className={`font-mono ${
-            isBalanced
-              ? 'text-green-400'
-              : isUnderexposed
-              ? 'text-blue-400'
-              : 'text-yellow-400'
+            isBalanced ? 'text-green-400' : isUnderexposed ? 'text-blue-400' : 'text-yellow-400'
           }`}
         >
           {level > 0 ? '+' : ''}
@@ -206,9 +235,7 @@ const ScopeSettings = memo(function ScopeSettings({
           )}
 
           {scope === 'vectorscope' && (
-            <div className="text-xs text-editor-text-muted">
-              No additional settings
-            </div>
+            <div className="text-xs text-editor-text-muted">No additional settings</div>
           )}
         </div>
       )}
@@ -226,6 +253,12 @@ export const VideoScopesPanel = memo(function VideoScopesPanel({
   width = 300,
   height = 200,
   isAnalyzing = false,
+  sourceStatus = 'unavailable',
+  sourceWidth = analysis?.width ?? 0,
+  sourceHeight = analysis?.height ?? 0,
+  lastAnalyzedAt = analysis?.timestamp ? analysis.timestamp : null,
+  error = null,
+  onRefresh,
   onScopeChange,
   className = '',
 }: VideoScopesPanelProps) {
@@ -248,7 +281,7 @@ export const VideoScopesPanel = memo(function VideoScopesPanel({
       setActiveScope(scope);
       onScopeChange?.(scope);
     },
-    [onScopeChange]
+    [onScopeChange],
   );
 
   return (
@@ -261,21 +294,44 @@ export const VideoScopesPanel = memo(function VideoScopesPanel({
         <div className="flex items-center gap-2">
           <Activity className="w-4 h-4 text-purple-400" />
           <span className="text-sm font-medium text-editor-text">Video Scopes</span>
-          {isAnalyzing && (
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-          )}
+          {isAnalyzing && <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />}
+          <span
+            className={`rounded px-1.5 py-0.5 text-[10px] ${
+              sourceStatus === 'connected'
+                ? 'bg-green-500/10 text-green-400'
+                : sourceStatus === 'blocked'
+                  ? 'bg-red-500/10 text-red-400'
+                  : 'bg-editor-border text-editor-text-muted'
+            }`}
+            data-testid="scope-source-status"
+          >
+            {SOURCE_STATUS_LABELS[sourceStatus]}
+          </span>
         </div>
-        <ScopeSettings
-          scope={activeScope}
-          histogramMode={histogramMode}
-          waveformMode={waveformMode}
-          paradeMode={paradeMode}
-          logarithmic={logarithmic}
-          onHistogramModeChange={setHistogramMode}
-          onWaveformModeChange={setWaveformMode}
-          onParadeModeChange={setParadeMode}
-          onLogarithmicChange={setLogarithmic}
-        />
+        <div className="flex items-center gap-1">
+          {onRefresh && (
+            <button
+              type="button"
+              onClick={onRefresh}
+              className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text transition-colors disabled:opacity-50"
+              aria-label="Refresh scopes"
+              disabled={isAnalyzing}
+            >
+              <RefreshCw className={`w-4 h-4 ${isAnalyzing ? 'animate-spin' : ''}`} />
+            </button>
+          )}
+          <ScopeSettings
+            scope={activeScope}
+            histogramMode={histogramMode}
+            waveformMode={waveformMode}
+            paradeMode={paradeMode}
+            logarithmic={logarithmic}
+            onHistogramModeChange={setHistogramMode}
+            onWaveformModeChange={setWaveformMode}
+            onParadeModeChange={setParadeMode}
+            onLogarithmicChange={setLogarithmic}
+          />
+        </div>
       </div>
 
       {/* Tabs */}
@@ -321,10 +377,7 @@ export const VideoScopesPanel = memo(function VideoScopesPanel({
         )}
 
         {activeScope === 'vectorscope' && (
-          <VectorscopeDisplay
-            data={data.vectorscope}
-            size={Math.min(width - 16, height)}
-          />
+          <VectorscopeDisplay data={data.vectorscope} size={Math.min(width - 16, height)} />
         )}
 
         {activeScope === 'parade' && (
@@ -338,8 +391,15 @@ export const VideoScopesPanel = memo(function VideoScopesPanel({
       </div>
 
       {/* Footer with exposure indicator */}
-      <div className="px-3 py-2 border-t border-editor-border">
+      <div className="px-3 py-2 border-t border-editor-border space-y-1">
         <ExposureIndicator level={exposureLevel} />
+        <div className="flex items-center justify-between gap-2 text-[10px] text-editor-text-muted">
+          <span data-testid="scope-frame-size">
+            {sourceWidth > 0 && sourceHeight > 0 ? `${sourceWidth}x${sourceHeight}` : 'No frame'}
+          </span>
+          <span data-testid="scope-last-analyzed">{formatScopeTimestamp(lastAnalyzedAt)}</span>
+        </div>
+        {error && <div className="text-[10px] text-red-400">{error}</div>}
       </div>
     </div>
   );

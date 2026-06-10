@@ -26,6 +26,8 @@ import {
 export interface UseVideoScopesOptions {
   /** Whether scope analysis is enabled */
   enabled?: boolean;
+  /** Whether analysis should start automatically when enabled */
+  autoStart?: boolean;
   /** Target analysis updates per second (default: 10) */
   updateRate?: number;
   /** Sample rate for large frames (1 = every pixel, 2 = every other) */
@@ -36,11 +38,23 @@ export interface UseVideoScopesOptions {
   vectorscopeSize?: number;
 }
 
+export type VideoScopeSourceStatus = 'unavailable' | 'empty' | 'connected' | 'blocked';
+
 export interface UseVideoScopesResult {
   /** Current frame analysis data */
   analysis: FrameAnalysis;
   /** Whether analysis is currently running */
   isAnalyzing: boolean;
+  /** Whether a readable preview canvas is currently connected */
+  sourceStatus: VideoScopeSourceStatus;
+  /** Last readable source frame width */
+  sourceWidth: number;
+  /** Last readable source frame height */
+  sourceHeight: number;
+  /** Timestamp from the last successful analysis */
+  lastAnalyzedAt: number | null;
+  /** Last non-fatal analysis error */
+  error: string | null;
   /** Manually trigger an analysis */
   analyze: () => void;
   /** Start continuous analysis */
@@ -84,10 +98,11 @@ const DEFAULT_VECTORSCOPE_SIZE = 256;
  */
 export function useVideoScopes(
   canvasRef: RefObject<HTMLCanvasElement | null>,
-  options: UseVideoScopesOptions = {}
+  options: UseVideoScopesOptions = {},
 ): UseVideoScopesResult {
   const {
     enabled = true,
+    autoStart = true,
     updateRate = DEFAULT_UPDATE_RATE,
     sampleRate = DEFAULT_SAMPLE_RATE,
     waveformWidth = DEFAULT_WAVEFORM_WIDTH,
@@ -97,7 +112,12 @@ export function useVideoScopes(
   // State
   const [analysis, setAnalysis] = useState<FrameAnalysis>(createEmptyAnalysis);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isRunning, setIsRunning] = useState(enabled);
+  const [isRunning, setIsRunning] = useState(enabled && autoStart);
+  const [sourceStatus, setSourceStatus] = useState<VideoScopeSourceStatus>('unavailable');
+  const [sourceWidth, setSourceWidth] = useState(0);
+  const [sourceHeight, setSourceHeight] = useState(0);
+  const [lastAnalyzedAt, setLastAnalyzedAt] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   // Refs for animation loop
   const rafRef = useRef<number | null>(null);
@@ -125,10 +145,26 @@ export function useVideoScopes(
    */
   const performAnalysis = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) {
+      setSourceStatus('unavailable');
+      setSourceWidth(0);
+      setSourceHeight(0);
+      return;
+    }
+
+    setSourceWidth(canvas.width);
+    setSourceHeight(canvas.height);
+
+    if (canvas.width === 0 || canvas.height === 0) {
+      setSourceStatus('empty');
+      return;
+    }
 
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) return;
+    if (!ctx) {
+      setSourceStatus('unavailable');
+      return;
+    }
 
     try {
       setIsAnalyzing(true);
@@ -138,6 +174,7 @@ export function useVideoScopes(
 
       // Skip empty frames
       if (imageData.width === 0 || imageData.height === 0) {
+        setSourceStatus('empty');
         setIsAnalyzing(false);
         return;
       }
@@ -145,8 +182,15 @@ export function useVideoScopes(
       // Perform analysis
       const result = analyzeFrame(imageData, analysisOptionsRef.current);
       setAnalysis(result);
+      setSourceStatus('connected');
+      setSourceWidth(result.width);
+      setSourceHeight(result.height);
+      setLastAnalyzedAt(result.timestamp);
+      setError(null);
     } catch (error) {
-      // Canvas may be tainted or in invalid state - ignore silently
+      const message = error instanceof Error ? error.message : String(error);
+      setSourceStatus('blocked');
+      setError(message);
       console.debug('[useVideoScopes] Analysis failed:', error);
     } finally {
       setIsAnalyzing(false);
@@ -169,7 +213,7 @@ export function useVideoScopes(
       // Schedule next frame
       rafRef.current = requestAnimationFrame(tick);
     },
-    [isRunning, enabled, updateInterval, performAnalysis]
+    [isRunning, enabled, updateInterval, performAnalysis],
   );
 
   /**
@@ -213,17 +257,26 @@ export function useVideoScopes(
 
   // Auto-start when enabled changes
   useEffect(() => {
-    if (enabled) {
+    if (enabled && autoStart) {
       setIsRunning(true);
-    } else {
+    }
+    if (!enabled) {
       stop();
       setAnalysis(createEmptyAnalysis());
+      setSourceStatus('unavailable');
+      setLastAnalyzedAt(null);
+      setError(null);
     }
-  }, [enabled, stop]);
+  }, [autoStart, enabled, stop]);
 
   return {
     analysis,
     isAnalyzing,
+    sourceStatus,
+    sourceWidth,
+    sourceHeight,
+    lastAnalyzedAt,
+    error,
     analyze,
     start,
     stop,

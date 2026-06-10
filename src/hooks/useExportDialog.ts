@@ -28,6 +28,7 @@ import {
   getTimelineFormatOption,
   getVideoExportRequest,
   getPresetExtension,
+  applyHdrSettingsToVideoExportRequest,
 } from '@/components/features/export/constants';
 
 function replaceOutputPathExtension(path: string, nextExtension: string): string {
@@ -354,6 +355,15 @@ export function useExportDialog({
         return;
       }
 
+      const resolveVideoExportRequest = async () => {
+        const request = getVideoExportRequest(selectedPreset);
+        const hdrResult = await commands.getSequenceHdrSettings(sequenceId);
+        if (hdrResult.status === 'error') {
+          throw new Error(String(hdrResult.error));
+        }
+        return applyHdrSettingsToVideoExportRequest(request, hdrResult.data);
+      };
+
       const res =
         exportKind === 'audio'
           ? await commands.exportAudioOnly(
@@ -370,7 +380,7 @@ export function useExportDialog({
                 sequenceId,
                 outputPath,
                 selectedPreset,
-                getVideoExportRequest(selectedPreset),
+                await resolveVideoExportRequest(),
                 inPoint,
                 outPoint,
               )
@@ -378,7 +388,7 @@ export function useExportDialog({
                 sequenceId,
                 outputPath,
                 selectedPreset,
-                getVideoExportRequest(selectedPreset),
+                await resolveVideoExportRequest(),
               );
 
       if (res.status === 'error') {
