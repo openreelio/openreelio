@@ -29,6 +29,10 @@ export interface PlaybackState {
   isMuted: boolean;
   /** Whether to loop playback */
   loop: boolean;
+  /** Optional range used when loop playback is enabled */
+  loopRange: PlaybackRange | null;
+  /** Optional one-shot range used by play-around-edit */
+  playRange: PlaybackRange | null;
   /** Whether playback syncs with timeline */
   syncWithTimeline: boolean;
   /** Current JKL shuttle speed (-8 to 8, 0 = stopped) */
@@ -74,6 +78,14 @@ export interface PlaybackActions {
   toggleLoop: () => void;
   /** Set loop */
   setLoop: (loop: boolean) => void;
+  /** Set the active loop range */
+  setLoopRange: (startSec: number, endSec: number) => void;
+  /** Clear the active loop range */
+  clearLoopRange: () => void;
+  /** Set a one-shot playback range */
+  playRangeOnce: (startSec: number, endSec: number) => void;
+  /** Clear the one-shot playback range */
+  clearPlayRange: () => void;
   /** Toggle sync with timeline */
   toggleSyncWithTimeline: () => void;
   /** Set shuttle speed (for JKL shuttle indicator) */
@@ -83,6 +95,11 @@ export interface PlaybackActions {
 }
 
 export type PlaybackStore = PlaybackState & PlaybackActions;
+
+export interface PlaybackRange {
+  startSec: number;
+  endSec: number;
+}
 
 /**
  * Playback event detail type for seek events.
@@ -140,6 +157,20 @@ function normalizeDelta(value: number): number {
   return value;
 }
 
+function normalizePlaybackRange(startSec: number, endSec: number): PlaybackRange | null {
+  if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) {
+    return null;
+  }
+
+  const start = Math.max(0, Math.min(startSec, endSec));
+  const end = Math.max(0, Math.max(startSec, endSec));
+  if (end - start <= 0) {
+    return null;
+  }
+
+  return { startSec: start, endSec: end };
+}
+
 // =============================================================================
 // Playback Events
 // =============================================================================
@@ -188,6 +219,8 @@ const initialState: PlaybackState = {
   volume: 1,
   isMuted: false,
   loop: false,
+  loopRange: null,
+  playRange: null,
   syncWithTimeline: true,
   shuttleSpeed: 0,
 };
@@ -382,6 +415,36 @@ export const usePlaybackStore = create<PlaybackStore>()(
     setLoop: (loop: boolean) => {
       set((state) => {
         state.loop = loop;
+      });
+    },
+
+    setLoopRange: (startSec: number, endSec: number) => {
+      const range = normalizePlaybackRange(startSec, endSec);
+      if (!range) return;
+
+      set((state) => {
+        state.loopRange = range;
+      });
+    },
+
+    clearLoopRange: () => {
+      set((state) => {
+        state.loopRange = null;
+      });
+    },
+
+    playRangeOnce: (startSec: number, endSec: number) => {
+      const range = normalizePlaybackRange(startSec, endSec);
+      if (!range) return;
+
+      set((state) => {
+        state.playRange = range;
+      });
+    },
+
+    clearPlayRange: () => {
+      set((state) => {
+        state.playRange = null;
       });
     },
 

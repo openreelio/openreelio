@@ -221,6 +221,21 @@ describe('TimelinePreviewPlayer', () => {
     expect(visibleContext!.drawImage).not.toHaveBeenCalled();
   });
 
+  it('reports the visible preview canvas lifecycle for finishing tools', async () => {
+    const onPreviewCanvasChange = vi.fn();
+    const { unmount } = render(
+      <TimelinePreviewPlayer showControls={false} onPreviewCanvasChange={onPreviewCanvasChange} />,
+    );
+
+    await waitFor(() => {
+      expect(onPreviewCanvasChange).toHaveBeenCalledWith(screen.getByTestId('preview-canvas'));
+    });
+
+    unmount();
+
+    expect(onPreviewCanvasChange).toHaveBeenLastCalledWith(null);
+  });
+
   it('uses the underlying media clip for frame extraction when a text clip is on the top track', async () => {
     const textClip = createClip('text-clip', '__text__title');
     const baseClip = createClip('base-clip', 'asset-1');

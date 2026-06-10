@@ -8,9 +8,11 @@
 
 import { memo, useCallback, useRef, useState, useEffect, useMemo } from 'react';
 import { useProjectStore } from '@/stores/projectStore';
+import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { isTextClip } from '@/types';
 import type { Asset, Transform, Sequence, TextClipAlignment, TextClipData } from '@/types';
+import { getClipMotionTransformAtTime } from '@/utils/clipMotion';
 import { extractTextDataFromClipWithMap, getTextFontWeightNumber } from '@/utils/textRenderer';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 
@@ -238,6 +240,7 @@ export const TransformOverlay = memo(function TransformOverlay({
   // Store selectors
   const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
   const executeCommand = useProjectStore((state) => state.executeCommand);
+  const currentTime = usePlaybackStore((state) => state.currentTime);
   const textClipDataById = useSequenceTextClipData(sequence);
 
   // Get the first selected clip (only support single selection for transform)
@@ -261,7 +264,8 @@ export const TransformOverlay = memo(function TransformOverlay({
     const { clip } = selectedClip;
     const asset = assets.get(clip.assetId);
 
-    const resolvedClipTransform = previewTransform ?? clip.transform ?? getDefaultTransform();
+    const resolvedClipTransform =
+      previewTransform ?? getClipMotionTransformAtTime(clip, currentTime) ?? getDefaultTransform();
     const textData = isTextClip(clip.assetId)
       ? extractTextDataFromClipWithMap(clip, textClipDataById)
       : undefined;
@@ -331,6 +335,7 @@ export const TransformOverlay = memo(function TransformOverlay({
   }, [
     selectedClip,
     previewTransform,
+    currentTime,
     assets,
     canvasWidth,
     canvasHeight,
@@ -369,7 +374,8 @@ export const TransformOverlay = memo(function TransformOverlay({
       if (!selectedClip) return;
       if (!clipBounds) return;
 
-      const resolvedClipTransform = selectedClip.clip.transform ?? getDefaultTransform();
+      const resolvedClipTransform =
+        getClipMotionTransformAtTime(selectedClip.clip, currentTime) ?? getDefaultTransform();
       const textData = isTextClip(selectedClip.clip.assetId)
         ? extractTextDataFromClipWithMap(selectedClip.clip, textClipDataById)
         : undefined;
@@ -396,7 +402,7 @@ export const TransformOverlay = memo(function TransformOverlay({
       });
       setPreviewTransform({ ...transform });
     },
-    [clipBounds, selectedClip, textClipDataById],
+    [clipBounds, currentTime, selectedClip, textClipDataById],
   );
 
   // Handle drag

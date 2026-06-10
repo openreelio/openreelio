@@ -208,6 +208,47 @@ describe('usePlaybackLoop', () => {
       expect(onEnded).not.toHaveBeenCalled();
       expect(usePlaybackStore.getState().isPlaying).toBe(true);
     });
+
+    it('should loop within an active loop range', () => {
+      const onFrame = vi.fn();
+      renderHook(() => usePlaybackLoop({ onFrame, duration: 10 }));
+
+      act(() => {
+        usePlaybackStore.getState().setCurrentTime(3.9);
+        usePlaybackStore.getState().setLoop(true);
+        usePlaybackStore.getState().setLoopRange(2, 4);
+        usePlaybackStore.getState().play();
+      });
+
+      act(() => {
+        runFrames(10, 50);
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBeGreaterThanOrEqual(2);
+      expect(usePlaybackStore.getState().currentTime).toBeLessThan(4);
+      expect(usePlaybackStore.getState().isPlaying).toBe(true);
+    });
+
+    it('should stop and clear one-shot play range at the range end', () => {
+      const onFrame = vi.fn();
+      const onEnded = vi.fn();
+      renderHook(() => usePlaybackLoop({ onFrame, duration: 10, onEnded }));
+
+      act(() => {
+        usePlaybackStore.getState().setCurrentTime(3.9);
+        usePlaybackStore.getState().playRangeOnce(2, 4);
+        usePlaybackStore.getState().play();
+      });
+
+      act(() => {
+        runFrames(10, 50);
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBe(4);
+      expect(usePlaybackStore.getState().isPlaying).toBe(false);
+      expect(usePlaybackStore.getState().playRange).toBeNull();
+      expect(onEnded).toHaveBeenCalled();
+    });
   });
 
   // ===========================================================================

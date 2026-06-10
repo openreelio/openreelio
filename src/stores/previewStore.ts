@@ -26,6 +26,8 @@ import { immer } from 'zustand/middleware/immer';
 // =============================================================================
 
 export type ZoomMode = 'fit' | 'fill' | '100%' | 'custom';
+export type PreviewPlaybackQuality = 'full' | 'half' | 'quarter';
+export type PreviewMediaPreference = 'auto' | 'proxy' | 'renderCache';
 
 export interface PreviewState {
   /** Current zoom level (1.0 = 100%) */
@@ -38,6 +40,16 @@ export interface PreviewState {
   panY: number;
   /** Whether currently panning */
   isPanning: boolean;
+  /** Whether program monitor safe-margin overlays are visible */
+  showSafeMargins: boolean;
+  /** Whether program monitor composition guide overlays are visible */
+  showGuides: boolean;
+  /** Program monitor render resolution for canvas preview playback */
+  playbackQuality: PreviewPlaybackQuality;
+  /** Program monitor media source preference */
+  mediaPreference: PreviewMediaPreference;
+  /** Current program monitor canvas used by video scopes analysis */
+  programPreviewCanvas: HTMLCanvasElement | null;
 }
 
 export interface PreviewActions {
@@ -67,6 +79,16 @@ export interface PreviewActions {
   zoomIn: () => void;
   /** Zoom out by ZOOM_STEP multiplier */
   zoomOut: () => void;
+  /** Toggle program monitor safe-margin overlays */
+  toggleSafeMargins: () => void;
+  /** Toggle program monitor composition guide overlays */
+  toggleGuides: () => void;
+  /** Set program monitor render resolution */
+  setPlaybackQuality: (quality: PreviewPlaybackQuality) => void;
+  /** Set program monitor media source preference */
+  setMediaPreference: (preference: PreviewMediaPreference) => void;
+  /** Register the current program monitor canvas for finishing tools */
+  setProgramPreviewCanvas: (canvas: HTMLCanvasElement | null) => void;
 }
 
 export type PreviewStore = PreviewState & PreviewActions;
@@ -95,6 +117,12 @@ export const ZOOM_PRESETS = [
   { label: '200%', value: 2.0 },
 ] as const;
 
+export const PREVIEW_PLAYBACK_QUALITY_SCALE: Record<PreviewPlaybackQuality, number> = {
+  full: 1,
+  half: 0.5,
+  quarter: 0.25,
+};
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -119,6 +147,17 @@ function validateNumber(value: number, min?: number, max?: number): number | und
   return value;
 }
 
+function isPreviewPlaybackQuality(value: unknown): value is PreviewPlaybackQuality {
+  return (
+    typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(PREVIEW_PLAYBACK_QUALITY_SCALE, value)
+  );
+}
+
+function isPreviewMediaPreference(value: unknown): value is PreviewMediaPreference {
+  return value === 'auto' || value === 'proxy' || value === 'renderCache';
+}
+
 // =============================================================================
 // Initial State
 // =============================================================================
@@ -129,6 +168,11 @@ const initialState: PreviewState = {
   panX: 0,
   panY: 0,
   isPanning: false,
+  showSafeMargins: false,
+  showGuides: false,
+  playbackQuality: 'full',
+  mediaPreference: 'auto',
+  programPreviewCanvas: null,
 };
 
 // =============================================================================
@@ -196,6 +240,11 @@ export const usePreviewStore = create<PreviewStore>()(
         state.panX = 0;
         state.panY = 0;
         state.isPanning = false;
+        state.showSafeMargins = false;
+        state.showGuides = false;
+        state.playbackQuality = initialState.playbackQuality;
+        state.mediaPreference = initialState.mediaPreference;
+        state.programPreviewCanvas = null;
       });
     },
 
@@ -212,6 +261,44 @@ export const usePreviewStore = create<PreviewStore>()(
         const newLevel = state.zoomLevel / ZOOM_STEP;
         state.zoomLevel = Math.max(MIN_ZOOM, newLevel);
         state.zoomMode = 'custom';
+      });
+    },
+
+    toggleSafeMargins: () => {
+      set((state) => {
+        state.showSafeMargins = !state.showSafeMargins;
+      });
+    },
+
+    toggleGuides: () => {
+      set((state) => {
+        state.showGuides = !state.showGuides;
+      });
+    },
+
+    setPlaybackQuality: (quality: PreviewPlaybackQuality) => {
+      if (!isPreviewPlaybackQuality(quality)) {
+        return;
+      }
+
+      set((state) => {
+        state.playbackQuality = quality;
+      });
+    },
+
+    setMediaPreference: (preference: PreviewMediaPreference) => {
+      if (!isPreviewMediaPreference(preference)) {
+        return;
+      }
+
+      set((state) => {
+        state.mediaPreference = preference;
+      });
+    },
+
+    setProgramPreviewCanvas: (canvas: HTMLCanvasElement | null) => {
+      set((state) => {
+        (state as PreviewStore).programPreviewCanvas = canvas;
       });
     },
   })),

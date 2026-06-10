@@ -414,6 +414,7 @@ export class PlaybackController {
     } else if (driftMs > this.config.driftCorrectionThresholdMs) {
       // Moderate drift - apply soft correction
       this.syncState.lastCorrectionTime = now;
+      this.syncState.isSynced = false;
 
       // Gradual correction: move video time slightly toward audio time
       const correctionFactor = 0.1; // Correct 10% of the drift per check
@@ -426,8 +427,13 @@ export class PlaybackController {
 
       // Update internal video time (next frame will use this)
       this.syncState.videoTime += correction;
+      this.emit({ type: 'sync', time: this.syncState.videoTime });
     } else {
+      const wasOutOfSync = !this.syncState.isSynced || this.syncState.driftMs > 0;
       this.syncState.isSynced = true;
+      if (wasOutOfSync) {
+        this.emit({ type: 'sync', time: this.syncState.videoTime });
+      }
     }
   }
 

@@ -22,6 +22,8 @@ describe('playbackStore', () => {
       volume: 1,
       isMuted: false,
       loop: false,
+      loopRange: null,
+      playRange: null,
       syncWithTimeline: true,
       shuttleSpeed: 0,
     });
@@ -47,6 +49,8 @@ describe('playbackStore', () => {
       expect(state.volume).toBe(1);
       expect(state.isMuted).toBe(false);
       expect(state.loop).toBe(false);
+      expect(state.loopRange).toBeNull();
+      expect(state.playRange).toBeNull();
     });
   });
 
@@ -296,6 +300,29 @@ describe('playbackStore', () => {
       usePlaybackStore.getState().setLoop(true);
       expect(usePlaybackStore.getState().loop).toBe(true);
     });
+
+    it('should set and clear loop range', () => {
+      usePlaybackStore.getState().setLoopRange(8, 2);
+      expect(usePlaybackStore.getState().loopRange).toEqual({ startSec: 2, endSec: 8 });
+
+      usePlaybackStore.getState().clearLoopRange();
+      expect(usePlaybackStore.getState().loopRange).toBeNull();
+    });
+
+    it('should ignore invalid loop ranges', () => {
+      usePlaybackStore.getState().setLoopRange(4, 4);
+      usePlaybackStore.getState().setLoopRange(Number.NaN, 8);
+
+      expect(usePlaybackStore.getState().loopRange).toBeNull();
+    });
+
+    it('should set and clear one-shot play range', () => {
+      usePlaybackStore.getState().playRangeOnce(3, 9);
+      expect(usePlaybackStore.getState().playRange).toEqual({ startSec: 3, endSec: 9 });
+
+      usePlaybackStore.getState().clearPlayRange();
+      expect(usePlaybackStore.getState().playRange).toBeNull();
+    });
   });
 
   // ===========================================================================
@@ -339,6 +366,9 @@ describe('playbackStore', () => {
         playbackRate: 2,
         volume: 0.5,
         isMuted: true,
+        loop: true,
+        loopRange: { startSec: 1, endSec: 2 },
+        playRange: { startSec: 3, endSec: 4 },
       });
 
       usePlaybackStore.getState().reset();
@@ -349,6 +379,9 @@ describe('playbackStore', () => {
       expect(state.playbackRate).toBe(1);
       expect(state.volume).toBe(1);
       expect(state.isMuted).toBe(false);
+      expect(state.loop).toBe(false);
+      expect(state.loopRange).toBeNull();
+      expect(state.playRange).toBeNull();
     });
   });
 

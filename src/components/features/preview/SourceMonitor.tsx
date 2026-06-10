@@ -14,7 +14,7 @@ import {
   type KeyboardEvent,
   type DragEvent,
 } from 'react';
-import { Play, Pause } from 'lucide-react';
+import { CornerDownRight, Pause, Play, Replace } from 'lucide-react';
 import { PreviewPlayer } from '@/components/preview';
 import { SeekBar } from '@/components/preview';
 import { ShuttleSpeedIndicator } from '@/components/preview/ShuttleSpeedIndicator';
@@ -38,9 +38,17 @@ const FRAME_SEC = 1 / PLAYBACK.TARGET_FPS;
 export interface SourceMonitorProps {
   /** Additional CSS classes */
   className?: string;
+  /** Insert the marked source range at the timeline playhead using target tracks. */
+  onInsertEdit?: () => void | Promise<void>;
+  /** Overwrite the timeline at the playhead with the marked source range. */
+  onOverwriteEdit?: () => void | Promise<void>;
 }
 
-export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
+export const SourceMonitor: FC<SourceMonitorProps> = ({
+  className,
+  onInsertEdit,
+  onOverwriteEdit,
+}) => {
   const {
     assetId,
     inPoint,
@@ -101,6 +109,16 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
     shuttle.resetShuttle();
   }, [togglePlayback, shuttle]);
 
+  const handleInsertEdit = useCallback(() => {
+    if (!assetId || !onInsertEdit) return;
+    void onInsertEdit();
+  }, [assetId, onInsertEdit]);
+
+  const handleOverwriteEdit = useCallback(() => {
+    if (!assetId || !onOverwriteEdit) return;
+    void onOverwriteEdit();
+  }, [assetId, onOverwriteEdit]);
+
   // Keyboard: I = In, O = Out, Escape = clear, Space = play/pause, J/K/L = shuttle
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -134,9 +152,25 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
         e.preventDefault();
         e.stopPropagation();
         handleTransportToggle();
+      } else if (key === ',' && !ctrl) {
+        e.preventDefault();
+        e.stopPropagation();
+        handleInsertEdit();
+      } else if (key === '.' && !ctrl) {
+        e.preventDefault();
+        e.stopPropagation();
+        handleOverwriteEdit();
       }
     },
-    [setInPoint, setOutPoint, clearInOut, handleTransportToggle, shuttle],
+    [
+      setInPoint,
+      setOutPoint,
+      clearInOut,
+      handleTransportToggle,
+      handleInsertEdit,
+      handleOverwriteEdit,
+      shuttle,
+    ],
   );
 
   // Keyup handler for K+J/K+L combo detection
@@ -297,6 +331,31 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
             <span className="text-cyan-400">OUT {formatDuration(outPoint)}</span>
           )}
         </div>
+      </div>
+
+      <div className="flex items-center gap-2 border-t border-editor-border px-2 py-1">
+        <button
+          type="button"
+          data-testid="source-insert-edit-button"
+          className="flex flex-1 items-center justify-center gap-1.5 rounded border border-editor-border bg-editor-input px-2 py-1 text-[11px] font-medium text-editor-text transition-colors hover:border-primary-500 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={handleInsertEdit}
+          disabled={!assetId || !onInsertEdit}
+          title="Insert edit"
+        >
+          <CornerDownRight className="h-3.5 w-3.5" />
+          Insert
+        </button>
+        <button
+          type="button"
+          data-testid="source-overwrite-edit-button"
+          className="flex flex-1 items-center justify-center gap-1.5 rounded border border-editor-border bg-editor-input px-2 py-1 text-[11px] font-medium text-editor-text transition-colors hover:border-primary-500 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={handleOverwriteEdit}
+          disabled={!assetId || !onOverwriteEdit}
+          title="Overwrite edit"
+        >
+          <Replace className="h-3.5 w-3.5" />
+          Overwrite
+        </button>
       </div>
     </div>
   );

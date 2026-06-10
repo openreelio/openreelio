@@ -39,6 +39,7 @@ import {
   getSafeClipSpeed,
   isClipActiveAtTime,
 } from '@/utils/clipTiming';
+import { getClipMotionTransformAtTime } from '@/utils/clipMotion';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { TextPlacementOverlay, type TextPlacementCommitPayload } from './TextPlacementOverlay';
 import { TransformOverlay } from './TransformOverlay';
@@ -309,6 +310,26 @@ function resolveCaptionPositionForClip(
   }
 
   return DEFAULT_CAPTION_POSITION;
+}
+
+function buildProxyClipTransformStyle(clip: Clip, currentTime: number): {
+  transform: string;
+  transformOrigin: string;
+} {
+  const transform = getClipMotionTransformAtTime(clip, currentTime);
+  const translateXPercent = (transform.position.x - 0.5) * 100;
+  const translateYPercent = (transform.position.y - 0.5) * 100;
+
+  return {
+    transform: [
+      `translate(${translateXPercent.toFixed(3)}%, ${translateYPercent.toFixed(3)}%)`,
+      `rotate(${transform.rotationDeg.toFixed(3)}deg)`,
+      `scale(${transform.scale.x.toFixed(4)}, ${transform.scale.y.toFixed(4)})`,
+    ].join(' '),
+    transformOrigin: `${(transform.anchor.x * 100).toFixed(2)}% ${(
+      transform.anchor.y * 100
+    ).toFixed(2)}%`,
+  };
 }
 
 function parseHexColor(color: string): string | null {
@@ -1530,6 +1551,8 @@ export function ProxyPreviewPlayer({
             return null;
           }
 
+          const transformStyle = buildProxyClipTransformStyle(clip, currentTime);
+
           return (
             <video
               key={clip.id}
@@ -1540,6 +1563,8 @@ export function ProxyPreviewPlayer({
               style={{
                 opacity: isActive ? clip.opacity : 0,
                 visibility: isActive ? 'visible' : 'hidden',
+                transform: transformStyle.transform,
+                transformOrigin: transformStyle.transformOrigin,
                 zIndex: (sequence.tracks.length - trackIndex) * TRACK_LAYER_Z_INDEX_STEP,
               }}
               aria-hidden={!isActive}

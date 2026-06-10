@@ -10,6 +10,7 @@ import { isTextClip, type Sequence, type Asset, type Clip, type Track } from '@/
 import { getClipTimelineDurationSec, isClipActiveAtTime } from '@/utils/clipTiming';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { getEffectiveBlendMode } from '@/utils/blendModes';
+import type { PreviewMediaPreference } from '@/stores/previewStore';
 
 // =============================================================================
 // Types
@@ -35,6 +36,8 @@ export interface UsePreviewModeOptions {
   assets: Map<string, Asset>;
   /** Current playhead time in seconds */
   currentTime: number;
+  /** Preferred media path for preview playback */
+  mediaPreference?: PreviewMediaPreference;
 }
 
 // =============================================================================
@@ -262,6 +265,7 @@ export function usePreviewMode({
   sequence,
   assets,
   currentTime,
+  mediaPreference = 'auto',
 }: UsePreviewModeOptions): PreviewModeResult {
   const previousResultRef = useRef<PreviewModeResult | null>(null);
   const previousTimeRef = useRef<number | null>(null);
@@ -347,6 +351,18 @@ export function usePreviewMode({
       return result;
     }
 
+    if (mediaPreference === 'renderCache') {
+      const result: PreviewModeResult = {
+        mode: 'canvas',
+        reason: 'Render cache preferred',
+        hasGeneratingProxy: false,
+        clipsNeedingProxy: 0,
+      };
+      previousResultRef.current = result;
+      previousTimeRef.current = currentTime;
+      return result;
+    }
+
     // Analyze proxy readiness for active video clips on visual tracks.
     const videoClips = activeClips.filter(
       (activeClip): activeClip is ActiveClipInfo & { asset: Asset } =>
@@ -419,7 +435,10 @@ export function usePreviewMode({
     if (allHaveProxy) {
       const result: PreviewModeResult = {
         mode: 'video',
-        reason: 'All video clips have ready proxies',
+        reason:
+          mediaPreference === 'proxy'
+            ? 'Using preferred proxy media'
+            : 'All video clips have ready proxies',
         hasGeneratingProxy: false,
         clipsNeedingProxy: 0,
       };
@@ -432,8 +451,12 @@ export function usePreviewMode({
       const result: PreviewModeResult = {
         mode: 'video',
         reason: anyGenerating
-          ? 'Using source media while proxies generate'
-          : 'Using source media for clips without ready proxies',
+          ? mediaPreference === 'proxy'
+            ? 'Using source media while preferred proxies generate'
+            : 'Using source media while proxies generate'
+          : mediaPreference === 'proxy'
+            ? 'Using source media until preferred proxies are ready'
+            : 'Using source media for clips without ready proxies',
         hasGeneratingProxy: anyGenerating,
         clipsNeedingProxy,
       };
@@ -453,5 +476,5 @@ export function usePreviewMode({
     previousResultRef.current = result;
     previousTimeRef.current = currentTime;
     return result;
-  }, [sequence, assets, currentTime]);
+  }, [sequence, assets, currentTime, mediaPreference]);
 }

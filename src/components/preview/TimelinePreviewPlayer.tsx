@@ -29,6 +29,7 @@ import {
   renderTextToCanvas,
 } from '@/utils/textRenderer';
 import { getClipSourceTimeAtTimelineTime, isClipActiveAtTime } from '@/utils/clipTiming';
+import { getClipMotionTransformAtTime } from '@/utils/clipMotion';
 import { getActiveVisualLayers } from '@/utils/renderGraphLayers';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { getEffectiveBlendMode } from '@/utils/blendModes';
@@ -75,6 +76,8 @@ export interface TimelinePreviewPlayerProps {
   onEnded?: () => void;
   /** Callback when frame is rendered */
   onFrameRender?: (time: number) => void;
+  /** Callback when the visible preview canvas mounts or unmounts */
+  onPreviewCanvasChange?: (canvas: HTMLCanvasElement | null) => void;
   /** Whether the preview should accept click-to-place text input */
   textPlacementModeActive?: boolean;
   /** Commit handler for text entered directly on the preview */
@@ -134,8 +137,9 @@ function drawVisualWithClipTransform(
   blendMode: BlendMode,
   canvasWidth: number,
   canvasHeight: number,
+  timelineTimeSec: number,
 ): void {
-  const transform = clip.transform;
+  const transform = getClipMotionTransformAtTime(clip, timelineTimeSec);
   const sourceWidth = Math.max(1, visual.width);
   const sourceHeight = Math.max(1, visual.height);
 
@@ -180,6 +184,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   height = DEFAULT_HEIGHT,
   onEnded,
   onFrameRender,
+  onPreviewCanvasChange,
   textPlacementModeActive = false,
   onTextPlacementCommit,
 }: TimelinePreviewPlayerProps) {
@@ -237,6 +242,14 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
   // Note: Sequence format canvas dimensions are available via activeSequence?.format.canvas
   // Currently transforms are calculated relative to the preview canvas dimensions
+
+  useEffect(() => {
+    onPreviewCanvasChange?.(canvasRef.current);
+
+    return () => {
+      onPreviewCanvasChange?.(null);
+    };
+  }, [onPreviewCanvasChange]);
 
   // ===========================================================================
   // Get ALL Active Clips at Time
@@ -519,6 +532,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
               blendMode,
               targetCtx.canvas.width,
               targetCtx.canvas.height,
+              timelineTime,
             );
             continue;
           }
@@ -576,6 +590,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
             blendMode,
             targetCtx.canvas.width,
             targetCtx.canvas.height,
+            timelineTime,
           );
         }
 

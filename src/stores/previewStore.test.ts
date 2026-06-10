@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { usePreviewStore, ZOOM_PRESETS } from './previewStore';
+import { PREVIEW_PLAYBACK_QUALITY_SCALE, usePreviewStore, ZOOM_PRESETS } from './previewStore';
 
 describe('previewStore', () => {
   beforeEach(() => {
@@ -20,6 +20,11 @@ describe('previewStore', () => {
       panX: 0,
       panY: 0,
       isPanning: false,
+      showSafeMargins: false,
+      showGuides: false,
+      playbackQuality: 'full',
+      mediaPreference: 'auto',
+      programPreviewCanvas: null,
     });
   });
 
@@ -36,6 +41,11 @@ describe('previewStore', () => {
       expect(state.panX).toBe(0);
       expect(state.panY).toBe(0);
       expect(state.isPanning).toBe(false);
+      expect(state.showSafeMargins).toBe(false);
+      expect(state.showGuides).toBe(false);
+      expect(state.playbackQuality).toBe('full');
+      expect(state.mediaPreference).toBe('auto');
+      expect(state.programPreviewCanvas).toBeNull();
     });
   });
 
@@ -197,6 +207,11 @@ describe('previewStore', () => {
         panX: 100,
         panY: 50,
         isPanning: true,
+        showSafeMargins: true,
+        showGuides: true,
+        playbackQuality: 'quarter',
+        mediaPreference: 'renderCache',
+        programPreviewCanvas: document.createElement('canvas'),
       });
 
       usePreviewStore.getState().resetView();
@@ -207,6 +222,77 @@ describe('previewStore', () => {
       expect(state.panX).toBe(0);
       expect(state.panY).toBe(0);
       expect(state.isPanning).toBe(false);
+      expect(state.showSafeMargins).toBe(false);
+      expect(state.showGuides).toBe(false);
+      expect(state.playbackQuality).toBe('full');
+      expect(state.mediaPreference).toBe('auto');
+      expect(state.programPreviewCanvas).toBeNull();
+    });
+  });
+
+  describe('program preview canvas', () => {
+    it('should register the current preview canvas for scopes', () => {
+      const canvas = document.createElement('canvas');
+
+      usePreviewStore.getState().setProgramPreviewCanvas(canvas);
+
+      expect(usePreviewStore.getState().programPreviewCanvas).toBe(canvas);
+    });
+
+    it('should clear the preview canvas registration', () => {
+      const canvas = document.createElement('canvas');
+      usePreviewStore.getState().setProgramPreviewCanvas(canvas);
+
+      usePreviewStore.getState().setProgramPreviewCanvas(null);
+
+      expect(usePreviewStore.getState().programPreviewCanvas).toBeNull();
+    });
+  });
+
+  describe('program monitor overlays', () => {
+    it('should toggle safe margins', () => {
+      usePreviewStore.getState().toggleSafeMargins();
+      expect(usePreviewStore.getState().showSafeMargins).toBe(true);
+
+      usePreviewStore.getState().toggleSafeMargins();
+      expect(usePreviewStore.getState().showSafeMargins).toBe(false);
+    });
+
+    it('should toggle composition guides', () => {
+      usePreviewStore.getState().toggleGuides();
+      expect(usePreviewStore.getState().showGuides).toBe(true);
+
+      usePreviewStore.getState().toggleGuides();
+      expect(usePreviewStore.getState().showGuides).toBe(false);
+    });
+  });
+
+  describe('playback quality', () => {
+    it('should set playback quality', () => {
+      usePreviewStore.getState().setPlaybackQuality('half');
+
+      expect(usePreviewStore.getState().playbackQuality).toBe('half');
+      expect(PREVIEW_PLAYBACK_QUALITY_SCALE.half).toBe(0.5);
+    });
+
+    it('should ignore invalid playback quality values', () => {
+      usePreviewStore.getState().setPlaybackQuality('half');
+      usePreviewStore.getState().setPlaybackQuality('invalid' as never);
+
+      expect(usePreviewStore.getState().playbackQuality).toBe('half');
+    });
+
+    it('should set media preference', () => {
+      usePreviewStore.getState().setMediaPreference('proxy');
+
+      expect(usePreviewStore.getState().mediaPreference).toBe('proxy');
+    });
+
+    it('should ignore invalid media preference values', () => {
+      usePreviewStore.getState().setMediaPreference('proxy');
+      usePreviewStore.getState().setMediaPreference('invalid' as never);
+
+      expect(usePreviewStore.getState().mediaPreference).toBe('proxy');
     });
   });
 
