@@ -12,7 +12,7 @@
  * @module hooks/useMulticam
  */
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { nanoid } from 'nanoid';
 import {
   type MulticamGroup,
@@ -112,6 +112,11 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
   const [gridLayout, setGridLayout] = useState<GridLayout>(initialGridLayout);
   const [hoveredAngleIndex, setHoveredAngleIndex] = useState<number | null>(null);
 
+  useEffect(() => {
+    setGroup(initialGroup);
+    setHoveredAngleIndex(null);
+  }, [initialGroup]);
+
   // Derived values
   const activeAngleIndex = group?.activeAngleIndex ?? 0;
   const activeAngle = group?.angles[activeAngleIndex] ?? null;
@@ -141,7 +146,7 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
         return updated;
       });
     },
-    [onChange]
+    [onChange],
   );
 
   // Switch to a different angle
@@ -157,7 +162,7 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
         modifiedAt: new Date().toISOString(),
       }));
     },
-    [group, updateGroup]
+    [group, updateGroup],
   );
 
   // Switch to a different angle at a specific time (for recording)
@@ -194,7 +199,7 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
         }));
       }
     },
-    [group, isRecording, updateGroup]
+    [group, isRecording, updateGroup],
   );
 
   // Remove an angle switch
@@ -206,7 +211,7 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
         modifiedAt: new Date().toISOString(),
       }));
     },
-    [updateGroup]
+    [updateGroup],
   );
 
   // Update an angle switch time
@@ -215,14 +220,12 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
       updateGroup((g) => ({
         ...g,
         angleSwitches: sortAngleSwitches(
-          g.angleSwitches.map((s) =>
-            s.id === switchId ? { ...s, timeSec: newTimeSec } : s
-          )
+          g.angleSwitches.map((s) => (s.id === switchId ? { ...s, timeSec: newTimeSec } : s)),
         ),
         modifiedAt: new Date().toISOString(),
       }));
     },
-    [updateGroup]
+    [updateGroup],
   );
 
   // Clear all switches
@@ -242,7 +245,7 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
       if (index >= group.angles.length) return null;
       return group.angles[index];
     },
-    [group, gridLayout.cols]
+    [group, gridLayout.cols],
   );
 
   // Set audio mix mode
@@ -254,7 +257,7 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
         modifiedAt: new Date().toISOString(),
       }));
     },
-    [updateGroup]
+    [updateGroup],
   );
 
   // Get angle index at a specific time
@@ -263,7 +266,7 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
       if (!group) return null;
       return getAngleAtTime(group, timeSec);
     },
-    [group]
+    [group],
   );
 
   // Handle keyboard shortcuts
@@ -280,7 +283,7 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
         }
       }
     },
-    [group, switchAngle]
+    [group, switchAngle],
   );
 
   // Update group name
@@ -292,7 +295,7 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
         modifiedAt: new Date().toISOString(),
       }));
     },
-    [updateGroup]
+    [updateGroup],
   );
 
   // Add an angle to the group
@@ -304,7 +307,7 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
         modifiedAt: new Date().toISOString(),
       }));
     },
-    [updateGroup]
+    [updateGroup],
   );
 
   // Remove an angle from the group
@@ -322,7 +325,7 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
 
         // Remove switches referencing the removed angle
         const newSwitches = g.angleSwitches.filter(
-          (s) => s.fromAngleIndex !== angleIndex && s.toAngleIndex !== angleIndex
+          (s) => s.fromAngleIndex !== angleIndex && s.toAngleIndex !== angleIndex,
         );
 
         return {
@@ -334,7 +337,7 @@ export function useMulticam(options: UseMulticamOptions = {}): UseMulticamReturn
         };
       });
     },
-    [updateGroup]
+    [updateGroup],
   );
 
   // Set hovered angle
