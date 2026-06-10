@@ -408,6 +408,74 @@ describe('projectStore', () => {
     });
   });
 
+  describe('asset cache actions', () => {
+    it('regenerates an asset thumbnail and updates local asset state', async () => {
+      useProjectStore.setState({
+        assets: new Map([
+          [
+            'asset-1',
+            {
+              id: 'asset-1',
+              kind: 'video',
+              name: 'video.mp4',
+              uri: '/path/to/video.mp4',
+              hash: 'hash',
+              fileSize: 1024,
+              importedAt: '2026-03-23T00:00:00Z',
+              license: {
+                source: 'user',
+                licenseType: 'unknown',
+                allowedUse: [],
+              },
+              tags: [],
+              proxyStatus: 'notNeeded',
+            },
+          ],
+        ]),
+      });
+      mockTauriCommand('generate_asset_thumbnail', '/cache/asset-1.jpg');
+
+      const thumbnailUrl = await useProjectStore.getState().generateAssetThumbnail('asset-1');
+
+      expect(thumbnailUrl).toBe('/cache/asset-1.jpg');
+      expect(invoke).toHaveBeenCalledWith('generate_asset_thumbnail', { assetId: 'asset-1' });
+      expect(useProjectStore.getState().assets.get('asset-1')?.thumbnailUrl).toBe(
+        '/cache/asset-1.jpg',
+      );
+    });
+
+    it('loads and generates waveform data through media cache IPC', async () => {
+      const waveform = {
+        samplesPerSecond: 100,
+        peaks: [0.2, 0.8],
+        durationSec: 2,
+        channels: 2,
+      };
+      mockTauriCommands({
+        get_waveform_data: waveform,
+        generate_waveform_for_asset: waveform,
+        ensure_audio_preview_for_asset: '/cache/asset-1.mp3',
+      });
+
+      await expect(useProjectStore.getState().loadWaveformData('asset-1')).resolves.toEqual(
+        waveform,
+      );
+      await expect(useProjectStore.getState().generateWaveformForAsset('asset-1')).resolves.toEqual(
+        waveform,
+      );
+      await expect(useProjectStore.getState().ensureAudioPreviewForAsset('asset-1')).resolves.toBe(
+        '/cache/asset-1.mp3',
+      );
+
+      expect(invoke).toHaveBeenCalledWith('get_waveform_data', { assetId: 'asset-1' });
+      expect(invoke).toHaveBeenCalledWith('generate_waveform_for_asset', {
+        assetId: 'asset-1',
+        samplesPerSecond: 100,
+      });
+      expect(invoke).toHaveBeenCalledWith('ensure_audio_preview_for_asset', { assetId: 'asset-1' });
+    });
+  });
+
   describe('removeAsset', () => {
     it('should remove asset successfully', async () => {
       // Setup state with an asset

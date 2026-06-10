@@ -11,7 +11,9 @@ import {
   Trash2,
   ExternalLink,
   Copy,
+  Link2,
   Plus,
+  Replace,
   Upload,
   MessageSquare,
   Loader2,
@@ -28,6 +30,8 @@ export interface FileTreeContextMenuProps {
   onRevealInExplorer?: (relativePath: string) => void;
   onCopyPath?: (relativePath: string) => void;
   onImportFiles?: (entry: FileTreeEntry) => void;
+  onRelinkAsset?: (entry: FileTreeEntry) => void;
+  onReplaceAsset?: (entry: FileTreeEntry) => void;
   onAddToTimeline?: (entry: FileTreeEntry) => void;
   onTranscribe?: (entry: FileTreeEntry) => void;
   isTranscribing?: boolean;
@@ -43,6 +47,8 @@ export function FileTreeContextMenu({
   onRevealInExplorer,
   onCopyPath,
   onImportFiles,
+  onRelinkAsset,
+  onReplaceAsset,
   onAddToTimeline,
   onTranscribe,
   isTranscribing = false,
@@ -97,6 +103,16 @@ export function FileTreeContextMenu({
     onImportFiles?.(entry);
     onClose();
   }, [entry, onClose, onImportFiles]);
+
+  const handleRelinkAsset = useCallback(() => {
+    onRelinkAsset?.(entry);
+    onClose();
+  }, [entry, onClose, onRelinkAsset]);
+
+  const handleReplaceAsset = useCallback(() => {
+    onReplaceAsset?.(entry);
+    onClose();
+  }, [entry, onClose, onReplaceAsset]);
 
   const handleCopyPath = useCallback(() => {
     onCopyPath?.(entry.relativePath);
@@ -170,6 +186,30 @@ export function FileTreeContextMenu({
       )}
 
       {(canTranscribe || (!entry.isDirectory && entry.assetId)) && (
+        <div className="my-1 border-t border-editor-border" />
+      )}
+
+      {!entry.isDirectory && entry.assetId && entry.missing && (
+        <button
+          className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-editor-text hover:bg-surface-active transition-colors"
+          onClick={handleRelinkAsset}
+        >
+          <Link2 className="w-3.5 h-3.5" />
+          Relink Media...
+        </button>
+      )}
+
+      {!entry.isDirectory && entry.assetId && (
+        <button
+          className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-editor-text hover:bg-surface-active transition-colors"
+          onClick={handleReplaceAsset}
+        >
+          <Replace className="w-3.5 h-3.5" />
+          Replace Footage...
+        </button>
+      )}
+
+      {!entry.isDirectory && entry.assetId && (
         <div className="my-1 border-t border-editor-border" />
       )}
 

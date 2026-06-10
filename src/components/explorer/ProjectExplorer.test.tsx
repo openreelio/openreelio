@@ -13,6 +13,11 @@ const mockState = vi.hoisted(() => ({
   importExternalFiles: vi.fn(),
   selectAsset: vi.fn(),
   executeCommand: vi.fn(),
+  relinkAsset: vi.fn(),
+  generateProxyForAsset: vi.fn(),
+  cancelProxyForAsset: vi.fn(),
+  useOriginalMedia: vi.fn(),
+  openDialog: vi.fn(),
   setSourceAsset: vi.fn(),
   createFolder: vi.fn(),
   renameFile: vi.fn(),
@@ -40,6 +45,11 @@ vi.mock('@/stores', () => ({
       assets: mockState.assets,
       selectAsset: mockState.selectAsset,
       executeCommand: mockState.executeCommand,
+      relinkAsset: mockState.relinkAsset,
+      proxyJobIdsByAssetId: {},
+      generateProxyForAsset: mockState.generateProxyForAsset,
+      cancelProxyForAsset: mockState.cancelProxyForAsset,
+      useOriginalMedia: mockState.useOriginalMedia,
       activeSequenceId: null,
       sequences: new Map(),
     };
@@ -65,6 +75,20 @@ vi.mock('@/hooks/useFileOperations', () => ({
   }),
 }));
 
+vi.mock('@/hooks/useJobs', () => ({
+  useJobs: () => ({
+    jobs: [],
+    stats: null,
+    isLoading: false,
+    error: null,
+    submitJob: vi.fn(),
+    cancelJob: vi.fn(),
+    getJob: vi.fn(),
+    refreshJobs: vi.fn(),
+    refreshStats: vi.fn(),
+  }),
+}));
+
 vi.mock('@/bindings', () => ({
   commands: {
     setSourceAsset: mockState.setSourceAsset,
@@ -75,6 +99,10 @@ vi.mock('@/bindings', () => ({
 
 vi.mock('@tauri-apps/api/core', () => ({
   isTauri: () => false,
+}));
+
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: mockState.openDialog,
 }));
 
 vi.mock('@/services/logger', () => ({
@@ -139,7 +167,7 @@ function createFileEntry(overrides: Partial<FileTreeEntry>): FileTreeEntry {
   };
 }
 
-function createAsset(id: string, kind: Asset['kind']): Asset {
+function createAsset(id: string, kind: Asset['kind'], overrides: Partial<Asset> = {}): Asset {
   return {
     id,
     kind,
@@ -155,6 +183,7 @@ function createAsset(id: string, kind: Asset['kind']): Asset {
     },
     tags: [],
     proxyStatus: 'notNeeded',
+    ...overrides,
   };
 }
 
@@ -181,6 +210,11 @@ describe('ProjectExplorer', () => {
     mockState.renameFile.mockResolvedValue(undefined);
     mockState.deleteFile.mockResolvedValue(undefined);
     mockState.revealInExplorer.mockResolvedValue(undefined);
+    mockState.relinkAsset.mockResolvedValue(undefined);
+    mockState.generateProxyForAsset.mockResolvedValue(undefined);
+    mockState.cancelProxyForAsset.mockResolvedValue(undefined);
+    mockState.useOriginalMedia.mockResolvedValue(undefined);
+    mockState.openDialog.mockResolvedValue(null);
     mockState.importExternalFiles.mockResolvedValue({
       importedFiles: [],
       failedFiles: [],
@@ -339,6 +373,67 @@ describe('ProjectExplorer', () => {
     });
   });
 
+  it('should bulk import files from the header picker and show a summary', async () => {
+    mockState.openDialog.mockResolvedValue([
+      '/Users/test/Desktop/a.mp4',
+      '/Users/test/Desktop/b.wav',
+      '/Users/test/Desktop/broken.mov',
+    ]);
+    mockState.importExternalFiles.mockResolvedValue({
+      importedFiles: [
+        {
+          sourcePath: '/Users/test/Desktop/a.mp4',
+          relativePath: 'a.mp4',
+          name: 'a.mp4',
+          kind: 'video',
+          fileSize: 100,
+          assetId: 'asset-a',
+          alreadyInWorkspace: false,
+        },
+        {
+          sourcePath: '/Users/test/Desktop/b.wav',
+          relativePath: 'b.wav',
+          name: 'b.wav',
+          kind: 'audio',
+          fileSize: 50,
+          assetId: 'asset-b',
+          alreadyInWorkspace: false,
+        },
+      ],
+      failedFiles: [
+        {
+          sourcePath: '/Users/test/Desktop/broken.mov',
+          message: 'Cannot read file',
+        },
+      ],
+    });
+
+    render(<ProjectExplorer />);
+
+    fireEvent.click(screen.getByTestId('import-files-button'));
+
+    await waitFor(() => {
+      expect(mockState.openDialog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          multiple: true,
+          title: 'Import Media Files',
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(mockState.importExternalFiles).toHaveBeenCalledWith(
+        [
+          '/Users/test/Desktop/a.mp4',
+          '/Users/test/Desktop/b.wav',
+          '/Users/test/Desktop/broken.mov',
+        ],
+        undefined,
+      );
+    });
+    expect(screen.getByTestId('import-status')).toHaveTextContent('Imported 2/3 files; 1 failed');
+  });
+
   it('should import externally dropped files into a hovered folder', async () => {
     mockState.fileTree = [
       createFileEntry({
@@ -375,6 +470,56 @@ describe('ProjectExplorer', () => {
         ['/Users/test/Desktop/drop.mp4'],
         'footage',
       );
+    });
+  });
+
+  it('should keep the explorer surface simple while search narrows files', () => {
+    mockState.fileTree = [
+      createFileEntry({
+        relativePath: 'footage/interview.mp4',
+        name: 'interview.mp4',
+        kind: 'video',
+        assetId: 'video-1',
+      }),
+      createFileEntry({
+        relativePath: 'footage/music.wav',
+        name: 'music.wav',
+        kind: 'audio',
+        assetId: 'audio-1',
+      }),
+    ];
+
+    render(<ProjectExplorer />);
+
+    expect(screen.queryByText(/registered/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Explorer filters')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('asset-search'), { target: { value: 'music' } });
+
+    expect(screen.getByRole('button', { name: 'music.wav' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'interview.mp4' })).not.toBeInTheDocument();
+  });
+
+  it('should request proxy generation automatically for high-resolution video assets', async () => {
+    mockState.assets = new Map([
+      [
+        'video-1',
+        createAsset('video-1', 'video', {
+          video: {
+            width: 3840,
+            height: 2160,
+            fps: { num: 30, den: 1 },
+            codec: 'h264',
+            hasAlpha: false,
+          },
+        }),
+      ],
+    ]);
+
+    render(<ProjectExplorer />);
+
+    await waitFor(() => {
+      expect(mockState.generateProxyForAsset).toHaveBeenCalledWith('video-1');
     });
   });
 });

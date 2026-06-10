@@ -23,6 +23,11 @@ const imageEntry: FileTreeEntry = {
   children: [],
 };
 
+const missingMediaEntry: FileTreeEntry = {
+  ...mediaEntry,
+  missing: true,
+};
+
 const directoryEntry: FileTreeEntry = {
   relativePath: 'footage',
   name: 'footage',
@@ -82,6 +87,36 @@ describe('FileTreeContextMenu', () => {
 
     expect(transcribeButton).toBeDisabled();
     expect(onTranscribe).not.toHaveBeenCalled();
+  });
+
+  it('should expose relink for missing assets and replace for registered assets', () => {
+    const onRelinkAsset = vi.fn();
+    const onReplaceAsset = vi.fn();
+
+    render(
+      <FileTreeContextMenu
+        entry={missingMediaEntry}
+        position={{ x: 20, y: 30 }}
+        onClose={vi.fn()}
+        onRelinkAsset={onRelinkAsset}
+        onReplaceAsset={onReplaceAsset}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Relink Media...' }));
+    expect(onRelinkAsset).toHaveBeenCalledWith(missingMediaEntry);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Replace Footage...' }));
+    expect(onReplaceAsset).toHaveBeenCalledWith(missingMediaEntry);
+  });
+
+  it('should hide relink for online assets while keeping replace footage available', () => {
+    render(
+      <FileTreeContextMenu entry={mediaEntry} position={{ x: 20, y: 30 }} onClose={vi.fn()} />,
+    );
+
+    expect(screen.queryByRole('button', { name: 'Relink Media...' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Replace Footage...' })).toBeInTheDocument();
   });
 
   it('should expose folder management actions for directories', () => {

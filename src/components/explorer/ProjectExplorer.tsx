@@ -25,7 +25,8 @@ import { commands, type TranscriptionModelDto } from '@/bindings';
 import { createLogger } from '@/services/logger';
 import { FileTree } from './FileTree';
 import { FileTreeContextMenu } from './FileTreeContextMenu';
-import type { FileTreeEntry, AssetKind } from '@/types';
+import { ProxyQueuePanel } from './ProxyQueuePanel';
+import { assetNeedsProxy, type FileTreeEntry, type AssetKind } from '@/types';
 import { ConfirmDialog } from '@/components/ui';
 import {
   TranscriptionDialog,
@@ -180,6 +181,11 @@ type NativeDragDropEvent = {
     | { type: 'leave' };
 };
 
+interface ImportStatus {
+  kind: 'importing' | 'success' | 'warning' | 'error';
+  message: string;
+}
+
 async function selectExternalImportFiles(): Promise<string[]> {
   const { open } = await import('@tauri-apps/plugin-dialog');
   const selected = await open({
@@ -194,6 +200,22 @@ async function selectExternalImportFiles(): Promise<string[]> {
   }
 
   return Array.isArray(selected) ? selected : [selected];
+}
+
+async function selectReplacementAssetFile(): Promise<string | null> {
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    title: 'Choose Replacement Media',
+    filters: [{ name: 'Media Files', extensions: IMPORT_DIALOG_MEDIA_EXTENSIONS }],
+  });
+
+  if (selected == null || Array.isArray(selected)) {
+    return null;
+  }
+
+  return selected;
 }
 
 function createWorkspaceRootEntry(children: FileTreeEntry[]): FileTreeEntry {
@@ -291,7 +313,16 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
   const importExternalFiles = useWorkspaceStore((state) => state.importExternalFiles);
 
   // Project store
-  const { assets, selectAsset, executeCommand, activeSequenceId, sequences } = useProjectStore();
+  const {
+    assets,
+    selectAsset,
+    executeCommand,
+    activeSequenceId,
+    sequences,
+    relinkAsset,
+    proxyJobIdsByAssetId,
+    generateProxyForAsset,
+  } = useProjectStore();
 
   // File operations
   const { createFolder, renameFile, deleteFile, revealInExplorer } = useFileOperations();
@@ -329,6 +360,9 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
 
   // Search
   const [searchQuery, setSearchQuery] = useState('');
+  const [importStatus, setImportStatus] = useState<ImportStatus | null>(null);
+  const isImporting = importStatus?.kind === 'importing';
+  const autoProxyRequestedAssetIdsRef = useRef<Set<string>>(new Set());
 
   // Rename state
   const [renamingEntry, setRenamingEntry] = useState<FileTreeEntry | null>(null);
@@ -340,6 +374,22 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
       renameInputRef.current?.select();
     }
   }, [renamingEntry]);
+
+  useEffect(() => {
+    for (const asset of assets.values()) {
+      if (
+        !asset.missing &&
+        asset.proxyStatus === 'notNeeded' &&
+        assetNeedsProxy(asset) &&
+        !autoProxyRequestedAssetIdsRef.current.has(asset.id)
+      ) {
+        autoProxyRequestedAssetIdsRef.current.add(asset.id);
+        void generateProxyForAsset(asset.id).catch((error) => {
+          logger.warn('Automatic proxy generation failed', { assetId: asset.id, error });
+        });
+      }
+    }
+  }, [assets, generateProxyForAsset]);
 
   const applyTranscriptionStatus = useCallback(
     (status: Awaited<ReturnType<typeof getTranscriptionStatus>>) => {
@@ -431,25 +481,73 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
     void scanWorkspace();
   }, [scanWorkspace]);
 
+  const importFilesToTarget = useCallback(
+    async (sourcePaths: string[], targetDir: string | undefined, source: 'picker' | 'drop') => {
+      if (sourcePaths.length === 0) {
+        return;
+      }
+
+      setImportStatus({
+        kind: 'importing',
+        message: `Importing ${sourcePaths.length.toLocaleString()} file${sourcePaths.length === 1 ? '' : 's'}...`,
+      });
+
+      try {
+        const result = await importExternalFiles(sourcePaths, targetDir || undefined);
+        const importedCount = result.importedFiles.length;
+        const failedCount = result.failedFiles.length;
+        const totalCount = importedCount + failedCount || sourcePaths.length;
+
+        setImportStatus({
+          kind: failedCount > 0 ? 'warning' : 'success',
+          message:
+            importedCount === 0 && failedCount === 0
+              ? 'No new files imported'
+              : failedCount > 0
+                ? `Imported ${importedCount.toLocaleString()}/${totalCount.toLocaleString()} files; ${failedCount.toLocaleString()} failed`
+                : `Imported ${importedCount.toLocaleString()} file${importedCount === 1 ? '' : 's'}`,
+        });
+
+        logger.info(
+          source === 'picker'
+            ? 'External files imported from file picker'
+            : 'External files imported into workspace',
+          {
+            importedCount,
+            failedCount,
+            targetDir: targetDir || null,
+          },
+        );
+      } catch (error) {
+        setImportStatus({
+          kind: 'error',
+          message: `Import failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        logger.error(
+          source === 'picker'
+            ? 'Failed to import files from picker'
+            : 'Failed to import external file drop',
+          { error },
+        );
+      }
+    },
+    [importExternalFiles],
+  );
+
   const handleImportExternalFilesToTarget = useCallback(
     async (targetDir: string) => {
       try {
         const sourcePaths = await selectExternalImportFiles();
-        if (sourcePaths.length === 0) {
-          return;
-        }
-
-        const result = await importExternalFiles(sourcePaths, targetDir || undefined);
-        logger.info('External files imported from file picker', {
-          importedCount: result.importedFiles.length,
-          failedCount: result.failedFiles.length,
-          targetDir: targetDir || null,
-        });
+        await importFilesToTarget(sourcePaths, targetDir || undefined, 'picker');
       } catch (error) {
-        logger.error('Failed to import files from picker', { error });
+        setImportStatus({
+          kind: 'error',
+          message: `Import failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        logger.error('Failed to select files for import', { error });
       }
     },
-    [importExternalFiles],
+    [importFilesToTarget],
   );
 
   const handleImportFilesForEntry = useCallback(
@@ -498,18 +596,9 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
         timestampMs: now,
       };
 
-      try {
-        const result = await importExternalFiles(sourcePaths, targetDir || undefined);
-        logger.info('External files imported into workspace', {
-          importedCount: result.importedFiles.length,
-          failedCount: result.failedFiles.length,
-          targetDir: targetDir || null,
-        });
-      } catch (error) {
-        logger.error('Failed to import external file drop', { error });
-      }
+      await importFilesToTarget(sourcePaths, targetDir || undefined, 'drop');
     },
-    [importExternalFiles],
+    [importFilesToTarget],
   );
 
   const handleNativeDragDropEvent = useCallback(
@@ -740,6 +829,33 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
     [revealInExplorer],
   );
 
+  const handleRelinkAsset = useCallback(
+    (entry: FileTreeEntry) => {
+      const assetId = entry.assetId;
+      if (!assetId) return;
+
+      void (async () => {
+        const selectedPath = await selectReplacementAssetFile();
+        if (!selectedPath) return;
+
+        try {
+          await relinkAsset(assetId, selectedPath);
+          logger.info('Asset relinked', {
+            assetId,
+            relativePath: entry.relativePath,
+          });
+        } catch (error) {
+          logger.error('Failed to relink asset', {
+            assetId,
+            relativePath: entry.relativePath,
+            error,
+          });
+        }
+      })();
+    },
+    [relinkAsset],
+  );
+
   const handleCopyPath = useCallback((relativePath: string) => {
     void (async () => {
       try {
@@ -925,20 +1041,26 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
   // ===========================================================================
 
   const filteredTree = useMemo(() => {
-    if (!searchQuery.trim()) return fileTree;
-    const query = searchQuery.toLowerCase();
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return fileTree;
 
     function filterEntries(entries: FileTreeEntry[]): FileTreeEntry[] {
       return entries
         .map((entry) => {
           if (entry.isDirectory) {
             const filteredChildren = filterEntries(entry.children);
-            if (filteredChildren.length > 0) {
+            const directoryMatchesQuery = entry.name.toLowerCase().includes(query);
+            if (filteredChildren.length > 0 || directoryMatchesQuery) {
               return { ...entry, children: filteredChildren };
             }
             return null;
           }
-          return entry.name.toLowerCase().includes(query) ? entry : null;
+
+          const matchesQuery =
+            query.length === 0 ||
+            entry.name.toLowerCase().includes(query) ||
+            entry.relativePath.toLowerCase().includes(query);
+          return matchesQuery ? entry : null;
         })
         .filter((e): e is FileTreeEntry => e !== null);
     }
@@ -992,9 +1114,10 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
           </button>
           <button
             data-testid="import-files-button"
-            className="p-1.5 rounded transition-colors hover:bg-surface-active"
+            className={`p-1.5 rounded transition-colors ${isImporting ? 'opacity-50 cursor-not-allowed' : 'hover:bg-surface-active'}`}
             onClick={handleHeaderImportFiles}
-            aria-label="Import files"
+            disabled={isImporting}
+            aria-label={isImporting ? 'Importing files...' : 'Import files'}
             title="Import files"
           >
             <Upload className="w-4 h-4" />
@@ -1011,6 +1134,24 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
           </button>
         </div>
       </div>
+
+      {importStatus && (
+        <div
+          data-testid="import-status"
+          className={`border-b border-editor-border px-3 py-2 text-xs ${
+            importStatus.kind === 'error'
+              ? 'text-red-400'
+              : importStatus.kind === 'warning'
+                ? 'text-amber-300'
+                : importStatus.kind === 'success'
+                  ? 'text-emerald-300'
+                  : 'text-editor-text-muted'
+          }`}
+          role={importStatus.kind === 'error' ? 'alert' : 'status'}
+        >
+          {importStatus.message}
+        </div>
+      )}
 
       {/* Search */}
       <div className="p-2 border-b border-editor-border">
@@ -1037,6 +1178,8 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
           )}
         </div>
       </div>
+
+      <ProxyQueuePanel assets={assets} proxyJobIdsByAssetId={proxyJobIdsByAssetId} />
 
       {/* File Tree */}
       <div
@@ -1140,6 +1283,8 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
           onRevealInExplorer={handleRevealInExplorer}
           onCopyPath={handleCopyPath}
           onImportFiles={handleImportFilesForEntry}
+          onRelinkAsset={handleRelinkAsset}
+          onReplaceAsset={handleRelinkAsset}
           onAddToTimeline={handleAddToTimeline}
           onTranscribe={handleContextTranscribe}
           isTranscribing={
