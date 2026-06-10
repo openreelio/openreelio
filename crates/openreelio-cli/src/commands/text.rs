@@ -428,19 +428,29 @@ fn text_data_for_clip(
 }
 
 fn normalize_text_preset_key(preset: Option<&str>) -> String {
-    preset
-        .unwrap_or("default")
-        .to_lowercase()
-        .replace('_', "-")
+    preset.unwrap_or("default").to_lowercase().replace('_', "-")
 }
 
 fn text_preset_default_duration(preset: Option<&str>) -> f64 {
     match normalize_text_preset_key(preset).as_str() {
-        "lower-third" | "lowerthird" | "lower-third-name-role" | "interview-lower-third"
-        | "speaker-id" | "name-role" | "credit-line" | "source-credit" | "attribution"
-        | "social-handle" | "handle" | "social" => 5.0,
-        "lower-third-news" | "broadcast-lower-third" | "news-lower-third" | "end-card-title"
-        | "end-card" | "outro-title" => 6.0,
+        "lower-third"
+        | "lowerthird"
+        | "lower-third-name-role"
+        | "interview-lower-third"
+        | "speaker-id"
+        | "name-role"
+        | "credit-line"
+        | "source-credit"
+        | "attribution"
+        | "social-handle"
+        | "handle"
+        | "social" => 5.0,
+        "lower-third-news"
+        | "broadcast-lower-third"
+        | "news-lower-third"
+        | "end-card-title"
+        | "end-card"
+        | "outro-title" => 6.0,
         "credits" | "credits-block" | "credit-block" | "end-credits" => 8.0,
         "logo-bug" | "bug" | "channel-bug" | "brand-bug" => 10.0,
         "countdown" | "timer" => 1.0,
@@ -1017,7 +1027,8 @@ pub fn execute(action: TextAction) -> anyhow::Result<()> {
         } => {
             validate::non_empty(&text, "text")?;
             validate::time_non_negative(start, "start")?;
-            let duration = duration.unwrap_or_else(|| text_preset_default_duration(preset.as_deref()));
+            let duration =
+                duration.unwrap_or_else(|| text_preset_default_duration(preset.as_deref()));
             if duration <= 0.0 || !duration.is_finite() {
                 return Err(anyhow::anyhow!("duration must be finite and positive"));
             }
@@ -1345,7 +1356,10 @@ mod tests {
         assert_eq!(credits.shadow.as_ref().map(|shadow| shadow.blur), Some(5));
 
         let logo_bug = parse_text_preset(Some("logo_bug".to_string()), "OPEN").unwrap();
-        assert_eq!(logo_bug.style.background_color.as_deref(), Some("#0F766ECC"));
+        assert_eq!(
+            logo_bug.style.background_color.as_deref(),
+            Some("#0F766ECC")
+        );
         assert_eq!(logo_bug.position, TextPosition::new(0.94, 0.08));
         assert!((logo_bug.opacity - 0.85).abs() < 0.001);
     }
