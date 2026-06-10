@@ -31,13 +31,13 @@ describe('shortcutStore', () => {
 
     it('should have all bindings enabled by default', () => {
       const state = useShortcutStore.getState();
-      const allEnabled = state.bindings.every(b => b.enabled);
+      const allEnabled = state.bindings.every((b) => b.enabled);
       expect(allEnabled).toBe(true);
     });
 
     it('should have no customized bindings initially', () => {
       const state = useShortcutStore.getState();
-      const anyCustomized = state.bindings.some(b => b.customized);
+      const anyCustomized = state.bindings.some((b) => b.customized);
       expect(anyCustomized).toBe(false);
     });
   });
@@ -196,6 +196,15 @@ describe('shortcutStore', () => {
       expect(binding?.id).toBe('tool-select');
     });
 
+    it('should expose the rate stretch tool shortcut', () => {
+      const store = useShortcutStore.getState();
+      const binding = store.getBindingByAction('tool.rate-stretch');
+
+      expect(binding).toBeDefined();
+      expect(binding?.id).toBe('tool-rate-stretch');
+      expect(binding?.key).toBe('KeyR');
+    });
+
     it('should return undefined for non-existent action', () => {
       const store = useShortcutStore.getState();
       const binding = store.getBindingByAction('non.existent');
@@ -218,7 +227,7 @@ describe('shortcutStore', () => {
       const toolBindings = store.getBindingsByCategory('tools');
 
       expect(toolBindings.length).toBeGreaterThan(0);
-      expect(toolBindings.every(b => b.category === 'tools')).toBe(true);
+      expect(toolBindings.every((b) => b.category === 'tools')).toBe(true);
     });
   });
 
@@ -389,18 +398,18 @@ describe('formatShortcut', () => {
 
 describe('SHORTCUT_PRESETS', () => {
   it('should have default preset', () => {
-    const defaultPreset = SHORTCUT_PRESETS.find(p => p.id === 'default');
+    const defaultPreset = SHORTCUT_PRESETS.find((p) => p.id === 'default');
     expect(defaultPreset).toBeDefined();
     expect(defaultPreset?.bindings.length).toBe(DEFAULT_SHORTCUTS.length);
   });
 
   it('should have premiere preset', () => {
-    const premierePreset = SHORTCUT_PRESETS.find(p => p.id === 'premiere');
+    const premierePreset = SHORTCUT_PRESETS.find((p) => p.id === 'premiere');
     expect(premierePreset).toBeDefined();
   });
 
   it('should have davinci preset', () => {
-    const davinciPreset = SHORTCUT_PRESETS.find(p => p.id === 'davinci');
+    const davinciPreset = SHORTCUT_PRESETS.find((p) => p.id === 'davinci');
     expect(davinciPreset).toBeDefined();
   });
 });

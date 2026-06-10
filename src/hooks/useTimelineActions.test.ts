@@ -161,7 +161,7 @@ describe('useTimelineActions', () => {
       audio: undefined,
       video: undefined,
     });
-    useTimelineStore.setState({ linkedSelectionEnabled: true });
+    useTimelineStore.setState({ linkedSelectionEnabled: true, editTargetTrackId: null });
     // Reset projectStore
     useProjectStore.setState({
       isLoaded: true,
@@ -323,6 +323,8 @@ describe('useTimelineActions', () => {
           volumeDb: -6,
           fadeInSec: 1.25,
           fadeOutSec: 0.75,
+          audioRole: 'dialogue',
+          audioTags: ['interview', 'lav'],
         });
       });
 
@@ -335,6 +337,8 @@ describe('useTimelineActions', () => {
           volumeDb: -6,
           fadeInSec: 1.25,
           fadeOutSec: 0.75,
+          audioRole: 'dialogue',
+          audioTags: ['interview', 'lav'],
         },
       });
     });
@@ -2084,6 +2088,69 @@ describe('useTimelineActions', () => {
         },
       ]);
     });
+
+    it('should execute SetCaptionTrackLanguage for caption tracks', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({
+            id: 'track_caption_001',
+            kind: 'caption',
+            name: 'Captions',
+            captionLanguage: 'en',
+          }),
+        ],
+      });
+
+      useProjectStore.setState({ sequences: new Map([[sequence.id, sequence]]) });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          executeCalls.push(args as { commandType: string; payload: Record<string, unknown> });
+          return Promise.resolve({
+            opId: 'op_set_caption_language',
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [
+              {
+                ...sequence,
+                tracks: [{ ...sequence.tracks[0], captionLanguage: 'ko' }],
+              },
+            ],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleCaptionTrackLanguageChange({
+          sequenceId: 'seq_001',
+          trackId: 'track_caption_001',
+          language: 'KO',
+        });
+      });
+
+      expect(executeCalls).toEqual([
+        {
+          commandType: 'SetCaptionTrackLanguage',
+          payload: {
+            sequenceId: 'seq_001',
+            trackId: 'track_caption_001',
+            language: 'ko',
+          },
+        },
+      ]);
+    });
   });
 
   // ===========================================================================
@@ -3169,6 +3236,8 @@ describe('useTimelineActions', () => {
               muted: true,
               fadeInSec: 0.5,
               fadeOutSec: 0.75,
+              audioRole: 'music',
+              audioTags: ['score'],
             },
           },
         });
@@ -3217,6 +3286,8 @@ describe('useTimelineActions', () => {
               muted: true,
               fadeInSec: 0.5,
               fadeOutSec: 0.75,
+              audioRole: 'music',
+              audioTags: ['score'],
             },
           },
           {
@@ -3843,6 +3914,165 @@ describe('useTimelineActions', () => {
       expect(projectState.stateVersion).toBe(1);
       expect(projectState.activeSequenceId).toBe('seq_001');
       expect(projectState.sequences.get('seq_001')?.tracks[0]?.clips).toEqual([insertedClip]);
+    });
+
+    it('should send the selected unlocked edit target track', async () => {
+      const videoTrack = createMockTrack({ id: 'track_v1', kind: 'video', locked: false });
+      const audioTrack = createMockTrack({
+        id: 'track_a1',
+        kind: 'audio',
+        name: 'Audio 1',
+        locked: false,
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [videoTrack, audioTrack],
+      });
+
+      useTimelineStore.getState().setEditTargetTrack('track_a1');
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'three_point_insert') {
+          return Promise.resolve({
+            clipId: 'clip_new',
+            assetId: 'asset_001',
+            sourceIn: 0.0,
+            sourceOut: 60.0,
+            timelinePosition: 0.0,
+            duration: 60.0,
+            editMode: 'insert',
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.resolve(null);
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleInsertEditFromSource();
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('three_point_insert', {
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_a1',
+          timelinePosition: expect.any(Number),
+          editMode: 'insert',
+        },
+      });
+    });
+
+    it('should omit locked edit target tracks from the insert payload', async () => {
+      const videoTrack = createMockTrack({ id: 'track_v1', kind: 'video', locked: false });
+      const lockedAudioTrack = createMockTrack({
+        id: 'track_a1',
+        kind: 'audio',
+        name: 'Audio 1',
+        locked: true,
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [videoTrack, lockedAudioTrack],
+      });
+
+      useTimelineStore.getState().setEditTargetTrack('track_a1');
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'three_point_insert') {
+          return Promise.resolve({
+            clipId: 'clip_new',
+            assetId: 'asset_001',
+            sourceIn: 0.0,
+            sourceOut: 60.0,
+            timelinePosition: 0.0,
+            duration: 60.0,
+            editMode: 'insert',
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.resolve(null);
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleInsertEditFromSource();
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('three_point_insert', {
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: null,
+          timelinePosition: expect.any(Number),
+          editMode: 'insert',
+        },
+      });
+    });
+
+    it('should omit non-insertable edit target tracks from the insert payload', async () => {
+      const videoTrack = createMockTrack({ id: 'track_v1', kind: 'video', locked: false });
+      const captionTrack = createMockTrack({
+        id: 'track_c1',
+        kind: 'caption',
+        name: 'Captions',
+        locked: false,
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [videoTrack, captionTrack],
+      });
+
+      useTimelineStore.getState().setEditTargetTrack('track_c1');
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'three_point_insert') {
+          return Promise.resolve({
+            clipId: 'clip_new',
+            assetId: 'asset_001',
+            sourceIn: 0.0,
+            sourceOut: 60.0,
+            timelinePosition: 0.0,
+            duration: 60.0,
+            editMode: 'insert',
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.resolve(null);
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleInsertEditFromSource();
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('three_point_insert', {
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: null,
+          timelinePosition: expect.any(Number),
+          editMode: 'insert',
+        },
+      });
     });
 
     it('should not call threePointInsert when no sequence is provided', async () => {

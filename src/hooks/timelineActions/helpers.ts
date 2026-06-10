@@ -391,6 +391,12 @@ export function buildClipAudioPayload(data: ClipAudioUpdateData): Record<string,
   if (data.fadeOutSec !== undefined) {
     payload.fadeOutSec = data.fadeOutSec;
   }
+  if (data.audioRole !== undefined) {
+    payload.audioRole = data.audioRole;
+  }
+  if (data.audioTags !== undefined) {
+    payload.audioTags = data.audioTags;
+  }
 
   return payload;
 }

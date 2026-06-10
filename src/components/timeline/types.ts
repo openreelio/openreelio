@@ -170,6 +170,10 @@ export interface ClipAudioUpdateData {
   fadeInSec?: number;
   /** Updated fade-out duration in seconds */
   fadeOutSec?: number;
+  /** Editorial audio role for future buses/routing */
+  audioRole?: string;
+  /** Editorial audio tags for future buses/routing */
+  audioTags?: string[];
 }
 
 /**
@@ -225,6 +229,18 @@ export interface TrackControlData {
   sequenceId: string;
   /** ID of the track being controlled */
   trackId: string;
+}
+
+/**
+ * Data for caption track language changes.
+ */
+export interface CaptionTrackLanguageData {
+  /** ID of the sequence containing the caption track */
+  sequenceId: string;
+  /** ID of the caption track being updated */
+  trackId: string;
+  /** New BCP-47-ish language code */
+  language: string;
 }
 
 /**
@@ -292,6 +308,8 @@ export interface TimelineProps {
   onTrackLockToggle?: (data: TrackControlData) => void;
   /** Callback when track visibility is toggled */
   onTrackVisibilityToggle?: (data: TrackControlData) => void;
+  /** Callback when a caption track language changes */
+  onCaptionTrackLanguageChange?: (data: CaptionTrackLanguageData) => void | Promise<void>;
   /** Callback when a track should be deleted */
   onTrackDelete?: (data: TrackControlData) => void | Promise<void>;
   /** Callback when a new track should be created */
@@ -308,6 +326,8 @@ export interface TimelineProps {
   onCloseAllGaps?: (data: { sequenceId: string; trackId: string }) => void;
   /** Callback to ripple-delete clips (remove + close gap) */
   onRippleDeleteClips?: (clipIds: string[]) => void | Promise<void>;
+  /** Callback to create a multicam group from the current clip selection */
+  onCreateMulticamGroup?: () => void | Promise<void>;
   /** Callback to lift clips (remove, leave gap) */
   onLiftClips?: (clipIds: string[]) => void | Promise<void>;
   /** Callback to insert edit from Source Monitor at playhead */
@@ -315,7 +335,12 @@ export interface TimelineProps {
   /** Callback to overwrite edit from Source Monitor at playhead */
   onOverwriteEditFromSource?: () => void | Promise<void>;
   /** Callback when clip speed changes */
-  onClipSpeedChange?: (clipId: string, trackId: string, speed: number, reverse: boolean) => void | Promise<void>;
+  onClipSpeedChange?: (
+    clipId: string,
+    trackId: string,
+    speed: number,
+    reverse: boolean,
+  ) => void | Promise<void>;
   /** Callback when clip reverse is toggled */
   onClipReverse?: (clipId: string, trackId: string) => void | Promise<void>;
   /** Callback when freeze frame is requested */
@@ -348,6 +373,10 @@ export interface TimelineProps {
   onPasteEffects?: (clipIds: string[]) => void | Promise<void>;
   /** Callback when selected attributes should be pasted to clips */
   onPasteAttributes?: (clipIds: string[], selection: AttributeSelection) => void | Promise<void>;
+  /** Whether adjacent clip transition zones should be visible/clickable */
+  showTransitionZones?: boolean;
+  /** Callback when an adjacent clip transition zone is clicked */
+  onTransitionZoneClick?: (clipAId: string, clipBId: string) => void | Promise<void>;
   /** Callback when selected attributes/effects should be removed from a clip */
   onRemoveAttributes?: (
     clipId: string,

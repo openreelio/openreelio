@@ -89,6 +89,7 @@ const TOOL_KEYS: Record<string, EditorTool> = {
   y: 'slip',
   u: 'slide',
   n: 'roll',
+  r: 'rate-stretch',
   h: 'hand',
 };
 

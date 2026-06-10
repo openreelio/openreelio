@@ -34,6 +34,7 @@ import type {
   ClipTrimData,
   ClipSplitData,
   TrackControlData,
+  CaptionTrackLanguageData,
   TrackCreateData,
   TrackReorderData,
   CaptionUpdateData,
@@ -103,6 +104,7 @@ interface TimelineActions {
   handleTrackMuteToggle: (data: TrackControlData) => Promise<void>;
   handleTrackLockToggle: (data: TrackControlData) => Promise<void>;
   handleTrackVisibilityToggle: (data: TrackControlData) => Promise<void>;
+  handleCaptionTrackLanguageChange: (data: CaptionTrackLanguageData) => Promise<void>;
   handleTrackReorder: (data: TrackReorderData) => Promise<void>;
   handleUpdateCaption: (data: CaptionUpdateData) => Promise<void>;
   handleCloseGap: (data: GapClickData) => Promise<void>;
@@ -742,7 +744,9 @@ function hasMeaningfulAudioSettings(audio: ClipPasteData['clipData']['audio']): 
     audio.pan !== 0 ||
     audio.muted ||
     (typeof audio.fadeInSec === 'number' && audio.fadeInSec > 0) ||
-    (typeof audio.fadeOutSec === 'number' && audio.fadeOutSec > 0)
+    (typeof audio.fadeOutSec === 'number' && audio.fadeOutSec > 0) ||
+    (typeof audio.audioRole === 'string' && audio.audioRole !== 'none') ||
+    (Array.isArray(audio.audioTags) && audio.audioTags.length > 0)
   );
 }
 
@@ -1593,6 +1597,8 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
               muted: data.clipData.audio?.muted,
               fadeInSec: data.clipData.audio?.fadeInSec,
               fadeOutSec: data.clipData.audio?.fadeOutSec,
+              audioRole: data.clipData.audio?.audioRole,
+              audioTags: data.clipData.audio?.audioTags,
             },
           });
         }
@@ -2733,6 +2739,70 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
   );
 
   /**
+   * Handle caption track language changes.
+   * State refresh is automatic via executeCommand.
+   */
+  const handleCaptionTrackLanguageChange = useCallback(
+    async (data: CaptionTrackLanguageData): Promise<void> => {
+      if (!sequence) {
+        logger.warn('Cannot update caption track language: no sequence');
+        return;
+      }
+
+      const sequenceSnapshot = getCurrentSequence();
+      if (!sequenceSnapshot) {
+        logger.warn('Cannot update caption track language: sequence snapshot unavailable', {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+        });
+        return;
+      }
+
+      const track = sequenceSnapshot.tracks.find((candidate) => candidate.id === data.trackId);
+      if (!track) {
+        logger.warn('Cannot update caption track language: track not found', {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+        });
+        return;
+      }
+
+      if (track.kind !== 'caption') {
+        logger.warn('Cannot update caption track language: track is not a caption track', {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+          trackKind: track.kind,
+        });
+        return;
+      }
+
+      const language = data.language.trim().replace(/_/g, '-').toLowerCase();
+      if (!language || language === (track.captionLanguage ?? 'en')) {
+        return;
+      }
+
+      try {
+        await executeCommand({
+          type: 'SetCaptionTrackLanguage',
+          payload: {
+            sequenceId: data.sequenceId,
+            trackId: data.trackId,
+            language,
+          },
+        });
+      } catch (error) {
+        logger.error('Failed to update caption track language', {
+          error,
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+          language,
+        });
+      }
+    },
+    [sequence, executeCommand, getCurrentSequence],
+  );
+
+  /**
    * Handle caption update.
    * State refresh is automatic via executeCommand.
    */
@@ -2880,9 +2950,19 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
       if (!sequence) return;
 
       const playhead = usePlaybackStore.getState().currentTime;
+      const selectedTargetTrackId = useTimelineStore.getState().editTargetTrackId;
+      const selectedTargetTrack =
+        selectedTargetTrackId !== null
+          ? sequence.tracks.find(
+              (track) =>
+                track.id === selectedTargetTrackId &&
+                !track.locked &&
+                (track.kind === 'video' || track.kind === 'overlay' || track.kind === 'audio'),
+            )
+          : undefined;
       const payload = {
         sequenceId: sequence.id,
-        trackId: null,
+        trackId: selectedTargetTrack?.id ?? null,
         timelinePosition: playhead,
         editMode,
       };
@@ -3316,6 +3396,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleTrackMuteToggle,
     handleTrackLockToggle,
     handleTrackVisibilityToggle,
+    handleCaptionTrackLanguageChange,
     handleTrackReorder,
     handleUpdateCaption,
     handleCloseGap,

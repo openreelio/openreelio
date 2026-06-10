@@ -36,10 +36,18 @@ export interface UseKeyboardShortcutsOptions {
   onExport?: () => void;
   onMatchFrame?: () => void;
   onReverseMatchFrame?: () => void;
+  onRevealSourceClip?: () => void;
+  onToggleLoopRange?: () => void;
+  onPlayAroundEdit?: () => void;
   onToggleClipEnabled?: () => void;
   onToggleColorComparison?: () => void;
   onCopyEffects?: () => void;
   onPasteEffects?: () => void;
+  onPasteAttributes?: () => void;
+  onLinkClips?: () => void;
+  onUnlinkClips?: () => void;
+  onGroupClips?: () => void;
+  onUngroupClips?: () => void;
   onToggleCommandPalette?: () => void;
   onToggleFullscreen?: () => void;
   onCaptureSnapshot?: () => void;
@@ -74,10 +82,18 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
     onExport,
     onMatchFrame,
     onReverseMatchFrame,
+    onRevealSourceClip,
+    onToggleLoopRange,
+    onPlayAroundEdit,
     onToggleClipEnabled,
     onToggleColorComparison,
     onCopyEffects,
     onPasteEffects,
+    onPasteAttributes,
+    onLinkClips,
+    onUnlinkClips,
+    onGroupClips,
+    onUngroupClips,
     onToggleCommandPalette,
     onToggleFullscreen,
     onCaptureSnapshot,
@@ -241,6 +257,14 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         return;
       }
 
+      if (key === ' ' && !ctrl && shiftKey) {
+        if (onPlayAroundEdit) {
+          e.preventDefault();
+          onPlayAroundEdit();
+        }
+        return;
+      }
+
       // -----------------------------------------------------------------------
       // Navigation
       // -----------------------------------------------------------------------
@@ -385,6 +409,14 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         }
       }
 
+      if (key.toLowerCase() === 'f' && !ctrl && e.altKey && !shiftKey) {
+        if (onRevealSourceClip) {
+          e.preventDefault();
+          onRevealSourceClip();
+        }
+        return;
+      }
+
       // Toggle Clip Enabled (Shift+E)
       if (key.toLowerCase() === 'e' && shiftKey && !ctrl && !e.altKey) {
         if (onToggleClipEnabled) {
@@ -417,6 +449,43 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         return;
       }
 
+      // Paste Attributes (Ctrl+Alt+A)
+      if (key.toLowerCase() === 'a' && ctrl && e.altKey && !shiftKey) {
+        e.preventDefault();
+        if (onPasteAttributes) onPasteAttributes();
+        return;
+      }
+
+      // Link / Unlink selected clips (Ctrl+L / Ctrl+Shift+L)
+      if (key.toLowerCase() === 'l' && ctrl && !e.altKey) {
+        e.preventDefault();
+        if (shiftKey) {
+          if (onUnlinkClips) onUnlinkClips();
+        } else if (onLinkClips) {
+          onLinkClips();
+        }
+        return;
+      }
+
+      if (key.toLowerCase() === 'l' && !ctrl && e.altKey && !shiftKey) {
+        if (onToggleLoopRange) {
+          e.preventDefault();
+          onToggleLoopRange();
+        }
+        return;
+      }
+
+      // Group / Ungroup selected clips (Ctrl+G / Ctrl+Shift+G)
+      if (key.toLowerCase() === 'g' && ctrl && !e.altKey) {
+        e.preventDefault();
+        if (shiftKey) {
+          if (onUngroupClips) onUngroupClips();
+        } else if (onGroupClips) {
+          onGroupClips();
+        }
+        return;
+      }
+
       // Export
       if (key.toLowerCase() === 'e' && ctrl && shiftKey) {
         e.preventDefault();
@@ -444,10 +513,18 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       onExport,
       onMatchFrame,
       onReverseMatchFrame,
+      onRevealSourceClip,
+      onToggleLoopRange,
+      onPlayAroundEdit,
       onToggleClipEnabled,
       onToggleColorComparison,
       onCopyEffects,
       onPasteEffects,
+      onPasteAttributes,
+      onLinkClips,
+      onUnlinkClips,
+      onGroupClips,
+      onUngroupClips,
       onToggleCommandPalette,
       onToggleFullscreen,
       onCaptureSnapshot,
@@ -516,13 +593,17 @@ export const KEYBOARD_SHORTCUTS = [
       { key: 'Esc', description: 'Deselect All' },
       { key: 'Ctrl+Alt+C', description: 'Copy Effects' },
       { key: 'Ctrl+Alt+V', description: 'Paste Effects' },
+      { key: 'Ctrl+Alt+A', description: 'Paste Attributes' },
+      { key: 'Shift+E', description: 'Toggle Clip Enabled' },
+      { key: 'Ctrl+L', description: 'Link Selected Clips' },
+      { key: 'Ctrl+Shift+L', description: 'Unlink Selected Clips' },
+      { key: 'Ctrl+G', description: 'Group Selected Clips' },
+      { key: 'Ctrl+Shift+G', description: 'Ungroup Selected Clips' },
     ],
   },
   {
     category: 'Color',
-    shortcuts: [
-      { key: 'Shift+D', description: 'Toggle Before/After Color Comparison' },
-    ],
+    shortcuts: [{ key: 'Shift+D', description: 'Toggle Before/After Color Comparison' }],
   },
   {
     category: 'General',

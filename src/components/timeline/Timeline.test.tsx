@@ -179,9 +179,9 @@ describe('Timeline', () => {
       const { container } = render(<Timeline sequence={mockSequence} />);
 
       await waitFor(() => {
-        const canvas = container.querySelector('[data-testid="time-ruler"] canvas') as
-          | HTMLCanvasElement
-          | null;
+        const canvas = container.querySelector(
+          '[data-testid="time-ruler"] canvas',
+        ) as HTMLCanvasElement | null;
         expect(canvas?.style.width).toBe('808px');
       });
     });
@@ -189,6 +189,33 @@ describe('Timeline', () => {
     it('should render all tracks', () => {
       render(<Timeline sequence={mockSequence} />);
       expect(screen.getAllByTestId(/^track-header/)).toHaveLength(2);
+    });
+
+    it('should not expose source-edit target controls in the main toolbar', () => {
+      const sequenceWithCaption: Sequence = {
+        ...mockSequence,
+        tracks: [
+          ...mockSequence.tracks,
+          {
+            id: 'track_caption',
+            kind: 'caption',
+            name: 'Captions',
+            clips: [],
+            blendMode: 'normal',
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1.0,
+          },
+        ],
+      };
+
+      render(<Timeline sequence={sequenceWithCaption} />);
+
+      expect(screen.queryByTestId('edit-target-group')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('edit-target-track_001')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('edit-target-track_002')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('edit-target-track_caption')).not.toBeInTheDocument();
     });
 
     it('should render playhead', () => {
@@ -1053,6 +1080,33 @@ describe('Timeline', () => {
       fireEvent.keyDown(screen.getByTestId('timeline'), { key: 'b' });
 
       expect(useEditorToolStore.getState().activeTool).toBe('ripple');
+    });
+
+    it('should switch to rate stretch tool on R', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      fireEvent.keyDown(screen.getByTestId('timeline'), { key: 'r' });
+
+      expect(useEditorToolStore.getState().activeTool).toBe('rate-stretch');
+    });
+
+    it('should toggle ripple mode on Ctrl+R', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      fireEvent.keyDown(screen.getByTestId('timeline'), { key: 'r', ctrlKey: true });
+
+      expect(useEditorToolStore.getState().rippleEnabled).toBe(true);
+    });
+
+    it('should extract selected clips on quote key', () => {
+      const onRippleDeleteClips = vi.fn();
+      useTimelineStore.setState({ selectedClipIds: ['clip_001'] });
+
+      render(<Timeline sequence={mockSequence} onRippleDeleteClips={onRippleDeleteClips} />);
+
+      fireEvent.keyDown(screen.getByTestId('timeline'), { key: "'" });
+
+      expect(onRippleDeleteClips).toHaveBeenCalledWith(['clip_001']);
     });
 
     it('should delete selected clips on delete key', () => {

@@ -5,7 +5,15 @@
  * Similar to Track component but specialized for caption display.
  */
 
-import { useRef, useMemo, useState, useCallback, type MouseEvent as ReactMouseEvent } from 'react';
+import {
+  useRef,
+  useMemo,
+  useState,
+  useCallback,
+  type DragEvent as ReactDragEvent,
+  type ChangeEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 import { Type, Eye, EyeOff, Lock, Unlock, Globe, Download } from 'lucide-react';
 import type { Caption, CaptionTrack as CaptionTrackType, CaptionColor } from '@/types';
 import { ContextMenu, type MenuItemOrDivider } from '@/components/ui';
@@ -46,12 +54,16 @@ interface CaptionTrackProps {
   onDeleteTrack?: (trackId: string) => void;
   /** Whether this track can be deleted */
   canDeleteTrack?: boolean;
+  /** Whether this track is the current source edit target */
+  isEditTarget?: boolean;
   /** Same-kind tracks available for swapping */
   swapTargets?: TrackSwapTarget[];
   /** Swap handler */
   onSwapTracks?: (trackId: string, targetTrackId: string) => void;
   /** Export click handler - receives track ID and all captions */
   onExportClick?: (trackId: string, captions: Caption[]) => void;
+  /** Caption track language change handler */
+  onLanguageChange?: (trackId: string, language: string) => void;
 }
 
 // =============================================================================
@@ -60,6 +72,7 @@ interface CaptionTrackProps {
 
 /** Default viewport width for virtualization fallback */
 const DEFAULT_VIEWPORT_WIDTH = 1200;
+const TRACK_DRAG_MIME = 'application/x-openreelio-track';
 
 /** Buffer zone in pixels for pre-rendering off-screen captions */
 const VIRTUALIZATION_BUFFER_PX = 100;
@@ -78,6 +91,8 @@ const LANGUAGE_NAMES: Record<string, string> = {
   ar: 'Arabic',
 };
 
+const LANGUAGE_OPTIONS = Object.entries(LANGUAGE_NAMES);
+
 // =============================================================================
 // Helper Functions
 // =============================================================================
@@ -87,6 +102,27 @@ const LANGUAGE_NAMES: Record<string, string> = {
  */
 function getLanguageDisplayName(code: string): string {
   return LANGUAGE_NAMES[code.toLowerCase()] || code.toUpperCase();
+}
+
+function readCaptionTrackDragPayload(dataTransfer: DataTransfer): { trackId: string } | null {
+  const raw =
+    dataTransfer.getData(TRACK_DRAG_MIME) ||
+    dataTransfer.getData('application/json') ||
+    dataTransfer.getData('text/plain');
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<{ trackId: string; kind: string }>;
+    if (typeof parsed.trackId === 'string' && parsed.kind === 'caption') {
+      return { trackId: parsed.trackId };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 /**
@@ -133,9 +169,11 @@ export function CaptionTrack({
   onTrackClick,
   onDeleteTrack,
   canDeleteTrack = false,
+  isEditTarget = false,
   swapTargets = [],
   onSwapTracks,
   onExportClick,
+  onLanguageChange,
 }: CaptionTrackProps) {
   // Ref for measuring viewport width if not provided
   const contentRef = useRef<HTMLDivElement>(null);
@@ -165,6 +203,7 @@ export function CaptionTrack({
 
   // Language display
   const languageDisplay = getLanguageDisplayName(track.language);
+  const hasKnownLanguage = LANGUAGE_NAMES[track.language.toLowerCase()] != null;
   const contextMenuItems = useMemo<MenuItemOrDivider[]>(() => {
     const items: MenuItemOrDivider[] =
       swapTargets.length === 0
@@ -197,6 +236,56 @@ export function CaptionTrack({
     setContextMenuPosition({ x: event.clientX, y: event.clientY });
   }, []);
 
+  const handleHeaderDragStart = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      if (!onSwapTracks) {
+        event.preventDefault();
+        return;
+      }
+
+      const payload = JSON.stringify({ trackId: track.id, kind: 'caption' });
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData(TRACK_DRAG_MIME, payload);
+      event.dataTransfer.setData('text/plain', payload);
+    },
+    [onSwapTracks, track.id],
+  );
+
+  const handleHeaderDragOver = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      const payload = readCaptionTrackDragPayload(event.dataTransfer);
+      if (!payload || payload.trackId === track.id) {
+        return;
+      }
+
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+    },
+    [track.id],
+  );
+
+  const handleHeaderDrop = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      const payload = readCaptionTrackDragPayload(event.dataTransfer);
+      if (!payload || payload.trackId === track.id) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      onSwapTracks?.(payload.trackId, track.id);
+    },
+    [onSwapTracks, track.id],
+  );
+
+  const handleLanguageChange = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>) => {
+      event.stopPropagation();
+      onLanguageChange?.(track.id, event.target.value);
+    },
+    [onLanguageChange, track.id],
+  );
+
   return (
     <>
       <div
@@ -208,11 +297,16 @@ export function CaptionTrack({
         {/* Track Header */}
         <div
           data-testid="caption-track-header"
-          className="w-48 flex-shrink-0 bg-editor-sidebar px-2 py-1.5 flex items-center gap-2 border-r border-editor-border cursor-pointer hover:bg-editor-border/50"
+          draggable={Boolean(onSwapTracks)}
+          aria-grabbed="false"
+          className="w-48 flex-shrink-0 bg-editor-sidebar px-2 py-1.5 flex items-center gap-2 border-r border-editor-border cursor-grab active:cursor-grabbing hover:bg-editor-border/50"
           style={{ height: TRACK_HEIGHT }}
-          title="Right-click to swap or delete this track"
+          title="Drag to reorder. Right-click to swap or delete this track"
           onClick={() => onTrackClick?.(track.id)}
           onContextMenu={handleHeaderContextMenu}
+          onDragStart={handleHeaderDragStart}
+          onDragOver={handleHeaderDragOver}
+          onDrop={handleHeaderDrop}
         >
           {/* Track type icon */}
           <Type className="w-4 h-4 text-teal-400" />
@@ -222,7 +316,22 @@ export function CaptionTrack({
             <span className="text-sm text-editor-text truncate block">{track.name}</span>
             <div className="flex items-center gap-1 text-[10px] text-editor-text-muted">
               <Globe className="w-3 h-3" />
-              <span>{languageDisplay}</span>
+              <select
+                data-testid="caption-language-select"
+                className="min-w-0 max-w-24 bg-transparent text-[10px] text-editor-text-muted outline-none hover:text-editor-text focus:text-editor-text"
+                value={track.language}
+                aria-label={`${track.name} caption language`}
+                title={`Caption language: ${languageDisplay}`}
+                onClick={(event) => event.stopPropagation()}
+                onChange={handleLanguageChange}
+              >
+                {!hasKnownLanguage && <option value={track.language}>{languageDisplay}</option>}
+                {LANGUAGE_OPTIONS.map(([code, name]) => (
+                  <option key={code} value={code}>
+                    {name}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 
@@ -277,8 +386,8 @@ export function CaptionTrack({
           ref={contentRef}
           data-testid="caption-track-content"
           className={`min-w-0 flex-1 bg-editor-bg relative overflow-hidden ${
-            !track.visible ? 'opacity-50' : ''
-          }`}
+            isEditTarget ? 'border-l-2 border-cyan-400/60' : ''
+          } ${!track.visible ? 'opacity-50' : ''}`}
           style={{ height: TRACK_HEIGHT }}
         >
           {/* Background pattern for caption track */}

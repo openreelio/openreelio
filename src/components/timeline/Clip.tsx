@@ -27,7 +27,12 @@ import { TRACK_HEIGHT } from './constants';
 // =============================================================================
 
 export type { ClipDragData, DragPreviewPosition };
-export type ClipDragType = 'move' | 'trim-left' | 'trim-right';
+export type ClipDragType =
+  | 'move'
+  | 'trim-left'
+  | 'trim-right'
+  | 'rate-stretch-left'
+  | 'rate-stretch-right';
 export type { ClipAudioSettingsPatch };
 
 /** Modifier keys pressed during click */
@@ -143,6 +148,7 @@ export function Clip({
   // Use the clip drag hook for smooth drag operations
   const activeTool = useEditorToolStore((state) => state.activeTool);
   const isRazorToolActive = activeTool === 'razor';
+  const isRateStretchToolActive = activeTool === 'rate-stretch';
 
   const { isDragging, previewPosition, activeSnapPoint, handleMouseDown } = useClipDrag({
     clip,
@@ -277,7 +283,7 @@ export function Clip({
     }
 
     e.stopPropagation();
-    handleMouseDown(e, 'trim-left');
+    handleMouseDown(e, isRateStretchToolActive ? 'rate-stretch-left' : 'trim-left');
   };
 
   // Handle mouse down on right trim handle
@@ -287,14 +293,16 @@ export function Clip({
     }
 
     e.stopPropagation();
-    handleMouseDown(e, 'trim-right');
+    handleMouseDown(e, isRateStretchToolActive ? 'rate-stretch-right' : 'trim-right');
   };
 
   const hasEffects = clip.effects.length > 0;
   const hasSpeedChange = clip.speed !== 1;
   const isReversed = clip.reverse === true;
   const hasTimeRemap = hasActiveTimeRemap(clip);
-  const trimHandlesDisabled = disabled || !supportsSourceBoundaryTrimming(clip);
+  const trimHandlesDisabled = isRateStretchToolActive
+    ? disabled || clip.freezeFrame === true || hasTimeRemap
+    : disabled || !supportsSourceBoundaryTrimming(clip);
 
   // Determine if this is a text clip or adjustment layer
   const isText = isTextClip(clip.assetId);
@@ -394,7 +402,7 @@ export function Clip({
         />
       )}
 
-      {showAudioEditorControls && displayPosition.width > 0 && !showAudioAutomationEditor && (
+      {showAudioEditorControls && displayPosition.width > 0 && (
         <AudioClipControls
           clip={clip}
           width={displayPosition.width}
@@ -441,9 +449,7 @@ export function Clip({
       )}
 
       {/* Clip content */}
-      <div
-        className="h-full p-1 pointer-events-none relative z-10 overflow-hidden"
-      >
+      <div className="h-full p-1 pointer-events-none relative z-10 overflow-hidden">
         {/* Label */}
         {displayLabel && (
           <span
@@ -564,7 +570,11 @@ export function Clip({
           ${selected ? 'bg-primary-400 bg-opacity-50' : 'bg-white bg-opacity-0 hover:bg-opacity-20'}
         `}
         style={{ cursor: isRazorToolActive ? 'inherit' : undefined }}
-        title={trimHandlesDisabled ? 'Trim is unavailable for freeze-frame and time-remapped clips' : undefined}
+        title={
+          trimHandlesDisabled
+            ? 'Trim is unavailable for freeze-frame and time-remapped clips'
+            : undefined
+        }
         onMouseDown={handleLeftTrimMouseDown}
       />
       <div
@@ -574,7 +584,11 @@ export function Clip({
           ${selected ? 'bg-primary-400 bg-opacity-50' : 'bg-white bg-opacity-0 hover:bg-opacity-20'}
         `}
         style={{ cursor: isRazorToolActive ? 'inherit' : undefined }}
-        title={trimHandlesDisabled ? 'Trim is unavailable for freeze-frame and time-remapped clips' : undefined}
+        title={
+          trimHandlesDisabled
+            ? 'Trim is unavailable for freeze-frame and time-remapped clips'
+            : undefined
+        }
         onMouseDown={handleRightTrimMouseDown}
       />
     </div>

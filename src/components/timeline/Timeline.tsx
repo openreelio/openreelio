@@ -86,6 +86,7 @@ export type {
   ClipPasteData,
   ClipAudioUpdateData,
   TrackControlData,
+  CaptionTrackLanguageData,
   TrackCreateData,
   TrackReorderData,
   CaptionUpdateData,
@@ -174,6 +175,7 @@ export function Timeline({
   onTrackMuteToggle,
   onTrackLockToggle,
   onTrackVisibilityToggle,
+  onCaptionTrackLanguageChange,
   onTrackDelete,
   onTrackCreate,
   onAddText,
@@ -182,6 +184,7 @@ export function Timeline({
   onCloseGap,
   onCloseAllGaps,
   onRippleDeleteClips,
+  onCreateMulticamGroup,
   onLiftClips,
   onInsertEditFromSource,
   onOverwriteEditFromSource,
@@ -203,6 +206,8 @@ export function Timeline({
   onPasteEffects,
   onPasteAttributes,
   onRemoveAttributes,
+  showTransitionZones,
+  onTransitionZoneClick,
 }: TimelineProps) {
   // ===========================================================================
   // Store State - Using targeted selectors to minimize re-renders
@@ -214,6 +219,7 @@ export function Timeline({
   const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
   const snapEnabled = useTimelineStore((state) => state.snapEnabled);
   const linkedSelectionEnabled = useTimelineStore((state) => state.linkedSelectionEnabled);
+  const selectedEditTargetTrackId = useTimelineStore((state) => state.editTargetTrackId);
 
   // Actions - stable references, don't cause re-renders
   const setScrollX = useTimelineStore((state) => state.setScrollX);
@@ -229,16 +235,30 @@ export function Timeline({
 
   const assets = useProjectStore((state) => state.assets);
 
-  // Edit target: first unlocked video track (receives 3-point edits).
+  // Edit target: selected unlocked track, falling back to the first unlocked video track.
   // Derive a stable key from track identity + lock state so we don't recompute on clip edits.
   const trackLockKey = useMemo(
     () => sequence?.tracks.map((t) => `${t.id}:${t.kind}:${t.locked}`).join(',') ?? '',
     [sequence?.tracks],
   );
   const editTargetTrackId = useMemo(
-    () => sequence?.tracks.find((t) => t.kind === 'video' && !t.locked)?.id ?? null,
+    () => {
+      if (!sequence) return null;
+
+      const selectedTrack = sequence.tracks.find(
+        (track) =>
+          track.id === selectedEditTargetTrackId &&
+          !track.locked &&
+          (track.kind === 'video' || track.kind === 'overlay' || track.kind === 'audio'),
+      );
+      if (selectedTrack) {
+        return selectedTrack.id;
+      }
+
+      return sequence.tracks.find((t) => t.kind === 'video' && !t.locked)?.id ?? null;
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [trackLockKey],
+    [trackLockKey, selectedEditTargetTrackId],
   );
 
   // Editor tool store - for tool switching
@@ -853,6 +873,14 @@ export function Timeline({
     [onDeleteClips, isRippleEnabled, sequence, onClipMove, calculateDeleteRipple],
   );
 
+  const handleExtractEdit = useCallback(() => {
+    if (!onRippleDeleteClips || selectedClipIds.length === 0) return;
+
+    void Promise.resolve(onRippleDeleteClips([...selectedClipIds])).catch((error) => {
+      logger.error('Failed to extract selected clips', { error, selectedClipIds });
+    });
+  }, [onRippleDeleteClips, selectedClipIds]);
+
   // ===========================================================================
   // Keyboard Shortcuts
   // ===========================================================================
@@ -872,6 +900,7 @@ export function Timeline({
     onOverwriteEdit: onOverwriteEditFromSource,
     onRippleDelete: onRippleDeleteClips,
     onLiftEdit: onLiftClips,
+    onExtractEdit: handleExtractEdit,
   });
 
   // Enhanced keyboard handler with clipboard operations and tool switching
@@ -930,6 +959,10 @@ export function Timeline({
             }
             e.preventDefault();
             return;
+          case 'r':
+            toggleRipple();
+            e.preventDefault();
+            return;
         }
       }
 
@@ -960,13 +993,12 @@ export function Timeline({
             setActiveTool('roll');
             e.preventDefault();
             return;
-          case 'h':
-            setActiveTool('hand');
+          case 'r':
+            setActiveTool('rate-stretch');
             e.preventDefault();
             return;
-          case 'r':
-            // Toggle ripple mode
-            toggleRipple();
+          case 'h':
+            setActiveTool('hand');
             e.preventDefault();
             return;
           case 't':
@@ -1024,6 +1056,7 @@ export function Timeline({
     trackHeight: TRACK_HEIGHT,
     onClipMove,
     onClipTrim,
+    onClipSpeedChange,
     selectClip,
   });
 
@@ -1984,8 +2017,10 @@ export function Timeline({
           onDuplicate={handleToolbarDuplicate}
           onDelete={handleToolbarDelete}
           onRippleDelete={handleToolbarRippleDelete}
+          onCreateMulticamGroup={onCreateMulticamGroup}
           hasActiveSequence={sequence !== null}
           hasSelectedClips={selectedClipIds.length > 0}
+          canCreateMulticamGroup={selectedClipIds.length >= 2}
           fps={DEFAULT_FPS}
           duration={playbackDuration}
         />
@@ -2051,6 +2086,7 @@ export function Timeline({
                 onTrackMuteToggle={onTrackMuteToggle}
                 onTrackLockToggle={onTrackLockToggle}
                 onTrackVisibilityToggle={onTrackVisibilityToggle}
+                onCaptionTrackLanguageChange={onCaptionTrackLanguageChange}
                 onTrackDelete={onTrackDelete}
                 onTrackSwap={handleTrackSwap}
                 onClipSpeedChange={onClipSpeedChange}
@@ -2072,6 +2108,8 @@ export function Timeline({
                 onPasteEffects={onPasteEffects}
                 onPasteAttributes={onPasteAttributes}
                 onRemoveAttributes={onRemoveAttributes}
+                showTransitionZones={showTransitionZones}
+                onTransitionZoneClick={onTransitionZoneClick}
                 createCaptionDoubleClickHandler={createCaptionDoubleClickHandler}
                 onCaptionExportClick={handleCaptionExportClick}
               />

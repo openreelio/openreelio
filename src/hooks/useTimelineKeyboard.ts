@@ -189,15 +189,20 @@ const KEYBOARD_COMMANDS: KeyboardCommand[] = [
     keys: ['s', 'S'],
     requiresCtrl: false,
     execute: (ctx) => {
-      if (!ctx.sequence || ctx.selectedClipIds.length === 0 || !ctx.onClipSplit) {
+      if (!ctx.sequence || !ctx.onClipSplit) {
         return;
       }
 
+      const targetClipIds =
+        ctx.selectedClipIds.length > 0
+          ? ctx.selectedClipIds
+          : ctx.sequence.tracks.flatMap((track) => track.clips.map((clip) => clip.id));
+
       const splitTargets = getSplitTargetsAtTime(
         ctx.sequence,
-        ctx.selectedClipIds,
+        targetClipIds,
         ctx.playhead,
-        ctx.linkedSelectionEnabled,
+        ctx.selectedClipIds.length > 0 ? ctx.linkedSelectionEnabled : false,
       );
 
       for (const splitTarget of splitTargets) {

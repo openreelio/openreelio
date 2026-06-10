@@ -227,6 +227,8 @@ describe('getCommandLabel', () => {
     expect(getCommandLabel('RippleDelete')).toBe('Ripple Delete');
     expect(getCommandLabel('CreateAdjustmentLayer')).toBe('Adjustment Layer');
     expect(getCommandLabel('SetMasterVolume')).toBe('Master Volume');
+    expect(getCommandLabel('SetTrackVolume')).toBe('Set Track Volume');
+    expect(getCommandLabel('SetCaptionTrackLanguage')).toBe('Caption Track Language');
   });
 
   it('should convert PascalCase to spaced words for unknown command types', () => {

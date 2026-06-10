@@ -25,7 +25,7 @@ function adaptTrackToCaptionTrack(track: TrackType): CaptionTrackType {
   return {
     id: track.id,
     name: track.name,
-    language: 'en',
+    language: track.captionLanguage ?? 'en',
     visible: track.visible,
     locked: track.locked,
     captions,
@@ -77,6 +77,11 @@ export interface TimelineTrackRowsProps {
   onTrackMuteToggle?: TrackControlHandler;
   onTrackLockToggle?: TrackControlHandler;
   onTrackVisibilityToggle?: TrackControlHandler;
+  onCaptionTrackLanguageChange?: (data: {
+    sequenceId: string;
+    trackId: string;
+    language: string;
+  }) => void | Promise<void>;
   onTrackDelete?: TrackControlHandler;
   onTrackSwap: (trackId: string, targetTrackId: string) => void;
   onClipSpeedChange?: ComponentProps<typeof Track>['onClipSpeedChange'];
@@ -98,6 +103,8 @@ export interface TimelineTrackRowsProps {
   onPasteEffects?: ComponentProps<typeof Track>['onPasteEffects'];
   onPasteAttributes?: ComponentProps<typeof Track>['onPasteAttributes'];
   onRemoveAttributes?: ComponentProps<typeof Track>['onRemoveAttributes'];
+  showTransitionZones?: ComponentProps<typeof Track>['showTransitionZones'];
+  onTransitionZoneClick?: ComponentProps<typeof Track>['onTransitionZoneClick'];
   createCaptionDoubleClickHandler: (trackId: string) => (captionId: string) => void;
   onCaptionExportClick?: ComponentProps<typeof CaptionTrack>['onExportClick'];
 }
@@ -127,6 +134,7 @@ export function TimelineTrackRows({
   onTrackMuteToggle,
   onTrackLockToggle,
   onTrackVisibilityToggle,
+  onCaptionTrackLanguageChange,
   onTrackDelete,
   onTrackSwap,
   onClipSpeedChange,
@@ -148,6 +156,8 @@ export function TimelineTrackRows({
   onPasteEffects,
   onPasteAttributes,
   onRemoveAttributes,
+  showTransitionZones,
+  onTransitionZoneClick,
   createCaptionDoubleClickHandler,
   onCaptionExportClick,
 }: TimelineTrackRowsProps): JSX.Element {
@@ -169,8 +179,16 @@ export function TimelineTrackRows({
               selectedCaptionIds={selectedClipIds}
               onLockToggle={createTrackHandler(onTrackLockToggle)}
               onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
+              onLanguageChange={(trackId, language) =>
+                onCaptionTrackLanguageChange?.({
+                  sequenceId: sequence.id,
+                  trackId,
+                  language,
+                })
+              }
               onDeleteTrack={createTrackHandler(onTrackDelete)}
               canDeleteTrack={!isProtectedBaseTrack(sequence.tracks, track.id)}
+              isEditTarget={track.id === editTargetTrackId}
               swapTargets={swapTargets}
               onSwapTracks={onTrackSwap}
               onCaptionClick={onClipClick}
@@ -229,6 +247,8 @@ export function TimelineTrackRows({
             onPasteEffects={onPasteEffects}
             onPasteAttributes={onPasteAttributes}
             onRemoveAttributes={onRemoveAttributes}
+            showTransitionZones={showTransitionZones}
+            onTransitionZoneClick={onTransitionZoneClick}
           />
         );
       })}
