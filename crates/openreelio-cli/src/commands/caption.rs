@@ -142,6 +142,10 @@ pub enum CaptionAction {
         #[arg(long)]
         format: Option<String>,
 
+        /// Optional language code stored on the caption track and generated caption segments
+        #[arg(long)]
+        language: Option<String>,
+
         /// Optional caption style JSON object applied to every imported caption
         #[arg(long = "style-json")]
         style_json: Option<String>,
@@ -849,6 +853,26 @@ fn load_caption_file(path: &Path, format: CaptionFileFormat) -> anyhow::Result<V
     }
 }
 
+fn normalize_caption_language_arg(language: Option<String>) -> anyhow::Result<Option<String>> {
+    let Some(language) = language else {
+        return Ok(None);
+    };
+
+    let normalized = language.trim().replace('_', "-").to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    let primary = normalized.split('-').next().unwrap_or_default();
+    if !(2..=3).contains(&primary.len()) || !primary.chars().all(|ch| ch.is_ascii_lowercase()) {
+        return Err(anyhow::anyhow!(
+            "--language must start with a 2-3 letter language code"
+        ));
+    }
+
+    Ok(Some(normalized))
+}
+
 fn rollback_import(
     project: &mut ActiveProject,
     sequence_id: &str,
@@ -1044,6 +1068,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             file,
             track,
             format,
+            language,
             style_json,
             position,
             position_json,
@@ -1053,6 +1078,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 anyhow::anyhow!("Subtitle file '{}' not found: {}", file.display(), e)
             })?;
             let format = detect_caption_file_format(&subtitle_path, format.as_deref())?;
+            let language = normalize_caption_language_arg(language)?;
             let captions = load_caption_file(&subtitle_path, format)?;
             let style = parse_style_json(style_json)?;
             let position = parse_caption_position(position, position_json)?;
@@ -1074,11 +1100,13 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 let segments = captions
                     .iter()
                     .map(|caption| {
-                        GeneratedCaptionSegment::new(
+                        let mut segment = GeneratedCaptionSegment::new(
                             caption.start_sec,
                             caption.end_sec,
                             caption.text.clone(),
-                        )
+                        );
+                        segment.language = language.clone();
+                        segment
                     })
                     .collect();
                 let cmd = ImportGeneratedCaptionsCommand::new(&seq_id, &track_id, segments)
@@ -1139,6 +1167,19 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 }
             }
 
+            if let Some(language) = &language {
+                let cmd = SetCaptionTrackLanguageCommand::new(&seq_id, &track_id, language);
+                project
+                    .executor
+                    .execute(Box::new(cmd), &mut project.state)
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "Caption import succeeded, but setting track language failed: {}",
+                            error
+                        )
+                    })?;
+            }
+
             super::save_project(&mut project)?;
 
             output::print_json(&serde_json::json!({
@@ -1147,6 +1188,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 "createdIds": created_ids,
                 "importedCount": created_ids.len(),
                 "format": format.as_str(),
+                "language": language,
                 "source": subtitle_path.display().to_string(),
             }))
         }

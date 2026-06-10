@@ -463,6 +463,9 @@ pub struct Track {
     pub sync_lock: bool,
     /// Volume for audio tracks (0.0 - 2.0, 1.0 = 100%)
     pub volume: f32,
+    /// BCP-47-ish language code for caption tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption_language: Option<String>,
 }
 
 impl Track {
@@ -480,6 +483,7 @@ impl Track {
             visible: true,
             sync_lock: false,
             volume: 1.0,
+            caption_language: None,
         }
     }
 
@@ -727,6 +731,12 @@ pub struct AudioSettings {
     /// Sorted by time_offset. Values in dB, times relative to clip start.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volume_keyframes: Vec<AudioKeyframe>,
+    /// Editorial audio role groundwork for future buses/routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_role: Option<String>,
+    /// Editorial audio tags groundwork for future buses/routing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_tags: Vec<String>,
 }
 
 impl Default for AudioSettings {
@@ -740,6 +750,8 @@ impl Default for AudioSettings {
             fade_in_type: FadeType::default(),
             fade_out_type: FadeType::default(),
             volume_keyframes: Vec::new(),
+            audio_role: None,
+            audio_tags: Vec::new(),
         }
     }
 }
@@ -784,6 +796,38 @@ pub enum KeyframeInterpolation {
     },
     /// Hold at the current source time until the next keyframe
     Hold,
+}
+
+/// Slow-motion interpolation mode used when a clip plays below real time.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum SlowMotionInterpolation {
+    /// Duplicate/hold source frames. This is the fastest and preserves legacy behavior.
+    #[default]
+    Nearest,
+    /// Blend neighboring frames for smoother slow motion.
+    FrameBlend,
+    /// Use motion-compensated interpolation during export.
+    MotionCompensated,
+}
+
+impl SlowMotionInterpolation {
+    pub fn is_nearest(&self) -> bool {
+        matches!(self, Self::Nearest)
+    }
+}
+
+/// A single transform keyframe on a clip motion curve.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformKeyframe {
+    /// Time offset from clip start in seconds (must be >= 0)
+    pub time_offset: f64,
+    /// Complete transform snapshot at this keyframe
+    pub transform: Transform,
+    /// How to interpolate to the next keyframe
+    #[serde(default)]
+    pub interpolation: KeyframeInterpolation,
 }
 
 /// A single keyframe in a time remap curve.
@@ -1154,6 +1198,9 @@ pub struct Clip {
     /// Placement on the timeline
     pub place: ClipPlace,
     pub transform: Transform,
+    /// Optional transform animation keyframes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub motion_keyframes: Vec<TransformKeyframe>,
     /// Opacity (0.0 - 1.0)
     pub opacity: f32,
     /// Blend mode for compositing (default: Normal)
@@ -1171,6 +1218,9 @@ pub struct Clip {
     /// When present and valid, overrides the constant `speed` field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_remap: Option<TimeRemapCurve>,
+    /// Slow-motion interpolation mode for preview/export quality.
+    #[serde(default, skip_serializing_if = "SlowMotionInterpolation::is_nearest")]
+    pub slow_motion_interpolation: SlowMotionInterpolation,
     pub effects: Vec<EffectId>,
     pub audio: AudioSettings,
     /// Optional label for organization
@@ -1228,12 +1278,14 @@ impl Clip {
             range: ClipRange::default(),
             place: ClipPlace::default(),
             transform: Transform::default(),
+            motion_keyframes: Vec::new(),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             speed: 1.0,
             reverse: false,
             freeze_frame: false,
             time_remap: None,
+            slow_motion_interpolation: SlowMotionInterpolation::Nearest,
             effects: vec![],
             audio: AudioSettings::default(),
             label: None,
@@ -1277,12 +1329,14 @@ impl Clip {
             range: ClipRange::new(source_in, source_out),
             place: ClipPlace::new(0.0, duration),
             transform: Transform::default(),
+            motion_keyframes: Vec::new(),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             speed: 1.0,
             reverse: false,
             freeze_frame: false,
             time_remap: None,
+            slow_motion_interpolation: SlowMotionInterpolation::Nearest,
             effects: vec![],
             audio: AudioSettings::default(),
             label: None,
@@ -1394,12 +1448,14 @@ impl Clip {
             range: ClipRange::new(0.0, duration),
             place: ClipPlace::new(0.0, duration),
             transform: Transform::default(),
+            motion_keyframes: Vec::new(),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             speed: 1.0,
             reverse: false,
             freeze_frame: false,
             time_remap: None,
+            slow_motion_interpolation: SlowMotionInterpolation::Nearest,
             effects: vec![],
             audio: AudioSettings::default(),
             label: None,
@@ -1428,12 +1484,14 @@ impl Clip {
             range: ClipRange::new(0.0, duration),
             place: ClipPlace::new(0.0, duration),
             transform: Transform::default(),
+            motion_keyframes: Vec::new(),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             speed: 1.0,
             reverse: false,
             freeze_frame: false,
             time_remap: None,
+            slow_motion_interpolation: SlowMotionInterpolation::Nearest,
             effects: vec![],
             audio: AudioSettings::default(),
             label: Some("Adjustment Layer".to_string()),

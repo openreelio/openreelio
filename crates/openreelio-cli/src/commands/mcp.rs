@@ -1047,6 +1047,10 @@ fn build_command_schema() -> Value {
                 "optional": ["position"],
                 "note": "Use kind video or overlay for editable text clips. AddTextClip requires a target video/overlay track; create one first when no suitable upper text track exists."
             },
+            "SetCaptionTrackLanguage": {
+                "required": ["sequenceId", "trackId", "language"],
+                "note": "Use this for caption tracks only. Language should be a BCP-47-ish code such as en, ko, ja, zh, es, or en-us."
+            },
             "InsertClip": {
                 "required": ["sequenceId", "trackId", "assetId", "timelineStart"],
                 "optional": ["sourceIn", "sourceOut"],
@@ -1075,6 +1079,7 @@ fn build_command_schema() -> Value {
             "AddTextClip": {
                 "required": ["sequenceId", "trackId", "timelineIn", "duration", "textData"],
                 "textDataShape": "TextClipData includes content, style(fontFamily/fontSize/fontWeight/color/backgroundColor/backgroundPadding/alignment/bold/italic/underline/lineHeight/letterSpacing), position(x/y 0..1), shadow(color/offsetX/offsetY/blur), outline(color/width), rotation, and opacity.",
+                "presetHints": "Production presets supported by UI/agent/CLI include title, centered-title, epic-title, chapter-title, lower-third, lower-third-news, lower-third-name-role, subtitle, callout, callout-stat, credits, credit-line, logo-bug, social-handle, quote, watermark, and countdown.",
                 "note": "Text clips must be placed on a video or overlay track. Use SetClipTransform after creation when scale or anchor must be exact."
             },
             "UpdateTextClip": {
@@ -1100,6 +1105,7 @@ fn build_command_schema() -> Value {
                 "Read annotation.read for overlapping source assets when placement should avoid faces, objects, or OCR text.",
                 "CreateTrack(kind=\"video\" or \"overlay\") when there is no unlocked non-overlapping text track above the media.",
                 "AddTextClip with complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity.",
+                "Use production text presets for common work: credits for end cards, logo-bug for channel marks, social-handle for creator IDs, lower-third-name-role for interviews, and callout-stat for numeric emphasis.",
                 "SetClipTransform for exact preview drag/resize/rotate parity using normalized position, scale, rotationDeg, and anchor."
             ],
             "timedSubtitles": [
@@ -1113,7 +1119,8 @@ fn build_command_schema() -> Value {
             "placementDefaults": {
                 "subtitle": "Bottom center around y=0.85 with outline/shadow unless it covers important visual content.",
                 "title": "Center or upper third depending on the shot composition.",
-                "lowerThird": "Lower-left or lower-center with enough safe margin and readable contrast."
+                "lowerThird": "Lower-left or lower-center with enough safe margin and readable contrast.",
+                "creditBrand": "Credits, credit lines, logo bugs, social handles, quote, and watermark presets preserve their template position unless the user asks for automatic placement."
             }
         },
         "payloadFormat": {

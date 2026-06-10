@@ -635,6 +635,32 @@ impl Effect {
             EffectType::Volume => {
                 params.insert("level".to_string(), ParamValue::Float(1.0));
             }
+            EffectType::Gain => {
+                params.insert("gain".to_string(), ParamValue::Float(0.0));
+            }
+            EffectType::EqBand => {
+                params.insert("frequency".to_string(), ParamValue::Float(1000.0));
+                params.insert("width".to_string(), ParamValue::Float(1.0));
+                params.insert("gain".to_string(), ParamValue::Float(0.0));
+            }
+            EffectType::Compressor => {
+                params.insert("threshold".to_string(), ParamValue::Float(-24.0));
+                params.insert("ratio".to_string(), ParamValue::Float(4.0));
+                params.insert("attack".to_string(), ParamValue::Float(5.0));
+                params.insert("release".to_string(), ParamValue::Float(50.0));
+            }
+            EffectType::Limiter => {
+                params.insert("limit".to_string(), ParamValue::Float(1.0));
+                params.insert("attack".to_string(), ParamValue::Float(5.0));
+                params.insert("release".to_string(), ParamValue::Float(50.0));
+            }
+            EffectType::Reverb => {
+                params.insert("delay".to_string(), ParamValue::Float(500.0));
+                params.insert("decay".to_string(), ParamValue::Float(0.5));
+            }
+            EffectType::Delay => {
+                params.insert("delay".to_string(), ParamValue::Float(500.0));
+            }
             EffectType::Fade => {
                 params.insert("duration".to_string(), ParamValue::Float(1.0));
                 params.insert("fade_in".to_string(), ParamValue::Bool(true));
@@ -706,6 +732,14 @@ impl Effect {
                 // White balance: temperature (blue↔orange) and tint (green↔magenta)
                 params.insert("temperature".to_string(), ParamValue::Float(0.0));
                 params.insert("tint".to_string(), ParamValue::Float(0.0));
+            }
+            EffectType::Lut => {
+                params.insert("file".to_string(), ParamValue::String(String::new()));
+                params.insert(
+                    "interp".to_string(),
+                    ParamValue::String("tetrahedral".to_string()),
+                );
+                params.insert("intensity".to_string(), ParamValue::Float(1.0));
             }
             EffectType::Curves => {
                 // RGB Color Curves — each channel stored as JSON-serialized Vec<CurvePoint>
@@ -817,6 +851,32 @@ impl Effect {
             EffectType::Volume => {
                 vec![ParamDef::float("level", "Volume", 1.0, 0.0, 2.0)]
             }
+            EffectType::Gain => {
+                vec![ParamDef::float("gain", "Gain (dB)", 0.0, -24.0, 24.0)]
+            }
+            EffectType::EqBand => vec![
+                ParamDef::float("frequency", "Frequency (Hz)", 1000.0, 20.0, 20000.0),
+                ParamDef::float("width", "Q", 1.0, 0.1, 10.0),
+                ParamDef::float("gain", "Gain (dB)", 0.0, -24.0, 24.0),
+            ],
+            EffectType::Compressor => vec![
+                ParamDef::float("threshold", "Threshold (dB)", -24.0, -60.0, 0.0),
+                ParamDef::float("ratio", "Ratio", 4.0, 1.0, 20.0),
+                ParamDef::float("attack", "Attack (ms)", 5.0, 0.1, 100.0),
+                ParamDef::float("release", "Release (ms)", 50.0, 1.0, 1000.0),
+            ],
+            EffectType::Limiter => vec![
+                ParamDef::float("limit", "Limit", 1.0, 0.0, 1.0),
+                ParamDef::float("attack", "Attack (ms)", 5.0, 0.1, 100.0),
+                ParamDef::float("release", "Release (ms)", 50.0, 1.0, 1000.0),
+            ],
+            EffectType::Reverb => vec![
+                ParamDef::float("delay", "Delay (ms)", 500.0, 10.0, 2000.0),
+                ParamDef::float("decay", "Decay", 0.5, 0.0, 1.0),
+            ],
+            EffectType::Delay => {
+                vec![ParamDef::float("delay", "Delay (ms)", 500.0, 1.0, 5000.0)]
+            }
             EffectType::Fade => vec![
                 ParamDef::float("duration", "Duration", 1.0, 0.0, 10.0),
                 ParamDef::boolean("fade_in", "Fade In", true),
@@ -888,6 +948,11 @@ impl Effect {
             EffectType::TemperatureTint => vec![
                 ParamDef::float("temperature", "Temperature", 0.0, -100.0, 100.0),
                 ParamDef::float("tint", "Tint", 0.0, -100.0, 100.0),
+            ],
+            EffectType::Lut => vec![
+                ParamDef::string("file", "LUT File", ""),
+                ParamDef::string("interp", "Interpolation", "tetrahedral"),
+                ParamDef::float("intensity", "Intensity", 1.0, 0.0, 1.0),
             ],
             EffectType::Curves => {
                 let identity_json = curve_points_to_json(&default_identity_curve());
@@ -1258,6 +1323,20 @@ mod tests {
         let fade = Effect::new(EffectType::Fade);
         assert_eq!(fade.get_float("duration"), Some(1.0));
         assert_eq!(fade.get_bool("fade_in"), Some(true));
+
+        let gain = Effect::new(EffectType::Gain);
+        assert_eq!(gain.get_float("gain"), Some(0.0));
+
+        let eq = Effect::new(EffectType::EqBand);
+        assert_eq!(eq.get_float("frequency"), Some(1000.0));
+        assert_eq!(eq.get_float("width"), Some(1.0));
+        assert_eq!(eq.get_float("gain"), Some(0.0));
+
+        let compressor = Effect::new(EffectType::Compressor);
+        assert_eq!(compressor.get_float("threshold"), Some(-24.0));
+        assert_eq!(compressor.get_float("ratio"), Some(4.0));
+        assert_eq!(compressor.get_float("attack"), Some(5.0));
+        assert_eq!(compressor.get_float("release"), Some(50.0));
     }
 
     #[test]
@@ -1316,6 +1395,35 @@ mod tests {
     fn test_color_wheels_is_video() {
         assert!(EffectType::ColorWheels.is_video());
         assert!(!EffectType::ColorWheels.is_audio());
+    }
+
+    #[test]
+    fn should_create_lut_effect_with_export_defaults() {
+        let effect = Effect::new(EffectType::Lut);
+
+        assert_eq!(effect.get_string("file"), Some(String::new()));
+        assert_eq!(effect.get_string("interp"), Some("tetrahedral".to_string()));
+        assert_eq!(effect.get_float("intensity"), Some(1.0));
+        assert_eq!(effect.category(), EffectCategory::Color);
+    }
+
+    #[test]
+    fn should_provide_param_definitions_for_lut() {
+        let effect = Effect::new(EffectType::Lut);
+        let defs = effect.param_definitions();
+
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["file", "interp", "intensity"]);
+
+        let file = defs.iter().find(|d| d.name == "file").unwrap();
+        let interp = defs.iter().find(|d| d.name == "interp").unwrap();
+        let intensity = defs.iter().find(|d| d.name == "intensity").unwrap();
+
+        assert_eq!(file.default.as_str(), Some(""));
+        assert_eq!(interp.default.as_str(), Some("tetrahedral"));
+        assert_eq!(intensity.default.as_float(), Some(1.0));
+        assert_eq!(intensity.min, Some(0.0));
+        assert_eq!(intensity.max, Some(1.0));
     }
 
     // -------------------------------------------------------------------------

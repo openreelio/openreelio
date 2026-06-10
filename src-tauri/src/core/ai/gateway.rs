@@ -295,6 +295,7 @@ When actions are needed, use this format:
 - **InsertEdit**: { "sequenceId": "required", "assetId": "required", "trackId": "required", "timelinePosition": seconds }
 - **OverwriteEdit**: { "sequenceId": "required", "assetId": "required", "trackId": "required", "timelinePosition": seconds }
 - **AddTrack**: { "sequenceId": "required", "kind": "video|audio|caption|overlay", "name": string }
+- **SetCaptionTrackLanguage**: { "sequenceId": "required", "trackId": "required", "language": string }
 - **ToggleTrackMute**: { "sequenceId": "required", "trackId": "required", "muted": boolean }
 - **AddEffect**: { "sequenceId": "required", "trackId": "required", "clipId": "required", "effectType": string, "params": object }
 - **AddMarker**: { "sequenceId": "required", "timeSec": seconds, "label": string }
@@ -871,6 +872,33 @@ Return JSON array of edit scripts."#;
                         Some(v) if !v.is_boolean() => {
                             issues.push(format!(
                                 "ToggleTrackMute command {} invalid muted (must be boolean)",
+                                i
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                "SetCaptionTrackLanguage" => {
+                    if cmd.params.get("sequenceId").is_none() {
+                        issues.push(format!(
+                            "SetCaptionTrackLanguage command {} missing sequenceId",
+                            i
+                        ));
+                    }
+                    if cmd.params.get("trackId").is_none() {
+                        issues.push(format!(
+                            "SetCaptionTrackLanguage command {} missing trackId",
+                            i
+                        ));
+                    }
+                    match cmd.params.get("language") {
+                        None => issues.push(format!(
+                            "SetCaptionTrackLanguage command {} missing language",
+                            i
+                        )),
+                        Some(v) if v.as_str().is_none_or(|language| language.trim().is_empty()) => {
+                            issues.push(format!(
+                                "SetCaptionTrackLanguage command {} invalid language",
                                 i
                             ));
                         }

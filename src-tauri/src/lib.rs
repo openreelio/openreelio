@@ -1277,6 +1277,7 @@ mod tauri_app {
                 $crate::ipc::get_effect_capabilities,
                 // Asset commands
                 $crate::ipc::import_asset,
+                $crate::ipc::relink_asset,
                 $crate::ipc::get_assets,
                 $crate::ipc::remove_asset,
                 $crate::ipc::generate_asset_thumbnail,
@@ -1775,6 +1776,7 @@ mod tauri_app {
             ipc::get_effect_capabilities,
             // Asset commands
             ipc::import_asset,
+            ipc::relink_asset,
             ipc::get_assets,
             ipc::remove_asset,
             ipc::generate_asset_thumbnail,

@@ -101,6 +101,13 @@ fn fingerprint_clip(clip: &Clip, hasher: &mut impl Hasher) {
     hash_f64(clip.transform.rotation_deg, hasher);
     hash_f64(clip.transform.anchor.x, hasher);
     hash_f64(clip.transform.anchor.y, hasher);
+    match serde_json::to_string(&clip.motion_keyframes) {
+        Ok(json) => json.hash(hasher),
+        Err(e) => {
+            tracing::warn!("Failed to serialize motion_keyframes for fingerprint: {e}");
+            "motion_keyframes_serialize_error".hash(hasher);
+        }
+    }
 
     // Visual properties
     hash_f64(f64::from(clip.opacity), hasher);
@@ -108,6 +115,7 @@ fn fingerprint_clip(clip: &Clip, hasher: &mut impl Hasher) {
     hash_f64(f64::from(clip.speed), hasher);
     clip.reverse.hash(hasher);
     clip.freeze_frame.hash(hasher);
+    format!("{:?}", clip.slow_motion_interpolation).hash(hasher);
     clip.enabled.hash(hasher);
 
     // Time remap
@@ -1038,12 +1046,14 @@ mod tests {
                 duration_sec: duration,
             },
             transform: Transform::default(),
+            motion_keyframes: Vec::new(),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             speed: 1.0,
             reverse: false,
             freeze_frame: false,
             time_remap: None,
+            slow_motion_interpolation: crate::core::timeline::SlowMotionInterpolation::Nearest,
             effects: vec![],
             audio: AudioSettings::default(),
             label: None,
@@ -1071,6 +1081,7 @@ mod tests {
             visible: true,
             sync_lock: false,
             volume: 1.0,
+            caption_language: None,
         }
     }
 

@@ -384,6 +384,18 @@ impl ProjectState {
                     asset.file_size = file_size;
                 }
             }
+
+            if let Some(duration_value) = op.payload.get("durationSec") {
+                asset.duration_sec = duration_value.as_f64();
+            }
+
+            if let Some(video_value) = op.payload.get("video") {
+                asset.video = serde_json::from_value(video_value.clone()).ok();
+            }
+
+            if let Some(audio_value) = op.payload.get("audio") {
+                asset.audio = serde_json::from_value(audio_value.clone()).ok();
+            }
         }
         Ok(())
     }

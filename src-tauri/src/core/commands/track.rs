@@ -449,6 +449,132 @@ impl Command for RenameTrackCommand {
 }
 
 // =============================================================================
+// SetCaptionTrackLanguageCommand
+// =============================================================================
+
+/// Command to set a caption track language.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetCaptionTrackLanguageCommand {
+    /// Target sequence ID
+    pub sequence_id: SequenceId,
+    /// Target caption track ID
+    pub track_id: TrackId,
+    /// Normalized language code
+    pub language: String,
+    /// Original language (for undo)
+    #[serde(skip)]
+    original_language: Option<Option<String>>,
+}
+
+impl SetCaptionTrackLanguageCommand {
+    /// Creates a new caption track language command.
+    pub fn new(sequence_id: &str, track_id: &str, language: &str) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            language: language.to_string(),
+            original_language: None,
+        }
+    }
+}
+
+fn normalize_caption_language(language: &str) -> CoreResult<String> {
+    let normalized = language.trim().replace('_', "-").to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(CoreError::ValidationError(
+            "Caption track language is required".to_string(),
+        ));
+    }
+
+    if normalized.len() > 32 {
+        return Err(CoreError::ValidationError(
+            "Caption track language must be 32 characters or fewer".to_string(),
+        ));
+    }
+
+    let mut parts = normalized.split('-');
+    let Some(primary) = parts.next() else {
+        return Err(CoreError::ValidationError(
+            "Caption track language is required".to_string(),
+        ));
+    };
+
+    if !(2..=3).contains(&primary.len()) || !primary.chars().all(|ch| ch.is_ascii_lowercase()) {
+        return Err(CoreError::ValidationError(
+            "Caption track language must start with a 2-3 letter code".to_string(),
+        ));
+    }
+
+    for subtag in parts {
+        if subtag.len() < 2
+            || subtag.len() > 8
+            || !subtag.chars().all(|ch| ch.is_ascii_alphanumeric())
+        {
+            return Err(CoreError::ValidationError(
+                "Caption track language contains an invalid subtag".to_string(),
+            ));
+        }
+    }
+
+    Ok(normalized)
+}
+
+impl Command for SetCaptionTrackLanguageCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let normalized_language = normalize_caption_language(&self.language)?;
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        if !track.is_caption() {
+            return Err(CoreError::InvalidCommand(
+                "Caption track language requires a caption track".to_string(),
+            ));
+        }
+
+        self.original_language = Some(track.caption_language.clone());
+        self.language = normalized_language.clone();
+        track.caption_language = Some(normalized_language);
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::TrackModified {
+                track_id: self.track_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(original_language) = &self.original_language else {
+            return Ok(());
+        };
+
+        if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) {
+                track.caption_language = original_language.clone();
+            }
+        }
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetCaptionTrackLanguage"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
 // SetTrackBlendModeCommand
 // =============================================================================
 
@@ -526,6 +652,90 @@ impl Command for SetTrackBlendModeCommand {
 
     fn type_name(&self) -> &'static str {
         "SetTrackBlendMode"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
+// SetTrackVolumeCommand
+// =============================================================================
+
+/// Command to set a track's linear mixer volume.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTrackVolumeCommand {
+    /// Target sequence ID
+    pub sequence_id: SequenceId,
+    /// Target track ID
+    pub track_id: TrackId,
+    /// Desired linear volume (0.0 to 2.0)
+    pub volume: f32,
+    /// Original volume (for undo)
+    #[serde(skip)]
+    original_volume: Option<f32>,
+}
+
+impl SetTrackVolumeCommand {
+    /// Creates a new set track volume command.
+    pub fn new(sequence_id: &str, track_id: &str, volume: f32) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            volume,
+            original_volume: None,
+        }
+    }
+}
+
+impl Command for SetTrackVolumeCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !self.volume.is_finite() {
+            return Err(CoreError::ValidationError(
+                "Track volume must be finite".to_string(),
+            ));
+        }
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        self.original_volume = Some(track.volume);
+        track.volume = self.volume.clamp(0.0, 2.0);
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::TrackModified {
+                track_id: self.track_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(original_volume) = self.original_volume else {
+            return Ok(());
+        };
+
+        if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) {
+                track.volume = original_volume;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetTrackVolume"
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -952,6 +1162,74 @@ mod tests {
 
         let track = &state.sequences[&seq_id].tracks[0];
         assert_eq!(track.name, "New Name");
+    }
+
+    #[test]
+    fn test_set_caption_track_language_normalizes_and_undoes() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        let mut add_cmd = AddTrackCommand::new(&seq_id, "Captions", TrackKind::Caption);
+        let result = add_cmd.execute(&mut state).unwrap();
+        let track_id = result.created_ids[0].clone();
+
+        let mut language_cmd = SetCaptionTrackLanguageCommand::new(&seq_id, &track_id, " KO_kr ");
+        language_cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.caption_language.as_deref(), Some("ko-kr"));
+
+        language_cmd.undo(&mut state).unwrap();
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.caption_language, None);
+    }
+
+    #[test]
+    fn test_set_caption_track_language_rejects_non_caption_tracks() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        let mut add_cmd = AddTrackCommand::new(&seq_id, "Video 1", TrackKind::Video);
+        let result = add_cmd.execute(&mut state).unwrap();
+        let track_id = result.created_ids[0].clone();
+
+        let mut language_cmd = SetCaptionTrackLanguageCommand::new(&seq_id, &track_id, "en");
+        let result = language_cmd.execute(&mut state);
+
+        assert!(matches!(result, Err(CoreError::InvalidCommand(_))));
+    }
+
+    #[test]
+    fn test_set_track_volume_command() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        let mut add_cmd = AddTrackCommand::new(&seq_id, "Audio 1", TrackKind::Audio);
+        let result = add_cmd.execute(&mut state).unwrap();
+        let track_id = result.created_ids[0].clone();
+
+        let mut volume_cmd = SetTrackVolumeCommand::new(&seq_id, &track_id, 0.5);
+        volume_cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.volume, 0.5);
+    }
+
+    #[test]
+    fn test_set_track_volume_clamps_and_undoes() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        let mut add_cmd = AddTrackCommand::new(&seq_id, "Audio 1", TrackKind::Audio);
+        let result = add_cmd.execute(&mut state).unwrap();
+        let track_id = result.created_ids[0].clone();
+
+        let mut volume_cmd = SetTrackVolumeCommand::new(&seq_id, &track_id, 4.0);
+        volume_cmd.execute(&mut state).unwrap();
+        assert_eq!(state.sequences[&seq_id].tracks[0].volume, 2.0);
+
+        volume_cmd.undo(&mut state).unwrap();
+        assert_eq!(state.sequences[&seq_id].tracks[0].volume, 1.0);
     }
 
     #[test]

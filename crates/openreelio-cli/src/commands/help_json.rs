@@ -294,6 +294,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "file": { "type": "string", "required": true, "desc": "Subtitle or transcription JSON file path" },
                     "track": { "type": "string", "required": false, "desc": "Caption track ID (auto-created when omitted)" },
                     "format": { "type": "string", "required": false, "desc": "Subtitle format: srt, vtt, or transcript-json (auto-detected when omitted)" },
+                    "language": { "type": "string", "required": false, "desc": "Language code stored on the caption track and generated caption segments" },
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object applied to all cues" },
                     "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
                     "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object applied to all cues" },
@@ -378,8 +379,8 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "track": { "type": "string", "required": false, "desc": "Video or overlay track ID (auto-created when omitted)" },
                     "text": { "type": "string", "required": true, "desc": "Text content" },
                     "start": { "type": "number", "required": true, "desc": "Timeline start time in seconds" },
-                    "duration": { "type": "number", "required": false, "desc": "Clip duration in seconds" },
-                    "preset": { "type": "string", "required": false, "desc": "default, title, lower-third, or subtitle" },
+                    "duration": { "type": "number", "required": false, "desc": "Clip duration in seconds. Defaults to the selected preset's recommended duration." },
+                    "preset": { "type": "string", "required": false, "desc": "default, title, centered-title, epic-title, chapter-title, lower-third, lower-third-news, lower-third-name-role, subtitle, callout, callout-stat, credits, credit-line, logo-bug, social-handle, quote, watermark, or countdown" },
                     "text-json": { "type": "string", "required": false, "desc": "Full TextClipData JSON object" },
                     "style-json": { "type": "string", "required": false, "desc": "Full TextStyle JSON object" },
                     "position-json": { "type": "string", "required": false, "desc": "Text position JSON object" },
@@ -403,7 +404,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "opacity": { "type": "number", "required": false, "desc": "Opacity, 0-1" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
-                "example": "openreelio-cli text add --path ./project --text \"Title\" --start 0 --duration 3 --font-family Inter --font-size 72 --font-weight 700 --x 0.5 --y 0.2"
+                "example": "openreelio-cli text add --path ./project --text \"Directed by OpenReelio\" --start 90 --preset credits"
             },
             "text.update": {
                 "description": "Update an editable text clip's content, style, position, effects, and timing",

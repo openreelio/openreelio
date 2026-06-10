@@ -472,6 +472,34 @@ describe('commandSchemas', () => {
       expect(result.success).toBe(true);
     });
 
+    it('should validate effect preset keyframes when adding an effect', () => {
+      const command = {
+        commandType: 'AddEffect',
+        params: {
+          clipId: '550e8400-e29b-41d4-a716-446655440000',
+          effectType: 'gaussian_blur',
+          params: { radius: 12 },
+          keyframes: {
+            radius: [
+              {
+                timeOffset: 0,
+                value: 4,
+                easing: 'linear',
+              },
+              {
+                timeOffset: 1.5,
+                value: 12,
+                easing: 'ease_out',
+              },
+            ],
+          },
+        },
+      };
+
+      const result = AddEffectSchema.safeParse(command);
+      expect(result.success).toBe(true);
+    });
+
     it('should reject invalid effect type', () => {
       const command = {
         commandType: 'AddEffect',

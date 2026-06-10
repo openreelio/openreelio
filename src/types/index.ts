@@ -414,6 +414,8 @@ export interface Track {
   syncLock?: boolean;
   /** Volume as linear multiplier (0.0 - 2.0, where 1.0 = 100%) */
   volume: number;
+  /** Language code for caption tracks */
+  captionLanguage?: string;
 }
 
 export interface ClipRange {
@@ -439,6 +441,8 @@ export interface Transform {
 
 /** Audio fade curve type */
 export type FadeType = 'linear' | 'constantGain' | 'constantPower' | 'exponential' | 'sCurve';
+
+export type AudioRole = 'dialogue' | 'music' | 'sfx' | 'ambience' | 'voiceover' | 'none';
 
 /** Parameters for audio ducking (auto-duck music during speech) */
 export interface AudioDuckingParams {
@@ -479,6 +483,10 @@ export interface AudioSettings {
   fadeOutType?: FadeType;
   /** Volume automation keyframes (overrides flat volumeDb when non-empty) */
   volumeKeyframes?: AudioKeyframe[];
+  /** Editorial role groundwork for future buses/routing */
+  audioRole?: AudioRole;
+  /** Editorial tags groundwork for future buses/routing */
+  audioTags?: string[];
 }
 
 /** Interpolation type for time remap keyframes */
@@ -503,12 +511,27 @@ export interface TimeRemapCurve {
   keyframes: TimeRemapKeyframe[];
 }
 
+/** Slow-motion interpolation mode for clips playing below real time */
+export type SlowMotionInterpolation = 'nearest' | 'frameBlend' | 'motionCompensated';
+
+/** A single transform keyframe on a clip motion curve. */
+export interface TransformKeyframe {
+  /** Timeline time in seconds relative to clip start */
+  timeOffset: number;
+  /** Complete transform snapshot at this keyframe */
+  transform: Transform;
+  /** How to interpolate to the next keyframe */
+  interpolation: KeyframeInterpolation;
+}
+
 export interface Clip {
   id: ClipId;
   assetId: AssetId;
   range: ClipRange;
   place: ClipPlace;
   transform: Transform;
+  /** Optional clip transform animation keyframes */
+  motionKeyframes?: TransformKeyframe[];
   opacity: number;
   /** Blend mode for compositing (default: 'normal') */
   blendMode?: BlendMode;
@@ -518,6 +541,8 @@ export interface Clip {
   freezeFrame?: boolean;
   /** Optional time remap curve for variable-speed playback */
   timeRemap?: TimeRemapCurve | null;
+  /** Slow-motion interpolation mode for slow clips and speed ramps */
+  slowMotionInterpolation?: SlowMotionInterpolation;
   effects: EffectId[];
   audio: AudioSettings;
   label?: string;
@@ -890,6 +915,7 @@ export function isTextClip(assetId: string): boolean {
 
 export type CommandType =
   | 'ImportAsset'
+  | 'UpdateAsset'
   // Filesystem commands
   | 'CreateFolder'
   | 'RenameFile'
@@ -899,7 +925,10 @@ export type CommandType =
   | 'InsertEdit'
   | 'OverwriteEdit'
   | 'SetClipTransform'
+  | 'SetClipMotionKeyframes'
+  | 'SetClipOpacity'
   | 'SetClipSpeed'
+  | 'SetClipSlowMotionInterpolation'
   | 'SetClipMute'
   | 'SetClipAudio'
   | 'SetClipBlendMode'
@@ -920,6 +949,8 @@ export type CommandType =
   | 'ReorderTracks'
   | 'DeleteTrack'
   | 'SetTrackBlendMode'
+  | 'SetTrackVolume'
+  | 'SetCaptionTrackLanguage'
   | 'ToggleTrackMute'
   | 'ToggleTrackLock'
   | 'ToggleTrackVisibility'
@@ -941,6 +972,7 @@ export type CommandType =
   | 'CloseAllGaps'
   // Speed operations (S25)
   | 'SetClipSpeed'
+  | 'SetClipSlowMotionInterpolation'
   | 'ReverseClip'
   | 'CreateFreezeFrame'
   | 'SetTimeRemap'

@@ -26,7 +26,9 @@ use crate::core::{
         build_ffmpeg_invocation_for_render_plan, build_ffmpeg_invocation_from_args,
         execute_ffmpeg_invocation, execute_ffmpeg_output, RenderPlan,
     },
-    timeline::{BlendMode, Clip, Sequence, TimelineClock, Track, TrackKind},
+    timeline::{
+        BlendMode, Clip, Sequence, SlowMotionInterpolation, TimelineClock, Track, TrackKind,
+    },
 };
 
 pub(super) fn hdr_metadata_for_asset(asset: &Asset) -> HdrMetadata {
@@ -388,6 +390,11 @@ pub struct VideoExportRequest {
     pub crf: Option<u8>,
     #[serde(default)]
     pub two_pass: bool,
+    #[serde(default)]
+    pub hdr_mode: HdrMode,
+    pub max_cll: Option<u32>,
+    pub max_fall: Option<u32>,
+    pub bit_depth: Option<u8>,
 }
 
 /// Export settings
@@ -725,10 +732,10 @@ impl ExportSettings {
             two_pass: request.two_pass,
             start_time,
             end_time,
-            hdr_mode: HdrMode::Sdr,
-            max_cll: None,
-            max_fall: None,
-            bit_depth: None,
+            hdr_mode: request.hdr_mode.clone(),
+            max_cll: request.max_cll,
+            max_fall: request.max_fall,
+            bit_depth: request.bit_depth,
             tonemap_mode: None,
             hardware_accel: super::hardware::HardwareAccelMode::default(),
             resolved_encoder_name: None,
@@ -757,6 +764,10 @@ impl ExportSettings {
             audio_bitrate: settings.audio_bitrate,
             crf: settings.crf,
             two_pass: settings.two_pass,
+            hdr_mode: HdrMode::Sdr,
+            max_cll: None,
+            max_fall: None,
+            bit_depth: None,
         }
     }
 
@@ -1158,6 +1169,31 @@ pub fn validate_video_export_request(
         ));
     }
 
+    if !matches!(request.hdr_mode, HdrMode::Sdr) {
+        if !matches!(request.video_codec, VideoCodec::H265) {
+            return Err(ExportError::InvalidSettings(format!(
+                "HDR export requires H.265 (HEVC) codec. Current codec: {:?}. H.264 does not support HDR metadata.",
+                request.video_codec
+            )));
+        }
+
+        if request.bit_depth.unwrap_or(8) < 10 {
+            return Err(ExportError::InvalidSettings(
+                "HDR export requires 10-bit or higher color depth".to_string(),
+            ));
+        }
+
+        if matches!(request.hdr_mode, HdrMode::Hdr10) {
+            if let (Some(max_cll), Some(max_fall)) = (request.max_cll, request.max_fall) {
+                if max_fall > max_cll {
+                    return Err(ExportError::InvalidSettings(
+                        "HDR10 MaxFALL must be less than or equal to MaxCLL".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1197,6 +1233,10 @@ fn validate_export_settings_options(settings: &ExportSettings) -> Vec<String> {
         audio_bitrate: settings.audio_bitrate.clone(),
         crf: settings.crf,
         two_pass: settings.two_pass,
+        hdr_mode: settings.hdr_mode.clone(),
+        max_cll: settings.max_cll,
+        max_fall: settings.max_fall,
+        bit_depth: settings.bit_depth,
     };
 
     if let Err(error) = validate_video_export_request(&request, &settings.output_path) {
@@ -1824,6 +1864,48 @@ fn format_speed_number(value: f64) -> String {
     s
 }
 
+fn time_remap_has_slow_segment(curve: &crate::core::timeline::TimeRemapCurve) -> bool {
+    curve.keyframes.windows(2).any(|pair| {
+        let start = &pair[0];
+        let end = &pair[1];
+        let timeline_delta = end.timeline_time - start.timeline_time;
+        let source_delta = (end.source_time - start.source_time).abs();
+
+        timeline_delta.is_finite()
+            && timeline_delta > 1e-6
+            && source_delta.is_finite()
+            && source_delta / timeline_delta < 1.0 - 1e-6
+    })
+}
+
+fn clip_uses_slow_motion(clip: &Clip) -> bool {
+    if clip.freeze_frame {
+        return false;
+    }
+
+    if let Some(ref remap) = clip.time_remap {
+        if remap.is_valid() {
+            return time_remap_has_slow_segment(remap);
+        }
+    }
+
+    clip.safe_speed() < 1.0 - 1e-6
+}
+
+fn build_slow_motion_interpolation_filter(clip: &Clip) -> Option<&'static str> {
+    if !clip_uses_slow_motion(clip) {
+        return None;
+    }
+
+    match clip.slow_motion_interpolation {
+        SlowMotionInterpolation::Nearest => None,
+        SlowMotionInterpolation::FrameBlend => Some("minterpolate=mi_mode=blend"),
+        SlowMotionInterpolation::MotionCompensated => {
+            Some("minterpolate=mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
+        }
+    }
+}
+
 /// Build video trim filter with speed, reverse, freeze frame, and time remap support.
 ///
 /// Generates the complete video filter chain from input to the trim output label:
@@ -1852,12 +1934,16 @@ pub(super) fn build_video_trim_filter(
         let remap = clip.time_remap.as_ref().unwrap();
         let setpts = build_time_remap_setpts(remap);
         let (source_start, source_end) = remap.source_range();
+        let interpolation = build_slow_motion_interpolation_filter(clip)
+            .map(|filter| format!(",{}", filter))
+            .unwrap_or_default();
         let filter = format!(
-            "[{}:v]trim=start={}:end={},setpts={}[{}]",
+            "[{}:v]trim=start={}:end={},setpts={}{}[{}]",
             input_index,
             format_speed_number(source_start),
             format_speed_number(source_end),
             setpts,
+            interpolation,
             trim_label
         );
         filter_complex.push_str(&filter);
@@ -1865,18 +1951,34 @@ pub(super) fn build_video_trim_filter(
         // Reverse: apply reverse filter after trim, before speed
         let speed = clip.safe_speed();
         let setpts = build_speed_setpts(speed);
+        let interpolation = build_slow_motion_interpolation_filter(clip)
+            .map(|filter| format!(",{}", filter))
+            .unwrap_or_default();
         let filter = format!(
-            "[{}:v]trim=start={}:end={},setpts=PTS-STARTPTS,reverse,setpts={}[{}]",
-            input_index, clip.range.source_in_sec, clip.range.source_out_sec, setpts, trim_label
+            "[{}:v]trim=start={}:end={},setpts=PTS-STARTPTS,reverse,setpts={}{}[{}]",
+            input_index,
+            clip.range.source_in_sec,
+            clip.range.source_out_sec,
+            setpts,
+            interpolation,
+            trim_label
         );
         filter_complex.push_str(&filter);
     } else {
         // Normal: trim with constant speed adjustment
         let speed = clip.safe_speed();
         let setpts = build_speed_setpts(speed);
+        let interpolation = build_slow_motion_interpolation_filter(clip)
+            .map(|filter| format!(",{}", filter))
+            .unwrap_or_default();
         let filter = format!(
-            "[{}:v]trim=start={}:end={},setpts={}[{}]",
-            input_index, clip.range.source_in_sec, clip.range.source_out_sec, setpts, trim_label
+            "[{}:v]trim=start={}:end={},setpts={}{}[{}]",
+            input_index,
+            clip.range.source_in_sec,
+            clip.range.source_out_sec,
+            setpts,
+            interpolation,
+            trim_label
         );
         filter_complex.push_str(&filter);
     }
@@ -4519,6 +4621,126 @@ fn validate_clip_frame_alignment(
     }
 }
 
+fn has_active_tonemap(settings: &ExportSettings) -> bool {
+    settings
+        .tonemap_mode
+        .as_ref()
+        .is_some_and(|mode| !matches!(mode, TonemapMode::None))
+}
+
+fn linear_gain_to_db(gain: f32) -> f64 {
+    if gain <= 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        20.0 * (gain as f64).log10()
+    }
+}
+
+fn max_clip_volume_db(clip: &Clip) -> f64 {
+    if clip.audio.has_volume_automation() {
+        clip.audio
+            .volume_keyframes
+            .iter()
+            .map(|keyframe| keyframe.value_db)
+            .fold(f64::NEG_INFINITY, f64::max)
+    } else {
+        clip.audio.volume_db as f64
+    }
+}
+
+fn validate_clip_asset_qc(
+    validation: &mut ExportValidation,
+    clip: &Clip,
+    track: &Track,
+    asset: &Asset,
+    sequence: &Sequence,
+    settings: &ExportSettings,
+) {
+    if asset.missing {
+        validation.add_error(format!(
+            "Asset '{}' is marked missing/offline for clip '{}'",
+            asset.id, clip.id
+        ));
+    }
+
+    if let Some(video) = asset.video.as_ref() {
+        if video.is_hdr && !settings.is_hdr() && !has_active_tonemap(settings) {
+            validation.add_warning(format!(
+                "HDR source asset '{}' on clip '{}' is exporting to SDR without tonemapping; verify gamut/clipping in scopes or enable HDR export/tonemap",
+                asset.id, clip.id
+            ));
+        }
+    }
+
+    let carries_audio = matches!(asset.kind, AssetKind::Audio | AssetKind::Video)
+        && asset.audio.is_some()
+        && !clip.audio.muted;
+    if carries_audio {
+        let combined_gain_db = max_clip_volume_db(clip)
+            + linear_gain_to_db(track.volume)
+            + sequence.master_volume_db as f64;
+
+        if combined_gain_db > 3.0 {
+            validation.add_warning(format!(
+                "Clip '{}' on track '{}' has {:.1} dB combined gain; verify loudness and clipping before export",
+                clip.id, track.name, combined_gain_db
+            ));
+        }
+    }
+}
+
+fn validate_caption_track_qc(
+    validation: &mut ExportValidation,
+    clock: &TimelineClock,
+    track: &Track,
+) {
+    let mut enabled_caption_clips: Vec<&Clip> =
+        track.clips.iter().filter(|clip| clip.enabled).collect();
+
+    for clip in &enabled_caption_clips {
+        validate_clip_frame_alignment(validation, clock, clip, track);
+
+        let caption_text = clip.label.as_deref().unwrap_or("").trim();
+        if caption_text.is_empty() {
+            validation.add_warning(format!(
+                "Caption clip '{}' on track '{}' has empty text",
+                clip.id, track.name
+            ));
+        }
+
+        let duration = clip.place.duration_sec;
+        if duration <= 0.0 {
+            validation.add_warning(format!(
+                "Caption clip '{}' on track '{}' has no visible duration",
+                clip.id, track.name
+            ));
+        } else if duration < 0.5 {
+            validation.add_warning(format!(
+                "Caption clip '{}' on track '{}' is shorter than 0.5 seconds",
+                clip.id, track.name
+            ));
+        }
+    }
+
+    enabled_caption_clips.sort_by(|a, b| {
+        a.place
+            .timeline_in_sec
+            .partial_cmp(&b.place.timeline_in_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for pair in enabled_caption_clips.windows(2) {
+        let previous = pair[0];
+        let next = pair[1];
+        if previous.place.overlaps(&next.place) {
+            validation.add_warning(format!(
+                "Caption clips '{}' and '{}' overlap on track '{}'",
+                previous.id, next.id, track.name
+            ));
+        }
+    }
+}
+
 /// Validate export settings before starting export
 pub fn validate_export_settings(
     sequence: &Sequence,
@@ -4590,6 +4812,7 @@ pub fn validate_export_settings(
 
         if track.kind == TrackKind::Caption {
             // Caption tracks are burned in separately and do not use file-backed assets.
+            validate_caption_track_qc(&mut validation, &timeline_clock, track);
             continue;
         }
 
@@ -4656,6 +4879,8 @@ pub fn validate_export_settings(
                     asset.id, err
                 ));
             }
+
+            validate_clip_asset_qc(&mut validation, clip, track, asset, sequence, settings);
         }
     }
 
@@ -5159,6 +5384,173 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_rejects_asset_marked_missing_offline() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_offline_video.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_offline_video.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        video_asset.missing = true;
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(!validation.is_valid);
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.contains("missing/offline")));
+    }
+
+    #[test]
+    fn test_validation_warns_hdr_source_to_sdr_without_tonemap() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(
+            Clip::new("hdr_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_hdr_source.mp4");
+        let mut assets = HashMap::new();
+        let mut video_info = VideoInfo::default();
+        video_info.is_hdr = true;
+        video_info.color_transfer = Some("smpte2084".to_string());
+        let mut video_asset =
+            Asset::new_video("validation_hdr_source.mp4", &video_path, video_info)
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        video_asset.id = "hdr_asset".to_string();
+        assets.insert("hdr_asset".to_string(), video_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            validation.is_valid,
+            "HDR-to-SDR QC should warn, not block export. Got: {validation:?}"
+        );
+        assert!(validation.warnings.iter().any(|warning| {
+            warning.contains("HDR source") && warning.contains("gamut/clipping")
+        }));
+    }
+
+    #[test]
+    fn test_validation_allows_hdr_source_to_sdr_with_tonemap_without_warning() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(
+            Clip::new("hdr_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_hdr_tonemapped_source.mp4");
+        let mut assets = HashMap::new();
+        let mut video_info = VideoInfo::default();
+        video_info.is_hdr = true;
+        video_info.color_transfer = Some("smpte2084".to_string());
+        let mut video_asset = Asset::new_video(
+            "validation_hdr_tonemapped_source.mp4",
+            &video_path,
+            video_info,
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "hdr_asset".to_string();
+        assets.insert("hdr_asset".to_string(), video_asset);
+
+        let settings = ExportSettings {
+            tonemap_mode: Some(TonemapMode::Reinhard),
+            ..ExportSettings::default()
+        };
+        let validation = validate_export_settings(&sequence, &assets, &HashMap::new(), &settings);
+
+        assert!(validation.is_valid);
+        assert!(!validation
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("HDR source")));
+    }
+
+    #[test]
+    fn test_validation_warns_high_audio_gain_for_loudness_qc() {
+        use crate::core::assets::{AudioInfo, VideoInfo};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.volume = 2.0;
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.audio.volume_db = 1.0;
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_loudness_video.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_loudness_video.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        video_asset.audio = Some(AudioInfo::default());
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(validation.is_valid);
+        assert!(validation
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("loudness and clipping")));
+    }
+
+    #[test]
     fn test_validation_rejects_missing_clip_effect_reference() {
         use crate::core::assets::VideoInfo;
         use crate::core::timeline::{Clip, SequenceFormat, Track};
@@ -5498,6 +5890,69 @@ mod tests {
             validation.is_valid,
             "Expected caption track assets to be ignored. Got: {validation:?}"
         );
+    }
+
+    #[test]
+    fn test_validation_warns_caption_text_timing_and_overlap_qc() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut caption_track = Track::new_caption("Captions");
+        let mut empty_caption = Clip::new("caption_empty")
+            .with_source_range(0.0, 0.25)
+            .place_at(0.0);
+        empty_caption.label = Some("   ".to_string());
+        caption_track.add_clip(empty_caption);
+
+        let mut overlapping_caption = Clip::new("caption_overlap")
+            .with_source_range(0.0, 1.0)
+            .place_at(0.2);
+        overlapping_caption.label = Some("Readable caption".to_string());
+        caption_track.add_clip(overlapping_caption);
+        sequence.add_track(caption_track);
+
+        let video_path = create_temp_media_file("validation_caption_qc_video.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_caption_qc_video.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(validation.is_valid);
+        assert!(validation
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("empty text")));
+        assert!(validation
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("shorter than 0.5 seconds")));
+        assert!(validation
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("overlap")));
     }
 
     #[test]
@@ -6173,6 +6628,10 @@ mod tests {
             audio_bitrate: None,
             crf: None,
             two_pass: false,
+            hdr_mode: HdrMode::Sdr,
+            max_cll: None,
+            max_fall: None,
+            bit_depth: None,
         };
 
         let error =
@@ -6209,6 +6668,55 @@ mod tests {
 
         validate_video_export_request(&request, Path::new("/tmp/delivery.m4v"))
             .expect("m4v is an MPEG-4 container extension");
+    }
+
+    /// Feature: Structured video export validation
+    /// Scenario: should reject HDR requests with H.264 before rendering
+    #[test]
+    fn video_export_request_should_reject_hdr_h264() {
+        let request = VideoExportRequest {
+            hdr_mode: HdrMode::Hdr10,
+            bit_depth: Some(10),
+            max_cll: Some(1000),
+            max_fall: Some(400),
+            ..ExportSettings::request_from_preset(ExportPreset::Youtube1080p)
+        };
+
+        let error =
+            validate_video_export_request(&request, Path::new("/tmp/delivery.mp4")).unwrap_err();
+
+        assert!(
+            error.to_string().contains("HDR export requires H.265"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Feature: Structured video export validation
+    /// Scenario: should carry valid HDR settings into export settings
+    #[test]
+    fn video_export_request_should_apply_hdr_settings() {
+        let request = VideoExportRequest {
+            video_codec: VideoCodec::H265,
+            hdr_mode: HdrMode::Hdr10,
+            bit_depth: Some(10),
+            max_cll: Some(1000),
+            max_fall: Some(400),
+            ..ExportSettings::request_from_preset(ExportPreset::Youtube1080p)
+        };
+
+        let settings = ExportSettings::from_video_request(
+            &request,
+            PathBuf::from("/tmp/delivery.mp4"),
+            None,
+            None,
+        )
+        .expect("HDR H.265 request should be valid");
+
+        assert_eq!(settings.video_codec, VideoCodec::H265);
+        assert_eq!(settings.hdr_mode, HdrMode::Hdr10);
+        assert_eq!(settings.bit_depth, Some(10));
+        assert_eq!(settings.max_cll, Some(1000));
+        assert_eq!(settings.max_fall, Some(400));
     }
 
     /// Feature: WebM VP9 quality export
@@ -9031,6 +9539,57 @@ mod tests {
         let setpts = build_speed_setpts(0.5);
         // Then setpts should divide timestamps by 0.5 (plays slower)
         assert_eq!(setpts, "(PTS-STARTPTS)/0.5");
+    }
+
+    #[test]
+    fn should_not_add_slow_motion_filter_for_nearest_mode() {
+        let mut clip = Clip::new("asset")
+            .with_source_range(0.0, 10.0)
+            .place_at(0.0);
+        clip.speed = 0.5;
+        clip.slow_motion_interpolation = SlowMotionInterpolation::Nearest;
+
+        let mut filter = String::new();
+        build_video_trim_filter(&clip, 0, "vtrim0", &mut filter);
+
+        assert!(
+            !filter.contains("minterpolate"),
+            "nearest mode should preserve legacy frame duplication: {filter}"
+        );
+    }
+
+    #[test]
+    fn should_add_frame_blend_filter_for_slow_motion_export() {
+        let mut clip = Clip::new("asset")
+            .with_source_range(0.0, 10.0)
+            .place_at(0.0);
+        clip.speed = 0.5;
+        clip.slow_motion_interpolation = SlowMotionInterpolation::FrameBlend;
+
+        let mut filter = String::new();
+        build_video_trim_filter(&clip, 0, "vtrim0", &mut filter);
+
+        assert!(
+            filter.contains("minterpolate=mi_mode=blend"),
+            "frame blend slow motion should include minterpolate blend: {filter}"
+        );
+    }
+
+    #[test]
+    fn should_add_motion_compensated_filter_for_slow_motion_export() {
+        let mut clip = Clip::new("asset")
+            .with_source_range(0.0, 10.0)
+            .place_at(0.0);
+        clip.speed = 0.5;
+        clip.slow_motion_interpolation = SlowMotionInterpolation::MotionCompensated;
+
+        let mut filter = String::new();
+        build_video_trim_filter(&clip, 0, "vtrim0", &mut filter);
+
+        assert!(
+            filter.contains("minterpolate=mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"),
+            "motion-compensated slow motion should include minterpolate mci: {filter}"
+        );
     }
 
     #[test]

@@ -7807,7 +7807,7 @@ export type VideoCodec = "h264" | "h265" | "vp9" | "prores" | "copy"
 /**
  * Structured video export request used by UI and agent-driven export paths.
  */
-export type VideoExportRequest = { container: ContainerFormat; videoCodec: VideoCodec; audioCodec: AudioCodec; qualityTier: ExportQualityTier; width: number | null; height: number | null; fps: number | null; videoBitrate: string | null; audioBitrate: string | null; crf: number | null; twoPass?: boolean }
+export type VideoExportRequest = { container: ContainerFormat; videoCodec: VideoCodec; audioCodec: AudioCodec; qualityTier: ExportQualityTier; width: number | null; height: number | null; fps: number | null; videoBitrate: string | null; audioBitrate: string | null; crf: number | null; twoPass?: boolean; hdrMode?: SequenceHdrMode; maxCll?: number | null; maxFall?: number | null; bitDepth?: number | null }
 /**
  * Video-specific metadata
  */
