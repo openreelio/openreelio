@@ -16,6 +16,9 @@ const logger = createLogger('AudioTools');
 const MIN_VOLUME_PERCENT = 0;
 const MAX_VOLUME_PERCENT = 200;
 const SILENT_DB = -80;
+const DEFAULT_TARGET_LUFS = -14;
+const DEFAULT_TARGET_LRA = 11;
+const DEFAULT_TRUE_PEAK_DBTP = -1;
 
 function getSequence(sequenceId: string): Sequence | undefined {
   return useProjectStore.getState().sequences.get(sequenceId);
@@ -36,6 +39,13 @@ function toVolumeDb(volumePercent: number): number {
   }
 
   return 20 * Math.log10(volumePercent / 100);
+}
+
+function clampFinite(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, value));
 }
 
 // =============================================================================
@@ -85,48 +95,59 @@ const AUDIO_TOOLS: ToolDefinition[] = [
 
         const clampedVolume = Math.max(MIN_VOLUME_PERCENT, Math.min(MAX_VOLUME_PERCENT, rawVolume));
 
-        let targetClipIds: string[];
         if (requestedClipId) {
-          targetClipIds = [requestedClipId];
-        } else {
-          const sequence = getSequence(sequenceId);
-          if (!sequence) {
-            return { success: false, error: `Sequence '${sequenceId}' not found` };
-          }
-          targetClipIds = getTrackClipIds(sequence, trackId);
-        }
-
-        if (targetClipIds.length === 0) {
-          return {
-            success: false,
-            error: requestedClipId
-              ? `Clip '${requestedClipId}' not found on track '${trackId}'`
-              : `Track '${trackId}' has no clips to adjust`,
-          };
-        }
-
-        const volumeDb = toVolumeDb(clampedVolume);
-        for (const clipId of targetClipIds) {
           await executeAgentCommand('SetClipAudio', {
             sequenceId,
             trackId,
-            clipId,
-            volumeDb,
+            clipId: requestedClipId,
+            volumeDb: toVolumeDb(clampedVolume),
             muted: clampedVolume <= 0,
           });
+
+          const volumeDb = toVolumeDb(clampedVolume);
+          const result = {
+            appliedCount: 1,
+            clipIds: [requestedClipId],
+            volumePercent: clampedVolume,
+            volumeDb,
+          };
+
+          logger.debug('adjust_volume executed', {
+            trackId,
+            appliedCount: result.appliedCount,
+            volumeDb,
+          });
+          return { success: true, result };
         }
 
+        const sequence = getSequence(sequenceId);
+        if (!sequence) {
+          return { success: false, error: `Sequence '${sequenceId}' not found` };
+        }
+
+        const track = sequence.tracks.find((candidate) => candidate.id === trackId);
+        if (!track) {
+          return { success: false, error: `Track '${trackId}' not found` };
+        }
+
+        const trackVolume = clampedVolume / 100;
+        await executeAgentCommand('SetTrackVolume', {
+          sequenceId,
+          trackId,
+          volume: trackVolume,
+        });
+
         const result = {
-          appliedCount: targetClipIds.length,
-          clipIds: targetClipIds,
+          appliedCount: 1,
+          trackId,
           volumePercent: clampedVolume,
-          volumeDb,
+          trackVolume,
         };
 
         logger.debug('adjust_volume executed', {
           trackId,
           appliedCount: result.appliedCount,
-          volumeDb,
+          trackVolume,
         });
         return { success: true, result };
       } catch (error) {
@@ -363,7 +384,7 @@ const AUDIO_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   {
     name: 'normalize_audio',
-    description: 'Normalize audio levels of a clip to a target level',
+    description: 'Normalize audio loudness of a clip to a LUFS target',
     category: 'audio',
     parameters: {
       type: 'object',
@@ -380,16 +401,56 @@ const AUDIO_TOOLS: ToolDefinition[] = [
           type: 'string',
           description: 'The ID of the clip',
         },
+        targetLufs: {
+          type: 'number',
+          description: 'Target integrated loudness in LUFS (default: -14)',
+        },
         targetLevel: {
           type: 'number',
-          description: 'Target normalization level in dB (default: -3)',
+          description: 'Legacy alias for targetLufs in LUFS',
+        },
+        targetLra: {
+          type: 'number',
+          description: 'Target loudness range in LU (default: 11)',
+        },
+        truePeak: {
+          type: 'number',
+          description: 'Target true peak in dBTP (default: -1)',
+        },
+        printFormat: {
+          type: 'string',
+          description: 'FFmpeg loudnorm stats output: summary, json, or none',
         },
       },
       required: ['sequenceId', 'trackId', 'clipId'],
     },
     handler: async (args) => {
       try {
-        const targetLevel = (args.targetLevel as number | undefined) ?? -3;
+        const requestedTargetLufs =
+          (args.targetLufs as number | undefined) ?? (args.targetLevel as number | undefined);
+        const targetLufs = clampFinite(
+          requestedTargetLufs ?? DEFAULT_TARGET_LUFS,
+          -70,
+          -5,
+          DEFAULT_TARGET_LUFS,
+        );
+        const targetLra = clampFinite(
+          (args.targetLra as number | undefined) ?? DEFAULT_TARGET_LRA,
+          1,
+          50,
+          DEFAULT_TARGET_LRA,
+        );
+        const truePeak = clampFinite(
+          (args.truePeak as number | undefined) ?? DEFAULT_TRUE_PEAK_DBTP,
+          -9,
+          0,
+          DEFAULT_TRUE_PEAK_DBTP,
+        );
+        const requestedPrintFormat = args.printFormat as string | undefined;
+        const printFormat =
+          requestedPrintFormat === 'json' || requestedPrintFormat === 'none'
+            ? requestedPrintFormat
+            : 'summary';
 
         const result = await executeAgentCommand('AddEffect', {
           sequenceId: args.sequenceId as string,
@@ -397,12 +458,23 @@ const AUDIO_TOOLS: ToolDefinition[] = [
           clipId: args.clipId as string,
           effectType: 'loudness_normalize',
           params: {
-            target_lufs: targetLevel,
+            target_lufs: targetLufs,
+            target_lra: targetLra,
+            target_tp: truePeak,
+            print_format: printFormat,
           },
         });
 
-        logger.debug('normalize_audio executed', { opId: result.opId, targetLevel });
-        return { success: true, result };
+        const response = {
+          ...result,
+          targetLufs,
+          targetLra,
+          truePeak,
+          printFormat,
+        };
+
+        logger.debug('normalize_audio executed', { opId: result.opId, targetLufs });
+        return { success: true, result: response };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('normalize_audio failed', { error: message });
