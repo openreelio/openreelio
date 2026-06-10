@@ -34,6 +34,18 @@ intro
     expect(result).toEqual([{ startTime: 1, endTime: 3, text: 'Hello world', speaker: 'Alice' }]);
   });
 
+  it('strips inline tags from SRT documents', () => {
+    const result = parseCaptionDocument(
+      `1
+00:00:01,000 --> 00:00:03,000
+<font color="red"><i>Hello</i></font>
+<b>world</b>`,
+      'srt',
+    );
+
+    expect(result).toEqual([{ startTime: 1, endTime: 3, text: 'Hello\nworld' }]);
+  });
+
   it('skips WebVTT metadata blocks before parsing cues', () => {
     const result = parseCaptionDocument(
       `WEBVTT

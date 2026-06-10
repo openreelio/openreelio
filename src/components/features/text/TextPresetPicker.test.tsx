@@ -47,6 +47,8 @@ describe('TextPresetPicker', () => {
       expect(screen.getAllByText(/lower third/i).length).toBeGreaterThanOrEqual(1);
       expect(screen.getAllByText(/centered title/i).length).toBeGreaterThanOrEqual(1);
       expect(screen.getAllByText(/subtitle/i).length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText(/credits block/i).length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText(/logo bug/i).length).toBeGreaterThanOrEqual(1);
     });
 
     it('should render with custom className', () => {
@@ -98,7 +100,7 @@ describe('TextPresetPicker', () => {
       expect(mockOnSelect).toHaveBeenCalledWith(
         expect.objectContaining({
           id: 'lower-third',
-        })
+        }),
       );
     });
 
@@ -116,7 +118,7 @@ describe('TextPresetPicker', () => {
             fontSize: expect.any(Number),
             fontFamily: expect.any(String),
           }),
-        })
+        }),
       );
     });
 
@@ -219,6 +221,17 @@ describe('TextPresetPicker', () => {
       expect(presetNames.some((n) => n.includes('lower third'))).toBe(true);
       expect(presetNames.some((n) => n.includes('title'))).toBe(true);
       expect(presetNames.some((n) => n.includes('subtitle'))).toBe(true);
+      expect(presetNames.some((n) => n.includes('credit'))).toBe(true);
+      expect(presetNames.some((n) => n.includes('bug'))).toBe(true);
+    });
+
+    it('should include production metadata for template defaults', () => {
+      TEXT_PRESETS.forEach((preset) => {
+        expect(preset.defaultContent).toEqual(expect.any(String));
+        expect(preset.defaultContent?.trim().length).toBeGreaterThan(0);
+        expect(preset.defaultDurationSec).toEqual(expect.any(Number));
+        expect(preset.defaultDurationSec).toBeGreaterThan(0);
+      });
     });
   });
 
@@ -234,6 +247,8 @@ describe('TextPresetPicker', () => {
       expect(screen.getByTestId('category-tab-all')).toBeInTheDocument();
       expect(screen.getByTestId('category-tab-title')).toBeInTheDocument();
       expect(screen.getByTestId('category-tab-lower-third')).toBeInTheDocument();
+      expect(screen.getByTestId('category-tab-credit')).toBeInTheDocument();
+      expect(screen.getByTestId('category-tab-brand')).toBeInTheDocument();
     });
 
     it('should not render category tabs by default', () => {
@@ -265,6 +280,20 @@ describe('TextPresetPicker', () => {
       expect(screen.queryByTestId('preset-button-subtitle')).not.toBeInTheDocument();
     });
 
+    it('should filter credit and brand template categories', async () => {
+      render(<TextPresetPicker onSelect={mockOnSelect} showCategories />);
+
+      await userEvent.click(screen.getByTestId('category-tab-credit'));
+      expect(screen.getByTestId('preset-button-credits-block')).toBeInTheDocument();
+      expect(screen.getByTestId('preset-button-credit-line')).toBeInTheDocument();
+      expect(screen.queryByTestId('preset-button-logo-bug')).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByTestId('category-tab-brand'));
+      expect(screen.getByTestId('preset-button-logo-bug')).toBeInTheDocument();
+      expect(screen.getByTestId('preset-button-social-handle')).toBeInTheDocument();
+      expect(screen.queryByTestId('preset-button-credits-block')).not.toBeInTheDocument();
+    });
+
     it('should show all presets when All tab is clicked back', async () => {
       render(<TextPresetPicker onSelect={mockOnSelect} showCategories />);
 
@@ -275,9 +304,9 @@ describe('TextPresetPicker', () => {
       await userEvent.click(screen.getByTestId('category-tab-all'));
 
       // Should show all presets again
-      const presetButtons = screen.getAllByRole('button').filter(
-        (btn) => btn.getAttribute('data-testid')?.startsWith('preset-button-')
-      );
+      const presetButtons = screen
+        .getAllByRole('button')
+        .filter((btn) => btn.getAttribute('data-testid')?.startsWith('preset-button-'));
       expect(presetButtons.length).toBe(TEXT_PRESETS.length);
     });
   });
@@ -288,24 +317,14 @@ describe('TextPresetPicker', () => {
 
   describe('selected state', () => {
     it('should highlight selected preset when selectedPresetId is provided', () => {
-      render(
-        <TextPresetPicker
-          onSelect={mockOnSelect}
-          selectedPresetId="lower-third"
-        />
-      );
+      render(<TextPresetPicker onSelect={mockOnSelect} selectedPresetId="lower-third" />);
 
       const selectedButton = screen.getByTestId('preset-button-lower-third');
       expect(selectedButton).toHaveClass('ring-2');
     });
 
     it('should not highlight other presets when one is selected', () => {
-      render(
-        <TextPresetPicker
-          onSelect={mockOnSelect}
-          selectedPresetId="lower-third"
-        />
-      );
+      render(<TextPresetPicker onSelect={mockOnSelect} selectedPresetId="lower-third" />);
 
       const otherButton = screen.getByTestId('preset-button-centered-title');
       expect(otherButton).not.toHaveClass('ring-2');

@@ -11,6 +11,17 @@ export interface ParsedCaptionSegment {
   speaker?: string;
 }
 
+function sanitizeCaptionText(text: string): string {
+  return text
+    .replace(/<[^>\n]*>/g, '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
 function parseTimestamp(rawValue: string): number {
   const normalized = rawValue.trim().replace(',', '.');
   const parts = normalized.split(':');
@@ -86,7 +97,7 @@ function parseSrtBlocks(content: string): ParsedCaptionSegment[] {
       index += 1;
     }
 
-    const text = textLines.join('\n').trim();
+    const text = sanitizeCaptionText(textLines.join('\n'));
     if (!text) {
       throw new Error(`Missing caption text for range '${timestampLine}'`);
     }
@@ -100,7 +111,7 @@ function parseSrtBlocks(content: string): ParsedCaptionSegment[] {
 function stripVttTags(text: string): { text: string; speaker?: string } {
   const speakerMatch = text.match(/<v(?:\.[^>\s]+)?\s+([^>]+)>/i);
   const speaker = speakerMatch?.[1]?.trim();
-  const cleanedText = text.replace(/<[^>]+>/g, '').trim();
+  const cleanedText = sanitizeCaptionText(text);
 
   return speaker ? { text: cleanedText, speaker } : { text: cleanedText };
 }

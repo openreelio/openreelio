@@ -296,6 +296,60 @@ describe('textTools', () => {
     });
   });
 
+  it('should resolve production text preset aliases with template duration metadata', async () => {
+    mockProject(createSequence({ tracks: [createTrack()] }));
+
+    const result = await globalToolRegistry.execute(
+      'add_text_clip',
+      {
+        content: 'Directed by\nOpenReelio',
+        startTime: 12,
+        preset: 'credits',
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.result).toMatchObject({
+      presetId: 'credits-block',
+    });
+    expect(findExecutedCommand('AddTextClip')).toMatchObject({
+      type: 'AddTextClip',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-video-1',
+        timelineIn: 12,
+        duration: 8,
+        textData: {
+          content: 'Directed by\nOpenReelio',
+          style: expect.objectContaining({
+            fontFamily: 'Georgia',
+            alignment: 'center',
+          }),
+          position: { x: 0.5, y: 0.52 },
+        },
+      },
+    });
+  });
+
+  it('should reject unknown text presets before creating commands', async () => {
+    mockProject(createSequence({ tracks: [createTrack()] }));
+
+    const result = await globalToolRegistry.execute(
+      'add_text_clip',
+      {
+        content: 'Unknown style',
+        startTime: 1,
+        preset: 'not-a-template',
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Parameter 'preset' must be one of");
+    expect(executeCommandMock).not.toHaveBeenCalled();
+  });
+
   it('should auto-place new subtitle-style text away from detected faces', async () => {
     const mediaClip = createClip({
       id: 'clip-video-1',

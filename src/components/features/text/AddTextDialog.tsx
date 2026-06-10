@@ -42,6 +42,7 @@ const MIN_DURATION = 0.5;
 const MAX_DURATION = 300;
 const DEFAULT_DURATION = 3;
 const DEFAULT_TEXT = 'Text';
+const DEFAULT_PRESET_ID = 'centered-title';
 
 /** Fallback style when no preset is selected */
 const DEFAULT_TEXT_STYLE: TextClipData['style'] = {
@@ -75,6 +76,30 @@ function trackHasOverlap(track: Track, timelineIn: number, durationSec: number):
   });
 }
 
+function getDefaultPreset(): TextPreset | null {
+  return getPresetById(DEFAULT_PRESET_ID) ?? null;
+}
+
+function getPresetDefaultContent(preset: TextPreset | null): string {
+  return preset?.defaultContent ?? DEFAULT_TEXT;
+}
+
+function getPresetDefaultDuration(preset: TextPreset | null): number {
+  return preset?.defaultDurationSec ?? DEFAULT_DURATION;
+}
+
+function shouldReplaceContentForPreset(
+  currentContent: string,
+  currentPreset: TextPreset | null,
+): boolean {
+  const normalized = currentContent.trim();
+  return (
+    normalized.length === 0 ||
+    normalized === DEFAULT_TEXT ||
+    normalized === getPresetDefaultContent(currentPreset)
+  );
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -90,12 +115,10 @@ export function AddTextDialog({
   // State
   // ===========================================================================
 
-  const [content, setContent] = useState(DEFAULT_TEXT);
-  const [duration, setDuration] = useState(DEFAULT_DURATION);
+  const [content, setContent] = useState(() => getPresetDefaultContent(getDefaultPreset()));
+  const [duration, setDuration] = useState(() => getPresetDefaultDuration(getDefaultPreset()));
   const [selectedTrackId, setSelectedTrackId] = useState<string>('');
-  const [selectedPreset, setSelectedPreset] = useState<TextPreset | null>(
-    () => getPresetById('centered-title') ?? null,
-  );
+  const [selectedPreset, setSelectedPreset] = useState<TextPreset | null>(() => getDefaultPreset());
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -153,9 +176,10 @@ export function AddTextDialog({
   // Reset form when dialog opens
   useEffect(() => {
     if (isOpen) {
-      setContent(DEFAULT_TEXT);
-      setDuration(DEFAULT_DURATION);
-      setSelectedPreset(getPresetById('centered-title') ?? null);
+      const defaultPreset = getDefaultPreset();
+      setContent(getPresetDefaultContent(defaultPreset));
+      setDuration(getPresetDefaultDuration(defaultPreset));
+      setSelectedPreset(defaultPreset);
       setSubmitError(null);
       setIsSubmitting(false);
     }
@@ -224,9 +248,19 @@ export function AddTextDialog({
         setSubmitError(null);
       }
 
+      setContent((currentContent) =>
+        shouldReplaceContentForPreset(currentContent, selectedPreset)
+          ? getPresetDefaultContent(preset)
+          : currentContent,
+      );
+      setDuration((currentDuration) =>
+        currentDuration === getPresetDefaultDuration(selectedPreset)
+          ? getPresetDefaultDuration(preset)
+          : currentDuration,
+      );
       setSelectedPreset(preset);
     },
-    [submitError],
+    [selectedPreset, submitError],
   );
 
   const handleAdd = useCallback(async () => {

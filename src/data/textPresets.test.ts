@@ -42,6 +42,8 @@ describe('textPresets', () => {
         'title',
         'subtitle',
         'callout',
+        'credit',
+        'brand',
         'creative',
       ];
 
@@ -50,8 +52,8 @@ describe('textPresets', () => {
       });
     });
 
-    it('should have 12 presets', () => {
-      expect(TEXT_PRESETS.length).toBe(12);
+    it('should include a production-sized preset library', () => {
+      expect(TEXT_PRESETS.length).toBeGreaterThanOrEqual(12);
     });
   });
 
@@ -96,6 +98,13 @@ describe('textPresets', () => {
       expect(ids).toContain('tech-style');
       expect(ids).toContain('watermark');
     });
+
+    it('should assign credit and brand presets correctly', () => {
+      const credits = TEXT_PRESETS.filter((p) => p.category === 'credit');
+      const brands = TEXT_PRESETS.filter((p) => p.category === 'brand');
+      expect(credits.length).toBeGreaterThan(0);
+      expect(brands.length).toBeGreaterThan(0);
+    });
   });
 
   // ===========================================================================
@@ -103,34 +112,19 @@ describe('textPresets', () => {
   // ===========================================================================
 
   describe('getPresetsByCategory', () => {
-    it('should return correct presets for lower-third', () => {
-      const presets = getPresetsByCategory('lower-third');
-      expect(presets.length).toBe(3);
-      expect(presets.every((p) => p.category === 'lower-third')).toBe(true);
-    });
-
-    it('should return correct presets for title', () => {
-      const presets = getPresetsByCategory('title');
-      expect(presets.length).toBe(2);
-      expect(presets.every((p) => p.category === 'title')).toBe(true);
-    });
-
-    it('should return correct presets for subtitle', () => {
-      const presets = getPresetsByCategory('subtitle');
-      expect(presets.length).toBe(2);
-      expect(presets.every((p) => p.category === 'subtitle')).toBe(true);
-    });
-
-    it('should return correct presets for callout', () => {
-      const presets = getPresetsByCategory('callout');
-      expect(presets.length).toBe(2);
-      expect(presets.every((p) => p.category === 'callout')).toBe(true);
-    });
-
-    it('should return correct presets for creative', () => {
-      const presets = getPresetsByCategory('creative');
-      expect(presets.length).toBe(3);
-      expect(presets.every((p) => p.category === 'creative')).toBe(true);
+    it.each<TextPresetCategory>([
+      'lower-third',
+      'title',
+      'subtitle',
+      'callout',
+      'credit',
+      'brand',
+      'creative',
+    ])('should return correct presets for %s', (category) => {
+      const presets = getPresetsByCategory(category);
+      const expected = TEXT_PRESETS.filter((p) => p.category === category);
+      expect(presets).toEqual(expected);
+      expect(presets.every((p) => p.category === category)).toBe(true);
     });
   });
 

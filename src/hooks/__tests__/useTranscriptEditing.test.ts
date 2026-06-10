@@ -39,6 +39,18 @@ function createMockWords(count: number): TranscriptWord[] {
   }));
 }
 
+function createWordsFromText(text: string): TranscriptWord[] {
+  return text.split(/\s+/).map((word, index) => ({
+    text: word,
+    startSec: index * 0.5,
+    endSec: (index + 1) * 0.5,
+    segmentIndex: 0,
+    wordIndex: index,
+    confidence: 0.95,
+    speakerId: null,
+  }));
+}
+
 // Helper: set up a selected clip in stores
 function setupClipSelection(assetId = 'asset_1', clipOverrides: Partial<Clip> = {}): void {
   const clipId = 'clip_1';
@@ -59,19 +71,19 @@ function setupClipSelection(assetId = 'asset_1', clipOverrides: Partial<Clip> = 
               id: trackId,
               kind: 'video',
               clips: [
-                      {
-                        id: clipId,
-                        assetId,
-                        range: { sourceInSec: 0.0, sourceOutSec: 10.0 },
-                        place: { timelineInSec: 0.0, durationSec: 10.0 },
-                        speed: 1.0,
-                        effects: [],
-                        audio: {},
-                        transform: {},
-                        opacity: 1.0,
-                        blendMode: 'Normal',
-                        ...clipOverrides,
-                      },
+                {
+                  id: clipId,
+                  assetId,
+                  range: { sourceInSec: 0.0, sourceOutSec: 10.0 },
+                  place: { timelineInSec: 0.0, durationSec: 10.0 },
+                  speed: 1.0,
+                  effects: [],
+                  audio: {},
+                  transform: {},
+                  opacity: 1.0,
+                  blendMode: 'Normal',
+                  ...clipOverrides,
+                },
               ],
               name: 'Video 1',
               muted: false,
@@ -357,6 +369,94 @@ describe('useTranscriptEditing', () => {
         startIndex: 1,
         endIndex: 3,
       });
+    });
+  });
+
+  describe('Search and Correction Preview', () => {
+    it('should find transcript word matches and select an active match', async () => {
+      mockInvoke.mockResolvedValueOnce(createWordsFromText('Hello world hello editor'));
+      setupClipSelection();
+
+      const { result } = renderHook(() => useTranscriptEditing());
+
+      await waitFor(() => {
+        expect(result.current.words).toHaveLength(4);
+      });
+
+      act(() => {
+        result.current.setSearchTerm('hello');
+      });
+
+      expect(result.current.searchMatches).toEqual([
+        { startIndex: 0, endIndex: 0, text: 'Hello' },
+        { startIndex: 2, endIndex: 2, text: 'hello' },
+      ]);
+      expect(result.current.activeSearchMatchIndex).toBe(0);
+
+      act(() => {
+        result.current.selectSearchMatch(1);
+      });
+
+      expect(result.current.activeSearchMatchIndex).toBe(1);
+      expect(result.current.selection).toEqual({ startIndex: 2, endIndex: 2 });
+    });
+
+    it('should navigate search matches with wrapping selection', async () => {
+      mockInvoke.mockResolvedValueOnce(createWordsFromText('cut pause cut pause cut'));
+      setupClipSelection();
+
+      const { result } = renderHook(() => useTranscriptEditing());
+
+      await waitFor(() => {
+        expect(result.current.words).toHaveLength(5);
+      });
+
+      act(() => {
+        result.current.setSearchTerm('cut');
+      });
+
+      act(() => {
+        result.current.goToPreviousSearchMatch();
+      });
+
+      expect(result.current.activeSearchMatchIndex).toBe(2);
+      expect(result.current.selection).toEqual({ startIndex: 4, endIndex: 4 });
+
+      act(() => {
+        result.current.goToNextSearchMatch();
+      });
+
+      expect(result.current.activeSearchMatchIndex).toBe(0);
+      expect(result.current.selection).toEqual({ startIndex: 0, endIndex: 0 });
+    });
+
+    it('should match contiguous phrase queries and preview replacement without mutating words', async () => {
+      mockInvoke.mockResolvedValueOnce(createWordsFromText('we need to trim this part'));
+      setupClipSelection();
+
+      const { result } = renderHook(() => useTranscriptEditing());
+
+      await waitFor(() => {
+        expect(result.current.words).toHaveLength(6);
+      });
+
+      act(() => {
+        result.current.setSearchTerm('need to');
+        result.current.setReplacementText('should');
+      });
+
+      expect(result.current.searchMatches).toEqual([
+        { startIndex: 1, endIndex: 2, text: 'need to' },
+      ]);
+      expect(result.current.replacementPreview).toBe('we should trim this part');
+      expect(result.current.words.map((word) => word.text)).toEqual([
+        'we',
+        'need',
+        'to',
+        'trim',
+        'this',
+        'part',
+      ]);
     });
   });
 

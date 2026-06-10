@@ -387,6 +387,64 @@ describe('captionTools', () => {
     });
   });
 
+  it('should preserve imported speaker metadata and set caption track language', async () => {
+    const tool = globalToolRegistry.get('import_captions_from_file');
+    expect(tool).toBeDefined();
+
+    executeCommandMock
+      .mockResolvedValueOnce({
+        opId: 'op-caption-import',
+        success: true,
+        createdIds: ['cap-101'],
+        deletedIds: [],
+        changes: [],
+      })
+      .mockResolvedValueOnce({
+        opId: 'op-caption-language',
+        success: true,
+        createdIds: [],
+        deletedIds: [],
+        changes: [],
+      });
+
+    vi.mocked(readWorkspaceDocumentFromBackend).mockResolvedValueOnce({
+      relativePath: 'captions/interview.vtt',
+      content: 'WEBVTT\n\n00:00:00.000 --> 00:00:01.500\n<v Alice><i>Hello</i></v>\n',
+      sizeBytes: 72,
+      modifiedAtUnixSec: 1,
+    });
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        relativePath: 'captions/interview.vtt',
+        language: 'KO_kr',
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeCommandMock).toHaveBeenCalledWith({
+      type: 'ImportGeneratedCaptions',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-caption-1',
+        segments: [
+          { startSec: 0, endSec: 1.5, text: 'Hello', speaker: 'Alice', language: 'ko-kr' },
+        ],
+        replaceExisting: false,
+      },
+    });
+    expect(executeCommandMock).toHaveBeenCalledWith({
+      type: 'SetCaptionTrackLanguage',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-caption-1',
+        language: 'ko-kr',
+      },
+    });
+  });
+
   it('should remove a newly created caption track when batch creation fails', async () => {
     const tool = globalToolRegistry.get('add_captions_from_transcription');
     expect(tool).toBeDefined();

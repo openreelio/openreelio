@@ -7,14 +7,17 @@
 
 import { globalToolRegistry, type AgentContext, type ToolDefinition } from '../ToolRegistry';
 import { commands, type AssetAnnotation } from '@/bindings';
+import {
+  TEXT_PRESETS,
+  getPresetByKey,
+  presetToTextClipData,
+  type TextPreset,
+} from '@/data/textPresets';
 import { createLogger } from '@/services/logger';
 import { executeAgentCommand } from './commandExecutor';
 import { useProjectStore } from '@/stores/projectStore';
 import {
-  createLowerThirdTextClipData,
-  createSubtitleTextClipData,
   createTextClipData,
-  createTitleTextClipData,
   isTextClip,
   type Clip,
   type CommandResult,
@@ -51,7 +54,11 @@ const TEXT_TOOL_NAMES = [
 
 const HEX_COLOR_PATTERN = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 
-type TextPresetName = 'default' | 'title' | 'lower_third' | 'subtitle';
+type TextPlacementPresetName = 'default' | 'title' | 'lower_third' | 'subtitle' | 'callout';
+
+const AGENT_TEXT_PRESET_VALUES = Array.from(
+  new Set(['default', ...TEXT_PRESETS.flatMap((preset) => [preset.id, ...(preset.aliases ?? [])])]),
+);
 
 const TEXT_STYLE_PARAMETER_PROPERTIES = {
   fontFamily: { type: 'string', description: 'Font family name' },
@@ -693,17 +700,61 @@ function mergeTextOutline(
   };
 }
 
-function textDataFromPreset(preset: TextPresetName, content: string): TextClipData {
-  switch (preset) {
-    case 'title':
-      return createTitleTextClipData(content);
-    case 'lower_third':
-      return createLowerThirdTextClipData(content);
-    case 'subtitle':
-      return createSubtitleTextClipData(content);
-    default:
-      return createTextClipData(content);
+function textDataFromPreset(preset: TextPreset | null, content: string): TextClipData {
+  if (preset) {
+    return presetToTextClipData(preset, content);
   }
+
+  return createTextClipData(content);
+}
+
+function resolveTextPreset(value: unknown): TextPreset | null {
+  if (typeof value !== 'string' || !value.trim()) {
+    return null;
+  }
+
+  const preset = getPresetByKey(value);
+  if (preset) {
+    return preset;
+  }
+
+  if (value.trim().toLowerCase() === 'default') {
+    return null;
+  }
+
+  throw new Error(
+    `preset must be default or one of: ${TEXT_PRESETS.map((presetItem) => presetItem.id).join(', ')}.`,
+  );
+}
+
+function placementIntentForPreset(preset: TextPreset | null): TextPlacementPresetName {
+  switch (preset?.category) {
+    case 'title':
+      return 'title';
+    case 'lower-third':
+      return 'lower_third';
+    case 'subtitle':
+      return 'subtitle';
+    case 'callout':
+      return 'callout';
+    default:
+      return 'default';
+  }
+}
+
+function hasExplicitPlacementControl(args: Record<string, unknown>): boolean {
+  return (
+    args.autoPlacement !== undefined ||
+    args.placement !== undefined ||
+    args.placementIntent !== undefined ||
+    args.intent !== undefined
+  );
+}
+
+function shouldPreserveTemplatePlacement(preset: TextPreset | null): boolean {
+  return (
+    preset?.category === 'credit' || preset?.category === 'brand' || preset?.category === 'creative'
+  );
 }
 
 function buildTextData(base: TextClipData, args: Record<string, unknown>): TextClipData {
@@ -956,7 +1007,7 @@ async function applyAutomaticTextPlacement(
     timelineIn: number;
     duration: number;
     isCreate: boolean;
-    preset?: TextPresetName;
+    preset?: TextPlacementPresetName;
     excludeClipId?: string;
   },
 ): Promise<{ textData: TextClipData; placement: TextPlacementDecision | null }> {
@@ -1056,8 +1107,9 @@ const TEXT_TOOLS: ToolDefinition[] = [
         endTime: { type: 'number', description: 'Optional end time in seconds' },
         preset: {
           type: 'string',
-          enum: ['default', 'title', 'lower_third', 'subtitle'],
-          description: 'Optional starter text preset',
+          enum: AGENT_TEXT_PRESET_VALUES,
+          description:
+            'Optional starter text preset. Supports preset IDs plus aliases such as title, lower_third, credits, logo_bug, and social_handle.',
         },
         style: { type: 'object', description: 'Text style overrides' },
         ...TEXT_STYLE_PARAMETER_PROPERTIES,
@@ -1100,6 +1152,7 @@ const TEXT_TOOLS: ToolDefinition[] = [
           throw new Error('startTime is required.');
         }
 
+        const preset = resolveTextPreset(args.preset);
         const explicitDuration = requireFiniteNumber(
           args.duration,
           'duration',
@@ -1107,24 +1160,27 @@ const TEXT_TOOLS: ToolDefinition[] = [
           Number.MAX_SAFE_INTEGER,
         );
         const endTime = requireFiniteNumber(args.endTime, 'endTime', 0, Number.MAX_SAFE_INTEGER);
-        const duration = explicitDuration ?? (endTime !== undefined ? endTime - startTime : 4);
+        const duration =
+          explicitDuration ??
+          (endTime !== undefined ? endTime - startTime : (preset?.defaultDurationSec ?? 4));
         if (!Number.isFinite(duration) || duration <= 0) {
           throw new Error('duration must be positive, or endTime must be greater than startTime.');
         }
 
-        const preset =
-          args.preset === 'title' || args.preset === 'lower_third' || args.preset === 'subtitle'
-            ? args.preset
-            : 'default';
+        const placementIntent = placementIntentForPreset(preset);
+        const placementArgs =
+          shouldPreserveTemplatePlacement(preset) && !hasExplicitPlacementControl(args)
+            ? { ...args, placement: false }
+            : args;
         const placementResult = await applyAutomaticTextPlacement(
           buildTextData(textDataFromPreset(preset, text), args),
-          args,
+          placementArgs,
           {
             sequence,
             timelineIn: startTime,
             duration,
             isCreate: true,
-            preset,
+            preset: placementIntent,
           },
         );
         const textData = placementResult.textData;
@@ -1171,6 +1227,7 @@ const TEXT_TOOLS: ToolDefinition[] = [
             clipId: createdClipId,
             trackId: resolvedTrackId,
             createdTrack,
+            presetId: preset?.id ?? 'default',
             textData,
             transform: transform ?? null,
             placement: placementResult.placement,
