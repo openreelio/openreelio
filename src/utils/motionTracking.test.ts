@@ -19,11 +19,16 @@ import {
   getTrackingMethodDescription,
   interpolateTrackData,
   calculateTrackBounds,
+  createTrackedMaskKeyframes,
+  createTrackingAssistedMaskPayload,
+  createTrackingMaskShape,
+  translateMaskShape,
   applyTrackToTransform,
   type TrackingMethod,
   type TrackKeyframe,
   type Transform2D,
 } from './motionTracking';
+import type { MaskShape } from '@/types';
 
 // =============================================================================
 // Tracking Method Tests
@@ -58,9 +63,7 @@ describe('TRACKING_METHODS', () => {
 
 describe('DEFAULT_TRACKING_SETTINGS', () => {
   it('should have valid default method', () => {
-    expect(['point', 'region', 'planar']).toContain(
-      DEFAULT_TRACKING_SETTINGS.method
-    );
+    expect(['point', 'region', 'planar']).toContain(DEFAULT_TRACKING_SETTINGS.method);
   });
 
   it('should have search area size', () => {
@@ -341,6 +344,81 @@ describe('calculateTrackBounds', () => {
     expect(bounds?.maxX).toBe(50);
     expect(bounds?.minY).toBe(60);
     expect(bounds?.maxY).toBe(60);
+  });
+});
+
+// =============================================================================
+// Tracking-Assisted Mask Tests
+// =============================================================================
+
+describe('tracking-assisted mask utilities', () => {
+  const trackKeyframes: TrackKeyframe[] = [
+    { time: 0, x: 0.4, y: 0.5, confidence: 0.95 },
+    { time: 0.5, x: 0.5, y: 0.55, confidence: 0.9 },
+    { time: 1, x: 0.6, y: 0.65, confidence: 0.4 },
+  ];
+
+  it('should create a rectangle mask around a tracked point', () => {
+    const shape = createTrackingMaskShape(0.4, 0.5, {
+      width: 0.3,
+      height: 0.2,
+    });
+
+    expect(shape).toMatchObject({
+      type: 'rectangle',
+      x: 0.4,
+      y: 0.5,
+      width: 0.3,
+      height: 0.2,
+    });
+  });
+
+  it('should translate rectangle masks by normalized tracking deltas', () => {
+    const baseShape: MaskShape = createTrackingMaskShape(0.4, 0.5);
+    const translated = translateMaskShape(baseShape, 0.1, 0.05);
+
+    expect(translated).toMatchObject({
+      type: 'rectangle',
+      x: 0.5,
+      y: 0.55,
+    });
+  });
+
+  it('should generate mask keyframes from tracking data', () => {
+    const baseShape = createTrackingMaskShape(0.4, 0.5, {
+      width: 0.3,
+      height: 0.2,
+    });
+
+    const keyframes = createTrackedMaskKeyframes(baseShape, trackKeyframes, {
+      originX: 0.4,
+      originY: 0.5,
+      confidenceThreshold: 0.75,
+    });
+
+    expect(keyframes).toHaveLength(2);
+    expect(keyframes[0]).toMatchObject({
+      timeOffset: 0,
+      easing: 'linear',
+      shape: { type: 'rectangle', x: 0.4, y: 0.5 },
+    });
+    expect(keyframes[1]).toMatchObject({
+      timeOffset: 0.5,
+      shape: { type: 'rectangle', x: 0.5, y: 0.55 },
+    });
+  });
+
+  it('should build an AddMask-compatible tracking payload fragment', () => {
+    const baseShape = createTrackingMaskShape(0.4, 0.5, { shapeType: 'ellipse' });
+    const payload = createTrackingAssistedMaskPayload(baseShape, trackKeyframes.slice(0, 2), {
+      originX: 0.4,
+      originY: 0.5,
+      trackingSourceId: 'tracking-effect-001',
+    });
+
+    expect(payload.shape.type).toBe('ellipse');
+    expect(payload.keyframes).toHaveLength(2);
+    expect(payload.trackingSourceId).toBe('tracking-effect-001');
   });
 });
 

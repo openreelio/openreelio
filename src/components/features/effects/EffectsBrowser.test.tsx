@@ -6,15 +6,84 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { EffectsBrowser } from './EffectsBrowser';
 import { useSettingsStore } from '@/stores/settingsStore';
+import type { EffectPreset, EffectPresetSummary } from '@/types';
+
+const mockInvoke = vi.hoisted(() => vi.fn());
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: mockInvoke,
+}));
+
+const savedPresetSummary: EffectPresetSummary = {
+  id: 'preset-saved-warm',
+  name: 'Saved Warm Blur',
+  description: 'Reusable warm blur with animated radius',
+  effectType: 'gaussian_blur',
+  category: 'blur_sharpen',
+  createdAt: '2026-06-08T00:00:00Z',
+  updatedAt: '2026-06-08T00:00:00Z',
+};
+
+const savedPreset: EffectPreset = {
+  ...savedPresetSummary,
+  params: { radius: 12 },
+  keyframes: {
+    radius: [
+      {
+        timeOffset: 0,
+        value: { type: 'float', value: 4 },
+        easing: 'linear',
+      },
+      {
+        timeOffset: 1,
+        value: { type: 'float', value: 12 },
+        easing: 'ease_out',
+      },
+    ],
+  },
+};
+
+const savedPresetBackend = {
+  ...savedPresetSummary,
+  params: { radius: 12 },
+  keyframes: {
+    radius: [
+      {
+        timeOffset: 0,
+        value: 4,
+        easing: 'linear',
+      },
+      {
+        timeOffset: 1,
+        value: 12,
+        easing: 'ease_out',
+      },
+    ],
+  },
+} as unknown as EffectPreset;
 
 // =============================================================================
 // Setup
 // =============================================================================
 
 beforeEach(() => {
+  mockInvoke.mockReset();
+  mockInvoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+    if (command === 'list_effect_presets') {
+      return Promise.resolve([]);
+    }
+    if (command === 'load_effect_preset' && args?.presetId === savedPreset.id) {
+      return Promise.resolve(savedPresetBackend);
+    }
+    if (command === 'delete_effect_preset') {
+      return Promise.resolve(null);
+    }
+    return Promise.reject(new Error(`Unexpected invoke: ${command}`));
+  });
+
   const store = useSettingsStore.getState();
   if (typeof (store as unknown as Record<string, unknown>)._resetInternalState === 'function') {
     (store as unknown as Record<string, (() => void)>)._resetInternalState();
@@ -31,21 +100,44 @@ beforeEach(() => {
 describe('EffectsBrowser', () => {
   describe('rendering', () => {
     it('should render the effects browser container', () => {
-      render(<EffectsBrowser />);
+      render(<EffectsBrowser onSavedPresetSelect={vi.fn()} />);
 
       expect(screen.getByTestId('effects-browser')).toBeInTheDocument();
     });
 
     it('should render header with Effects title', () => {
-      render(<EffectsBrowser />);
+      render(<EffectsBrowser onSavedPresetSelect={vi.fn()} />);
 
       expect(screen.getByText('Effects')).toBeInTheDocument();
     });
 
     it('should render search input', () => {
-      render(<EffectsBrowser />);
+      render(<EffectsBrowser onSavedPresetSelect={vi.fn()} />);
 
       expect(screen.getByPlaceholderText('Search effects...')).toBeInTheDocument();
+    });
+
+    it('should render built-in visual presets', () => {
+      render(<EffectsBrowser onSavedPresetSelect={vi.fn()} />);
+
+      expect(screen.getByTestId('effect-presets-section')).toBeInTheDocument();
+      expect(screen.getByText('Heavy Mosaic')).toBeInTheDocument();
+      expect(screen.getByText('Warm Documentary')).toBeInTheDocument();
+    });
+
+    it('should render saved effect presets loaded from the preset store', async () => {
+      mockInvoke.mockImplementation((command: string) => {
+        if (command === 'list_effect_presets') {
+          return Promise.resolve([savedPresetSummary]);
+        }
+        return Promise.reject(new Error(`Unexpected invoke: ${command}`));
+      });
+
+      render(<EffectsBrowser onSavedPresetSelect={vi.fn()} />);
+
+      expect(await screen.findByTestId('saved-effect-presets-section')).toBeInTheDocument();
+      expect(screen.getByTestId('saved-effect-preset-preset-saved-warm')).toBeInTheDocument();
+      expect(screen.getByText('Saved Warm Blur')).toBeInTheDocument();
     });
   });
 
@@ -218,6 +310,70 @@ describe('EffectsBrowser', () => {
 
       expect(onEffectSelect).toHaveBeenCalledWith('wipe');
     });
+
+    it('should call onPresetSelect with a built-in visual preset when clicked', () => {
+      const onPresetSelect = vi.fn();
+      render(<EffectsBrowser onPresetSelect={onPresetSelect} />);
+
+      fireEvent.click(screen.getByTestId('effect-preset-privacy-heavy-mosaic'));
+
+      expect(onPresetSelect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'privacy-heavy-mosaic',
+          effects: expect.arrayContaining([
+            expect.objectContaining({
+              effectType: 'pixelate',
+              params: { size: 28 },
+              defaultMask: expect.objectContaining({
+                name: 'Privacy Mosaic Region',
+                shape: expect.objectContaining({ type: 'rectangle' }),
+              }),
+            }),
+          ]),
+        }),
+      );
+    });
+
+    it('should load and apply a saved effect preset when clicked', async () => {
+      mockInvoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+        if (command === 'list_effect_presets') {
+          return Promise.resolve([savedPresetSummary]);
+        }
+        if (command === 'load_effect_preset' && args?.presetId === savedPreset.id) {
+          return Promise.resolve(savedPresetBackend);
+        }
+        return Promise.reject(new Error(`Unexpected invoke: ${command}`));
+      });
+      const onSavedPresetSelect = vi.fn();
+      render(<EffectsBrowser onSavedPresetSelect={onSavedPresetSelect} />);
+
+      fireEvent.click(await screen.findByTestId('saved-effect-preset-preset-saved-warm'));
+
+      await waitFor(() => expect(onSavedPresetSelect).toHaveBeenCalledWith(savedPreset));
+    });
+
+    it('should delete a saved effect preset after confirmation', async () => {
+      mockInvoke.mockImplementation((command: string) => {
+        if (command === 'list_effect_presets') {
+          return Promise.resolve([savedPresetSummary]);
+        }
+        if (command === 'delete_effect_preset') {
+          return Promise.resolve(null);
+        }
+        return Promise.reject(new Error(`Unexpected invoke: ${command}`));
+      });
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      render(<EffectsBrowser onSavedPresetSelect={vi.fn()} />);
+
+      fireEvent.click(await screen.findByTestId('delete-saved-effect-preset-preset-saved-warm'));
+
+      await waitFor(() =>
+        expect(mockInvoke).toHaveBeenCalledWith('delete_effect_preset', {
+          presetId: savedPreset.id,
+        }),
+      );
+      confirmSpy.mockRestore();
+    });
   });
 
   // ===========================================================================
@@ -226,7 +382,7 @@ describe('EffectsBrowser', () => {
 
   describe('search functionality', () => {
     it('should have enabled search input', () => {
-      render(<EffectsBrowser />);
+      render(<EffectsBrowser onSavedPresetSelect={vi.fn()} />);
 
       const searchInput = screen.getByPlaceholderText('Search effects...');
       expect(searchInput).not.toBeDisabled();
@@ -244,6 +400,33 @@ describe('EffectsBrowser', () => {
       expect(screen.queryByRole('button', { name: /^Brightness$/i })).not.toBeInTheDocument();
     });
 
+    it('should filter built-in visual presets by category and description', () => {
+      render(<EffectsBrowser />);
+
+      const searchInput = screen.getByPlaceholderText('Search effects...');
+      fireEvent.change(searchInput, { target: { value: 'privacy' } });
+
+      expect(screen.getByText('Heavy Mosaic')).toBeInTheDocument();
+      expect(screen.getByTestId('effect-preset-privacy-soft-blur')).toBeInTheDocument();
+      expect(screen.queryByText('Warm Documentary')).not.toBeInTheDocument();
+    });
+
+    it('should filter saved effect presets by saved name and effect type', async () => {
+      mockInvoke.mockImplementation((command: string) => {
+        if (command === 'list_effect_presets') {
+          return Promise.resolve([savedPresetSummary]);
+        }
+        return Promise.reject(new Error(`Unexpected invoke: ${command}`));
+      });
+      render(<EffectsBrowser onSavedPresetSelect={vi.fn()} />);
+
+      const searchInput = screen.getByPlaceholderText('Search effects...');
+      fireEvent.change(searchInput, { target: { value: 'animated radius' } });
+
+      expect(await screen.findByTestId('saved-effect-preset-preset-saved-warm')).toBeInTheDocument();
+      expect(screen.queryByText('Warm Documentary')).not.toBeInTheDocument();
+    });
+
     it('should be case-insensitive when searching', () => {
       render(<EffectsBrowser />);
 
@@ -253,13 +436,13 @@ describe('EffectsBrowser', () => {
       expect(screen.getByText(/Wipe/)).toBeInTheDocument();
     });
 
-    it('should show empty state when no results match', () => {
+    it('should show empty state when no results match', async () => {
       render(<EffectsBrowser />);
 
       const searchInput = screen.getByPlaceholderText('Search effects...');
       fireEvent.change(searchInput, { target: { value: 'nonexistent' } });
 
-      expect(screen.getByText(/no effects found/i)).toBeInTheDocument();
+      expect(await screen.findByText(/no effects found/i)).toBeInTheDocument();
     });
 
     it('should clear search and show all effects when search is cleared', () => {

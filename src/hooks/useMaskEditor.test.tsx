@@ -41,6 +41,45 @@ function createGradientMask(id = 'mask-gradient-001') {
   };
 }
 
+function createTrackedMask(id = 'mask-tracked-001') {
+  return {
+    id,
+    name: 'Tracked Mask',
+    shape: {
+      type: 'rectangle' as const,
+      x: 0.4,
+      y: 0.5,
+      width: 0.3,
+      height: 0.2,
+      cornerRadius: 0,
+      rotation: 0,
+    },
+    inverted: false,
+    feather: 0.08,
+    opacity: 1,
+    expansion: 0,
+    blendMode: 'add' as const,
+    enabled: true,
+    locked: false,
+    keyframes: [
+      {
+        timeOffset: 0,
+        shape: {
+          type: 'rectangle' as const,
+          x: 0.4,
+          y: 0.5,
+          width: 0.3,
+          height: 0.2,
+          cornerRadius: 0,
+          rotation: 0,
+        },
+        easing: 'linear' as const,
+      },
+    ],
+    trackingSourceId: 'tracking-effect-001',
+  };
+}
+
 describe('useMaskEditor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -53,7 +92,7 @@ describe('useMaskEditor', () => {
       useMaskEditor({
         ...DEFAULT_OPTIONS,
         fetchOnMount: true,
-      })
+      }),
     );
 
     await waitFor(() => {
@@ -65,6 +104,25 @@ describe('useMaskEditor', () => {
     expect(mockInvoke).toHaveBeenCalledWith('get_effect_masks', {
       effectId: DEFAULT_OPTIONS.effectId,
     });
+  });
+
+  it('should preserve fetched tracking-assisted masks from the backend', async () => {
+    mockInvoke.mockResolvedValueOnce([createTrackedMask()]);
+
+    const { result } = renderHook(() =>
+      useMaskEditor({
+        ...DEFAULT_OPTIONS,
+        fetchOnMount: true,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+      expect(result.current.masks).toHaveLength(1);
+    });
+
+    expect(result.current.masks[0]?.keyframes).toHaveLength(1);
+    expect(result.current.masks[0]?.trackingSourceId).toBe('tracking-effect-001');
   });
 
   it('should create gradient masks through the shared editor hook', async () => {
@@ -126,7 +184,7 @@ describe('useMaskEditor', () => {
       useMaskEditor({
         ...DEFAULT_OPTIONS,
         initialMasks: [createGradientMask('mask-gradient-003')],
-      })
+      }),
     );
 
     const updatedShape = {
@@ -149,5 +207,51 @@ describe('useMaskEditor', () => {
       },
     });
     expect(result.current.masks[0]?.shape).toEqual(updatedShape);
+  });
+
+  it('should forward tracking keyframe updates to the backend', async () => {
+    mockInvoke.mockResolvedValueOnce({ opId: 'op-002', changes: [] });
+
+    const { result } = renderHook(() =>
+      useMaskEditor({
+        ...DEFAULT_OPTIONS,
+        initialMasks: [createTrackedMask()],
+      }),
+    );
+
+    const keyframes = [
+      {
+        timeOffset: 0.5,
+        shape: {
+          type: 'rectangle' as const,
+          x: 0.5,
+          y: 0.55,
+          width: 0.3,
+          height: 0.2,
+          cornerRadius: 0,
+          rotation: 0,
+        },
+        easing: 'linear' as const,
+      },
+    ];
+
+    await act(async () => {
+      await result.current.updateMask('mask-tracked-001', {
+        keyframes,
+        trackingSourceId: 'tracking-effect-002',
+      });
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith('execute_command', {
+      commandType: 'UpdateMask',
+      payload: {
+        effectId: DEFAULT_OPTIONS.effectId,
+        maskId: 'mask-tracked-001',
+        keyframes,
+        trackingSourceId: 'tracking-effect-002',
+      },
+    });
+    expect(result.current.masks[0]?.keyframes).toEqual(keyframes);
+    expect(result.current.masks[0]?.trackingSourceId).toBe('tracking-effect-002');
   });
 });

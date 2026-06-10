@@ -156,6 +156,12 @@ function toMaskUpdatePayload(updates: Partial<Mask>): Partial<Mask> {
   if (typeof updates.locked === 'boolean') {
     payload.locked = updates.locked;
   }
+  if (Array.isArray(updates.keyframes) && updates.keyframes.every(isValidMaskKeyframe)) {
+    payload.keyframes = updates.keyframes;
+  }
+  if (typeof updates.trackingSourceId === 'string' && updates.trackingSourceId.trim().length > 0) {
+    payload.trackingSourceId = updates.trackingSourceId.trim();
+  }
 
   return payload;
 }
@@ -173,6 +179,24 @@ function isValidMaskShape(value: unknown): value is MaskShape {
     shape.type === 'polygon' ||
     shape.type === 'bezier' ||
     shape.type === 'gradient'
+  );
+}
+
+function isValidMaskKeyframe(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const keyframe = value as { timeOffset?: unknown; shape?: unknown; easing?: unknown };
+  return (
+    typeof keyframe.timeOffset === 'number' &&
+    Number.isFinite(keyframe.timeOffset) &&
+    keyframe.timeOffset >= 0 &&
+    isValidMaskShape(keyframe.shape) &&
+    (keyframe.easing === 'linear' ||
+      keyframe.easing === 'ease_in' ||
+      keyframe.easing === 'ease_out' ||
+      keyframe.easing === 'ease_in_out' ||
+      keyframe.easing === 'cubic_bezier' ||
+      keyframe.easing === 'step' ||
+      keyframe.easing === 'hold')
   );
 }
 
@@ -203,6 +227,14 @@ function normalizeFetchedMask(raw: unknown): Mask | null {
         : 'add',
     enabled: typeof candidate.enabled === 'boolean' ? candidate.enabled : true,
     locked: typeof candidate.locked === 'boolean' ? candidate.locked : false,
+    keyframes:
+      Array.isArray(candidate.keyframes) && candidate.keyframes.every(isValidMaskKeyframe)
+        ? candidate.keyframes
+        : undefined,
+    trackingSourceId:
+      typeof candidate.trackingSourceId === 'string' && candidate.trackingSourceId.length > 0
+        ? candidate.trackingSourceId
+        : undefined,
   };
 }
 

@@ -13,6 +13,20 @@ export type { ParameterEditorProps } from './ParameterEditor';
 export { EffectsBrowser } from './EffectsBrowser';
 export type { EffectsBrowserProps } from './EffectsBrowser';
 
+export {
+  BUILT_IN_VISUAL_EFFECT_PRESETS,
+  VISUAL_EFFECT_PRESET_CATEGORY_LABELS,
+  filterSavedEffectPresets,
+  filterVisualEffectPresets,
+  getEffectPresetTypeKey,
+  getEffectPresetTypeLabel,
+} from './effectPresetLibrary';
+export type {
+  VisualEffectPreset,
+  VisualEffectPresetCategory,
+  VisualEffectPresetStep,
+} from './effectPresetLibrary';
+
 export { TransitionPicker } from './TransitionPicker';
 export type {
   TransitionPickerProps,

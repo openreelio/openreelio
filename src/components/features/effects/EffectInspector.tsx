@@ -23,15 +23,18 @@ import {
 import { ChromaKeyControl } from './ChromaKeyControl';
 import {
   ColorCurvesPanel,
+  LutPanel,
   TemperatureTintPanel,
   PowerWindowSection,
   ColorMatchSection,
 } from '@/components/features/color';
+import { QualifierPanel } from '@/components/features/qualifier';
 import { getEffectDefaultParamValues } from '@/utils/effectParamDefs';
 import { StabilizePanel } from './StabilizePanel';
 import { SmartReframePanel } from './SmartReframePanel';
 import { PointTrackingPanel } from './PointTrackingPanel';
 import type { ChromaKeyParams } from '@/hooks/useChromaKey';
+import { paramsToQualifierValues, type QualifierValues } from '@/types/qualifier';
 
 // =============================================================================
 // Constants
@@ -224,6 +227,14 @@ function isTemperatureTintEffect(effectType: Effect['effectType']): boolean {
   return effectType === 'temperature_tint';
 }
 
+function isLutEffect(effectType: Effect['effectType']): boolean {
+  return effectType === 'lut';
+}
+
+function isHSLQualifierEffect(effectType: Effect['effectType']): boolean {
+  return effectType === 'hsl_qualifier';
+}
+
 /**
  * Check if an effect is a Stabilize effect.
  */
@@ -246,7 +257,7 @@ function isObjectTrackingEffect(effectType: Effect['effectType']): boolean {
 }
 
 /** Color effect types that support Power Window masks */
-const POWER_WINDOW_EFFECT_TYPES = new Set([
+const COLOR_POWER_WINDOW_EFFECT_TYPES = new Set([
   'color_wheels',
   'curves',
   'temperature_tint',
@@ -261,11 +272,21 @@ const POWER_WINDOW_EFFECT_TYPES = new Set([
   'lut',
 ]);
 
+const PRIVACY_POWER_WINDOW_EFFECT_TYPES = new Set(['gaussian_blur', 'pixelate']);
+
 /**
  * Check if an effect type supports power window masking.
  */
 function supportsPowerWindows(effectType: Effect['effectType']): boolean {
-  return typeof effectType === 'string' && POWER_WINDOW_EFFECT_TYPES.has(effectType);
+  return (
+    typeof effectType === 'string' &&
+    (COLOR_POWER_WINDOW_EFFECT_TYPES.has(effectType) ||
+      PRIVACY_POWER_WINDOW_EFFECT_TYPES.has(effectType))
+  );
+}
+
+function supportsColorMatch(effectType: Effect['effectType']): boolean {
+  return typeof effectType === 'string' && COLOR_POWER_WINDOW_EFFECT_TYPES.has(effectType);
 }
 
 /**
@@ -284,6 +305,15 @@ function paramsToChromaKeyParams(
     spillSuppression: typeof params.spill_suppression === 'number' ? params.spill_suppression : 0,
     edgeFeather: typeof params.edge_feather === 'number' ? params.edge_feather : 0,
   };
+}
+
+function emitQualifierValues(
+  values: QualifierValues,
+  onChange: (paramName: string, value: SimpleParamValue) => void,
+): void {
+  Object.entries(values).forEach(([paramName, value]) => {
+    onChange(paramName, value);
+  });
 }
 
 // =============================================================================
@@ -546,6 +576,22 @@ export const EffectInspector = memo(function EffectInspector({
             }}
             readOnly={readOnly}
           />
+        ) : isLutEffect(effect.effectType) ? (
+          <LutPanel
+            params={effectParams ?? {}}
+            onChange={(paramName: string, value: SimpleParamValue) => {
+              handleParamChange(paramName, value);
+            }}
+            readOnly={readOnly}
+          />
+        ) : isHSLQualifierEffect(effect.effectType) ? (
+          <QualifierPanel
+            values={paramsToQualifierValues(effectParams ?? {})}
+            onChange={(values) => {
+              emitQualifierValues(values, handleParamChange);
+            }}
+            disabled={readOnly}
+          />
         ) : isStabilizeEffect(effect.effectType) ? (
           <StabilizePanel
             params={effectParams ?? {}}
@@ -623,7 +669,7 @@ export const EffectInspector = memo(function EffectInspector({
         )}
       </div>
 
-      {/* Power Windows Section (for color effects) */}
+      {/* Power Windows Section */}
       {effect && supportsPowerWindows(effect.effectType) && (
         <div className="px-3 pb-1">
           <PowerWindowSection effect={effect} clipContext={clipContext} readOnly={readOnly} />
@@ -631,7 +677,7 @@ export const EffectInspector = memo(function EffectInspector({
       )}
 
       {/* Color Match Section (for color effects) */}
-      {effect && supportsPowerWindows(effect.effectType) && (
+      {effect && supportsColorMatch(effect.effectType) && (
         <ColorMatchSection clipContext={clipContext} readOnly={readOnly} />
       )}
 
