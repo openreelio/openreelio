@@ -34,11 +34,23 @@ import { useBlendMode } from '@/hooks/useBlendMode';
 import { useAudioDucking } from '@/hooks/useAudioDucking';
 import { useAudioScrubbing } from '@/hooks/useAudioScrubbing';
 import { useCommandPalette } from '@/hooks/useCommandPalette';
+import { serializeEffectPresetKeyframes } from '@/hooks/useEffectPresets';
 import { useFullscreenPreview } from '@/hooks/useFullscreenPreview';
 import { useInterchangeExport } from '@/hooks/useInterchangeExport';
 import { CommandPalette } from '@/components/features/command-palette';
+import { PasteAttributesDialog } from '@/components/features/effects/PasteAttributesDialog';
+import {
+  RemoveAttributesDialog,
+  type RemoveAttributesResult,
+} from '@/components/features/effects/RemoveAttributesDialog';
+import {
+  TransitionPicker,
+  type TransitionConfig,
+} from '@/components/features/effects/TransitionPicker';
+import type { VisualEffectPreset } from '@/components/features/effects';
 import { useToastStore } from '@/hooks/useToast';
 import { useTerminalStore } from '@/stores/terminalStore';
+import { useWaveformCacheStore } from '@/stores/waveformCacheStore';
 import { revealWorkspacePanel } from '@/stores/workspaceLayoutStore';
 import { useDockableAIPanel } from './hooks/useDockableAIPanel';
 import { dbToLinear, linearToDb } from '@/utils/audioMeter';
@@ -47,7 +59,11 @@ import {
   applyClipTransformToEditableTextData,
   extractTextDataFromClipWithMap,
 } from '@/utils/textRenderer';
-import { getClipTimelineDurationSec, getClipTimelineEndSec } from '@/utils/clipTiming';
+import {
+  getClipSourceTimeAtTimelineTime,
+  getClipTimelineDurationSec,
+  getClipTimelineEndSec,
+} from '@/utils/clipTiming';
 import {
   getDefaultTrackInsertPosition,
   getNextTrackName,
@@ -58,23 +74,35 @@ import { createLogger } from '@/services/logger';
 import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { getSplitTargetsAtTime } from '@/utils/clipLinking';
+import { getClipTransitionEffect } from '@/utils/transitions';
 import type {
   BlendMode,
+  AttributeSelection,
   Clip,
   ClipId,
   Effect,
   EffectId,
+  EffectPreset,
+  EffectType,
   FileTreeEntry,
   Sequence,
   SimpleParamValue,
+  SlowMotionInterpolation,
   TextClipData,
   Track,
   Transform,
+  TransformKeyframe,
+  TimeRemapCurve,
 } from '@/types';
+import { EFFECT_TYPE_LABELS, isAudioEffect } from '@/types';
 import type { AddTextPayload } from '@/components/features/text';
 import type { TextPlacementCommitPayload } from '@/components/preview/TextPlacementOverlay';
 import type { AudioMixerPanelProps, ChannelLevels } from '@/components/features/mixer';
-import type { MulticamGroup } from '@/utils/multicam';
+import {
+  createSynchronizedMulticamGroup,
+  type MulticamGroup,
+  type MulticamSyncClipSource,
+} from '@/utils/multicam';
 import { createTextClipData, isTextClip, hasActiveTimeRemap } from '@/types';
 import { createEditorPanelContent } from './EditorPanels';
 import { BottomTerminalControls } from './BottomTerminalControls';
@@ -86,6 +114,10 @@ const AI_AUTO_COLLAPSE_BREAKPOINT = 1440;
 const JPEG_EXPORT_QUALITY = 2;
 const AUTO_TIMELINE_INSERT_TRACK_ID = '__openreelio_auto_timeline_track__';
 const DEFAULT_PREVIEW_TEXT_DURATION_SEC = 5;
+const DEFAULT_TRANSITION_TYPE: TransitionConfig['type'] = 'cross_dissolve';
+const DEFAULT_TRANSITION_DURATION_SEC = 1;
+const PLAY_AROUND_PRE_ROLL_SEC = 2;
+const PLAY_AROUND_POST_ROLL_SEC = 2;
 
 const ExportDialog = lazy(async () => {
   const module = await import('@/components/features/export');
@@ -100,6 +132,9 @@ const AddTextDialog = lazy(async () => {
 // =============================================================================
 // EditorView Component
 // =============================================================================
+
+const MIXER_VOLUME_COMMAND_DEBOUNCE_MS = 150;
+const MIXER_PAN_COMMAND_DEBOUNCE_MS = 150;
 
 export interface EditorViewProps {
   /** Currently active sequence for timeline (null if none active) */
@@ -116,6 +151,222 @@ function isTimelineInsertableAssetKind(
 
 function isUnlockedTrack(track: Track): boolean {
   return !track.locked;
+}
+
+interface ClipRef {
+  trackId: string;
+  clipId: string;
+}
+
+interface ClipMatch extends ClipRef {
+  clip: Clip;
+}
+
+interface TimelineRange {
+  startSec: number;
+  endSec: number;
+}
+
+interface TransitionPickerContext {
+  clipIds: string[];
+  transitionId?: string;
+  initialConfig?: TransitionConfig;
+}
+
+interface RemoveAttributesContext {
+  clipIds: string[];
+}
+
+function resolveClipRefs(
+  sequence: Sequence | null,
+  clipIds: string[],
+  options: { includeLockedTracks?: boolean; visualOnly?: boolean } = {},
+): ClipRef[] {
+  if (!sequence || clipIds.length === 0) {
+    return [];
+  }
+
+  const requestedClipIds = new Set(clipIds);
+  const refs: ClipRef[] = [];
+
+  for (const track of sequence.tracks) {
+    if (!options.includeLockedTracks && track.locked) {
+      continue;
+    }
+    if (options.visualOnly && track.kind !== 'video' && track.kind !== 'overlay') {
+      continue;
+    }
+
+    for (const clip of track.clips) {
+      if (requestedClipIds.has(clip.id)) {
+        refs.push({ trackId: track.id, clipId: clip.id });
+      }
+    }
+  }
+
+  return refs;
+}
+
+function resolveClipMatches(
+  sequence: Sequence | null,
+  clipIds: string[],
+  options: { includeLockedTracks?: boolean; visualOnly?: boolean } = {},
+): ClipMatch[] {
+  if (!sequence || clipIds.length === 0) {
+    return [];
+  }
+
+  const requestedClipIds = new Set(clipIds);
+  const matches: ClipMatch[] = [];
+
+  for (const track of sequence.tracks) {
+    if (!options.includeLockedTracks && track.locked) continue;
+    if (options.visualOnly && track.kind !== 'video' && track.kind !== 'overlay') continue;
+
+    for (const clip of track.clips) {
+      if (requestedClipIds.has(clip.id)) {
+        matches.push({ trackId: track.id, clipId: clip.id, clip });
+      }
+    }
+  }
+
+  return matches;
+}
+
+function getClipTimelineRange(clip: Clip): TimelineRange {
+  return {
+    startSec: clip.place.timelineInSec,
+    endSec: getClipTimelineEndSec(clip),
+  };
+}
+
+function getSelectedOrPlayheadRange(
+  sequence: Sequence | null,
+  selectedClipIds: string[],
+  currentTime: number,
+): TimelineRange | null {
+  if (!sequence) return null;
+
+  const selectedMatches = resolveClipMatches(sequence, selectedClipIds);
+  if (selectedMatches.length > 0) {
+    const starts = selectedMatches.map(({ clip }) => clip.place.timelineInSec);
+    const ends = selectedMatches.map(({ clip }) => getClipTimelineEndSec(clip));
+    return { startSec: Math.min(...starts), endSec: Math.max(...ends) };
+  }
+
+  for (const track of sequence.tracks) {
+    if (track.locked || track.muted || !track.visible) continue;
+
+    const clip = track.clips.find((candidate) => {
+      const range = getClipTimelineRange(candidate);
+      return currentTime >= range.startSec && currentTime < range.endSec;
+    });
+    if (clip) {
+      return getClipTimelineRange(clip);
+    }
+  }
+
+  const duration = getSequenceDurationSec(sequence);
+  return {
+    startSec: Math.max(0, currentTime - PLAY_AROUND_PRE_ROLL_SEC),
+    endSec: Math.min(duration, currentTime + PLAY_AROUND_POST_ROLL_SEC),
+  };
+}
+
+function getNearestEditPoint(sequence: Sequence | null, currentTime: number): number | null {
+  if (!sequence) return null;
+
+  const editPoints: number[] = [];
+  for (const track of sequence.tracks) {
+    if (track.locked || track.muted || !track.visible) continue;
+
+    for (const clip of track.clips) {
+      editPoints.push(clip.place.timelineInSec, getClipTimelineEndSec(clip));
+    }
+  }
+
+  if (editPoints.length === 0) {
+    return null;
+  }
+
+  return editPoints.reduce((nearest, point) =>
+    Math.abs(point - currentTime) < Math.abs(nearest - currentTime) ? point : nearest,
+  );
+}
+
+function getSequenceDurationSec(sequence: Sequence): number {
+  return sequence.tracks.reduce((duration, track) => {
+    return Math.max(
+      duration,
+      ...track.clips.map((clip) => getClipTimelineEndSec(clip)),
+      ...sequence.markers.map((marker) => marker.timeSec),
+    );
+  }, 0);
+}
+
+function getTransitionParams(config: TransitionConfig): Record<string, SimpleParamValue> {
+  const params: Record<string, SimpleParamValue> = {
+    duration: config.duration,
+  };
+
+  if (config.direction) {
+    params.direction = config.direction;
+  }
+  if (config.zoomType) {
+    params.zoom_type = config.zoomType;
+  }
+
+  return params;
+}
+
+function getTransitionConfigFromEffect(effect: Effect): TransitionConfig | undefined {
+  if (
+    effect.effectType !== 'cross_dissolve' &&
+    effect.effectType !== 'fade' &&
+    effect.effectType !== 'wipe' &&
+    effect.effectType !== 'slide' &&
+    effect.effectType !== 'zoom'
+  ) {
+    return undefined;
+  }
+
+  const rawDuration = effect.params.duration;
+  const duration =
+    typeof rawDuration === 'number' && Number.isFinite(rawDuration) ? rawDuration : 1;
+  const config: TransitionConfig = { type: effect.effectType, duration };
+
+  if (
+    (effect.effectType === 'wipe' || effect.effectType === 'slide') &&
+    (effect.params.direction === 'left' ||
+      effect.params.direction === 'right' ||
+      effect.params.direction === 'up' ||
+      effect.params.direction === 'down')
+  ) {
+    config.direction = effect.params.direction;
+  }
+
+  if (
+    effect.effectType === 'zoom' &&
+    (effect.params.zoom_type === 'in' || effect.params.zoom_type === 'out')
+  ) {
+    config.zoomType = effect.params.zoom_type;
+  }
+
+  return config;
+}
+
+function getEffectSelectionKey(effect: Effect): string {
+  if (typeof effect.effectType === 'object' && 'custom' in effect.effectType) {
+    return `custom:${effect.effectType.custom}`;
+  }
+  return `type:${effect.effectType}`;
+}
+
+function getEffectSelectionLabel(effect: Effect): string {
+  if (typeof effect.effectType === 'object' && 'custom' in effect.effectType) {
+    return effect.effectType.custom;
+  }
+  return EFFECT_TYPE_LABELS[effect.effectType] ?? effect.effectType.replace(/_/g, ' ');
 }
 
 function resolveExplorerInsertTrackId(
@@ -146,11 +397,25 @@ function resolveAvailablePreviewTextTrack(
 }
 
 export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps): JSX.Element {
-  const { selectedAssetId, assets, effects, executeCommand } = useProjectStore();
+  const {
+    selectedAssetId,
+    assets,
+    effects,
+    executeCommand,
+    selectAsset,
+    proxyJobIdsByAssetId,
+    generateAssetThumbnail,
+    loadWaveformData,
+    generateWaveformForAsset,
+    ensureAudioPreviewForAsset,
+  } = useProjectStore();
+  const waveformUiCacheSize = useWaveformCacheStore((state) => state.cacheSize);
+  const clearWaveformUiCache = useWaveformCacheStore((state) => state.clearCache);
   const currentTime = usePlaybackStore((state) => state.currentTime);
   const { selectedClipIds, linkedSelectionEnabled, selectClip } = useTimelineStore();
   const activeTool = useEditorToolStore((state) => state.activeTool);
   const setActiveTool = useEditorToolStore((state) => state.setActiveTool);
+  const effectsClipboard = useEditorToolStore((state) => state.effectsClipboard);
   const sanitizeSelection = useTimelineStore((state) => state.sanitizeSelection);
   const sequenceNavigationStack = useProjectStore((s) => s.sequenceNavigationStack);
   const sequences = useProjectStore((s) => s.sequences);
@@ -176,6 +441,11 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
 
   // Add Text dialog state
   const [showAddTextDialog, setShowAddTextDialog] = useState(false);
+  const [showPasteAttributesDialog, setShowPasteAttributesDialog] = useState(false);
+  const [removeAttributesContext, setRemoveAttributesContext] =
+    useState<RemoveAttributesContext | null>(null);
+  const [transitionPickerContext, setTransitionPickerContext] =
+    useState<TransitionPickerContext | null>(null);
 
   // Mixer visibility state (toggled from timeline header)
   const [showMixer, setShowMixer] = useState(false);
@@ -197,7 +467,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   // Multicam session state
   const [multicamGroup, setMulticamGroup] = useState<MulticamGroup | null>(null);
   const [multicamMode] = useState<'view' | 'record'>('view');
-  useMulticamSession({
+  const multicamSession = useMulticamSession({
     group: multicamGroup,
     mode: multicamMode,
     onChange: setMulticamGroup,
@@ -234,8 +504,18 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     for (const [trackId, state] of mixerTrackStates) {
       pans.set(trackId, state.pan);
     }
+    if (sequence && selectedClipIds.length === 1) {
+      const selectedClipId = selectedClipIds[0];
+      for (const track of sequence.tracks) {
+        const clip = track.clips.find((candidate) => candidate.id === selectedClipId);
+        if (clip) {
+          pans.set(track.id, clip.audio?.pan ?? 0);
+          break;
+        }
+      }
+    }
     return pans;
-  }, [mixerTrackStates]);
+  }, [mixerTrackStates, selectedClipIds, sequence]);
 
   const masterVolume = dbToLinear(mixerMasterState.volumeDb);
   const masterMuted = mixerMasterState.muted;
@@ -246,6 +526,23 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     }),
     [mixerMasterState.levels.left, mixerMasterState.levels.right],
   );
+  const mixerVolumeCommitTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const mixerPanCommitTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  useEffect(() => {
+    const volumeTimers = mixerVolumeCommitTimersRef.current;
+    const panTimers = mixerPanCommitTimersRef.current;
+    return () => {
+      for (const timer of volumeTimers.values()) {
+        clearTimeout(timer);
+      }
+      for (const timer of panTimers.values()) {
+        clearTimeout(timer);
+      }
+      volumeTimers.clear();
+      panTimers.clear();
+    };
+  }, []);
 
   // Audio ducking
   const { applyDucking, isApplying: isAutoDucking } = useAudioDucking();
@@ -270,6 +567,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
         resolution.targets.musicTrackId,
         resolution.targets.musicClipId,
       );
+      useToastStore.getState().addToast({
+        message: 'Auto-duck applied to the selected music clip.',
+        variant: 'success',
+      });
     } catch (err) {
       logger.error('Auto-duck failed', { reason: String(err) });
       useToastStore.getState().addToast({
@@ -468,6 +769,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     handleTrackMuteToggle,
     handleTrackLockToggle,
     handleTrackVisibilityToggle,
+    handleCaptionTrackLanguageChange,
     handleTrackReorder,
     handleUpdateCaption,
     handleCloseGap,
@@ -539,17 +841,100 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
 
   // Match Frame: F key — timeline clip → source monitor
   const handleMatchFrame = useCallback(() => {
-    void commands.matchFrame({ timeSec: currentTime });
-  }, [currentTime]);
+    void commands.matchFrame({ timeSec: currentTime }).then((result) => {
+      if (result.status !== 'ok') {
+        return;
+      }
+
+      selectAsset(result.data.assetId);
+      revealWorkspacePanel('source-monitor', 'left');
+    });
+  }, [currentTime, selectAsset]);
 
   // Reverse Match Frame: Shift+F — source monitor → timeline seek
   const handleReverseMatchFrame = useCallback(() => {
     void commands.reverseMatchFrame().then((result) => {
       if (result.status === 'ok') {
         usePlaybackStore.getState().seek(result.data.timelineSec);
+        selectClip(result.data.clipId, false);
       }
     });
-  }, []);
+  }, [selectClip]);
+
+  const handleToggleLoopRange = useCallback(() => {
+    if (!sequence) return;
+
+    const playback = usePlaybackStore.getState();
+    if (playback.loopRange) {
+      playback.clearLoopRange();
+      playback.setLoop(false);
+      return;
+    }
+
+    const range = getSelectedOrPlayheadRange(sequence, selectedClipIds, currentTime);
+    if (!range || range.endSec <= range.startSec) return;
+
+    playback.setLoopRange(range.startSec, range.endSec);
+    playback.setLoop(true);
+    if (currentTime < range.startSec || currentTime >= range.endSec) {
+      playback.seek(range.startSec, 'loop-range-start');
+    }
+    playback.setIsPlaying(true, 'loop-range');
+  }, [currentTime, selectedClipIds, sequence]);
+
+  const handlePlayAroundEdit = useCallback(() => {
+    if (!sequence) return;
+
+    const duration = getSequenceDurationSec(sequence);
+    if (duration <= 0) return;
+
+    const editPoint = getNearestEditPoint(sequence, currentTime) ?? currentTime;
+    const startSec = Math.max(0, editPoint - PLAY_AROUND_PRE_ROLL_SEC);
+    const endSec = Math.min(duration, editPoint + PLAY_AROUND_POST_ROLL_SEC);
+    if (endSec <= startSec) return;
+
+    const playback = usePlaybackStore.getState();
+    playback.playRangeOnce(startSec, endSec);
+    playback.seek(startSec, 'play-around-edit-start');
+    playback.setIsPlaying(true, 'play-around-edit');
+  }, [currentTime, sequence]);
+
+  const handleRevealSourceClip = useCallback(() => {
+    if (!sequence) return;
+
+    const selectedMatch = resolveClipMatches(sequence, selectedClipIds)[0];
+    const playheadMatch =
+      selectedMatch ??
+      resolveClipMatches(
+        sequence,
+        sequence.tracks.flatMap((track) =>
+          track.clips
+            .filter((clip) => {
+              const range = getClipTimelineRange(clip);
+              return currentTime >= range.startSec && currentTime < range.endSec;
+            })
+            .map((clip) => clip.id),
+        ),
+      )[0];
+
+    if (!playheadMatch) return;
+
+    const { clip } = playheadMatch;
+    const clipRange = getClipTimelineRange(clip);
+    const sourceTime =
+      currentTime >= clipRange.startSec && currentTime < clipRange.endSec
+        ? getClipSourceTimeAtTimelineTime(clip, currentTime)
+        : clip.range.sourceInSec;
+
+    selectAsset(clip.assetId);
+    revealWorkspacePanel('explorer', 'left');
+    revealWorkspacePanel('source-monitor', 'left');
+    void commands.setSourceAsset({ assetId: clip.assetId }).then((result) => {
+      if (result.status === 'ok') {
+        void commands.setSourcePlayhead({ timeSec: sourceTime });
+      }
+    });
+  }, [currentTime, selectAsset, selectedClipIds, sequence]);
 
   const handleCopySelectedClipEffects = useCallback(() => {
     if (!sequence || selectedClipIds.length !== 1) {
@@ -575,16 +960,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     void handlePasteEffects(selectedClipIds);
   }, [handlePasteEffects, selectedClipIds]);
 
-  // Command Palette
   const handleToggleClipEnabledForPalette = useCallback(() => {
     if (!sequence || selectedClipIds.length === 0) return;
-    const promises: Promise<void>[] = [];
-    for (const clipId of selectedClipIds) {
-      const track = sequence.tracks.find((t) => t.clips.some((c) => c.id === clipId));
-      if (track) {
-        promises.push(handleToggleClipEnabled(clipId, track.id));
-      }
-    }
+    const clipRefs = resolveClipRefs(sequence, selectedClipIds);
+    const promises = clipRefs.map((ref) => handleToggleClipEnabled(ref.clipId, ref.trackId));
     if (promises.length > 0) {
       Promise.all(promises).catch((error) => {
         logger.error('Failed to toggle clip enabled state', { error });
@@ -592,6 +971,448 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     }
   }, [sequence, selectedClipIds, handleToggleClipEnabled]);
 
+  const handleLinkSelectedClips = useCallback(() => {
+    const clipRefs = resolveClipRefs(sequence, selectedClipIds);
+    if (clipRefs.length < 2) return;
+    void handleLinkClips(clipRefs.map((ref) => ref.clipId)).catch((error) => {
+      logger.error('Failed to link selected clips', { error });
+    });
+  }, [handleLinkClips, selectedClipIds, sequence]);
+
+  const handleUnlinkSelectedClips = useCallback(() => {
+    const clipRefs = resolveClipRefs(sequence, selectedClipIds);
+    if (clipRefs.length === 0) return;
+    void handleUnlinkClips(clipRefs).catch((error) => {
+      logger.error('Failed to unlink selected clips', { error });
+    });
+  }, [handleUnlinkClips, selectedClipIds, sequence]);
+
+  const handleGroupSelectedClips = useCallback(() => {
+    const clipRefs = resolveClipRefs(sequence, selectedClipIds);
+    if (clipRefs.length < 2) return;
+    void handleGroupClips(clipRefs.map((ref) => ref.clipId)).catch((error) => {
+      logger.error('Failed to group selected clips', { error });
+    });
+  }, [handleGroupClips, selectedClipIds, sequence]);
+
+  const handleCreateSynchronizedMulticamGroup = useCallback(() => {
+    if (!sequence) {
+      return;
+    }
+
+    const matches = resolveClipMatches(sequence, selectedClipIds, { visualOnly: true }).filter(
+      ({ clip }) => !isTextClip(clip.assetId),
+    );
+    if (matches.length < 2) {
+      useToastStore.getState().addToast({
+        message: 'Select at least two visual clips to create a multicam group.',
+        variant: 'warning',
+      });
+      return;
+    }
+
+    const sources: MulticamSyncClipSource[] = matches.map(({ clip, trackId }) => {
+      const asset = assets.get(clip.assetId);
+      return {
+        clip,
+        trackId,
+        label: clip.label ?? asset?.name,
+        color: clip.color,
+        hasAudio: Boolean(asset?.audio),
+      };
+    });
+
+    try {
+      const result = createSynchronizedMulticamGroup({
+        sequenceId: sequence.id,
+        name: `Multicam ${matches.length} Angles`,
+        method: 'manual',
+        sources,
+      });
+
+      setMulticamGroup(result.group);
+      useToastStore.getState().addToast({
+        message:
+          result.warnings.length > 0
+            ? result.warnings[0]
+            : `Created multicam group with ${result.group.angles.length} angles.`,
+        variant: result.warnings.length > 0 ? 'warning' : 'success',
+      });
+    } catch (error) {
+      logger.error('Failed to create multicam group', { error });
+      useToastStore.getState().addToast({
+        message: error instanceof Error ? error.message : 'Failed to create multicam group.',
+        variant: 'warning',
+      });
+    }
+  }, [assets, selectedClipIds, sequence]);
+
+  const handleUngroupSelectedClips = useCallback(() => {
+    const clipRefs = resolveClipRefs(sequence, selectedClipIds);
+    if (clipRefs.length === 0) return;
+    void handleUngroupClips(clipRefs).catch((error) => {
+      logger.error('Failed to ungroup selected clips', { error });
+    });
+  }, [handleUngroupClips, selectedClipIds, sequence]);
+
+  const handleOpenPasteAttributesForSelection = useCallback(() => {
+    if (selectedClipIds.length === 0 || !effectsClipboard) {
+      return;
+    }
+    setShowPasteAttributesDialog(true);
+  }, [effectsClipboard, selectedClipIds.length]);
+
+  const handleConfirmPasteAttributesForSelection = useCallback(
+    (selection: AttributeSelection) => {
+      setShowPasteAttributesDialog(false);
+      void handlePasteAttributes(selectedClipIds, selection).catch((error) => {
+        logger.error('Failed to paste attributes to selected clips', { error });
+      });
+    },
+    [handlePasteAttributes, selectedClipIds],
+  );
+
+  const handleOpenRemoveAttributesForSelection = useCallback(() => {
+    const clipRefs = resolveClipRefs(sequence, selectedClipIds);
+    if (clipRefs.length === 0) return;
+    setRemoveAttributesContext({ clipIds: clipRefs.map((ref) => ref.clipId) });
+  }, [selectedClipIds, sequence]);
+
+  const handleConfirmRemoveAttributesForSelection = useCallback(
+    (result: RemoveAttributesResult) => {
+      const clipIds = removeAttributesContext?.clipIds ?? [];
+      setRemoveAttributesContext(null);
+
+      if (!sequence || clipIds.length === 0) return;
+
+      const selectedEffectKeys = new Set(result.effectIds);
+      const clipRefs = resolveClipRefs(sequence, clipIds);
+
+      void Promise.all(
+        clipRefs.map((ref) => {
+          const track = sequence.tracks.find((candidate) => candidate.id === ref.trackId);
+          const clip = track?.clips.find((candidate) => candidate.id === ref.clipId);
+          const effectIds =
+            clip?.effects.filter((effectId) => {
+              const effect = effects.get(effectId);
+              return effect ? selectedEffectKeys.has(getEffectSelectionKey(effect)) : false;
+            }) ?? [];
+
+          return handleRemoveAttributes(ref.clipId, ref.trackId, effectIds, {
+            resetTransform: result.resetTransform,
+            resetOpacity: result.resetOpacity,
+            resetBlendMode: result.resetBlendMode,
+            resetSpeed: result.resetSpeed,
+            resetAudio: result.resetAudio,
+          });
+        }),
+      ).catch((error) => {
+        logger.error('Failed to remove attributes from selected clips', { error });
+      });
+    },
+    [effects, handleRemoveAttributes, removeAttributesContext, sequence],
+  );
+
+  const handleApplyEffectFromBrowser = useCallback(
+    async (effectType: string) => {
+      if (!sequence) return;
+
+      const typedEffectType = effectType as EffectType;
+      const clipRefs = resolveClipRefs(sequence, selectedClipIds, {
+        visualOnly: !isAudioEffect(typedEffectType),
+      });
+
+      if (clipRefs.length === 0) {
+        useToastStore.getState().addToast({
+          variant: 'warning',
+          message: isAudioEffect(typedEffectType)
+            ? 'Select a clip to apply the audio effect.'
+            : 'Select a visual clip to apply the effect.',
+        });
+        return;
+      }
+
+      try {
+        for (const ref of clipRefs) {
+          await executeCommand({
+            type: 'AddEffect',
+            payload: {
+              sequenceId: sequence.id,
+              trackId: ref.trackId,
+              clipId: ref.clipId,
+              effectType,
+              params: {},
+            },
+          });
+        }
+
+        const effectLabel =
+          typeof typedEffectType === 'string'
+            ? (EFFECT_TYPE_LABELS[typedEffectType] ?? effectType)
+            : effectType;
+
+        useToastStore.getState().addToast({
+          variant: 'success',
+          message: `Applied ${effectLabel} to ${clipRefs.length} clip${clipRefs.length === 1 ? '' : 's'}.`,
+        });
+      } catch (error) {
+        logger.error('Failed to apply effect from browser', { error, effectType });
+        useToastStore.getState().addToast({
+          variant: 'error',
+          message: 'Failed to apply effect to selected clips.',
+        });
+      }
+    },
+    [executeCommand, selectedClipIds, sequence],
+  );
+
+  const handleApplyEffectPresetFromBrowser = useCallback(
+    async (preset: VisualEffectPreset) => {
+      if (!sequence) return;
+
+      const clipRefs = resolveClipRefs(sequence, selectedClipIds, { visualOnly: true });
+      if (clipRefs.length === 0) {
+        useToastStore.getState().addToast({
+          variant: 'warning',
+          message: 'Select a visual clip to apply the preset.',
+        });
+        return;
+      }
+
+      try {
+        for (const ref of clipRefs) {
+          for (const effect of preset.effects) {
+            const addEffectResult = await executeCommand({
+              type: 'AddEffect',
+              payload: {
+                sequenceId: sequence.id,
+                trackId: ref.trackId,
+                clipId: ref.clipId,
+                effectType: effect.effectType,
+                params: effect.params,
+              },
+            });
+
+            if (effect.defaultMask) {
+              const effectId = addEffectResult.createdIds?.[0];
+              if (!effectId) {
+                throw new Error(`AddEffect did not return an effect id for ${effect.effectType}`);
+              }
+
+              await executeCommand({
+                type: 'AddMask',
+                payload: {
+                  sequenceId: sequence.id,
+                  trackId: ref.trackId,
+                  clipId: ref.clipId,
+                  effectId,
+                  shape: effect.defaultMask.shape,
+                  ...(effect.defaultMask.name ? { name: effect.defaultMask.name } : {}),
+                  ...(typeof effect.defaultMask.feather === 'number'
+                    ? { feather: effect.defaultMask.feather }
+                    : {}),
+                  ...(typeof effect.defaultMask.inverted === 'boolean'
+                    ? { inverted: effect.defaultMask.inverted }
+                    : {}),
+                },
+              });
+            }
+          }
+        }
+
+        useToastStore.getState().addToast({
+          variant: 'success',
+          message: `Applied ${preset.name} to ${clipRefs.length} clip${clipRefs.length === 1 ? '' : 's'}.`,
+        });
+      } catch (error) {
+        logger.error('Failed to apply effect preset from browser', { error, presetId: preset.id });
+        useToastStore.getState().addToast({
+          variant: 'error',
+          message: 'Failed to apply preset to selected clips.',
+        });
+      }
+    },
+    [executeCommand, selectedClipIds, sequence],
+  );
+
+  const handleApplySavedEffectPresetFromBrowser = useCallback(
+    async (preset: EffectPreset) => {
+      if (!sequence) return;
+
+      const targetIsAudio = isAudioEffect(preset.effectType);
+      const clipRefs = resolveClipRefs(sequence, selectedClipIds, { visualOnly: !targetIsAudio });
+      if (clipRefs.length === 0) {
+        useToastStore.getState().addToast({
+          variant: 'warning',
+          message: targetIsAudio
+            ? 'Select a clip to apply the saved audio preset.'
+            : 'Select a visual clip to apply the saved preset.',
+        });
+        return;
+      }
+
+      try {
+        const keyframes =
+          preset.keyframes && Object.keys(preset.keyframes).length > 0
+            ? serializeEffectPresetKeyframes(preset.keyframes)
+            : undefined;
+
+        for (const ref of clipRefs) {
+          await executeCommand({
+            type: 'AddEffect',
+            payload: {
+              sequenceId: sequence.id,
+              trackId: ref.trackId,
+              clipId: ref.clipId,
+              effectType: preset.effectType,
+              params: preset.params,
+              ...(keyframes ? { keyframes } : {}),
+            },
+          });
+        }
+
+        useToastStore.getState().addToast({
+          variant: 'success',
+          message: `Applied ${preset.name} to ${clipRefs.length} clip${clipRefs.length === 1 ? '' : 's'}.`,
+        });
+      } catch (error) {
+        logger.error('Failed to apply saved effect preset from browser', {
+          error,
+          presetId: preset.id,
+        });
+        useToastStore.getState().addToast({
+          variant: 'error',
+          message: 'Failed to apply saved preset to selected clips.',
+        });
+      }
+    },
+    [executeCommand, selectedClipIds, sequence],
+  );
+
+  const applyTransitionToClipIds = useCallback(
+    (clipIds: string[], config: TransitionConfig) => {
+      const clipRefs = resolveClipRefs(sequence, clipIds, { visualOnly: true });
+      if (!sequence || clipRefs.length === 0) return;
+
+      void Promise.all(
+        clipRefs.map((ref) =>
+          executeCommand({
+            type: 'AddEffect',
+            payload: {
+              sequenceId: sequence.id,
+              trackId: ref.trackId,
+              clipId: ref.clipId,
+              effectType: config.type,
+              params: getTransitionParams(config),
+            },
+          }),
+        ),
+      ).catch((error) => {
+        logger.error('Failed to apply transition to clips', { error });
+        useToastStore.getState().addToast({
+          variant: 'error',
+          message: 'Failed to apply transition to selected clips.',
+        });
+      });
+    },
+    [executeCommand, sequence],
+  );
+
+  const handleApplyDefaultTransitionToSelection = useCallback(() => {
+    applyTransitionToClipIds(selectedClipIds, {
+      type: DEFAULT_TRANSITION_TYPE,
+      duration: DEFAULT_TRANSITION_DURATION_SEC,
+    });
+  }, [applyTransitionToClipIds, selectedClipIds]);
+
+  const handleOpenTransitionPickerForSelection = useCallback(() => {
+    const clipRefs = resolveClipRefs(sequence, selectedClipIds, { visualOnly: true });
+    if (clipRefs.length === 0) return;
+    setTransitionPickerContext({ clipIds: clipRefs.map((ref) => ref.clipId) });
+  }, [selectedClipIds, sequence]);
+
+  const handleOpenTransitionPickerForZone = useCallback(
+    (_: string, clipBId: string) => {
+      const match = resolveClipMatches(sequence, [clipBId], { visualOnly: true })[0];
+      const transition = match ? getClipTransitionEffect(match.clip, effects) : undefined;
+
+      setTransitionPickerContext({
+        clipIds: [clipBId],
+        transitionId: transition?.id,
+        initialConfig: transition ? getTransitionConfigFromEffect(transition) : undefined,
+      });
+    },
+    [effects, sequence],
+  );
+
+  const handleSelectTransition = useCallback(
+    (config: TransitionConfig) => {
+      const context = transitionPickerContext;
+      const clipIds = context?.clipIds ?? [];
+      setTransitionPickerContext(null);
+
+      if (!sequence || clipIds.length === 0) return;
+
+      if (!context?.transitionId) {
+        applyTransitionToClipIds(clipIds, config);
+        return;
+      }
+
+      const clipRefs = resolveClipRefs(sequence, clipIds, { visualOnly: true });
+      if (clipRefs.length === 0) return;
+
+      const previousType = context.initialConfig?.type;
+      if (previousType && previousType !== config.type) {
+        void (async () => {
+          for (const ref of clipRefs) {
+            await executeCommand({
+              type: 'RemoveEffect',
+              payload: {
+                sequenceId: sequence.id,
+                trackId: ref.trackId,
+                clipId: ref.clipId,
+                effectId: context.transitionId,
+              },
+            });
+            await executeCommand({
+              type: 'AddEffect',
+              payload: {
+                sequenceId: sequence.id,
+                trackId: ref.trackId,
+                clipId: ref.clipId,
+                effectType: config.type,
+                params: getTransitionParams(config),
+              },
+            });
+          }
+        })().catch((error) => {
+          logger.error('Failed to replace transition', { error });
+          useToastStore.getState().addToast({
+            variant: 'error',
+            message: 'Failed to replace transition.',
+          });
+        });
+        return;
+      }
+
+      void executeCommand({
+        type: 'UpdateEffect',
+        payload: {
+          effectId: context.transitionId,
+          params: getTransitionParams(config),
+        },
+      }).catch((error) => {
+        logger.error('Failed to update transition', { error });
+        useToastStore.getState().addToast({
+          variant: 'error',
+          message: 'Failed to update transition.',
+        });
+      });
+    },
+    [applyTransitionToClipIds, executeCommand, sequence, transitionPickerContext],
+  );
+
+  // Command Palette
   // Interchange export handlers (EDL/FCPXML) — defined before useCommandPalette
   const handleExportEdl = useCallback(() => {
     if (sequence?.id && sequence?.name) {
@@ -623,9 +1444,21 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     },
     onMatchFrame: handleMatchFrame,
     onReverseMatchFrame: handleReverseMatchFrame,
+    onRevealSourceClip: handleRevealSourceClip,
+    onToggleLoopRange: handleToggleLoopRange,
+    onPlayAroundEdit: handlePlayAroundEdit,
     onCopyEffects: handleCopySelectedClipEffects,
     onPasteEffects: handlePasteEffectsToSelection,
+    onPasteAttributes: handleOpenPasteAttributesForSelection,
+    onRemoveAttributes: handleOpenRemoveAttributesForSelection,
+    onApplyDefaultTransition: handleApplyDefaultTransitionToSelection,
+    onChooseTransition: handleOpenTransitionPickerForSelection,
     onToggleClipEnabled: handleToggleClipEnabledForPalette,
+    onLinkClips: handleLinkSelectedClips,
+    onUnlinkClips: handleUnlinkSelectedClips,
+    onGroupClips: handleGroupSelectedClips,
+    onUngroupClips: handleUngroupSelectedClips,
+    onCreateMulticamGroup: handleCreateSynchronizedMulticamGroup,
     onToggleMixer: handleToggleMixer,
     onAddText: () => setActiveTool('text'),
     onAutoDuck: handleAutoDuck,
@@ -646,10 +1479,18 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     },
     onMatchFrame: handleMatchFrame,
     onReverseMatchFrame: handleReverseMatchFrame,
+    onRevealSourceClip: handleRevealSourceClip,
+    onToggleLoopRange: handleToggleLoopRange,
+    onPlayAroundEdit: handlePlayAroundEdit,
     onCopyEffects: handleCopySelectedClipEffects,
     onPasteEffects: handlePasteEffectsToSelection,
+    onPasteAttributes: handleOpenPasteAttributesForSelection,
     onToggleCommandPalette: commandPalette.isOpen ? commandPalette.close : commandPalette.open,
     onToggleClipEnabled: handleToggleClipEnabledForPalette,
+    onLinkClips: handleLinkSelectedClips,
+    onUnlinkClips: handleUnlinkSelectedClips,
+    onGroupClips: handleGroupSelectedClips,
+    onUngroupClips: handleUngroupSelectedClips,
     onToggleFullscreen: toggleFullscreen,
     onCaptureSnapshot: captureSnapshot,
   });
@@ -665,14 +1506,26 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       kind: selectedAsset.kind as 'video' | 'audio' | 'image' | 'graphics',
       uri: selectedAsset.uri,
       durationSec: selectedAsset.durationSec,
+      fileSize: selectedAsset.fileSize,
+      importedAt: selectedAsset.importedAt,
       resolution: selectedAsset.video
         ? {
             width: selectedAsset.video.width,
             height: selectedAsset.video.height,
           }
         : undefined,
+      video: selectedAsset.video,
+      audio: selectedAsset.audio,
+      proxyStatus: selectedAsset.proxyStatus,
+      proxyUrl: selectedAsset.proxyUrl,
+      proxyJobId: proxyJobIdsByAssetId[selectedAsset.id],
+      thumbnailUrl: selectedAsset.thumbnailUrl,
+      missing: selectedAsset.missing,
+      relativePath: selectedAsset.relativePath,
+      workspaceManaged: selectedAsset.workspaceManaged,
+      tags: selectedAsset.tags,
     };
-  }, [selectedAssetId, assets]);
+  }, [selectedAssetId, assets, proxyJobIdsByAssetId]);
 
   // Get selected clip for inspector (non-text, non-caption video/audio clips)
   const inspectorClip: SelectedClip | undefined = useMemo(() => {
@@ -707,15 +1560,55 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
         effects: clip.effects
           .map((effectId) => effects.get(effectId))
           .filter((effect): effect is Effect => effect !== undefined),
+        transform: clip.transform,
+        motionKeyframes: clip.motionKeyframes,
+        opacity: clip.opacity,
+        sourceSize: asset?.video
+          ? {
+              width: asset.video.width,
+              height: asset.video.height,
+            }
+          : undefined,
+        canvasSize: sequence.format.canvas,
         blendMode: clip.blendMode,
         speed: clip.speed,
         reverse: clip.reverse,
         freezeFrame: clip.freezeFrame,
+        timeRemap: clip.timeRemap,
+        slowMotionInterpolation: clip.slowMotionInterpolation,
         hasTimeRemap: hasActiveTimeRemap(clip),
+        audio: clip.audio,
       };
     }
     return undefined;
   }, [sequence, selectedClipIds, assets, effects]);
+
+  const removeAttributeEffectEntries = useMemo(() => {
+    if (!removeAttributesContext || !sequence) {
+      return [];
+    }
+
+    const selectedKeys = new Set<string>();
+    const entries: Array<{ id: string; label: string }> = [];
+    const refs = resolveClipRefs(sequence, removeAttributesContext.clipIds);
+
+    for (const ref of refs) {
+      const track = sequence.tracks.find((candidate) => candidate.id === ref.trackId);
+      const clip = track?.clips.find((candidate) => candidate.id === ref.clipId);
+      if (!clip) continue;
+
+      for (const effectId of clip.effects) {
+        const effect = effects.get(effectId);
+        if (!effect) continue;
+        const key = getEffectSelectionKey(effect);
+        if (selectedKeys.has(key)) continue;
+        selectedKeys.add(key);
+        entries.push({ id: key, label: getEffectSelectionLabel(effect) });
+      }
+    }
+
+    return entries.sort((a, b) => a.label.localeCompare(b.label));
+  }, [effects, removeAttributesContext, sequence]);
 
   // Blend mode operations
   const { setClipBlendMode } = useBlendMode();
@@ -725,6 +1618,162 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       setClipBlendMode(trackId, clipId, blendMode);
     },
     [setClipBlendMode],
+  );
+
+  const handleClipTransformChange = useCallback(
+    (clipId: string, trackId: string, transform: Transform) => {
+      if (!sequence) {
+        return;
+      }
+
+      void executeCommand({
+        type: 'SetClipTransform',
+        payload: {
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+          transform,
+        },
+      }).catch((error) => {
+        logger.error('Failed to update clip transform from inspector', {
+          error,
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+        });
+      });
+    },
+    [executeCommand, sequence],
+  );
+
+  const handleClipOpacityChange = useCallback(
+    (clipId: string, trackId: string, opacity: number) => {
+      if (!sequence) {
+        return;
+      }
+
+      void executeCommand({
+        type: 'SetClipOpacity',
+        payload: {
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+          opacity,
+        },
+      }).catch((error) => {
+        logger.error('Failed to update clip opacity from inspector', {
+          error,
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+        });
+      });
+    },
+    [executeCommand, sequence],
+  );
+
+  const handleClipMotionKeyframesChange = useCallback(
+    (clipId: string, trackId: string, keyframes: TransformKeyframe[]) => {
+      if (!sequence) {
+        return;
+      }
+
+      void executeCommand({
+        type: 'SetClipMotionKeyframes',
+        payload: {
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+          keyframes,
+        },
+      }).catch((error) => {
+        logger.error('Failed to update clip motion keyframes from inspector', {
+          error,
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+        });
+      });
+    },
+    [executeCommand, sequence],
+  );
+
+  const handleTimeRemapChange = useCallback(
+    (clipId: string, trackId: string, timeRemap: TimeRemapCurve) => {
+      if (!sequence) {
+        return;
+      }
+
+      void executeCommand({
+        type: 'SetTimeRemap',
+        payload: {
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+          timeRemap,
+        },
+      }).catch((error) => {
+        logger.error('Failed to update clip time remap from inspector', {
+          error,
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+        });
+      });
+    },
+    [executeCommand, sequence],
+  );
+
+  const handleTimeRemapClear = useCallback(
+    (clipId: string, trackId: string) => {
+      if (!sequence) {
+        return;
+      }
+
+      void executeCommand({
+        type: 'ClearTimeRemap',
+        payload: {
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+        },
+      }).catch((error) => {
+        logger.error('Failed to clear clip time remap from inspector', {
+          error,
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+        });
+      });
+    },
+    [executeCommand, sequence],
+  );
+
+  const handleSlowMotionInterpolationChange = useCallback(
+    (clipId: string, trackId: string, interpolation: SlowMotionInterpolation) => {
+      if (!sequence) {
+        return;
+      }
+
+      void executeCommand({
+        type: 'SetClipSlowMotionInterpolation',
+        payload: {
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+          interpolation,
+        },
+      }).catch((error) => {
+        logger.error('Failed to update clip slow-motion interpolation from inspector', {
+          error,
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+          interpolation,
+        });
+      });
+    },
+    [executeCommand, sequence],
   );
 
   const handleEffectChange = useCallback(
@@ -1194,16 +2243,65 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   const handleMixerVolumeChange = useCallback(
     (trackId: string, volumeDb: number) => {
       setTrackVolume(trackId, volumeDb);
+      if (sequence?.id) {
+        const timerKey = `${sequence.id}:${trackId}`;
+        const timers = mixerVolumeCommitTimersRef.current;
+        const existingTimer = timers.get(timerKey);
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+        }
+
+        const timer = setTimeout(() => {
+          timers.delete(timerKey);
+          void executeCommand({
+            type: 'SetTrackVolume',
+            payload: {
+              sequenceId: sequence.id,
+              trackId,
+              volume: Math.max(0, Math.min(2, dbToLinear(volumeDb))),
+            },
+          });
+        }, MIXER_VOLUME_COMMAND_DEBOUNCE_MS);
+        timers.set(timerKey, timer);
+      }
       logger.debug('Volume change', { trackId, volumeDb });
     },
-    [setTrackVolume],
+    [executeCommand, sequence?.id, setTrackVolume],
   );
 
   const handleMixerPanChange = useCallback(
     (trackId: string, pan: number) => {
       setTrackPan(trackId, pan);
+      if (!sequence || selectedClipIds.length !== 1) {
+        return;
+      }
+
+      const selectedClipId = selectedClipIds[0];
+      const track = sequence.tracks.find((candidate) => candidate.id === trackId);
+      const clip = track?.clips.find((candidate) => candidate.id === selectedClipId);
+      if (!clip) {
+        return;
+      }
+
+      const timerKey = `${sequence.id}:${trackId}:${clip.id}`;
+      const timers = mixerPanCommitTimersRef.current;
+      const existingTimer = timers.get(timerKey);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+      }
+
+      const timer = setTimeout(() => {
+        timers.delete(timerKey);
+        void handleClipAudioUpdate({
+          sequenceId: sequence.id,
+          trackId,
+          clipId: clip.id,
+          pan: Math.max(-1, Math.min(1, pan)),
+        });
+      }, MIXER_PAN_COMMAND_DEBOUNCE_MS);
+      timers.set(timerKey, timer);
     },
-    [setTrackPan],
+    [handleClipAudioUpdate, selectedClipIds, sequence, setTrackPan],
   );
 
   const handleMixerMuteToggle = useCallback(
@@ -1293,12 +2391,14 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       onTrackMuteToggle: handleTrackMuteToggle,
       onTrackLockToggle: handleTrackLockToggle,
       onTrackVisibilityToggle: handleTrackVisibilityToggle,
+      onCaptionTrackLanguageChange: handleCaptionTrackLanguageChange,
       onTrackReorder: handleTrackReorder,
       onAddText: handleOpenAddText,
       getTextClipData: (clipId) => textClipDataById.get(clipId),
       onCloseGap: handleCloseGap,
       onCloseAllGaps: handleCloseAllGaps,
       onRippleDeleteClips: handleRippleDeleteClips,
+      onCreateMulticamGroup: handleCreateSynchronizedMulticamGroup,
       onLiftClips: handleLiftClips,
       onInsertEditFromSource: handleInsertEditFromSource,
       onOverwriteEditFromSource: handleOverwriteEditFromSource,
@@ -1318,6 +2418,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       onPasteEffects: handlePasteEffects,
       onPasteAttributes: handlePasteAttributes,
       onRemoveAttributes: handleRemoveAttributes,
+      showTransitionZones: true,
+      onTransitionZoneClick: handleOpenTransitionPickerForZone,
       onClipDoubleClick: handleClipDoubleClick,
     }),
     [
@@ -1337,11 +2439,13 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       handleTrackMuteToggle,
       handleTrackLockToggle,
       handleTrackVisibilityToggle,
+      handleCaptionTrackLanguageChange,
       handleTrackReorder,
       handleOpenAddText,
       handleCloseGap,
       handleCloseAllGaps,
       handleRippleDeleteClips,
+      handleCreateSynchronizedMulticamGroup,
       handleLiftClips,
       handleInsertEditFromSource,
       handleOverwriteEditFromSource,
@@ -1361,6 +2465,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       handlePasteEffects,
       handlePasteAttributes,
       handleRemoveAttributes,
+      handleOpenTransitionPickerForZone,
       handleClipDoubleClick,
     ],
   );
@@ -1372,9 +2477,30 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       selectedTextClip,
       selectedCaption,
       onClipBlendModeChange: handleClipBlendModeChange,
+      onClipTransformChange: handleClipTransformChange,
+      onClipOpacityChange: handleClipOpacityChange,
+      onClipMotionKeyframesChange: handleClipMotionKeyframesChange,
       onClipSpeedChange: handleSetClipSpeed,
       onClipReverseToggle: handleReverseClip,
       onFreezeFrame: handleCreateFreezeFrame,
+      onTimeRemapChange: handleTimeRemapChange,
+      onTimeRemapClear: handleTimeRemapClear,
+      onSlowMotionInterpolationChange: handleSlowMotionInterpolationChange,
+      onClipAudioChange: (clipId, trackId, patch) => {
+        if (!sequence?.id) return;
+        void handleClipAudioUpdate({
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+          volumeDb: patch.volumeDb,
+          pan: patch.pan,
+          muted: patch.muted,
+          fadeInSec: patch.fadeInSec,
+          fadeOutSec: patch.fadeOutSec,
+          audioRole: patch.audioRole,
+          audioTags: patch.audioTags,
+        });
+      },
       onTextDataChange: onTextDataChange,
       onTextTransformChange,
       onTextTimingChange,
@@ -1382,6 +2508,12 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       onEffectChange: handleEffectChange,
       onEffectToggle: handleEffectToggle,
       onEffectRemove: handleEffectRemove,
+      onGenerateThumbnail: generateAssetThumbnail,
+      onLoadWaveformData: loadWaveformData,
+      onGenerateWaveform: generateWaveformForAsset,
+      onEnsureAudioPreview: ensureAudioPreviewForAsset,
+      waveformUiCacheSize,
+      onClearWaveformUiCache: clearWaveformUiCache,
     }),
     [
       inspectorClip,
@@ -1389,9 +2521,17 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       selectedTextClip,
       selectedCaption,
       handleClipBlendModeChange,
+      handleClipTransformChange,
+      handleClipOpacityChange,
+      handleClipMotionKeyframesChange,
       handleSetClipSpeed,
       handleReverseClip,
       handleCreateFreezeFrame,
+      handleTimeRemapChange,
+      handleTimeRemapClear,
+      handleSlowMotionInterpolationChange,
+      sequence?.id,
+      handleClipAudioUpdate,
       onTextDataChange,
       onTextTransformChange,
       onTextTimingChange,
@@ -1399,6 +2539,12 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       handleEffectChange,
       handleEffectToggle,
       handleEffectRemove,
+      generateAssetThumbnail,
+      loadWaveformData,
+      generateWaveformForAsset,
+      ensureAudioPreviewForAsset,
+      waveformUiCacheSize,
+      clearWaveformUiCache,
     ],
   );
 
@@ -1458,6 +2604,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
         onCaptureSnapshot: captureSnapshot,
         textPlacementModeActive: activeTool === 'text',
         onTextPlacementCommit: handlePreviewTextPlacementCommit,
+        multicamGroup: multicamSession.group ?? multicamGroup,
+        multicamCurrentTimeSec: currentTime,
+        multicamRecording: multicamSession.isRecording,
+        onMulticamAngleSwitch: multicamSession.switchAngle,
         showMixer,
         onToggleMixer: handleToggleMixer,
         sequenceNavigationStack,
@@ -1469,6 +2619,11 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
         aiSidebarProps,
         videoGenerationEnabled: videoGenEnabled,
         onExplorerAssetAddToTimeline: handleExplorerAssetAddToTimeline,
+        onSourceInsertEdit: handleInsertEditFromSource,
+        onSourceOverwriteEdit: handleOverwriteEditFromSource,
+        onEffectSelect: handleApplyEffectFromBrowser,
+        onEffectPresetSelect: handleApplyEffectPresetFromBrowser,
+        onSavedEffectPresetSelect: handleApplySavedEffectPresetFromBrowser,
       }),
     [
       sequence,
@@ -1476,6 +2631,11 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       captureSnapshot,
       activeTool,
       handlePreviewTextPlacementCommit,
+      multicamSession.group,
+      multicamSession.isRecording,
+      multicamSession.switchAngle,
+      multicamGroup,
+      currentTime,
       showMixer,
       handleToggleMixer,
       sequenceNavigationStack,
@@ -1487,6 +2647,11 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       aiSidebarProps,
       videoGenEnabled,
       handleExplorerAssetAddToTimeline,
+      handleInsertEditFromSource,
+      handleOverwriteEditFromSource,
+      handleApplyEffectFromBrowser,
+      handleApplyEffectPresetFromBrowser,
+      handleApplySavedEffectPresetFromBrowser,
     ],
   );
 
@@ -1547,6 +2712,36 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
           currentTime={currentTime}
         />
       </Suspense>
+
+      <PasteAttributesDialog
+        isOpen={showPasteAttributesDialog}
+        clipboardData={effectsClipboard}
+        onConfirm={handleConfirmPasteAttributesForSelection}
+        onCancel={() => setShowPasteAttributesDialog(false)}
+      />
+
+      <RemoveAttributesDialog
+        isOpen={removeAttributesContext !== null}
+        clipEffects={removeAttributeEffectEntries}
+        onConfirm={handleConfirmRemoveAttributesForSelection}
+        onCancel={() => setRemoveAttributesContext(null)}
+      />
+
+      {transitionPickerContext && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="h-[520px] w-[520px] max-h-[80vh] max-w-[92vw] rounded-lg border border-editor-border bg-editor-surface shadow-xl">
+            <TransitionPicker
+              initialConfig={transitionPickerContext.initialConfig}
+              onSelect={handleSelectTransition}
+              onCancel={() => setTransitionPickerContext(null)}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Command Palette */}
       <CommandPalette palette={commandPalette} />

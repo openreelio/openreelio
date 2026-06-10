@@ -5,8 +5,10 @@ import type { AudioMixerPanelProps } from '@/components/features/mixer';
 import { Inspector, type InspectorProps } from '@/components/features/inspector';
 import { ProjectExplorer } from '@/components/explorer';
 import { UnifiedPreviewPlayer } from '@/components/preview';
+import { EffectsBrowser, type VisualEffectPreset } from '@/components/features/effects';
 import type { TextPlacementCommitPayload } from '@/components/preview/TextPlacementOverlay';
 import { SourceMonitor } from '@/components/features/preview/SourceMonitor';
+import { MulticamAngleViewer } from '@/components/features/multicam';
 import type { TimelineProps } from '@/components/timeline';
 import {
   AIErrorBoundary,
@@ -15,7 +17,8 @@ import {
   PreviewErrorBoundary,
 } from '@/components/shared';
 import { type Logger } from '@/services/logger';
-import type { FileTreeEntry, Sequence } from '@/types';
+import type { EffectPreset, FileTreeEntry, Sequence } from '@/types';
+import type { MulticamGroup } from '@/utils/multicam';
 import type { PanelId } from '@/stores/workspaceLayoutStore';
 import { EditorTimelineDockPanel } from './EditorTimelineDockPanel';
 
@@ -55,6 +58,16 @@ const TranscriptEditorPanelLazy = lazy(async () => {
   return { default: module.TranscriptEditor };
 });
 
+const TimelineIndexPanelLazy = lazy(async () => {
+  const module = await import('@/components/features/timeline-index/TimelineIndexPanel');
+  return { default: module.TimelineIndexPanel };
+});
+
+const PreviewScopesPanelLazy = lazy(async () => {
+  const module = await import('@/components/features/scopes');
+  return { default: module.PreviewScopesPanel };
+});
+
 const PerformancePanelLazy = lazy(async () => {
   const module = await import('@/components/features/dev');
   return { default: module.PerformancePanel };
@@ -73,6 +86,10 @@ export interface EditorPanelContentOptions {
   onCaptureSnapshot: () => void | Promise<void>;
   textPlacementModeActive?: boolean;
   onTextPlacementCommit?: (payload: TextPlacementCommitPayload) => void | Promise<void>;
+  multicamGroup?: MulticamGroup | null;
+  multicamCurrentTimeSec?: number;
+  multicamRecording?: boolean;
+  onMulticamAngleSwitch?: (angleIndex: number) => void;
   showMixer: boolean;
   onToggleMixer: () => void;
   sequenceNavigationStack: string[];
@@ -84,6 +101,11 @@ export interface EditorPanelContentOptions {
   aiSidebarProps: AISidebarProps;
   videoGenerationEnabled: boolean;
   onExplorerAssetAddToTimeline?: (entry: FileTreeEntry) => void | Promise<void>;
+  onSourceInsertEdit?: () => void | Promise<void>;
+  onSourceOverwriteEdit?: () => void | Promise<void>;
+  onEffectSelect?: (effectType: string) => void | Promise<void>;
+  onEffectPresetSelect?: (preset: VisualEffectPreset) => void | Promise<void>;
+  onSavedEffectPresetSelect?: (preset: EffectPreset) => void | Promise<void>;
 }
 
 export function createEditorPanelContent({
@@ -94,6 +116,10 @@ export function createEditorPanelContent({
   onCaptureSnapshot,
   textPlacementModeActive = false,
   onTextPlacementCommit,
+  multicamGroup = null,
+  multicamCurrentTimeSec = 0,
+  multicamRecording = false,
+  onMulticamAngleSwitch,
   showMixer,
   onToggleMixer,
   sequenceNavigationStack,
@@ -105,6 +131,11 @@ export function createEditorPanelContent({
   aiSidebarProps,
   videoGenerationEnabled,
   onExplorerAssetAddToTimeline,
+  onSourceInsertEdit,
+  onSourceOverwriteEdit,
+  onEffectSelect,
+  onEffectPresetSelect,
+  onSavedEffectPresetSelect,
 }: EditorPanelContentOptions): Partial<Record<PanelId, ReactNode>> {
   return {
     explorer: (
@@ -117,8 +148,23 @@ export function createEditorPanelContent({
 
     'source-monitor': (
       <PreviewErrorBoundary onError={(error) => logger.error('SourceMonitor error', { error })}>
-        <SourceMonitor className="h-full w-full" />
+        <SourceMonitor
+          className="h-full w-full"
+          onInsertEdit={onSourceInsertEdit}
+          onOverwriteEdit={onSourceOverwriteEdit}
+        />
       </PreviewErrorBoundary>
+    ),
+
+    'effects-browser': (
+      <InspectorErrorBoundary onError={(error) => logger.error('EffectsBrowser error', { error })}>
+        <EffectsBrowser
+          className="h-full"
+          onEffectSelect={onEffectSelect}
+          onPresetSelect={onEffectPresetSelect}
+          onSavedPresetSelect={onSavedEffectPresetSelect}
+        />
+      </InspectorErrorBoundary>
     ),
 
     'program-monitor': (
@@ -148,6 +194,17 @@ export function createEditorPanelContent({
         >
           <Camera className="w-4 h-4" />
         </button>
+        {multicamGroup && onMulticamAngleSwitch && (
+          <div className="absolute bottom-2 left-2 right-2 z-10 h-36 rounded border border-editor-border bg-black/80 p-1 shadow-lg">
+            <MulticamAngleViewer
+              group={multicamGroup}
+              currentTimeSec={multicamCurrentTimeSec}
+              onAngleSwitch={onMulticamAngleSwitch}
+              isRecording={multicamRecording}
+              className="h-full w-full"
+            />
+          </div>
+        )}
       </div>
     ),
 
@@ -214,6 +271,18 @@ export function createEditorPanelContent({
     transcript: (
       <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
         <TranscriptEditorPanelLazy />
+      </Suspense>
+    ),
+
+    'timeline-index': (
+      <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+        <TimelineIndexPanelLazy sequence={sequence} />
+      </Suspense>
+    ),
+
+    scopes: (
+      <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+        <PreviewScopesPanelLazy />
       </Suspense>
     ),
 
