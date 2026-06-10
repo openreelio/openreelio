@@ -123,6 +123,105 @@ describe('editingTools — extended tools', () => {
     });
   });
 
+  describe('get_transcript_words', () => {
+    it('should load and filter transcript words before a transcript edit', async () => {
+      vi.mocked(invoke).mockResolvedValueOnce([
+        {
+          text: 'Keep',
+          startSec: 0,
+          endSec: 0.5,
+          segmentIndex: 0,
+          wordIndex: 0,
+          confidence: 0.9,
+        },
+        {
+          text: 'remove',
+          startSec: 1,
+          endSec: 1.5,
+          segmentIndex: 0,
+          wordIndex: 1,
+          confidence: 0.8,
+        },
+      ]);
+
+      const tool = globalToolRegistry.get('get_transcript_words');
+      const result = await tool!.handler(
+        {
+          assetId: 'asset-1',
+          query: 'remove',
+          startSec: 0.5,
+          endSec: 2,
+        },
+        CTX,
+      );
+
+      expect(result.success).toBe(true);
+      expect(invoke).toHaveBeenCalledWith('get_transcript_words', { assetId: 'asset-1' });
+      expect(result.result).toMatchObject({
+        assetId: 'asset-1',
+        wordCount: 1,
+        totalWordCount: 2,
+        query: 'remove',
+        words: [expect.objectContaining({ text: 'remove', startSec: 1, endSec: 1.5 })],
+      });
+    });
+  });
+
+  describe('delete_transcript_range', () => {
+    it('should require transcript evidence before deleting', async () => {
+      const tool = globalToolRegistry.get('delete_transcript_range');
+      expect(tool).toBeDefined();
+
+      const result = await tool!.handler(
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          clipId: 'clip-1',
+          startSec: 1,
+          endSec: 2,
+        },
+        CTX,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('evidence text');
+      expect(invoke).not.toHaveBeenCalled();
+    });
+
+    it('should call transcript ripple delete IPC with the selected source range', async () => {
+      vi.mocked(invoke).mockResolvedValueOnce({
+        success: true,
+        deletedRange: { startSec: 1, endSec: 2 },
+        timelineRange: { startSec: 5, endSec: 6 },
+      });
+
+      const tool = globalToolRegistry.get('delete_transcript_range');
+      const result = await tool!.handler(
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          clipId: 'clip-1',
+          startSec: 1,
+          endSec: 2,
+          evidenceText: 'remove this phrase',
+        },
+        CTX,
+      );
+
+      expect(result.success).toBe(true);
+      expect(invoke).toHaveBeenCalledWith('delete_transcript_range', {
+        args: {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          clipId: 'clip-1',
+          startSec: 1,
+          endSec: 2,
+        },
+      });
+      expect(result.result).toMatchObject({ evidenceText: 'remove this phrase' });
+    });
+  });
+
   describe('rename_track', () => {
     it('should be registered with category track', () => {
       const tool = globalToolRegistry.get('rename_track');

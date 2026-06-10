@@ -52,6 +52,22 @@ describe('effectTools', () => {
       name: 'Semantic mask: logo',
       feather: 0.08,
       inverted: false,
+      keyframes: [
+        {
+          timeOffset: 0,
+          shape: {
+            type: 'rectangle',
+            x: 0.5,
+            y: 0.5,
+            width: 0.3,
+            height: 0.2,
+            cornerRadius: 0.02,
+            rotation: 0,
+          },
+          easing: 'linear',
+        },
+      ],
+      trackingSourceId: 'tracking-effect-1',
     });
 
     expect(result.success).toBe(true);
@@ -72,6 +88,22 @@ describe('effectTools', () => {
       name: 'Semantic mask: logo',
       feather: 0.08,
       inverted: false,
+      keyframes: [
+        {
+          timeOffset: 0,
+          shape: {
+            type: 'rectangle',
+            x: 0.5,
+            y: 0.5,
+            width: 0.3,
+            height: 0.2,
+            cornerRadius: 0.02,
+            rotation: 0,
+          },
+          easing: 'linear',
+        },
+      ],
+      trackingSourceId: 'tracking-effect-1',
     });
   });
 
@@ -88,6 +120,21 @@ describe('effectTools', () => {
       maskId: 'mask-1',
       feather: 0.12,
       enabled: true,
+      keyframes: [
+        {
+          timeOffset: 0.5,
+          shape: {
+            type: 'ellipse',
+            x: 0.4,
+            y: 0.45,
+            radiusX: 0.1,
+            radiusY: 0.08,
+            rotation: 0,
+          },
+          easing: 'linear',
+        },
+      ],
+      trackingSourceId: 'tracking-effect-2',
     });
 
     expect(result.success).toBe(true);
@@ -96,6 +143,21 @@ describe('effectTools', () => {
       maskId: 'mask-1',
       feather: 0.12,
       enabled: true,
+      keyframes: [
+        {
+          timeOffset: 0.5,
+          shape: {
+            type: 'ellipse',
+            x: 0.4,
+            y: 0.45,
+            radiusX: 0.1,
+            radiusY: 0.08,
+            rotation: 0,
+          },
+          easing: 'linear',
+        },
+      ],
+      trackingSourceId: 'tracking-effect-2',
     });
   });
 });

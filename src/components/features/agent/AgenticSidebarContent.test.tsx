@@ -1134,7 +1134,9 @@ describe('AgenticSidebarContent', () => {
     expect(useWorkspaceLayoutStore.getState().layout.zones.bottom.panelIds).not.toContain(
       'agent-review',
     );
-    expect(useWorkspaceLayoutStore.getState().layout.zones.bottom.activePanelId).toBe('history');
+    expect(useWorkspaceLayoutStore.getState().layout.zones.bottom.activePanelId).toBe(
+      'timeline-index',
+    );
 
     await user.click(screen.getByTestId('agent-review-inline-close-btn'));
 

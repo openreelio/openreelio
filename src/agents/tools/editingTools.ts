@@ -717,6 +717,192 @@ const EDITING_TOOLS: ToolDefinition[] = [
   },
 
   // -------------------------------------------------------------------------
+  // Get Transcript Words
+  // -------------------------------------------------------------------------
+  {
+    name: 'get_transcript_words',
+    description:
+      'Read word-level transcript timing for an asset before selecting evidence for transcript-driven edits.',
+    category: 'clip',
+    parameters: {
+      type: 'object',
+      properties: {
+        assetId: {
+          type: 'string',
+          description: 'Asset ID whose transcript words should be loaded',
+        },
+        query: {
+          type: 'string',
+          description: 'Optional word/text filter for finding candidate edit ranges',
+        },
+        startSec: {
+          type: 'number',
+          description: 'Optional source-time lower bound in seconds',
+        },
+        endSec: {
+          type: 'number',
+          description: 'Optional source-time upper bound in seconds',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum words to return (default 200)',
+        },
+      },
+      required: ['assetId'],
+    },
+    handler: async (args) => {
+      const assetId = typeof args.assetId === 'string' ? args.assetId.trim() : '';
+      if (!assetId) {
+        return { success: false, error: 'assetId is required' };
+      }
+
+      const startSec = typeof args.startSec === 'number' ? args.startSec : undefined;
+      const endSec = typeof args.endSec === 'number' ? args.endSec : undefined;
+      if (
+        startSec !== undefined &&
+        endSec !== undefined &&
+        (!Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec <= startSec)
+      ) {
+        return { success: false, error: 'Invalid transcript word range' };
+      }
+
+      const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
+      const limit =
+        typeof args.limit === 'number' && Number.isFinite(args.limit)
+          ? Math.max(1, Math.min(1000, Math.floor(args.limit)))
+          : 200;
+
+      try {
+        const words = await invoke<
+          Array<{
+            text: string;
+            startSec: number;
+            endSec: number;
+            segmentIndex: number;
+            wordIndex: number;
+            confidence: number;
+            speakerId?: string | null;
+            speakerTurnId?: string | null;
+          }>
+        >('get_transcript_words', { assetId });
+
+        const filteredWords = words
+          .filter((word) => (startSec === undefined ? true : word.endSec >= startSec))
+          .filter((word) => (endSec === undefined ? true : word.startSec <= endSec))
+          .filter((word) => (query ? word.text.toLowerCase().includes(query) : true))
+          .slice(0, limit);
+
+        return {
+          success: true,
+          result: {
+            assetId,
+            words: filteredWords,
+            wordCount: filteredWords.length,
+            totalWordCount: words.length,
+            query: query || null,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('get_transcript_words failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // Delete Transcript Range
+  // -------------------------------------------------------------------------
+  {
+    name: 'delete_transcript_range',
+    description:
+      'Ripple-delete a source transcript time range from a timeline clip. Use only after citing transcript evidence for the selected words or phrase.',
+    category: 'clip',
+    parameters: {
+      type: 'object',
+      properties: {
+        sequenceId: {
+          type: 'string',
+          description: 'The ID of the sequence containing the transcript clip',
+        },
+        trackId: {
+          type: 'string',
+          description: 'The ID of the track containing the clip',
+        },
+        clipId: {
+          type: 'string',
+          description: 'The ID of the clip whose source transcript range should be removed',
+        },
+        startSec: {
+          type: 'number',
+          description: 'Transcript source start time in seconds',
+        },
+        endSec: {
+          type: 'number',
+          description: 'Transcript source end time in seconds',
+        },
+        evidenceText: {
+          type: 'string',
+          description: 'Transcript text being removed; required for reviewability',
+        },
+      },
+      required: ['sequenceId', 'trackId', 'clipId', 'startSec', 'endSec', 'evidenceText'],
+    },
+    handler: async (args) => {
+      const sequenceId = args.sequenceId as string;
+      const trackId = args.trackId as string;
+      const clipId = args.clipId as string;
+      const startSec = Number(args.startSec);
+      const endSec = Number(args.endSec);
+      const evidenceText = typeof args.evidenceText === 'string' ? args.evidenceText.trim() : '';
+
+      if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec <= startSec) {
+        return { success: false, error: 'Invalid transcript range: endSec must be after startSec' };
+      }
+
+      if (!evidenceText) {
+        return {
+          success: false,
+          error: 'Transcript evidence text is required before deleting a transcript range',
+        };
+      }
+
+      try {
+        const result = await invoke('delete_transcript_range', {
+          args: {
+            sequenceId,
+            trackId,
+            clipId,
+            startSec,
+            endSec,
+          },
+        });
+
+        logger.info('delete_transcript_range executed', {
+          sequenceId,
+          trackId,
+          clipId,
+          startSec,
+          endSec,
+          evidenceText,
+        });
+
+        return {
+          success: true,
+          result: {
+            ...(typeof result === 'object' && result !== null ? result : {}),
+            evidenceText,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('delete_transcript_range failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // -------------------------------------------------------------------------
   // Insert Clip
   // -------------------------------------------------------------------------
   {
