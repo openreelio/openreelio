@@ -806,9 +806,11 @@ mod tests {
         let result = import_cmd.execute(&mut state).unwrap();
         let asset_id = &result.created_ids[0];
 
-        let mut replacement_video = VideoInfo::default();
-        replacement_video.width = 3840;
-        replacement_video.height = 2160;
+        let replacement_video = VideoInfo {
+            width: 3840,
+            height: 2160,
+            ..Default::default()
+        };
 
         let mut update_cmd = UpdateAssetCommand::new(asset_id)
             .with_uri(&replacement_uri)

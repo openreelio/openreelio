@@ -5440,9 +5440,11 @@ mod tests {
 
         let video_path = create_temp_media_file("validation_hdr_source.mp4");
         let mut assets = HashMap::new();
-        let mut video_info = VideoInfo::default();
-        video_info.is_hdr = true;
-        video_info.color_transfer = Some("smpte2084".to_string());
+        let video_info = VideoInfo {
+            is_hdr: true,
+            color_transfer: Some("smpte2084".to_string()),
+            ..Default::default()
+        };
         let mut video_asset =
             Asset::new_video("validation_hdr_source.mp4", &video_path, video_info)
                 .with_duration(3.0)
@@ -5482,9 +5484,11 @@ mod tests {
 
         let video_path = create_temp_media_file("validation_hdr_tonemapped_source.mp4");
         let mut assets = HashMap::new();
-        let mut video_info = VideoInfo::default();
-        video_info.is_hdr = true;
-        video_info.color_transfer = Some("smpte2084".to_string());
+        let video_info = VideoInfo {
+            is_hdr: true,
+            color_transfer: Some("smpte2084".to_string()),
+            ..Default::default()
+        };
         let mut video_asset = Asset::new_video(
             "validation_hdr_tonemapped_source.mp4",
             &video_path,
