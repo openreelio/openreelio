@@ -12,8 +12,13 @@
  * @module components/features/multicam/MulticamAngleViewer
  */
 
-import { useCallback, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
-import { Circle } from 'lucide-react';
+import {
+  useCallback,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from 'react';
+import { Circle, Volume2, VolumeX } from 'lucide-react';
 import type { MulticamGroup, MulticamAngle } from '@/utils/multicam';
 
 // =============================================================================
@@ -48,6 +53,15 @@ export interface MulticamAngleViewerProps {
 // Component
 // =============================================================================
 
+function formatSyncOffset(offsetSec: number | undefined): string {
+  const safeOffset = Number.isFinite(offsetSec) ? (offsetSec ?? 0) : 0;
+  if (Math.abs(safeOffset) < 0.05) {
+    return 'Sync 0.0s';
+  }
+
+  return `Sync ${safeOffset > 0 ? '+' : ''}${safeOffset.toFixed(1)}s`;
+}
+
 export function MulticamAngleViewer({
   group,
   // currentTimeSec is received for future thumbnail frame selection
@@ -71,7 +85,7 @@ export function MulticamAngleViewer({
       if (index === group.activeAngleIndex) return;
       onAngleSwitch(index);
     },
-    [disabled, group, onAngleSwitch]
+    [disabled, group, onAngleSwitch],
   );
 
   // Handle keyboard shortcuts
@@ -88,7 +102,7 @@ export function MulticamAngleViewer({
         }
       }
     },
-    [disabled, group, onAngleSwitch]
+    [disabled, group, onAngleSwitch],
   );
 
   // Empty states
@@ -181,9 +195,7 @@ export function MulticamAngleViewer({
                 {renderThumbnail ? (
                   renderThumbnail(angle, index)
                 ) : (
-                  <div className="text-zinc-600 text-4xl font-bold">
-                    {index + 1}
-                  </div>
+                  <div className="text-zinc-600 text-4xl font-bold">{index + 1}</div>
                 )}
               </div>
 
@@ -193,17 +205,35 @@ export function MulticamAngleViewer({
                   <span className="text-xs text-white truncate">
                     {angle.label || `Angle ${index + 1}`}
                   </span>
-                  {isActive && (
-                    <span className="text-xs text-yellow-400 font-medium">
-                      LIVE
-                    </span>
-                  )}
+                  {isActive && <span className="text-xs text-yellow-400 font-medium">LIVE</span>}
                 </div>
               </div>
 
               {/* Keyboard hint */}
               <div className="absolute top-1 left-1 w-5 h-5 flex items-center justify-center bg-black/60 rounded text-xs text-white font-mono">
                 {index + 1}
+              </div>
+
+              <div className="absolute top-1 right-1 flex max-w-[calc(100%-2rem)] items-center gap-1">
+                <span
+                  data-testid={`angle-audio-${index}`}
+                  className="inline-flex h-5 items-center gap-1 rounded bg-black/60 px-1.5 text-[10px] font-medium text-white"
+                  title={angle.hasAudio === false ? 'No audio available' : 'Audio available'}
+                >
+                  {angle.hasAudio === false ? (
+                    <VolumeX className="h-3 w-3" />
+                  ) : (
+                    <Volume2 className="h-3 w-3" />
+                  )}
+                  {angle.hasAudio === false ? 'No audio' : 'Audio'}
+                </span>
+                <span
+                  data-testid={`angle-sync-offset-${index}`}
+                  className="inline-flex h-5 max-w-20 items-center rounded bg-black/60 px-1.5 text-[10px] font-mono text-zinc-200"
+                  title="Sync offset"
+                >
+                  {formatSyncOffset(angle.syncOffsetSec)}
+                </span>
               </div>
             </div>
           );

@@ -90,8 +90,27 @@ describe('useCommandPalette', () => {
       const onExportFrame = vi.fn();
       const onExportAudio = vi.fn();
       const onMatchFrame = vi.fn();
+      const onRevealSourceClip = vi.fn();
+      const onToggleLoopRange = vi.fn();
+      const onPlayAroundEdit = vi.fn();
+      const onLinkClips = vi.fn();
+      const onUngroupClips = vi.fn();
+      const onCreateMulticamGroup = vi.fn();
       const { result } = renderHook(() =>
-        useCommandPalette({ onExport, onExportEdl, onExportFcpxml, onExportFrame, onExportAudio, onMatchFrame }),
+        useCommandPalette({
+          onExport,
+          onExportEdl,
+          onExportFcpxml,
+          onExportFrame,
+          onExportAudio,
+          onMatchFrame,
+          onRevealSourceClip,
+          onToggleLoopRange,
+          onPlayAroundEdit,
+          onLinkClips,
+          onUngroupClips,
+          onCreateMulticamGroup,
+        }),
       );
 
       const ids = result.current.filteredActions.map((a) => a.id);
@@ -101,6 +120,12 @@ describe('useCommandPalette', () => {
       expect(ids).toContain('view.export-frame');
       expect(ids).toContain('view.export-audio');
       expect(ids).toContain('source.match-frame');
+      expect(ids).toContain('source.reveal-source-clip');
+      expect(ids).toContain('transport.loop-range');
+      expect(ids).toContain('transport.play-around-edit');
+      expect(ids).toContain('edit.link-clips');
+      expect(ids).toContain('edit.ungroup-clips');
+      expect(ids).toContain('edit.create-multicam');
     });
 
     it('should not include callback-based actions when callback not provided', () => {
@@ -228,6 +253,55 @@ describe('useCommandPalette', () => {
       await waitFor(() => {
         expect(onExportEdl).toHaveBeenCalledTimes(1);
         expect(onExportFcpxml).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('should execute multi-clip callbacks when invoked', async () => {
+      const onPasteAttributes = vi.fn();
+      const onRemoveAttributes = vi.fn();
+      const onApplyDefaultTransition = vi.fn();
+      const onChooseTransition = vi.fn();
+      const onLinkClips = vi.fn();
+      const onUnlinkClips = vi.fn();
+      const onGroupClips = vi.fn();
+      const onUngroupClips = vi.fn();
+      const onCreateMulticamGroup = vi.fn();
+      const { result } = renderHook(() =>
+        useCommandPalette({
+          onPasteAttributes,
+          onRemoveAttributes,
+          onApplyDefaultTransition,
+          onChooseTransition,
+          onLinkClips,
+          onUnlinkClips,
+          onGroupClips,
+          onUngroupClips,
+          onCreateMulticamGroup,
+        }),
+      );
+
+      act(() => {
+        result.current.executeAction('edit.paste-attributes');
+        result.current.executeAction('edit.remove-attributes');
+        result.current.executeAction('edit.apply-default-transition');
+        result.current.executeAction('edit.choose-transition');
+        result.current.executeAction('edit.link-clips');
+        result.current.executeAction('edit.unlink-clips');
+        result.current.executeAction('edit.group-clips');
+        result.current.executeAction('edit.ungroup-clips');
+        result.current.executeAction('edit.create-multicam');
+      });
+
+      await waitFor(() => {
+        expect(onPasteAttributes).toHaveBeenCalledTimes(1);
+        expect(onRemoveAttributes).toHaveBeenCalledTimes(1);
+        expect(onApplyDefaultTransition).toHaveBeenCalledTimes(1);
+        expect(onChooseTransition).toHaveBeenCalledTimes(1);
+        expect(onLinkClips).toHaveBeenCalledTimes(1);
+        expect(onUnlinkClips).toHaveBeenCalledTimes(1);
+        expect(onGroupClips).toHaveBeenCalledTimes(1);
+        expect(onUngroupClips).toHaveBeenCalledTimes(1);
+        expect(onCreateMulticamGroup).toHaveBeenCalledTimes(1);
       });
     });
   });

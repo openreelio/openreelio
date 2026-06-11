@@ -11,7 +11,7 @@ import type {
   TimelineExportFormat,
   TimelineFormatOption,
 } from './types';
-import type { VideoExportRequest } from '@/bindings';
+import type { SequenceHdrSettings, VideoExportRequest } from '@/bindings';
 
 // =============================================================================
 // Export Presets
@@ -36,6 +36,10 @@ export const EXPORT_PRESETS: ExportPreset[] = [
       audioBitrate: '192k',
       crf: 23,
       twoPass: false,
+      hdrMode: 'sdr',
+      maxCll: null,
+      maxFall: null,
+      bitDepth: 8,
     },
   },
   {
@@ -55,6 +59,10 @@ export const EXPORT_PRESETS: ExportPreset[] = [
       audioBitrate: '128k',
       crf: 28,
       twoPass: false,
+      hdrMode: 'sdr',
+      maxCll: null,
+      maxFall: null,
+      bitDepth: 8,
     },
   },
   {
@@ -74,6 +82,10 @@ export const EXPORT_PRESETS: ExportPreset[] = [
       audioBitrate: '320k',
       crf: 18,
       twoPass: false,
+      hdrMode: 'sdr',
+      maxCll: null,
+      maxFall: null,
+      bitDepth: 8,
     },
   },
   {
@@ -93,6 +105,10 @@ export const EXPORT_PRESETS: ExportPreset[] = [
       audioBitrate: '320k',
       crf: 18,
       twoPass: false,
+      hdrMode: 'sdr',
+      maxCll: null,
+      maxFall: null,
+      bitDepth: 8,
     },
   },
   {
@@ -112,6 +128,10 @@ export const EXPORT_PRESETS: ExportPreset[] = [
       audioBitrate: '192k',
       crf: 23,
       twoPass: false,
+      hdrMode: 'sdr',
+      maxCll: null,
+      maxFall: null,
+      bitDepth: 8,
     },
   },
   {
@@ -131,6 +151,10 @@ export const EXPORT_PRESETS: ExportPreset[] = [
       audioBitrate: '128k',
       crf: 24,
       twoPass: false,
+      hdrMode: 'sdr',
+      maxCll: null,
+      maxFall: null,
+      bitDepth: 8,
     },
   },
   {
@@ -150,6 +174,10 @@ export const EXPORT_PRESETS: ExportPreset[] = [
       audioBitrate: '128k',
       crf: 23,
       twoPass: false,
+      hdrMode: 'sdr',
+      maxCll: null,
+      maxFall: null,
+      bitDepth: 8,
     },
   },
   {
@@ -169,6 +197,10 @@ export const EXPORT_PRESETS: ExportPreset[] = [
       audioBitrate: '128k',
       crf: 31,
       twoPass: false,
+      hdrMode: 'sdr',
+      maxCll: null,
+      maxFall: null,
+      bitDepth: 8,
     },
   },
   {
@@ -188,6 +220,10 @@ export const EXPORT_PRESETS: ExportPreset[] = [
       audioBitrate: null,
       crf: null,
       twoPass: false,
+      hdrMode: 'sdr',
+      maxCll: null,
+      maxFall: null,
+      bitDepth: 8,
     },
   },
 ];
@@ -295,6 +331,31 @@ export function getExportPreset(presetId: string): ExportPreset {
 export function getVideoExportRequest(presetId: string): VideoExportRequest {
   const preset = getExportPreset(presetId);
   return { ...preset.settings };
+}
+
+/** Merge sequence HDR settings into a video export request. */
+export function applyHdrSettingsToVideoExportRequest(
+  request: VideoExportRequest,
+  hdrSettings: SequenceHdrSettings | null | undefined,
+): VideoExportRequest {
+  if (!hdrSettings || (hdrSettings.hdrMode !== 'hdr10' && hdrSettings.hdrMode !== 'hlg')) {
+    return {
+      ...request,
+      hdrMode: 'sdr',
+      maxCll: null,
+      maxFall: null,
+      bitDepth: request.bitDepth ?? 8,
+    };
+  }
+
+  return {
+    ...request,
+    videoCodec: 'h265',
+    hdrMode: hdrSettings.hdrMode === 'hdr10' ? 'hdr_10' : 'hlg',
+    maxCll: hdrSettings.hdrMode === 'hdr10' ? (hdrSettings.maxCll ?? 1000) : null,
+    maxFall: hdrSettings.hdrMode === 'hdr10' ? (hdrSettings.maxFall ?? 400) : null,
+    bitDepth: hdrSettings.bitDepth >= 10 ? hdrSettings.bitDepth : 10,
+  };
 }
 
 /** Look up the metadata for an editable timeline export format. */

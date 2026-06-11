@@ -721,6 +721,10 @@ describe('CodexReferenceAdapter', () => {
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"AddTextClip"');
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"textWorkflows"');
     expect(getFirstTextContent(commandSchemaResponse)).toContain('"SetClipTransform"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"SetClipMotionKeyframes"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"SetTimeRemap"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"SetClipSlowMotionInterpolation"');
+    expect(getFirstTextContent(commandSchemaResponse)).toContain('"speedAndTime"');
     expect(getFirstTextContent(commandSchemaResponse)).toContain('openreelio.transcription_status');
     expect(getFirstTextContent(commandSchemaResponse)).toContain(
       'openreelio.transcription_install_model',

@@ -13,6 +13,7 @@ import type {
   EffectId,
   MaskId,
   MaskShape,
+  MaskKeyframe,
   MaskBlendMode,
   GradientType,
   Point2D,
@@ -52,6 +53,8 @@ export interface AddMaskPayload {
   name?: string;
   feather?: number;
   inverted?: boolean;
+  keyframes?: MaskKeyframe[];
+  trackingSourceId?: string;
 }
 
 export interface UpdateMaskPayload {
@@ -66,6 +69,8 @@ export interface UpdateMaskPayload {
   blendMode?: MaskBlendMode;
   enabled?: boolean;
   locked?: boolean;
+  keyframes?: MaskKeyframe[];
+  trackingSourceId?: string;
 }
 
 export interface RemoveMaskPayload {

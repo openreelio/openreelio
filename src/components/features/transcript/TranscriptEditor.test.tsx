@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { TranscriptEditor } from './TranscriptEditor';
 import { useProjectStore } from '@/stores/projectStore';
@@ -22,6 +23,18 @@ function createMockWords(count: number): TranscriptWord[] {
     endSec: (i + 1) * 1.0,
     segmentIndex: Math.floor(i / 3),
     wordIndex: i % 3,
+    confidence: 0.95,
+    speakerId: null,
+  }));
+}
+
+function createWordsFromText(text: string): TranscriptWord[] {
+  return text.split(/\s+/).map((word, index) => ({
+    text: word,
+    startSec: index * 0.5,
+    endSec: (index + 1) * 0.5,
+    segmentIndex: 0,
+    wordIndex: index,
     confidence: 0.95,
     speakerId: null,
   }));
@@ -122,7 +135,7 @@ describe('TranscriptEditor', () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText('No transcript available. Run transcription first.')
+        screen.getByText('No transcript available. Run transcription first.'),
       ).toBeInTheDocument();
     });
   });
@@ -196,10 +209,66 @@ describe('TranscriptEditor', () => {
     expect(screen.getByText(/2 words selected/)).toBeInTheDocument();
 
     // Press Escape on the container
-    const container = screen.getByRole('textbox');
+    const container = screen.getByRole('textbox', { name: 'Transcript editor' });
     fireEvent.keyDown(container, { key: 'Escape' });
 
     expect(screen.queryByText(/words selected/)).not.toBeInTheDocument();
+  });
+
+  it('should find transcript matches and select the active result', async () => {
+    const user = userEvent.setup();
+    mockInvoke.mockResolvedValueOnce(createWordsFromText('Hello world hello editor'));
+    setupClipSelection();
+    render(<TranscriptEditor />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Hello')).toBeInTheDocument();
+    });
+
+    await user.type(screen.getByRole('searchbox', { name: 'Find in transcript' }), 'hello');
+
+    expect(screen.getByText('2 matches')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    await user.click(screen.getByRole('button', { name: 'Select' }));
+
+    expect(screen.getByText('1 word selected')).toBeInTheDocument();
+  });
+
+  it('should show correction preview without sending transcript mutation IPC', async () => {
+    const user = userEvent.setup();
+    mockInvoke.mockResolvedValueOnce(createWordsFromText('we need to trim this part'));
+    setupClipSelection();
+    render(<TranscriptEditor />);
+
+    await waitFor(() => {
+      expect(screen.getByText('need')).toBeInTheDocument();
+    });
+
+    await user.type(screen.getByRole('searchbox', { name: 'Find in transcript' }), 'need to');
+    await user.type(
+      screen.getByRole('textbox', { name: 'Transcript replacement preview' }),
+      'should',
+    );
+
+    expect(screen.getByText('we should trim this part')).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith('get_transcript_words', {
+      assetId: 'asset_1',
+    });
+  });
+
+  it('should keep replacement preview disabled in read-only mode', async () => {
+    mockInvoke.mockResolvedValueOnce(createWordsFromText('readonly transcript text'));
+    setupClipSelection();
+    render(<TranscriptEditor readOnly />);
+
+    await waitFor(() => {
+      expect(screen.getByText('readonly')).toBeInTheDocument();
+    });
+
+    expect(screen.getByRole('textbox', { name: 'Transcript replacement preview' })).toBeDisabled();
+    expect(screen.queryByText('Remove')).not.toBeInTheDocument();
   });
 
   it('should have proper accessibility attributes', async () => {
@@ -211,7 +280,7 @@ describe('TranscriptEditor', () => {
       expect(screen.getByText('word0')).toBeInTheDocument();
     });
 
-    const container = screen.getByRole('textbox');
+    const container = screen.getByRole('textbox', { name: 'Transcript editor' });
     expect(container).toHaveAttribute('aria-label', 'Transcript editor');
 
     const wordList = screen.getByRole('list');

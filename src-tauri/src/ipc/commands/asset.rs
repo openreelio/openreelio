@@ -192,6 +192,20 @@ pub struct AssetImportResult {
     pub job_id: Option<String>,
 }
 
+/// Result of relinking or replacing an existing asset source.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetRelinkResult {
+    /// Updated asset ID.
+    pub asset_id: String,
+    /// Operation ID for undo/redo tracking.
+    pub op_id: String,
+    /// Resolved local URI now attached to the asset.
+    pub uri: String,
+    /// Relative workspace path when the source is inside the project folder.
+    pub relative_path: Option<String>,
+}
+
 // =============================================================================
 // Commands
 // =============================================================================
@@ -487,6 +501,113 @@ mod tests {
         let command = build_import_command("voice.track", "/tmp/voice.track", Some(&media_info));
         assert_eq!(command.asset.kind, AssetKind::Audio);
     }
+}
+
+/// Relinks or replaces the media source for an existing asset while preserving its asset ID.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state, ffmpeg_state), fields(asset_id = %asset_id, uri = %uri))]
+pub async fn relink_asset(
+    asset_id: String,
+    uri: String,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, SharedFFmpegState>,
+) -> Result<AssetRelinkResult, String> {
+    use crate::core::fs::{validate_local_input_path, validate_path_id_component};
+
+    validate_path_id_component(&asset_id, "assetId")?;
+
+    let (project_root, existing_kind) = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        let asset = project
+            .state
+            .assets
+            .get(&asset_id)
+            .ok_or_else(|| CoreError::AssetNotFound(asset_id.clone()).to_ipc_error())?;
+
+        (project.path.clone(), asset.kind.clone())
+    };
+
+    let (resolved_uri, relative_path) = resolve_asset_uri(&project_root, &uri);
+    let path = validate_local_input_path(&resolved_uri, "Asset path")?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let media_info = {
+        let ffmpeg_guard = ffmpeg_state.read().await;
+        if let Some(runner) = ffmpeg_guard.runner() {
+            match runner.probe(&path).await {
+                Ok(media_info) => Some(media_info),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to extract replacement metadata for {}: {}. Using defaults.",
+                        name,
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            tracing::warn!(
+                "FFmpeg not available for replacement metadata extraction of {}. Using defaults.",
+                name
+            );
+            None
+        }
+    };
+
+    let replacement = build_import_command(&name, &resolved_uri, media_info.as_ref()).asset;
+    if replacement.kind != existing_kind {
+        return Err(format!(
+            "Replacement media kind must match existing asset kind: expected {:?}, got {:?}",
+            existing_kind, replacement.kind
+        ));
+    }
+
+    let op_id = {
+        let mut guard = state.project.lock().await;
+        let project = guard
+            .as_mut()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        let mut command = UpdateAssetCommand::new(&asset_id)
+            .with_uri(&resolved_uri)
+            .with_duration_sec(replacement.duration_sec)
+            .with_file_size(replacement.file_size)
+            .with_video(replacement.video.clone())
+            .with_audio(replacement.audio.clone())
+            .with_relative_path(relative_path.clone())
+            .with_workspace_managed(relative_path.is_some())
+            .with_missing(false)
+            .with_thumbnail_url(None)
+            .with_proxy_status(ProxyStatus::NotNeeded)
+            .with_proxy_url(None);
+
+        if let Some(rel_path) = &relative_path {
+            command = command.with_relative_path(Some(rel_path.clone()));
+        }
+
+        let result = project
+            .executor
+            .execute(Box::new(command), &mut project.state)
+            .map_err(|e| e.to_ipc_error())?;
+
+        result.op_id
+    };
+
+    state.allow_asset_protocol_file(&path);
+
+    Ok(AssetRelinkResult {
+        asset_id,
+        op_id,
+        uri: resolved_uri,
+        relative_path,
+    })
 }
 
 /// Gets all assets in the project

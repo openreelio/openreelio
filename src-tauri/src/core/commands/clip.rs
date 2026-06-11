@@ -11,7 +11,8 @@ use crate::core::{
     project::ProjectState,
     timeline::{
         AudioKeyframe, AudioSettings, BlendMode, Clip, ClipPlace, ClipRange, FadeType,
-        KeyframeInterpolation, TimeRemapCurve, TimeRemapKeyframe, Track, TrackKind, Transform,
+        KeyframeInterpolation, SlowMotionInterpolation, TimeRemapCurve, TimeRemapKeyframe, Track,
+        TrackKind, Transform, TransformKeyframe,
     },
     AssetId, ClipId, CoreError, CoreResult, SequenceId, TimeSec, TrackId,
 };
@@ -3068,6 +3069,8 @@ pub struct SetClipAudioCommand {
     pub muted: Option<bool>,
     pub fade_in_sec: Option<TimeSec>,
     pub fade_out_sec: Option<TimeSec>,
+    pub audio_role: Option<String>,
+    pub audio_tags: Option<Vec<String>>,
     #[serde(skip)]
     previous_audio: Option<AudioSettings>,
 }
@@ -3093,8 +3096,20 @@ impl SetClipAudioCommand {
             muted,
             fade_in_sec,
             fade_out_sec,
+            audio_role: None,
+            audio_tags: None,
             previous_audio: None,
         }
+    }
+
+    pub fn with_audio_role(mut self, audio_role: String) -> Self {
+        self.audio_role = Some(audio_role);
+        self
+    }
+
+    pub fn with_audio_tags(mut self, audio_tags: Vec<String>) -> Self {
+        self.audio_tags = Some(audio_tags);
+        self
     }
 
     fn clamp_volume_db(value: f32) -> f32 {
@@ -3127,6 +3142,33 @@ impl SetClipAudioCommand {
 
         clip.audio.fade_out_sec = (clip_duration - clip.audio.fade_in_sec).max(0.0);
     }
+
+    fn normalize_audio_role(value: &str) -> CoreResult<Option<String>> {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() || normalized == "none" {
+            return Ok(None);
+        }
+
+        match normalized.as_str() {
+            "dialogue" | "music" | "sfx" | "ambience" | "voiceover" => Ok(Some(normalized)),
+            _ => Err(CoreError::InvalidCommand(format!(
+                "Unsupported audioRole '{}'",
+                value
+            ))),
+        }
+    }
+
+    fn normalize_audio_tags(values: &[String]) -> Vec<String> {
+        let mut normalized = Vec::new();
+        for value in values {
+            let tag = value.trim().to_ascii_lowercase();
+            if tag.is_empty() || normalized.contains(&tag) {
+                continue;
+            }
+            normalized.push(tag);
+        }
+        normalized
+    }
 }
 
 impl Command for SetClipAudioCommand {
@@ -3136,6 +3178,8 @@ impl Command for SetClipAudioCommand {
             && self.muted.is_none()
             && self.fade_in_sec.is_none()
             && self.fade_out_sec.is_none()
+            && self.audio_role.is_none()
+            && self.audio_tags.is_none()
         {
             return Err(CoreError::InvalidCommand(
                 "SetClipAudio requires at least one audio field".to_string(),
@@ -3201,6 +3245,14 @@ impl Command for SetClipAudioCommand {
             clip.audio.fade_out_sec = fade_out_sec;
         }
 
+        if let Some(audio_role) = &self.audio_role {
+            clip.audio.audio_role = Self::normalize_audio_role(audio_role)?;
+        }
+
+        if let Some(audio_tags) = &self.audio_tags {
+            clip.audio.audio_tags = Self::normalize_audio_tags(audio_tags);
+        }
+
         Self::normalize_fade_pair(
             clip,
             self.fade_in_sec.is_some(),
@@ -3249,6 +3301,8 @@ impl Command for SetClipAudioCommand {
             "muted": self.muted,
             "fadeInSec": self.fade_in_sec,
             "fadeOutSec": self.fade_out_sec,
+            "audioRole": self.audio_role,
+            "audioTags": self.audio_tags,
         })
     }
 }
@@ -3395,6 +3449,105 @@ impl Command for SetClipSpeedCommand {
             "clipId": self.clip_id,
             "speed": self.speed,
             "reverse": self.reverse,
+        })
+    }
+}
+
+// =============================================================================
+// SetClipSlowMotionInterpolationCommand
+// =============================================================================
+
+/// Command to update a clip's slow-motion interpolation mode.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetClipSlowMotionInterpolationCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub interpolation: SlowMotionInterpolation,
+    #[serde(skip)]
+    previous_interpolation: Option<SlowMotionInterpolation>,
+}
+
+impl SetClipSlowMotionInterpolationCommand {
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        clip_id: &str,
+        interpolation: SlowMotionInterpolation,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            interpolation,
+            previous_interpolation: None,
+        }
+    }
+}
+
+impl Command for SetClipSlowMotionInterpolationCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track_idx = sequence
+            .tracks
+            .iter()
+            .position(|track| track.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        validate_track_unlocked(&sequence.tracks[track_idx])?;
+
+        let clip = sequence.tracks[track_idx]
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        self.previous_interpolation = Some(clip.slow_motion_interpolation.clone());
+        clip.slow_motion_interpolation = self.interpolation.clone();
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(ref previous_interpolation) = self.previous_interpolation else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.slow_motion_interpolation = previous_interpolation.clone();
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetClipSlowMotionInterpolation"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "interpolation": self.interpolation,
         })
     }
 }
@@ -4995,6 +5148,215 @@ impl Command for SetClipTransformCommand {
             "trackId": self.track_id,
             "clipId": self.clip_id,
             "transform": self.transform,
+        })
+    }
+}
+
+// =============================================================================
+// SetClipMotionKeyframesCommand
+// =============================================================================
+
+/// Command to replace a clip's transform animation keyframes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetClipMotionKeyframesCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub keyframes: Vec<TransformKeyframe>,
+    #[serde(skip)]
+    previous_keyframes: Option<Vec<TransformKeyframe>>,
+}
+
+impl SetClipMotionKeyframesCommand {
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        clip_id: &str,
+        keyframes: Vec<TransformKeyframe>,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            keyframes,
+            previous_keyframes: None,
+        }
+    }
+
+    fn sanitize_keyframes(mut keyframes: Vec<TransformKeyframe>) -> Vec<TransformKeyframe> {
+        keyframes
+            .retain(|keyframe| keyframe.time_offset.is_finite() && keyframe.time_offset >= 0.0);
+        for keyframe in &mut keyframes {
+            keyframe.time_offset = keyframe.time_offset.max(0.0);
+            keyframe.transform =
+                SetClipTransformCommand::sanitize_transform(keyframe.transform.clone());
+        }
+        keyframes.sort_by(|a, b| a.time_offset.total_cmp(&b.time_offset));
+        keyframes
+    }
+}
+
+impl Command for SetClipMotionKeyframesCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        let clip = track
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        self.previous_keyframes = Some(clip.motion_keyframes.clone());
+        clip.motion_keyframes = Self::sanitize_keyframes(self.keyframes.clone());
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(prev) = &self.previous_keyframes else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.motion_keyframes = prev.clone();
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetClipMotionKeyframes"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "keyframes": self.keyframes,
+        })
+    }
+}
+
+// =============================================================================
+// SetClipOpacityCommand
+// =============================================================================
+
+/// Command to set a clip's opacity.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetClipOpacityCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub opacity: f32,
+    #[serde(skip)]
+    previous_opacity: Option<f32>,
+}
+
+impl SetClipOpacityCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_id: &str, opacity: f32) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            opacity,
+            previous_opacity: None,
+        }
+    }
+
+    fn sanitize_opacity(opacity: f32) -> f32 {
+        if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
+}
+
+impl Command for SetClipOpacityCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        let clip = track
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        self.previous_opacity = Some(clip.opacity);
+        clip.opacity = Self::sanitize_opacity(self.opacity);
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(prev) = self.previous_opacity else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.opacity = prev;
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetClipOpacity"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "opacity": self.opacity,
         })
     }
 }
@@ -7887,6 +8249,43 @@ mod tests {
     }
 
     #[test]
+    fn test_set_clip_slow_motion_interpolation_updates_and_undoes() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0].slow_motion_interpolation,
+            SlowMotionInterpolation::Nearest
+        );
+
+        let mut cmd = SetClipSlowMotionInterpolationCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            SlowMotionInterpolation::MotionCompensated,
+        );
+        cmd.execute(&mut state).unwrap();
+
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0].slow_motion_interpolation,
+            SlowMotionInterpolation::MotionCompensated
+        );
+
+        cmd.undo(&mut state).unwrap();
+
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0].slow_motion_interpolation,
+            SlowMotionInterpolation::Nearest
+        );
+    }
+
+    #[test]
     fn test_set_clip_mute_command_updates_and_undoes() {
         let mut state = create_test_state();
         let seq_id = state.active_sequence_id.clone().unwrap();
@@ -7931,7 +8330,13 @@ mod tests {
             Some(true),
             Some(8.0),
             Some(8.0),
-        );
+        )
+        .with_audio_role("Dialogue".to_string())
+        .with_audio_tags(vec![
+            " Interview ".to_string(),
+            "lav".to_string(),
+            "interview".to_string(),
+        ]);
         audio_cmd.execute(&mut state).unwrap();
 
         let audio = &state.sequences[&seq_id].tracks[0].clips[0].audio;
@@ -7940,6 +8345,11 @@ mod tests {
         assert!(audio.muted);
         assert_eq!(audio.fade_in_sec, 8.0);
         assert_eq!(audio.fade_out_sec, 2.0);
+        assert_eq!(audio.audio_role.as_deref(), Some("dialogue"));
+        assert_eq!(
+            audio.audio_tags,
+            vec!["interview".to_string(), "lav".to_string()]
+        );
 
         audio_cmd.undo(&mut state).unwrap();
 
@@ -7949,6 +8359,8 @@ mod tests {
         assert!(!restored.muted);
         assert_eq!(restored.fade_in_sec, 0.0);
         assert_eq!(restored.fade_out_sec, 0.0);
+        assert_eq!(restored.audio_role, None);
+        assert!(restored.audio_tags.is_empty());
     }
 
     // =============================================================================
@@ -8388,6 +8800,66 @@ mod tests {
 
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
         (state, seq_id, track_id, clip_id)
+    }
+
+    #[test]
+    fn test_set_clip_opacity_should_change_opacity() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+
+        let mut cmd = SetClipOpacityCommand::new(&seq_id, &track_id, &clip_id, 0.45);
+        let result = cmd.execute(&mut state);
+        assert!(result.is_ok());
+
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert!((clip.opacity - 0.45).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_set_clip_opacity_should_clamp_and_undo() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0].opacity = 0.25;
+
+        let mut cmd = SetClipOpacityCommand::new(&seq_id, &track_id, &clip_id, 1.5);
+        cmd.execute(&mut state).unwrap();
+        assert!((state.sequences[&seq_id].tracks[0].clips[0].opacity - 1.0).abs() < 0.001);
+
+        cmd.undo(&mut state).unwrap();
+        assert!((state.sequences[&seq_id].tracks[0].clips[0].opacity - 0.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_set_clip_motion_keyframes_should_sort_and_undo() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+
+        let mut end_transform = Transform::default();
+        end_transform.scale.x = 1.2;
+        end_transform.scale.y = 1.2;
+
+        let keyframes = vec![
+            TransformKeyframe {
+                time_offset: 4.0,
+                transform: end_transform,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TransformKeyframe {
+                time_offset: 0.0,
+                transform: Transform::default(),
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ];
+
+        let mut cmd = SetClipMotionKeyframesCommand::new(&seq_id, &track_id, &clip_id, keyframes);
+        cmd.execute(&mut state).unwrap();
+
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert_eq!(clip.motion_keyframes.len(), 2);
+        assert_eq!(clip.motion_keyframes[0].time_offset, 0.0);
+        assert_eq!(clip.motion_keyframes[1].time_offset, 4.0);
+        assert!((clip.motion_keyframes[1].transform.scale.x - 1.2).abs() < 0.001);
+
+        cmd.undo(&mut state).unwrap();
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert!(clip.motion_keyframes.is_empty());
     }
 
     #[test]

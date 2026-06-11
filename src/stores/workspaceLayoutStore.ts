@@ -21,7 +21,9 @@ export type PanelId =
   | 'source-monitor'
   | 'program-monitor'
   | 'timeline'
+  | 'timeline-index'
   | 'terminal'
+  | 'effects-browser'
   | 'inspector'
   | 'ai-assistant'
   | 'agent-review'
@@ -29,6 +31,7 @@ export type PanelId =
   | 'history'
   | 'transcript'
   | 'performance'
+  | 'scopes'
   | 'comparison'
   | 'generation';
 
@@ -91,7 +94,14 @@ export const PANEL_REGISTRY: Record<PanelId, PanelMeta> = {
     minWidth: 300,
   },
   timeline: { id: 'timeline', label: 'Timeline', icon: 'Film', minHeight: 120 },
+  'timeline-index': {
+    id: 'timeline-index',
+    label: 'Timeline Index',
+    icon: 'ListFilter',
+    minHeight: 80,
+  },
   terminal: { id: 'terminal', label: 'Terminal', icon: 'Terminal', minHeight: 140 },
+  'effects-browser': { id: 'effects-browser', label: 'Effects', icon: 'Wand2', minWidth: 240 },
   inspector: { id: 'inspector', label: 'Inspector', icon: 'SlidersHorizontal', minWidth: 240 },
   'ai-assistant': { id: 'ai-assistant', label: 'AI Assistant', icon: 'Sparkles', minWidth: 280 },
   'agent-review': {
@@ -104,6 +114,7 @@ export const PANEL_REGISTRY: Record<PanelId, PanelMeta> = {
   history: { id: 'history', label: 'History', icon: 'History', minHeight: 80 },
   transcript: { id: 'transcript', label: 'Transcript', icon: 'FileText', minHeight: 80 },
   performance: { id: 'performance', label: 'Performance', icon: 'Activity', minHeight: 80 },
+  scopes: { id: 'scopes', label: 'Scopes', icon: 'Activity', minWidth: 260, minHeight: 120 },
   comparison: { id: 'comparison', label: 'Comparison', icon: 'GitCompareArrows', minHeight: 80 },
   generation: { id: 'generation', label: 'Generate', icon: 'Sparkles', minHeight: 80 },
 };
@@ -124,8 +135,8 @@ export const MIN_ZONE_SIZES = {
   centerSplitMax: 0.8,
 } as const;
 
-const DEFAULT_BOTTOM_PANEL_IDS: PanelId[] = ['history', 'transcript'];
-const DEFAULT_BOTTOM_ACTIVE_PANEL: PanelId = 'history';
+const DEFAULT_BOTTOM_PANEL_IDS: PanelId[] = ['timeline-index', 'history', 'transcript'];
+const DEFAULT_BOTTOM_ACTIVE_PANEL: PanelId = 'timeline-index';
 const NON_PERSISTED_PANEL_IDS = new Set<PanelId>(['terminal', 'agent-review']);
 const INTERNAL_ONLY_PANEL_IDS = new Set<PanelId>(['agent-review']);
 
@@ -232,8 +243,8 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
         },
         'center-bottom': { panelIds: ['timeline'], activePanelId: 'timeline', collapsed: false },
         right: {
-          panelIds: ['inspector', 'comparison'],
-          activePanelId: 'inspector',
+          panelIds: ['scopes', 'inspector', 'comparison'],
+          activePanelId: 'scopes',
           collapsed: false,
         },
         bottom: {
@@ -280,7 +291,11 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
     builtIn: true,
     layout: {
       zones: {
-        left: { panelIds: ['explorer'], activePanelId: 'explorer', collapsed: false },
+        left: {
+          panelIds: ['effects-browser', 'explorer'],
+          activePanelId: 'effects-browser',
+          collapsed: false,
+        },
         'center-top': {
           panelIds: ['program-monitor'],
           activePanelId: 'program-monitor',
@@ -298,7 +313,7 @@ export const WORKSPACE_PRESETS: WorkspacePreset[] = [
           collapsed: true,
         },
       },
-      sizes: { leftWidth: 260, rightWidth: 340, centerSplitRatio: 0.5, bottomHeight: 200 },
+      sizes: { leftWidth: 300, rightWidth: 340, centerSplitRatio: 0.5, bottomHeight: 200 },
     },
   },
   {

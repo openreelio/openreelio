@@ -6,7 +6,7 @@
  */
 
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import { X, Trash2, Clock, User, Type, AlertTriangle } from 'lucide-react';
+import { X, Trash2, Clock, User, Type, AlertTriangle, Search, Replace } from 'lucide-react';
 import type { Caption, CaptionStyle } from '@/types';
 
 // =============================================================================
@@ -44,6 +44,11 @@ interface ValidationErrors {
   startSec?: string;
   endSec?: string;
   timeRange?: string;
+}
+
+interface TextMatch {
+  start: number;
+  end: number;
 }
 
 // =============================================================================
@@ -108,6 +113,25 @@ function validateForm(formState: FormState): ValidationErrors {
   return errors;
 }
 
+function findTextMatches(text: string, query: string): TextMatch[] {
+  const needle = query.trim();
+  if (!needle) {
+    return [];
+  }
+
+  const haystack = text.toLocaleLowerCase();
+  const normalizedNeedle = needle.toLocaleLowerCase();
+  const matches: TextMatch[] = [];
+  let index = haystack.indexOf(normalizedNeedle);
+
+  while (index !== -1) {
+    matches.push({ start: index, end: index + needle.length });
+    index = haystack.indexOf(normalizedNeedle, index + Math.max(needle.length, 1));
+  }
+
+  return matches;
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -133,6 +157,9 @@ export const CaptionEditor: React.FC<CaptionEditorProps> = ({
   const [errors, setErrors] = useState<ValidationErrors>({});
   const [isSaving, setIsSaving] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [replaceTerm, setReplaceTerm] = useState('');
+  const [activeMatchIndex, setActiveMatchIndex] = useState(0);
 
   // Refs
   const textInputRef = useRef<HTMLTextAreaElement>(null);
@@ -177,6 +204,12 @@ export const CaptionEditor: React.FC<CaptionEditorProps> = ({
   // Character count
   const charCount = formState.text.length;
   const exceedsRecommended = charCount > maxRecommendedLength;
+  const textMatches = useMemo(
+    () => findTextMatches(formState.text, searchTerm),
+    [formState.text, searchTerm],
+  );
+  const activeMatch =
+    textMatches.length > 0 ? textMatches[activeMatchIndex % textMatches.length] : null;
 
   // Check if form is valid for saving
   const isFormValid = useMemo(() => {
@@ -189,6 +222,67 @@ export const CaptionEditor: React.FC<CaptionEditorProps> = ({
     setFormState((prev) => ({ ...prev, text: e.target.value }));
     setErrors((prev) => ({ ...prev, text: undefined }));
   }, []);
+
+  const selectMatch = useCallback((match: TextMatch | null) => {
+    if (!match || !textInputRef.current) {
+      return;
+    }
+
+    textInputRef.current.focus();
+    textInputRef.current.setSelectionRange(match.start, match.end);
+  }, []);
+
+  const handleSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setSearchTerm(e.target.value);
+    setActiveMatchIndex(0);
+  }, []);
+
+  const handleReplaceChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setReplaceTerm(e.target.value);
+  }, []);
+
+  const handleFindNext = useCallback(() => {
+    if (textMatches.length === 0) {
+      return;
+    }
+
+    const nextIndex = (activeMatchIndex + 1) % textMatches.length;
+    setActiveMatchIndex(nextIndex);
+    selectMatch(textMatches[nextIndex]);
+  }, [activeMatchIndex, selectMatch, textMatches]);
+
+  const handleFindPrevious = useCallback(() => {
+    if (textMatches.length === 0) {
+      return;
+    }
+
+    const nextIndex = (activeMatchIndex - 1 + textMatches.length) % textMatches.length;
+    setActiveMatchIndex(nextIndex);
+    selectMatch(textMatches[nextIndex]);
+  }, [activeMatchIndex, selectMatch, textMatches]);
+
+  const handleReplaceCurrent = useCallback(() => {
+    if (readOnly || !activeMatch) {
+      return;
+    }
+
+    setFormState((prev) => ({
+      ...prev,
+      text: `${prev.text.slice(0, activeMatch.start)}${replaceTerm}${prev.text.slice(activeMatch.end)}`,
+    }));
+    setActiveMatchIndex((index) => Math.min(index, Math.max(textMatches.length - 2, 0)));
+  }, [activeMatch, readOnly, replaceTerm, textMatches.length]);
+
+  const handleReplaceAll = useCallback(() => {
+    if (readOnly || textMatches.length === 0 || !searchTerm.trim()) {
+      return;
+    }
+
+    const escaped = searchTerm.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(escaped, 'gi');
+    setFormState((prev) => ({ ...prev, text: prev.text.replace(pattern, replaceTerm) }));
+    setActiveMatchIndex(0);
+  }, [readOnly, replaceTerm, searchTerm, textMatches.length]);
 
   const handleSpeakerChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setFormState((prev) => ({ ...prev, speaker: e.target.value }));
@@ -321,6 +415,7 @@ export const CaptionEditor: React.FC<CaptionEditorProps> = ({
               value={formState.text}
               onChange={handleTextChange}
               disabled={readOnly}
+              spellCheck
               rows={3}
               className={`w-full px-3 py-2 rounded bg-neutral-800 border text-white placeholder-neutral-500
                 focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:opacity-50 disabled:cursor-not-allowed
@@ -335,6 +430,79 @@ export const CaptionEditor: React.FC<CaptionEditorProps> = ({
                 {exceedsRecommended && ' (exceeds recommended length)'}
               </span>
               {errors.text && <span className="text-xs text-red-400">{errors.text}</span>}
+            </div>
+          </div>
+
+          <div className="rounded border border-neutral-700 bg-neutral-900/70 p-3 space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-neutral-400 flex items-center gap-1">
+                  <Search className="w-3.5 h-3.5" />
+                  Find
+                </span>
+                <input
+                  type="search"
+                  aria-label="Find in caption"
+                  value={searchTerm}
+                  onChange={handleSearchChange}
+                  className="w-full px-2 py-1.5 rounded bg-neutral-800 border border-neutral-600 text-sm text-white placeholder-neutral-500 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  placeholder="Search"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-neutral-400 flex items-center gap-1">
+                  <Replace className="w-3.5 h-3.5" />
+                  Replace
+                </span>
+                <input
+                  type="text"
+                  aria-label="Replace with"
+                  value={replaceTerm}
+                  onChange={handleReplaceChange}
+                  disabled={readOnly}
+                  className="w-full px-2 py-1.5 rounded bg-neutral-800 border border-neutral-600 text-sm text-white placeholder-neutral-500 focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                  placeholder="Replacement"
+                />
+              </label>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-neutral-500 mr-auto" aria-live="polite">
+                {searchTerm.trim()
+                  ? `${textMatches.length} ${textMatches.length === 1 ? 'match' : 'matches'}`
+                  : 'No search'}
+              </span>
+              <button
+                type="button"
+                onClick={handleFindPrevious}
+                disabled={textMatches.length === 0}
+                className="px-2 py-1 text-xs rounded border border-neutral-600 text-neutral-300 hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                onClick={handleFindNext}
+                disabled={textMatches.length === 0}
+                className="px-2 py-1 text-xs rounded border border-neutral-600 text-neutral-300 hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Next
+              </button>
+              <button
+                type="button"
+                onClick={handleReplaceCurrent}
+                disabled={readOnly || !activeMatch}
+                className="px-2 py-1 text-xs rounded border border-neutral-600 text-neutral-300 hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Replace
+              </button>
+              <button
+                type="button"
+                onClick={handleReplaceAll}
+                disabled={readOnly || textMatches.length === 0}
+                className="px-2 py-1 text-xs rounded bg-neutral-700 text-neutral-100 hover:bg-neutral-600 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                All
+              </button>
             </div>
           </div>
 

@@ -174,6 +174,88 @@ describe('CaptionEditor', () => {
 
       expect(textArea).toHaveValue('Line 1\nLine 2');
     });
+
+    it('enables browser spellcheck for caption text', () => {
+      const caption = createTestCaption({ text: 'Speling mistake' });
+
+      render(
+        <CaptionEditor
+          caption={caption}
+          isOpen={true}
+          onSave={mockOnSave}
+          onCancel={mockOnCancel}
+        />,
+      );
+
+      expect(screen.getByRole('textbox', { name: /caption text/i })).toHaveAttribute(
+        'spellcheck',
+        'true',
+      );
+    });
+
+    it('finds caption text matches case-insensitively', async () => {
+      const user = userEvent.setup();
+      const caption = createTestCaption({ text: 'Hello world. hello editor.' });
+
+      render(
+        <CaptionEditor
+          caption={caption}
+          isOpen={true}
+          onSave={mockOnSave}
+          onCancel={mockOnCancel}
+        />,
+      );
+
+      await user.type(screen.getByLabelText(/find in caption/i), 'hello');
+
+      expect(screen.getByText('2 matches')).toBeInTheDocument();
+    });
+
+    it('replaces the active caption text match', async () => {
+      const user = userEvent.setup();
+      const caption = createTestCaption({ text: 'Hello world. Hello editor.' });
+
+      render(
+        <CaptionEditor
+          caption={caption}
+          isOpen={true}
+          onSave={mockOnSave}
+          onCancel={mockOnCancel}
+        />,
+      );
+
+      await user.type(screen.getByLabelText(/find in caption/i), 'Hello');
+      await user.type(screen.getByLabelText(/replace with/i), 'Hi');
+      await user.click(screen.getByRole('button', { name: /^replace$/i }));
+
+      expect(screen.getByRole('textbox', { name: /caption text/i })).toHaveValue(
+        'Hi world. Hello editor.',
+      );
+    });
+
+    it('replaces all caption text matches before saving', async () => {
+      const user = userEvent.setup();
+      const caption = createTestCaption({ text: 'um Hello um world um' });
+
+      render(
+        <CaptionEditor
+          caption={caption}
+          isOpen={true}
+          onSave={mockOnSave}
+          onCancel={mockOnCancel}
+        />,
+      );
+
+      await user.type(screen.getByLabelText(/find in caption/i), 'um');
+      await user.click(screen.getByRole('button', { name: /^all$/i }));
+      await user.click(screen.getByRole('button', { name: /save/i }));
+
+      expect(mockOnSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: 'Hello  world',
+        }),
+      );
+    });
   });
 
   describe('Speaker Editing', () => {

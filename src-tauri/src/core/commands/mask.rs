@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
-    masks::{Mask, MaskBlendMode, MaskShape},
+    masks::{Mask, MaskBlendMode, MaskKeyframe, MaskShape},
     project::ProjectState,
     ClipId, CoreError, CoreResult, EffectId, MaskId, SequenceId, TrackId,
 };
@@ -50,6 +50,12 @@ pub struct AddMaskCommand {
     /// Whether to invert the mask
     #[serde(default)]
     pub inverted: bool,
+    /// Optional shape animation keyframes
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyframes: Vec<MaskKeyframe>,
+    /// Optional tracking effect/source ID that generated the keyframes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking_source_id: Option<String>,
     #[serde(skip)]
     created_mask_id: Option<MaskId>,
 }
@@ -71,6 +77,8 @@ impl AddMaskCommand {
             name: None,
             feather: None,
             inverted: false,
+            keyframes: Vec::new(),
+            tracking_source_id: None,
             created_mask_id: None,
         }
     }
@@ -90,6 +98,18 @@ impl AddMaskCommand {
     /// Inverts the mask
     pub fn inverted(mut self) -> Self {
         self.inverted = true;
+        self
+    }
+
+    /// Sets shape animation keyframes
+    pub fn with_keyframes(mut self, keyframes: Vec<MaskKeyframe>) -> Self {
+        self.keyframes = keyframes;
+        self
+    }
+
+    /// Sets the tracking source ID that generated this mask animation
+    pub fn with_tracking_source_id(mut self, tracking_source_id: impl Into<String>) -> Self {
+        self.tracking_source_id = Some(tracking_source_id.into());
         self
     }
 }
@@ -114,6 +134,9 @@ impl Command for AddMaskCommand {
             mask.feather = feather;
         }
         mask.inverted = self.inverted;
+        mask.keyframes = self.keyframes.clone();
+        mask.tracking_source_id = self.tracking_source_id.clone();
+        mask.validate().map_err(CoreError::ValidationError)?;
 
         let mask_id = mask.id.clone();
         self.created_mask_id = Some(mask_id.clone());
@@ -191,6 +214,12 @@ pub struct UpdateMaskCommand {
     /// New locked state
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locked: Option<bool>,
+    /// Replacement shape animation keyframes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyframes: Option<Vec<MaskKeyframe>>,
+    /// Tracking effect/source ID that generated the keyframes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking_source_id: Option<String>,
     #[serde(skip)]
     previous_mask: Option<Mask>,
 }
@@ -209,6 +238,8 @@ impl UpdateMaskCommand {
             blend_mode: None,
             enabled: None,
             locked: None,
+            keyframes: None,
+            tracking_source_id: None,
             previous_mask: None,
         }
     }
@@ -266,6 +297,18 @@ impl UpdateMaskCommand {
         self.locked = Some(locked);
         self
     }
+
+    /// Replaces shape animation keyframes
+    pub fn with_keyframes(mut self, keyframes: Vec<MaskKeyframe>) -> Self {
+        self.keyframes = Some(keyframes);
+        self
+    }
+
+    /// Sets the tracking source ID that generated mask animation
+    pub fn with_tracking_source_id(mut self, tracking_source_id: impl Into<String>) -> Self {
+        self.tracking_source_id = Some(tracking_source_id.into());
+        self
+    }
 }
 
 impl Command for UpdateMaskCommand {
@@ -317,6 +360,13 @@ impl Command for UpdateMaskCommand {
         if let Some(locked) = self.locked {
             mask.locked = locked;
         }
+        if let Some(ref keyframes) = self.keyframes {
+            mask.keyframes = keyframes.clone();
+        }
+        if let Some(ref tracking_source_id) = self.tracking_source_id {
+            mask.tracking_source_id = Some(tracking_source_id.clone());
+        }
+        mask.validate().map_err(CoreError::ValidationError)?;
 
         let op_id = ulid::Ulid::new().to_string();
         Ok(
@@ -674,5 +724,79 @@ mod tests {
         let effect = state.effects.get(&effect_id).unwrap();
         let mask = effect.masks.masks.first().unwrap();
         assert!(mask.inverted);
+    }
+
+    #[test]
+    fn test_add_mask_command_with_tracking_keyframes() {
+        let (mut state, effect_id) = setup_state_with_effect();
+
+        let keyframes = vec![
+            MaskKeyframe::new(0.0, MaskShape::Rectangle(RectMask::new(0.4, 0.5, 0.3, 0.2))),
+            MaskKeyframe::new(1.0, MaskShape::Rectangle(RectMask::new(0.6, 0.5, 0.3, 0.2))),
+        ];
+
+        let mut cmd = AddMaskCommand::new(
+            "seq-1",
+            "track-1",
+            "clip-1",
+            &effect_id,
+            MaskShape::Rectangle(RectMask::new(0.4, 0.5, 0.3, 0.2)),
+        )
+        .with_keyframes(keyframes)
+        .with_tracking_source_id("effect-track-1");
+
+        let result = cmd.execute(&mut state).unwrap();
+        let mask_id = result.created_ids[0].clone();
+        let mask = state
+            .effects
+            .get(&effect_id)
+            .unwrap()
+            .masks
+            .get(&mask_id)
+            .unwrap();
+
+        assert_eq!(mask.keyframes.len(), 2);
+        assert_eq!(mask.tracking_source_id.as_deref(), Some("effect-track-1"));
+    }
+
+    #[test]
+    fn test_update_mask_command_with_tracking_keyframes() {
+        let (mut state, effect_id) = setup_state_with_effect();
+
+        let mut add_cmd = AddMaskCommand::new(
+            "seq-1",
+            "track-1",
+            "clip-1",
+            &effect_id,
+            MaskShape::Rectangle(RectMask::default()),
+        );
+        let result = add_cmd.execute(&mut state).unwrap();
+        let mask_id = result.created_ids[0].clone();
+
+        let keyframes = vec![
+            MaskKeyframe::new(
+                0.0,
+                MaskShape::Rectangle(RectMask::new(0.3, 0.5, 0.25, 0.2)),
+            ),
+            MaskKeyframe::new(
+                0.5,
+                MaskShape::Rectangle(RectMask::new(0.5, 0.55, 0.25, 0.2)),
+            ),
+        ];
+        let mut update_cmd = UpdateMaskCommand::new(&effect_id, &mask_id)
+            .with_keyframes(keyframes)
+            .with_tracking_source_id("effect-track-2");
+
+        update_cmd.execute(&mut state).unwrap();
+
+        let mask = state
+            .effects
+            .get(&effect_id)
+            .unwrap()
+            .masks
+            .get(&mask_id)
+            .unwrap();
+        assert_eq!(mask.keyframes.len(), 2);
+        assert_eq!(mask.tracking_source_id.as_deref(), Some("effect-track-2"));
     }
 }

@@ -254,7 +254,7 @@ describe('terminalStore', () => {
     expect(useTerminalStore.getState().groupOrder).toHaveLength(0);
     expect(layout.zones.bottom.panelIds).not.toContain('terminal');
     expect(layout.zones.bottom.collapsed).toBe(true);
-    expect(layout.zones.bottom.activePanelId).toBe('history');
+    expect(layout.zones.bottom.activePanelId).toBe('timeline-index');
   });
 
   it('should keep the terminal visible when backend close fails', async () => {

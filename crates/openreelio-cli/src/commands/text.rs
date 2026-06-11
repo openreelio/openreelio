@@ -9,7 +9,7 @@ use openreelio_core::commands::{
 };
 use openreelio_core::timeline::{Sequence, Track, TrackKind, Transform};
 use openreelio_core::{
-    text::{TextAlignment, TextClipData, TextPosition, TextStyle},
+    text::{TextAlignment, TextClipData, TextOutline, TextPosition, TextShadow, TextStyle},
     ActiveProject, Point2D,
 };
 use std::path::PathBuf;
@@ -35,10 +35,10 @@ pub enum TextAction {
         start: f64,
 
         /// Clip duration in seconds
-        #[arg(long, default_value = "3.0")]
-        duration: f64,
+        #[arg(long)]
+        duration: Option<f64>,
 
-        /// Preset: default, title, lower-third, subtitle
+        /// Preset: default, title, lower-third, subtitle, callout, credits, credit-line, logo-bug, social-handle
         #[arg(long)]
         preset: Option<String>,
 
@@ -427,20 +427,301 @@ fn text_data_for_clip(
         .ok_or_else(|| anyhow::anyhow!("TextOverlay effect not found on clip '{}'", clip_id))
 }
 
+fn normalize_text_preset_key(preset: Option<&str>) -> String {
+    preset.unwrap_or("default").to_lowercase().replace('_', "-")
+}
+
+fn text_preset_default_duration(preset: Option<&str>) -> f64 {
+    match normalize_text_preset_key(preset).as_str() {
+        "lower-third"
+        | "lowerthird"
+        | "lower-third-name-role"
+        | "interview-lower-third"
+        | "speaker-id"
+        | "name-role"
+        | "credit-line"
+        | "source-credit"
+        | "attribution"
+        | "social-handle"
+        | "handle"
+        | "social" => 5.0,
+        "lower-third-news"
+        | "broadcast-lower-third"
+        | "news-lower-third"
+        | "end-card-title"
+        | "end-card"
+        | "outro-title" => 6.0,
+        "credits" | "credits-block" | "credit-block" | "end-credits" => 8.0,
+        "logo-bug" | "bug" | "channel-bug" | "brand-bug" => 10.0,
+        "countdown" | "timer" => 1.0,
+        "title" | "centered-title" | "tech-style" | "tech" | "terminal" => 4.0,
+        _ => 3.0,
+    }
+}
+
 fn parse_text_preset(preset: Option<String>, content: &str) -> anyhow::Result<TextClipData> {
-    match preset
-        .as_deref()
-        .unwrap_or("default")
-        .to_lowercase()
-        .replace('_', "-")
-        .as_str()
-    {
+    let normalized = normalize_text_preset_key(preset.as_deref());
+
+    match normalized.as_str() {
         "default" => Ok(TextClipData::new(content)),
         "title" => Ok(TextClipData::title(content)),
+        "centered-title" => Ok(TextClipData {
+            content: content.to_string(),
+            style: TextStyle::default().with_font_size(72).with_bold(true),
+            position: TextPosition::new(0.5, 0.5),
+            shadow: Some(TextShadow {
+                color: "#000000".to_string(),
+                offset_x: 3,
+                offset_y: 3,
+                blur: 8,
+            }),
+            outline: None,
+            rotation: 0.0,
+            opacity: 1.0,
+        }),
+        "epic-title" | "impact-title" | "hero-title" => Ok(TextClipData {
+            content: content.to_string(),
+            style: TextStyle::default()
+                .with_font_family("Impact")
+                .with_font_size(96)
+                .with_bold(true),
+            position: TextPosition::new(0.5, 0.5),
+            shadow: Some(TextShadow {
+                color: "#000000".to_string(),
+                offset_x: 4,
+                offset_y: 4,
+                blur: 12,
+            }),
+            outline: Some(TextOutline {
+                color: "#000000".to_string(),
+                width: 3,
+            }),
+            rotation: 0.0,
+            opacity: 1.0,
+        }),
+        "chapter-title" | "chapter" | "chapter-card" | "section-title" => Ok(TextClipData {
+            content: content.to_string(),
+            style: TextStyle {
+                font_family: "Georgia".to_string(),
+                font_size: 62,
+                font_weight: 700,
+                color: "#F8FAFC".to_string(),
+                background_color: None,
+                background_padding: 0,
+                alignment: TextAlignment::Center,
+                bold: true,
+                italic: false,
+                underline: false,
+                line_height: 1.18,
+                letter_spacing: 2,
+            },
+            position: TextPosition::new(0.5, 0.45),
+            shadow: Some(TextShadow {
+                color: "#00000099".to_string(),
+                offset_x: 2,
+                offset_y: 3,
+                blur: 8,
+            }),
+            outline: None,
+            rotation: 0.0,
+            opacity: 1.0,
+        }),
         "lower-third" | "lowerthird" => Ok(TextClipData::lower_third(content)),
+        "lower-third-news" | "broadcast-lower-third" | "news-lower-third" => Ok(TextClipData {
+            content: content.to_string(),
+            style: TextStyle {
+                font_family: "Arial".to_string(),
+                font_size: 40,
+                font_weight: 700,
+                color: "#FFFFFF".to_string(),
+                background_color: Some("#123E7CCC".to_string()),
+                background_padding: 14,
+                alignment: TextAlignment::Left,
+                bold: true,
+                italic: false,
+                underline: false,
+                line_height: 1.15,
+                letter_spacing: 1,
+            },
+            position: TextPosition::new(0.07, 0.78),
+            shadow: Some(TextShadow {
+                color: "#00000080".to_string(),
+                offset_x: 1,
+                offset_y: 2,
+                blur: 3,
+            }),
+            outline: None,
+            rotation: 0.0,
+            opacity: 1.0,
+        }),
+        "lower-third-name-role" | "interview-lower-third" | "speaker-id" | "name-role" => {
+            Ok(TextClipData {
+                content: content.to_string(),
+                style: TextStyle {
+                    font_family: "Helvetica".to_string(),
+                    font_size: 38,
+                    font_weight: 700,
+                    color: "#F8FAFC".to_string(),
+                    background_color: Some("#111827D9".to_string()),
+                    background_padding: 10,
+                    alignment: TextAlignment::Left,
+                    bold: true,
+                    italic: false,
+                    underline: false,
+                    line_height: 1.25,
+                    letter_spacing: 1,
+                },
+                position: TextPosition::new(0.08, 0.84),
+                shadow: None,
+                outline: Some(TextOutline {
+                    color: "#00000066".to_string(),
+                    width: 1,
+                }),
+                rotation: 0.0,
+                opacity: 1.0,
+            })
+        }
         "subtitle" => Ok(TextClipData::subtitle(content)),
+        "callout" | "emphasis" => Ok(TextClipData {
+            content: content.to_string(),
+            style: TextStyle::default()
+                .with_font_size(48)
+                .with_font_weight(700)
+                .with_color("#FFD700"),
+            position: TextPosition::new(0.5, 0.35),
+            shadow: Some(TextShadow {
+                color: "#000000".to_string(),
+                offset_x: 2,
+                offset_y: 2,
+                blur: 6,
+            }),
+            outline: Some(TextOutline {
+                color: "#000000".to_string(),
+                width: 2,
+            }),
+            rotation: 0.0,
+            opacity: 1.0,
+        }),
+        "callout-stat" | "stat" | "number-callout" | "price-callout" => Ok(TextClipData {
+            content: content.to_string(),
+            style: TextStyle::default()
+                .with_font_size(82)
+                .with_font_weight(700)
+                .with_color("#38BDF8"),
+            position: TextPosition::new(0.5, 0.42),
+            shadow: Some(TextShadow {
+                color: "#000000".to_string(),
+                offset_x: 3,
+                offset_y: 4,
+                blur: 8,
+            }),
+            outline: Some(TextOutline {
+                color: "#082F49".to_string(),
+                width: 2,
+            }),
+            rotation: 0.0,
+            opacity: 1.0,
+        }),
+        "credits" | "credits-block" | "credit-block" | "end-credits" => Ok(TextClipData {
+            content: content.to_string(),
+            style: TextStyle {
+                font_family: "Georgia".to_string(),
+                font_size: 34,
+                font_weight: 400,
+                color: "#F8FAFC".to_string(),
+                background_color: None,
+                background_padding: 0,
+                alignment: TextAlignment::Center,
+                bold: false,
+                italic: false,
+                underline: false,
+                line_height: 1.45,
+                letter_spacing: 1,
+            },
+            position: TextPosition::new(0.5, 0.52),
+            shadow: Some(TextShadow {
+                color: "#000000AA".to_string(),
+                offset_x: 1,
+                offset_y: 2,
+                blur: 5,
+            }),
+            outline: None,
+            rotation: 0.0,
+            opacity: 1.0,
+        }),
+        "credit-line" | "source-credit" | "attribution" => Ok(TextClipData {
+            content: content.to_string(),
+            style: TextStyle {
+                font_family: "Arial".to_string(),
+                font_size: 24,
+                font_weight: 400,
+                color: "#E5E7EB".to_string(),
+                background_color: Some("#00000080".to_string()),
+                background_padding: 6,
+                alignment: TextAlignment::Right,
+                bold: false,
+                italic: false,
+                underline: false,
+                line_height: 1.2,
+                letter_spacing: 0,
+            },
+            position: TextPosition::new(0.94, 0.92),
+            shadow: None,
+            outline: None,
+            rotation: 0.0,
+            opacity: 0.9,
+        }),
+        "logo-bug" | "bug" | "channel-bug" | "brand-bug" => Ok(TextClipData {
+            content: content.to_string(),
+            style: TextStyle {
+                font_family: "Arial".to_string(),
+                font_size: 24,
+                font_weight: 700,
+                color: "#FFFFFF".to_string(),
+                background_color: Some("#0F766ECC".to_string()),
+                background_padding: 8,
+                alignment: TextAlignment::Right,
+                bold: true,
+                italic: false,
+                underline: false,
+                line_height: 1.15,
+                letter_spacing: 1,
+            },
+            position: TextPosition::new(0.94, 0.08),
+            shadow: None,
+            outline: None,
+            rotation: 0.0,
+            opacity: 0.85,
+        }),
+        "social-handle" | "handle" | "social" => Ok(TextClipData {
+            content: content.to_string(),
+            style: TextStyle {
+                font_family: "Arial".to_string(),
+                font_size: 30,
+                font_weight: 700,
+                color: "#FFFFFF".to_string(),
+                background_color: Some("#7C3AEDCC".to_string()),
+                background_padding: 10,
+                alignment: TextAlignment::Left,
+                bold: true,
+                italic: false,
+                underline: false,
+                line_height: 1.2,
+                letter_spacing: 0,
+            },
+            position: TextPosition::new(0.07, 0.91),
+            shadow: Some(TextShadow {
+                color: "#00000099".to_string(),
+                offset_x: 1,
+                offset_y: 2,
+                blur: 4,
+            }),
+            outline: None,
+            rotation: 0.0,
+            opacity: 1.0,
+        }),
         other => Err(anyhow::anyhow!(
-            "Unsupported text preset '{}'. Use: default, title, lower-third, subtitle",
+            "Unsupported text preset '{}'. Use: default, title, centered-title, epic-title, chapter-title, lower-third, lower-third-news, lower-third-name-role, subtitle, callout, callout-stat, credits, credit-line, logo-bug, social-handle",
             other
         )),
     }
@@ -746,6 +1027,8 @@ pub fn execute(action: TextAction) -> anyhow::Result<()> {
         } => {
             validate::non_empty(&text, "text")?;
             validate::time_non_negative(start, "start")?;
+            let duration =
+                duration.unwrap_or_else(|| text_preset_default_duration(preset.as_deref()));
             if duration <= 0.0 || !duration.is_finite() {
                 return Err(anyhow::anyhow!("duration must be finite and positive"));
             }
@@ -1056,5 +1339,37 @@ pub fn execute(action: TextAction) -> anyhow::Result<()> {
                 "count": clips.len(),
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_parse_production_text_presets() {
+        let credits =
+            parse_text_preset(Some("credits".to_string()), "Directed by OpenReelio").unwrap();
+        assert_eq!(credits.style.font_family, "Georgia");
+        assert_eq!(credits.style.alignment, TextAlignment::Center);
+        assert_eq!(credits.position, TextPosition::new(0.5, 0.52));
+        assert_eq!(credits.shadow.as_ref().map(|shadow| shadow.blur), Some(5));
+
+        let logo_bug = parse_text_preset(Some("logo_bug".to_string()), "OPEN").unwrap();
+        assert_eq!(
+            logo_bug.style.background_color.as_deref(),
+            Some("#0F766ECC")
+        );
+        assert_eq!(logo_bug.position, TextPosition::new(0.94, 0.08));
+        assert!((logo_bug.opacity - 0.85).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_use_template_duration_when_duration_is_omitted() {
+        assert_eq!(text_preset_default_duration(Some("title")), 4.0);
+        assert_eq!(text_preset_default_duration(Some("credits")), 8.0);
+        assert_eq!(text_preset_default_duration(Some("logo_bug")), 10.0);
+        assert_eq!(text_preset_default_duration(Some("callout")), 3.0);
+        assert_eq!(text_preset_default_duration(None), 3.0);
     }
 }

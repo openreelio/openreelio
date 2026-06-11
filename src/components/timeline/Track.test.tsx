@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { Track } from './Track';
-import type { Track as TrackType, Clip as ClipType } from '@/types';
+import type { Effect, Track as TrackType, Clip as ClipType } from '@/types';
 import { useEditorToolStore } from '@/stores/editorToolStore';
 import { useProjectStore } from '@/stores/projectStore';
 
@@ -114,6 +114,36 @@ const adjacentClips: ClipType[] = [
   },
 ];
 
+const mockTransitionEffect: Effect = {
+  id: 'transition_001',
+  effectType: 'cross_dissolve',
+  enabled: true,
+  params: { duration: 1.5 },
+  keyframes: {},
+  order: 0,
+};
+
+function createTrackDataTransfer(payload?: unknown): DataTransfer {
+  const data = new Map<string, string>();
+  const transfer = {
+    effectAllowed: 'all',
+    dropEffect: 'none',
+    setData: vi.fn((type: string, value: string) => {
+      data.set(type, value);
+    }),
+    getData: vi.fn((type: string) => data.get(type) ?? ''),
+    clearData: vi.fn(),
+  } as unknown as DataTransfer;
+
+  if (payload !== undefined) {
+    const serialized = JSON.stringify(payload);
+    transfer.setData('application/x-openreelio-track', serialized);
+    transfer.setData('text/plain', serialized);
+  }
+
+  return transfer;
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -186,6 +216,45 @@ describe('Track', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Swap with Video 2' }));
 
       expect(onSwapTracks).toHaveBeenCalledWith('track_001', 'track_002');
+    });
+
+    it('should call onSwapTracks when a same-kind track header is dropped onto this track', () => {
+      const onSwapTracks = vi.fn();
+      const targetTrack = { ...mockTrack, id: 'track_002', name: 'Video 2' };
+      const dataTransfer = createTrackDataTransfer({ trackId: 'track_001', kind: 'video' });
+
+      render(
+        <Track track={targetTrack} clips={[]} zoom={100} onSwapTracks={onSwapTracks} />,
+      );
+
+      fireEvent.dragOver(screen.getByTestId('track-header'), { dataTransfer });
+      fireEvent.drop(screen.getByTestId('track-header'), { dataTransfer });
+
+      expect(onSwapTracks).toHaveBeenCalledWith('track_001', 'track_002');
+    });
+
+    it('should ignore dropped track headers from a different track kind', () => {
+      const onSwapTracks = vi.fn();
+      const dataTransfer = createTrackDataTransfer({ trackId: 'track_audio', kind: 'audio' });
+
+      render(<Track track={mockTrack} clips={[]} zoom={100} onSwapTracks={onSwapTracks} />);
+
+      fireEvent.drop(screen.getByTestId('track-header'), { dataTransfer });
+
+      expect(onSwapTracks).not.toHaveBeenCalled();
+    });
+
+    it('should write track drag payload when dragging a reorderable header', () => {
+      const dataTransfer = createTrackDataTransfer();
+
+      render(<Track track={mockTrack} clips={[]} zoom={100} onSwapTracks={vi.fn()} />);
+
+      fireEvent.dragStart(screen.getByTestId('track-header'), { dataTransfer });
+
+      expect(dataTransfer.setData).toHaveBeenCalledWith(
+        'application/x-openreelio-track',
+        JSON.stringify({ trackId: 'track_001', kind: 'video' }),
+      );
     });
 
     it('should show a disabled context menu item when no same-kind swap targets exist', () => {
@@ -522,6 +591,63 @@ describe('Track', () => {
       fireEvent.click(zones[0]);
 
       expect(onTransitionZoneClick).not.toHaveBeenCalled();
+    });
+
+    it('should render an existing transition effect on the junction clip', () => {
+      const clipsWithTransition = [
+        adjacentClips[0],
+        { ...adjacentClips[1], effects: ['transition_001'] },
+        adjacentClips[2],
+      ];
+      act(() => {
+        useProjectStore.setState({ effects: new Map([['transition_001', mockTransitionEffect]]) });
+      });
+
+      render(
+        <Track
+          track={mockTrack}
+          clips={clipsWithTransition}
+          zoom={100}
+          viewportWidth={2000}
+          showTransitionZones
+        />,
+      );
+
+      expect(screen.getByTestId('transition-indicator')).toBeInTheDocument();
+      expect(screen.getByText('Cross Dissolve')).toBeInTheDocument();
+      expect(screen.getByText('1.5s')).toBeInTheDocument();
+    });
+
+    it('should remove an existing transition through the remove attributes path', () => {
+      const onRemoveAttributes = vi.fn();
+      const clipsWithTransition = [
+        adjacentClips[0],
+        { ...adjacentClips[1], effects: ['transition_001'] },
+        adjacentClips[2],
+      ];
+      act(() => {
+        useProjectStore.setState({ effects: new Map([['transition_001', mockTransitionEffect]]) });
+      });
+
+      render(
+        <Track
+          track={mockTrack}
+          clips={clipsWithTransition}
+          zoom={100}
+          viewportWidth={2000}
+          showTransitionZones
+          onRemoveAttributes={onRemoveAttributes}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: /delete transition/i }));
+
+      expect(onRemoveAttributes).toHaveBeenCalledWith(
+        'clip_002',
+        'track_001',
+        ['transition_001'],
+        {},
+      );
     });
   });
 });

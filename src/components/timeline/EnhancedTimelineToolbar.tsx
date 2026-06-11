@@ -25,14 +25,20 @@ import {
   ChevronLast,
   Copy,
   Trash2,
-  Layers,
   Focus,
   Video,
   Music,
+  Layers,
   Link2,
   ArrowRightToLine,
   SquarePen,
   ListX,
+  TimerReset,
+  Clapperboard,
+  MoveHorizontal,
+  ChevronsLeftRight,
+  Repeat2,
+  StretchHorizontal,
 } from 'lucide-react';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
@@ -66,10 +72,14 @@ export interface EnhancedTimelineToolbarProps {
   onDelete?: () => void;
   /** Callback when ripple delete is clicked */
   onRippleDelete?: () => void;
+  /** Callback when selected clips should become a multicam group */
+  onCreateMulticamGroup?: () => void;
   /** Whether there's an active sequence */
   hasActiveSequence?: boolean;
   /** Whether there are selected clips to edit */
   hasSelectedClips?: boolean;
+  /** Whether the selected clips can create a multicam group */
+  canCreateMulticamGroup?: boolean;
   /** Current FPS for timecode display */
   fps?: number;
   /** Total duration in seconds */
@@ -107,10 +117,15 @@ const ToolButton = memo(function ToolButton({
       case 'hand':
         return <Hand className="w-4 h-4" />;
       case 'ripple':
-      case 'slip':
-      case 'slide':
+        return <MoveHorizontal className="w-4 h-4" />;
       case 'roll':
-        return <Layers className="w-4 h-4" />;
+        return <Repeat2 className="w-4 h-4" />;
+      case 'slip':
+        return <ChevronsLeftRight className="w-4 h-4" />;
+      case 'slide':
+        return <StretchHorizontal className="w-4 h-4" />;
+      case 'rate-stretch':
+        return <TimerReset className="w-4 h-4" />;
       default:
         return <MousePointer className="w-4 h-4" />;
     }
@@ -118,7 +133,9 @@ const ToolButton = memo(function ToolButton({
 
   return (
     <button
+      data-testid={`tool-button-${tool}`}
       type="button"
+      aria-pressed={isActive}
       className={`
         p-1.5 rounded transition-colors
         ${
@@ -150,8 +167,10 @@ function EnhancedTimelineToolbarComponent({
   onDuplicate,
   onDelete,
   onRippleDelete,
+  onCreateMulticamGroup,
   hasActiveSequence = false,
   hasSelectedClips = false,
+  canCreateMulticamGroup = false,
   fps = 30,
   duration = 0,
 }: EnhancedTimelineToolbarProps) {
@@ -254,6 +273,10 @@ function EnhancedTimelineToolbarComponent({
     onRippleDelete?.();
   }, [onRippleDelete]);
 
+  const handleCreateMulticamGroup = useCallback(() => {
+    onCreateMulticamGroup?.();
+  }, [onCreateMulticamGroup]);
+
   const handleEditModeChange = useCallback(
     (mode: EditMode) => {
       setEditMode(mode);
@@ -328,10 +351,24 @@ function EnhancedTimelineToolbarComponent({
       {/* Left Section: Tools and Editing Actions */}
       <div className="flex shrink-0 items-center gap-1">
         {/* Tool Selection */}
-        <div className="flex items-center gap-0.5 bg-editor-panel/50 rounded p-0.5">
+        <div
+          data-testid="primary-tool-panel"
+          className="flex items-center gap-0.5 bg-editor-panel/50 rounded p-0.5"
+        >
           <ToolButton tool="select" activeTool={activeTool} onClick={handleToolChange} />
           <ToolButton tool="razor" activeTool={activeTool} onClick={handleToolChange} />
           <ToolButton tool="hand" activeTool={activeTool} onClick={handleToolChange} />
+        </div>
+
+        <div
+          data-testid="trim-mode-panel"
+          className="flex items-center gap-0.5 bg-editor-panel/50 rounded p-0.5"
+        >
+          <ToolButton tool="ripple" activeTool={activeTool} onClick={handleToolChange} />
+          <ToolButton tool="roll" activeTool={activeTool} onClick={handleToolChange} />
+          <ToolButton tool="slip" activeTool={activeTool} onClick={handleToolChange} />
+          <ToolButton tool="slide" activeTool={activeTool} onClick={handleToolChange} />
+          <ToolButton tool="rate-stretch" activeTool={activeTool} onClick={handleToolChange} />
         </div>
 
         {/* Divider */}
@@ -421,6 +458,17 @@ function EnhancedTimelineToolbarComponent({
           title="Ripple Delete (Shift+Delete)"
         >
           <ListX className="w-4 h-4" />
+        </button>
+
+        <button
+          data-testid="create-multicam-group-button"
+          type="button"
+          className="p-1.5 rounded text-editor-text-muted hover:bg-editor-border hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
+          onClick={handleCreateMulticamGroup}
+          disabled={!hasActiveSequence || !canCreateMulticamGroup}
+          title="Create Multicam Group"
+        >
+          <Clapperboard className="w-4 h-4" />
         </button>
 
         {/* Divider */}

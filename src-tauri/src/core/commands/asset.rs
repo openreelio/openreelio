@@ -316,6 +316,22 @@ pub struct UpdateAssetCommand {
     pub proxy_status: Option<ProxyStatus>,
     /// New proxy URL (optional). `Some(None)` clears the proxy URL.
     pub proxy_url: Option<Option<String>>,
+    /// New URI (optional)
+    pub uri: Option<String>,
+    /// New duration (optional). `Some(None)` clears duration.
+    pub duration_sec: Option<Option<f64>>,
+    /// New file size (optional)
+    pub file_size: Option<u64>,
+    /// New video metadata (optional). `Some(None)` clears video metadata.
+    pub video: Option<Option<VideoInfo>>,
+    /// New audio metadata (optional). `Some(None)` clears audio metadata.
+    pub audio: Option<Option<AudioInfo>>,
+    /// New relative workspace path (optional). `Some(None)` clears workspace path.
+    pub relative_path: Option<Option<String>>,
+    /// Whether the asset is workspace managed (optional)
+    pub workspace_managed: Option<bool>,
+    /// Whether the asset file is missing (optional)
+    pub missing: Option<bool>,
     /// Original values (for undo)
     #[serde(skip)]
     original_name: Option<String>,
@@ -329,6 +345,22 @@ pub struct UpdateAssetCommand {
     original_proxy_status: Option<ProxyStatus>,
     #[serde(skip)]
     original_proxy_url: Option<Option<String>>,
+    #[serde(skip)]
+    original_uri: Option<String>,
+    #[serde(skip)]
+    original_duration_sec: Option<Option<f64>>,
+    #[serde(skip)]
+    original_file_size: Option<u64>,
+    #[serde(skip)]
+    original_video: Option<Option<VideoInfo>>,
+    #[serde(skip)]
+    original_audio: Option<Option<AudioInfo>>,
+    #[serde(skip)]
+    original_relative_path: Option<Option<String>>,
+    #[serde(skip)]
+    original_workspace_managed: Option<bool>,
+    #[serde(skip)]
+    original_missing: Option<bool>,
 }
 
 impl UpdateAssetCommand {
@@ -342,12 +374,28 @@ impl UpdateAssetCommand {
             thumbnail_url: None,
             proxy_status: None,
             proxy_url: None,
+            uri: None,
+            duration_sec: None,
+            file_size: None,
+            video: None,
+            audio: None,
+            relative_path: None,
+            workspace_managed: None,
+            missing: None,
             original_name: None,
             original_tags: None,
             original_license: None,
             original_thumbnail_url: None,
             original_proxy_status: None,
             original_proxy_url: None,
+            original_uri: None,
+            original_duration_sec: None,
+            original_file_size: None,
+            original_video: None,
+            original_audio: None,
+            original_relative_path: None,
+            original_workspace_managed: None,
+            original_missing: None,
         }
     }
 
@@ -386,6 +434,54 @@ impl UpdateAssetCommand {
         self.proxy_url = Some(url);
         self
     }
+
+    /// Sets the asset URI.
+    pub fn with_uri(mut self, uri: &str) -> Self {
+        self.uri = Some(uri.to_string());
+        self
+    }
+
+    /// Sets the duration. Use `None` to clear.
+    pub fn with_duration_sec(mut self, duration_sec: Option<f64>) -> Self {
+        self.duration_sec = Some(duration_sec);
+        self
+    }
+
+    /// Sets the file size.
+    pub fn with_file_size(mut self, file_size: u64) -> Self {
+        self.file_size = Some(file_size);
+        self
+    }
+
+    /// Sets video metadata. Use `None` to clear.
+    pub fn with_video(mut self, video: Option<VideoInfo>) -> Self {
+        self.video = Some(video);
+        self
+    }
+
+    /// Sets audio metadata. Use `None` to clear.
+    pub fn with_audio(mut self, audio: Option<AudioInfo>) -> Self {
+        self.audio = Some(audio);
+        self
+    }
+
+    /// Sets the relative workspace path. Use `None` to clear.
+    pub fn with_relative_path(mut self, relative_path: Option<String>) -> Self {
+        self.relative_path = Some(relative_path);
+        self
+    }
+
+    /// Sets whether the asset is workspace managed.
+    pub fn with_workspace_managed(mut self, workspace_managed: bool) -> Self {
+        self.workspace_managed = Some(workspace_managed);
+        self
+    }
+
+    /// Sets whether the backing file is missing.
+    pub fn with_missing(mut self, missing: bool) -> Self {
+        self.missing = Some(missing);
+        self
+    }
 }
 
 impl Command for UpdateAssetCommand {
@@ -402,6 +498,14 @@ impl Command for UpdateAssetCommand {
         self.original_thumbnail_url = Some(asset.thumbnail_url.clone());
         self.original_proxy_status = Some(asset.proxy_status.clone());
         self.original_proxy_url = Some(asset.proxy_url.clone());
+        self.original_uri = Some(asset.uri.clone());
+        self.original_duration_sec = Some(asset.duration_sec);
+        self.original_file_size = Some(asset.file_size);
+        self.original_video = Some(asset.video.clone());
+        self.original_audio = Some(asset.audio.clone());
+        self.original_relative_path = Some(asset.relative_path.clone());
+        self.original_workspace_managed = Some(asset.workspace_managed);
+        self.original_missing = Some(asset.missing);
 
         // Apply new values
         if let Some(name) = &self.new_name {
@@ -421,6 +525,30 @@ impl Command for UpdateAssetCommand {
         }
         if let Some(proxy_url) = &self.proxy_url {
             asset.proxy_url = proxy_url.clone();
+        }
+        if let Some(uri) = &self.uri {
+            asset.uri = uri.clone();
+        }
+        if let Some(duration_sec) = self.duration_sec {
+            asset.duration_sec = duration_sec;
+        }
+        if let Some(file_size) = self.file_size {
+            asset.file_size = file_size;
+        }
+        if let Some(video) = &self.video {
+            asset.video = video.clone();
+        }
+        if let Some(audio) = &self.audio {
+            asset.audio = audio.clone();
+        }
+        if let Some(relative_path) = &self.relative_path {
+            asset.relative_path = relative_path.clone();
+        }
+        if let Some(workspace_managed) = self.workspace_managed {
+            asset.workspace_managed = workspace_managed;
+        }
+        if let Some(missing) = self.missing {
+            asset.missing = missing;
         }
 
         let op_id = ulid::Ulid::new().to_string();
@@ -451,6 +579,30 @@ impl Command for UpdateAssetCommand {
             }
             if let Some(proxy_url) = &self.original_proxy_url {
                 asset.proxy_url = proxy_url.clone();
+            }
+            if let Some(uri) = &self.original_uri {
+                asset.uri = uri.clone();
+            }
+            if let Some(duration_sec) = self.original_duration_sec {
+                asset.duration_sec = duration_sec;
+            }
+            if let Some(file_size) = self.original_file_size {
+                asset.file_size = file_size;
+            }
+            if let Some(video) = &self.original_video {
+                asset.video = video.clone();
+            }
+            if let Some(audio) = &self.original_audio {
+                asset.audio = audio.clone();
+            }
+            if let Some(relative_path) = &self.original_relative_path {
+                asset.relative_path = relative_path.clone();
+            }
+            if let Some(workspace_managed) = self.original_workspace_managed {
+                asset.workspace_managed = workspace_managed;
+            }
+            if let Some(missing) = self.original_missing {
+                asset.missing = missing;
             }
         }
         Ok(())
@@ -640,6 +792,67 @@ mod tests {
         assert_eq!(asset.proxy_status, ProxyStatus::NotNeeded);
         assert_eq!(asset.proxy_url, None);
         assert_eq!(asset.thumbnail_url, None);
+    }
+
+    #[test]
+    fn test_update_asset_source_fields_and_undo() {
+        let mut state = create_test_state();
+        let (_dir, uri) = create_temp_asset_file("video.mp4");
+        let (_replacement_dir, replacement_uri) = create_temp_asset_file("replacement.mp4");
+
+        let mut import_cmd = ImportAssetCommand::video("video.mp4", &uri, VideoInfo::default())
+            .with_duration(10.0)
+            .with_file_size(100);
+        let result = import_cmd.execute(&mut state).unwrap();
+        let asset_id = &result.created_ids[0];
+
+        let replacement_video = VideoInfo {
+            width: 3840,
+            height: 2160,
+            ..Default::default()
+        };
+
+        let mut update_cmd = UpdateAssetCommand::new(asset_id)
+            .with_uri(&replacement_uri)
+            .with_duration_sec(Some(42.0))
+            .with_file_size(2048)
+            .with_video(Some(replacement_video))
+            .with_audio(Some(AudioInfo::default()))
+            .with_relative_path(Some("media/replacement.mp4".to_string()))
+            .with_workspace_managed(true)
+            .with_missing(false)
+            .with_proxy_status(ProxyStatus::NotNeeded)
+            .with_proxy_url(None);
+
+        update_cmd.execute(&mut state).unwrap();
+
+        let asset = state.assets.get(asset_id).unwrap();
+        assert_eq!(asset.uri, replacement_uri);
+        assert_eq!(asset.duration_sec, Some(42.0));
+        assert_eq!(asset.file_size, 2048);
+        assert_eq!(asset.video.as_ref().unwrap().width, 3840);
+        assert!(asset.audio.is_some());
+        assert_eq!(
+            asset.relative_path.as_deref(),
+            Some("media/replacement.mp4")
+        );
+        assert!(asset.workspace_managed);
+        assert!(!asset.missing);
+
+        update_cmd.undo(&mut state).unwrap();
+
+        let asset = state.assets.get(asset_id).unwrap();
+        assert_eq!(asset.uri, uri);
+        assert_eq!(asset.duration_sec, Some(10.0));
+        assert_eq!(asset.file_size, 100);
+        assert_eq!(
+            asset.video.as_ref().unwrap().width,
+            VideoInfo::default().width
+        );
+        assert!(asset.audio.is_none());
+        assert_eq!(asset.relative_path, None);
+        assert!(!asset.workspace_managed);
+        assert!(!asset.missing);
     }
 
     #[test]

@@ -48,7 +48,12 @@ const DRAG_THRESHOLD_PX = 5;
 // Types
 // =============================================================================
 
-export type DragType = 'move' | 'trim-left' | 'trim-right';
+export type DragType =
+  | 'move'
+  | 'trim-left'
+  | 'trim-right'
+  | 'rate-stretch-left'
+  | 'rate-stretch-right';
 
 /**
  * Data passed to drag callbacks
@@ -243,6 +248,31 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
         if (clipGridInterval > 0) {
           newTimelineIn = snapToGrid(newTimelineIn, clipGridInterval);
         }
+      } else if (type === 'rate-stretch-left') {
+        const rightEdge = origTimelineIn + clipDuration;
+        newTimelineIn = Math.min(rightEdge - clipMinDuration, origTimelineIn + deltaTime);
+
+        if (clipGridInterval > 0) {
+          const stretchedDuration = rightEdge - newTimelineIn;
+          const snappedDuration = Math.max(
+            clipMinDuration,
+            snapToGrid(stretchedDuration, clipGridInterval),
+          );
+          newTimelineIn = rightEdge - snappedDuration;
+        }
+
+        previewDuration = Math.max(clipMinDuration, rightEdge - newTimelineIn);
+      } else if (type === 'rate-stretch-right') {
+        let stretchedDuration = Math.max(clipMinDuration, clipDuration + deltaTime);
+
+        if (clipGridInterval > 0) {
+          stretchedDuration = Math.max(
+            clipMinDuration,
+            snapToGrid(stretchedDuration, clipGridInterval),
+          );
+        }
+
+        previewDuration = stretchedDuration;
       } else if (type === 'trim-left') {
         if (opts.clip && !supportsSourceBoundaryTrimming(opts.clip)) {
           return {
@@ -261,7 +291,8 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
           ? getClipLeftTrimDeltaBoundsSec(opts.clip, sourceDurationSec, clipMinDuration)
           : {
               minDeltaSec: -origSourceIn,
-              maxDeltaSec: calculateDuration(origSourceIn, origSourceOut, clipSpeed) - clipMinDuration,
+              maxDeltaSec:
+                calculateDuration(origSourceIn, origSourceOut, clipSpeed) - clipMinDuration,
             };
         const clampedDelta = clampTime(rawDelta, minDeltaSec, maxDeltaSec);
 
@@ -311,8 +342,9 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
         const { minDeltaSec, maxDeltaSec } = opts.clip
           ? getClipRightTrimDeltaBoundsSec(opts.clip, sourceDurationSec, clipMinDuration)
           : {
-              minDeltaSec:
-                -(calculateDuration(origSourceIn, origSourceOut, clipSpeed) - clipMinDuration),
+              minDeltaSec: -(
+                calculateDuration(origSourceIn, origSourceOut, clipSpeed) - clipMinDuration
+              ),
               maxDeltaSec:
                 ((clipMaxSourceDuration ?? Number.POSITIVE_INFINITY) - origSourceOut) / clipSpeed,
             };
@@ -360,7 +392,10 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
         timelineIn: newTimelineIn,
         sourceIn: newSourceIn,
         sourceOut: newSourceOut,
-        duration: opts.clip ? previewDuration : calculateDuration(newSourceIn, newSourceOut, clipSpeed),
+        duration:
+          opts.clip || type === 'rate-stretch-left' || type === 'rate-stretch-right'
+            ? previewDuration
+            : calculateDuration(newSourceIn, newSourceOut, clipSpeed),
       };
     },
     [calculateDuration],

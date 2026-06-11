@@ -11,10 +11,7 @@ import type { ClipMoveData, ClipTrimData } from '@/components/timeline/types';
 import type { ClipDragData, DragPreviewPosition } from '@/components/timeline/Clip';
 import type { DragPreviewState } from '@/components/timeline/DragPreviewLayer';
 import { useToastStore } from '@/hooks/useToast';
-import {
-  getClipTimelineDurationSec,
-  supportsSourceBoundaryTrimming,
-} from '@/utils/clipTiming';
+import { getClipTimelineDurationSec, supportsSourceBoundaryTrimming } from '@/utils/clipTiming';
 
 // =============================================================================
 // Helper Functions
@@ -72,9 +69,16 @@ export interface UseTimelineClipOperationsProps {
   /** Track height in pixels (for cross-track drag calculation) */
   trackHeight?: number;
   /** Callback for clip move operations */
-  onClipMove?: (data: ClipMoveData) => void;
+  onClipMove?: (data: ClipMoveData) => void | Promise<void>;
   /** Callback for clip trim operations */
   onClipTrim?: (data: ClipTrimData) => void;
+  /** Callback for rate stretch speed changes */
+  onClipSpeedChange?: (
+    clipId: string,
+    trackId: string,
+    speed: number,
+    reverse: boolean,
+  ) => void | Promise<void>;
   /** Callback to select a clip */
   selectClip?: (clipId: string) => void;
 }
@@ -124,6 +128,7 @@ export function useTimelineClipOperations({
   trackHeight = DEFAULT_TRACK_HEIGHT,
   onClipMove,
   onClipTrim,
+  onClipSpeedChange,
   selectClip,
 }: UseTimelineClipOperationsProps): UseTimelineClipOperationsResult {
   // ===========================================================================
@@ -364,6 +369,53 @@ export function useTimelineClipOperations({
         }
 
         onClipMove(moveData);
+      } else if (
+        (data.type === 'rate-stretch-left' || data.type === 'rate-stretch-right') &&
+        onClipSpeedChange
+      ) {
+        const clipInfo = sequence.tracks
+          .flatMap((track) => track.clips)
+          .find((clip) => clip.id === data.clipId);
+
+        const safeDuration = Number.isFinite(finalPosition.duration)
+          ? Math.max(0, finalPosition.duration)
+          : 0;
+        const sourceDuration = clipInfo
+          ? Math.max(0, clipInfo.range.sourceOutSec - clipInfo.range.sourceInSec)
+          : 0;
+
+        if (clipInfo && sourceDuration > 0 && safeDuration > 0) {
+          const nextSpeed = sourceDuration / safeDuration;
+          const moveData: ClipMoveData = {
+            sequenceId: sequence.id,
+            trackId,
+            clipId: data.clipId,
+            newTimelineIn: safeTimelineIn,
+          };
+
+          const commitRateStretch = async () => {
+            if (data.type === 'rate-stretch-left' && onClipMove) {
+              if (safeTimelineIn < data.originalTimelineIn) {
+                await onClipMove(moveData);
+                await onClipSpeedChange(data.clipId, trackId, nextSpeed, clipInfo.reverse ?? false);
+              } else {
+                await onClipSpeedChange(data.clipId, trackId, nextSpeed, clipInfo.reverse ?? false);
+                await onClipMove(moveData);
+              }
+              return;
+            }
+
+            await onClipSpeedChange(data.clipId, trackId, nextSpeed, clipInfo.reverse ?? false);
+          };
+
+          void commitRateStretch().catch(() => {
+            useToastStore.getState().addToast({
+              message: 'Failed to rate stretch clip',
+              variant: 'error',
+              duration: 3000,
+            });
+          });
+        }
       } else if ((data.type === 'trim-left' || data.type === 'trim-right') && onClipTrim) {
         const clipInfo = sequence.tracks
           .flatMap((track) => track.clips)
@@ -415,7 +467,7 @@ export function useTimelineClipOperations({
 
       setDragPreview(null);
     },
-    [sequence, onClipMove, onClipTrim],
+    [sequence, onClipMove, onClipTrim, onClipSpeedChange],
   );
 
   /**

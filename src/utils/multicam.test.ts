@@ -12,6 +12,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   createMulticamGroup,
+  createSynchronizedMulticamGroup,
   validateMulticamGroup,
   findAudioSyncOffset,
   calculateCrossCorrelation,
@@ -31,9 +32,36 @@ import {
   type MulticamGroup,
   type MulticamAngle,
   type AngleSwitch,
+  type MulticamSyncClipSource,
 } from './multicam';
 
 describe('multicam utilities', () => {
+  type SyncSourceOverrides = Partial<Omit<MulticamSyncClipSource, 'clip'>> & {
+    clip?: Partial<MulticamSyncClipSource['clip']>;
+  };
+
+  const makeSyncSource = (
+    clipId: string,
+    trackId: string,
+    overrides: SyncSourceOverrides = {},
+  ): MulticamSyncClipSource => {
+    const { clip: clipOverrides, ...sourceOverrides } = overrides;
+
+    return {
+      clip: {
+        id: clipId,
+        range: { sourceInSec: 0, sourceOutSec: 10 },
+        place: { timelineInSec: 0, durationSec: 10 },
+        speed: 1,
+        label: clipId,
+        color: { r: 1, g: 1, b: 1 },
+        ...clipOverrides,
+      },
+      trackId,
+      ...sourceOverrides,
+    };
+  };
+
   // =============================================================================
   // Type Definitions
   // =============================================================================
@@ -64,9 +92,7 @@ describe('multicam utilities', () => {
       const group = createMulticamGroup({
         sequenceId: 'seq-1',
         name: 'Test',
-        angles: [
-          { clipId: 'clip-1', trackId: 'track-1' },
-        ],
+        angles: [{ clipId: 'clip-1', trackId: 'track-1' }],
         timelineInSec: 0,
         durationSec: 10,
       });
@@ -78,14 +104,143 @@ describe('multicam utilities', () => {
       const group = createMulticamGroup({
         sequenceId: 'seq-1',
         name: 'Test',
-        angles: [
-          { clipId: 'clip-1', trackId: 'track-1' },
-        ],
+        angles: [{ clipId: 'clip-1', trackId: 'track-1' }],
         timelineInSec: 0,
         durationSec: 10,
       });
 
       expect(group.audioMixMode).toBe('active');
+    });
+  });
+
+  describe('createSynchronizedMulticamGroup', () => {
+    it('should create a synchronized group using in/out sync', () => {
+      const result = createSynchronizedMulticamGroup({
+        sequenceId: 'seq-1',
+        name: 'Interview Multicam',
+        method: 'inOut',
+        sources: [makeSyncSource('clip-1', 'track-1'), makeSyncSource('clip-2', 'track-2')],
+      });
+
+      expect(result.group.name).toBe('Interview Multicam');
+      expect(result.group.angles).toHaveLength(2);
+      expect(result.group.durationSec).toBe(10);
+      expect(result.group.angles.map((angle) => angle.syncOffsetSec)).toEqual([0, 0]);
+      expect(result.warnings).toHaveLength(0);
+    });
+
+    it('should calculate manual sync offsets from current timeline placement', () => {
+      const result = createSynchronizedMulticamGroup({
+        sequenceId: 'seq-1',
+        name: 'Manual Sync',
+        method: 'manual',
+        sources: [
+          makeSyncSource('clip-1', 'track-1', {
+            clip: { place: { timelineInSec: 5, durationSec: 8 } },
+          }),
+          makeSyncSource('clip-2', 'track-2', {
+            clip: { place: { timelineInSec: 7.5, durationSec: 8 } },
+          }),
+        ],
+      });
+
+      expect(result.group.timelineInSec).toBe(5);
+      expect(result.group.angles[0].syncOffsetSec).toBe(0);
+      expect(result.group.angles[1].syncOffsetSec).toBe(2.5);
+      expect(result.group.durationSec).toBeCloseTo(5.5, 5);
+    });
+
+    it('should calculate marker sync offsets from source marker times', () => {
+      const result = createSynchronizedMulticamGroup({
+        sequenceId: 'seq-1',
+        name: 'Marker Sync',
+        method: 'marker',
+        sources: [
+          makeSyncSource('clip-1', 'track-1', { markerSec: 2 }),
+          makeSyncSource('clip-2', 'track-2', { markerSec: 5 }),
+        ],
+      });
+
+      expect(result.group.angles[0].syncOffsetSec).toBe(0);
+      expect(result.group.angles[1].syncOffsetSec).toBe(-3);
+      expect(result.group.durationSec).toBeCloseTo(7, 5);
+    });
+
+    it('should calculate timecode sync offsets from absolute start timecode', () => {
+      const result = createSynchronizedMulticamGroup({
+        sequenceId: 'seq-1',
+        name: 'Timecode Sync',
+        method: 'timecode',
+        sources: [
+          makeSyncSource('clip-1', 'track-1', { timecodeStartSec: 3600 }),
+          makeSyncSource('clip-2', 'track-2', { timecodeStartSec: 3603.25 }),
+        ],
+      });
+
+      expect(result.group.angles[0].syncOffsetSec).toBe(0);
+      expect(result.group.angles[1].syncOffsetSec).toBeCloseTo(3.25, 5);
+      expect(result.group.durationSec).toBeCloseTo(6.75, 5);
+    });
+
+    it('should calculate waveform sync offsets with cross-correlation', () => {
+      const waveform1 = {
+        samplesPerSecond: 10,
+        peaks: [0.1, 0.5, 0.8, 0.3, 0.2, 0.6, 0.9, 0.4, 0.1, 0.3],
+        durationSec: 1,
+        channels: 1,
+      };
+      const waveform2 = {
+        samplesPerSecond: 10,
+        peaks: [0, 0, 0, 0.1, 0.5, 0.8, 0.3, 0.2, 0.6, 0.9],
+        durationSec: 1,
+        channels: 1,
+      };
+
+      const result = createSynchronizedMulticamGroup({
+        sequenceId: 'seq-1',
+        name: 'Waveform Sync',
+        method: 'waveform',
+        sources: [
+          makeSyncSource('clip-1', 'track-1', { waveform: waveform1 }),
+          makeSyncSource('clip-2', 'track-2', { waveform: waveform2 }),
+        ],
+      });
+
+      expect(result.group.angles[0].syncOffsetSec).toBe(0);
+      expect(result.group.angles[1].syncOffsetSec).toBeCloseTo(-0.3, 1);
+    });
+
+    it('should warn when synchronized sources have no common overlap', () => {
+      const result = createSynchronizedMulticamGroup({
+        sequenceId: 'seq-1',
+        name: 'No Overlap',
+        method: 'manual',
+        sources: [
+          makeSyncSource('clip-1', 'track-1', {
+            clip: { place: { timelineInSec: 0, durationSec: 2 } },
+          }),
+          makeSyncSource('clip-2', 'track-2', {
+            clip: { place: { timelineInSec: 5, durationSec: 2 } },
+          }),
+        ],
+      });
+
+      expect(result.group.durationSec).toBe(0);
+      expect(result.warnings).toContain('Synchronized clips do not have an overlapping duration');
+    });
+
+    it('should require marker data for marker sync', () => {
+      expect(() =>
+        createSynchronizedMulticamGroup({
+          sequenceId: 'seq-1',
+          name: 'Broken Marker Sync',
+          method: 'marker',
+          sources: [
+            makeSyncSource('clip-1', 'track-1', { markerSec: 2 }),
+            makeSyncSource('clip-2', 'track-2'),
+          ],
+        }),
+      ).toThrow('markerSec is required');
     });
   });
 
@@ -134,9 +289,7 @@ describe('multicam utilities', () => {
         id: 'group-1',
         sequenceId: 'seq-1',
         name: 'Test',
-        angles: [
-          { id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' },
-        ],
+        angles: [{ id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' }],
         activeAngleIndex: 5,
         timelineInSec: 0,
         durationSec: 10,
@@ -154,9 +307,7 @@ describe('multicam utilities', () => {
         id: 'group-1',
         sequenceId: 'seq-1',
         name: 'Test',
-        angles: [
-          { id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' },
-        ],
+        angles: [{ id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' }],
         activeAngleIndex: 0,
         timelineInSec: 0,
         durationSec: -5,
@@ -174,9 +325,7 @@ describe('multicam utilities', () => {
         id: 'group-1',
         sequenceId: 'seq-1',
         name: 'Test',
-        angles: [
-          { id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' },
-        ],
+        angles: [{ id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' }],
         activeAngleIndex: 0,
         timelineInSec: -10,
         durationSec: 10,
@@ -361,9 +510,7 @@ describe('multicam utilities', () => {
     });
 
     it('should return false for single angle', () => {
-      const angles: MulticamAngle[] = [
-        { id: 'a1', clipId: 'c1', trackId: 't1', hasAudio: true },
-      ];
+      const angles: MulticamAngle[] = [{ id: 'a1', clipId: 'c1', trackId: 't1', hasAudio: true }];
 
       expect(canSyncAngles(angles)).toBe(false);
     });
@@ -379,9 +526,7 @@ describe('multicam utilities', () => {
         id: 'group-1',
         sequenceId: 'seq-1',
         name: 'Test',
-        angles: [
-          { id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' },
-        ],
+        angles: [{ id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' }],
         activeAngleIndex: 0,
         timelineInSec: 0,
         durationSec: 10,
@@ -406,9 +551,7 @@ describe('multicam utilities', () => {
         id: 'group-1',
         sequenceId: 'seq-1',
         name: 'Test',
-        angles: [
-          { id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' },
-        ],
+        angles: [{ id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' }],
         activeAngleIndex: 0,
         timelineInSec: 0,
         durationSec: 10,
@@ -520,9 +663,7 @@ describe('multicam utilities', () => {
         id: 'group-1',
         sequenceId: 'seq-1',
         name: 'Test',
-        angles: [
-          { id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' },
-        ],
+        angles: [{ id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' }],
         activeAngleIndex: 0,
         timelineInSec: 0,
         durationSec: 10,
@@ -793,9 +934,7 @@ describe('multicam utilities', () => {
         id: 'group-1',
         sequenceId: 'seq-1',
         name: 'Group 1',
-        angles: [
-          { id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' },
-        ],
+        angles: [{ id: 'angle-1', clipId: 'clip-1', trackId: 'track-1' }],
         activeAngleIndex: 0,
         timelineInSec: 0,
         durationSec: 15,
@@ -807,9 +946,7 @@ describe('multicam utilities', () => {
         id: 'group-2',
         sequenceId: 'seq-1',
         name: 'Group 2',
-        angles: [
-          { id: 'angle-2', clipId: 'clip-2', trackId: 'track-2' },
-        ],
+        angles: [{ id: 'angle-2', clipId: 'clip-2', trackId: 'track-2' }],
         activeAngleIndex: 0,
         timelineInSec: 10,
         durationSec: 15,

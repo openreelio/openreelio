@@ -14,6 +14,10 @@ export type { ColorCurvesPanelProps } from './ColorCurvesPanel';
 export { TemperatureTintPanel } from './TemperatureTintPanel';
 export type { TemperatureTintPanelProps } from './TemperatureTintPanel';
 
+// LUT Controls
+export { LutPanel } from './LutPanel';
+export type { LutPanelProps, LutInterpolation } from './LutPanel';
+
 // Before/After Color Comparison
 export { ColorComparisonOverlay } from './ColorComparisonOverlay';
 export type { ColorComparisonOverlayProps } from './ColorComparisonOverlay';

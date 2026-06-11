@@ -84,6 +84,240 @@ describe('Inspector', () => {
     expect(screen.getByTestId('clip-duration')).toHaveTextContent('10.00s');
   });
 
+  it('commits clip transform changes from numeric controls', () => {
+    const onClipTransformChange = vi.fn();
+    const transform = {
+      position: { x: 0.5, y: 0.5 },
+      scale: { x: 1, y: 1 },
+      rotationDeg: 0,
+      anchor: { x: 0.5, y: 0.5 },
+    };
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          sequenceId: 'seq-1',
+          name: 'Test Clip',
+          assetId: 'asset-1',
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+          },
+          transform,
+        }}
+        onClipTransformChange={onClipTransformChange}
+      />,
+    );
+
+    const positionXInput = screen.getByTestId('clip-position-x-input');
+    fireEvent.change(positionXInput, { target: { value: '62.5' } });
+    fireEvent.blur(positionXInput);
+
+    expect(onClipTransformChange).toHaveBeenCalledWith('clip-1', 'track-1', {
+      ...transform,
+      position: { x: 0.625, y: 0.5 },
+    });
+  });
+
+  it('applies fit fill and reset transform presets', () => {
+    const onClipTransformChange = vi.fn();
+    const transform = {
+      position: { x: 0.2, y: 0.3 },
+      scale: { x: 1.5, y: 1.25 },
+      rotationDeg: 12,
+      anchor: { x: 0.1, y: 0.9 },
+    };
+    const defaultTransform = {
+      position: { x: 0.5, y: 0.5 },
+      scale: { x: 1, y: 1 },
+      rotationDeg: 0,
+      anchor: { x: 0.5, y: 0.5 },
+    };
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          sequenceId: 'seq-1',
+          name: 'Test Clip',
+          assetId: 'asset-1',
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+          },
+          transform,
+          sourceSize: { width: 1920, height: 1080 },
+          canvasSize: { width: 1080, height: 1920 },
+        }}
+        onClipTransformChange={onClipTransformChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('clip-fit-button'));
+    expect(onClipTransformChange).toHaveBeenLastCalledWith('clip-1', 'track-1', defaultTransform);
+
+    fireEvent.click(screen.getByTestId('clip-fill-button'));
+    expect(onClipTransformChange).toHaveBeenLastCalledWith('clip-1', 'track-1', {
+      ...defaultTransform,
+      scale: { x: 3.16, y: 3.16 },
+    });
+
+    fireEvent.click(screen.getByTestId('clip-reset-transform-button'));
+    expect(onClipTransformChange).toHaveBeenLastCalledWith('clip-1', 'track-1', defaultTransform);
+  });
+
+  it('commits clip opacity changes as normalized values', () => {
+    const onClipOpacityChange = vi.fn();
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          sequenceId: 'seq-1',
+          name: 'Test Clip',
+          assetId: 'asset-1',
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+          },
+          opacity: 0.8,
+        }}
+        onClipOpacityChange={onClipOpacityChange}
+      />,
+    );
+
+    const opacityInput = screen.getByTestId('clip-opacity-input');
+    fireEvent.change(opacityInput, { target: { value: '45' } });
+    fireEvent.blur(opacityInput);
+
+    expect(onClipOpacityChange).toHaveBeenCalledWith('clip-1', 'track-1', 0.45);
+  });
+
+  it('commits clip audio changes from inspector controls', () => {
+    const onClipAudioChange = vi.fn();
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          sequenceId: 'seq-1',
+          name: 'Test Clip',
+          assetId: 'asset-1',
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+          },
+          audio: {
+            volumeDb: -3,
+            pan: 0.25,
+            muted: false,
+            fadeInSec: 0.5,
+            fadeOutSec: 1,
+            audioRole: 'dialogue',
+            audioTags: ['interview', 'lav'],
+          },
+        }}
+        onClipAudioChange={onClipAudioChange}
+      />,
+    );
+
+    expect(screen.getByTestId('clip-audio-gain-input')).toHaveValue(-3);
+    expect(screen.getByTestId('clip-audio-pan-input')).toHaveValue(0.25);
+    expect(screen.getByTestId('clip-audio-role-select')).toHaveValue('dialogue');
+    expect(screen.getByTestId('clip-audio-tags-input')).toHaveValue('interview, lav');
+
+    fireEvent.change(screen.getByTestId('clip-audio-pan-input'), {
+      target: { value: '-0.5' },
+    });
+    expect(onClipAudioChange).toHaveBeenCalledWith('clip-1', 'track-1', { pan: -0.5 });
+
+    fireEvent.change(screen.getByTestId('clip-audio-fade-in-input'), {
+      target: { value: '1.25' },
+    });
+    expect(onClipAudioChange).toHaveBeenCalledWith('clip-1', 'track-1', { fadeInSec: 1.25 });
+
+    fireEvent.change(screen.getByTestId('clip-audio-role-select'), {
+      target: { value: 'music' },
+    });
+    expect(onClipAudioChange).toHaveBeenCalledWith('clip-1', 'track-1', { audioRole: 'music' });
+
+    fireEvent.change(screen.getByTestId('clip-audio-tags-input'), {
+      target: { value: 'Score, Music, score' },
+    });
+    expect(onClipAudioChange).toHaveBeenCalledWith('clip-1', 'track-1', {
+      audioTags: ['score', 'music'],
+    });
+  });
+
+  it('creates editable motion keyframes from clip motion presets', () => {
+    const onClipMotionKeyframesChange = vi.fn();
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          sequenceId: 'seq-1',
+          name: 'Test Clip',
+          assetId: 'asset-1',
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+            durationSec: 8,
+          },
+          transform: {
+            position: { x: 0.5, y: 0.5 },
+            scale: { x: 1, y: 1 },
+            rotationDeg: 0,
+            anchor: { x: 0.5, y: 0.5 },
+          },
+          sourceSize: { width: 1920, height: 1080 },
+          canvasSize: { width: 1920, height: 1080 },
+        }}
+        onClipMotionKeyframesChange={onClipMotionKeyframesChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('clip-motion-zoom-in-button'));
+
+    expect(onClipMotionKeyframesChange).toHaveBeenCalledWith(
+      'clip-1',
+      'track-1',
+      expect.arrayContaining([
+        expect.objectContaining({
+          timeOffset: 0,
+          interpolation: 'linear',
+          transform: expect.objectContaining({ scale: { x: 1, y: 1 } }),
+        }),
+        expect.objectContaining({
+          timeOffset: 8,
+          interpolation: 'linear',
+          transform: expect.objectContaining({ scale: { x: 1.2, y: 1.2 } }),
+        }),
+      ]),
+    );
+  });
+
   it('saves a selected effect as a preset through IPC', async () => {
     const user = userEvent.setup();
 
@@ -250,6 +484,166 @@ describe('Inspector', () => {
 
     // 125.5 seconds = 2:05.50
     expect(screen.getByTestId('asset-duration')).toHaveTextContent('2:05');
+  });
+
+  it('displays detailed asset metadata for editorial review', () => {
+    const selectedAsset = {
+      id: 'asset-1',
+      name: 'interview.mov',
+      kind: 'video' as const,
+      uri: '/project/media/interview.mov',
+      durationSec: 125.5,
+      fileSize: 1024 * 1024 * 512,
+      importedAt: '2026-03-23T12:30:00Z',
+      resolution: { width: 3840, height: 2160 },
+      video: {
+        width: 3840,
+        height: 2160,
+        fps: { num: 30000, den: 1001 },
+        codec: 'prores',
+        bitrate: 120_000_000,
+        hasAlpha: true,
+      },
+      audio: {
+        sampleRate: 48000,
+        channels: 2,
+        codec: 'pcm_s24le',
+        bitrate: 2304000,
+      },
+      proxyStatus: 'ready' as const,
+      proxyUrl: 'asset://proxy/interview.mp4',
+      missing: true,
+      relativePath: 'media/interview.mov',
+      workspaceManaged: true,
+      tags: ['interview', 'a-roll'],
+    };
+
+    render(<Inspector selectedAsset={selectedAsset} />);
+
+    expect(screen.getByTestId('asset-status')).toHaveTextContent('Missing');
+    expect(screen.getByTestId('asset-video-codec')).toHaveTextContent('prores');
+    expect(screen.getByTestId('asset-fps')).toHaveTextContent('29.97 fps');
+    expect(screen.getByTestId('asset-audio-codec')).toHaveTextContent('pcm_s24le');
+    expect(screen.getByTestId('asset-audio-channels')).toHaveTextContent('Stereo');
+    expect(screen.getByTestId('asset-sample-rate')).toHaveTextContent('48,000 Hz');
+    expect(screen.getByTestId('asset-file-size')).toHaveTextContent('512.0 MB');
+    expect(screen.getByTestId('asset-proxy-status')).toHaveTextContent('Optimized');
+    expect(screen.getByTestId('asset-workspace')).toHaveTextContent('Managed');
+    expect(screen.getByTestId('asset-tags')).toHaveTextContent('interview, a-roll');
+    expect(screen.getByTestId('asset-relative-path')).toHaveTextContent('media/interview.mov');
+    expect(screen.queryByTestId('asset-proxy-url')).not.toBeInTheDocument();
+  });
+
+  it('keeps media optimization automatic for selected video assets', () => {
+    const onGenerateProxy = vi.fn();
+    const onCancelProxy = vi.fn();
+    const onUseOriginalMedia = vi.fn();
+
+    render(
+      <Inspector
+        selectedAsset={{
+          id: 'asset-1',
+          name: 'video.mp4',
+          kind: 'video',
+          uri: '/path/to/video.mp4',
+          proxyStatus: 'ready',
+          proxyUrl: '/proxy/video.mp4',
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId('asset-proxy-status')).toHaveTextContent('Optimized');
+    expect(onGenerateProxy).not.toHaveBeenCalled();
+    expect(onCancelProxy).not.toHaveBeenCalled();
+    expect(onUseOriginalMedia).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('asset-generate-proxy')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('asset-use-original')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('asset-cancel-proxy')).not.toBeInTheDocument();
+  });
+
+  it('shows media optimization progress without exposing manual cancellation', () => {
+    const onCancelProxy = vi.fn();
+
+    render(
+      <Inspector
+        selectedAsset={{
+          id: 'asset-1',
+          name: 'video.mp4',
+          kind: 'video',
+          uri: '/path/to/video.mp4',
+          proxyStatus: 'generating',
+          proxyJobId: 'job-1',
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId('asset-proxy-status')).toHaveTextContent('Optimizing media');
+    expect(onCancelProxy).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('asset-cancel-proxy')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('asset-generate-proxy')).not.toBeInTheDocument();
+  });
+
+  it('exposes media cache status and cache generation controls for selected assets', async () => {
+    const onGenerateThumbnail = vi.fn().mockResolvedValue('/cache/thumb.jpg');
+    const onLoadWaveformData = vi.fn().mockResolvedValue({
+      samplesPerSecond: 100,
+      peaks: [0.2, 0.7],
+      durationSec: 2,
+      channels: 2,
+    });
+    const onGenerateWaveform = vi.fn().mockResolvedValue({
+      samplesPerSecond: 100,
+      peaks: [0.1, 0.3, 0.8],
+      durationSec: 3,
+      channels: 2,
+    });
+    const onEnsureAudioPreview = vi.fn().mockResolvedValue('/cache/audio-preview.mp3');
+    const onClearWaveformUiCache = vi.fn();
+
+    render(
+      <Inspector
+        selectedAsset={{
+          id: 'asset-1',
+          name: 'dialogue.wav',
+          kind: 'audio',
+          uri: '/path/to/dialogue.wav',
+          thumbnailUrl: '/cache/existing-thumb.jpg',
+        }}
+        onGenerateThumbnail={onGenerateThumbnail}
+        onLoadWaveformData={onLoadWaveformData}
+        onGenerateWaveform={onGenerateWaveform}
+        onEnsureAudioPreview={onEnsureAudioPreview}
+        waveformUiCacheSize={3}
+        onClearWaveformUiCache={onClearWaveformUiCache}
+      />,
+    );
+
+    expect(screen.getByTestId('asset-thumbnail-cache')).toHaveTextContent('Ready');
+    expect(onLoadWaveformData).toHaveBeenCalledWith('asset-1');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('asset-waveform-cache')).toHaveTextContent('2 peaks @ 100 Hz');
+    });
+
+    fireEvent.click(screen.getByTestId('asset-regenerate-thumbnail'));
+    fireEvent.click(screen.getByTestId('asset-generate-waveform'));
+    fireEvent.click(screen.getByTestId('asset-ensure-audio-preview'));
+    fireEvent.click(screen.getByTestId('asset-clear-waveform-ui-cache'));
+
+    await waitFor(() => {
+      expect(onGenerateThumbnail).toHaveBeenCalledWith('asset-1');
+      expect(onGenerateWaveform).toHaveBeenCalledWith('asset-1');
+      expect(onEnsureAudioPreview).toHaveBeenCalledWith('asset-1');
+    });
+    expect(onClearWaveformUiCache).toHaveBeenCalledTimes(1);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('asset-waveform-cache')).toHaveTextContent('3 peaks @ 100 Hz');
+      expect(screen.getByTestId('asset-audio-preview-cache')).toHaveTextContent('Ready');
+      expect(screen.getByTestId('asset-audio-preview-url')).toHaveTextContent(
+        '/cache/audio-preview.mp3',
+      );
+    });
   });
 
   // ===========================================================================
@@ -559,6 +953,156 @@ describe('Inspector', () => {
 
     expect(onClipSpeedChange).not.toHaveBeenCalled();
     expect(screen.getByTestId('speed-input')).toHaveValue(100);
+  });
+
+  it('applies constant speed presets from the clip inspector', async () => {
+    const user = userEvent.setup();
+    const onClipSpeedChange = vi.fn();
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          name: 'Clip One',
+          assetId: 'asset-1',
+          speed: 1,
+          reverse: false,
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+          },
+        }}
+        onClipSpeedChange={onClipSpeedChange}
+      />,
+    );
+
+    await user.click(screen.getByTestId('speed-preset-200'));
+
+    expect(onClipSpeedChange).toHaveBeenCalledWith('clip-1', 'track-1', 2, false);
+  });
+
+  it('creates an editable ramp-up time remap curve from the clip inspector', async () => {
+    const user = userEvent.setup();
+    const onTimeRemapChange = vi.fn();
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          name: 'Clip One',
+          assetId: 'asset-1',
+          speed: 1,
+          reverse: false,
+          range: {
+            sourceInSec: 5,
+            sourceOutSec: 15,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+            durationSec: 10,
+          },
+        }}
+        onTimeRemapChange={onTimeRemapChange}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Ramp Up' }));
+
+    expect(onTimeRemapChange).toHaveBeenCalledWith('clip-1', 'track-1', {
+      keyframes: [
+        { timelineTime: 0, sourceTime: 5, interpolation: 'linear' },
+        { timelineTime: 5, sourceTime: 8.5, interpolation: 'linear' },
+        { timelineTime: 10, sourceTime: 15, interpolation: 'linear' },
+      ],
+    });
+  });
+
+  it('edits active time remap speed points from the clip inspector', () => {
+    const onTimeRemapChange = vi.fn();
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          name: 'Clip One',
+          assetId: 'asset-1',
+          speed: 1,
+          reverse: false,
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+            durationSec: 10,
+          },
+          timeRemap: {
+            keyframes: [
+              { timelineTime: 0, sourceTime: 0, interpolation: 'linear' },
+              { timelineTime: 5, sourceTime: 4, interpolation: 'linear' },
+              { timelineTime: 10, sourceTime: 10, interpolation: 'linear' },
+            ],
+          },
+          hasTimeRemap: true,
+        }}
+        onTimeRemapChange={onTimeRemapChange}
+      />,
+    );
+
+    const sourceInput = screen.getByLabelText('Speed point 2 source time');
+    fireEvent.change(sourceInput, { target: { value: '6' } });
+    fireEvent.blur(sourceInput);
+
+    expect(onTimeRemapChange).toHaveBeenCalledWith('clip-1', 'track-1', {
+      keyframes: [
+        { timelineTime: 0, sourceTime: 0, interpolation: 'linear' },
+        { timelineTime: 5, sourceTime: 6, interpolation: 'linear' },
+        { timelineTime: 10, sourceTime: 10, interpolation: 'linear' },
+      ],
+    });
+  });
+
+  it('changes slow-motion interpolation from the clip inspector', () => {
+    const onSlowMotionInterpolationChange = vi.fn();
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          name: 'Clip One',
+          assetId: 'asset-1',
+          speed: 0.5,
+          reverse: false,
+          slowMotionInterpolation: 'nearest',
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+            durationSec: 20,
+          },
+        }}
+        onSlowMotionInterpolationChange={onSlowMotionInterpolationChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('slow-motion-interpolation-select'), {
+      target: { value: 'motionCompensated' },
+    });
+
+    expect(onSlowMotionInterpolationChange).toHaveBeenCalledWith(
+      'clip-1',
+      'track-1',
+      'motionCompensated',
+    );
   });
 
   // ===========================================================================

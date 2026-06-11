@@ -263,6 +263,7 @@ export {
 
 export {
   createMulticamGroup,
+  createSynchronizedMulticamGroup,
   validateMulticamGroup,
   normalizeWaveformPeaks,
   calculateCrossCorrelation,
@@ -281,10 +282,14 @@ export {
   splitMulticamGroup,
   type AudioMixMode,
   type AngleTransitionType,
+  type MulticamSyncMethod,
   type MulticamAngle,
   type AngleSwitch,
   type MulticamGroup,
   type CreateMulticamGroupOptions,
+  type MulticamSyncClipSource,
+  type CreateSynchronizedMulticamGroupOptions,
+  type SynchronizedMulticamGroupResult,
   type ValidationResult,
   type CreateAngleSwitchOptions,
   type AngleSwitchValidationResult,

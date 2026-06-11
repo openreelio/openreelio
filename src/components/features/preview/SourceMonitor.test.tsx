@@ -277,6 +277,37 @@ describe('SourceMonitor', () => {
     expect(mockSourceMonitor.clearInOut).toHaveBeenCalledOnce();
   });
 
+  it('should trigger insert and overwrite edits from transport buttons', () => {
+    const onInsertEdit = vi.fn();
+    const onOverwriteEdit = vi.fn();
+    mockSourceMonitor.assetId = 'test-asset';
+
+    render(<SourceMonitor onInsertEdit={onInsertEdit} onOverwriteEdit={onOverwriteEdit} />);
+
+    fireEvent.click(screen.getByTestId('source-insert-edit-button'));
+    fireEvent.click(screen.getByTestId('source-overwrite-edit-button'));
+
+    expect(onInsertEdit).toHaveBeenCalledOnce();
+    expect(onOverwriteEdit).toHaveBeenCalledOnce();
+  });
+
+  it('should trigger insert and overwrite edits from comma and period keys', () => {
+    const onInsertEdit = vi.fn();
+    const onOverwriteEdit = vi.fn();
+    mockSourceMonitor.assetId = 'test-asset';
+
+    const { container } = render(
+      <SourceMonitor onInsertEdit={onInsertEdit} onOverwriteEdit={onOverwriteEdit} />,
+    );
+    const wrapper = container.firstElementChild!;
+
+    fireEvent.keyDown(wrapper, { key: ',' });
+    fireEvent.keyDown(wrapper, { key: '.' });
+
+    expect(onInsertEdit).toHaveBeenCalledOnce();
+    expect(onOverwriteEdit).toHaveBeenCalledOnce();
+  });
+
   it('should display asset name header after match frame loads asset', () => {
     mockSourceMonitor.assetId = 'test-asset';
     mockSourceMonitor.currentTime = 13.0;

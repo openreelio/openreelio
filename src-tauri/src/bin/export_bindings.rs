@@ -156,6 +156,29 @@ fn normalize_unstable_type_line_spacing(input: &str) -> String {
             }
 
             match line {
+                "export type AssetRelinkResult = { " => "export type AssetRelinkResult = {",
+                "assetId: string; " => "assetId: string;",
+                "opId: string; " => "opId: string;",
+                "uri: string; " => "uri: string;",
+                "volumeKeyframes: AudioKeyframe[]; " => "volumeKeyframes: AudioKeyframe[];",
+                "audioRole?: string | null; " => "audioRole?: string | null;",
+                "motionKeyframes: TransformKeyframe[]; " => "motionKeyframes: TransformKeyframe[];",
+                "timeRemap?: TimeRemapCurve | null; " => "timeRemap?: TimeRemapCurve | null;",
+                "slowMotionInterpolation: SlowMotionInterpolation; effects: string[]; audio: AudioSettings; " => {
+                    "slowMotionInterpolation: SlowMotionInterpolation; effects: string[]; audio: AudioSettings;"
+                }
+                "export type HdrMode = " => "export type HdrMode =",
+                "\"sdr\" | " => "\"sdr\" |",
+                "\"hdr_10\" | " => "\"hdr_10\" |",
+                "export type SlowMotionInterpolation = " => {
+                    "export type SlowMotionInterpolation ="
+                }
+                "\"nearest\" | " => "\"nearest\" |",
+                "\"frameBlend\" | " => "\"frameBlend\" |",
+                "volume: number; " => "volume: number;",
+                "export type TransformKeyframe = { " => "export type TransformKeyframe = {",
+                "timeOffset: number; " => "timeOffset: number;",
+                "transform: Transform; " => "transform: Transform;",
                 "export type ContainerFormat = " => "export type ContainerFormat =",
                 "\"mp4\" | " => "\"mp4\" |",
                 "\"mov\" | " => "\"mov\" |",

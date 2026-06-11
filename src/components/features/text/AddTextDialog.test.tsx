@@ -125,7 +125,7 @@ describe('AddTextDialog', () => {
 
       const durationInput = screen.getByLabelText(/duration/i);
       expect(durationInput).toBeInTheDocument();
-      expect(durationInput).toHaveValue(3); // Default 3 seconds
+      expect(durationInput).toHaveValue(4); // Centered Title preset default
     });
 
     it('should show TextPresetPicker', () => {
@@ -169,7 +169,7 @@ describe('AddTextDialog', () => {
           expect.objectContaining({
             trackId: expect.any(String),
             timelineIn: 5.0,
-            duration: 3,
+            duration: 4,
             textData: expect.objectContaining({
               content: 'Hello World',
             }),
@@ -225,6 +225,37 @@ describe('AddTextDialog', () => {
               style: expect.objectContaining({
                 fontSize: 96, // Epic Title preset uses 96pt
                 bold: true,
+              }),
+            }),
+          }),
+        );
+      });
+    });
+
+    it('should update default text and duration when selecting a production template', async () => {
+      const user = userEvent.setup();
+      const onAdd = vi.fn().mockResolvedValue(undefined);
+
+      render(<AddTextDialog {...defaultProps} onAdd={onAdd} />);
+
+      await user.click(screen.getByTestId('category-tab-credit'));
+      await user.click(screen.getByTestId('preset-button-credits-block'));
+
+      expect(screen.getByLabelText(/text content/i)).toHaveValue(
+        'Directed by\nJane Doe\n\nProduced by\nOpenReelio',
+      );
+      expect(screen.getByLabelText(/duration/i)).toHaveValue(8);
+
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+      await waitFor(() => {
+        expect(onAdd).toHaveBeenCalledWith(
+          expect.objectContaining({
+            duration: 8,
+            textData: expect.objectContaining({
+              content: 'Directed by\nJane Doe\n\nProduced by\nOpenReelio',
+              style: expect.objectContaining({
+                alignment: 'center',
               }),
             }),
           }),
@@ -446,7 +477,14 @@ describe('AddTextDialog', () => {
         ...mockTracks.slice(1),
       ];
 
-      render(<AddTextDialog {...defaultProps} onAdd={onAdd} tracks={tracksWithFreezeConflict} currentTime={6} />);
+      render(
+        <AddTextDialog
+          {...defaultProps}
+          onAdd={onAdd}
+          tracks={tracksWithFreezeConflict}
+          currentTime={6}
+        />,
+      );
 
       await user.click(screen.getByRole('button', { name: /^add$/i }));
 

@@ -8,6 +8,7 @@
  */
 
 import { nanoid } from 'nanoid';
+import type { MaskKeyframe, MaskShape } from '@/types';
 
 // =============================================================================
 // Types
@@ -171,6 +172,34 @@ export interface ApplyTrackOptions {
   offsetY?: number;
 }
 
+/** Shape preset used when turning a tracked point into a mask. */
+export type TrackingMaskShapeType = 'rectangle' | 'ellipse';
+
+/** Options for creating a base mask around a tracked point. */
+export interface TrackingMaskShapeOptions {
+  shapeType?: TrackingMaskShapeType;
+  width?: number;
+  height?: number;
+  radiusX?: number;
+  radiusY?: number;
+  cornerRadius?: number;
+}
+
+/** Options for converting tracking data into mask animation keyframes. */
+export interface TrackingMaskKeyframeOptions {
+  originX?: number;
+  originY?: number;
+  confidenceThreshold?: number;
+  easing?: MaskKeyframe['easing'];
+}
+
+/** Payload fragment that can be sent to AddMask or UpdateMask. */
+export interface TrackingAssistedMaskPayload {
+  shape: MaskShape;
+  keyframes: MaskKeyframe[];
+  trackingSourceId?: string;
+}
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -316,7 +345,7 @@ export function resetColorIndex(): void {
 export function createTrackPoint(
   x: number,
   y: number,
-  options?: { name?: string; color?: string }
+  options?: { name?: string; color?: string },
 ): TrackPoint {
   return {
     id: nanoid(),
@@ -337,7 +366,7 @@ export function createTrackRegion(
   y: number,
   width: number,
   height: number,
-  options?: { name?: string; color?: string }
+  options?: { name?: string; color?: string },
 ): TrackRegion {
   return {
     id: nanoid(),
@@ -357,7 +386,7 @@ export function createTrackRegion(
  */
 export function createMotionTrack(
   clipId: string,
-  options?: { settings?: TrackingSettings }
+  options?: { settings?: TrackingSettings },
 ): MotionTrack {
   return {
     id: nanoid(),
@@ -367,6 +396,38 @@ export function createMotionTrack(
     settings: options?.settings ?? { ...DEFAULT_TRACKING_SETTINGS },
     locked: false,
     createdAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Create a compact rectangle/ellipse mask around a tracked point.
+ */
+export function createTrackingMaskShape(
+  x: number,
+  y: number,
+  options: TrackingMaskShapeOptions = {},
+): MaskShape {
+  const shapeType = options.shapeType ?? 'rectangle';
+
+  if (shapeType === 'ellipse') {
+    return {
+      type: 'ellipse',
+      x,
+      y,
+      radiusX: options.radiusX ?? Math.max(0.02, (options.width ?? 0.24) / 2),
+      radiusY: options.radiusY ?? Math.max(0.02, (options.height ?? 0.16) / 2),
+      rotation: 0,
+    };
+  }
+
+  return {
+    type: 'rectangle',
+    x,
+    y,
+    width: options.width ?? 0.28,
+    height: options.height ?? 0.18,
+    cornerRadius: options.cornerRadius ?? 0.02,
+    rotation: 0,
   };
 }
 
@@ -421,7 +482,7 @@ export function getTrackingMethodDescription(method: TrackingMethod): string {
  */
 export function interpolateTrackData(
   keyframes: TrackKeyframe[],
-  time: number
+  time: number,
 ): InterpolatedTrackData | null {
   if (keyframes.length === 0) return null;
 
@@ -483,9 +544,7 @@ export function interpolateTrackData(
 /**
  * Calculate the bounds of tracked positions
  */
-export function calculateTrackBounds(
-  keyframes: TrackKeyframe[]
-): TrackBounds | null {
+export function calculateTrackBounds(keyframes: TrackKeyframe[]): TrackBounds | null {
   if (keyframes.length === 0) return null;
 
   let minX = Infinity;
@@ -503,13 +562,105 @@ export function calculateTrackBounds(
   return { minX, maxX, minY, maxY };
 }
 
+function translatePoint(
+  point: { x: number; y: number },
+  dx: number,
+  dy: number,
+): { x: number; y: number } {
+  return {
+    x: point.x + dx,
+    y: point.y + dy,
+  };
+}
+
+/**
+ * Translate any mask shape by a normalized delta.
+ */
+export function translateMaskShape(shape: MaskShape, dx: number, dy: number): MaskShape {
+  switch (shape.type) {
+    case 'rectangle':
+      return { ...shape, x: shape.x + dx, y: shape.y + dy };
+    case 'ellipse':
+      return { ...shape, x: shape.x + dx, y: shape.y + dy };
+    case 'polygon':
+      return {
+        ...shape,
+        points: shape.points.map((point) => translatePoint(point, dx, dy)),
+      };
+    case 'bezier':
+      return {
+        ...shape,
+        points: shape.points.map((point) => ({
+          ...point,
+          anchor: translatePoint(point.anchor, dx, dy),
+          handleIn: point.handleIn ? translatePoint(point.handleIn, dx, dy) : point.handleIn,
+          handleOut: point.handleOut ? translatePoint(point.handleOut, dx, dy) : point.handleOut,
+        })),
+      };
+    case 'gradient':
+      return {
+        ...shape,
+        start: translatePoint(shape.start, dx, dy),
+        end: translatePoint(shape.end, dx, dy),
+      };
+    default:
+      return shape;
+  }
+}
+
+/**
+ * Convert point tracking data into mask shape keyframes.
+ */
+export function createTrackedMaskKeyframes(
+  baseShape: MaskShape,
+  trackingKeyframes: TrackKeyframe[],
+  options: TrackingMaskKeyframeOptions = {},
+): MaskKeyframe[] {
+  if (trackingKeyframes.length === 0) return [];
+
+  const sorted = [...trackingKeyframes]
+    .filter((keyframe) => {
+      const confidence = Number.isFinite(keyframe.confidence) ? keyframe.confidence : 0;
+      return confidence >= (options.confidenceThreshold ?? 0);
+    })
+    .sort((a, b) => a.time - b.time);
+
+  if (sorted.length === 0) return [];
+
+  const originX = options.originX ?? sorted[0].x;
+  const originY = options.originY ?? sorted[0].y;
+  const easing = options.easing ?? 'linear';
+
+  return sorted.map((keyframe) => ({
+    timeOffset: Math.max(0, keyframe.time),
+    shape: translateMaskShape(baseShape, keyframe.x - originX, keyframe.y - originY),
+    easing,
+  }));
+}
+
+/**
+ * Build the AddMask/UpdateMask payload fragment for a tracked region blur or
+ * object highlight workflow.
+ */
+export function createTrackingAssistedMaskPayload(
+  baseShape: MaskShape,
+  trackingKeyframes: TrackKeyframe[],
+  options: TrackingMaskKeyframeOptions & { trackingSourceId?: string } = {},
+): TrackingAssistedMaskPayload {
+  return {
+    shape: baseShape,
+    keyframes: createTrackedMaskKeyframes(baseShape, trackingKeyframes, options),
+    ...(options.trackingSourceId ? { trackingSourceId: options.trackingSourceId } : {}),
+  };
+}
+
 /**
  * Apply track data to a transform
  */
 export function applyTrackToTransform(
   trackData: InterpolatedTrackData,
   baseTransform: Transform2D,
-  options: ApplyTrackOptions
+  options: ApplyTrackOptions,
 ): Transform2D {
   const result = { ...baseTransform };
 
@@ -535,9 +686,7 @@ export function applyTrackToTransform(
 /**
  * Check if a tracking method is valid
  */
-export function isValidTrackingMethod(
-  value: unknown
-): value is TrackingMethod {
+export function isValidTrackingMethod(value: unknown): value is TrackingMethod {
   if (typeof value !== 'string') return false;
   return ALL_TRACKING_METHODS.includes(value as TrackingMethod);
 }

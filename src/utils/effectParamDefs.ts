@@ -7,6 +7,15 @@
 
 import type { ParamDef, EffectType, SimpleParamValue } from '@/types';
 
+const RGB_IDENTITY_CURVE_JSON = JSON.stringify([
+  { x: 0, y: 0 },
+  { x: 1, y: 1 },
+]);
+const ADVANCED_IDENTITY_CURVE_JSON = JSON.stringify([
+  { x: 0, y: 0.5 },
+  { x: 1, y: 0.5 },
+]);
+
 // =============================================================================
 // Audio Effect Parameter Definitions
 // =============================================================================
@@ -45,7 +54,7 @@ export const AUDIO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
     },
     {
       name: 'width',
-      label: 'Width (Q)',
+      label: 'Q',
       default: { type: 'float', value: 1.0 },
       min: 0.1,
       max: 10,
@@ -64,11 +73,11 @@ export const AUDIO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
   compressor: [
     {
       name: 'threshold',
-      label: 'Threshold',
-      default: { type: 'float', value: 0.5 },
-      min: 0,
-      max: 1,
-      step: 0.01,
+      label: 'Threshold (dB)',
+      default: { type: 'float', value: -24 },
+      min: -60,
+      max: 0,
+      step: 0.5,
     },
     {
       name: 'ratio',
@@ -155,12 +164,49 @@ export const AUDIO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
 
   noise_reduction: [
     {
+      name: 'algorithm',
+      label: 'Algorithm',
+      default: { type: 'string', value: 'anlmdn' },
+      inputType: 'select',
+      options: ['anlmdn', 'afftdn', 'arnndn'],
+    },
+    {
       name: 'strength',
       label: 'Strength',
-      default: { type: 'float', value: 0.5 },
+      default: { type: 'float', value: 0.3 },
       min: 0,
       max: 1,
       step: 0.01,
+    },
+    {
+      name: 'patch_size',
+      label: 'Patch Size',
+      default: { type: 'float', value: 7 },
+      min: 1,
+      max: 99,
+      step: 2,
+    },
+    {
+      name: 'research_size',
+      label: 'Research Size',
+      default: { type: 'float', value: 15 },
+      min: 1,
+      max: 99,
+      step: 2,
+    },
+    {
+      name: 'noise_floor',
+      label: 'Noise Floor (dB)',
+      default: { type: 'float', value: -40 },
+      min: -80,
+      max: 0,
+      step: 1,
+    },
+    {
+      name: 'model_path',
+      label: 'Model Path',
+      default: { type: 'string', value: '' },
+      inputType: 'file',
     },
   ],
 
@@ -169,17 +215,32 @@ export const AUDIO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
       name: 'target_lufs',
       label: 'Target Loudness (LUFS)',
       default: { type: 'float', value: -14 },
-      min: -50,
-      max: 0,
+      min: -70,
+      max: -5,
       step: 0.5,
     },
     {
-      name: 'true_peak',
+      name: 'target_lra',
+      label: 'Loudness Range (LU)',
+      default: { type: 'float', value: 11 },
+      min: 1,
+      max: 50,
+      step: 0.5,
+    },
+    {
+      name: 'target_tp',
       label: 'True Peak (dBTP)',
       default: { type: 'float', value: -1 },
-      min: -10,
+      min: -9,
       max: 0,
       step: 0.1,
+    },
+    {
+      name: 'print_format',
+      label: 'Analysis Output',
+      default: { type: 'string', value: 'summary' },
+      inputType: 'select',
+      options: ['summary', 'json', 'none'],
     },
   ],
 };
@@ -889,67 +950,111 @@ export const VIDEO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
       step: 1,
     },
     {
-      name: 'hue_softness',
-      label: 'Hue Softness',
-      default: { type: 'float', value: 10 },
+      name: 'sat_min',
+      label: 'Saturation Min',
+      default: { type: 'float', value: 0.2 },
       min: 0,
-      max: 90,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'sat_max',
+      label: 'Saturation Max',
+      default: { type: 'float', value: 1 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'lum_min',
+      label: 'Luminance Min',
+      default: { type: 'float', value: 0 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'lum_max',
+      label: 'Luminance Max',
+      default: { type: 'float', value: 1 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'softness',
+      label: 'Softness',
+      default: { type: 'float', value: 0.1 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'hue_shift',
+      label: 'Hue Shift',
+      default: { type: 'float', value: 0 },
+      min: -180,
+      max: 180,
       step: 1,
     },
     {
-      name: 'sat_low',
-      label: 'Saturation Low',
+      name: 'sat_adjust',
+      label: 'Saturation Adjust',
       default: { type: 'float', value: 0 },
-      min: 0,
+      min: -1,
       max: 1,
       step: 0.01,
     },
     {
-      name: 'sat_high',
-      label: 'Saturation High',
-      default: { type: 'float', value: 1 },
-      min: 0,
-      max: 1,
-      step: 0.01,
-    },
-    {
-      name: 'lum_low',
-      label: 'Luminance Low',
+      name: 'lum_adjust',
+      label: 'Luminance Adjust',
       default: { type: 'float', value: 0 },
-      min: 0,
+      min: -1,
       max: 1,
       step: 0.01,
     },
     {
-      name: 'lum_high',
-      label: 'Luminance High',
-      default: { type: 'float', value: 1 },
-      min: 0,
-      max: 1,
-      step: 0.01,
+      name: 'invert',
+      label: 'Invert Selection',
+      default: { type: 'bool', value: false },
     },
   ],
 
   curves: [
     {
-      name: 'master',
+      name: 'master_curve',
       label: 'Master Curve',
-      default: { type: 'string', value: '0/0 1/1' },
+      default: { type: 'string', value: RGB_IDENTITY_CURVE_JSON },
     },
     {
-      name: 'red',
+      name: 'red_curve',
       label: 'Red Curve',
-      default: { type: 'string', value: '0/0 1/1' },
+      default: { type: 'string', value: RGB_IDENTITY_CURVE_JSON },
     },
     {
-      name: 'green',
+      name: 'green_curve',
       label: 'Green Curve',
-      default: { type: 'string', value: '0/0 1/1' },
+      default: { type: 'string', value: RGB_IDENTITY_CURVE_JSON },
     },
     {
-      name: 'blue',
+      name: 'blue_curve',
       label: 'Blue Curve',
-      default: { type: 'string', value: '0/0 1/1' },
+      default: { type: 'string', value: RGB_IDENTITY_CURVE_JSON },
+    },
+    {
+      name: 'hue_vs_hue_curve',
+      label: 'Hue vs Hue',
+      default: { type: 'string', value: ADVANCED_IDENTITY_CURVE_JSON },
+    },
+    {
+      name: 'hue_vs_sat_curve',
+      label: 'Hue vs Sat',
+      default: { type: 'string', value: ADVANCED_IDENTITY_CURVE_JSON },
+    },
+    {
+      name: 'luma_vs_sat_curve',
+      label: 'Luma vs Sat',
+      default: { type: 'string', value: ADVANCED_IDENTITY_CURVE_JSON },
     },
   ],
 

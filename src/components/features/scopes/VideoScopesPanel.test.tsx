@@ -63,7 +63,9 @@ beforeAll(() => {
   };
 
   // Override getContext on HTMLCanvasElement prototype
-  HTMLCanvasElement.prototype.getContext = vi.fn(() => mockContext) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = vi.fn(
+    () => mockContext,
+  ) as unknown as typeof HTMLCanvasElement.prototype.getContext;
 });
 
 // =============================================================================
@@ -80,15 +82,19 @@ function createMockAnalysis(): FrameAnalysis {
   analysis.histogram.blue[128] = 1000;
   analysis.histogram.maxCount = 1000;
 
-  analysis.waveform.columns = Array(100).fill(null).map(() => ({
-    min: 100,
-    max: 150,
-    avg: 128,
-    distribution: new Array(256).fill(0),
-  }));
+  analysis.waveform.columns = Array(100)
+    .fill(null)
+    .map(() => ({
+      min: 100,
+      max: 150,
+      avg: 128,
+      distribution: new Array(256).fill(0),
+    }));
   analysis.waveform.width = 100;
 
-  analysis.vectorscope.grid = Array(256).fill(null).map(() => new Array(256).fill(0));
+  analysis.vectorscope.grid = Array(256)
+    .fill(null)
+    .map(() => new Array(256).fill(0));
   analysis.vectorscope.grid[128][128] = 1000;
   analysis.vectorscope.size = 256;
   analysis.vectorscope.maxIntensity = 1000;
@@ -163,6 +169,32 @@ describe('VideoScopesPanel', () => {
 
       expect(screen.getByTestId('video-scopes-panel')).toBeInTheDocument();
       expect(screen.getByTestId('histogram-display')).toBeInTheDocument();
+    });
+
+    it('should show preview frame source metadata when connected', () => {
+      const analysis = createMockAnalysis();
+      render(
+        <VideoScopesPanel
+          analysis={analysis}
+          sourceStatus="connected"
+          sourceWidth={1920}
+          sourceHeight={1080}
+          lastAnalyzedAt={analysis.timestamp}
+        />,
+      );
+
+      expect(screen.getByTestId('scope-source-status')).toHaveTextContent('Live preview');
+      expect(screen.getByTestId('scope-frame-size')).toHaveTextContent('1920x1080');
+      expect(screen.getByTestId('scope-last-analyzed')).not.toHaveTextContent('Not analyzed');
+    });
+
+    it('should refresh scope analysis when requested', () => {
+      const onRefresh = vi.fn();
+      render(<VideoScopesPanel {...defaultProps} onRefresh={onRefresh} />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh scopes' }));
+
+      expect(onRefresh).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -329,7 +361,9 @@ describe('VideoScopesPanel', () => {
     });
 
     it('should pass correct dimensions to waveform display', () => {
-      render(<VideoScopesPanel {...defaultProps} width={400} height={300} initialScope="waveform" />);
+      render(
+        <VideoScopesPanel {...defaultProps} width={400} height={300} initialScope="waveform" />,
+      );
 
       const canvas = screen.getByTestId('waveform-display');
       expect(canvas).toHaveAttribute('width', '384');
@@ -337,7 +371,9 @@ describe('VideoScopesPanel', () => {
     });
 
     it('should use square dimensions for vectorscope', () => {
-      render(<VideoScopesPanel {...defaultProps} width={400} height={300} initialScope="vectorscope" />);
+      render(
+        <VideoScopesPanel {...defaultProps} width={400} height={300} initialScope="vectorscope" />,
+      );
 
       const canvas = screen.getByTestId('vectorscope-display');
       // Should use smaller of width or height

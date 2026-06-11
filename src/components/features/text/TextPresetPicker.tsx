@@ -116,6 +116,8 @@ const CATEGORY_LABELS: Record<TextPresetCategory | 'all', string> = {
   title: 'Title',
   subtitle: 'Subtitle',
   callout: 'Callout',
+  credit: 'Credit',
+  brand: 'Brand',
   creative: 'Creative',
 };
 
@@ -125,6 +127,8 @@ const CATEGORY_TABS: Array<TextPresetCategory | 'all'> = [
   'title',
   'subtitle',
   'callout',
+  'credit',
+  'brand',
   'creative',
 ];
 

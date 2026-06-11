@@ -134,6 +134,7 @@ export const DEFAULT_SHORTCUTS: Omit<ShortcutBinding, 'customized' | 'enabled'>[
   { id: 'tool-slip', label: 'Slip Tool', description: 'Switch to slip edit tool', key: 'KeyY', modifiers: [], action: 'tool.slip', category: 'tools' },
   { id: 'tool-slide', label: 'Slide Tool', description: 'Switch to slide edit tool', key: 'KeyU', modifiers: [], action: 'tool.slide', category: 'tools' },
   { id: 'tool-roll', label: 'Roll Tool', description: 'Switch to roll edit tool', key: 'KeyN', modifiers: [], action: 'tool.roll', category: 'tools' },
+  { id: 'tool-rate-stretch', label: 'Rate Stretch Tool', description: 'Switch to rate stretch edit tool', key: 'KeyR', modifiers: [], action: 'tool.rate-stretch', category: 'tools' },
   { id: 'tool-hand', label: 'Hand Tool', description: 'Switch to hand/pan tool', key: 'KeyH', modifiers: [], action: 'tool.hand', category: 'tools' },
 
   // Editing
@@ -151,6 +152,9 @@ export const DEFAULT_SHORTCUTS: Omit<ShortcutBinding, 'customized' | 'enabled'>[
   { id: 'redo-alt', label: 'Redo (Alt)', description: 'Redo last undone action', key: 'KeyZ', modifiers: ['ctrl', 'shift'], action: 'edit.redo', category: 'editing' },
   { id: 'insert-edit', label: 'Insert Edit', description: 'Insert edit from Source Monitor at playhead', key: 'Comma', modifiers: [], action: 'edit.insertEdit', category: 'editing' },
   { id: 'overwrite-edit', label: 'Overwrite Edit', description: 'Overwrite edit from Source Monitor at playhead', key: 'Period', modifiers: [], action: 'edit.overwriteEdit', category: 'editing' },
+  { id: 'play-around-edit', label: 'Play Around Edit', description: 'Play around the nearest edit point', key: 'Space', modifiers: ['shift'], action: 'transport.playAroundEdit', category: 'playback' },
+  { id: 'loop-range', label: 'Loop Range', description: 'Toggle playback looping over the selected or active range', key: 'KeyL', modifiers: ['alt'], action: 'transport.loopRange', category: 'playback' },
+  { id: 'reveal-source-clip', label: 'Reveal Source Clip', description: 'Reveal the selected timeline clip source asset', key: 'KeyF', modifiers: ['alt'], action: 'source.revealSourceClip', category: 'editing' },
   { id: 'lift-edit', label: 'Lift', description: 'Remove selected clips leaving gap', key: 'Semicolon', modifiers: [], action: 'edit.lift', category: 'editing' },
   { id: 'extract-edit', label: 'Extract', description: 'Remove In/Out range and close gap', key: 'Quote', modifiers: [], action: 'edit.extract', category: 'editing' },
 

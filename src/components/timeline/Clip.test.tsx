@@ -356,7 +356,7 @@ describe('Clip', () => {
       });
     });
 
-    it('should render the rubber band editor when only one keyframe exists', () => {
+    it('should keep fade controls available when the rubber band editor is shown', () => {
       render(
         <Clip
           clip={{
@@ -375,7 +375,50 @@ describe('Clip', () => {
       );
 
       expect(screen.getByTestId('audio-rubber-band')).toBeInTheDocument();
-      expect(screen.queryByTestId('audio-clip-controls')).not.toBeInTheDocument();
+      expect(screen.getByTestId('audio-clip-controls')).toBeInTheDocument();
+      expect(screen.getByTestId('audio-fade-in-handle')).toBeInTheDocument();
+      expect(screen.getByTestId('audio-fade-out-handle')).toBeInTheDocument();
+    });
+
+    it('should commit fade updates while audio keyframe automation is visible', () => {
+      const onAudioSettingsChange = vi.fn();
+
+      render(
+        <Clip
+          clip={{
+            ...mockClip,
+            audio: {
+              volumeDb: 0,
+              pan: 0,
+              muted: false,
+              volumeKeyframes: [{ timeOffset: 2, valueDb: -6, interpolation: 'linear' as const }],
+            },
+          }}
+          zoom={100}
+          selected={false}
+          trackKind="audio"
+          onAudioSettingsChange={onAudioSettingsChange}
+        />,
+      );
+
+      fireEvent.mouseDown(screen.getByTestId('audio-fade-in-handle'), {
+        clientX: 0,
+        clientY: 8,
+      });
+
+      fireEvent.mouseMove(window, {
+        clientX: 100,
+        clientY: 8,
+      });
+
+      fireEvent.mouseUp(window);
+
+      expect(onAudioSettingsChange).toHaveBeenCalledWith(
+        'clip_001',
+        expect.objectContaining({
+          fadeInSec: expect.any(Number),
+        }),
+      );
     });
 
     it('should commit clip volume changes after dragging the volume handle', () => {
@@ -687,10 +730,7 @@ describe('Clip', () => {
 
       const indicator = screen.getByTestId('adjustment-layer-indicator');
       expect(indicator).toHaveAttribute('aria-label', 'Adjustment layer');
-      expect(indicator).toHaveAttribute(
-        'title',
-        'Adjustment layer - effects apply to clips below',
-      );
+      expect(indicator).toHaveAttribute('title', 'Adjustment layer - effects apply to clips below');
     });
 
     it('should show ADJ badge alongside other indicators', () => {

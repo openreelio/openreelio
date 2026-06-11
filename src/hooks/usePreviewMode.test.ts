@@ -300,6 +300,64 @@ describe('usePreviewMode', () => {
       expect(result.current.hasGeneratingProxy).toBe(false);
     });
 
+    it('should prefer proxy media when requested and proxies are ready', () => {
+      const clip = createMockClip({
+        assetId: 'asset-1',
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
+      const track = createMockTrack({ clips: [clip] });
+      const sequence = createMockSequence([track]);
+      const assets = new Map([
+        [
+          'asset-1',
+          createMockAsset({
+            id: 'asset-1',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
+      ]);
+
+      const { result } = renderUsePreviewMode({
+        sequence,
+        assets,
+        currentTime: 5,
+        mediaPreference: 'proxy',
+      });
+
+      expect(result.current.mode).toBe('video');
+      expect(result.current.reason).toBe('Using preferred proxy media');
+    });
+
+    it('should route render-cache preference through the canvas preview path', () => {
+      const clip = createMockClip({
+        assetId: 'asset-1',
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
+      const track = createMockTrack({ clips: [clip] });
+      const sequence = createMockSequence([track]);
+      const assets = new Map([
+        [
+          'asset-1',
+          createMockAsset({
+            id: 'asset-1',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
+      ]);
+
+      const { result } = renderUsePreviewMode({
+        sequence,
+        assets,
+        currentTime: 5,
+        mediaPreference: 'renderCache',
+      });
+
+      expect(result.current.mode).toBe('canvas');
+      expect(result.current.reason).toBe('Render cache preferred');
+    });
+
     it('should return video mode with multiple clips all having ready proxies', () => {
       const clip1 = createMockClip({
         assetId: 'asset-1',

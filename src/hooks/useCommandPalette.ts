@@ -35,9 +35,21 @@ export interface CommandPaletteCallbacks {
   onExportAudio?: () => void;
   onMatchFrame?: () => void;
   onReverseMatchFrame?: () => void;
+  onRevealSourceClip?: () => void;
+  onToggleLoopRange?: () => void;
+  onPlayAroundEdit?: () => void;
   onCopyEffects?: () => void;
   onPasteEffects?: () => void;
+  onPasteAttributes?: () => void;
+  onRemoveAttributes?: () => void;
+  onApplyDefaultTransition?: () => void;
+  onChooseTransition?: () => void;
   onToggleClipEnabled?: () => void;
+  onLinkClips?: () => void;
+  onUnlinkClips?: () => void;
+  onGroupClips?: () => void;
+  onUngroupClips?: () => void;
+  onCreateMulticamGroup?: () => void;
   onToggleColorComparison?: () => void;
   onToggleMixer?: () => void;
   onAddText?: () => void;
@@ -205,11 +217,66 @@ export function useCommandPalette(
       actions.push(action('edit.paste-effects', 'Paste Effects', 'Edit', () => cb(), 'Ctrl+Alt+V'));
     }
 
+    if (callbacks.onPasteAttributes) {
+      const cb = callbacks.onPasteAttributes;
+      actions.push(
+        action('edit.paste-attributes', 'Paste Attributes...', 'Edit', () => cb(), 'Ctrl+Alt+A'),
+      );
+    }
+
+    if (callbacks.onRemoveAttributes) {
+      const cb = callbacks.onRemoveAttributes;
+      actions.push(action('edit.remove-attributes', 'Remove Attributes...', 'Edit', () => cb()));
+    }
+
+    if (callbacks.onApplyDefaultTransition) {
+      const cb = callbacks.onApplyDefaultTransition;
+      actions.push(
+        action('edit.apply-default-transition', 'Apply Default Transition', 'Edit', () => cb()),
+      );
+    }
+
+    if (callbacks.onChooseTransition) {
+      const cb = callbacks.onChooseTransition;
+      actions.push(action('edit.choose-transition', 'Choose Transition...', 'Edit', () => cb()));
+    }
+
     if (callbacks.onToggleClipEnabled) {
       const cb = callbacks.onToggleClipEnabled;
       actions.push(
         action('edit.toggle-enabled', 'Toggle Clip Enabled', 'Edit', () => cb(), 'Shift+E'),
       );
+    }
+
+    if (callbacks.onLinkClips) {
+      const cb = callbacks.onLinkClips;
+      actions.push(action('edit.link-clips', 'Link Selected Clips', 'Edit', () => cb(), 'Ctrl+L'));
+    }
+
+    if (callbacks.onUnlinkClips) {
+      const cb = callbacks.onUnlinkClips;
+      actions.push(
+        action('edit.unlink-clips', 'Unlink Selected Clips', 'Edit', () => cb(), 'Ctrl+Shift+L'),
+      );
+    }
+
+    if (callbacks.onGroupClips) {
+      const cb = callbacks.onGroupClips;
+      actions.push(
+        action('edit.group-clips', 'Group Selected Clips', 'Edit', () => cb(), 'Ctrl+G'),
+      );
+    }
+
+    if (callbacks.onUngroupClips) {
+      const cb = callbacks.onUngroupClips;
+      actions.push(
+        action('edit.ungroup-clips', 'Ungroup Selected Clips', 'Edit', () => cb(), 'Ctrl+Shift+G'),
+      );
+    }
+
+    if (callbacks.onCreateMulticamGroup) {
+      const cb = callbacks.onCreateMulticamGroup;
+      actions.push(action('edit.create-multicam', 'Create Multicam Group', 'Edit', () => cb()));
     }
 
     // --- View Actions ---
@@ -268,6 +335,33 @@ export function useCommandPalette(
           'Source',
           () => cb(),
           'Shift+F',
+        ),
+      );
+    }
+
+    if (callbacks.onRevealSourceClip) {
+      const cb = callbacks.onRevealSourceClip;
+      actions.push(
+        action('source.reveal-source-clip', 'Reveal Source Clip', 'Source', () => cb(), 'Alt+F'),
+      );
+    }
+
+    if (callbacks.onToggleLoopRange) {
+      const cb = callbacks.onToggleLoopRange;
+      actions.push(
+        action('transport.loop-range', 'Toggle Loop Range', 'Transport', () => cb(), 'Alt+L'),
+      );
+    }
+
+    if (callbacks.onPlayAroundEdit) {
+      const cb = callbacks.onPlayAroundEdit;
+      actions.push(
+        action(
+          'transport.play-around-edit',
+          'Play Around Edit',
+          'Transport',
+          () => cb(),
+          'Shift+Space',
         ),
       );
     }
@@ -351,9 +445,21 @@ export function useCommandPalette(
     callbacks.onExportAudio,
     callbacks.onMatchFrame,
     callbacks.onReverseMatchFrame,
+    callbacks.onRevealSourceClip,
+    callbacks.onToggleLoopRange,
+    callbacks.onPlayAroundEdit,
     callbacks.onCopyEffects,
     callbacks.onPasteEffects,
+    callbacks.onPasteAttributes,
+    callbacks.onRemoveAttributes,
+    callbacks.onApplyDefaultTransition,
+    callbacks.onChooseTransition,
     callbacks.onToggleClipEnabled,
+    callbacks.onLinkClips,
+    callbacks.onUnlinkClips,
+    callbacks.onGroupClips,
+    callbacks.onUngroupClips,
+    callbacks.onCreateMulticamGroup,
     callbacks.onToggleColorComparison,
     callbacks.onToggleMixer,
     callbacks.onAddText,

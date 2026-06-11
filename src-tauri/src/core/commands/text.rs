@@ -213,12 +213,14 @@ impl Command for AddTextClipCommand {
                 rotation_deg: self.text_data.rotation,
                 anchor: Point2D::center(),
             },
+            motion_keyframes: Vec::new(),
             opacity: self.text_data.opacity as f32,
             blend_mode: crate::core::timeline::BlendMode::Normal,
             speed: 1.0,
             reverse: false,
             freeze_frame: false,
             time_remap: None,
+            slow_motion_interpolation: crate::core::timeline::SlowMotionInterpolation::Nearest,
             effects: vec![], // Will add effect below
             audio: crate::core::timeline::AudioSettings::default(),
             label: Some(format!(

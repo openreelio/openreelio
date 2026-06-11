@@ -26,6 +26,10 @@ use super::{
 };
 use tracing::warn;
 
+fn db_to_linear(db: f64) -> f64 {
+    10_f64.powf(db / 20.0)
+}
+
 // =============================================================================
 // Advanced Curve Helpers (Hue vs Hue, Hue vs Sat)
 // =============================================================================
@@ -393,7 +397,8 @@ impl Effect {
             EffectType::Zoom => self.build_zoom_filter(),
 
             // Audio effects
-            EffectType::Volume | EffectType::Gain => self.build_volume_filter(),
+            EffectType::Volume => self.build_volume_filter(),
+            EffectType::Gain => self.build_gain_filter(),
             EffectType::EqBand => self.build_equalizer_filter(),
             EffectType::Compressor => self.build_compressor_filter(),
             EffectType::Limiter => self.build_limiter_filter(),
@@ -973,23 +978,32 @@ impl Effect {
         format!("volume={:.4}", level)
     }
 
+    fn build_gain_filter(&self) -> String {
+        let gain_db = self.get_float("gain").unwrap_or(0.0).clamp(-96.0, 24.0);
+        format!("volume={:.6}", db_to_linear(gain_db))
+    }
+
     fn build_equalizer_filter(&self) -> String {
         let frequency = self.get_float("frequency").unwrap_or(1000.0);
-        let width = self.get_float("width").unwrap_or(100.0);
+        let width = self.get_float("width").unwrap_or(1.0).clamp(0.1, 10.0);
         let gain = self.get_float("gain").unwrap_or(0.0);
         format!(
-            "equalizer=f={}:width_type=h:width={}:g={}",
+            "equalizer=f={}:width_type=q:width={}:g={}",
             frequency, width, gain
         )
     }
 
     fn build_compressor_filter(&self) -> String {
-        let threshold = self.get_float("threshold").unwrap_or(0.5);
+        let threshold_db = self
+            .get_float("threshold")
+            .unwrap_or(-24.0)
+            .clamp(-60.0, 0.0);
+        let threshold = db_to_linear(threshold_db);
         let ratio = self.get_float("ratio").unwrap_or(4.0);
         let attack = self.get_float("attack").unwrap_or(5.0);
         let release = self.get_float("release").unwrap_or(50.0);
         format!(
-            "acompressor=threshold={}:ratio={}:attack={}:release={}",
+            "acompressor=threshold={:.6}:ratio={}:attack={}:release={}",
             threshold, ratio, attack, release
         )
     }
@@ -2087,6 +2101,50 @@ mod tests {
 
         let filter = effect.to_filter_string("0:a", "aout");
         assert!(filter.contains("volume=0.5"));
+    }
+
+    #[test]
+    fn test_gain_filter_uses_db_parameter() {
+        let mut effect = Effect::new(EffectType::Gain);
+        effect.set_param("gain", ParamValue::Float(6.0));
+
+        let filter = effect.to_filter_string("0:a", "aout");
+        assert!(
+            filter.contains("volume=1.995262"),
+            "Expected +6 dB gain to become a linear FFmpeg volume multiplier. Got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_equalizer_filter_uses_q_width_for_preview_export_parity() {
+        let mut effect = Effect::new(EffectType::EqBand);
+        effect.set_param("frequency", ParamValue::Float(1200.0));
+        effect.set_param("width", ParamValue::Float(1.5));
+        effect.set_param("gain", ParamValue::Float(-3.0));
+
+        let filter = effect.to_filter_string("0:a", "aout");
+        assert!(
+            filter.contains("equalizer=f=1200:width_type=q:width=1.5:g=-3"),
+            "Expected EQ export to use Q width semantics. Got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_compressor_filter_converts_db_threshold_to_linear_export_value() {
+        let mut effect = Effect::new(EffectType::Compressor);
+        effect.set_param("threshold", ParamValue::Float(-18.0));
+        effect.set_param("ratio", ParamValue::Float(3.0));
+        effect.set_param("attack", ParamValue::Float(10.0));
+        effect.set_param("release", ParamValue::Float(120.0));
+
+        let filter = effect.to_filter_string("0:a", "aout");
+        assert!(
+            filter.contains("acompressor=threshold=0.125893:ratio=3:attack=10:release=120"),
+            "Expected compressor dB threshold to be converted for FFmpeg. Got: {}",
+            filter
+        );
     }
 
     #[test]

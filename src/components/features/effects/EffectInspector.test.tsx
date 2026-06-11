@@ -15,13 +15,50 @@ import type { Effect, ParamDef, ParamValue } from '@/types';
 // (useMask, useProjectStore, useTimelineStore) that cause re-render loops
 // when rendered without full app context.
 vi.mock('@/components/features/color', () => ({
-  PowerWindowSection: () => null,
-  ColorMatchSection: () => null,
+  ColorCurvesPanel: () => <div data-testid="color-curves-panel" />,
+  TemperatureTintPanel: () => <div data-testid="temperature-tint-panel" />,
+  LutPanel: () => <div data-testid="lut-panel" />,
+  PowerWindowSection: () => <div data-testid="power-window-section" />,
+  ColorMatchSection: () => <div data-testid="color-match-section" />,
+}));
+
+vi.mock('@/components/features/qualifier', () => ({
+  QualifierPanel: ({
+    onChange,
+  }: {
+    onChange: (values: Record<string, string | number | boolean>) => void;
+  }) => (
+    <button
+      type="button"
+      data-testid="qualifier-panel"
+      onClick={() =>
+        onChange({
+          hue_center: 40,
+          hue_width: 35,
+          sat_min: 0.2,
+          sat_max: 0.8,
+          lum_min: 0.1,
+          lum_max: 0.9,
+          softness: 0.12,
+          hue_shift: 12,
+          sat_adjust: 0.2,
+          lum_adjust: -0.1,
+          invert: true,
+        })
+      }
+    />
+  ),
 }));
 
 // Mock useChromaKey hook (used by ChromaKeyControl)
 vi.mock('@/hooks/useChromaKey', () => ({
-  useChromaKey: ({ initialParams, onChange }: { initialParams?: Record<string, unknown>; onChange?: (p: Record<string, unknown>) => void }) => ({
+  useChromaKey: ({
+    initialParams,
+    onChange,
+  }: {
+    initialParams?: Record<string, unknown>;
+    onChange?: (p: Record<string, unknown>) => void;
+  }) => ({
     params: {
       keyColor: initialParams?.keyColor ?? '#00FF00',
       similarity: initialParams?.similarity ?? 0.3,
@@ -62,7 +99,7 @@ const createParamDef = (
   name: string,
   label: string,
   defaultValue: ParamValue,
-  options?: Partial<ParamDef>
+  options?: Partial<ParamDef>,
 ): ParamDef => ({
   name,
   label,
@@ -80,7 +117,12 @@ const mockEffect: Effect = {
 };
 
 const mockBrightnessParamDefs: ParamDef[] = [
-  createParamDef('value', 'Brightness', { type: 'float', value: 0 }, { min: -1, max: 1, step: 0.01 }),
+  createParamDef(
+    'value',
+    'Brightness',
+    { type: 'float', value: 0 },
+    { min: -1, max: 1, step: 0.01 },
+  ),
 ];
 
 const mockBlurEffect: Effect = {
@@ -107,7 +149,12 @@ const mockWipeEffect: Effect = {
 };
 
 const mockWipeParamDefs: ParamDef[] = [
-  createParamDef('duration', 'Duration', { type: 'float', value: 1.0 }, { min: 0.1, max: 10, step: 0.1 }),
+  createParamDef(
+    'duration',
+    'Duration',
+    { type: 'float', value: 1.0 },
+    { min: 0.1, max: 10, step: 0.1 },
+  ),
 ];
 
 const mockStabilizeEffect: Effect = {
@@ -120,7 +167,12 @@ const mockStabilizeEffect: Effect = {
 };
 
 const mockStabilizeParamDefs: ParamDef[] = [
-  createParamDef('smoothing', 'Smoothing', { type: 'float', value: 10 }, { min: 1, max: 100, step: 1 }),
+  createParamDef(
+    'smoothing',
+    'Smoothing',
+    { type: 'float', value: 10 },
+    { min: 1, max: 100, step: 1 },
+  ),
   createParamDef('crop_mode', 'Crop Mode', { type: 'string', value: 'crop' }),
   createParamDef('zoom', 'Zoom', { type: 'float', value: 0 }, { min: -100, max: 100, step: 1 }),
 ];
@@ -142,10 +194,63 @@ const mockAutoReframeEffect: Effect = {
 
 const mockAutoReframeParamDefs: ParamDef[] = [
   createParamDef('target_aspect', 'Target Aspect Ratio', { type: 'string', value: '9:16' }),
-  createParamDef('smoothing', 'Smoothing', { type: 'float', value: 30 }, { min: 1, max: 100, step: 1 }),
+  createParamDef(
+    'smoothing',
+    'Smoothing',
+    { type: 'float', value: 30 },
+    { min: 1, max: 100, step: 1 },
+  ),
   createParamDef('zoom', 'Zoom', { type: 'float', value: 0 }, { min: 0, max: 50, step: 1 }),
   createParamDef('detection_mode', 'Detection Mode', { type: 'string', value: 'center' }),
 ];
+
+const mockCurvesEffect: Effect = {
+  id: 'effect_curves',
+  effectType: 'curves',
+  enabled: true,
+  params: { master_curve: '[{"x":0,"y":0},{"x":1,"y":1}]' },
+  keyframes: {},
+  order: 0,
+};
+
+const mockTemperatureTintEffect: Effect = {
+  id: 'effect_temperature_tint',
+  effectType: 'temperature_tint',
+  enabled: true,
+  params: { temperature: 12, tint: -4 },
+  keyframes: {},
+  order: 0,
+};
+
+const mockLutEffect: Effect = {
+  id: 'effect_lut',
+  effectType: 'lut',
+  enabled: true,
+  params: { file: '/project/luts/show.cube', interp: 'tetrahedral', intensity: 0.75 },
+  keyframes: {},
+  order: 0,
+};
+
+const mockHslQualifierEffect: Effect = {
+  id: 'effect_hsl_qualifier',
+  effectType: 'hsl_qualifier',
+  enabled: true,
+  params: {
+    hue_center: 120,
+    hue_width: 30,
+    sat_min: 0.2,
+    sat_max: 1,
+    lum_min: 0,
+    lum_max: 1,
+    softness: 0.1,
+    hue_shift: 0,
+    sat_adjust: 0,
+    lum_adjust: 0,
+    invert: false,
+  },
+  keyframes: {},
+  order: 0,
+};
 
 // =============================================================================
 // Rendering Tests
@@ -159,7 +264,7 @@ describe('EffectInspector', () => {
           effect={mockEffect}
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       expect(screen.getByTestId('effect-inspector')).toBeInTheDocument();
@@ -171,7 +276,7 @@ describe('EffectInspector', () => {
           effect={mockEffect}
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       // Header contains the effect name in a span with specific class
@@ -180,13 +285,7 @@ describe('EffectInspector', () => {
     });
 
     it('should render empty state when no effect is selected', () => {
-      render(
-        <EffectInspector
-          effect={null}
-          paramDefs={[]}
-          onChange={vi.fn()}
-        />
-      );
+      render(<EffectInspector effect={null} paramDefs={[]} onChange={vi.fn()} />);
 
       expect(screen.getByText(/no effect selected/i)).toBeInTheDocument();
     });
@@ -197,11 +296,99 @@ describe('EffectInspector', () => {
           effect={mockBlurEffect}
           paramDefs={mockBlurParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       expect(screen.getByText('Radius')).toBeInTheDocument();
       expect(screen.getByText('Sigma')).toBeInTheDocument();
+    });
+
+    it('should show power windows for blur privacy workflows without color match', () => {
+      render(
+        <EffectInspector
+          effect={mockBlurEffect}
+          paramDefs={mockBlurParamDefs}
+          clipContext={{ sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1' }}
+          onChange={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByTestId('power-window-section')).toBeInTheDocument();
+      expect(screen.queryByTestId('color-match-section')).not.toBeInTheDocument();
+    });
+
+    it('should keep color match limited to color effects', () => {
+      render(
+        <EffectInspector
+          effect={mockEffect}
+          paramDefs={mockBrightnessParamDefs}
+          clipContext={{ sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1' }}
+          onChange={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByTestId('power-window-section')).toBeInTheDocument();
+      expect(screen.getByTestId('color-match-section')).toBeInTheDocument();
+    });
+
+    it('should render the curves finishing panel for curves effects', () => {
+      render(
+        <EffectInspector
+          effect={mockCurvesEffect}
+          paramDefs={[]}
+          clipContext={{ sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1' }}
+          onChange={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByTestId('color-curves-panel')).toBeInTheDocument();
+      expect(screen.getByTestId('power-window-section')).toBeInTheDocument();
+      expect(screen.getByTestId('color-match-section')).toBeInTheDocument();
+    });
+
+    it('should render the temperature/tint finishing panel for white balance effects', () => {
+      render(
+        <EffectInspector
+          effect={mockTemperatureTintEffect}
+          paramDefs={[]}
+          clipContext={{ sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1' }}
+          onChange={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByTestId('temperature-tint-panel')).toBeInTheDocument();
+      expect(screen.getByTestId('power-window-section')).toBeInTheDocument();
+      expect(screen.getByTestId('color-match-section')).toBeInTheDocument();
+    });
+
+    it('should render the LUT finishing panel for LUT effects', () => {
+      render(
+        <EffectInspector
+          effect={mockLutEffect}
+          paramDefs={[]}
+          clipContext={{ sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1' }}
+          onChange={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByTestId('lut-panel')).toBeInTheDocument();
+      expect(screen.getByTestId('power-window-section')).toBeInTheDocument();
+      expect(screen.getByTestId('color-match-section')).toBeInTheDocument();
+    });
+
+    it('should render qualifier and power windows as one secondary correction workflow', () => {
+      render(
+        <EffectInspector
+          effect={mockHslQualifierEffect}
+          paramDefs={[]}
+          clipContext={{ sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1' }}
+          onChange={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByTestId('qualifier-panel')).toBeInTheDocument();
+      expect(screen.getByTestId('power-window-section')).toBeInTheDocument();
+      expect(screen.getByTestId('color-match-section')).toBeInTheDocument();
     });
 
     it('should pass clip context through to the stabilize panel', () => {
@@ -211,7 +398,7 @@ describe('EffectInspector', () => {
           paramDefs={mockStabilizeParamDefs}
           clipContext={{ sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1' }}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       expect(screen.getByTestId('analyze-button')).toBeEnabled();
@@ -229,7 +416,7 @@ describe('EffectInspector', () => {
           effect={mockBlurEffect}
           paramDefs={mockBlurParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       // Find inputs with current values
@@ -248,7 +435,7 @@ describe('EffectInspector', () => {
           effect={effectWithMissingParam}
           paramDefs={mockBlurParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       const sigmaInput = screen.getByLabelText('Sigma') as HTMLInputElement;
@@ -276,7 +463,7 @@ describe('EffectInspector', () => {
           effect={mockEffect}
           paramDefs={mockBrightnessParamDefs}
           onChange={onChange}
-        />
+        />,
       );
 
       const input = screen.getByLabelText('Brightness');
@@ -296,7 +483,7 @@ describe('EffectInspector', () => {
           effect={mockBlurEffect}
           paramDefs={mockBlurParamDefs}
           onChange={onChange}
-        />
+        />,
       );
 
       const radiusInput = screen.getByLabelText('Radius');
@@ -309,6 +496,30 @@ describe('EffectInspector', () => {
       expect(onChange).toHaveBeenCalledWith('effect_002', {
         radius: 20,
         sigma: 2, // Preserved
+      });
+    });
+
+    it('should propagate qualifier panel values as effect params', () => {
+      const onChange = vi.fn();
+      render(
+        <EffectInspector effect={mockHslQualifierEffect} paramDefs={[]} onChange={onChange} />,
+      );
+
+      fireEvent.click(screen.getByTestId('qualifier-panel'));
+      vi.advanceTimersByTime(20);
+
+      expect(onChange).toHaveBeenCalledWith('effect_hsl_qualifier', {
+        hue_center: 40,
+        hue_width: 35,
+        sat_min: 0.2,
+        sat_max: 0.8,
+        lum_min: 0.1,
+        lum_max: 0.9,
+        softness: 0.12,
+        hue_shift: 12,
+        sat_adjust: 0.2,
+        lum_adjust: -0.1,
+        invert: true,
       });
     });
   });
@@ -324,7 +535,7 @@ describe('EffectInspector', () => {
           effect={mockEffect}
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       expect(screen.getByRole('checkbox', { name: /enabled/i })).toBeInTheDocument();
@@ -336,7 +547,7 @@ describe('EffectInspector', () => {
           effect={mockEffect}
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       const toggle = screen.getByRole('checkbox', { name: /enabled/i });
@@ -351,7 +562,7 @@ describe('EffectInspector', () => {
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
           onToggle={onToggle}
-        />
+        />,
       );
 
       const toggle = screen.getByRole('checkbox', { name: /enabled/i });
@@ -373,7 +584,7 @@ describe('EffectInspector', () => {
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
           onDelete={vi.fn()}
-        />
+        />,
       );
 
       expect(screen.getByRole('button', { name: /delete/i })).toBeInTheDocument();
@@ -385,7 +596,7 @@ describe('EffectInspector', () => {
           effect={mockEffect}
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       expect(screen.queryByRole('button', { name: /delete/i })).not.toBeInTheDocument();
@@ -399,7 +610,7 @@ describe('EffectInspector', () => {
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
           onDelete={onDelete}
-        />
+        />,
       );
 
       fireEvent.click(screen.getByRole('button', { name: /delete/i }));
@@ -419,7 +630,7 @@ describe('EffectInspector', () => {
           effect={mockEffect}
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       expect(screen.getByRole('button', { name: /reset to defaults/i })).toBeInTheDocument();
@@ -432,7 +643,7 @@ describe('EffectInspector', () => {
           effect={mockBlurEffect}
           paramDefs={mockBlurParamDefs}
           onChange={onChange}
-        />
+        />,
       );
 
       fireEvent.click(screen.getByRole('button', { name: /reset to defaults/i }));
@@ -449,11 +660,16 @@ describe('EffectInspector', () => {
         <EffectInspector
           effect={{
             ...mockStabilizeEffect,
-            params: { smoothing: 25, crop_mode: 'dynamic', zoom: 8, analysis_path: '/tmp/test.trf' },
+            params: {
+              smoothing: 25,
+              crop_mode: 'dynamic',
+              zoom: 8,
+              analysis_path: '/tmp/test.trf',
+            },
           }}
           paramDefs={mockStabilizeParamDefs}
           onChange={onChange}
-        />
+        />,
       );
 
       fireEvent.click(screen.getByRole('button', { name: /reset to defaults/i }));
@@ -473,7 +689,7 @@ describe('EffectInspector', () => {
           effect={mockAutoReframeEffect}
           paramDefs={mockAutoReframeParamDefs}
           onChange={onChange}
-        />
+        />,
       );
 
       fireEvent.click(screen.getByRole('button', { name: /reset to defaults/i }));
@@ -500,7 +716,7 @@ describe('EffectInspector', () => {
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
           readOnly
-        />
+        />,
       );
 
       const input = screen.getByLabelText('Brightness');
@@ -515,7 +731,7 @@ describe('EffectInspector', () => {
           onChange={vi.fn()}
           onDelete={vi.fn()}
           readOnly
-        />
+        />,
       );
 
       expect(screen.queryByRole('button', { name: /delete/i })).not.toBeInTheDocument();
@@ -528,7 +744,7 @@ describe('EffectInspector', () => {
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
           readOnly
-        />
+        />,
       );
 
       const toggle = screen.getByRole('checkbox', { name: /enabled/i });
@@ -548,7 +764,7 @@ describe('EffectInspector', () => {
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
           className="custom-class"
-        />
+        />,
       );
 
       expect(screen.getByTestId('effect-inspector')).toHaveClass('custom-class');
@@ -566,7 +782,7 @@ describe('EffectInspector', () => {
           effect={mockWipeEffect}
           paramDefs={mockWipeParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       expect(screen.getByText('Wipe')).toBeInTheDocument();
@@ -601,7 +817,7 @@ describe('EffectInspector', () => {
           onChange={vi.fn()}
           showKeyframes
           currentTime={0}
-        />
+        />,
       );
 
       expect(screen.getByRole('button', { name: /toggle keyframe/i })).toBeInTheDocument();
@@ -614,7 +830,7 @@ describe('EffectInspector', () => {
           paramDefs={mockBrightnessParamDefs}
           onChange={vi.fn()}
           currentTime={0}
-        />
+        />,
       );
 
       expect(screen.queryByRole('button', { name: /toggle keyframe/i })).not.toBeInTheDocument();
@@ -629,7 +845,7 @@ describe('EffectInspector', () => {
           showKeyframes
           currentTime={0.5}
           duration={2}
-        />
+        />,
       );
 
       expect(screen.getByTestId('keyframe-editor')).toBeInTheDocument();
@@ -644,7 +860,7 @@ describe('EffectInspector', () => {
           showKeyframes
           currentTime={0.5}
           duration={2}
-        />
+        />,
       );
 
       const markers = screen.getAllByTestId('keyframe-marker');
@@ -662,17 +878,13 @@ describe('EffectInspector', () => {
           showKeyframes
           currentTime={0.5}
           duration={2}
-        />
+        />,
       );
 
       // Click add keyframe button
       fireEvent.click(screen.getByRole('button', { name: /add keyframe/i }));
 
-      expect(onKeyframesChange).toHaveBeenCalledWith(
-        'effect_kf',
-        'value',
-        expect.any(Array)
-      );
+      expect(onKeyframesChange).toHaveBeenCalledWith('effect_kf', 'value', expect.any(Array));
     });
 
     it('should expand keyframe editor when toggle is clicked for param without keyframes', () => {
@@ -684,7 +896,7 @@ describe('EffectInspector', () => {
           showKeyframes
           currentTime={0}
           duration={2}
-        />
+        />,
       );
 
       // Toggle keyframe for the param
@@ -704,7 +916,7 @@ describe('EffectInspector', () => {
           currentTime={0.5}
           duration={2}
           readOnly
-        />
+        />,
       );
 
       // Keyframe editor should be visible but read-only
@@ -733,8 +945,18 @@ describe('EffectInspector', () => {
 
     const mockChromaKeyParamDefs: ParamDef[] = [
       createParamDef('key_color', 'Key Color', { type: 'string', value: '#00FF00' }),
-      createParamDef('similarity', 'Similarity', { type: 'float', value: 0.3 }, { min: 0, max: 1, step: 0.01 }),
-      createParamDef('blend', 'Blend', { type: 'float', value: 0.1 }, { min: 0, max: 1, step: 0.01 }),
+      createParamDef(
+        'similarity',
+        'Similarity',
+        { type: 'float', value: 0.3 },
+        { min: 0, max: 1, step: 0.01 },
+      ),
+      createParamDef(
+        'blend',
+        'Blend',
+        { type: 'float', value: 0.1 },
+        { min: 0, max: 1, step: 0.01 },
+      ),
     ];
 
     it('should render ChromaKeyControl for chroma_key effect', () => {
@@ -743,7 +965,7 @@ describe('EffectInspector', () => {
           effect={mockChromaKeyEffect}
           paramDefs={mockChromaKeyParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       expect(screen.getByTestId('chroma-key-control')).toBeInTheDocument();
@@ -755,7 +977,7 @@ describe('EffectInspector', () => {
           effect={mockChromaKeyEffect}
           paramDefs={mockChromaKeyParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       // ChromaKeyControl uses its own sliders, not ParameterEditor
@@ -770,7 +992,7 @@ describe('EffectInspector', () => {
           effect={mockChromaKeyEffect}
           paramDefs={mockChromaKeyParamDefs}
           onChange={vi.fn()}
-        />
+        />,
       );
 
       // The header shows the effect type label; ChromaKeyControl also has its own heading

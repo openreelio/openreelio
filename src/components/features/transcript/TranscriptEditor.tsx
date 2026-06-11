@@ -1,7 +1,7 @@
 /** Transcript-based video editing panel with word-level interaction. */
 
 import React, { useCallback, useRef, useState } from 'react';
-import { FileText, Trash2, AlertCircle, Loader2 } from 'lucide-react';
+import { FileText, Trash2, AlertCircle, Loader2, Search, Replace } from 'lucide-react';
 import { useTranscriptEditing } from '@/hooks/useTranscriptEditing';
 import { useCleanupDetection } from '@/hooks/useCleanupDetection';
 import { TranscriptWord } from './TranscriptWord';
@@ -18,7 +18,17 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({ readOnly = f
     activeWordIndex,
     selection,
     assetId,
+    searchTerm,
+    replacementText,
+    searchMatches,
+    activeSearchMatchIndex,
+    replacementPreview,
     setSelection,
+    setSearchTerm,
+    setReplacementText,
+    selectSearchMatch,
+    goToNextSearchMatch,
+    goToPreviousSearchMatch,
     seekToWord,
     deleteSelection,
     reload,
@@ -156,6 +166,79 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({ readOnly = f
           readOnly={readOnly}
         />
       )}
+
+      <div className="px-3 py-2 border-b border-neutral-700 bg-neutral-900/80 space-y-2">
+        <div className="grid grid-cols-2 gap-2">
+          <label className="space-y-1">
+            <span className="text-xs font-medium text-neutral-400 flex items-center gap-1">
+              <Search className="w-3.5 h-3.5" />
+              Find
+            </span>
+            <input
+              type="search"
+              aria-label="Find in transcript"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              className="w-full px-2 py-1.5 rounded bg-neutral-800 border border-neutral-600 text-xs text-white placeholder-neutral-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+              placeholder="Search"
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-medium text-neutral-400 flex items-center gap-1">
+              <Replace className="w-3.5 h-3.5" />
+              Replace
+            </span>
+            <input
+              type="text"
+              aria-label="Transcript replacement preview"
+              value={replacementText}
+              onChange={(event) => setReplacementText(event.target.value)}
+              disabled={readOnly}
+              className="w-full px-2 py-1.5 rounded bg-neutral-800 border border-neutral-600 text-xs text-white placeholder-neutral-500 focus:outline-none focus:ring-2 focus:ring-primary-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              placeholder="Preview"
+            />
+          </label>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-neutral-500 mr-auto" aria-live="polite">
+            {searchTerm.trim()
+              ? `${searchMatches.length} ${searchMatches.length === 1 ? 'match' : 'matches'}`
+              : 'No search'}
+          </span>
+          <button
+            type="button"
+            onClick={goToPreviousSearchMatch}
+            disabled={searchMatches.length === 0}
+            className="px-2 py-1 text-xs rounded border border-neutral-600 text-neutral-300 hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Previous
+          </button>
+          <button
+            type="button"
+            onClick={goToNextSearchMatch}
+            disabled={searchMatches.length === 0}
+            className="px-2 py-1 text-xs rounded border border-neutral-600 text-neutral-300 hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Next
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              selectSearchMatch(activeSearchMatchIndex < 0 ? 0 : activeSearchMatchIndex)
+            }
+            disabled={searchMatches.length === 0}
+            className="px-2 py-1 text-xs rounded bg-neutral-700 text-neutral-100 hover:bg-neutral-600 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Select
+          </button>
+        </div>
+        {replacementPreview && (
+          <div className="rounded border border-neutral-700 bg-neutral-800/70 px-2 py-1.5 text-xs text-neutral-300">
+            <span className="text-neutral-500">Preview: </span>
+            {replacementPreview}
+          </div>
+        )}
+      </div>
 
       {/* Selection toolbar */}
       {selection && !readOnly && (

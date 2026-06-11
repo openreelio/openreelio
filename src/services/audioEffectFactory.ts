@@ -30,6 +30,8 @@ export interface AudioEffectNode {
 
 const MAX_GAIN_DB = 24;
 const MIN_GAIN_DB = -96;
+const MAX_COMPRESSOR_THRESHOLD_DB = 0;
+const MIN_COMPRESSOR_THRESHOLD_DB = -60;
 const MAX_FREQUENCY = 20000;
 const MIN_FREQUENCY = 20;
 const MAX_DELAY_MS = 5000;
@@ -68,6 +70,10 @@ export function convertLinearToDb(linear: number): number {
   return 20 * Math.log10(linear);
 }
 
+export function clampCompressorThresholdDb(thresholdDb: number): number {
+  return clamp(thresholdDb, MIN_COMPRESSOR_THRESHOLD_DB, MAX_COMPRESSOR_THRESHOLD_DB);
+}
+
 /**
  * Clamp a value to a range
  */
@@ -100,7 +106,7 @@ export function getEffectNodeType(effectType: string): AudioNodeType | null {
  */
 export function createAudioEffectNode(
   context: AudioContext,
-  config: EffectNodeConfig
+  config: EffectNodeConfig,
 ): AudioEffectNode | null {
   const nodeType = getEffectNodeType(config.effectType);
 
@@ -190,9 +196,9 @@ function createCompressorNode(context: AudioContext, config: EffectNodeConfig): 
   const { effectType, params } = config;
 
   if (effectType === 'compressor') {
-    // Compressor params: threshold (0-1), ratio (1-20), attack (ms), release (ms)
-    const threshold = params.threshold ?? 0.5;
-    node.threshold.value = -threshold * 48; // Convert 0-1 to dB range (-48 to 0)
+    // Compressor params use dB for preview/export parity.
+    const thresholdDb = clampCompressorThresholdDb(params.threshold ?? -24);
+    node.threshold.value = thresholdDb;
     node.ratio.value = clamp(params.ratio ?? 4, 1, 20);
     node.attack.value = (params.attack ?? 5) / 1000; // ms to seconds
     node.release.value = (params.release ?? 50) / 1000;
@@ -262,7 +268,7 @@ function createPannerNode(context: AudioContext, config: EffectNodeConfig): Audi
  */
 export function updateAudioEffectNode(
   effectNode: AudioEffectNode,
-  params: Record<string, number>
+  params: Record<string, number>,
 ): void {
   // Don't update bypassed nodes
   if (effectNode.bypassed) {
@@ -314,11 +320,11 @@ function updateBiquadNode(node: BiquadFilterNode, params: Record<string, number>
 function updateCompressorNode(
   node: DynamicsCompressorNode,
   effectType: string,
-  params: Record<string, number>
+  params: Record<string, number>,
 ): void {
   if (effectType === 'compressor') {
     if (params.threshold !== undefined) {
-      node.threshold.value = -params.threshold * 48;
+      node.threshold.value = clampCompressorThresholdDb(params.threshold);
     }
     if (params.ratio !== undefined) {
       node.ratio.value = clamp(params.ratio, 1, 20);

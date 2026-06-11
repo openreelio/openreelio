@@ -355,6 +355,20 @@ const EffectParamValue = z.union([z.number(), z.string(), z.boolean(), z.array(z
  */
 const EffectParamsRecord = z.record(z.string(), EffectParamValue);
 
+const EffectKeyframeEasing = z.union([
+  EasingType,
+  z.enum(['ease_in', 'ease_out', 'ease_in_out', 'cubic_bezier', 'step', 'hold']),
+]);
+
+const EffectKeyframe = z.object({
+  timeOffset: z.number().min(0),
+  value: EffectParamValue,
+  easing: EffectKeyframeEasing.default('linear'),
+  bezierPoints: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional(),
+});
+
+const EffectKeyframesRecord = z.record(z.string(), z.array(EffectKeyframe));
+
 /**
  * AddEffect - Apply effect to clip
  */
@@ -364,6 +378,7 @@ export const AddEffectSchema = z.object({
     clipId: ClipId,
     effectType: EffectType,
     params: EffectParamsRecord,
+    keyframes: EffectKeyframesRecord.optional(),
   }),
 });
 export type AddEffectCommand = z.infer<typeof AddEffectSchema>;

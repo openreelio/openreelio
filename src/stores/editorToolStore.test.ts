@@ -87,6 +87,24 @@ describe('editorToolStore — text tool', () => {
   });
 });
 
+describe('editorToolStore — trim tools', () => {
+  beforeEach(() => {
+    act(() => {
+      useEditorToolStore.getState().reset();
+    });
+  });
+
+  it('exposes the rate stretch tool with the standard shortcut', () => {
+    act(() => {
+      useEditorToolStore.getState().setActiveTool('rate-stretch');
+    });
+
+    expect(useEditorToolStore.getState().activeTool).toBe('rate-stretch');
+    expect(TOOL_CONFIGS['rate-stretch'].shortcut).toBe('R');
+    expect(getToolCursor('rate-stretch')).toBe('ew-resize');
+  });
+});
+
 describe('editorToolStore — effectsClipboard', () => {
   beforeEach(() => {
     act(() => {

@@ -18,3 +18,6 @@ export type { RGBParadeDisplayProps, ParadeMode } from './RGBParadeDisplay';
 
 export { VideoScopesPanel } from './VideoScopesPanel';
 export type { VideoScopesPanelProps, ScopeType } from './VideoScopesPanel';
+
+export { PreviewScopesPanel } from './PreviewScopesPanel';
+export type { PreviewScopesPanelProps } from './PreviewScopesPanel';

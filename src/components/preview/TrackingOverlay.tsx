@@ -105,6 +105,8 @@ export function TrackingOverlay({
       }`}
       width={width}
       height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
       onClick={handleClick}
     >
       {/* Tracking path line */}

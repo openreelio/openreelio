@@ -23,6 +23,7 @@ import type {
   ProxyStatus,
   Sequence,
   UndoRedoResult,
+  WaveformData,
 } from '@/types';
 import { createLogger } from '@/services/logger';
 // Direct imports instead of barrel to avoid bundling all utilities
@@ -114,6 +115,7 @@ interface ProjectState {
   /** Navigation stack for compound clip sequence drilling (parent → child) */
   sequenceNavigationStack: string[];
   selectedAssetId: string | null;
+  proxyJobIdsByAssetId: Record<string, string>;
   error: string | null;
   /** State version for conflict detection (increments on each state update) */
   stateVersion: number;
@@ -127,9 +129,20 @@ interface ProjectState {
 
   // Asset actions
   importAsset: (uri?: string) => Promise<string>;
+  relinkAsset: (assetId: string, uri: string) => Promise<void>;
   removeAsset: (assetId: string) => Promise<void>;
   getAsset: (assetId: string) => Asset | undefined;
   selectAsset: (assetId: string | null) => void;
+  generateAssetThumbnail: (assetId: string) => Promise<string | null>;
+  loadWaveformData: (assetId: string) => Promise<WaveformData | null>;
+  generateWaveformForAsset: (
+    assetId: string,
+    samplesPerSecond?: number,
+  ) => Promise<WaveformData | null>;
+  ensureAudioPreviewForAsset: (assetId: string) => Promise<string | null>;
+  generateProxyForAsset: (assetId: string) => Promise<void>;
+  cancelProxyForAsset: (assetId: string) => Promise<void>;
+  useOriginalMedia: (assetId: string) => Promise<void>;
   updateAssetProxyStatus: (assetId: string, status: ProxyStatus, proxyUrl?: string) => void;
 
   // Sequence actions
@@ -173,6 +186,7 @@ export const useProjectStore = create<ProjectState>()(
     activeSequenceId: null,
     sequenceNavigationStack: [],
     selectedAssetId: null,
+    proxyJobIdsByAssetId: {},
     error: null,
     stateVersion: 0,
 
@@ -195,6 +209,7 @@ export const useProjectStore = create<ProjectState>()(
           state.meta = projectInfo;
           state.isDirty = false;
           state.selectedAssetId = null;
+          state.proxyJobIdsByAssetId = {};
           state.sequenceNavigationStack = [];
 
           // Populate assets
@@ -262,6 +277,7 @@ export const useProjectStore = create<ProjectState>()(
           state.isLoading = false;
           state.meta = projectInfo;
           state.selectedAssetId = null;
+          state.proxyJobIdsByAssetId = {};
           state.isDirty = false;
           state.sequenceNavigationStack = [];
 
@@ -291,6 +307,8 @@ export const useProjectStore = create<ProjectState>()(
           state.effects = new Map();
           state.activeSequenceId = null;
           state.sequenceNavigationStack = [];
+          state.selectedAssetId = null;
+          state.proxyJobIdsByAssetId = {};
           state.error = error instanceof Error ? error.message : String(error);
         });
         throw error;
@@ -316,6 +334,7 @@ export const useProjectStore = create<ProjectState>()(
           state.meta = projectInfo;
           state.isDirty = false;
           state.selectedAssetId = null;
+          state.proxyJobIdsByAssetId = {};
           state.sequenceNavigationStack = [];
 
           // Populate assets
@@ -405,6 +424,7 @@ export const useProjectStore = create<ProjectState>()(
         state.activeSequenceId = null;
         state.sequenceNavigationStack = [];
         state.selectedAssetId = null;
+        state.proxyJobIdsByAssetId = {};
         state.isDirty = false;
         state.error = null;
         // Increment (not reset) so in-flight ops from the old project
@@ -477,6 +497,62 @@ export const useProjectStore = create<ProjectState>()(
       }
     },
 
+    // Relink or replace an existing asset source while preserving its asset ID
+    relinkAsset: async (assetId: string, uri: string) => {
+      if (!uri) {
+        const message = 'Replacement asset URI is required';
+        set((state) => {
+          state.error = message;
+        });
+        throw new Error(message);
+      }
+
+      try {
+        await invoke('relink_asset', { assetId, uri });
+
+        const assets = await invoke<Asset[]>('get_assets');
+
+        set((state) => {
+          state.isDirty = true;
+          state.selectedAssetId = assetId;
+          state.assets = new Map();
+          for (const asset of assets) {
+            state.assets.set(asset.id, asset);
+          }
+        });
+
+        invoke<string | null>('generate_asset_thumbnail', { assetId })
+          .then((thumbnailUrl) => {
+            if (thumbnailUrl) {
+              set((state) => {
+                const asset = state.assets.get(assetId);
+                if (asset) {
+                  asset.thumbnailUrl = thumbnailUrl;
+                }
+              });
+            }
+          })
+          .catch((err) => {
+            logger.warn('Thumbnail generation failed after asset relink', { assetId, error: err });
+          });
+
+        useWorkspaceStore
+          .getState()
+          .refreshTree()
+          .catch((err) => {
+            logger.warn('Failed to refresh workspace tree after asset relink', {
+              assetId,
+              error: String(err),
+            });
+          });
+      } catch (error) {
+        set((state) => {
+          state.error = error instanceof Error ? error.message : String(error);
+        });
+        throw error;
+      }
+    },
+
     // Remove asset
     removeAsset: async (assetId: string) => {
       try {
@@ -517,6 +593,92 @@ export const useProjectStore = create<ProjectState>()(
     selectAsset: (assetId: string | null) => {
       set((state) => {
         state.selectedAssetId = assetId;
+      });
+    },
+
+    generateAssetThumbnail: async (assetId: string) => {
+      const thumbnailUrl = await invoke<string | null>('generate_asset_thumbnail', { assetId });
+
+      if (thumbnailUrl) {
+        set((state) => {
+          const asset = state.assets.get(assetId);
+          if (asset) {
+            asset.thumbnailUrl = thumbnailUrl;
+          }
+        });
+      }
+
+      return thumbnailUrl;
+    },
+
+    loadWaveformData: async (assetId: string) => {
+      return invoke<WaveformData | null>('get_waveform_data', { assetId });
+    },
+
+    generateWaveformForAsset: async (assetId: string, samplesPerSecond = 100) => {
+      return invoke<WaveformData | null>('generate_waveform_for_asset', {
+        assetId,
+        samplesPerSecond,
+      });
+    },
+
+    ensureAudioPreviewForAsset: async (assetId: string) => {
+      return invoke<string | null>('ensure_audio_preview_for_asset', { assetId });
+    },
+
+    generateProxyForAsset: async (assetId: string) => {
+      try {
+        set((state) => {
+          const asset = state.assets.get(assetId);
+          if (asset) {
+            asset.proxyStatus = 'pending';
+          }
+        });
+
+        const proxyUrl = await invoke<string | null>('generate_proxy_for_asset', { assetId });
+        if (proxyUrl) {
+          set((state) => {
+            const asset = state.assets.get(assetId);
+            if (asset) {
+              asset.proxyStatus = 'ready';
+              asset.proxyUrl = proxyUrl;
+            }
+          });
+        }
+      } catch (error) {
+        set((state) => {
+          const asset = state.assets.get(assetId);
+          if (asset) {
+            asset.proxyStatus = 'failed';
+          }
+          state.error = error instanceof Error ? error.message : String(error);
+        });
+        throw error;
+      }
+    },
+
+    cancelProxyForAsset: async (assetId: string) => {
+      const jobId = get().proxyJobIdsByAssetId[assetId];
+      if (!jobId) {
+        throw new Error('No cancellable proxy job for asset');
+      }
+
+      await invoke<boolean>('cancel_job', { jobId });
+      await get().useOriginalMedia(assetId);
+    },
+
+    useOriginalMedia: async (assetId: string) => {
+      await get().executeCommand({
+        type: 'UpdateAsset',
+        payload: {
+          assetId,
+          proxyStatus: 'notNeeded',
+          proxyUrl: null,
+        },
+      });
+
+      set((state) => {
+        delete state.proxyJobIdsByAssetId[assetId];
       });
     },
 
@@ -1084,6 +1246,11 @@ export async function setupProxyEventListeners(): Promise<void> {
         'asset:proxy-generating',
         (event) => {
           logger.info('Proxy generation started', { assetId: event.payload.assetId });
+          if (event.payload.jobId !== 'manual-ffmpeg') {
+            useProjectStore.setState((state) => {
+              state.proxyJobIdsByAssetId[event.payload.assetId] = event.payload.jobId;
+            });
+          }
           updateAssetProxyStatus(event.payload.assetId, 'generating');
         },
       );
@@ -1099,6 +1266,9 @@ export async function setupProxyEventListeners(): Promise<void> {
           assetId: event.payload.assetId,
           proxyUrl: event.payload.proxyUrl,
         });
+        useProjectStore.setState((state) => {
+          delete state.proxyJobIdsByAssetId[event.payload.assetId];
+        });
         updateAssetProxyStatus(event.payload.assetId, 'ready', event.payload.proxyUrl);
       });
       newUnlisteners.push(unlistenReady);
@@ -1112,6 +1282,9 @@ export async function setupProxyEventListeners(): Promise<void> {
         logger.error('Proxy generation failed', {
           assetId: event.payload.assetId,
           error: event.payload.error,
+        });
+        useProjectStore.setState((state) => {
+          delete state.proxyJobIdsByAssetId[event.payload.assetId];
         });
         updateAssetProxyStatus(event.payload.assetId, 'failed');
       });

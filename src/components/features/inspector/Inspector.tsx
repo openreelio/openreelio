@@ -23,10 +23,19 @@ import type {
   EffectId,
   CaptionStyle,
   CaptionPosition,
+  AssetKind,
+  AudioInfo,
   TextClipData,
   ClipId,
+  AudioSettings,
+  ProxyStatus,
   SimpleParamValue,
+  SlowMotionInterpolation,
   Transform,
+  TransformKeyframe,
+  TimeRemapCurve,
+  VideoInfo,
+  WaveformData,
 } from '@/types';
 
 // =============================================================================
@@ -50,6 +59,22 @@ export interface SelectedClip {
   };
   /** Effects applied to this clip */
   effects?: Effect[];
+  /** Clip transform in normalized canvas coordinates */
+  transform?: Transform;
+  /** Optional clip motion transform keyframes */
+  motionKeyframes?: TransformKeyframe[];
+  /** Clip opacity (0.0-1.0) */
+  opacity?: number;
+  /** Source media dimensions used for fit/fill transform presets */
+  sourceSize?: {
+    width: number;
+    height: number;
+  };
+  /** Sequence canvas dimensions used for fit/fill transform presets */
+  canvasSize?: {
+    width: number;
+    height: number;
+  };
   /** Clip blend mode (default: 'normal') */
   blendMode?: BlendMode;
   /** Playback speed (1.0 = normal) */
@@ -58,21 +83,39 @@ export interface SelectedClip {
   reverse?: boolean;
   /** Whether clip is a freeze frame */
   freezeFrame?: boolean;
+  /** Optional variable-speed time remap curve */
+  timeRemap?: TimeRemapCurve | null;
+  /** Slow-motion interpolation mode */
+  slowMotionInterpolation?: SlowMotionInterpolation;
   /** Whether clip has time remap active */
   hasTimeRemap?: boolean;
+  /** Clip-level audio settings */
+  audio?: AudioSettings;
 }
 
 /** Asset selection data */
 export interface SelectedAsset {
   id: string;
   name: string;
-  kind: 'video' | 'audio' | 'image' | 'graphics';
+  kind: AssetKind | 'graphics';
   uri: string;
   durationSec?: number;
+  fileSize?: number;
+  importedAt?: string;
   resolution?: {
     width: number;
     height: number;
   };
+  video?: VideoInfo;
+  audio?: AudioInfo;
+  proxyStatus?: ProxyStatus;
+  proxyUrl?: string;
+  proxyJobId?: string;
+  thumbnailUrl?: string;
+  missing?: boolean;
+  relativePath?: string;
+  workspaceManaged?: boolean;
+  tags?: string[];
 }
 
 /** Caption selection data */
@@ -99,12 +142,38 @@ export interface InspectorProps {
   onClipChange?: (clipId: string, property: string, value: unknown) => void;
   /** Callback when clip blend mode changes */
   onClipBlendModeChange?: (clipId: string, trackId: string, blendMode: BlendMode) => void;
+  /** Callback when clip transform changes */
+  onClipTransformChange?: (clipId: string, trackId: string, transform: Transform) => void;
+  /** Callback when clip opacity changes */
+  onClipOpacityChange?: (clipId: string, trackId: string, opacity: number) => void;
+  /** Callback when clip motion keyframes change */
+  onClipMotionKeyframesChange?: (
+    clipId: string,
+    trackId: string,
+    keyframes: TransformKeyframe[],
+  ) => void;
   /** Callback when clip speed changes */
   onClipSpeedChange?: (clipId: string, trackId: string, speed: number, reverse: boolean) => void;
   /** Callback when reverse is toggled */
   onClipReverseToggle?: (clipId: string, trackId: string) => void;
   /** Callback when freeze frame is requested */
   onFreezeFrame?: (clipId: string, trackId: string) => void;
+  /** Callback when clip time remap changes */
+  onTimeRemapChange?: (clipId: string, trackId: string, timeRemap: TimeRemapCurve) => void;
+  /** Callback when clip time remap is cleared */
+  onTimeRemapClear?: (clipId: string, trackId: string) => void;
+  /** Callback when slow-motion interpolation changes */
+  onSlowMotionInterpolationChange?: (
+    clipId: string,
+    trackId: string,
+    interpolation: SlowMotionInterpolation,
+  ) => void;
+  /** Callback when clip-level audio settings change */
+  onClipAudioChange?: (
+    clipId: string,
+    trackId: string,
+    patch: Partial<AudioSettings>,
+  ) => void | Promise<void>;
   /** Callback when text clip data changes */
   onTextDataChange?: (clipId: ClipId, textData: TextClipData) => void;
   /** Callback when text clip transform changes */
@@ -124,6 +193,18 @@ export interface InspectorProps {
   onEffectRemove?: (clipId: string, effectId: EffectId) => void;
   /** Callback when add effect is requested */
   onAddEffect?: (clipId: string) => void;
+  /** Callback when thumbnail generation is requested */
+  onGenerateThumbnail?: (assetId: string) => Promise<string | null>;
+  /** Callback when cached waveform peak data should be loaded */
+  onLoadWaveformData?: (assetId: string) => Promise<WaveformData | null>;
+  /** Callback when waveform peak generation is requested */
+  onGenerateWaveform?: (assetId: string) => Promise<WaveformData | null>;
+  /** Callback when browser-decodable audio preview generation is requested */
+  onEnsureAudioPreview?: (assetId: string) => Promise<string | null>;
+  /** Number of frontend waveform image cache entries */
+  waveformUiCacheSize?: number;
+  /** Callback when frontend waveform image cache should be cleared */
+  onClearWaveformUiCache?: () => void;
   /** Whether the inspector is read-only */
   readOnly?: boolean;
 }
@@ -139,9 +220,16 @@ export function Inspector({
   selectedCaption,
   // onClipChange is reserved for future clip property editing
   onClipBlendModeChange,
+  onClipTransformChange,
+  onClipOpacityChange,
+  onClipMotionKeyframesChange,
   onClipSpeedChange,
   onClipReverseToggle,
   onFreezeFrame,
+  onTimeRemapChange,
+  onTimeRemapClear,
+  onSlowMotionInterpolationChange,
+  onClipAudioChange,
   onTextDataChange,
   onTextTransformChange,
   onTextTimingChange,
@@ -150,6 +238,12 @@ export function Inspector({
   onEffectChange,
   onEffectRemove,
   onAddEffect,
+  onGenerateThumbnail,
+  onLoadWaveformData,
+  onGenerateWaveform,
+  onEnsureAudioPreview,
+  waveformUiCacheSize = 0,
+  onClearWaveformUiCache,
   readOnly = false,
 }: InspectorProps): JSX.Element {
   // ===========================================================================
@@ -298,6 +392,42 @@ export function Inspector({
     [selectedClip, onClipBlendModeChange],
   );
 
+  const handleClipTransformChange = useCallback(
+    (transform: Transform) => {
+      if (selectedClip && onClipTransformChange) {
+        onClipTransformChange(selectedClip.id, selectedClip.place.trackId, transform);
+      }
+    },
+    [selectedClip, onClipTransformChange],
+  );
+
+  const handleClipOpacityChange = useCallback(
+    (opacity: number) => {
+      if (selectedClip && onClipOpacityChange) {
+        onClipOpacityChange(selectedClip.id, selectedClip.place.trackId, opacity);
+      }
+    },
+    [selectedClip, onClipOpacityChange],
+  );
+
+  const handleClipMotionKeyframesChange = useCallback(
+    (keyframes: TransformKeyframe[]) => {
+      if (selectedClip && onClipMotionKeyframesChange) {
+        onClipMotionKeyframesChange(selectedClip.id, selectedClip.place.trackId, keyframes);
+      }
+    },
+    [selectedClip, onClipMotionKeyframesChange],
+  );
+
+  const handleClipAudioChange = useCallback(
+    (patch: Partial<AudioSettings>) => {
+      if (selectedClip && onClipAudioChange) {
+        void onClipAudioChange(selectedClip.id, selectedClip.place.trackId, patch);
+      }
+    },
+    [selectedClip, onClipAudioChange],
+  );
+
   // ===========================================================================
   // Render Empty State
   // ===========================================================================
@@ -347,6 +477,10 @@ export function Inspector({
         clipDuration={clipDuration ?? 0}
         readOnly={readOnly}
         canChangeBlendMode={Boolean(onClipBlendModeChange)}
+        canChangeTransform={Boolean(onClipTransformChange)}
+        canChangeOpacity={Boolean(onClipOpacityChange)}
+        canChangeMotionKeyframes={Boolean(onClipMotionKeyframesChange)}
+        canChangeAudio={Boolean(onClipAudioChange)}
         canEditEffects={Boolean(onEffectChange)}
         selectedEffectId={selectedEffectId}
         selectedEffect={selectedEffect}
@@ -355,9 +489,16 @@ export function Inspector({
         presetSaveError={presetSaveError}
         isSavingPreset={isSavingPreset}
         onBlendModeChange={handleBlendModeChange}
+        onTransformChange={handleClipTransformChange}
+        onOpacityChange={handleClipOpacityChange}
+        onMotionKeyframesChange={handleClipMotionKeyframesChange}
+        onClipAudioChange={handleClipAudioChange}
         onClipSpeedChange={onClipSpeedChange}
         onClipReverseToggle={onClipReverseToggle}
         onFreezeFrame={onFreezeFrame}
+        onTimeRemapChange={onTimeRemapChange}
+        onTimeRemapClear={onTimeRemapClear}
+        onSlowMotionInterpolationChange={onSlowMotionInterpolationChange}
         onSelectEffect={handleEffectSelect}
         onToggleEffect={onEffectToggle ? handleEffectToggle : undefined}
         onRemoveEffect={onEffectRemove ? handleEffectRemove : undefined}
@@ -375,7 +516,18 @@ export function Inspector({
   // ===========================================================================
 
   if (selectedAsset) {
-    return <AssetInspectorPanel selectedAsset={selectedAsset} />;
+    return (
+      <AssetInspectorPanel
+        selectedAsset={selectedAsset}
+        onGenerateThumbnail={onGenerateThumbnail}
+        onLoadWaveformData={onLoadWaveformData}
+        onGenerateWaveform={onGenerateWaveform}
+        onEnsureAudioPreview={onEnsureAudioPreview}
+        waveformUiCacheSize={waveformUiCacheSize}
+        onClearWaveformUiCache={onClearWaveformUiCache}
+        readOnly={readOnly}
+      />
+    );
   }
 
   return <></>;

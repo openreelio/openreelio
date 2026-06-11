@@ -42,6 +42,27 @@ describe('timelineStore', () => {
       expect(state.scrollY).toBe(0);
       expect(state.snapEnabled).toBe(true);
       expect(state.linkedSelectionEnabled).toBe(true);
+      expect(state.editTargetTrackId).toBeNull();
+    });
+  });
+
+  describe('edit target track', () => {
+    it('sets and clears the source edit target track', () => {
+      const { setEditTargetTrack } = useTimelineStore.getState();
+
+      setEditTargetTrack('track_video_2');
+      expect(useTimelineStore.getState().editTargetTrackId).toBe('track_video_2');
+
+      setEditTargetTrack(null);
+      expect(useTimelineStore.getState().editTargetTrackId).toBeNull();
+    });
+
+    it('resets the source edit target track', () => {
+      useTimelineStore.getState().setEditTargetTrack('track_video_2');
+
+      useTimelineStore.getState().reset();
+
+      expect(useTimelineStore.getState().editTargetTrackId).toBeNull();
     });
   });
 

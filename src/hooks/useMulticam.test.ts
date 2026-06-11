@@ -54,10 +54,23 @@ describe('useMulticam', () => {
 
     it('should allow custom grid layout', () => {
       const { result } = renderHook(() =>
-        useMulticam({ group: mockGroup, initialGridLayout: { rows: 1, cols: 4 } })
+        useMulticam({ group: mockGroup, initialGridLayout: { rows: 1, cols: 4 } }),
       );
 
       expect(result.current.gridLayout).toEqual({ rows: 1, cols: 4 });
+    });
+
+    it('should sync when an external group is provided after initialization', () => {
+      const { result, rerender } = renderHook(({ group }) => useMulticam({ group }), {
+        initialProps: { group: null as MulticamGroup | null },
+      });
+
+      expect(result.current.group).toBeNull();
+
+      rerender({ group: mockGroup });
+
+      expect(result.current.group).toEqual(mockGroup);
+      expect(result.current.activeAngleIndex).toBe(0);
     });
   });
 
@@ -86,9 +99,7 @@ describe('useMulticam', () => {
 
     it('should call onChange when angle switches', () => {
       const onChange = vi.fn();
-      const { result } = renderHook(() =>
-        useMulticam({ group: mockGroup, onChange })
-      );
+      const { result } = renderHook(() => useMulticam({ group: mockGroup, onChange }));
 
       act(() => {
         result.current.switchAngle(1);
@@ -97,15 +108,13 @@ describe('useMulticam', () => {
       expect(onChange).toHaveBeenCalledWith(
         expect.objectContaining({
           activeAngleIndex: 1,
-        })
+        }),
       );
     });
 
     it('should not call onChange when switching to same angle', () => {
       const onChange = vi.fn();
-      const { result } = renderHook(() =>
-        useMulticam({ group: mockGroup, onChange })
-      );
+      const { result } = renderHook(() => useMulticam({ group: mockGroup, onChange }));
 
       act(() => {
         result.current.switchAngle(0);
@@ -117,9 +126,7 @@ describe('useMulticam', () => {
 
   describe('angle switching with recording', () => {
     it('should record angle switch when recording is enabled', () => {
-      const { result } = renderHook(() =>
-        useMulticam({ group: mockGroup, isRecording: true })
-      );
+      const { result } = renderHook(() => useMulticam({ group: mockGroup, isRecording: true }));
 
       act(() => {
         result.current.switchAngleAt(1, 10.5);
@@ -134,9 +141,7 @@ describe('useMulticam', () => {
     });
 
     it('should not record switch when recording is disabled', () => {
-      const { result } = renderHook(() =>
-        useMulticam({ group: mockGroup, isRecording: false })
-      );
+      const { result } = renderHook(() => useMulticam({ group: mockGroup, isRecording: false }));
 
       act(() => {
         result.current.switchAngleAt(1, 10.5);
@@ -148,9 +153,7 @@ describe('useMulticam', () => {
     });
 
     it('should sort switches by time when recording', () => {
-      const { result } = renderHook(() =>
-        useMulticam({ group: mockGroup, isRecording: true })
-      );
+      const { result } = renderHook(() => useMulticam({ group: mockGroup, isRecording: true }));
 
       act(() => {
         result.current.switchAngleAt(1, 20);
@@ -174,9 +177,7 @@ describe('useMulticam', () => {
     };
 
     it('should remove an angle switch', () => {
-      const { result } = renderHook(() =>
-        useMulticam({ group: groupWithSwitches })
-      );
+      const { result } = renderHook(() => useMulticam({ group: groupWithSwitches }));
 
       act(() => {
         result.current.removeSwitch('sw-2');
@@ -187,9 +188,7 @@ describe('useMulticam', () => {
     });
 
     it('should update an angle switch time', () => {
-      const { result } = renderHook(() =>
-        useMulticam({ group: groupWithSwitches })
-      );
+      const { result } = renderHook(() => useMulticam({ group: groupWithSwitches }));
 
       act(() => {
         result.current.updateSwitchTime('sw-2', 25);
@@ -200,9 +199,7 @@ describe('useMulticam', () => {
     });
 
     it('should clear all switches', () => {
-      const { result } = renderHook(() =>
-        useMulticam({ group: groupWithSwitches })
-      );
+      const { result } = renderHook(() => useMulticam({ group: groupWithSwitches }));
 
       act(() => {
         result.current.clearSwitches();
@@ -226,7 +223,7 @@ describe('useMulticam', () => {
     it('should get visible angles based on grid layout', () => {
       // 4 angles, 2x2 grid = all visible
       const { result } = renderHook(() =>
-        useMulticam({ group: mockGroup, initialGridLayout: { rows: 2, cols: 2 } })
+        useMulticam({ group: mockGroup, initialGridLayout: { rows: 2, cols: 2 } }),
       );
 
       expect(result.current.visibleAngles).toHaveLength(4);
@@ -241,7 +238,7 @@ describe('useMulticam', () => {
 
     it('should get angle at grid position', () => {
       const { result } = renderHook(() =>
-        useMulticam({ group: mockGroup, initialGridLayout: { rows: 2, cols: 2 } })
+        useMulticam({ group: mockGroup, initialGridLayout: { rows: 2, cols: 2 } }),
       );
 
       // Grid positions: [0,0] [0,1]
@@ -281,9 +278,7 @@ describe('useMulticam', () => {
     };
 
     it('should return correct angle at various times', () => {
-      const { result } = renderHook(() =>
-        useMulticam({ group: groupWithSwitches })
-      );
+      const { result } = renderHook(() => useMulticam({ group: groupWithSwitches }));
 
       expect(result.current.getAngleIndexAtTime(5)?.angleIndex).toBe(0);
       expect(result.current.getAngleIndexAtTime(15)?.angleIndex).toBe(1);

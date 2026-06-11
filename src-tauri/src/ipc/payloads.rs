@@ -1,9 +1,10 @@
-use crate::core::effects::{EffectType, ParamValue};
-use crate::core::masks::{MaskBlendMode, MaskShape};
+use crate::core::assets::{AudioInfo, LicenseInfo, ProxyStatus, VideoInfo};
+use crate::core::effects::{EffectType, Keyframe, ParamValue};
+use crate::core::masks::{MaskBlendMode, MaskKeyframe, MaskShape};
 use crate::core::project::ProjectState;
 use crate::core::text::TextClipData;
 use crate::core::timeline::{
-    BlendMode, MarkerType, SequenceHdrSettings, Track, TrackKind, Transform,
+    BlendMode, MarkerType, SequenceHdrSettings, Track, TrackKind, Transform, TransformKeyframe,
 };
 use crate::core::{AssetId, ClipId, Color, EffectId, MaskId, SequenceId, TimeSec, TrackId};
 use serde::{Deserialize, Serialize};
@@ -223,6 +224,24 @@ pub struct SetClipTransformPayload {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetClipMotionKeyframesPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub keyframes: Vec<TransformKeyframe>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetClipOpacityPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub opacity: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipSpeedPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
@@ -230,6 +249,15 @@ pub struct SetClipSpeedPayload {
     pub speed: f32,
     #[serde(default)]
     pub reverse: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetClipSlowMotionInterpolationPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub interpolation: crate::core::timeline::SlowMotionInterpolation,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -347,6 +375,8 @@ pub struct SetClipAudioPayload {
     pub muted: Option<bool>,
     pub fade_in_sec: Option<TimeSec>,
     pub fade_out_sec: Option<TimeSec>,
+    pub audio_role: Option<String>,
+    pub audio_tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -438,6 +468,26 @@ pub struct RemoveAssetPayload {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateAssetPayload {
+    pub asset_id: AssetId,
+    pub name: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub license: Option<LicenseInfo>,
+    pub thumbnail_url: Option<Option<String>>,
+    pub proxy_status: Option<ProxyStatus>,
+    pub proxy_url: Option<Option<String>>,
+    pub uri: Option<String>,
+    pub duration_sec: Option<Option<f64>>,
+    pub file_size: Option<u64>,
+    pub video: Option<Option<VideoInfo>>,
+    pub audio: Option<Option<AudioInfo>>,
+    pub relative_path: Option<Option<String>>,
+    pub workspace_managed: Option<bool>,
+    pub missing: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateSequencePayload {
     pub name: String,
     pub format: Option<String>,
@@ -484,9 +534,26 @@ pub struct RenameTrackPayload {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetCaptionTrackLanguagePayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub language: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReorderTracksPayload {
     pub sequence_id: SequenceId,
     pub new_order: Vec<TrackId>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetTrackVolumePayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    /// Linear track volume, where 1.0 is unity and 2.0 is +6 dB.
+    pub volume: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -620,6 +687,8 @@ pub struct AddEffectPayload {
     pub effect_type: EffectType,
     #[serde(default, alias = "parameters")]
     pub params: HashMap<String, ParamValue>,
+    #[serde(default)]
+    pub keyframes: HashMap<String, Vec<Keyframe>>,
     /// Optional position in the effect list (None = append at end)
     pub position: Option<usize>,
 }
@@ -745,6 +814,12 @@ pub struct AddMaskPayload {
     /// Whether the mask is inverted
     #[serde(default)]
     pub inverted: bool,
+    /// Optional shape animation keyframes, commonly generated from tracking data
+    #[serde(default)]
+    pub keyframes: Vec<MaskKeyframe>,
+    /// Optional tracking effect/source ID that generated the keyframes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking_source_id: Option<String>,
 }
 
 /// Payload for updating a mask's properties.
@@ -794,6 +869,12 @@ pub struct UpdateMaskPayload {
     /// Toggle mask locked state
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locked: Option<bool>,
+    /// Replacement shape animation keyframes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyframes: Option<Vec<MaskKeyframe>>,
+    /// Tracking effect/source ID that generated the keyframes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking_source_id: Option<String>,
 }
 
 /// Payload for removing a mask from an effect.
@@ -1032,12 +1113,24 @@ pub enum CommandPayload {
     #[serde(alias = "setClipTransform", alias = "SetClipTransform")]
     SetClipTransform(SetClipTransformPayload),
 
+    #[serde(alias = "setClipMotionKeyframes", alias = "SetClipMotionKeyframes")]
+    SetClipMotionKeyframes(SetClipMotionKeyframesPayload),
+
+    #[serde(alias = "setClipOpacity", alias = "SetClipOpacity")]
+    SetClipOpacity(SetClipOpacityPayload),
+
     #[serde(
         alias = "setClipSpeed",
         alias = "SetClipSpeed",
         alias = "changeClipSpeed"
     )]
     SetClipSpeed(SetClipSpeedPayload),
+
+    #[serde(
+        alias = "setClipSlowMotionInterpolation",
+        alias = "SetClipSlowMotionInterpolation"
+    )]
+    SetClipSlowMotionInterpolation(SetClipSlowMotionInterpolationPayload),
 
     #[serde(alias = "reverseClip", alias = "ReverseClip")]
     ReverseClip(ReverseClipPayload),
@@ -1109,6 +1202,9 @@ pub enum CommandPayload {
     #[serde(alias = "removeAsset", alias = "RemoveAsset")]
     RemoveAsset(RemoveAssetPayload),
 
+    #[serde(alias = "updateAsset", alias = "UpdateAsset")]
+    UpdateAsset(UpdateAssetPayload),
+
     #[serde(alias = "createSequence", alias = "CreateSequence")]
     CreateSequence(CreateSequencePayload),
 
@@ -1140,8 +1236,14 @@ pub enum CommandPayload {
     #[serde(alias = "renameTrack", alias = "RenameTrack")]
     RenameTrack(RenameTrackPayload),
 
+    #[serde(alias = "setCaptionTrackLanguage", alias = "SetCaptionTrackLanguage")]
+    SetCaptionTrackLanguage(SetCaptionTrackLanguagePayload),
+
     #[serde(alias = "reorderTracks", alias = "ReorderTracks")]
     ReorderTracks(ReorderTracksPayload),
+
+    #[serde(alias = "setTrackVolume", alias = "SetTrackVolume")]
+    SetTrackVolume(SetTrackVolumePayload),
 
     #[serde(alias = "toggleTrackMute", alias = "ToggleTrackMute")]
     ToggleTrackMute(ToggleTrackMutePayload),
@@ -1277,7 +1379,10 @@ impl CommandPayload {
         "TrimClip",
         "SplitClip",
         "SetClipTransform",
+        "SetClipMotionKeyframes",
+        "SetClipOpacity",
         "SetClipSpeed",
+        "SetClipSlowMotionInterpolation",
         "ReverseClip",
         "SetClipEnabled",
         "LinkClips",
@@ -1300,13 +1405,16 @@ impl CommandPayload {
         "SetClipBlendMode",
         "ImportAsset",
         "RemoveAsset",
+        "UpdateAsset",
         "CreateSequence",
         "SetMasterVolume",
         "UpdateSequenceHdrSettings",
         "CreateTrack",
         "RemoveTrack",
         "RenameTrack",
+        "SetCaptionTrackLanguage",
         "ReorderTracks",
+        "SetTrackVolume",
         "ToggleTrackMute",
         "ToggleTrackLock",
         "ToggleTrackVisibility",
@@ -1400,14 +1508,15 @@ impl CommandPayload {
             RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand,
             RenameFileCommand, RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand,
             RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
-            SetAudioKeyframeValueCommand, SetClipAudioCommand, SetClipBlendModeCommand,
-            SetClipEnabledCommand, SetClipMuteCommand, SetClipSpeedCommand,
-            SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
-            SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand,
-            ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand,
-            UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
-            UpdateEffectCommand, UpdateMaskCommand, UpdateSequenceHdrSettingsCommand,
-            UpdateTextCommand,
+            SetAudioKeyframeValueCommand, SetCaptionTrackLanguageCommand, SetClipAudioCommand,
+            SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMotionKeyframesCommand,
+            SetClipMuteCommand, SetClipOpacityCommand, SetClipSlowMotionInterpolationCommand,
+            SetClipSpeedCommand, SetClipTransformCommand, SetMasterVolumeCommand,
+            SetTimeRemapCommand, SetTrackBlendModeCommand, SetTrackVolumeCommand, SplitClipCommand,
+            ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
+            TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
+            UpdateAssetCommand, UpdateEffectCommand, UpdateMaskCommand,
+            UpdateSequenceHdrSettingsCommand, UpdateTextCommand,
         };
 
         use crate::core::commands::{
@@ -1504,6 +1613,20 @@ impl CommandPayload {
                 &p.clip_id,
                 p.transform,
             )),
+            CommandPayload::SetClipMotionKeyframes(p) => {
+                Box::new(SetClipMotionKeyframesCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.keyframes,
+                ))
+            }
+            CommandPayload::SetClipOpacity(p) => Box::new(SetClipOpacityCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.opacity,
+            )),
             CommandPayload::SetClipSpeed(p) => Box::new(SetClipSpeedCommand::new(
                 &p.sequence_id,
                 &p.track_id,
@@ -1511,6 +1634,14 @@ impl CommandPayload {
                 p.speed,
                 p.reverse,
             )),
+            CommandPayload::SetClipSlowMotionInterpolation(p) => {
+                Box::new(SetClipSlowMotionInterpolationCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.interpolation,
+                ))
+            }
             CommandPayload::ReverseClip(p) => Box::new(ReverseClipCommand::new(
                 &p.sequence_id,
                 &p.track_id,
@@ -1580,16 +1711,25 @@ impl CommandPayload {
                 &p.clip_id,
                 p.muted,
             )),
-            CommandPayload::SetClipAudio(p) => Box::new(SetClipAudioCommand::new(
-                &p.sequence_id,
-                &p.track_id,
-                &p.clip_id,
-                p.volume_db,
-                p.pan,
-                p.muted,
-                p.fade_in_sec,
-                p.fade_out_sec,
-            )),
+            CommandPayload::SetClipAudio(p) => {
+                let mut cmd = SetClipAudioCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.volume_db,
+                    p.pan,
+                    p.muted,
+                    p.fade_in_sec,
+                    p.fade_out_sec,
+                );
+                if let Some(audio_role) = p.audio_role {
+                    cmd = cmd.with_audio_role(audio_role);
+                }
+                if let Some(audio_tags) = p.audio_tags {
+                    cmd = cmd.with_audio_tags(audio_tags);
+                }
+                Box::new(cmd)
+            }
             CommandPayload::AddAudioKeyframe(p) => Box::new(AddAudioKeyframeCommand::new(
                 &p.sequence_id,
                 &p.track_id,
@@ -1640,6 +1780,11 @@ impl CommandPayload {
                 &p.track_id,
                 p.blend_mode,
             )),
+            CommandPayload::SetTrackVolume(p) => Box::new(SetTrackVolumeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.volume,
+            )),
             CommandPayload::SetClipBlendMode(p) => Box::new(SetClipBlendModeCommand::new(
                 &p.sequence_id,
                 &p.track_id,
@@ -1648,6 +1793,52 @@ impl CommandPayload {
             )),
             CommandPayload::ImportAsset(p) => Box::new(ImportAssetCommand::new(&p.name, &p.uri)),
             CommandPayload::RemoveAsset(p) => Box::new(RemoveAssetCommand::new(&p.asset_id)),
+            CommandPayload::UpdateAsset(p) => {
+                let mut cmd = UpdateAssetCommand::new(&p.asset_id);
+                if let Some(name) = &p.name {
+                    cmd = cmd.with_name(name);
+                }
+                if let Some(tags) = p.tags {
+                    cmd = cmd.with_tags(tags);
+                }
+                if let Some(license) = p.license {
+                    cmd = cmd.with_license(license);
+                }
+                if let Some(thumbnail_url) = p.thumbnail_url {
+                    cmd = cmd.with_thumbnail_url(thumbnail_url);
+                }
+                if let Some(proxy_status) = p.proxy_status {
+                    cmd = cmd.with_proxy_status(proxy_status);
+                }
+                if let Some(proxy_url) = p.proxy_url {
+                    cmd = cmd.with_proxy_url(proxy_url);
+                }
+                if let Some(uri) = &p.uri {
+                    cmd = cmd.with_uri(uri);
+                }
+                if let Some(duration_sec) = p.duration_sec {
+                    cmd = cmd.with_duration_sec(duration_sec);
+                }
+                if let Some(file_size) = p.file_size {
+                    cmd = cmd.with_file_size(file_size);
+                }
+                if let Some(video) = p.video {
+                    cmd = cmd.with_video(video);
+                }
+                if let Some(audio) = p.audio {
+                    cmd = cmd.with_audio(audio);
+                }
+                if let Some(relative_path) = p.relative_path {
+                    cmd = cmd.with_relative_path(relative_path);
+                }
+                if let Some(workspace_managed) = p.workspace_managed {
+                    cmd = cmd.with_workspace_managed(workspace_managed);
+                }
+                if let Some(missing) = p.missing {
+                    cmd = cmd.with_missing(missing);
+                }
+                Box::new(cmd)
+            }
             CommandPayload::CreateSequence(p) => Box::new(CreateSequenceCommand::new(
                 &p.name,
                 &p.format.unwrap_or_else(|| "1080p".to_string()),
@@ -1673,6 +1864,9 @@ impl CommandPayload {
                 &p.track_id,
                 &p.new_name,
             )),
+            CommandPayload::SetCaptionTrackLanguage(p) => Box::new(
+                SetCaptionTrackLanguageCommand::new(&p.sequence_id, &p.track_id, &p.language),
+            ),
             CommandPayload::ReorderTracks(p) => {
                 Box::new(ReorderTracksCommand::new(&p.sequence_id, p.new_order))
             }
@@ -1750,6 +1944,9 @@ impl CommandPayload {
                 for (key, value) in p.params {
                     cmd = cmd.with_param(key, value);
                 }
+                for (key, keyframes) in p.keyframes {
+                    cmd = cmd.with_keyframes(key, keyframes);
+                }
                 if let Some(pos) = p.position {
                     cmd = cmd.at_position(pos);
                 }
@@ -1788,6 +1985,12 @@ impl CommandPayload {
                 if p.inverted {
                     cmd = cmd.inverted();
                 }
+                if !p.keyframes.is_empty() {
+                    cmd = cmd.with_keyframes(p.keyframes);
+                }
+                if let Some(tracking_source_id) = p.tracking_source_id {
+                    cmd = cmd.with_tracking_source_id(tracking_source_id);
+                }
                 Box::new(cmd)
             }
             CommandPayload::UpdateMask(p) => {
@@ -1818,6 +2021,12 @@ impl CommandPayload {
                 }
                 if let Some(locked) = p.locked {
                     cmd = cmd.with_locked(locked);
+                }
+                if let Some(keyframes) = p.keyframes {
+                    cmd = cmd.with_keyframes(keyframes);
+                }
+                if let Some(tracking_source_id) = p.tracking_source_id {
+                    cmd = cmd.with_tracking_source_id(tracking_source_id);
                 }
                 Box::new(cmd)
             }
@@ -1963,6 +2172,14 @@ pub fn validate_command_payload_against_project_state(
             |track| track.is_caption(),
         ),
         CommandPayload::UpdateCaption(payload) => validate_track_kind(
+            state,
+            command_type,
+            &payload.sequence_id,
+            &payload.track_id,
+            "caption",
+            |track| track.is_caption(),
+        ),
+        CommandPayload::SetCaptionTrackLanguage(payload) => validate_track_kind(
             state,
             command_type,
             &payload.sequence_id,
@@ -2276,6 +2493,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_add_effect_payload_supports_keyframes() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001",
+            "effectType": "gaussian_blur",
+            "params": {
+                "radius": 12.0
+            },
+            "keyframes": {
+                "radius": [
+                    {
+                        "timeOffset": 0.0,
+                        "value": 4.0,
+                        "easing": "linear"
+                    },
+                    {
+                        "timeOffset": 1.0,
+                        "value": 12.0,
+                        "easing": "ease_out"
+                    }
+                ]
+            }
+        });
+
+        let parsed = CommandPayload::parse("AddEffect".to_string(), payload);
+        match parsed {
+            Ok(CommandPayload::AddEffect(payload)) => {
+                assert_eq!(payload.keyframes.get("radius").map(Vec::len), Some(2));
+            }
+            other => panic!("expected AddEffect with keyframes to parse, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_ripple_delete_payload_supports_legacy_ai_shape() {
         let payload = serde_json::json!({
             "sequenceId": "seq_001",
@@ -2319,6 +2571,64 @@ mod tests {
     }
 
     #[test]
+    fn parse_set_clip_motion_keyframes_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001",
+            "keyframes": [
+                {
+                    "timeOffset": 0.0,
+                    "interpolation": "linear",
+                    "transform": {
+                        "position": { "x": 0.5, "y": 0.5 },
+                        "scale": { "x": 1.0, "y": 1.0 },
+                        "rotationDeg": 0.0,
+                        "anchor": { "x": 0.5, "y": 0.5 }
+                    }
+                }
+            ]
+        });
+
+        let parsed = CommandPayload::parse("SetClipMotionKeyframes".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected SetClipMotionKeyframes to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::SetClipMotionKeyframes(inner)) = parsed {
+            assert_eq!(inner.sequence_id, "seq_001");
+            assert_eq!(inner.track_id, "track_001");
+            assert_eq!(inner.clip_id, "clip_001");
+            assert_eq!(inner.keyframes.len(), 1);
+            assert_eq!(inner.keyframes[0].time_offset, 0.0);
+        }
+    }
+
+    #[test]
+    fn parse_set_clip_opacity_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001",
+            "opacity": 0.45
+        });
+
+        let parsed = CommandPayload::parse("SetClipOpacity".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected SetClipOpacity to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::SetClipOpacity(inner)) = parsed {
+            assert_eq!(inner.sequence_id, "seq_001");
+            assert_eq!(inner.track_id, "track_001");
+            assert_eq!(inner.clip_id, "clip_001");
+            assert!((inner.opacity - 0.45).abs() < 0.001);
+        }
+    }
+
+    #[test]
     fn parse_set_clip_speed_payload_is_supported() {
         let payload = serde_json::json!({
             "sequenceId": "seq_001",
@@ -2336,6 +2646,25 @@ mod tests {
         if let Ok(CommandPayload::SetClipSpeed(inner)) = parsed {
             assert!(!inner.reverse, "reverse should default to false");
         }
+    }
+
+    #[test]
+    fn parse_set_clip_slow_motion_interpolation_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001",
+            "interpolation": "motionCompensated",
+        });
+
+        let parsed = CommandPayload::parse("SetClipSlowMotionInterpolation".to_string(), payload);
+        assert!(
+            matches!(
+                parsed,
+                Ok(CommandPayload::SetClipSlowMotionInterpolation(_))
+            ),
+            "expected SetClipSlowMotionInterpolation to parse, got: {parsed:?}"
+        );
     }
 
     #[test]
@@ -2385,6 +2714,8 @@ mod tests {
             "pan": 0.2,
             "fadeInSec": 1.25,
             "fadeOutSec": 0.75,
+            "audioRole": "dialogue",
+            "audioTags": ["interview", "lav"],
         });
 
         let parsed = CommandPayload::parse("SetClipAudio".to_string(), payload);
@@ -2392,6 +2723,13 @@ mod tests {
             matches!(parsed, Ok(CommandPayload::SetClipAudio(_))),
             "expected SetClipAudio to parse, got: {parsed:?}"
         );
+        if let Ok(CommandPayload::SetClipAudio(p)) = parsed {
+            assert_eq!(p.audio_role.as_deref(), Some("dialogue"));
+            assert_eq!(
+                p.audio_tags,
+                Some(vec!["interview".to_string(), "lav".to_string()])
+            );
+        }
     }
 
     #[test]
@@ -2420,6 +2758,48 @@ mod tests {
 
         let parsed = CommandPayload::parse("SetTrackBlendMode".to_string(), payload);
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn parse_set_track_volume_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "volume": 0.5,
+        });
+
+        let parsed = CommandPayload::parse("SetTrackVolume".to_string(), payload);
+        assert!(
+            matches!(parsed, Ok(CommandPayload::SetTrackVolume(_))),
+            "expected SetTrackVolume to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::SetTrackVolume(p)) = parsed {
+            assert_eq!(p.sequence_id, "seq_001");
+            assert_eq!(p.track_id, "track_001");
+            assert!((p.volume - 0.5).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn parse_set_caption_track_language_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_caption_001",
+            "language": "ko",
+        });
+
+        let parsed = CommandPayload::parse("SetCaptionTrackLanguage".to_string(), payload);
+        assert!(
+            matches!(parsed, Ok(CommandPayload::SetCaptionTrackLanguage(_))),
+            "expected SetCaptionTrackLanguage to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::SetCaptionTrackLanguage(p)) = parsed {
+            assert_eq!(p.sequence_id, "seq_001");
+            assert_eq!(p.track_id, "track_caption_001");
+            assert_eq!(p.language, "ko");
+        }
     }
 
     #[test]
@@ -2895,6 +3275,65 @@ mod tests {
     }
 
     #[test]
+    fn parse_add_mask_payload_supports_tracking_keyframes() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "video_001",
+            "clipId": "clip_001",
+            "effectId": "eff_001",
+            "shape": {
+                "type": "rectangle",
+                "x": 0.4,
+                "y": 0.5,
+                "width": 0.3,
+                "height": 0.2,
+                "cornerRadius": 0.0,
+                "rotation": 0.0
+            },
+            "keyframes": [
+                {
+                    "timeOffset": 0.0,
+                    "shape": {
+                        "type": "rectangle",
+                        "x": 0.4,
+                        "y": 0.5,
+                        "width": 0.3,
+                        "height": 0.2,
+                        "cornerRadius": 0.0,
+                        "rotation": 0.0
+                    },
+                    "easing": "linear"
+                },
+                {
+                    "timeOffset": 0.5,
+                    "shape": {
+                        "type": "rectangle",
+                        "x": 0.5,
+                        "y": 0.55,
+                        "width": 0.3,
+                        "height": 0.2,
+                        "cornerRadius": 0.0,
+                        "rotation": 0.0
+                    },
+                    "easing": "linear"
+                }
+            ],
+            "trackingSourceId": "tracking-effect-001"
+        });
+
+        let parsed = CommandPayload::parse("AddMask".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected AddMask with tracking keyframes to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::AddMask(p)) = parsed {
+            assert_eq!(p.keyframes.len(), 2);
+            assert_eq!(p.tracking_source_id.as_deref(), Some("tracking-effect-001"));
+        }
+    }
+
+    #[test]
     fn parse_update_mask_payload() {
         let payload = serde_json::json!({
             "effectId": "eff_001",
@@ -2917,6 +3356,40 @@ mod tests {
             assert_eq!(p.feather, Some(0.2));
             assert_eq!(p.opacity, Some(0.8));
             assert_eq!(p.inverted, Some(true));
+        }
+    }
+
+    #[test]
+    fn parse_update_mask_payload_supports_tracking_keyframes() {
+        let payload = serde_json::json!({
+            "effectId": "eff_001",
+            "maskId": "mask_001",
+            "keyframes": [
+                {
+                    "timeOffset": 0.0,
+                    "shape": {
+                        "type": "ellipse",
+                        "x": 0.5,
+                        "y": 0.5,
+                        "radiusX": 0.2,
+                        "radiusY": 0.1,
+                        "rotation": 0.0
+                    },
+                    "easing": "linear"
+                }
+            ],
+            "trackingSourceId": "tracking-effect-002"
+        });
+
+        let parsed = CommandPayload::parse("UpdateMask".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected UpdateMask with tracking keyframes to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::UpdateMask(p)) = parsed {
+            assert_eq!(p.keyframes.as_ref().map(Vec::len), Some(1));
+            assert_eq!(p.tracking_source_id.as_deref(), Some("tracking-effect-002"));
         }
     }
 

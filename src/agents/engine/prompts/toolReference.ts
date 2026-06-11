@@ -85,6 +85,8 @@ const EDIT_ACTIONS = `## Edit Actions (meta-tool: edit, all require sequenceId)
 - split_timeline_by_interval(intervalSeconds, includeVideo?, includeAudio?, startTime?, endTime?) → split unlocked timeline clips at regular boundaries across video and/or audio tracks
 - delete_clip(trackId, clipId) → remove clip from timeline
 - delete_clips_in_range(startTime, endTime, trackId?) → bulk remove by time range
+- get_transcript_words(assetId, query?, startSec?, endSec?) → inspect transcript word timings before text-based edits
+- delete_transcript_range(trackId, clipId, startSec, endSec, evidenceText) → ripple-delete a source transcript range only after citing the exact transcript evidence
 - change_clip_speed(trackId, clipId, speed) → speed 0.1–10.0, duration auto-adjusts
 - freeze_frame(trackId, clipId, frameTime, duration?) → still image at time (default 2s)
 - ripple_edit(trackId, clipId, trimEnd) → trim clip end + shift all subsequent clips to close gap
@@ -102,16 +104,18 @@ const EDIT_ACTIONS = `## Edit Actions (meta-tool: edit, all require sequenceId)
 
 const AUDIO_ACTIONS = `## Audio Actions (meta-tool: audio, require sequenceId + trackId)
 - adjust_volume(clipId?, volume) → set volume 0–200% (omit clipId for whole track)
+- SetTrackVolume is the command-log path for mixer track faders; SetClipAudio remains the clip gain/pan/fade path
 - add_fade_in(clipId, duration) → fade-in at clip start
 - add_fade_out(clipId, duration) → fade-out at clip end
 - mute_clip(clipId, muted) → mute/unmute single clip
 - mute_track(muted) → mute/unmute entire track
-- normalize_audio(clipId, targetLevel?) → normalize to dB target (default -3dB)`;
+- normalize_audio(clipId, targetLufs?, targetLra?, truePeak?) → add loudness_normalize for export LUFS normalization (default -14 LUFS)`;
 
 const EFFECTS_ACTIONS = `## Effects Actions (meta-tool: effects)
 - add_effect(trackId, clipId, effectType, parameters?) → apply blur/brightness/contrast/saturation
-- add_mask(trackId, clipId, effectId, shape, feather?, inverted?) → apply a spatial power-window mask to an effect, commonly after plan_semantic_clip_edit returns AddMask drafts
-- update_mask(effectId, maskId, shape?/feather?/opacity?/expansion?/enabled?) → refine a mask after visual review
+- add_mask(trackId, clipId, effectId, shape, feather?, inverted?, keyframes?, trackingSourceId?) → apply a spatial power-window mask to an effect, commonly after plan_semantic_clip_edit returns AddMask drafts
+- privacy blur/mosaic workflow: add_effect with gaussian_blur or pixelate, read the created effectId, then add_mask with an editable rectangle/ellipse shape; when object_tracking data exists, include mask keyframes and trackingSourceId so the blur follows the subject
+- update_mask(effectId, maskId, shape?/feather?/opacity?/expansion?/enabled?/keyframes?/trackingSourceId?) → refine a mask after visual review or replace tracking-assisted mask animation
 - remove_mask(effectId, maskId) → remove one mask from an effect
 - remove_effect(trackId, clipId, effectId) → remove one effect
 - adjust_effect_param(trackId, clipId, effectId, paramName, paramValue) → tune effect parameter
@@ -127,6 +131,7 @@ Editable text overlays default to the active sequence when sequenceId is omitted
 - Use caption-track actions for semantic timed subtitles/captions and AI transcript import.
 - list_text_clips() → inspect editable text overlay clips with textData, style, transform, trackId, and clipId
 - add_text_clip(text, startTime, duration?, endTime?, trackId?, preset?, style?, position?, x?, y?, xPercent?, yPercent?, shadow?, outline?, transform?, autoPlacement?, placementIntent?) → add editable on-video text; video text track auto-created if needed. Auto-placement is on by default when no explicit position is supplied.
+- Text presets: title/centered-title, epic-title, chapter-title, lower_third/lower-third, lower-third-news, lower-third-name-role, subtitle, callout, callout-stat, credits/credits-block, credit-line, logo-bug, social-handle, quote, watermark, countdown.
 - update_text_clip(clipId, text?, style?, fontFamily?, fontSize?, fontWeight?, color?, backgroundColor?, backgroundPadding?, alignment?, bold?, italic?, underline?, lineHeight?, letterSpacing?, position?, x?, y?, shadow?, outline?, clearShadow?, clearOutline?, clearBackground?, opacity?, rotation?, transform?, autoPlacement?) → edit text content, font, size, weight, color, outline, shadow, background, rotation, opacity, and transform
 - set_text_transform(clipId, transform? or transformX/transformY/scaleX/scaleY/rotationDeg/anchorX/anchorY) → move, resize, rotate, or re-anchor a text clip
 - delete_text_clip(clipId) → remove an editable text overlay clip
@@ -140,7 +145,7 @@ Editable text overlays default to the active sequence when sequenceId is omitted
 - auto_transcribe_sequence(sequenceId?, language?, model?) → transcribe the audible edited timeline mix into timeline-relative segments
 - add_captions_from_transcription(segments, trackId?, replaceExisting?) → create captions from timed transcript segments as one atomic caption import
 - import_captions_from_file(relativePath, format?, trackId?) → import SRT/VTT subtitle files from the workspace
-- Placement defaults: add_text_clip auto-places when no exact position is supplied, scoring default candidate regions against available faces/objects/OCR annotations and existing text. Use autoPlacement:false only when the user explicitly wants the preset's raw position.`;
+- Placement defaults: add_text_clip auto-places title/lower-third/subtitle/callout presets when no exact position is supplied, scoring default candidate regions against available faces/objects/OCR annotations and existing text. Credit, brand, watermark, and quote presets preserve their template position unless autoPlacement:true or a placement override is supplied.`;
 
 const GENERATE_ACTIONS = `## Generate Actions (meta-tool: generate)
 - generate_timeline_media(prompt, mediaType?, provider?, sequenceId?, trackId?, timelineStart?) → submit provider-neutral generation or SFX discovery; video jobs can create a pending marker and auto-place when ready
@@ -203,14 +208,14 @@ const COMMON_WORKFLOWS = `## Common Workflows
 11. Generative edit: generate_timeline_media with sequenceId/trackId/timelineStart creates a pending timeline marker and stores placement intent; the generation store imports and places the asset when the provider job completes. Use resolve_generation_job for explicit status checks.
 12. SFX discovery/import: search_sound_for_scene → present usable candidates and license policy → import_asset_candidate only with licenseAck=true → insert_clip on an audio track.
 13. AI subtitles: transcription_status() → install_whisper_model(model?) when approved and needed → auto_transcribe_sequence(sequenceId?) for edited timeline audio or auto_transcribe(assetId) for source assets → inspect returned segments → add_captions_from_transcription(segments, replaceExisting?) → style_caption for readable typography when needed.
-14. Editable on-video text: list_text_clips when editing existing text, otherwise add_text_clip with preset and style → set_text_transform for exact preview position/size/rotation.
+14. Editable on-video text: list_text_clips when editing existing text, otherwise add_text_clip with preset and style. Use production presets for common jobs: credits for end cards, logo-bug for channel marks, social-handle for creator IDs, lower-third-name-role for interviews, and callout-stat for numeric emphasis → set_text_transform for exact preview position/size/rotation.
 15. If the user asks to save the analysis as a file but does not specify a location, do not add a separate write step: source-analysis tools already save "<asset-name>.analysis.md" beside the asset by default. Use write_workspace_document only for a custom second copy/path.`;
 
 const CLI_REFERENCE = `## CLI (headless alternative)
 openreelio-cli <group> <command> --path <dir> [--args]
 Groups: project, asset, analysis, timeline, caption, text, transcription, plan, state, render
 Key analysis commands: analysis report --path <dir> --id <asset_id>, analysis search --path <dir> --id <asset_id> --query "crowd cheer", analysis search-library --path <dir> --query "crowd cheer", analysis build-selects --path <dir> --query "crowd cheer"
-Key text commands: text add --text "Title" --start 0 --duration 3 --preset title --font-family Inter --font-size 72 --x 0.5 --y 0.2, text update --id <clip_id> --font-weight 700 --color "#FFFFFF", text transform --id <clip_id> --x 0.5 --y 0.82 --scale-x 1.1 --scale-y 1.1
+Key text commands: text add --text "Title" --start 0 --preset title --font-family Inter --font-size 72 --x 0.5 --y 0.2, text add --text "Directed by OpenReelio" --start 90 --preset credits, text update --id <clip_id> --font-weight 700 --color "#FFFFFF", text transform --id <clip_id> --x 0.5 --y 0.82 --scale-x 1.1 --scale-y 1.1
 Key transcription commands: transcription status, transcription install --model large-v3-turbo, transcription generate --path <dir> --asset <asset_id> --language auto --model auto --import, transcription generate-sequence --path <dir> --sequence <seq_id> --language auto --model auto --import
 Key: plan execute --file <plan.json> for atomic batch operations
 Run help-json for machine-readable full schema.`;

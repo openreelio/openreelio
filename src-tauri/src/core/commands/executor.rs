@@ -1066,6 +1066,14 @@ impl CommandExecutor {
                     "thumbnailUrl": asset.thumbnail_url.clone(),
                     "proxyStatus": asset.proxy_status,
                     "proxyUrl": asset.proxy_url.clone(),
+                    "uri": asset.uri.clone(),
+                    "durationSec": asset.duration_sec,
+                    "fileSize": asset.file_size,
+                    "video": asset.video.clone(),
+                    "audio": asset.audio.clone(),
+                    "relativePath": asset.relative_path.clone(),
+                    "workspaceManaged": asset.workspace_managed,
+                    "missing": asset.missing,
                 }))
             }
 
@@ -1897,6 +1905,7 @@ impl CommandExecutor {
             | "SetClipTransform"
             | "SetClipAudio"
             | "SetClipSpeed"
+            | "SetClipSlowMotionInterpolation"
             | "SetClipBlendMode"
             | "AddAudioKeyframe"
             | "RemoveAudioKeyframe"
@@ -1916,7 +1925,9 @@ impl CommandExecutor {
             "RemoveTrack" | "DeleteTrack" => OpKind::TrackRemove,
             "ReorderTracks" => OpKind::TrackReorder,
             "RenameTrack"
+            | "SetCaptionTrackLanguage"
             | "SetTrackBlendMode"
+            | "SetTrackVolume"
             | "ToggleTrackMute"
             | "ToggleTrackLock"
             | "ToggleTrackVisibility"

@@ -10,7 +10,7 @@
  */
 
 import { nanoid } from 'nanoid';
-import type { WaveformData, Color, ClipId, TrackId, SequenceId } from '@/types';
+import type { WaveformData, Color, Clip, ClipId, TrackId, SequenceId } from '@/types';
 
 // =============================================================================
 // Types
@@ -41,6 +41,9 @@ export interface MulticamAngle {
   /** Audio sync offset in seconds (relative to first angle) */
   syncOffsetSec?: number;
 }
+
+/** Supported source synchronization methods for creating multicam groups. */
+export type MulticamSyncMethod = 'waveform' | 'timecode' | 'inOut' | 'marker' | 'manual';
 
 /**
  * An angle switch point within a multicam group.
@@ -97,6 +100,39 @@ export interface CreateMulticamGroupOptions {
   durationSec: number;
   activeAngleIndex?: number;
   audioMixMode?: AudioMixMode;
+}
+
+/** Source clip data used to build a synchronized multicam group. */
+export interface MulticamSyncClipSource {
+  clip: Pick<Clip, 'id' | 'range' | 'place' | 'speed' | 'label' | 'color'>;
+  trackId: TrackId;
+  label?: string;
+  color?: Color;
+  hasAudio?: boolean;
+  waveform?: WaveformData;
+  /** Absolute source timecode at the selected source in point, in seconds. */
+  timecodeStartSec?: number;
+  /** Source-local sync marker time, in seconds. */
+  markerSec?: number;
+}
+
+/** Options for creating a synchronized multicam group from selected clips. */
+export interface CreateSynchronizedMulticamGroupOptions {
+  sequenceId: SequenceId;
+  name: string;
+  sources: MulticamSyncClipSource[];
+  method: MulticamSyncMethod;
+  referenceClipId?: ClipId;
+  timelineInSec?: number;
+  maxOffsetSec?: number;
+  activeAngleIndex?: number;
+  audioMixMode?: AudioMixMode;
+}
+
+/** Result of synchronized multicam group creation. */
+export interface SynchronizedMulticamGroupResult {
+  group: MulticamGroup;
+  warnings: string[];
 }
 
 /** Validation result for multicam operations */
@@ -168,6 +204,145 @@ export function createMulticamGroup(options: CreateMulticamGroupOptions): Multic
   };
 }
 
+function finiteOr(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function clipDurationSec(source: MulticamSyncClipSource): number {
+  const explicitDuration = finiteOr(source.clip.place.durationSec, 0);
+  if (explicitDuration > 0) {
+    return explicitDuration;
+  }
+
+  const speed = Math.max(Math.abs(finiteOr(source.clip.speed, 1)), 0.0001);
+  return Math.max(0, (source.clip.range.sourceOutSec - source.clip.range.sourceInSec) / speed);
+}
+
+function getReferenceSource(
+  sources: MulticamSyncClipSource[],
+  referenceClipId?: ClipId,
+): MulticamSyncClipSource {
+  if (!referenceClipId) {
+    return sources[0];
+  }
+
+  const reference = sources.find((source) => source.clip.id === referenceClipId);
+  if (!reference) {
+    throw new Error(`Reference clip '${referenceClipId}' was not found`);
+  }
+
+  return reference;
+}
+
+function requireFiniteSyncValue(value: number | undefined, label: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`${label} is required for this multicam sync method`);
+  }
+
+  return value;
+}
+
+function calculateSyncOffsetSec(
+  method: MulticamSyncMethod,
+  reference: MulticamSyncClipSource,
+  source: MulticamSyncClipSource,
+  maxOffsetSec: number,
+): number {
+  switch (method) {
+    case 'waveform': {
+      if (source.clip.id === reference.clip.id) {
+        return 0;
+      }
+
+      if (!reference.waveform || !source.waveform) {
+        throw new Error('Waveform sync requires waveform data for every source clip');
+      }
+
+      return findAudioSyncOffset(reference.waveform, source.waveform, { maxOffsetSec }).offsetSec;
+    }
+    case 'timecode': {
+      const referenceTimecode = requireFiniteSyncValue(
+        reference.timecodeStartSec,
+        'Reference timecodeStartSec',
+      );
+      const sourceTimecode = requireFiniteSyncValue(source.timecodeStartSec, 'timecodeStartSec');
+      return sourceTimecode - referenceTimecode;
+    }
+    case 'marker': {
+      const referenceMarker = requireFiniteSyncValue(reference.markerSec, 'Reference markerSec');
+      const sourceMarker = requireFiniteSyncValue(source.markerSec, 'markerSec');
+      return referenceMarker - sourceMarker;
+    }
+    case 'manual':
+      return source.clip.place.timelineInSec - reference.clip.place.timelineInSec;
+    case 'inOut':
+      return 0;
+    default:
+      return 0;
+  }
+}
+
+function calculateSynchronizedDuration(
+  sources: MulticamSyncClipSource[],
+  offsets: number[],
+): { durationSec: number; warnings: string[] } {
+  const starts = offsets.map((offset) => Math.max(0, offset));
+  const ends = sources.map((source, index) => offsets[index] + clipDurationSec(source));
+  const commonStart = Math.max(0, ...starts);
+  const commonEnd = Math.min(...ends);
+  const durationSec = Math.max(0, commonEnd - commonStart);
+  const warnings: string[] = [];
+
+  if (durationSec <= 0) {
+    warnings.push('Synchronized clips do not have an overlapping duration');
+  }
+
+  return { durationSec, warnings };
+}
+
+/**
+ * Creates a multicam group from selected clips using a synchronization method.
+ */
+export function createSynchronizedMulticamGroup(
+  options: CreateSynchronizedMulticamGroupOptions,
+): SynchronizedMulticamGroupResult {
+  const sources = options.sources.filter((source) => source.clip);
+
+  if (sources.length < 2) {
+    throw new Error(
+      'At least two source clips are required to create a synchronized multicam group',
+    );
+  }
+
+  const reference = getReferenceSource(sources, options.referenceClipId);
+  const maxOffsetSec = options.maxOffsetSec ?? 10;
+  const offsets = sources.map((source) =>
+    calculateSyncOffsetSec(options.method, reference, source, maxOffsetSec),
+  );
+  const { durationSec, warnings } = calculateSynchronizedDuration(sources, offsets);
+  const timelineInSec =
+    options.timelineInSec ?? Math.max(0, finiteOr(reference.clip.place.timelineInSec, 0));
+
+  const group = createMulticamGroup({
+    sequenceId: options.sequenceId,
+    name: options.name,
+    timelineInSec,
+    durationSec,
+    activeAngleIndex: options.activeAngleIndex,
+    audioMixMode: options.audioMixMode,
+    angles: sources.map((source, index) => ({
+      clipId: source.clip.id,
+      trackId: source.trackId,
+      label: source.label ?? source.clip.label ?? `Angle ${index + 1}`,
+      color: source.color ?? source.clip.color,
+      hasAudio: source.hasAudio,
+      syncOffsetSec: offsets[index],
+    })),
+  });
+
+  return { group, warnings };
+}
+
 /**
  * Validates a multicam group for consistency.
  */
@@ -223,7 +398,7 @@ export function normalizeWaveformPeaks(peaks: number[]): number[] {
 export function calculateCrossCorrelation(
   signal1: number[],
   signal2: number[],
-  offset: number
+  offset: number,
 ): number {
   if (signal1.length === 0 || signal2.length === 0) return 0;
 
@@ -277,7 +452,7 @@ function validateWaveformData(waveform: WaveformData, name: string): string[] {
 export function findAudioSyncOffset(
   waveform1: WaveformData,
   waveform2: WaveformData,
-  options: AudioSyncOptions = {}
+  options: AudioSyncOptions = {},
 ): AudioSyncResult {
   // Validate inputs
   const errors = [
@@ -346,10 +521,7 @@ export function canSyncAngles(angles: MulticamAngle[]): boolean {
 /**
  * Adds a new angle to a multicam group.
  */
-export function addAngleToGroup(
-  group: MulticamGroup,
-  angle: MulticamAngle
-): MulticamGroup {
+export function addAngleToGroup(group: MulticamGroup, angle: MulticamAngle): MulticamGroup {
   return {
     ...group,
     angles: [...group.angles, angle],
@@ -360,10 +532,7 @@ export function addAngleToGroup(
 /**
  * Removes an angle from a multicam group by ID.
  */
-export function removeAngleFromGroup(
-  group: MulticamGroup,
-  angleId: string
-): MulticamGroup {
+export function removeAngleFromGroup(group: MulticamGroup, angleId: string): MulticamGroup {
   const angleIndex = group.angles.findIndex((a) => a.id === angleId);
   if (angleIndex === -1) return group;
 
@@ -377,7 +546,7 @@ export function removeAngleFromGroup(
 
   // Remove angle switches that reference the removed angle
   const newSwitches = group.angleSwitches.filter(
-    (sw) => sw.fromAngleIndex !== angleIndex && sw.toAngleIndex !== angleIndex
+    (sw) => sw.fromAngleIndex !== angleIndex && sw.toAngleIndex !== angleIndex,
   );
 
   // Adjust switch indices for removed angle
@@ -399,10 +568,7 @@ export function removeAngleFromGroup(
 /**
  * Switches the active angle in a multicam group.
  */
-export function switchActiveAngle(
-  group: MulticamGroup,
-  newAngleIndex: number
-): MulticamGroup {
+export function switchActiveAngle(group: MulticamGroup, newAngleIndex: number): MulticamGroup {
   if (newAngleIndex < 0 || newAngleIndex >= group.angles.length) {
     throw new Error('Invalid angle index');
   }
@@ -437,7 +603,7 @@ export function createAngleSwitchPoint(options: CreateAngleSwitchOptions): Angle
  */
 export function validateAngleSwitch(
   switchPoint: AngleSwitch,
-  group: MulticamGroup
+  group: MulticamGroup,
 ): AngleSwitchValidationResult {
   const groupStart = group.timelineInSec;
   const groupEnd = groupStart + group.durationSec;
@@ -475,10 +641,7 @@ export function validateAngleSwitch(
   }
 
   // Check transition duration for non-cut transitions
-  if (
-    switchPoint.transitionType !== 'cut' &&
-    switchPoint.transitionDurationSec !== undefined
-  ) {
+  if (switchPoint.transitionType !== 'cut' && switchPoint.transitionDurationSec !== undefined) {
     if (switchPoint.transitionDurationSec <= 0) {
       return {
         valid: false,
@@ -500,10 +663,7 @@ export function validateAngleSwitch(
 /**
  * Gets the active angle at a specific timeline time.
  */
-export function getAngleAtTime(
-  group: MulticamGroup,
-  timeSec: number
-): AngleAtTimeResult | null {
+export function getAngleAtTime(group: MulticamGroup, timeSec: number): AngleAtTimeResult | null {
   const groupStart = group.timelineInSec;
   const groupEnd = groupStart + group.durationSec;
 
@@ -538,7 +698,7 @@ export function getAngleAtTime(
 export function getAngleSwitchesInRange(
   switches: AngleSwitch[],
   startSec: number,
-  endSec: number
+  endSec: number,
 ): AngleSwitch[] {
   return switches.filter((sw) => sw.timeSec >= startSec && sw.timeSec <= endSec);
 }
@@ -566,7 +726,7 @@ export function calculateGroupDuration(group: MulticamGroup): number {
  */
 export function mergeOverlappingGroups(
   group1: MulticamGroup,
-  group2: MulticamGroup
+  group2: MulticamGroup,
 ): MulticamGroup {
   const start1 = group1.timelineInSec;
   const end1 = start1 + group1.durationSec;
@@ -612,7 +772,7 @@ export function mergeOverlappingGroups(
  */
 export function splitMulticamGroup(
   group: MulticamGroup,
-  splitTimeSec: number
+  splitTimeSec: number,
 ): [MulticamGroup, MulticamGroup] {
   const groupStart = group.timelineInSec;
   const groupEnd = groupStart + group.durationSec;

@@ -55,9 +55,7 @@ describe('AudioMixerPanel', () => {
     });
 
     it('should render with video tracks', () => {
-      const tracks = [
-        createMockTrack({ id: 'video_1', kind: 'video', name: 'Video 1' }),
-      ];
+      const tracks = [createMockTrack({ id: 'video_1', kind: 'video', name: 'Video 1' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
@@ -65,9 +63,7 @@ describe('AudioMixerPanel', () => {
     });
 
     it('should render master channel', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio', name: 'Audio 1' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio', name: 'Audio 1' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
@@ -87,9 +83,7 @@ describe('AudioMixerPanel', () => {
     });
 
     it('should render track name labels', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio', name: 'Voice Over' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio', name: 'Voice Over' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
@@ -127,14 +121,13 @@ describe('AudioMixerPanel', () => {
 
     it('should call onVolumeChange when fader is moved', () => {
       const onVolumeChange = vi.fn();
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio', volume: 1.0 }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio', volume: 1.0 })];
 
       render(<AudioMixerPanel tracks={tracks} onVolumeChange={onVolumeChange} />);
 
-      const faderTrack = within(screen.getByTestId('mixer-channel-audio_1'))
-        .getByTestId('fader-track');
+      const faderTrack = within(screen.getByTestId('mixer-channel-audio_1')).getByTestId(
+        'fader-track',
+      );
 
       // Simulate fader drag
       fireEvent.mouseDown(faderTrack, { clientY: 100 });
@@ -144,16 +137,14 @@ describe('AudioMixerPanel', () => {
 
     it('should call onMasterVolumeChange when master fader is moved', () => {
       const onMasterVolumeChange = vi.fn();
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(
         <AudioMixerPanel
           tracks={tracks}
           masterVolume={1.0}
           onMasterVolumeChange={onMasterVolumeChange}
-        />
+        />,
       );
 
       const masterChannel = screen.getByTestId('mixer-channel-master');
@@ -171,28 +162,26 @@ describe('AudioMixerPanel', () => {
 
   describe('mute control', () => {
     it('should show muted state for muted tracks', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio', muted: true }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio', muted: true })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
-      const muteButton = within(screen.getByTestId('mixer-channel-audio_1'))
-        .getByTestId('mute-button');
+      const muteButton = within(screen.getByTestId('mixer-channel-audio_1')).getByTestId(
+        'mute-button',
+      );
 
       expect(muteButton).toHaveAttribute('aria-pressed', 'true');
     });
 
     it('should call onMuteToggle when mute button is clicked', () => {
       const onMuteToggle = vi.fn();
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio', muted: false }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio', muted: false })];
 
       render(<AudioMixerPanel tracks={tracks} onMuteToggle={onMuteToggle} />);
 
-      const muteButton = within(screen.getByTestId('mixer-channel-audio_1'))
-        .getByTestId('mute-button');
+      const muteButton = within(screen.getByTestId('mixer-channel-audio_1')).getByTestId(
+        'mute-button',
+      );
 
       fireEvent.click(muteButton);
 
@@ -201,16 +190,14 @@ describe('AudioMixerPanel', () => {
 
     it('should call onMasterMuteToggle when master mute is clicked', () => {
       const onMasterMuteToggle = vi.fn();
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(
         <AudioMixerPanel
           tracks={tracks}
           masterMuted={false}
           onMasterMuteToggle={onMasterMuteToggle}
-        />
+        />,
       );
 
       const masterChannel = screen.getByTestId('mixer-channel-master');
@@ -224,9 +211,7 @@ describe('AudioMixerPanel', () => {
 
   describe('solo control', () => {
     it('should show solo button for non-master tracks', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
@@ -235,9 +220,7 @@ describe('AudioMixerPanel', () => {
     });
 
     it('should not show solo button for master channel', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
@@ -247,14 +230,13 @@ describe('AudioMixerPanel', () => {
 
     it('should call onSoloToggle when solo button is clicked', () => {
       const onSoloToggle = vi.fn();
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(<AudioMixerPanel tracks={tracks} onSoloToggle={onSoloToggle} />);
 
-      const soloButton = within(screen.getByTestId('mixer-channel-audio_1'))
-        .getByTestId('solo-button');
+      const soloButton = within(screen.getByTestId('mixer-channel-audio_1')).getByTestId(
+        'solo-button',
+      );
 
       fireEvent.click(soloButton);
 
@@ -262,17 +244,40 @@ describe('AudioMixerPanel', () => {
     });
 
     it('should show soloed state for soloed tracks', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
       const soloedTrackIds = new Set(['audio_1']);
 
       render(<AudioMixerPanel tracks={tracks} soloedTrackIds={soloedTrackIds} />);
 
-      const soloButton = within(screen.getByTestId('mixer-channel-audio_1'))
-        .getByTestId('solo-button');
+      const soloButton = within(screen.getByTestId('mixer-channel-audio_1')).getByTestId(
+        'solo-button',
+      );
 
       expect(soloButton).toHaveAttribute('aria-pressed', 'true');
+    });
+  });
+
+  describe('auto ducking', () => {
+    it('should call onAutoDuck when the auto-duck button is clicked', () => {
+      const onAutoDuck = vi.fn();
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
+
+      render(<AudioMixerPanel tracks={tracks} onAutoDuck={onAutoDuck} />);
+
+      fireEvent.click(screen.getByTestId('auto-duck-button'));
+
+      expect(onAutoDuck).toHaveBeenCalledTimes(1);
+    });
+
+    it('should disable the auto-duck button while ducking is in progress', () => {
+      const onAutoDuck = vi.fn();
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
+
+      render(<AudioMixerPanel tracks={tracks} onAutoDuck={onAutoDuck} isAutoDucking />);
+
+      const button = screen.getByTestId('auto-duck-button');
+      expect(button).toBeDisabled();
+      expect(button).toHaveTextContent('Ducking...');
     });
   });
 
@@ -282,9 +287,7 @@ describe('AudioMixerPanel', () => {
 
   describe('pan control', () => {
     it('should render pan control for audio tracks', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
@@ -293,9 +296,7 @@ describe('AudioMixerPanel', () => {
     });
 
     it('should render pan control for video tracks', () => {
-      const tracks = [
-        createMockTrack({ id: 'video_1', kind: 'video' }),
-      ];
+      const tracks = [createMockTrack({ id: 'video_1', kind: 'video' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
@@ -304,9 +305,7 @@ describe('AudioMixerPanel', () => {
     });
 
     it('should not render pan control for master channel', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
@@ -316,14 +315,13 @@ describe('AudioMixerPanel', () => {
 
     it('should call onPanChange when pan control is changed', () => {
       const onPanChange = vi.fn();
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(<AudioMixerPanel tracks={tracks} onPanChange={onPanChange} />);
 
-      const panControl = within(screen.getByTestId('mixer-channel-audio_1'))
-        .getByTestId('pan-control');
+      const panControl = within(screen.getByTestId('mixer-channel-audio_1')).getByTestId(
+        'pan-control',
+      );
 
       fireEvent.change(panControl, { target: { value: '0.5' } });
 
@@ -337,9 +335,7 @@ describe('AudioMixerPanel', () => {
 
   describe('audio levels', () => {
     it('should display audio meter for each channel', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
@@ -348,12 +344,8 @@ describe('AudioMixerPanel', () => {
     });
 
     it('should pass levels to channel strip when provided', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
-      const trackLevels = new Map([
-        ['audio_1', { left: 0.5, right: 0.5 }],
-      ]);
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
+      const trackLevels = new Map([['audio_1', { left: 0.5, right: 0.5 }]]);
 
       render(<AudioMixerPanel tracks={tracks} trackLevels={trackLevels} />);
 
@@ -364,9 +356,7 @@ describe('AudioMixerPanel', () => {
     });
 
     it('should display master levels when provided', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
       const masterLevels = { left: 0.7, right: 0.7 };
 
       render(<AudioMixerPanel tracks={tracks} masterLevels={masterLevels} />);
@@ -383,9 +373,7 @@ describe('AudioMixerPanel', () => {
 
   describe('channel type styling', () => {
     it('should apply audio type styling to audio tracks', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
@@ -394,9 +382,7 @@ describe('AudioMixerPanel', () => {
     });
 
     it('should apply video type styling to video tracks', () => {
-      const tracks = [
-        createMockTrack({ id: 'video_1', kind: 'video' }),
-      ];
+      const tracks = [createMockTrack({ id: 'video_1', kind: 'video' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
@@ -405,9 +391,7 @@ describe('AudioMixerPanel', () => {
     });
 
     it('should apply master type styling to master channel', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
@@ -422,9 +406,7 @@ describe('AudioMixerPanel', () => {
 
   describe('disabled state', () => {
     it('should disable all controls when disabled prop is true', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(<AudioMixerPanel tracks={tracks} disabled={true} />);
 
@@ -445,9 +427,7 @@ describe('AudioMixerPanel', () => {
 
   describe('compact mode', () => {
     it('should render in compact mode when compact prop is true', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(<AudioMixerPanel tracks={tracks} compact={true} />);
 
@@ -461,28 +441,26 @@ describe('AudioMixerPanel', () => {
 
   describe('track pan state', () => {
     it('should display track pan when provided in trackPans map', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
       const trackPans = new Map([['audio_1', 0.5]]);
 
       render(<AudioMixerPanel tracks={tracks} trackPans={trackPans} />);
 
-      const panControl = within(screen.getByTestId('mixer-channel-audio_1'))
-        .getByTestId('pan-control') as HTMLInputElement;
+      const panControl = within(screen.getByTestId('mixer-channel-audio_1')).getByTestId(
+        'pan-control',
+      ) as HTMLInputElement;
 
       expect(panControl.value).toBe('0.5');
     });
 
     it('should default to center pan when not provided', () => {
-      const tracks = [
-        createMockTrack({ id: 'audio_1', kind: 'audio' }),
-      ];
+      const tracks = [createMockTrack({ id: 'audio_1', kind: 'audio' })];
 
       render(<AudioMixerPanel tracks={tracks} />);
 
-      const panControl = within(screen.getByTestId('mixer-channel-audio_1'))
-        .getByTestId('pan-control') as HTMLInputElement;
+      const panControl = within(screen.getByTestId('mixer-channel-audio_1')).getByTestId(
+        'pan-control',
+      ) as HTMLInputElement;
 
       expect(panControl.value).toBe('0');
     });
@@ -495,7 +473,7 @@ describe('AudioMixerPanel', () => {
   describe('scroll behavior', () => {
     it('should have horizontal scroll when many tracks', () => {
       const tracks = Array.from({ length: 10 }, (_, i) =>
-        createMockTrack({ id: `audio_${i}`, kind: 'audio', name: `Audio ${i}` })
+        createMockTrack({ id: `audio_${i}`, kind: 'audio', name: `Audio ${i}` }),
       );
 
       render(<AudioMixerPanel tracks={tracks} />);

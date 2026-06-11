@@ -589,6 +589,64 @@ describe('useClipDrag', () => {
     });
   });
 
+  describe('rate stretch drag', () => {
+    it('stretches the right edge by changing timeline duration without changing source range', () => {
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          initialSourceIn: 0,
+          initialSourceOut: 10,
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 500);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'rate-stretch-right');
+      });
+
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 510));
+      });
+
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 700));
+      });
+
+      expect(result.current.previewPosition?.timelineIn).toBe(5);
+      expect(result.current.previewPosition?.sourceIn).toBe(0);
+      expect(result.current.previewPosition?.sourceOut).toBe(10);
+      expect(result.current.previewPosition?.duration).toBeCloseTo(12, 5);
+    });
+
+    it('stretches the left edge by moving timelineIn and preserving source range', () => {
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          initialSourceIn: 0,
+          initialSourceOut: 10,
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'rate-stretch-left');
+      });
+
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 110));
+      });
+
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 300));
+      });
+
+      expect(result.current.previewPosition?.timelineIn).toBeCloseTo(7, 5);
+      expect(result.current.previewPosition?.sourceIn).toBe(0);
+      expect(result.current.previewPosition?.sourceOut).toBe(10);
+      expect(result.current.previewPosition?.duration).toBeCloseTo(8, 5);
+    });
+  });
+
   // ===========================================================================
   // Cleanup Tests
   // ===========================================================================
@@ -658,9 +716,7 @@ describe('useClipDrag', () => {
 
   describe('snap points integration', () => {
     it('should snap to nearby clip edge when snapPoints provided', () => {
-      const snapPoints = [
-        { time: 10, type: 'clip-end' as const, clipId: 'other-clip' },
-      ];
+      const snapPoints = [{ time: 10, type: 'clip-end' as const, clipId: 'other-clip' }];
 
       const { result } = renderHook(() =>
         useClipDrag({
@@ -695,9 +751,7 @@ describe('useClipDrag', () => {
     });
 
     it('should snap to playhead when within threshold', () => {
-      const snapPoints = [
-        { time: 15, type: 'playhead' as const },
-      ];
+      const snapPoints = [{ time: 15, type: 'playhead' as const }];
 
       const { result } = renderHook(() =>
         useClipDrag({
@@ -730,9 +784,7 @@ describe('useClipDrag', () => {
     });
 
     it('should NOT snap when outside threshold', () => {
-      const snapPoints = [
-        { time: 10, type: 'clip-end' as const, clipId: 'other-clip' },
-      ];
+      const snapPoints = [{ time: 10, type: 'clip-end' as const, clipId: 'other-clip' }];
 
       const { result } = renderHook(() =>
         useClipDrag({
@@ -765,9 +817,7 @@ describe('useClipDrag', () => {
     });
 
     it('should report active snap point when snapping', () => {
-      const snapPoints = [
-        { time: 10, type: 'clip-end' as const, clipId: 'other-clip' },
-      ];
+      const snapPoints = [{ time: 10, type: 'clip-end' as const, clipId: 'other-clip' }];
 
       const { result } = renderHook(() =>
         useClipDrag({
@@ -802,9 +852,7 @@ describe('useClipDrag', () => {
     });
 
     it('should clear active snap point when not snapping', () => {
-      const snapPoints = [
-        { time: 10, type: 'clip-end' as const, clipId: 'other-clip' },
-      ];
+      const snapPoints = [{ time: 10, type: 'clip-end' as const, clipId: 'other-clip' }];
 
       const { result } = renderHook(() =>
         useClipDrag({
@@ -910,9 +958,7 @@ describe('useClipDrag', () => {
     it('cleans up refs when component unmounts mid-drag', () => {
       const onDragEnd = vi.fn();
       const removeEventListenerSpy = vi.spyOn(document, 'removeEventListener');
-      const { result, unmount } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, onDragEnd }),
-      );
+      const { result, unmount } = renderHook(() => useClipDrag({ ...defaultOptions, onDragEnd }));
 
       // Start drag
       act(() => {
@@ -948,9 +994,7 @@ describe('useClipDrag', () => {
 
     it('does not call onDragEnd after unmount', () => {
       const onDragEnd = vi.fn();
-      const { result, unmount } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, onDragEnd }),
-      );
+      const { result, unmount } = renderHook(() => useClipDrag({ ...defaultOptions, onDragEnd }));
 
       // Start and exceed threshold
       act(() => {
@@ -977,9 +1021,7 @@ describe('useClipDrag', () => {
   describe('destructive: escape key cancellation', () => {
     it('cancels active drag on Escape without committing', () => {
       const onDragEnd = vi.fn();
-      const { result } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, onDragEnd }),
-      );
+      const { result } = renderHook(() => useClipDrag({ ...defaultOptions, onDragEnd }));
 
       // Start drag
       act(() => {
@@ -1005,9 +1047,7 @@ describe('useClipDrag', () => {
 
     it('cancels pending drag on Escape', () => {
       const onDragStart = vi.fn();
-      const { result } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, onDragStart }),
-      );
+      const { result } = renderHook(() => useClipDrag({ ...defaultOptions, onDragStart }));
 
       // Start pending drag (no threshold exceeded)
       act(() => {
@@ -1031,9 +1071,7 @@ describe('useClipDrag', () => {
   describe('destructive: window blur during drag', () => {
     it('cancels drag when window loses focus', () => {
       const onDragEnd = vi.fn();
-      const { result } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, onDragEnd }),
-      );
+      const { result } = renderHook(() => useClipDrag({ ...defaultOptions, onDragEnd }));
 
       // Start active drag
       act(() => {
@@ -1058,9 +1096,7 @@ describe('useClipDrag', () => {
 
   describe('destructive: zero and invalid zoom', () => {
     it('handles zero zoom without division by zero', () => {
-      const { result } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, zoom: 0 }),
-      );
+      const { result } = renderHook(() => useClipDrag({ ...defaultOptions, zoom: 0 }));
 
       act(() => {
         const event = createMouseEvent('mousedown', 100);
@@ -1077,9 +1113,7 @@ describe('useClipDrag', () => {
     });
 
     it('handles negative zoom without producing negative time', () => {
-      const { result } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, zoom: -50 }),
-      );
+      const { result } = renderHook(() => useClipDrag({ ...defaultOptions, zoom: -50 }));
 
       act(() => {
         const event = createMouseEvent('mousedown', 100);
@@ -1187,9 +1221,7 @@ describe('useClipDrag', () => {
   describe('destructive: rapid mousedown without mouseup', () => {
     it('handles rapid successive mousedowns gracefully', () => {
       const onDragStart = vi.fn();
-      const { result } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, onDragStart }),
-      );
+      const { result } = renderHook(() => useClipDrag({ ...defaultOptions, onDragStart }));
 
       // Multiple rapid mousedowns without mouseup between them
       for (let i = 0; i < 5; i++) {

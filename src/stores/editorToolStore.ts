@@ -39,6 +39,7 @@ export type EditorTool =
   | 'slide' // Slide edit - move clip while adjusting neighbors
   | 'ripple' // Ripple edit - move clip and shift all subsequent clips
   | 'roll' // Roll edit - adjust edit point between two adjacent clips
+  | 'rate-stretch' // Rate stretch edit - change clip speed by dragging an edge
   | 'hand'; // Pan/navigate timeline (H)
 
 /**
@@ -209,6 +210,13 @@ export const TOOL_CONFIGS: Record<EditorTool, ToolConfig> = {
     shortcut: 'N',
     cursor: 'col-resize',
     description: 'Adjust edit point between clips',
+  },
+  'rate-stretch': {
+    id: 'rate-stretch',
+    label: 'Rate Stretch Tool',
+    shortcut: 'R',
+    cursor: 'ew-resize',
+    description: 'Change clip speed by stretching its timeline duration',
   },
   hand: {
     id: 'hand',

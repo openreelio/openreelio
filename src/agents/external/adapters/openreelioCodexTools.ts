@@ -60,7 +60,9 @@ const OPENREELIO_COMMAND_TYPES = [
   'TrimClip',
   'SplitClip',
   'SetClipTransform',
+  'SetClipMotionKeyframes',
   'SetClipSpeed',
+  'SetClipSlowMotionInterpolation',
   'ReverseClip',
   'SetClipEnabled',
   'LinkClips',
@@ -80,6 +82,8 @@ const OPENREELIO_COMMAND_TYPES = [
   'SetAudioFadeIn',
   'SetAudioFadeOut',
   'SetTrackBlendMode',
+  'SetTrackVolume',
+  'SetCaptionTrackLanguage',
   'SetClipBlendMode',
   'ImportAsset',
   'RemoveAsset',
@@ -171,7 +175,9 @@ const ACTIVE_TIMELINE_SCOPED_COMMAND_TYPES = new Set<string>([
   'TrimClip',
   'SplitClip',
   'SetClipTransform',
+  'SetClipMotionKeyframes',
   'SetClipSpeed',
+  'SetClipSlowMotionInterpolation',
   'ReverseClip',
   'SetClipEnabled',
   'LinkClips',
@@ -191,6 +197,8 @@ const ACTIVE_TIMELINE_SCOPED_COMMAND_TYPES = new Set<string>([
   'SetAudioFadeIn',
   'SetAudioFadeOut',
   'SetTrackBlendMode',
+  'SetTrackVolume',
+  'SetCaptionTrackLanguage',
   'SetClipBlendMode',
   'SetMasterVolume',
   'CreateTrack',
@@ -230,7 +238,9 @@ const CLIP_TARGET_COMMAND_TYPES = new Set<string>([
   'TrimClip',
   'SplitClip',
   'SetClipTransform',
+  'SetClipMotionKeyframes',
   'SetClipSpeed',
+  'SetClipSlowMotionInterpolation',
   'ReverseClip',
   'SetClipEnabled',
   'DetachAudio',
@@ -347,11 +357,13 @@ const ANNOTATION_READ_SCHEMA: CodexJsonObject = {
 const CLIP_ANALYZE_SCHEMA_PROPERTIES: CodexJsonObject = {
   sequenceId: {
     type: 'string',
-    description: 'Optional target sequence ID. Defaults to the active timeline when omitted or stale.',
+    description:
+      'Optional target sequence ID. Defaults to the active timeline when omitted or stale.',
   },
   trackId: {
     type: 'string',
-    description: 'Optional timeline track ID. The active timeline clip location is resolved when omitted or stale.',
+    description:
+      'Optional timeline track ID. The active timeline clip location is resolved when omitted or stale.',
   },
   clipId: { type: 'string', description: 'Timeline clip ID to sample.' },
   mode: {
@@ -944,6 +956,7 @@ export function buildOpenReelioCodexDeveloperInstructions(
     '- Use openreelio.annotation_read for the source asset before deciding exact text placement that should avoid faces, objects, or existing OCR text.',
     '- Use openreelio.clip_analyze and openreelio.clip_describe for detailed clip-local frame evidence before choosing a highlight clip, placing timing-sensitive SFX, or making semantic visual edits.',
     '- Use openreelio.semantic_edit_plan after clip_describe when a semantic target needs ranges, draft edits, or spatial mask guidance.',
+    '- For privacy blur or mosaic, add gaussian_blur or pixelate through the command log, then add a rectangle or ellipse mask to the created effectId for editable region coverage. When object_tracking data exists, include AddMask keyframes plus trackingSourceId so region blur and object highlight masks follow the subject.',
     '- Use openreelio.transcription_status to check local Whisper readiness before promising automatic subtitles.',
     '- Use openreelio.transcription_generate before creating or replacing subtitles from speech. Pass clipId with sequenceId/trackId when captions must align to a timeline clip rather than the full source asset.',
     '- After openreelio.transcription_install_model or any other long-running tool, read openreelio.project_state or openreelio.timeline_snapshot again before the next mutation. Do not reuse a contextToken captured before that long-running operation.',
@@ -2754,7 +2767,9 @@ async function resolveClipReadTarget(
 
   if (state?.activeSequenceId) {
     const activeSequence = findSequenceById(state, state.activeSequenceId);
-    const activeLocation = activeSequence ? findClipLocationInSequence(activeSequence, clipId) : null;
+    const activeLocation = activeSequence
+      ? findClipLocationInSequence(activeSequence, clipId)
+      : null;
     if (activeLocation) {
       const notes: CodexJsonObject[] = [];
       if (requestedSequenceId !== state.activeSequenceId) {
@@ -3704,7 +3719,9 @@ function normalizePrimitiveMediaTrackTarget(
     return;
   }
 
-  const fallbackTrack = expectsAudioTrack ? chooseAudioTrack(sequence) : chooseMainMediaVideoTrack(sequence);
+  const fallbackTrack = expectsAudioTrack
+    ? chooseAudioTrack(sequence)
+    : chooseMainMediaVideoTrack(sequence);
   if (!fallbackTrack) {
     return;
   }
@@ -3809,8 +3826,7 @@ function validateCreateSequencePlanBoundary(
 
   return {
     valid: false,
-    message:
-      `Plan step '${createSequenceStep.id}' creates a new sequence. Create the sequence first, read openreelio.timeline_snapshot again, then apply timeline edits to the newly active sequence with fresh track IDs.`,
+    message: `Plan step '${createSequenceStep.id}' creates a new sequence. Create the sequence first, read openreelio.timeline_snapshot again, then apply timeline edits to the newly active sequence with fresh track IDs.`,
   };
 }
 
@@ -3857,7 +3873,9 @@ async function normalizeMediaInsertTarget(
     return { sequenceId, trackId, notes };
   }
 
-  const fallbackTrack = expectsAudioTrack ? chooseAudioTrack(sequence) : chooseMainMediaVideoTrack(sequence);
+  const fallbackTrack = expectsAudioTrack
+    ? chooseAudioTrack(sequence)
+    : chooseMainMediaVideoTrack(sequence);
   if (!fallbackTrack) {
     return { sequenceId, trackId, notes };
   }
@@ -3941,6 +3959,10 @@ function buildCommandSchema(): CodexJsonObject {
         optional: ['position'],
         note: 'Use kind video or overlay for editable text clips. Visual track order is front-to-back, so use position 0 for text, captions, B-roll overlays, and any visual layer that must appear above the base video. Audio tracks can be appended.',
       },
+      SetCaptionTrackLanguage: {
+        required: ['sequenceId', 'trackId', 'language'],
+        note: 'Use this for caption tracks only. Language should be a BCP-47-ish code such as en, ko, ja, zh, es, or en-us.',
+      },
       InsertClip: {
         required: ['sequenceId', 'trackId', 'assetId', 'timelineStart'],
         optional: ['sourceIn', 'sourceOut'],
@@ -3976,6 +3998,8 @@ function buildCommandSchema(): CodexJsonObject {
         required: ['sequenceId', 'trackId', 'timelineIn', 'duration', 'textData'],
         textDataShape:
           'TextClipData includes content, style(fontFamily/fontSize/fontWeight/color/backgroundColor/backgroundPadding/alignment/bold/italic/underline/lineHeight/letterSpacing), position(x/y 0..1), shadow(color/offsetX/offsetY/blur), outline(color/width), rotation, and opacity.',
+        presetHints:
+          'Production presets supported by UI/agent/CLI include title, centered-title, epic-title, chapter-title, lower-third, lower-third-news, lower-third-name-role, subtitle, callout, callout-stat, credits, credit-line, logo-bug, social-handle, quote, watermark, and countdown.',
         note: 'Text clips must be placed on a top/front video or overlay track above the base video. The Codex bridge will correct below-base text tracks when possible. Use SetClipTransform after creation when scale or anchor must be exact.',
       },
       UpdateTextClip: {
@@ -3986,6 +4010,42 @@ function buildCommandSchema(): CodexJsonObject {
         required: ['sequenceId', 'trackId', 'clipId', 'transform'],
         transformShape:
           'transform includes position{x,y}, scale{x,y}, rotationDeg, and anchor{x,y}; text clips use this for preview drag/resize/rotate parity.',
+      },
+      SetClipMotionKeyframes: {
+        required: ['sequenceId', 'trackId', 'clipId', 'keyframes'],
+        keyframeShape:
+          'keyframes is an array of {timeOffset, transform, interpolation}; transform uses position{x,y}, scale{x,y}, rotationDeg, anchor{x,y}; interpolation is "linear", "hold", or bezier control points.',
+        note: 'Use this for editable clip motion such as zoom in, zoom out, and Ken Burns presets. Times are seconds relative to the clip start.',
+      },
+      SetClipSpeed: {
+        required: ['sequenceId', 'trackId', 'clipId', 'speed'],
+        speedShape:
+          'speed is a positive multiplier where 1 is 100%, 0.5 is 50% slow motion, and 2 is 200%; optional reverse preserves or sets reverse playback.',
+        note: 'Use this for constant-speed edits. Rate-stretch UI also resolves to this command after deriving speed from the source duration and stretched timeline duration.',
+      },
+      SetClipSlowMotionInterpolation: {
+        required: ['sequenceId', 'trackId', 'clipId', 'interpolation'],
+        interpolationValues: ['nearest', 'frameBlend', 'motionCompensated'],
+        note: 'Use this to choose slow-motion quality for clips or speed ramps below real time. nearest preserves legacy frame duplication, frameBlend blends frames, and motionCompensated uses motion interpolation during export.',
+      },
+      ReverseClip: {
+        required: ['sequenceId', 'trackId', 'clipId'],
+        note: 'Toggles reverse playback for the clip while preserving constant speed.',
+      },
+      CreateFreezeFrame: {
+        required: ['sequenceId', 'trackId', 'clipId', 'playheadSec'],
+        optional: ['durationSec'],
+        note: 'Creates a freeze-frame segment from the clip at the requested timeline playhead time.',
+      },
+      SetTimeRemap: {
+        required: ['sequenceId', 'trackId', 'clipId', 'timeRemap'],
+        timeRemapShape:
+          'timeRemap.keyframes is an ordered array of {timelineTime, sourceTime, interpolation}; timelineTime is seconds relative to clip start and sourceTime is absolute source media seconds.',
+        note: 'Use this for speed ramps and editable variable-speed curves. The last timelineTime becomes the clip timeline duration.',
+      },
+      ClearTimeRemap: {
+        required: ['sequenceId', 'trackId', 'clipId'],
+        note: 'Removes a variable-speed curve and returns the clip to constant-speed playback.',
       },
     },
     payloadFormat: {
@@ -4042,7 +4102,15 @@ function buildCommandSchema(): CodexJsonObject {
         'Read annotation_read for overlapping source assets when placement should avoid faces, objects, or OCR text.',
         'CreateTrack(kind="video" or "overlay", position=0) when there is no unlocked non-overlapping text track above the media.',
         'AddTextClip with complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity.',
+        'Use production text presets for common work: credits for end cards, logo-bug for channel marks, social-handle for creator IDs, lower-third-name-role for interviews, and callout-stat for numeric emphasis.',
         'SetClipTransform for exact preview drag/resize/rotate parity using normalized position, scale, rotationDeg, and anchor.',
+        'SetClipMotionKeyframes for editable text or media motion presets such as zoom in, zoom out, and Ken Burns.',
+      ],
+      speedAndTime: [
+        'Use SetClipSpeed for constant 25%, 50%, 100%, 200%, or 400% speed changes.',
+        'Use SetClipSlowMotionInterpolation to choose nearest, frameBlend, or motionCompensated quality for slow-motion clips.',
+        'Use ReverseClip to toggle reverse, and CreateFreezeFrame for playhead-based freeze-frame segments.',
+        'Use SetTimeRemap for speed ramps with timeline/source keyframes, then ClearTimeRemap when returning to constant speed.',
       ],
       timedSubtitles: [
         'Call openreelio.transcription_status first and explain missing model installation before attempting automatic subtitles.',
@@ -4059,6 +4127,8 @@ function buildCommandSchema(): CodexJsonObject {
           'Bottom center around y=0.85 with outline/shadow unless it covers important visual content.',
         title: 'Center or upper third depending on the shot composition.',
         lowerThird: 'Lower-left or lower-center with enough safe margin and readable contrast.',
+        creditBrand:
+          'Credits, credit lines, logo bugs, social handles, quote, and watermark presets preserve their template position unless the user asks for automatic placement.',
       },
     },
   };

@@ -547,10 +547,16 @@ const META_TOOLS: ToolDefinition[] = [
         volume: { type: 'number', description: 'Volume level (0-200%)' },
         duration: { type: 'number', description: 'Fade duration in seconds' },
         muted: { type: 'boolean', description: 'Mute state' },
-        targetLevel: { type: 'number', description: 'Target normalization level in dB' },
+        targetLevel: { type: 'number', description: 'Legacy LUFS target alias' },
         targetLufs: {
           type: 'number',
-          description: 'Legacy alias for targetLevel. Prefer targetLevel.',
+          description: 'Target integrated loudness in LUFS. Prefer this over targetLevel.',
+        },
+        targetLra: { type: 'number', description: 'Target loudness range in LU' },
+        truePeak: { type: 'number', description: 'Target true peak in dBTP' },
+        printFormat: {
+          type: 'string',
+          description: 'FFmpeg loudnorm stats output: summary, json, or none',
         },
       },
       required: ['action', 'sequenceId', 'trackId'],

@@ -27,6 +27,11 @@ function expectValidParamDef(param: ParamDef): void {
   expect(param.default.value).toBeDefined();
 }
 
+function parseCurveDefault(param: ParamDef): Array<{ x: number; y: number }> {
+  expect(param.default.type).toBe('string');
+  return JSON.parse(param.default.value as string) as Array<{ x: number; y: number }>;
+}
+
 // =============================================================================
 // Audio Effect Parameter Tests
 // =============================================================================
@@ -70,6 +75,8 @@ describe('Audio Effect Parameters', () => {
 
       expect(frequency).toBeDefined();
       expect(width).toBeDefined();
+      expect(width!.label).toBe('Q');
+      expect(width!.default).toEqual({ type: 'float', value: 1.0 });
       expect(gain).toBeDefined();
     });
   });
@@ -83,6 +90,12 @@ describe('Audio Effect Parameters', () => {
       expect(params.find((p) => p.name === 'ratio')).toBeDefined();
       expect(params.find((p) => p.name === 'attack')).toBeDefined();
       expect(params.find((p) => p.name === 'release')).toBeDefined();
+
+      const threshold = params.find((p) => p.name === 'threshold');
+      expect(threshold!.label).toBe('Threshold (dB)');
+      expect(threshold!.default).toEqual({ type: 'float', value: -24 });
+      expect(threshold!.min).toBe(-60);
+      expect(threshold!.max).toBe(0);
     });
   });
 
@@ -119,12 +132,48 @@ describe('Audio Effect Parameters', () => {
   });
 
   describe('noise_reduction', () => {
-    it('should define strength parameter', () => {
+    it('should define export parity parameters', () => {
       const params = AUDIO_EFFECT_PARAM_DEFS.noise_reduction;
       expect(params).toBeDefined();
 
+      const algorithm = params.find((p) => p.name === 'algorithm');
       const strength = params.find((p) => p.name === 'strength');
+      const patchSize = params.find((p) => p.name === 'patch_size');
+      const researchSize = params.find((p) => p.name === 'research_size');
+      const noiseFloor = params.find((p) => p.name === 'noise_floor');
+      const modelPath = params.find((p) => p.name === 'model_path');
+
+      expect(algorithm).toBeDefined();
+      expect(algorithm!.inputType).toBe('select');
+      expect(algorithm!.options).toEqual(['anlmdn', 'afftdn', 'arnndn']);
       expect(strength).toBeDefined();
+      expect(strength!.default).toEqual({ type: 'float', value: 0.3 });
+      expect(patchSize).toBeDefined();
+      expect(researchSize).toBeDefined();
+      expect(noiseFloor).toBeDefined();
+      expect(modelPath).toBeDefined();
+      expect(modelPath!.inputType).toBe('file');
+    });
+  });
+
+  describe('loudness_normalize', () => {
+    it('should define export parity loudnorm parameters', () => {
+      const params = AUDIO_EFFECT_PARAM_DEFS.loudness_normalize;
+      expect(params).toBeDefined();
+
+      const targetLufs = params.find((p) => p.name === 'target_lufs');
+      const targetLra = params.find((p) => p.name === 'target_lra');
+      const targetTp = params.find((p) => p.name === 'target_tp');
+      const printFormat = params.find((p) => p.name === 'print_format');
+
+      expect(targetLufs!.default).toEqual({ type: 'float', value: -14 });
+      expect(targetLufs!.min).toBe(-70);
+      expect(targetLufs!.max).toBe(-5);
+      expect(targetLra!.default).toEqual({ type: 'float', value: 11 });
+      expect(targetTp!.default).toEqual({ type: 'float', value: -1 });
+      expect(printFormat!.inputType).toBe('select');
+      expect(printFormat!.options).toEqual(['summary', 'json', 'none']);
+      expect(params.find((p) => p.name === 'true_peak')).toBeUndefined();
     });
   });
 });
@@ -229,6 +278,95 @@ describe('Video Effect Parameters', () => {
       expect(params.find((p) => p.name === 'template_size')).toBeDefined();
       expect(params.find((p) => p.name === 'search_area_size')).toBeDefined();
       expect(params.find((p) => p.name === 'confidence_threshold')).toBeDefined();
+    });
+  });
+
+  describe('curves', () => {
+    it('should define backend-aligned curve parameter names and defaults', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.curves;
+      expect(params).toBeDefined();
+
+      const names = params.map((p) => p.name);
+      expect(names).toEqual([
+        'master_curve',
+        'red_curve',
+        'green_curve',
+        'blue_curve',
+        'hue_vs_hue_curve',
+        'hue_vs_sat_curve',
+        'luma_vs_sat_curve',
+      ]);
+
+      const master = params.find((p) => p.name === 'master_curve')!;
+      const hueVsHue = params.find((p) => p.name === 'hue_vs_hue_curve')!;
+      expect(parseCurveDefault(master)).toEqual([
+        { x: 0, y: 0 },
+        { x: 1, y: 1 },
+      ]);
+      expect(parseCurveDefault(hueVsHue)).toEqual([
+        { x: 0, y: 0.5 },
+        { x: 1, y: 0.5 },
+      ]);
+    });
+  });
+
+  describe('lut', () => {
+    it('should define export-backed LUT file, interpolation, and intensity parameters', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.lut;
+      expect(params).toBeDefined();
+
+      const file = params.find((p) => p.name === 'file');
+      const interpolation = params.find((p) => p.name === 'interp');
+      const intensity = params.find((p) => p.name === 'intensity');
+
+      expect(file).toBeDefined();
+      expect(file!.inputType).toBe('file');
+      expect(file!.fileExtensions).toEqual(['cube', '3dl', 'lut']);
+      expect(interpolation).toBeDefined();
+      expect(interpolation!.inputType).toBe('select');
+      expect(interpolation!.options).toEqual(['nearest', 'trilinear', 'tetrahedral']);
+      expect(interpolation!.default).toEqual({ type: 'string', value: 'tetrahedral' });
+      expect(intensity).toBeDefined();
+      expect(intensity!.default).toEqual({ type: 'float', value: 1 });
+      expect(intensity!.min).toBe(0);
+      expect(intensity!.max).toBe(1);
+    });
+  });
+
+  describe('hsl_qualifier', () => {
+    it('should define backend-aligned secondary correction parameters', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.hsl_qualifier;
+      expect(params).toBeDefined();
+
+      const names = params.map((p) => p.name);
+      expect(names).toEqual([
+        'hue_center',
+        'hue_width',
+        'sat_min',
+        'sat_max',
+        'lum_min',
+        'lum_max',
+        'softness',
+        'hue_shift',
+        'sat_adjust',
+        'lum_adjust',
+        'invert',
+      ]);
+
+      expect(params.find((p) => p.name === 'sat_min')!.default).toEqual({
+        type: 'float',
+        value: 0.2,
+      });
+      expect(params.find((p) => p.name === 'softness')!.default).toEqual({
+        type: 'float',
+        value: 0.1,
+      });
+      expect(params.find((p) => p.name === 'invert')!.default).toEqual({
+        type: 'bool',
+        value: false,
+      });
+      expect(names).not.toContain('sat_low');
+      expect(names).not.toContain('lum_low');
     });
   });
 
@@ -442,6 +580,41 @@ describe('getEffectDefaultParamValues', () => {
       origin_y: -1,
       start_frame: 0,
       tracking_data: '',
+    });
+  });
+
+  it('should return backend-aligned curve defaults when resetting', () => {
+    const defaults = getEffectDefaultParamValues('curves');
+
+    expect(defaults).toHaveProperty('master_curve');
+    expect(defaults).toHaveProperty('red_curve');
+    expect(defaults).toHaveProperty('green_curve');
+    expect(defaults).toHaveProperty('blue_curve');
+    expect(defaults).toHaveProperty('hue_vs_hue_curve');
+    expect(defaults).not.toHaveProperty('master');
+  });
+
+  it('should return LUT defaults when resetting', () => {
+    expect(getEffectDefaultParamValues('lut')).toEqual({
+      file: '',
+      interp: 'tetrahedral',
+      intensity: 1,
+    });
+  });
+
+  it('should return backend-aligned HSL qualifier defaults when resetting', () => {
+    expect(getEffectDefaultParamValues('hsl_qualifier')).toEqual({
+      hue_center: 120,
+      hue_width: 30,
+      sat_min: 0.2,
+      sat_max: 1,
+      lum_min: 0,
+      lum_max: 1,
+      softness: 0.1,
+      hue_shift: 0,
+      sat_adjust: 0,
+      lum_adjust: 0,
+      invert: false,
     });
   });
 });

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
-    effects::{Effect, EffectType, ParamValue},
+    effects::{Effect, EffectType, Keyframe, ParamValue},
     project::ProjectState,
     timeline::{AudioSettings, BlendMode, Transform},
     ClipId, CoreError, CoreResult, EffectId, SequenceId, TrackId,
@@ -77,6 +77,8 @@ pub struct AddEffectCommand {
     pub effect_type: EffectType,
     #[serde(default)]
     pub params: std::collections::HashMap<String, ParamValue>,
+    #[serde(default)]
+    pub keyframes: std::collections::HashMap<String, Vec<Keyframe>>,
     /// Position in the effect list (None = append at end)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<usize>,
@@ -97,6 +99,7 @@ impl AddEffectCommand {
             clip_id: clip_id.into(),
             effect_type,
             params: std::collections::HashMap::new(),
+            keyframes: std::collections::HashMap::new(),
             position: None,
             created_effect_id: None,
         }
@@ -105,6 +108,12 @@ impl AddEffectCommand {
     /// Add a parameter value to the effect
     pub fn with_param(mut self, name: impl Into<String>, value: ParamValue) -> Self {
         self.params.insert(name.into(), value);
+        self
+    }
+
+    /// Set keyframes for an animatable parameter.
+    pub fn with_keyframes(mut self, name: impl Into<String>, keyframes: Vec<Keyframe>) -> Self {
+        self.keyframes.insert(name.into(), keyframes);
         self
     }
 
@@ -138,6 +147,7 @@ impl Command for AddEffectCommand {
         for (key, value) in &self.params {
             effect.set_param(key, value.clone());
         }
+        effect.keyframes = self.keyframes.clone();
 
         let effect_id = effect.id.clone();
         self.created_effect_id = Some(effect_id.clone());
@@ -195,6 +205,7 @@ impl Command for AddEffectCommand {
             "clipId": self.clip_id.clone(),
             "effectType": self.effect_type.clone(),
             "params": self.params.clone(),
+            "keyframes": self.keyframes.clone(),
             "position": self.position,
         })
     }
@@ -1157,6 +1168,7 @@ mod tests {
     use super::*;
     use crate::core::{
         assets::{Asset, VideoInfo},
+        effects::Easing,
         timeline::{Clip, Sequence, SequenceFormat, Track, TrackKind},
     };
 
@@ -1229,6 +1241,29 @@ mod tests {
         let effect = state.effects.get(&effect_id).unwrap();
         assert_eq!(effect.get_float("radius"), Some(15.0));
         assert_eq!(effect.get_float("sigma"), Some(5.0));
+    }
+
+    #[test]
+    fn test_add_effect_command_with_keyframes() {
+        let mut state = create_test_state();
+        let mut cmd = AddEffectCommand::new("seq-1", "track-1", "clip-1", EffectType::GaussianBlur)
+            .with_param("radius", ParamValue::Float(12.0))
+            .with_keyframes(
+                "radius",
+                vec![
+                    Keyframe::new(0.0, ParamValue::Float(4.0)),
+                    Keyframe::with_easing(1.0, ParamValue::Float(12.0), Easing::EaseOut),
+                ],
+            );
+
+        let result = cmd.execute(&mut state).unwrap();
+        let effect_id = result.created_ids[0].clone();
+
+        let effect = state.effects.get(&effect_id).unwrap();
+        let radius_keyframes = effect.keyframes.get("radius").unwrap();
+        assert_eq!(radius_keyframes.len(), 2);
+        assert_eq!(radius_keyframes[0].value, ParamValue::Float(4.0));
+        assert_eq!(radius_keyframes[1].easing, Easing::EaseOut);
     }
 
     #[test]

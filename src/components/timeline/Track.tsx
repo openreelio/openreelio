@@ -4,7 +4,14 @@
  * Displays a single track with its clips and controls.
  */
 
-import { useRef, useMemo, useCallback, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import {
+  useRef,
+  useMemo,
+  useCallback,
+  useState,
+  type DragEvent as ReactDragEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 import {
   Video,
   Music,
@@ -49,6 +56,7 @@ import { TRACK_HEIGHT } from './constants';
 import { getTrackHeaderControls } from './trackHeaderControls';
 import { PasteAttributesDialog, RemoveAttributesDialog } from '@/components/features/effects';
 import { getClipTimelineEndSec } from '@/utils/clipTiming';
+import { getClipTransitionEffect } from '@/utils/transitions';
 
 // =============================================================================
 // Types
@@ -200,6 +208,12 @@ const VIRTUALIZATION_BUFFER_PX = 300;
 /** Empty array constants for stable references (prevents re-renders from new array allocations) */
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_SNAP_POINTS: SnapPoint[] = [];
+const TRACK_DRAG_MIME = 'application/x-openreelio-track';
+
+interface TrackDragPayload {
+  trackId: string;
+  kind: TrackKind;
+}
 
 function getEffectLabel(effect: Effect | undefined, fallbackId: string): string {
   if (!effect) {
@@ -211,6 +225,27 @@ function getEffectLabel(effect: Effect | undefined, fallbackId: string): string 
   }
 
   return EFFECT_TYPE_LABELS[effect.effectType] ?? effect.effectType;
+}
+
+function readTrackDragPayload(dataTransfer: DataTransfer): TrackDragPayload | null {
+  const raw =
+    dataTransfer.getData(TRACK_DRAG_MIME) ||
+    dataTransfer.getData('application/json') ||
+    dataTransfer.getData('text/plain');
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<TrackDragPayload>;
+    if (typeof parsed.trackId === 'string' && typeof parsed.kind === 'string') {
+      return { trackId: parsed.trackId, kind: parsed.kind as TrackKind };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 // =============================================================================
@@ -336,6 +371,14 @@ export function Track({
     [track.locked, onTransitionZoneClick],
   );
 
+  const handleTransitionDelete = useCallback(
+    (clipId: string, effectId: string) => {
+      if (track.locked) return;
+      onRemoveAttributes?.(clipId, track.id, [effectId], {});
+    },
+    [onRemoveAttributes, track.id, track.locked],
+  );
+
   // Calculate track content width based on duration and zoom
   const contentWidth = duration * zoom;
   const TrackIcon = TrackIcons[track.kind] || Video;
@@ -371,6 +414,48 @@ export function Track({
     event.stopPropagation();
     setContextMenuPosition({ x: event.clientX, y: event.clientY });
   }, []);
+
+  const handleHeaderDragStart = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      if (!onSwapTracks) {
+        event.preventDefault();
+        return;
+      }
+
+      const payload = JSON.stringify({ trackId: track.id, kind: track.kind });
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData(TRACK_DRAG_MIME, payload);
+      event.dataTransfer.setData('text/plain', payload);
+    },
+    [onSwapTracks, track.id, track.kind],
+  );
+
+  const handleHeaderDragOver = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      const payload = readTrackDragPayload(event.dataTransfer);
+      if (!payload || payload.trackId === track.id || payload.kind !== track.kind) {
+        return;
+      }
+
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+    },
+    [track.id, track.kind],
+  );
+
+  const handleHeaderDrop = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      const payload = readTrackDragPayload(event.dataTransfer);
+      if (!payload || payload.trackId === track.id || payload.kind !== track.kind) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      onSwapTracks?.(payload.trackId, track.id);
+    },
+    [onSwapTracks, track.id, track.kind],
+  );
 
   // Gap context menu state and operations
   const { onCloseGap, onCloseAllGaps } = useTimelineOperations();
@@ -708,10 +793,15 @@ export function Track({
         <div
           data-testid="track-header"
           data-track-kind={track.kind}
-          className="w-48 flex-shrink-0 bg-editor-sidebar px-2 py-1.5 flex items-center gap-2 border-r border-editor-border cursor-context-menu"
+          draggable={Boolean(onSwapTracks)}
+          aria-grabbed="false"
+          className="w-48 flex-shrink-0 bg-editor-sidebar px-2 py-1.5 flex items-center gap-2 border-r border-editor-border cursor-grab active:cursor-grabbing"
           style={{ height: TRACK_HEIGHT }}
-          title="Right-click to swap or delete this track"
+          title="Drag to reorder. Right-click to swap or delete this track"
           onContextMenu={handleHeaderContextMenu}
+          onDragStart={handleHeaderDragStart}
+          onDragOver={handleHeaderDragOver}
+          onDrop={handleHeaderDrop}
         >
           {/* Track type icon */}
           <TrackIcon className="w-4 h-4 text-editor-text-muted" />
@@ -846,6 +936,7 @@ export function Track({
                 const clipA = clipMap.get(zone.clipAId);
                 const clipB = clipMap.get(zone.clipBId);
                 if (!clipA || !clipB) return null;
+                const transition = getClipTransitionEffect(clipB, projectEffects);
 
                 return (
                   <TransitionZone
@@ -853,8 +944,11 @@ export function Track({
                     clipA={clipA}
                     clipB={clipB}
                     zoom={zoom}
+                    transition={transition}
                     disabled={track.locked}
                     onClick={handleTransitionZoneClick}
+                    onDoubleClick={handleTransitionZoneClick}
+                    onDelete={(effectId) => handleTransitionDelete(zone.clipBId, effectId)}
                   />
                 );
               })}

@@ -68,6 +68,23 @@ describe('MulticamAngleViewer', () => {
       expect(screen.getAllByText('4').length).toBeGreaterThanOrEqual(1);
     });
 
+    it('should show angle audio and sync metadata', () => {
+      const metadataGroup: MulticamGroup = {
+        ...mockGroup,
+        angles: [
+          { ...mockGroup.angles[0], hasAudio: true, syncOffsetSec: 0 },
+          { ...mockGroup.angles[1], hasAudio: false, syncOffsetSec: 2.5 },
+        ],
+      };
+
+      render(<MulticamAngleViewer {...defaultProps} group={metadataGroup} />);
+
+      expect(screen.getByTestId('angle-audio-0')).toHaveTextContent('Audio');
+      expect(screen.getByTestId('angle-sync-offset-0')).toHaveTextContent('Sync 0.0s');
+      expect(screen.getByTestId('angle-audio-1')).toHaveTextContent('No audio');
+      expect(screen.getByTestId('angle-sync-offset-1')).toHaveTextContent('Sync +2.5s');
+    });
+
     it('should render in 2x2 grid by default', () => {
       render(<MulticamAngleViewer {...defaultProps} />);
 
@@ -79,12 +96,7 @@ describe('MulticamAngleViewer', () => {
     });
 
     it('should render with custom grid layout', () => {
-      render(
-        <MulticamAngleViewer
-          {...defaultProps}
-          gridLayout={{ rows: 1, cols: 4 }}
-        />
-      );
+      render(<MulticamAngleViewer {...defaultProps} gridLayout={{ rows: 1, cols: 4 }} />);
 
       const grid = screen.getByTestId('multicam-grid');
       expect(grid).toHaveStyle({
@@ -94,12 +106,7 @@ describe('MulticamAngleViewer', () => {
     });
 
     it('should clamp invalid grid dimensions to minimum 1x1', () => {
-      render(
-        <MulticamAngleViewer
-          {...defaultProps}
-          gridLayout={{ rows: 0, cols: 0 }}
-        />
-      );
+      render(<MulticamAngleViewer {...defaultProps} gridLayout={{ rows: 0, cols: 0 }} />);
 
       // With 1x1 clamping, only the first angle should be visible.
       expect(screen.getByText('Camera 1')).toBeInTheDocument();
@@ -116,9 +123,7 @@ describe('MulticamAngleViewer', () => {
   describe('interaction', () => {
     it('should call onAngleSwitch when clicking an angle', async () => {
       const onAngleSwitch = vi.fn();
-      render(
-        <MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />
-      );
+      render(<MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />);
 
       const angle2 = screen.getByTestId('angle-panel-1');
       await userEvent.click(angle2);
@@ -128,9 +133,7 @@ describe('MulticamAngleViewer', () => {
 
     it('should not call onAngleSwitch when clicking active angle', async () => {
       const onAngleSwitch = vi.fn();
-      render(
-        <MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />
-      );
+      render(<MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />);
 
       const activeAngle = screen.getByTestId('angle-panel-0');
       await userEvent.click(activeAngle);
@@ -140,9 +143,7 @@ describe('MulticamAngleViewer', () => {
 
     it('should handle keyboard number shortcuts', async () => {
       const onAngleSwitch = vi.fn();
-      render(
-        <MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />
-      );
+      render(<MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />);
 
       const container = screen.getByTestId('multicam-viewer');
       fireEvent.keyDown(container, { key: '2' });
@@ -163,13 +164,7 @@ describe('MulticamAngleViewer', () => {
   describe('disabled state', () => {
     it('should not respond to clicks when disabled', async () => {
       const onAngleSwitch = vi.fn();
-      render(
-        <MulticamAngleViewer
-          {...defaultProps}
-          onAngleSwitch={onAngleSwitch}
-          disabled
-        />
-      );
+      render(<MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} disabled />);
 
       const angle2 = screen.getByTestId('angle-panel-1');
       await userEvent.click(angle2);
@@ -228,7 +223,7 @@ describe('MulticamAngleViewer', () => {
           {...defaultProps}
           group={groupWithAngle2Active}
           onAngleSwitch={onAngleSwitch}
-        />
+        />,
       );
 
       const container = screen.getByTestId('multicam-viewer');
@@ -239,9 +234,7 @@ describe('MulticamAngleViewer', () => {
 
     it('should switch to angles 1-4 with corresponding number keys', () => {
       const onAngleSwitch = vi.fn();
-      render(
-        <MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />
-      );
+      render(<MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />);
 
       const container = screen.getByTestId('multicam-viewer');
 
@@ -258,9 +251,7 @@ describe('MulticamAngleViewer', () => {
 
     it('should not switch when pressing key beyond available angles', () => {
       const onAngleSwitch = vi.fn();
-      render(
-        <MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />
-      );
+      render(<MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />);
 
       const container = screen.getByTestId('multicam-viewer');
       fireEvent.keyDown(container, { key: '5' }); // Only 4 angles
@@ -270,9 +261,7 @@ describe('MulticamAngleViewer', () => {
 
     it('should ignore non-number keys', () => {
       const onAngleSwitch = vi.fn();
-      render(
-        <MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />
-      );
+      render(<MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />);
 
       const container = screen.getByTestId('multicam-viewer');
       fireEvent.keyDown(container, { key: 'a' });
@@ -284,9 +273,7 @@ describe('MulticamAngleViewer', () => {
 
     it('should not switch when pressing same angle as active', () => {
       const onAngleSwitch = vi.fn();
-      render(
-        <MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />
-      );
+      render(<MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />);
 
       const container = screen.getByTestId('multicam-viewer');
       fireEvent.keyDown(container, { key: '1' }); // Already active
@@ -296,13 +283,7 @@ describe('MulticamAngleViewer', () => {
 
     it('should not respond to keyboard when disabled', () => {
       const onAngleSwitch = vi.fn();
-      render(
-        <MulticamAngleViewer
-          {...defaultProps}
-          onAngleSwitch={onAngleSwitch}
-          disabled
-        />
-      );
+      render(<MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} disabled />);
 
       const container = screen.getByTestId('multicam-viewer');
       fireEvent.keyDown(container, { key: '2' });
@@ -355,12 +336,7 @@ describe('MulticamAngleViewer', () => {
         <div data-testid={`custom-thumb-${angle.id}`}>Custom</div>
       ));
 
-      render(
-        <MulticamAngleViewer
-          {...defaultProps}
-          renderThumbnail={renderThumbnail}
-        />
-      );
+      render(<MulticamAngleViewer {...defaultProps} renderThumbnail={renderThumbnail} />);
 
       expect(screen.getByTestId('custom-thumb-angle-1')).toBeInTheDocument();
       expect(renderThumbnail).toHaveBeenCalledTimes(4);

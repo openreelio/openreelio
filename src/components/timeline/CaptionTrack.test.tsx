@@ -32,6 +32,27 @@ const createTestTrack = (overrides?: Partial<CaptionTrackType>): CaptionTrackTyp
   ...overrides,
 });
 
+function createCaptionTrackDataTransfer(payload?: unknown): DataTransfer {
+  const data = new Map<string, string>();
+  const transfer = {
+    effectAllowed: 'all',
+    dropEffect: 'none',
+    setData: vi.fn((type: string, value: string) => {
+      data.set(type, value);
+    }),
+    getData: vi.fn((type: string) => data.get(type) ?? ''),
+    clearData: vi.fn(),
+  } as unknown as DataTransfer;
+
+  if (payload !== undefined) {
+    const serialized = JSON.stringify(payload);
+    transfer.setData('application/x-openreelio-track', serialized);
+    transfer.setData('text/plain', serialized);
+  }
+
+  return transfer;
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -66,6 +87,13 @@ describe('CaptionTrack', () => {
       const header = screen.getByTestId('caption-track-header');
       expect(header).toBeInTheDocument();
     });
+
+    it('marks the caption content when it is the edit target', () => {
+      const track = createTestTrack();
+      render(<CaptionTrack track={track} zoom={100} isEditTarget />);
+
+      expect(screen.getByTestId('caption-track-content')).toHaveClass('border-cyan-400/60');
+    });
   });
 
   describe('Track Controls', () => {
@@ -86,6 +114,37 @@ describe('CaptionTrack', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Swap with Subtitles 2' }));
 
       expect(onSwapTracks).toHaveBeenCalledWith('track_swap_test', 'track_002');
+    });
+
+    it('calls onSwapTracks when a caption track header is dropped onto this track', () => {
+      const onSwapTracks = vi.fn();
+      const track = createTestTrack({ id: 'track_caption_2' });
+      const dataTransfer = createCaptionTrackDataTransfer({
+        trackId: 'track_caption_1',
+        kind: 'caption',
+      });
+
+      render(<CaptionTrack track={track} zoom={100} onSwapTracks={onSwapTracks} />);
+
+      fireEvent.dragOver(screen.getByTestId('caption-track-header'), { dataTransfer });
+      fireEvent.drop(screen.getByTestId('caption-track-header'), { dataTransfer });
+
+      expect(onSwapTracks).toHaveBeenCalledWith('track_caption_1', 'track_caption_2');
+    });
+
+    it('ignores dropped track headers from non-caption tracks', () => {
+      const onSwapTracks = vi.fn();
+      const track = createTestTrack({ id: 'track_caption_2' });
+      const dataTransfer = createCaptionTrackDataTransfer({
+        trackId: 'track_video_1',
+        kind: 'video',
+      });
+
+      render(<CaptionTrack track={track} zoom={100} onSwapTracks={onSwapTracks} />);
+
+      fireEvent.drop(screen.getByTestId('caption-track-header'), { dataTransfer });
+
+      expect(onSwapTracks).not.toHaveBeenCalled();
     });
 
     it('shows a disabled context menu item when no caption swap targets exist', () => {
@@ -144,6 +203,18 @@ describe('CaptionTrack', () => {
       fireEvent.click(visButton);
 
       expect(onVisibilityToggle).toHaveBeenCalledWith('track_vis_test');
+    });
+
+    it('calls onLanguageChange when language selection changes', () => {
+      const onLanguageChange = vi.fn();
+      const track = createTestTrack({ id: 'track_language_test', language: 'en' });
+
+      render(<CaptionTrack track={track} zoom={100} onLanguageChange={onLanguageChange} />);
+
+      const languageSelect = screen.getByTestId('caption-language-select');
+      fireEvent.change(languageSelect, { target: { value: 'ko' } });
+
+      expect(onLanguageChange).toHaveBeenCalledWith('track_language_test', 'ko');
     });
 
     it('calls onTrackClick when header is clicked', () => {

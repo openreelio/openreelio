@@ -20,7 +20,7 @@ const logger = createLogger('useCaptionExport');
 export type CaptionExportFormat = 'srt' | 'vtt';
 
 /** Caption data for export */
-interface CaptionForExport {
+export interface CaptionForExport {
   startSec: number;
   endSec: number;
   text: string;
@@ -36,9 +36,17 @@ interface CaptionExportState {
 /** Hook return type */
 interface UseCaptionExportReturn extends CaptionExportState {
   /** Export captions to a file (with file dialog) */
-  exportToFile: (captions: Caption[], format: CaptionExportFormat, defaultName?: string) => Promise<boolean>;
+  exportToFile: (
+    captions: Caption[],
+    format: CaptionExportFormat,
+    defaultName?: string,
+  ) => Promise<boolean>;
   /** Export captions to a specific path */
-  exportToPath: (captions: Caption[], path: string, format: CaptionExportFormat) => Promise<boolean>;
+  exportToPath: (
+    captions: Caption[],
+    path: string,
+    format: CaptionExportFormat,
+  ) => Promise<boolean>;
   /** Get captions as a string (without saving to file) */
   getAsString: (captions: Caption[], format: CaptionExportFormat) => Promise<string | null>;
   /** Clear any error */
@@ -49,14 +57,43 @@ interface UseCaptionExportReturn extends CaptionExportState {
 // Helper Functions
 // =============================================================================
 
+function sanitizeCaptionTextForExport(text: string): string {
+  return text
+    .replace(/<[^>\n]*>/g, '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function isExportableCaption(caption: Caption): boolean {
+  return (
+    Number.isFinite(caption.startSec) &&
+    Number.isFinite(caption.endSec) &&
+    caption.startSec >= 0 &&
+    caption.endSec > caption.startSec &&
+    sanitizeCaptionTextForExport(caption.text).length > 0
+  );
+}
+
 /** Converts frontend Caption to export format */
 function toExportFormat(caption: Caption): CaptionForExport {
   return {
     startSec: caption.startSec,
     endSec: caption.endSec,
-    text: caption.text,
+    text: sanitizeCaptionTextForExport(caption.text),
     speaker: caption.speaker ?? null,
   };
+}
+
+export function prepareCaptionsForExport(captions: Caption[]): CaptionForExport[] {
+  return captions
+    .filter(isExportableCaption)
+    .slice()
+    .sort((left, right) => left.startSec - right.startSec || left.endSec - right.endSec)
+    .map(toExportFormat);
 }
 
 /** Gets file extension for format */
@@ -99,8 +136,13 @@ export function useCaptionExport(): UseCaptionExportReturn {
    * Export captions to a file using a save dialog
    */
   const exportToFile = useCallback(
-    async (captions: Caption[], format: CaptionExportFormat, defaultName = 'captions'): Promise<boolean> => {
-      if (captions.length === 0) {
+    async (
+      captions: Caption[],
+      format: CaptionExportFormat,
+      defaultName = 'captions',
+    ): Promise<boolean> => {
+      const exportData = prepareCaptionsForExport(captions);
+      if (exportData.length === 0) {
         setState((prev) => ({ ...prev, error: 'No captions to export' }));
         return false;
       }
@@ -130,14 +172,13 @@ export function useCaptionExport(): UseCaptionExportReturn {
         }
 
         // Export to the selected path
-        const exportData = captions.map(toExportFormat);
         await invoke('export_captions', {
           captions: exportData,
           outputPath: filePath,
           format,
         });
 
-        logger.info(`Exported ${captions.length} captions to ${filePath}`);
+        logger.info(`Exported ${exportData.length} captions to ${filePath}`);
         setState({ isExporting: false, error: null });
         return true;
       } catch (error) {
@@ -147,7 +188,7 @@ export function useCaptionExport(): UseCaptionExportReturn {
         return false;
       }
     },
-    []
+    [],
   );
 
   /**
@@ -155,7 +196,8 @@ export function useCaptionExport(): UseCaptionExportReturn {
    */
   const exportToPath = useCallback(
     async (captions: Caption[], path: string, format: CaptionExportFormat): Promise<boolean> => {
-      if (captions.length === 0) {
+      const exportData = prepareCaptionsForExport(captions);
+      if (exportData.length === 0) {
         setState((prev) => ({ ...prev, error: 'No captions to export' }));
         return false;
       }
@@ -163,14 +205,13 @@ export function useCaptionExport(): UseCaptionExportReturn {
       setState({ isExporting: true, error: null });
 
       try {
-        const exportData = captions.map(toExportFormat);
         await invoke('export_captions', {
           captions: exportData,
           outputPath: path,
           format,
         });
 
-        logger.info(`Exported ${captions.length} captions to ${path}`);
+        logger.info(`Exported ${exportData.length} captions to ${path}`);
         setState({ isExporting: false, error: null });
         return true;
       } catch (error) {
@@ -180,7 +221,7 @@ export function useCaptionExport(): UseCaptionExportReturn {
         return false;
       }
     },
-    []
+    [],
   );
 
   /**
@@ -188,7 +229,8 @@ export function useCaptionExport(): UseCaptionExportReturn {
    */
   const getAsString = useCallback(
     async (captions: Caption[], format: CaptionExportFormat): Promise<string | null> => {
-      if (captions.length === 0) {
+      const exportData = prepareCaptionsForExport(captions);
+      if (exportData.length === 0) {
         setState((prev) => ({ ...prev, error: 'No captions to export' }));
         return null;
       }
@@ -196,7 +238,6 @@ export function useCaptionExport(): UseCaptionExportReturn {
       setState({ isExporting: true, error: null });
 
       try {
-        const exportData = captions.map(toExportFormat);
         const content = await invoke<string>('get_captions_as_string', {
           captions: exportData,
           format,
@@ -211,7 +252,7 @@ export function useCaptionExport(): UseCaptionExportReturn {
         return null;
       }
     },
-    []
+    [],
   );
 
   /**

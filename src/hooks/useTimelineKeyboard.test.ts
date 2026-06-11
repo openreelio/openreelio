@@ -354,7 +354,7 @@ describe('useTimelineKeyboard', () => {
       expect(options.onClipSplit).not.toHaveBeenCalled();
     });
 
-    it('should not split when no clips are selected', () => {
+    it('should split clips under the playhead when no clips are selected', () => {
       const clips = [[createMockClip('clip-1', 0, 5)]];
       const options = {
         ...createDefaultOptions(),
@@ -369,7 +369,43 @@ describe('useTimelineKeyboard', () => {
         result.current.handleKeyDown(event);
       });
 
-      expect(options.onClipSplit).not.toHaveBeenCalled();
+      expect(options.onClipSplit).toHaveBeenCalledWith({
+        sequenceId: 'seq-1',
+        trackId: 'track-0',
+        clipId: 'clip-1',
+        splitTime: 2,
+      });
+      expect(event.preventDefault).toHaveBeenCalled();
+    });
+
+    it('should split every clip under the playhead when no clips are selected', () => {
+      const clips = [[createMockClip('clip-1', 0, 5)], [createMockClip('clip-2', 0, 5)]];
+      const options = {
+        ...createDefaultOptions(),
+        sequence: createMockSequence(clips),
+        selectedClipIds: [],
+        playhead: 2,
+      };
+      const { result } = renderHook(() => useTimelineKeyboard(options));
+
+      const event = createKeyboardEvent('s');
+      act(() => {
+        result.current.handleKeyDown(event);
+      });
+
+      expect(options.onClipSplit).toHaveBeenCalledTimes(2);
+      expect(options.onClipSplit).toHaveBeenNthCalledWith(1, {
+        sequenceId: 'seq-1',
+        trackId: 'track-0',
+        clipId: 'clip-1',
+        splitTime: 2,
+      });
+      expect(options.onClipSplit).toHaveBeenNthCalledWith(2, {
+        sequenceId: 'seq-1',
+        trackId: 'track-1',
+        clipId: 'clip-2',
+        splitTime: 2,
+      });
     });
 
     it('should split every selected clip that contains the playhead', () => {

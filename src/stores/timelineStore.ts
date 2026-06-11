@@ -38,6 +38,9 @@ interface TimelineState {
   // Link settings
   linkedSelectionEnabled: boolean;
 
+  // Edit target state
+  editTargetTrackId: string | null;
+
   // Actions - Selection
   selectClip: (clipId: string, addToSelection?: boolean) => void;
   selectClips: (clipIds: string[]) => void;
@@ -64,6 +67,7 @@ interface TimelineState {
   setSnapToMarkers: (enabled: boolean) => void;
   setSnapToPlayhead: (enabled: boolean) => void;
   toggleLinkedSelection: () => void;
+  setEditTargetTrack: (trackId: string | null) => void;
 
   // Utilities
   timeToPixels: (time: TimeSec) => number;
@@ -100,6 +104,7 @@ export const useTimelineStore = create<TimelineState>()(
     snapToMarkers: true,
     snapToPlayhead: true,
     linkedSelectionEnabled: true,
+    editTargetTrackId: null,
 
     // Selection actions - consistently use array reassignment pattern
     selectClip: (clipId: string, addToSelection = false) => {
@@ -262,6 +267,12 @@ export const useTimelineStore = create<TimelineState>()(
       });
     },
 
+    setEditTargetTrack: (trackId: string | null) => {
+      set((state) => {
+        state.editTargetTrackId = trackId;
+      });
+    },
+
     // Utilities
     timeToPixels: (time: TimeSec) => {
       return time * get().zoom;
@@ -297,6 +308,7 @@ export const useTimelineStore = create<TimelineState>()(
         state.snapToMarkers = true;
         state.snapToPlayhead = true;
         state.linkedSelectionEnabled = true;
+        state.editTargetTrackId = null;
       });
     },
   })),

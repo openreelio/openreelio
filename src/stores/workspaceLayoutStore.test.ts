@@ -53,7 +53,8 @@ describe('WorkspaceLayoutStore', () => {
     it('should initialize bottom zone collapsed by default', () => {
       const { layout } = useWorkspaceLayoutStore.getState();
       expect(layout.zones.bottom.collapsed).toBe(true);
-      expect(layout.zones.bottom.panelIds.length).toBeGreaterThan(0);
+      expect(layout.zones.bottom.panelIds).toContain('timeline-index');
+      expect(layout.zones.bottom.activePanelId).toBe('timeline-index');
     });
 
     it('should have correct default zone sizes', () => {
@@ -145,7 +146,7 @@ describe('WorkspaceLayoutStore', () => {
 
       const { layout } = useWorkspaceLayoutStore.getState();
       expect(layout.zones.bottom.panelIds).not.toContain('agent-review');
-      expect(layout.zones.bottom.activePanelId).toBe('history');
+      expect(layout.zones.bottom.activePanelId).toBe('timeline-index');
     });
 
     it('should hide a panel and update the active tab when removed', () => {
@@ -157,7 +158,7 @@ describe('WorkspaceLayoutStore', () => {
 
       const { layout } = useWorkspaceLayoutStore.getState();
       expect(layout.zones.bottom.panelIds).not.toContain('terminal');
-      expect(layout.zones.bottom.activePanelId).toBe('history');
+      expect(layout.zones.bottom.activePanelId).toBe('timeline-index');
     });
   });
 
@@ -312,7 +313,7 @@ describe('WorkspaceLayoutStore', () => {
       const { layout } = useWorkspaceLayoutStore.getState();
       expect(zoneId).toBeNull();
       expect(layout.zones.bottom.panelIds).not.toContain('agent-review');
-      expect(layout.zones.bottom.activePanelId).toBe('history');
+      expect(layout.zones.bottom.activePanelId).toBe('timeline-index');
       expect(layout.zones.bottom.collapsed).toBe(true);
     });
 
@@ -398,13 +399,15 @@ describe('WorkspaceLayoutStore', () => {
         expect(layout.zones.bottom.activePanelId).toBe('history');
       });
 
-      it('should apply the Color preset with inspector and comparison in right zone', () => {
+      it('should apply the Color preset with scopes, inspector, and comparison in right zone', () => {
         const store = useWorkspaceLayoutStore.getState();
         store.applyPreset('color');
 
         const { layout, activePresetId } = useWorkspaceLayoutStore.getState();
         expect(activePresetId).toBe('color');
         expect(layout.zones.left.collapsed).toBe(true);
+        expect(layout.zones.right.activePanelId).toBe('scopes');
+        expect(layout.zones.right.panelIds).toContain('scopes');
         expect(layout.zones.right.panelIds).toContain('inspector');
         expect(layout.zones.right.panelIds).toContain('comparison');
         expect(layout.zones.right.panelIds).toContain('ai-assistant');
@@ -422,13 +425,16 @@ describe('WorkspaceLayoutStore', () => {
         expect(layout.zones.right.panelIds).toContain('ai-assistant');
       });
 
-      it('should apply the Effects preset with AI assistant in right zone', () => {
+      it('should apply the Effects preset with browser on the left and AI assistant on the right', () => {
         const store = useWorkspaceLayoutStore.getState();
         store.applyPreset('effects');
 
         const { layout, activePresetId } = useWorkspaceLayoutStore.getState();
         expect(activePresetId).toBe('effects');
+        expect(layout.zones.left.panelIds).toEqual(['effects-browser', 'explorer']);
+        expect(layout.zones.left.activePanelId).toBe('effects-browser');
         expect(layout.zones.right.panelIds).toContain('ai-assistant');
+        expect(layout.sizes.leftWidth).toBe(300);
         expect(layout.sizes.rightWidth).toBe(340);
       });
 

@@ -73,6 +73,8 @@ interface TranscriptionSegmentInput {
   startTime: number;
   endTime: number;
   text: string;
+  speaker?: string;
+  language?: string;
 }
 
 interface NormalizedTranscriptionSegments {
@@ -386,6 +388,8 @@ function normalizeTranscriptionSegments(
       startTime: segment.startTime,
       endTime: segment.endTime,
       text: trimmedText,
+      ...(segment.speaker ? { speaker: segment.speaker } : {}),
+      ...(segment.language ? { language: segment.language } : {}),
     });
   }
 
@@ -416,6 +420,7 @@ async function createCaptionsFromSegments(
   segments: TranscriptionSegmentInput[],
   explicitTrackId?: string,
   replaceExisting = false,
+  language?: string,
 ): Promise<{
   trackId: string;
   createdTrack: boolean;
@@ -433,6 +438,10 @@ async function createCaptionsFromSegments(
   }
 
   const { trackId, createdTrack } = await ensureCaptionTrack(sequenceId, explicitTrackId);
+  const normalizedLanguage =
+    typeof language === 'string' && language.trim().length > 0
+      ? language.trim().replace(/_/g, '-').toLowerCase()
+      : undefined;
   try {
     const result = await executeAgentCommand('ImportGeneratedCaptions', {
       sequenceId,
@@ -441,9 +450,30 @@ async function createCaptionsFromSegments(
         startSec: segment.startTime,
         endSec: segment.endTime,
         text: segment.text,
+        ...(segment.speaker ? { speaker: segment.speaker } : {}),
+        ...((segment.language ?? normalizedLanguage)
+          ? { language: segment.language ?? normalizedLanguage }
+          : {}),
       })),
       replaceExisting,
     });
+
+    if (normalizedLanguage) {
+      try {
+        await executeAgentCommand('SetCaptionTrackLanguage', {
+          sequenceId,
+          trackId,
+          language: normalizedLanguage,
+        });
+      } catch (error) {
+        logger.warn('Caption import succeeded, but track language update failed', {
+          sequenceId,
+          trackId,
+          language: normalizedLanguage,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
 
     const createdCaptions = result.createdIds.map((captionId, index) => ({
       captionId,
@@ -1306,6 +1336,10 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           enum: ['srt', 'vtt'],
           description: 'Optional explicit subtitle format. Auto-detected from file path/content.',
         },
+        language: {
+          type: 'string',
+          description: 'Optional language code to store on the caption track and imported cues.',
+        },
       },
       required: ['sequenceId', 'relativePath'],
     },
@@ -1320,6 +1354,8 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           args.sequenceId as string,
           segments,
           args.trackId as string | undefined,
+          false,
+          args.language as string | undefined,
         );
 
         logger.info('Captions imported from workspace file', {
@@ -1370,6 +1406,8 @@ const CAPTION_TOOLS: ToolDefinition[] = [
               startTime: { type: 'number' },
               endTime: { type: 'number' },
               text: { type: 'string' },
+              speaker: { type: 'string' },
+              language: { type: 'string' },
             },
             required: ['startTime', 'endTime', 'text'],
           },
@@ -1377,6 +1415,10 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         replaceExisting: {
           type: 'boolean',
           description: 'Replace existing captions on the target caption track before inserting',
+        },
+        language: {
+          type: 'string',
+          description: 'Optional language code to store on the caption track and imported cues.',
         },
       },
       required: ['sequenceId', 'segments'],
@@ -1388,6 +1430,7 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           args.segments as TranscriptionSegmentInput[],
           args.trackId as string | undefined,
           args.replaceExisting === true,
+          args.language as string | undefined,
         );
 
         logger.info('Captions created from transcription', {

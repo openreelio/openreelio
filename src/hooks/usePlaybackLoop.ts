@@ -13,6 +13,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { PLAYBACK } from '@/constants/preview';
 import { playbackMonitor } from '@/services/playbackMonitor';
+import { playbackController } from '@/services/PlaybackController';
 
 // =============================================================================
 // Types
@@ -112,8 +113,17 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
   } = options;
 
   // Playback store state
-  const { isPlaying, currentTime, playbackRate, loop, setCurrentTime, setIsPlaying } =
-    usePlaybackStore();
+  const {
+    isPlaying,
+    currentTime,
+    playbackRate,
+    loop,
+    loopRange,
+    playRange,
+    setCurrentTime,
+    setIsPlaying,
+    clearPlayRange,
+  } = usePlaybackStore();
 
   // State
   const [isActive, setIsActive] = useState(false);
@@ -213,23 +223,44 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       // Update playback time
       let newTime = lastPlaybackTimeRef.current + deltaSec;
 
-      // Handle end of sequence
-      if (newTime >= duration) {
+      const activeLoopRange =
+        loop &&
+        loopRange &&
+        loopRange.endSec > loopRange.startSec &&
+        loopRange.startSec < duration
+          ? { startSec: loopRange.startSec, endSec: Math.min(loopRange.endSec, duration) }
+          : null;
+      const activePlayRange =
+        playRange && playRange.endSec > playRange.startSec && playRange.startSec < duration
+          ? { startSec: playRange.startSec, endSec: Math.min(playRange.endSec, duration) }
+          : null;
+
+      if (activePlayRange && newTime >= activePlayRange.endSec) {
+        setIsPlaying(false);
+        setIsActive(false);
+        clearPlayRange();
+        setCurrentTime(activePlayRange.endSec);
+        onFrameRef.current(activePlayRange.endSec);
+        onEnded?.();
+
+        lastFrameTimeRef.current = 0;
+        lastPlaybackTimeRef.current = activePlayRange.endSec;
+        return;
+      }
+
+      if (activeLoopRange && newTime >= activeLoopRange.endSec) {
+        const rangeDuration = activeLoopRange.endSec - activeLoopRange.startSec;
+        newTime = activeLoopRange.startSec + ((newTime - activeLoopRange.startSec) % rangeDuration);
+      } else if (newTime >= duration) {
         if (loop) {
-          // Loop back to start
           newTime = newTime % duration;
         } else {
-          // Stop playback and return to start (standard NLE behavior)
           setIsPlaying(false);
           setIsActive(false);
           setCurrentTime(0);
-
-          // Render the first frame so the preview shows the start position
           onFrameRef.current(0);
-
           onEnded?.();
 
-          // Reset for next play session
           lastFrameTimeRef.current = 0;
           lastPlaybackTimeRef.current = 0;
           return;
@@ -238,6 +269,7 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
 
       // Update store
       setCurrentTime(newTime);
+      playbackController.reportVideoTime(newTime);
       lastPlaybackTimeRef.current = newTime;
 
       // Adjust lastFrameTimeRef to account for any accumulated sub-frame time
@@ -273,9 +305,12 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       playbackRate,
       duration,
       loop,
+      loopRange,
+      playRange,
       allowFrameDrop,
       setCurrentTime,
       setIsPlaying,
+      clearPlayRange,
       onEnded,
       updateFps,
     ],

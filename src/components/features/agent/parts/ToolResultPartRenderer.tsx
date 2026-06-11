@@ -8,7 +8,8 @@
 import { useState } from 'react';
 import { CheckCircle2, ChevronRight, XCircle } from 'lucide-react';
 import type { ToolResultPart } from '@/agents/engine/core/conversation';
-import { canRenderClipAnalysisResult, ClipAnalysisResultCard } from './ClipAnalysisResultCard';
+import { ClipAnalysisResultCard } from './ClipAnalysisResultCard';
+import { canRenderClipAnalysisResult } from './clipAnalysisResultUtils';
 
 interface ToolResultPartRendererProps {
   part: ToolResultPart;

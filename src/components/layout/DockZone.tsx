@@ -29,12 +29,14 @@ import {
   GitCompareArrows,
   GripVertical,
   History,
+  ListFilter,
   Monitor,
   Play,
   Sliders,
   SlidersHorizontal,
   Sparkles,
   Terminal,
+  Wand2,
   type LucideIcon,
 } from 'lucide-react';
 import { PANEL_REGISTRY, type DockZoneId, type PanelId } from '@/stores/workspaceLayoutStore';
@@ -89,7 +91,9 @@ const PANEL_ICONS: Record<PanelId, LucideIcon> = {
   'source-monitor': Monitor,
   'program-monitor': Play,
   timeline: Film,
+  'timeline-index': ListFilter,
   terminal: Terminal,
+  'effects-browser': Wand2,
   inspector: SlidersHorizontal,
   'ai-assistant': Sparkles,
   'agent-review': ClipboardList,
@@ -97,6 +101,7 @@ const PANEL_ICONS: Record<PanelId, LucideIcon> = {
   history: History,
   transcript: FileText,
   performance: Activity,
+  scopes: Activity,
   comparison: GitCompareArrows,
   generation: Sparkles,
 };
@@ -457,11 +462,7 @@ export function DockZone({
         <div
           id={`dock-panel-${activePanelId}`}
           role="tabpanel"
-          className={
-            collapsed
-              ? 'hidden'
-              : 'min-h-0 flex-1 overflow-hidden bg-editor-bg'
-          }
+          className={collapsed ? 'hidden' : 'min-h-0 flex-1 overflow-hidden bg-editor-bg'}
           aria-hidden={collapsed ? true : undefined}
         >
           {renderPanel(activePanelId)}

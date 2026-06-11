@@ -200,6 +200,16 @@ async importAsset(uri: string) : Promise<Result<AssetImportResult, string>> {
 }
 },
 /**
+ * Relinks or replaces the media source for an existing asset while preserving its asset ID.
+ */
+async relinkAsset(assetId: string, uri: string) : Promise<Result<AssetRelinkResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("relink_asset", { assetId, uri }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Gets all assets in the project
  */
 async getAssets() : Promise<Result<Asset[], string>> {
@@ -2913,7 +2923,7 @@ schemaVersion?: number;
 /**
  * Asset ID this bundle belongs to
  */
-assetId: string; 
+assetId: string;
 /**
  * Shot detection results
  */
@@ -3137,7 +3147,7 @@ export type AnalyzeAssetRequest = {
 /**
  * Asset ID to analyze
  */
-assetId: string; 
+assetId: string;
 /**
  * Provider to use
  */
@@ -3210,7 +3220,7 @@ name: string;
 /**
  * File path or URI
  */
-uri: string; 
+uri: string;
 /**
  * SHA256 hash of file content
  */
@@ -3280,7 +3290,7 @@ version: string;
 /**
  * Asset ID this annotation belongs to
  */
-assetId: string; 
+assetId: string;
 /**
  * SHA256 hash of the asset file (for staleness detection)
  */
@@ -3312,7 +3322,7 @@ export type AssetImportResult = {
 /**
  * Generated asset ID (ULID)
  */
-assetId: string; 
+assetId: string;
 /**
  * Asset display name (from filename)
  */
@@ -3320,7 +3330,7 @@ name: string;
 /**
  * Operation ID for undo/redo tracking
  */
-opId: string; 
+opId: string;
 /**
  * Background job ID for proxy/thumbnail generation (if any)
  */
@@ -3329,6 +3339,26 @@ jobId: string | null }
  * Asset type enumeration
  */
 export type AssetKind = "video" | "audio" | "image" | "subtitle" | "font" | "effectPreset" | "memePack"
+/**
+ * Result of relinking or replacing an existing asset source.
+ */
+export type AssetRelinkResult = {
+/**
+ * Updated asset ID.
+ */
+assetId: string;
+/**
+ * Operation ID for undo/redo tracking.
+ */
+opId: string;
+/**
+ * Resolved local URI now attached to the asset.
+ */
+uri: string;
+/**
+ * Relative workspace path when the source is inside the project folder.
+ */
+relativePath: string | null }
 /**
  * Search result for an asset.
  */
@@ -3426,7 +3456,7 @@ export type AudioKeyframe = {
 /**
  * Time offset from clip start in seconds (must be >= 0)
  */
-timeOffset: number; 
+timeOffset: number;
 /**
  * Volume value in dB (typically -60.0 to +6.0, -inf for silence)
  */
@@ -3509,7 +3539,15 @@ fadeOutType?: FadeType;
  * Volume automation keyframes (overrides flat volume_db when non-empty).
  * Sorted by time_offset. Values in dB, times relative to clip start.
  */
-volumeKeyframes: AudioKeyframe[] }
+volumeKeyframes: AudioKeyframe[];
+/**
+ * Editorial audio role groundwork for future buses/routing.
+ */
+audioRole?: string | null;
+/**
+ * Editorial audio tags groundwork for future buses/routing.
+ */
+audioTags: string[] }
 /**
  * Audio stream information.
  */
@@ -3805,6 +3843,10 @@ range: ClipRange;
  */
 place: ClipPlace; transform: Transform; 
 /**
+ * Optional transform animation keyframes.
+ */
+motionKeyframes: TransformKeyframe[];
+/**
  * Opacity (0.0 - 1.0)
  */
 opacity: number; 
@@ -3828,7 +3870,11 @@ freezeFrame?: boolean;
  * Optional time remap curve for variable-speed playback.
  * When present and valid, overrides the constant `speed` field.
  */
-timeRemap?: TimeRemapCurve | null; effects: string[]; audio: AudioSettings; 
+timeRemap?: TimeRemapCurve | null;
+/**
+ * Slow-motion interpolation mode for preview/export quality.
+ */
+slowMotionInterpolation: SlowMotionInterpolation; effects: string[]; audio: AudioSettings;
 /**
  * Optional label for organization
  */
@@ -3997,7 +4043,7 @@ export type CommandResultDto = {
 /**
  * Operation ID for tracking in undo/redo history
  */
-opId: string; 
+opId: string;
 /**
  * IDs of entities created by this command
  */
@@ -4249,7 +4295,7 @@ export type DetectFillerWordsArgs = {
 /**
  * Asset ID whose transcript to scan
  */
-assetId: string; 
+assetId: string;
 /**
  * Custom filler word list (if empty, uses defaults)
  */
@@ -4261,7 +4307,7 @@ export type DetectSilenceArgs = {
 /**
  * Asset ID to analyze
  */
-assetId: string; 
+assetId: string;
 /**
  * Silence threshold in dB (e.g., -30.0). Lower = more sensitive.
  */
@@ -4907,6 +4953,24 @@ h264Encoder: string;
  */
 h265Encoder: string }
 /**
+ * HDR (High Dynamic Range) mode for export
+ */
+export type HdrMode =
+/**
+ * SDR (Standard Dynamic Range) - default
+ */
+"sdr" |
+/**
+ * HDR10 with PQ (Perceptual Quantizer) transfer function
+ * Uses BT.2020 color primaries and 10-bit color depth
+ */
+"hdr_10" |
+/**
+ * HLG (Hybrid Log-Gamma) HDR format
+ * Compatible with both HDR and SDR displays
+ */
+"hlg"
+/**
  * History (undo/redo) state event payload.
  */
 export type HistoryChangedEvent = { 
@@ -5170,7 +5234,7 @@ export type MatchFrameResult = {
 /**
  * Asset ID of the clip under the playhead.
  */
-assetId: string; 
+assetId: string;
 /**
  * Corresponding source time within the asset (seconds).
  */
@@ -6145,7 +6209,7 @@ export type SearchResultDto = {
 /**
  * Asset ID
  */
-assetId: string; 
+assetId: string;
 /**
  * Start time in seconds
  */
@@ -6380,7 +6444,7 @@ id: string;
 /**
  * Asset ID this shot belongs to
  */
-assetId: string; 
+assetId: string;
 /**
  * Start time in seconds
  */
@@ -6437,6 +6501,22 @@ startSec: number;
  * End time in seconds
  */
 endSec: number }
+/**
+ * Slow-motion interpolation mode used when a clip plays below real time.
+ */
+export type SlowMotionInterpolation =
+/**
+ * Duplicate/hold source frames. This is the fastest and preserves legacy behavior.
+ */
+"nearest" |
+/**
+ * Blend neighboring frames for smoother slow motion.
+ */
+"frameBlend" |
+/**
+ * Use motion-compensated interpolation during export.
+ */
+"motionCompensated"
 /**
  * Arguments for the smart_reframe command.
  */
@@ -6635,7 +6715,7 @@ export type StateChangedEvent = {
 /**
  * Operation ID that caused the change
  */
-opId: string; 
+opId: string;
 /**
  * List of state changes
  */
@@ -7227,7 +7307,7 @@ clipId: string;
 /**
  * Asset ID used.
  */
-assetId: string; 
+assetId: string;
 /**
  * Source range used (in seconds).
  */
@@ -7320,7 +7400,11 @@ syncLock?: boolean;
 /**
  * Volume for audio tracks (0.0 - 2.0, 1.0 = 100%)
  */
-volume: number }
+volume: number;
+/**
+ * BCP-47-ish language code for caption tracks.
+ */
+captionLanguage?: string | null }
 /**
  * Track event payload.
  */
@@ -7412,7 +7496,7 @@ id: string;
 /**
  * Parent asset ID
  */
-assetId: string; 
+assetId: string;
 /**
  * Matched text content
  */
@@ -7677,6 +7761,22 @@ rotationDeg: number;
  */
 anchor: Point2D }
 /**
+ * A single transform keyframe on a clip motion curve.
+ */
+export type TransformKeyframe = {
+/**
+ * Time offset from clip start in seconds (must be >= 0)
+ */
+timeOffset: number;
+/**
+ * Complete transform snapshot at this keyframe
+ */
+transform: Transform;
+/**
+ * How to interpolate to the next keyframe
+ */
+interpolation?: KeyframeInterpolation }
+/**
  * A single transition between two consecutive shots
  */
 export type TransitionEntry = { 
@@ -7719,7 +7819,7 @@ export type UndoHistoryEntry = {
 /**
  * Operation ID
  */
-opId: string; 
+opId: string;
 /**
  * Command type name (e.g., "InsertClip", "SplitClip")
  */
@@ -7807,7 +7907,7 @@ export type VideoCodec = "h264" | "h265" | "vp9" | "prores" | "copy"
 /**
  * Structured video export request used by UI and agent-driven export paths.
  */
-export type VideoExportRequest = { container: ContainerFormat; videoCodec: VideoCodec; audioCodec: AudioCodec; qualityTier: ExportQualityTier; width: number | null; height: number | null; fps: number | null; videoBitrate: string | null; audioBitrate: string | null; crf: number | null; twoPass?: boolean }
+export type VideoExportRequest = { container: ContainerFormat; videoCodec: VideoCodec; audioCodec: AudioCodec; qualityTier: ExportQualityTier; width: number | null; height: number | null; fps: number | null; videoBitrate: string | null; audioBitrate: string | null; crf: number | null; twoPass?: boolean; hdrMode?: HdrMode; maxCll: number | null; maxFall: number | null; bitDepth: number | null }
 /**
  * Video-specific metadata
  */

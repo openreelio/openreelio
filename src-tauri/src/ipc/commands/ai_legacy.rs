@@ -795,13 +795,14 @@ pub async fn apply_edit_script(
         RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
         RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, ReorderTracksCommand,
         ReverseClipCommand, RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
-        SetAudioKeyframeValueCommand, SetClipAudioCommand, SetClipBlendModeCommand,
-        SetClipEnabledCommand, SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
-        SetMasterVolumeCommand, SetTimeRemapCommand, SetTrackBlendModeCommand, SplitClipCommand,
-        ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
-        TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
-        UpdateEffectCommand, UpdateMaskCommand, UpdateSequenceHdrSettingsCommand,
-        UpdateTextCommand,
+        SetAudioKeyframeValueCommand, SetCaptionTrackLanguageCommand, SetClipAudioCommand,
+        SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMotionKeyframesCommand,
+        SetClipMuteCommand, SetClipOpacityCommand, SetClipSlowMotionInterpolationCommand,
+        SetClipSpeedCommand, SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
+        SetTrackBlendModeCommand, SetTrackVolumeCommand, SplitClipCommand, ToggleTrackLockCommand,
+        ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand, UngroupClipsCommand,
+        UnlinkClipsCommand, UnnestCompoundClipCommand, UpdateAssetCommand, UpdateEffectCommand,
+        UpdateMaskCommand, UpdateSequenceHdrSettingsCommand, UpdateTextCommand,
     };
     use crate::core::commands::{
         CreateAdjustmentLayerCommand, CreateCompoundClipCommand, PasteAttributesCommand,
@@ -1044,6 +1045,20 @@ pub async fn apply_edit_script(
                 &p.clip_id,
                 p.transform,
             )),
+            CommandPayload::SetClipMotionKeyframes(p) => {
+                Box::new(SetClipMotionKeyframesCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.keyframes,
+                ))
+            }
+            CommandPayload::SetClipOpacity(p) => Box::new(SetClipOpacityCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.opacity,
+            )),
             CommandPayload::SetClipSpeed(p) => Box::new(SetClipSpeedCommand::new(
                 &p.sequence_id,
                 &p.track_id,
@@ -1051,6 +1066,14 @@ pub async fn apply_edit_script(
                 p.speed,
                 p.reverse,
             )),
+            CommandPayload::SetClipSlowMotionInterpolation(p) => {
+                Box::new(SetClipSlowMotionInterpolationCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.interpolation,
+                ))
+            }
             CommandPayload::ReverseClip(p) => Box::new(ReverseClipCommand::new(
                 &p.sequence_id,
                 &p.track_id,
@@ -1196,6 +1219,52 @@ pub async fn apply_edit_script(
                 crate::core::commands::ImportAssetCommand::new(&p.name, &p.uri),
             ),
             CommandPayload::RemoveAsset(p) => Box::new(RemoveAssetCommand::new(&p.asset_id)),
+            CommandPayload::UpdateAsset(p) => {
+                let mut cmd = UpdateAssetCommand::new(&p.asset_id);
+                if let Some(name) = &p.name {
+                    cmd = cmd.with_name(name);
+                }
+                if let Some(tags) = p.tags {
+                    cmd = cmd.with_tags(tags);
+                }
+                if let Some(license) = p.license {
+                    cmd = cmd.with_license(license);
+                }
+                if let Some(thumbnail_url) = p.thumbnail_url {
+                    cmd = cmd.with_thumbnail_url(thumbnail_url);
+                }
+                if let Some(proxy_status) = p.proxy_status {
+                    cmd = cmd.with_proxy_status(proxy_status);
+                }
+                if let Some(proxy_url) = p.proxy_url {
+                    cmd = cmd.with_proxy_url(proxy_url);
+                }
+                if let Some(uri) = &p.uri {
+                    cmd = cmd.with_uri(uri);
+                }
+                if let Some(duration_sec) = p.duration_sec {
+                    cmd = cmd.with_duration_sec(duration_sec);
+                }
+                if let Some(file_size) = p.file_size {
+                    cmd = cmd.with_file_size(file_size);
+                }
+                if let Some(video) = p.video {
+                    cmd = cmd.with_video(video);
+                }
+                if let Some(audio) = p.audio {
+                    cmd = cmd.with_audio(audio);
+                }
+                if let Some(relative_path) = p.relative_path {
+                    cmd = cmd.with_relative_path(relative_path);
+                }
+                if let Some(workspace_managed) = p.workspace_managed {
+                    cmd = cmd.with_workspace_managed(workspace_managed);
+                }
+                if let Some(missing) = p.missing {
+                    cmd = cmd.with_missing(missing);
+                }
+                Box::new(cmd)
+            }
             CommandPayload::CreateSequence(p) => Box::new(CreateSequenceCommand::new(
                 &p.name,
                 &p.format.unwrap_or_else(|| "1080p".to_string()),
@@ -1214,6 +1283,14 @@ pub async fn apply_edit_script(
                 &p.sequence_id,
                 &p.track_id,
                 &p.new_name,
+            )),
+            CommandPayload::SetCaptionTrackLanguage(p) => Box::new(
+                SetCaptionTrackLanguageCommand::new(&p.sequence_id, &p.track_id, &p.language),
+            ),
+            CommandPayload::SetTrackVolume(p) => Box::new(SetTrackVolumeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.volume,
             )),
             CommandPayload::ToggleTrackMute(p) => Box::new(ToggleTrackMuteCommand::new(
                 &p.sequence_id,
@@ -1278,6 +1355,9 @@ pub async fn apply_edit_script(
                     AddEffectCommand::new(&p.sequence_id, &p.track_id, &p.clip_id, p.effect_type);
                 for (key, value) in p.params {
                     cmd = cmd.with_param(key, value);
+                }
+                for (key, keyframes) in p.keyframes {
+                    cmd = cmd.with_keyframes(key, keyframes);
                 }
                 if let Some(pos) = p.position {
                     cmd = cmd.at_position(pos);
@@ -1557,8 +1637,15 @@ pub async fn validate_edit_script(
                     }
                 }
             }
-            "SplitClip" | "DeleteClip" | "TrimClip" | "MoveClip" | "SetClipSpeed"
-            | "setClipSpeed" | "changeClipSpeed" => {
+            "SplitClip"
+            | "DeleteClip"
+            | "TrimClip"
+            | "MoveClip"
+            | "SetClipSpeed"
+            | "setClipSpeed"
+            | "changeClipSpeed"
+            | "SetClipSlowMotionInterpolation"
+            | "setClipSlowMotionInterpolation" => {
                 if cmd.params.get("clipId").is_none() {
                     issues.push(format!("{} command {} missing clipId", cmd.command_type, i));
                 }
@@ -1578,6 +1665,15 @@ pub async fn validate_edit_script(
                             issues.push(format!("SetClipSpeed command {} missing speed", i));
                         }
                     }
+                }
+                if (cmd.command_type == "SetClipSlowMotionInterpolation"
+                    || cmd.command_type == "setClipSlowMotionInterpolation")
+                    && cmd.params.get("interpolation").is_none()
+                {
+                    issues.push(format!(
+                        "SetClipSlowMotionInterpolation command {} missing interpolation",
+                        i
+                    ));
                 }
             }
             "SetTrackBlendMode" | "setTrackBlendMode" => {
@@ -1599,6 +1695,50 @@ pub async fn validate_edit_script(
                     issues.push(format!("SetClipBlendMode command {} missing blendMode", i));
                 }
             }
+            "SetClipMotionKeyframes" | "setClipMotionKeyframes" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!(
+                        "SetClipMotionKeyframes command {} missing trackId",
+                        i
+                    ));
+                }
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!(
+                        "SetClipMotionKeyframes command {} missing clipId",
+                        i
+                    ));
+                }
+                if !cmd
+                    .params
+                    .get("keyframes")
+                    .is_some_and(|value| value.is_array())
+                {
+                    issues.push(format!(
+                        "SetClipMotionKeyframes command {} missing keyframes array",
+                        i
+                    ));
+                }
+            }
+            "SetClipOpacity" | "setClipOpacity" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("SetClipOpacity command {} missing trackId", i));
+                }
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("SetClipOpacity command {} missing clipId", i));
+                }
+                match cmd.params.get("opacity").and_then(|v| v.as_f64()) {
+                    Some(v) if v.is_finite() && (0.0..=1.0).contains(&v) => {}
+                    Some(_) => {
+                        issues.push(format!(
+                            "SetClipOpacity command {} has invalid opacity: must be finite and between 0 and 1",
+                            i
+                        ));
+                    }
+                    None => {
+                        issues.push(format!("SetClipOpacity command {} missing opacity", i));
+                    }
+                }
+            }
             "CreateTrack" | "createTrack" | "AddTrack" | "addTrack" => {
                 if cmd.params.get("kind").is_none() {
                     issues.push(format!("CreateTrack command {} missing kind", i));
@@ -1618,6 +1758,20 @@ pub async fn validate_edit_script(
                 }
                 if cmd.params.get("newName").is_none() {
                     issues.push(format!("RenameTrack command {} missing newName", i));
+                }
+            }
+            "SetCaptionTrackLanguage" | "setCaptionTrackLanguage" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!(
+                        "SetCaptionTrackLanguage command {} missing trackId",
+                        i
+                    ));
+                }
+                if cmd.params.get("language").is_none() {
+                    issues.push(format!(
+                        "SetCaptionTrackLanguage command {} missing language",
+                        i
+                    ));
                 }
             }
             "ToggleTrackMute" | "toggleTrackMute" => {

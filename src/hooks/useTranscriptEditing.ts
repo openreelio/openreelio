@@ -41,6 +41,13 @@ export interface WordSelection {
   endIndex: number;
 }
 
+/** Contiguous transcript search match */
+export interface TranscriptSearchMatch {
+  startIndex: number;
+  endIndex: number;
+  text: string;
+}
+
 /** Return type of the hook */
 export interface UseTranscriptEditingReturn {
   /** Words with timing that overlap the selected clip's source range */
@@ -55,9 +62,29 @@ export interface UseTranscriptEditingReturn {
   selection: WordSelection | null;
   /** The asset ID of the clip being edited */
   assetId: string | null;
+  /** Current transcript search query */
+  searchTerm: string;
+  /** Replacement text used for correction preview */
+  replacementText: string;
+  /** Contiguous word matches for the current query */
+  searchMatches: TranscriptSearchMatch[];
+  /** Active search match index, or -1 when there are no matches */
+  activeSearchMatchIndex: number;
+  /** Correction preview for the active match. This does not mutate source transcript data. */
+  replacementPreview: string | null;
 
   /** Set the word selection range */
   setSelection: (selection: WordSelection | null) => void;
+  /** Set transcript search query */
+  setSearchTerm: (term: string) => void;
+  /** Set replacement text for correction preview */
+  setReplacementText: (text: string) => void;
+  /** Select a search match and sync word selection to it */
+  selectSearchMatch: (matchIndex: number) => void;
+  /** Select next search match */
+  goToNextSearchMatch: () => void;
+  /** Select previous search match */
+  goToPreviousSearchMatch: () => void;
   /** Seek playhead to a word's start time */
   seekToWord: (wordIndex: number) => void;
   /** Delete the selected word range from the timeline */
@@ -72,12 +99,54 @@ export interface UseTranscriptEditingReturn {
 // Hook Implementation
 // =============================================================================
 
+function normalizeTranscriptToken(value: string): string {
+  return value
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}'-]+/gu, '')
+    .trim();
+}
+
+function buildSearchMatches(words: TranscriptWord[], query: string): TranscriptSearchMatch[] {
+  const queryTokens = query.trim().split(/\s+/).map(normalizeTranscriptToken).filter(Boolean);
+
+  if (queryTokens.length === 0) {
+    return [];
+  }
+
+  const normalizedWords = words.map((word) => normalizeTranscriptToken(word.text));
+  const matches: TranscriptSearchMatch[] = [];
+
+  for (let index = 0; index <= words.length - queryTokens.length; index += 1) {
+    const isMatch = queryTokens.every((token, offset) => {
+      const candidate = normalizedWords[index + offset];
+      return queryTokens.length === 1 ? candidate.includes(token) : candidate === token;
+    });
+
+    if (isMatch) {
+      const endIndex = index + queryTokens.length - 1;
+      matches.push({
+        startIndex: index,
+        endIndex,
+        text: words
+          .slice(index, endIndex + 1)
+          .map((word) => word.text)
+          .join(' '),
+      });
+    }
+  }
+
+  return matches;
+}
+
 export function useTranscriptEditing(): UseTranscriptEditingReturn {
   const isMountedRef = useRef(true);
   const [words, setWords] = useState<TranscriptWord[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selection, setSelection] = useState<WordSelection | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [replacementText, setReplacementText] = useState('');
+  const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(-1);
   const [loadTrigger, setLoadTrigger] = useState(0);
 
   const currentTime = usePlaybackStore((s) => s.currentTime);
@@ -174,6 +243,64 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
       (word) => word.endSec > clipInfo.sourceInSec && word.startSec < clipInfo.sourceOutSec,
     );
   }, [words, clipInfo]);
+
+  const searchMatches = useMemo(
+    () => buildSearchMatches(visibleWords, searchTerm),
+    [visibleWords, searchTerm],
+  );
+
+  useEffect(() => {
+    setActiveSearchMatchIndex(searchMatches.length > 0 ? 0 : -1);
+  }, [searchMatches.length, searchTerm]);
+
+  const selectSearchMatch = useCallback(
+    (matchIndex: number) => {
+      if (searchMatches.length === 0) {
+        setActiveSearchMatchIndex(-1);
+        setSelection(null);
+        return;
+      }
+
+      const normalizedIndex =
+        ((matchIndex % searchMatches.length) + searchMatches.length) % searchMatches.length;
+      const match = searchMatches[normalizedIndex];
+      setActiveSearchMatchIndex(normalizedIndex);
+      setSelection({ startIndex: match.startIndex, endIndex: match.endIndex });
+    },
+    [searchMatches],
+  );
+
+  const goToNextSearchMatch = useCallback(() => {
+    if (searchMatches.length === 0) return;
+    selectSearchMatch(activeSearchMatchIndex < 0 ? 0 : activeSearchMatchIndex + 1);
+  }, [activeSearchMatchIndex, searchMatches.length, selectSearchMatch]);
+
+  const goToPreviousSearchMatch = useCallback(() => {
+    if (searchMatches.length === 0) return;
+    selectSearchMatch(
+      activeSearchMatchIndex < 0 ? searchMatches.length - 1 : activeSearchMatchIndex - 1,
+    );
+  }, [activeSearchMatchIndex, searchMatches.length, selectSearchMatch]);
+
+  const replacementPreview = useMemo(() => {
+    if (!replacementText && !searchTerm.trim()) {
+      return null;
+    }
+
+    const activeMatch =
+      activeSearchMatchIndex >= 0 ? searchMatches[activeSearchMatchIndex] : undefined;
+    if (!activeMatch) {
+      return null;
+    }
+
+    const before = visibleWords
+      .slice(Math.max(0, activeMatch.startIndex - 4), activeMatch.startIndex)
+      .map((word) => word.text);
+    const after = visibleWords
+      .slice(activeMatch.endIndex + 1, activeMatch.endIndex + 5)
+      .map((word) => word.text);
+    return [...before, replacementText, ...after].join(' ').trim();
+  }, [activeSearchMatchIndex, replacementText, searchMatches, searchTerm, visibleWords]);
 
   // Find the active word index based on playhead position
   const activeWordIndex = useMemo(() => {
@@ -294,7 +421,17 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
     activeWordIndex,
     selection,
     assetId: clipInfo?.assetId ?? null,
+    searchTerm,
+    replacementText,
+    searchMatches,
+    activeSearchMatchIndex,
+    replacementPreview,
     setSelection,
+    setSearchTerm,
+    setReplacementText,
+    selectSearchMatch,
+    goToNextSearchMatch,
+    goToPreviousSearchMatch,
     seekToWord,
     deleteSelection,
     reorderToPosition,

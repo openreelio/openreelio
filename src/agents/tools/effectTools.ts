@@ -145,6 +145,15 @@ const EFFECT_TOOLS: ToolDefinition[] = [
         name: { type: 'string', description: 'Optional mask name' },
         feather: { type: 'number', description: 'Mask edge softness from 0 to 1' },
         inverted: { type: 'boolean', description: 'Whether the mask should be inverted' },
+        keyframes: {
+          type: 'array',
+          description:
+            'Optional mask animation keyframes: [{ timeOffset, shape, easing }] generated from object tracking',
+        },
+        trackingSourceId: {
+          type: 'string',
+          description: 'Optional effect/source ID for the tracking data that generated keyframes',
+        },
       },
       required: ['sequenceId', 'trackId', 'clipId', 'effectId', 'shape'],
     },
@@ -159,6 +168,10 @@ const EFFECT_TOOLS: ToolDefinition[] = [
           ...(typeof args.name === 'string' ? { name: args.name } : {}),
           ...(typeof args.feather === 'number' ? { feather: args.feather } : {}),
           ...(typeof args.inverted === 'boolean' ? { inverted: args.inverted } : {}),
+          ...(Array.isArray(args.keyframes) ? { keyframes: args.keyframes } : {}),
+          ...(typeof args.trackingSourceId === 'string'
+            ? { trackingSourceId: args.trackingSourceId }
+            : {}),
         });
 
         logger.debug('add_mask executed', { opId: result.opId });
@@ -192,6 +205,14 @@ const EFFECT_TOOLS: ToolDefinition[] = [
         blendMode: { type: 'string', description: 'Mask blend mode' },
         enabled: { type: 'boolean', description: 'Toggle mask enabled state' },
         locked: { type: 'boolean', description: 'Toggle mask locked state' },
+        keyframes: {
+          type: 'array',
+          description: 'Replacement mask animation keyframes: [{ timeOffset, shape, easing }]',
+        },
+        trackingSourceId: {
+          type: 'string',
+          description: 'Optional effect/source ID for the tracking data that generated keyframes',
+        },
       },
       required: ['effectId', 'maskId'],
     },
@@ -208,6 +229,8 @@ const EFFECT_TOOLS: ToolDefinition[] = [
           'blendMode',
           'enabled',
           'locked',
+          'keyframes',
+          'trackingSourceId',
         ]) {
           if (args[key] !== undefined) {
             optionalPayload[key] = args[key];

@@ -5,12 +5,13 @@
  * Tests for clip utility functions and drag operation handlers.
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import { useTimelineClipOperations } from './useTimelineClipOperations';
 import type { Sequence, Clip } from '@/types';
 import type { ClipMoveData, ClipTrimData } from '@/components/timeline/types';
 import type { ClipDragData, DragPreviewPosition } from '@/components/timeline/Clip';
+import { useToastStore } from '@/hooks/useToast';
 
 // =============================================================================
 // Test Data
@@ -74,6 +75,10 @@ const mockSequence: Sequence = {
 // =============================================================================
 
 describe('useTimelineClipOperations', () => {
+  beforeEach(() => {
+    useToastStore.getState().clearToasts();
+  });
+
   // ===========================================================================
   // getTrackClips Tests
   // ===========================================================================
@@ -773,6 +778,141 @@ describe('useTimelineClipOperations', () => {
         clipId: 'clip_001',
         newSourceIn: 4,
       } satisfies ClipTrimData);
+    });
+  });
+
+  describe('handleClipDragEnd for rate stretch', () => {
+    it('should convert stretched right-edge duration into clip speed', async () => {
+      const onClipSpeedChange = vi.fn().mockResolvedValue(undefined);
+      const onClipMove = vi.fn();
+      const { result } = renderHook(() =>
+        useTimelineClipOperations({
+          sequence: mockSequence,
+          zoom: 100,
+          onClipMove,
+          onClipTrim: undefined,
+          onClipSpeedChange,
+        }),
+      );
+
+      const dragData: ClipDragData = {
+        clipId: 'clip_001',
+        type: 'rate-stretch-right',
+        startX: 500,
+        startY: 0,
+        originalTimelineIn: 5,
+        originalSourceIn: 0,
+        originalSourceOut: 10,
+      };
+
+      const finalPosition: DragPreviewPosition = {
+        timelineIn: 5,
+        sourceIn: 0,
+        sourceOut: 10,
+        duration: 12,
+      };
+
+      act(() => {
+        result.current.handleClipDragEnd('track_001', dragData, finalPosition);
+      });
+
+      await waitFor(() => {
+        expect(onClipSpeedChange).toHaveBeenCalledWith('clip_001', 'track_001', 10 / 12, false);
+      });
+      expect(onClipMove).not.toHaveBeenCalled();
+    });
+
+    it('should move then speed-change when stretching the left edge earlier', async () => {
+      const onClipMove = vi.fn().mockResolvedValue(undefined);
+      const onClipSpeedChange = vi.fn().mockResolvedValue(undefined);
+      const { result } = renderHook(() =>
+        useTimelineClipOperations({
+          sequence: mockSequence,
+          zoom: 100,
+          onClipMove,
+          onClipTrim: undefined,
+          onClipSpeedChange,
+        }),
+      );
+
+      const dragData: ClipDragData = {
+        clipId: 'clip_001',
+        type: 'rate-stretch-left',
+        startX: 100,
+        startY: 0,
+        originalTimelineIn: 5,
+        originalSourceIn: 0,
+        originalSourceOut: 10,
+      };
+
+      const finalPosition: DragPreviewPosition = {
+        timelineIn: 3,
+        sourceIn: 0,
+        sourceOut: 10,
+        duration: 12,
+      };
+
+      act(() => {
+        result.current.handleClipDragEnd('track_001', dragData, finalPosition);
+      });
+
+      await waitFor(() => {
+        expect(onClipMove).toHaveBeenCalledWith({
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          clipId: 'clip_001',
+          newTimelineIn: 3,
+        } satisfies ClipMoveData);
+        expect(onClipSpeedChange).toHaveBeenCalledWith('clip_001', 'track_001', 10 / 12, false);
+      });
+      expect(onClipMove.mock.invocationCallOrder[0]).toBeLessThan(
+        onClipSpeedChange.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('should surface rate stretch commit failures as a toast', async () => {
+      const onClipSpeedChange = vi.fn().mockRejectedValue(new Error('Speed failed'));
+      const { result } = renderHook(() =>
+        useTimelineClipOperations({
+          sequence: mockSequence,
+          zoom: 100,
+          onClipMove: undefined,
+          onClipTrim: undefined,
+          onClipSpeedChange,
+        }),
+      );
+
+      const dragData: ClipDragData = {
+        clipId: 'clip_001',
+        type: 'rate-stretch-right',
+        startX: 500,
+        startY: 0,
+        originalTimelineIn: 5,
+        originalSourceIn: 0,
+        originalSourceOut: 10,
+      };
+
+      const finalPosition: DragPreviewPosition = {
+        timelineIn: 5,
+        sourceIn: 0,
+        sourceOut: 10,
+        duration: 12,
+      };
+
+      act(() => {
+        result.current.handleClipDragEnd('track_001', dragData, finalPosition);
+      });
+
+      await waitFor(() => {
+        expect(useToastStore.getState().toasts).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              message: 'Failed to rate stretch clip',
+              variant: 'error',
+            }),
+          ]),
+        );
+      });
     });
   });
 
