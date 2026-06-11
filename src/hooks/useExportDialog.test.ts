@@ -234,7 +234,7 @@ describe('useExportDialog', () => {
       preset: 'mp4_high',
       settings: expect.objectContaining({
         videoCodec: 'h265',
-        hdrMode: 'hdr10',
+        hdrMode: 'hdr_10',
         bitDepth: 10,
         maxCll: 1000,
         maxFall: 400,
