@@ -235,21 +235,25 @@ export function useRippleEdit(options: UseRippleEditOptions): UseRippleEditRetur
           });
         }
 
-        totalDelta = Math.max(totalDelta, deletedDuration);
+        totalDelta += deletedDuration;
       }
 
       // If rippling all tracks, process other tracks too
       if (rippleAllTracks && clipsByTrack.size > 0) {
-        // Find the earliest delete time across all tracks
+        // Collect every deleted clip's position and duration so each untouched-track
+        // clip can be shifted left by only the deleted time that lies before it,
+        // rather than by the sum of all deletions across every track (which would
+        // over-shift clips and desync tracks).
+        const deletions: Array<{ time: number; duration: number }> = [];
         let earliestTime = Infinity;
-        let totalDeleteDuration = 0;
 
         for (const deletedClips of clipsByTrack.values()) {
           for (const clip of deletedClips) {
-            if (clip.place.timelineInSec < earliestTime) {
-              earliestTime = clip.place.timelineInSec;
+            const time = clip.place.timelineInSec;
+            if (time < earliestTime) {
+              earliestTime = time;
             }
-            totalDeleteDuration += getClipDuration(clip);
+            deletions.push({ time, duration: getClipDuration(clip) });
           }
         }
 
@@ -258,16 +262,24 @@ export function useRippleEdit(options: UseRippleEditOptions): UseRippleEditRetur
           if (clipsByTrack.has(track.id)) continue; // Already processed
 
           for (const clip of track.clips) {
-            if (clip.place.timelineInSec >= earliestTime) {
+            const clipTime = clip.place.timelineInSec;
+            if (clipTime >= earliestTime) {
+              // Sum only the deletions positioned before this clip.
+              const deletedBefore = deletions.reduce(
+                (sum, deletion) =>
+                  deletion.time < clipTime ? sum + deletion.duration : sum,
+                0
+              );
+
               const newTime = Math.max(
                 MIN_CLIP_GAP_SEC,
-                clip.place.timelineInSec - totalDeleteDuration
+                clipTime - deletedBefore
               );
 
               affectedClips.push({
                 clipId: clip.id,
                 trackId: track.id,
-                originalTime: clip.place.timelineInSec,
+                originalTime: clipTime,
                 newTime,
               });
             }
