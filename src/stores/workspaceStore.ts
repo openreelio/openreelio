@@ -98,15 +98,26 @@ function toErrorMessage(error: unknown): string {
 }
 
 /**
- * Sync project store after a filesystem mutation (rename, move, delete).
- * These operations update asset paths on the backend, so we must refresh
- * the project store to keep frontend asset data consistent.
+ * Refresh the backend project state and apply it to the project store, but only
+ * if the open project did not change while the async refresh was in flight.
+ * Shared by all workspace -> project sync paths (mutations, auto-registration,
+ * scan-complete events) to keep frontend asset data consistent without ever
+ * applying a stale project's state over a newly opened one.
  */
-async function syncProjectStoreAfterMutation(operation: string): Promise<void> {
+async function syncProjectStoreState(operation: string): Promise<void> {
   try {
-    const freshState = await refreshProjectState();
     const { useProjectStore } = await import('@/stores/projectStore');
+    // Capture the open project's identity before the async refresh so a slow sync
+    // cannot apply one project's assets over another after the user switched
+    // projects mid-flight. We intentionally do not guard on stateVersion here:
+    // these syncs run during active editing, and a concurrent edit command must
+    // not cause newly auto-registered assets to be silently dropped.
+    const projectIdAtSync = useProjectStore.getState().meta?.id ?? null;
+    const freshState = await refreshProjectState();
     useProjectStore.setState((draft) => {
+      if ((draft.meta?.id ?? null) !== projectIdAtSync) {
+        return;
+      }
       applyProjectState(draft, freshState);
     });
   } catch (syncError) {
@@ -114,6 +125,15 @@ async function syncProjectStoreAfterMutation(operation: string): Promise<void> {
       error: toErrorMessage(syncError),
     });
   }
+}
+
+/**
+ * Sync project store after a filesystem mutation (rename, move, delete).
+ * These operations update asset paths on the backend, so we must refresh
+ * the project store to keep frontend asset data consistent.
+ */
+async function syncProjectStoreAfterMutation(operation: string): Promise<void> {
+  await syncProjectStoreState(operation);
 }
 
 function scheduleWorkspaceTreeRefresh(reason: string): void {
@@ -169,20 +189,10 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
         // We import useProjectStore lazily to avoid a circular dependency
         // (projectStore already imports workspaceStore).
         if (result.autoRegisteredFiles > 0) {
-          try {
-            const freshState = await refreshProjectState();
-            const { useProjectStore } = await import('@/stores/projectStore');
-            useProjectStore.setState((draft) => {
-              applyProjectState(draft, freshState);
-            });
-            logger.info('Project store synced after auto-registration', {
-              autoRegisteredFiles: result.autoRegisteredFiles,
-            });
-          } catch (syncError) {
-            logger.warn('Failed to sync project store after auto-registration', {
-              error: toErrorMessage(syncError),
-            });
-          }
+          await syncProjectStoreState('auto-registration');
+          logger.info('Project store synced after auto-registration', {
+            autoRegisteredFiles: result.autoRegisteredFiles,
+          });
         }
       } catch (error) {
         const message = toErrorMessage(error);
@@ -412,18 +422,7 @@ export async function setupWorkspaceEventListeners(): Promise<void> {
 
         // Sync project store when new assets were auto-registered
         if (event.autoRegisteredFiles > 0) {
-          refreshProjectState()
-            .then(async (freshState) => {
-              const { useProjectStore } = await import('@/stores/projectStore');
-              useProjectStore.setState((draft) => {
-                applyProjectState(draft, freshState);
-              });
-            })
-            .catch((syncError) => {
-              logger.warn('Failed to sync project store after scan-complete event', {
-                error: toErrorMessage(syncError),
-              });
-            });
+          void syncProjectStoreState('scan-complete event');
         }
       } catch (error) {
         logger.warn('Ignoring invalid workspace:scan-complete payload', {
