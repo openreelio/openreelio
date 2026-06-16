@@ -1067,6 +1067,18 @@ export function ProxyPreviewPlayer({
   // Track playback start time for synthetic time advancement
   const playbackStartRef = useRef<{ timestamp: number; timelineTime: number } | null>(null);
 
+  // Mirror frequently-changing playback values into refs so the RAF loop callback
+  // can read the latest values without listing them as dependencies. Keeping them
+  // out of updatePlayback's dep array gives the callback a stable identity, so the
+  // start/stop effect below runs once per play/pause transition instead of every
+  // frame (which previously orphaned a requestAnimationFrame handle each frame).
+  const currentTimeRef = useRef(currentTime);
+  currentTimeRef.current = currentTime;
+  const playbackRateRef = useRef(playbackRate);
+  playbackRateRef.current = playbackRate;
+  const durationRef = useRef(duration);
+  durationRef.current = duration;
+
   // Animation frame loop for playback
   const updatePlayback = useCallback(
     (timestamp: number) => {
@@ -1091,7 +1103,7 @@ export function ProxyPreviewPlayer({
               const offsetInSource = video.currentTime - clip.range.sourceInSec;
               const safeSpeed = getSafeClipSpeed(clip);
               const timelineTime = clip.place.timelineInSec + offsetInSource / safeSpeed;
-              const clampedTimelineTime = clampTimelineTime(timelineTime, duration);
+              const clampedTimelineTime = clampTimelineTime(timelineTime, durationRef.current);
               setCurrentTime(clampedTimelineTime, 'proxy-video-clock');
               // Update synthetic time reference
               playbackStartRef.current = { timestamp, timelineTime: clampedTimelineTime };
@@ -1104,12 +1116,13 @@ export function ProxyPreviewPlayer({
           // This ensures playback continues even when all videos fail to load
           if (!foundVideoSource && prevTimestamp > 0) {
             const elapsed = (timestamp - prevTimestamp) / 1000; // Convert to seconds
-            const timeAdvance = elapsed * playbackRate;
-            const newTime = clampTimelineTime(currentTime + timeAdvance, duration);
+            const timeAdvance = elapsed * playbackRateRef.current;
+            const currentDuration = durationRef.current;
+            const newTime = clampTimelineTime(currentTimeRef.current + timeAdvance, currentDuration);
             setCurrentTime(newTime, 'proxy-synthetic-clock');
 
             // Stop at end of duration
-            if (newTime >= duration) {
+            if (newTime >= currentDuration) {
               setIsPlaying(false);
             }
           }
@@ -1126,7 +1139,9 @@ export function ProxyPreviewPlayer({
         }
       }
     },
-    [isPlaying, renderableClips, setCurrentTime, playbackRate, currentTime, duration, setIsPlaying],
+    // currentTime, playbackRate and duration are read via refs to keep this
+    // callback's identity stable across frames (see the mirror refs above).
+    [isPlaying, renderableClips, setCurrentTime, setIsPlaying],
   );
 
   // Start/stop animation frame loop

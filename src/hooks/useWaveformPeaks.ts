@@ -73,6 +73,10 @@ export function useWaveformPeaks(
   const isMountedRef = useRef(true);
   // Track previous assetId for change detection
   const prevAssetIdRef = useRef<string | null>(null);
+  // Track the most recently requested assetId so a slower in-flight request for a
+  // previous asset cannot overwrite the data of the asset currently selected.
+  const latestAssetIdRef = useRef<AssetId>(assetId);
+  latestAssetIdRef.current = assetId;
 
   /**
    * Fetch waveform data from cache
@@ -85,7 +89,8 @@ export function useWaveformPeaks(
         assetId,
       });
 
-      if (isMountedRef.current) {
+      // Ignore the result if the selected asset changed while this request was in flight.
+      if (isMountedRef.current && latestAssetIdRef.current === assetId) {
         setData(result);
         setError(null);
       }
@@ -94,7 +99,7 @@ export function useWaveformPeaks(
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : 'Failed to fetch waveform';
-      if (isMountedRef.current) {
+      if (isMountedRef.current && latestAssetIdRef.current === assetId) {
         setError(errorMessage);
         setData(null);
       }
@@ -120,7 +125,7 @@ export function useWaveformPeaks(
         }
       );
 
-      if (isMountedRef.current) {
+      if (isMountedRef.current && latestAssetIdRef.current === assetId) {
         setData(result);
         setIsGenerating(false);
       }
