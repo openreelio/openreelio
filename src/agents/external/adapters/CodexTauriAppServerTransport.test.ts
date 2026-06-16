@@ -198,7 +198,14 @@ describe('CodexTauriAppServerTransport', () => {
 
     expect(client).toBeDefined();
     expect(invokeCommand).toHaveBeenCalledWith('start_codex_app_server', {
-      input: { serverId: null, projectPath: '/project', model: null, reasoningEffort: null },
+      input: {
+        // The client now derives a server id so it can subscribe to the stream
+        // event channel before the backend spawns the process.
+        serverId: expect.any(String),
+        projectPath: '/project',
+        model: null,
+        reasoningEffort: null,
+      },
     });
   });
 
@@ -219,11 +226,73 @@ describe('CodexTauriAppServerTransport', () => {
 
     expect(invokeCommand).toHaveBeenCalledWith('start_codex_app_server', {
       input: {
-        serverId: null,
+        serverId: expect.any(String),
         projectPath: '/project',
         model: 'gpt-5.4',
         reasoningEffort: 'high',
       },
     });
+  });
+
+  it('should subscribe to the stream channel before starting the backend process', async () => {
+    const order: string[] = [];
+    const invokeCommand = vi.fn().mockImplementation(async (command: string) => {
+      order.push(`invoke:${command}`);
+      return {
+        serverId: 'server-1',
+        eventName: 'codex:app-server:server-1',
+        command: 'codex',
+        args: ['app-server'],
+        bridgeCwd: '/openreelio-app-data/codex/bridge',
+      };
+    });
+    const listenEvent = vi.fn().mockImplementation(async () => {
+      order.push('listen');
+      return vi.fn();
+    });
+
+    await CodexTauriAppServerTransport.start(
+      { serverId: 'server-1' },
+      { invoke: invokeCommand, listen: listenEvent },
+    );
+
+    // The listener must be attached before the backend spawns the process so
+    // early stderr/exit events cannot be dropped.
+    expect(order[0]).toBe('listen');
+    expect(order).toContain('invoke:start_codex_app_server');
+    expect(order.indexOf('listen')).toBeLessThan(
+      order.indexOf('invoke:start_codex_app_server'),
+    );
+  });
+
+  it('should replay events that arrive before a consumer registers', async () => {
+    let listener: (event: { payload: CodexAppServerStreamEvent }) => void = () => undefined;
+    const invokeCommand = vi.fn().mockImplementation(async () => {
+      // Simulate the backend emitting an early message before start() resolves
+      // (the readers are spawned before the command returns).
+      listener({ payload: { type: 'message', message: { id: 1, result: { ready: true } } } });
+      return {
+        serverId: 'server-1',
+        eventName: 'codex:app-server:server-1',
+        command: 'codex',
+        args: ['app-server'],
+        bridgeCwd: '/openreelio-app-data/codex/bridge',
+      };
+    });
+    const listenEvent = vi.fn().mockImplementation(async (_eventName, handler) => {
+      listener = handler;
+      return vi.fn();
+    });
+
+    const transport = await CodexTauriAppServerTransport.start(
+      { serverId: 'server-1' },
+      { invoke: invokeCommand, listen: listenEvent },
+    );
+
+    const handler = vi.fn();
+    transport.onMessage(handler);
+
+    // The early message must be replayed to the late-registering consumer.
+    expect(handler).toHaveBeenCalledWith({ id: 1, result: { ready: true } });
   });
 });
