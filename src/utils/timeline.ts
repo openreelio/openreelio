@@ -333,7 +333,9 @@ export function calculateClipDuration(
   speed: number = 1
 ): number {
   const safeSpeed = speed > 0 ? speed : 1;
-  return (sourceOut - sourceIn) / safeSpeed;
+  // Guard against inverted source ranges (sourceIn > sourceOut) which would
+  // otherwise yield a negative duration and corrupt downstream layout/preview math.
+  return Math.max(0, (sourceOut - sourceIn) / safeSpeed);
 }
 
 /**

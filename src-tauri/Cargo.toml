@@ -116,8 +116,8 @@ meilisearch-sdk = { version = "0.27", optional = true }
 futures = { version = "0.3", optional = true }
 
 # WASM Plugin System
-wasmtime = "36.0.10"
-wasmtime-wasi = "36.0.10"
+wasmtime = "36.0.11"
+wasmtime-wasi = "36.0.11"
 
 # Workspace filesystem scanning and watching
 notify = { version = "7", features = ["macos_fsevent"] }

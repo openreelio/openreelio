@@ -126,6 +126,8 @@ export function FullscreenPreview({
   // videoRef kept for future PiP implementation and direct video element access
   const videoRef = useRef<HTMLVideoElement>(null);
   const hideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Holds the active window-level release listener while the seek bar is dragged.
+  const seekReleaseHandlerRef = useRef<(() => void) | null>(null);
 
   // Local state
   const [showControls, setShowControls] = useState(true);
@@ -281,13 +283,28 @@ export function FullscreenPreview({
   // Seek Bar Handling
   // ===========================================================================
 
-  const handleSeekStart = useCallback(() => {
-    setIsDraggingSeek(true);
-  }, []);
-
   const handleSeekEnd = useCallback(() => {
     setIsDraggingSeek(false);
+    if (seekReleaseHandlerRef.current) {
+      window.removeEventListener('mouseup', seekReleaseHandlerRef.current);
+      window.removeEventListener('touchend', seekReleaseHandlerRef.current);
+      seekReleaseHandlerRef.current = null;
+    }
   }, []);
+
+  const handleSeekStart = useCallback(() => {
+    setIsDraggingSeek(true);
+    // The range input's own onMouseUp/onTouchEnd does not fire when the pointer
+    // is released outside the element (common when overshooting the slider
+    // thumb), which would leave isDraggingSeek stuck true and permanently
+    // suppress the auto-hide-controls timer. Listen on window so the release is
+    // always caught regardless of where it happens.
+    if (seekReleaseHandlerRef.current) return;
+    const handleRelease = (): void => handleSeekEnd();
+    seekReleaseHandlerRef.current = handleRelease;
+    window.addEventListener('mouseup', handleRelease);
+    window.addEventListener('touchend', handleRelease);
+  }, [handleSeekEnd]);
 
   const handleSeekChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -320,6 +337,13 @@ export function FullscreenPreview({
     return () => {
       if (hideTimeoutRef.current) {
         clearTimeout(hideTimeoutRef.current);
+      }
+      // Remove any window-level seek release listener still attached if the
+      // component unmounts mid-drag.
+      if (seekReleaseHandlerRef.current) {
+        window.removeEventListener('mouseup', seekReleaseHandlerRef.current);
+        window.removeEventListener('touchend', seekReleaseHandlerRef.current);
+        seekReleaseHandlerRef.current = null;
       }
     };
   }, []);

@@ -228,6 +228,11 @@ export const useProjectStore = create<ProjectState>()(
         // Initialize workspace: setup event listeners and auto-scan
         setupWorkspaceEventListeners();
         if (shouldAutoScanWorkspaceOnOpen()) {
+          // Capture project identity + state version so a slow auto-scan cannot
+          // apply its result over a different project: the user may close this
+          // project or open another one before the scan resolves.
+          const scanProjectId = projectInfo.id;
+          const scanStateVersion = get().stateVersion;
           useWorkspaceStore
             .getState()
             .scanWorkspace()
@@ -235,6 +240,12 @@ export const useProjectStore = create<ProjectState>()(
               try {
                 const freshState = await refreshProjectState();
                 set((state) => {
+                  if (
+                    state.meta?.id !== scanProjectId ||
+                    state.stateVersion !== scanStateVersion
+                  ) {
+                    return;
+                  }
                   applyProjectState(state, freshState);
                 });
               } catch (syncError) {
@@ -353,6 +364,11 @@ export const useProjectStore = create<ProjectState>()(
         // Initialize workspace: setup event listeners and auto-scan
         setupWorkspaceEventListeners();
         if (shouldAutoScanWorkspaceOnOpen()) {
+          // Capture project identity + state version so a slow auto-scan cannot
+          // apply its result over a different project: the user may close this
+          // project or open another one before the scan resolves.
+          const scanProjectId = projectInfo.id;
+          const scanStateVersion = get().stateVersion;
           useWorkspaceStore
             .getState()
             .scanWorkspace()
@@ -360,6 +376,12 @@ export const useProjectStore = create<ProjectState>()(
               try {
                 const freshState = await refreshProjectState();
                 set((state) => {
+                  if (
+                    state.meta?.id !== scanProjectId ||
+                    state.stateVersion !== scanStateVersion
+                  ) {
+                    return;
+                  }
                   applyProjectState(state, freshState);
                 });
               } catch (syncError) {

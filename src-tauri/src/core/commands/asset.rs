@@ -634,7 +634,17 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join(file_name);
         std::fs::write(&path, b"test").unwrap();
-        (dir, path.to_string_lossy().to_string())
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        (dir, strip_windows_unc_prefix(path))
+    }
+
+    fn strip_windows_unc_prefix(path: std::path::PathBuf) -> String {
+        let path = path.to_string_lossy();
+        normalize_windows_unc_prefix(&path)
+    }
+
+    fn normalize_windows_unc_prefix(path: &str) -> String {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
     }
 
     #[test]
@@ -842,7 +852,7 @@ mod tests {
         update_cmd.undo(&mut state).unwrap();
 
         let asset = state.assets.get(asset_id).unwrap();
-        assert_eq!(asset.uri, uri);
+        assert_eq!(normalize_windows_unc_prefix(&asset.uri), uri);
         assert_eq!(asset.duration_sec, Some(10.0));
         assert_eq!(asset.file_size, 100);
         assert_eq!(

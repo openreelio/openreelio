@@ -317,9 +317,20 @@ export class TimelineEngine {
     this._syncedStore?.setDuration(this._duration);
     this._emit('durationChange', { duration: this._duration });
 
-    // Clamp current time if needed
+    // Clamp current time if it now exceeds the new duration. Do not route through
+    // seek(): seek() treats reaching the end during playback as end-of-stream and
+    // pauses, which would wrongly stop playback on a routine trailing-clip trim/delete.
+    // Genuine end-of-stream detection stays in _tick.
     if (this._currentTime > this._duration) {
-      this.seek(this._duration);
+      const clampedTime = this._duration;
+      this._emit('beforeSetTime', { time: clampedTime });
+      this._currentTime = clampedTime;
+      this._syncedStore?.setCurrentTime(clampedTime);
+      if (this._isPlaying) {
+        this._playStartTime = performance.now();
+        this._playStartPosition = clampedTime;
+      }
+      this._emit('afterSetTime', { time: clampedTime });
     }
   }
 
