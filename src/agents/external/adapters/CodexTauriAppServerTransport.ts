@@ -80,7 +80,7 @@ export class CodexTauriAppServerTransport implements CodexAppServerTransport {
   // crash emitted right after spawn) are buffered and replayed on registration
   // so they are never silently dropped.
   private readonly bufferedMessages: CodexAppServerIncomingMessage[] = [];
-  private pendingError: Error | null = null;
+  private readonly bufferedErrors: Error[] = [];
 
   private constructor(
     readonly startResult: CodexAppServerStartResult,
@@ -190,11 +190,11 @@ export class CodexTauriAppServerTransport implements CodexAppServerTransport {
 
   onError(handler: (error: Error) => void): () => void {
     this.errorHandlers.add(handler);
-    // Replay an error buffered before an error consumer was registered.
-    if (this.pendingError) {
-      const error = this.pendingError;
-      this.pendingError = null;
-      handler(error);
+    // Replay any errors buffered before an error consumer was registered.
+    if (this.bufferedErrors.length > 0) {
+      for (const error of this.bufferedErrors.splice(0)) {
+        handler(error);
+      }
     }
     return () => this.errorHandlers.delete(handler);
   }
@@ -210,7 +210,7 @@ export class CodexTauriAppServerTransport implements CodexAppServerTransport {
     this.handlers.clear();
     this.errorHandlers.clear();
     this.bufferedMessages.length = 0;
-    this.pendingError = null;
+    this.bufferedErrors.length = 0;
 
     if (this.options.autoStopOnDispose ?? true) {
       await this.invokeCommand('stop_codex_app_server', {
@@ -257,10 +257,8 @@ export class CodexTauriAppServerTransport implements CodexAppServerTransport {
   private emitError(message: string): void {
     const error = new Error(message);
     if (this.errorHandlers.size === 0) {
-      // Retain the first error until an error consumer registers (see onError).
-      if (!this.pendingError) {
-        this.pendingError = error;
-      }
+      // Buffer until a consumer registers (see onError).
+      this.bufferedErrors.push(error);
       return;
     }
     for (const handler of this.errorHandlers) {

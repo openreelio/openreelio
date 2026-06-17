@@ -295,4 +295,43 @@ describe('CodexTauriAppServerTransport', () => {
     // The early message must be replayed to the late-registering consumer.
     expect(handler).toHaveBeenCalledWith({ id: 1, result: { ready: true } });
   });
+
+  it('should replay early errors that arrive before an error consumer registers', async () => {
+    let listener: (event: { payload: CodexAppServerStreamEvent }) => void = () => undefined;
+    const invokeCommand = vi.fn().mockImplementation(async () => {
+      // Simulate startup diagnostics that arrive before start() resolves and
+      // before the consumer has a chance to attach onError.
+      listener({ payload: { type: 'error', message: 'Early failure' } });
+      listener({ payload: { type: 'exit', exitCode: 1 } });
+      return {
+        serverId: 'server-1',
+        eventName: 'codex:app-server:server-1',
+        command: 'codex',
+        args: ['app-server'],
+        bridgeCwd: '/openreelio-app-data/codex/bridge',
+      };
+    });
+    const listenEvent = vi.fn().mockImplementation(async (_eventName, handler) => {
+      listener = handler;
+      return vi.fn();
+    });
+
+    const transport = await CodexTauriAppServerTransport.start(
+      { serverId: 'server-1' },
+      { invoke: invokeCommand, listen: listenEvent },
+    );
+
+    const errorHandler = vi.fn();
+    transport.onError(errorHandler);
+
+    expect(errorHandler).toHaveBeenCalledTimes(2);
+    expect(errorHandler).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ message: 'Early failure' }),
+    );
+    expect(errorHandler).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ message: 'Codex app-server exited with exit code 1.' }),
+    );
+  });
 });

@@ -77,6 +77,7 @@ export function useWaveformPeaks(
   // previous asset cannot overwrite the data of the asset currently selected.
   const latestAssetIdRef = useRef<AssetId>(assetId);
   latestAssetIdRef.current = assetId;
+  const generateRequestIdRef = useRef(0);
 
   /**
    * Fetch waveform data from cache
@@ -113,6 +114,7 @@ export function useWaveformPeaks(
   const generate = useCallback(async (): Promise<WaveformData | null> => {
     if (!assetId) return null;
 
+    const requestId = ++generateRequestIdRef.current;
     setIsGenerating(true);
     setError(null);
 
@@ -125,20 +127,30 @@ export function useWaveformPeaks(
         }
       );
 
-      if (isMountedRef.current && latestAssetIdRef.current === assetId) {
+      if (
+        isMountedRef.current &&
+        latestAssetIdRef.current === assetId &&
+        generateRequestIdRef.current === requestId
+      ) {
         setData(result);
-        setIsGenerating(false);
       }
 
       return result;
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : 'Waveform generation failed';
-      if (isMountedRef.current) {
+      if (
+        isMountedRef.current &&
+        latestAssetIdRef.current === assetId &&
+        generateRequestIdRef.current === requestId
+      ) {
         setError(errorMessage);
-        setIsGenerating(false);
       }
       return null;
+    } finally {
+      if (isMountedRef.current && generateRequestIdRef.current === requestId) {
+        setIsGenerating(false);
+      }
     }
   }, [assetId, samplesPerSecond]);
 
