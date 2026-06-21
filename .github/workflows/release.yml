@@ -300,9 +300,15 @@ jobs:
           - os: macos-15-intel
             platform: macos-intel
             target: x86_64-apple-darwin
+            # Phase 1 GPU acceleration: Metal ships with macOS (no extra SDK to
+            # install in CI), so Whisper transcription runs on the GPU with an
+            # automatic CPU fallback at runtime. Linux/Windows stay CPU until the
+            # Vulkan build is validated (see docs/WHISPER_GPU_ACCELERATION.md).
+            whisperFeatures: whisper-metal
           - os: macos-15
             platform: macos-arm
             target: aarch64-apple-darwin
+            whisperFeatures: whisper-metal
 
     steps:
       - name: Checkout repository
@@ -410,6 +416,7 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: >-
             --target ${{ matrix.target }}
+            ${{ matrix.whisperFeatures && format('--features {0}', matrix.whisperFeatures) || '' }}
             --config '{"bundle":{"createUpdaterArtifacts":true}}'
           # Generate updater JSON artifacts
           updaterJsonPreferNsis: true
