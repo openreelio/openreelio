@@ -21,6 +21,7 @@ import {
   type TranscriptionStatusDto,
 } from '@/bindings';
 
+import { hasActiveTimeRemap, type TimeRemapCurve } from '@/types';
 import type { ExternalAgentApprovalDecisionProvider, ExternalAgentApprovalRequest } from '../types';
 import type {
   CodexAppServerRequest,
@@ -327,6 +328,13 @@ interface ClipTimeMapping {
   sourceOutSec: number;
   speed: number;
   reverse: boolean;
+  /**
+   * Whether the clip has an active time remap (variable-speed) curve. When
+   * true, source times cannot be mapped to the timeline with a constant-speed
+   * formula, so caption mapping must be skipped in favor of sequence
+   * transcription.
+   */
+  hasActiveTimeRemap: boolean;
 }
 
 const contextTokensBySessionId = new Map<string, ContextTokenRecord>();
@@ -612,12 +620,12 @@ const TRANSCRIPTION_GENERATE_SCHEMA: CodexJsonObject = {
     assetId: {
       type: 'string',
       description:
-        'Project asset ID whose audio should be transcribed when sequenceAudio is false.',
+        'Project asset ID whose audio should be transcribed when sequenceAudio is false. Source-asset transcription returns SOURCE-relative times (0-based to the asset) that are NOT safe as direct timeline caption times; pass clipId (with sequenceId/trackId) so the returned timelineCaptionSegments are mapped to timeline time before ImportGeneratedCaptions.',
     },
     sequenceAudio: {
       type: 'boolean',
       description:
-        'Set true to transcribe the audible audio mix of an edited sequence instead of one source asset.',
+        'Set true to transcribe the audible audio mix of an edited sequence instead of one source asset. Sequence audio returns TIMELINE-relative segment times that pass straight to ImportGeneratedCaptions; this is the default path for captioning.',
     },
     language: {
       type: 'string',
@@ -651,7 +659,7 @@ const TRANSCRIPTION_GENERATE_SCHEMA: CodexJsonObject = {
     clipId: {
       type: 'string',
       description:
-        'Optional timeline clip ID. When present, returned timelineCaptionSegments are clipped and remapped from source time to timeline time.',
+        'Optional timeline clip ID. Provide with assetId when source-relative segments must be mapped onto a placed clip: returned timelineCaptionSegments are clamped to the clip source range and remapped from source time to timeline time. Omit it for sequenceAudio, whose segments are already timeline-relative.',
     },
   },
   additionalProperties: false,
@@ -806,7 +814,7 @@ export const OPENREELIO_CODEX_DYNAMIC_TOOLS: CodexDynamicToolSpec[] = [
     namespace: 'openreelio',
     name: 'transcription_generate',
     description:
-      'Generate speech-to-text transcript segments from a project audio/video asset. Can also remap source-time segments onto a timeline clip for caption import.',
+      'Generate speech-to-text transcript segments. With sequenceAudio=true, returns TIMELINE-relative segments that pass straight to ImportGeneratedCaptions (default captioning path). With assetId, returns SOURCE-relative segments that are not safe as direct timeline caption times; pass clipId (with sequenceId/trackId) to also get timelineCaptionSegments remapped onto the placed clip.',
     inputSchema: TRANSCRIPTION_GENERATE_SCHEMA,
   },
   {
@@ -2591,13 +2599,27 @@ function buildTranscriptionResponse(
   };
 
   if (clipMapping) {
-    const timelineCaptionSegments = mapCaptionSegmentsToClipTimeline(captionSegments, clipMapping);
     response.clipMapping = clipMapping as unknown as CodexJsonObject;
-    response.timelineSegmentCount = timelineCaptionSegments.length;
-    response.skippedTimelineSegmentCount = captionSegments.length - timelineCaptionSegments.length;
-    response.timelineCaptionSegments = timelineCaptionSegments as unknown as CodexJsonObject[];
-    response.importHint =
-      'Use timelineCaptionSegments as ImportGeneratedCaptions.segments when creating subtitles for this timeline clip.';
+
+    if (clipMapping.hasActiveTimeRemap) {
+      // The clip has an active time remap curve, so source times cannot be
+      // mapped to the timeline with the constant-speed formula. Skip timeline
+      // mapping (mirrors the Phase 1 add_captions_from_transcription guard) and
+      // direct the caller to use sequence transcription instead.
+      response.timelineMappingSkipped = true;
+      response.timelineMappingSkippedReason =
+        `Clip '${clipMapping.clipId}' has an active time remap curve, so source times cannot be mapped ` +
+        'with a constant-speed formula. Use sequence transcription (transcribe the timeline) to obtain ' +
+        'timeline-relative segments instead.';
+      response.importHint = response.timelineMappingSkippedReason;
+    } else {
+      const timelineCaptionSegments = mapCaptionSegmentsToClipTimeline(captionSegments, clipMapping);
+      response.timelineSegmentCount = timelineCaptionSegments.length;
+      response.skippedTimelineSegmentCount = captionSegments.length - timelineCaptionSegments.length;
+      response.timelineCaptionSegments = timelineCaptionSegments as unknown as CodexJsonObject[];
+      response.importHint =
+        'Use timelineCaptionSegments as ImportGeneratedCaptions.segments when creating subtitles for this timeline clip.';
+    }
   }
 
   return response;
@@ -2640,6 +2662,25 @@ function mapCaptionSegmentsToClipTimeline(
       };
     })
     .filter((segment): segment is CaptionSegmentForImport => segment !== null);
+}
+
+/**
+ * Parse a raw clip `timeRemap` value from project state into a TimeRemapCurve.
+ * Only the keyframe count is required for active-remap detection, so unknown
+ * keyframe entries are preserved structurally rather than fully validated.
+ */
+function parseTimeRemapCurve(value: unknown): TimeRemapCurve | null {
+  const remapObject = asObject(value);
+  if (!remapObject) {
+    return null;
+  }
+
+  const keyframes = remapObject.keyframes;
+  if (!Array.isArray(keyframes)) {
+    return null;
+  }
+
+  return { keyframes } as TimeRemapCurve;
 }
 
 function findClipTimeMapping(
@@ -2705,6 +2746,9 @@ function findClipTimeMapping(
           sourceOutSec,
           speed: asFiniteNumber(clipObject.speed) ?? 1,
           reverse: clipObject.reverse === true,
+          hasActiveTimeRemap: hasActiveTimeRemap({
+            timeRemap: parseTimeRemapCurve(clipObject.timeRemap),
+          }),
         };
       }
     }
@@ -3992,7 +4036,7 @@ function buildCommandSchema(): CodexJsonObject {
           'trackId',
           'async',
         ],
-        note: 'Use this read-only tool before ImportGeneratedCaptions when subtitles should come from source audio. Set sequenceAudio=true for the edited timeline mix, or pass clipId plus sequenceId/trackId to receive timelineCaptionSegments aligned to a timeline clip.',
+        note: 'Use this read-only tool before ImportGeneratedCaptions. Set sequenceAudio=true (default captioning path) for the edited timeline mix; its captionSegments are TIMELINE-relative and pass straight to ImportGeneratedCaptions. assetId transcription is SOURCE-relative (0-based to the asset) and is not safe as direct timeline caption times; pass clipId plus sequenceId/trackId to receive timelineCaptionSegments remapped onto a timeline clip.',
       },
       AddTextClip: {
         required: ['sequenceId', 'trackId', 'timelineIn', 'duration', 'textData'],
@@ -4116,8 +4160,8 @@ function buildCommandSchema(): CodexJsonObject {
         'Call openreelio.transcription_status first and explain missing model installation before attempting automatic subtitles.',
         'If no model is installed and the user approves a download, call openreelio.transcription_install_model before transcription_generate.',
         'After transcription_install_model returns, refresh project_state or timeline_snapshot before any mutation because older contextTokens are intentionally invalidated.',
-        'Call openreelio.transcription_generate(assetId, language="auto", model="auto") for speech-to-text segments before creating generated subtitles.',
-        'For edited timeline audio, call openreelio.transcription_generate(sequenceAudio=true, sequenceId, language="auto", model="auto"); returned captionSegments are already timeline-relative.',
+        'Prefer openreelio.transcription_generate(sequenceAudio=true, sequenceId, language="auto", model="auto") as the default captioning path; returned captionSegments are TIMELINE-relative and pass straight to ImportGeneratedCaptions.',
+        'Use openreelio.transcription_generate(assetId, language="auto", model="auto") for source-asset analysis only; its segments are SOURCE-relative (0-based to the asset) and must not be used as direct timeline caption times. Pass clipId to map them onto the placed clip instead.',
         'When captioning an edited timeline clip, pass clipId with sequenceId and trackId, then use timelineCaptionSegments for ImportGeneratedCaptions.',
         'Use ImportGeneratedCaptions for AI transcript segments or CreateCaption/UpdateCaption for individual caption lines.',
         'Use caption style/position metadata for subtitle readability instead of editable overlay text when the user wants semantic subtitles.',

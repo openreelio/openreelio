@@ -22,7 +22,8 @@ import {
 } from './captionParsers';
 import { readWorkspaceDocumentFromBackend } from '@/services/workspaceGateway';
 import { useProjectStore } from '@/stores/projectStore';
-import type { CaptionColor, CaptionPosition, Sequence } from '@/types';
+import { DEFAULT_CAPTION_POSITION, DEFAULT_CAPTION_STYLE, hasActiveTimeRemap } from '@/types';
+import type { CaptionColor, CaptionPosition, CaptionStyle, Clip, Sequence } from '@/types';
 
 const logger = createLogger('CaptionTools');
 
@@ -30,7 +31,10 @@ const AUTO_TRANSCRIBE_ALTERNATIVES =
   'Try analyze_asset with analysisTypes ["transcript"] for provider-based speech analysis, or analysisTypes ["textOcr"] for on-screen text.';
 const WHISPER_MODEL_SELECTION_PREFERENCE = [
   'large-v3',
+  'large-v3-q5_0',
   'large-v3-turbo',
+  'large-v3-turbo-q8_0',
+  'large-v3-turbo-q5_0',
   'large',
   'medium',
   'small',
@@ -48,7 +52,252 @@ function selectDefaultWhisperModel(status: TranscriptionStatusDto | null): strin
   );
   return (
     WHISPER_MODEL_SELECTION_PREFERENCE.find((candidate) => installed.has(candidate)) ??
-    'large-v3-turbo'
+    'large-v3-turbo-q5_0'
+  );
+}
+
+// `small` is included because it remains weak at non-English speech and sung
+// content (it silently produced garbage for Korean sung audio). `medium` and
+// above are treated as adequate.
+const WEAK_WHISPER_MODELS = new Set(['tiny', 'base', 'small']);
+
+// Recommended high-accuracy model to install when only weak models are present.
+// Quantized turbo balances near-large accuracy with low memory/disk footprint.
+const RECOMMENDED_WHISPER_MODEL = 'large-v3-turbo-q5_0';
+
+/**
+ * Returns a non-fatal warning when a weak Whisper model (tiny/base/small) is
+ * used. These small models hallucinate and are weak at non-English speech and
+ * sung audio, so recommend a high-accuracy model instead. The warning is
+ * language-agnostic because the spoken language is auto-detected and not known
+ * up front. Returns null when no warning is warranted.
+ */
+function buildWeakModelWarning(resolvedModel: string): string | null {
+  if (!WEAK_WHISPER_MODELS.has(resolvedModel.trim().toLowerCase())) {
+    return null;
+  }
+  return (
+    `Model '${resolvedModel}' is a small Whisper model and is weak at non-English speech and ` +
+    `sung content; it may hallucinate or transcribe inaccurately. For higher accuracy, install ` +
+    `or select 'large-v3' or 'large-v3-turbo' via install_whisper_model.`
+  );
+}
+
+/**
+ * Structured model-quality assessment derived from the transcription status and
+ * the model that will actually be used for transcription. All fields are
+ * additive and non-breaking so the agent/UI can react without depending on a
+ * regenerated Rust binding.
+ */
+interface ModelQualityNotice {
+  /** Resolved Whisper model id that will run the transcription. */
+  resolvedModel: string;
+  /** Recommended high-accuracy model id to install. */
+  recommendedModel: string;
+  /** Whether the recommended-quality model is currently installed. */
+  recommendedInstalled: boolean;
+  /** Consolidated non-fatal warning, or null when no concern was detected. */
+  warning: string | null;
+}
+
+/**
+ * Reads the backend-provided recommended model id when present. The Rust binding
+ * may expose `recommendedModel` once regenerated; until then this reads it
+ * defensively and falls back to the constant default.
+ */
+function resolveRecommendedModel(status: TranscriptionStatusDto): string {
+  const candidate = (status as { recommendedModel?: unknown }).recommendedModel;
+  if (typeof candidate === 'string' && candidate.trim().length > 0) {
+    return candidate.trim();
+  }
+  return RECOMMENDED_WHISPER_MODEL;
+}
+
+/**
+ * Determines whether the recommended-quality model is installed. Prefers a
+ * backend-provided `recommendedInstalled` flag (defensively typed for the
+ * not-yet-regenerated binding); otherwise computes it from the model inventory
+ * using the `installed && recommended` flags, falling back to an explicit id
+ * match against the resolved recommended model.
+ */
+function resolveRecommendedInstalled(
+  status: TranscriptionStatusDto,
+  recommendedModel: string,
+): boolean {
+  const flag = (status as { recommendedInstalled?: unknown }).recommendedInstalled;
+  if (typeof flag === 'boolean') {
+    return flag;
+  }
+  const hasInstalledRecommended = status.models.some(
+    (candidate) => candidate.installed && candidate.recommended,
+  );
+  if (hasInstalledRecommended) {
+    return true;
+  }
+  return status.models.some(
+    (candidate) => candidate.installed && candidate.id === recommendedModel,
+  );
+}
+
+/**
+ * Builds a consolidated, non-fatal model-quality notice for a transcription. A
+ * warning is produced when EITHER the resolved model is weak OR no
+ * recommended-quality model is installed. The notice names the recommended
+ * model to install via `install_whisper_model` for accurate non-English/sung
+ * transcription. Merges with `buildWeakModelWarning` into a single warning
+ * string so guidance is not duplicated.
+ */
+function buildModelQualityNotice(
+  status: TranscriptionStatusDto,
+  resolvedModel: string,
+): ModelQualityNotice {
+  const recommendedModel = resolveRecommendedModel(status);
+  const recommendedInstalled = resolveRecommendedInstalled(status, recommendedModel);
+  const resolvedIsWeak = WEAK_WHISPER_MODELS.has(resolvedModel.trim().toLowerCase());
+
+  let warning: string | null = null;
+  if (resolvedIsWeak || !recommendedInstalled) {
+    const weakClause = resolvedIsWeak
+      ? `Model '${resolvedModel}' is a small Whisper model and is weak at non-English speech and ` +
+        `sung content; it may hallucinate or transcribe inaccurately. `
+      : '';
+    const installClause = recommendedInstalled
+      ? `For higher accuracy, select '${recommendedModel}' instead.`
+      : `The recommended high-accuracy model '${recommendedModel}' is not installed; install it via ` +
+        `install_whisper_model (one-time ~574MB download) for accurate non-English/sung transcription.`;
+    warning = `${weakClause}${installClause}`;
+  }
+
+  return { resolvedModel, recommendedModel, recommendedInstalled, warning };
+}
+
+/**
+ * Resolves the recommended high-accuracy model id from the status inventory.
+ * Mirrors the pure derivation in `src/hooks/transcriptionModelGate.ts`
+ * (`resolveRecommendedModel`) without importing a hook module into a tool file:
+ * prefer the quantized turbo model when listed, otherwise the first non-weak
+ * model flagged `recommended`. Returns null when no better model is available.
+ */
+function resolveRecommendedModelFromStatus(
+  status: TranscriptionStatusDto,
+): { id: string; installed: boolean } | null {
+  const preferred = status.models.find(
+    (candidate) => candidate.id === RECOMMENDED_WHISPER_MODEL,
+  );
+  if (preferred) {
+    return { id: preferred.id, installed: preferred.installed };
+  }
+
+  const recommendedNonWeak = status.models.find(
+    (candidate) =>
+      candidate.recommended && !WEAK_WHISPER_MODELS.has(candidate.id.trim().toLowerCase()),
+  );
+  if (recommendedNonWeak) {
+    return { id: recommendedNonWeak.id, installed: recommendedNonWeak.installed };
+  }
+
+  return null;
+}
+
+/**
+ * Outcome of hard-enforced model provisioning. `model` is the model that should
+ * actually run the transcription. `autoInstalledModel` is set only when a
+ * download was performed in this call. `warning` carries a non-fatal message
+ * when the recommended model could not be installed and we fell back to the
+ * original weak model.
+ */
+interface ModelProvisioningResult {
+  model: string;
+  autoInstalledModel: string | null;
+  warning: string | null;
+}
+
+/**
+ * Hard-enforces use of the recommended high-accuracy model when the resolved
+ * default is weak and the caller did not deliberately choose a model.
+ *
+ * - When the caller passed an explicit, non-`auto` model, the choice is honored
+ *   as-is (returned unchanged) — even when that model is weak.
+ * - When the effective model is weak and a better recommended model exists:
+ *   - If the recommended model is already installed, switch to it.
+ *   - If it is not installed, download it FIRST (one-time ~574MB), then use it.
+ *   - On download failure, fall back to the original weak model and surface a
+ *     non-fatal warning rather than failing the whole caption request.
+ *
+ * Only the recommended (quantized turbo) model is ever auto-downloaded; a large
+ * f16 model is never auto-provisioned.
+ */
+async function provisionRecommendedModel(
+  status: TranscriptionStatusDto,
+  effectiveModel: string,
+  callerSelectedExplicitModel: boolean,
+): Promise<ModelProvisioningResult> {
+  // Honor an explicit caller choice (even a weak one) — never override it.
+  if (callerSelectedExplicitModel) {
+    return { model: effectiveModel, autoInstalledModel: null, warning: null };
+  }
+
+  // Nothing to upgrade when the effective model is already adequate.
+  if (!WEAK_WHISPER_MODELS.has(effectiveModel.trim().toLowerCase())) {
+    return { model: effectiveModel, autoInstalledModel: null, warning: null };
+  }
+
+  const recommended = resolveRecommendedModelFromStatus(status);
+  if (!recommended) {
+    // No better model exists in the inventory; proceed with the weak model.
+    return { model: effectiveModel, autoInstalledModel: null, warning: null };
+  }
+
+  if (recommended.installed) {
+    // A better model is already installed — silently upgrade to it.
+    return { model: recommended.id, autoInstalledModel: null, warning: null };
+  }
+
+  // Weak default + recommended model not installed: download it first, then use
+  // it. On failure, fall back to the weak model with a clear warning.
+  try {
+    logger.info('Auto-provisioning recommended Whisper model before transcription', {
+      weakModel: effectiveModel,
+      recommendedModel: recommended.id,
+    });
+    const download = await commands.downloadWhisperModel(recommended.id, false);
+    if (download.status === 'error') {
+      throw new Error(download.error);
+    }
+    return { model: recommended.id, autoInstalledModel: recommended.id, warning: null };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn('Recommended Whisper model auto-install failed; falling back to weak model', {
+      weakModel: effectiveModel,
+      recommendedModel: recommended.id,
+      error: message,
+    });
+    return {
+      model: effectiveModel,
+      autoInstalledModel: null,
+      warning:
+        `The recommended high-accuracy model '${recommended.id}' could not be installed automatically ` +
+        `(${message}); transcription proceeded with '${effectiveModel}', which is weak at non-English ` +
+        `speech and sung content. Install '${recommended.id}' via install_whisper_model and re-run for higher accuracy.`,
+    };
+  }
+}
+
+/**
+ * Determines whether the caller deliberately selected a concrete Whisper model.
+ * An unset value, or the sentinels `auto`/`default`/`best`/empty string, mean
+ * "let the engine choose" and DO enable auto-provisioning.
+ */
+function callerSelectedExplicitModel(value: unknown): boolean {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized.length > 0 &&
+    normalized !== 'auto' &&
+    normalized !== 'default' &&
+    normalized !== 'best'
   );
 }
 
@@ -91,6 +340,76 @@ interface AnalysisTranscriptionResult {
 
 function getSequence(sequenceId: string): Sequence | undefined {
   return useProjectStore.getState().sequences.get(sequenceId);
+}
+
+/**
+ * Find a clip by ID anywhere in the given sequence's tracks.
+ * Uses the same track/clip traversal pattern as the rest of this module.
+ */
+function findClipInSequence(sequence: Sequence, clipId: string): Clip | undefined {
+  for (const track of sequence.tracks) {
+    const clip = track.clips.find((candidate) => candidate.id === clipId);
+    if (clip) {
+      return clip;
+    }
+  }
+  return undefined;
+}
+
+interface SourceToTimelineMappingResult {
+  segments: TranscriptionSegmentInput[];
+  skippedOutOfRangeCount: number;
+}
+
+/**
+ * Map source-relative transcription segment times onto timeline time using a
+ * placed clip's range/place/speed. Segments whose source time falls outside the
+ * clip's source range are dropped (reported via skippedOutOfRangeCount).
+ *
+ * Constant-speed mapping only. Clips with an active time remap curve must not be
+ * mapped with this formula — callers must reject them before calling this.
+ */
+function mapSourceSegmentsToTimeline(
+  segments: TranscriptionSegmentInput[],
+  clip: Clip,
+): SourceToTimelineMappingResult {
+  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+  const sourceIn = clip.range.sourceInSec;
+  const sourceOut = clip.range.sourceOutSec;
+  const timelineIn = clip.place.timelineInSec;
+
+  const mapped: TranscriptionSegmentInput[] = [];
+  let skippedOutOfRangeCount = 0;
+
+  for (const segment of segments) {
+    // Drop segments whose source window falls entirely outside the clip range.
+    if (segment.startTime < sourceIn || segment.startTime >= sourceOut) {
+      skippedOutOfRangeCount += 1;
+      continue;
+    }
+
+    // timelineTime = timelineInSec + (sourceTime - sourceInSec) / speed
+    const startTimeline = timelineIn + (segment.startTime - sourceIn) / safeSpeed;
+    const rawEndTimeline = timelineIn + (segment.endTime - sourceIn) / safeSpeed;
+    // Clamp the end to the clip's timeline extent so spillover does not drift.
+    const clipTimelineOut = timelineIn + (sourceOut - sourceIn) / safeSpeed;
+    const endTimeline = Math.min(rawEndTimeline, clipTimelineOut);
+
+    if (!(endTimeline > startTimeline)) {
+      skippedOutOfRangeCount += 1;
+      continue;
+    }
+
+    mapped.push({
+      startTime: startTimeline,
+      endTime: endTimeline,
+      text: segment.text,
+      ...(segment.speaker ? { speaker: segment.speaker } : {}),
+      ...(segment.language ? { language: segment.language } : {}),
+    });
+  }
+
+  return { segments: mapped, skippedOutOfRangeCount };
 }
 
 function resolveCaptionTrackId(
@@ -421,6 +740,9 @@ async function createCaptionsFromSegments(
   explicitTrackId?: string,
   replaceExisting = false,
   language?: string,
+  clipId?: string,
+  style?: Record<string, unknown>,
+  position?: CaptionPosition,
 ): Promise<{
   trackId: string;
   createdTrack: boolean;
@@ -432,7 +754,42 @@ async function createCaptionsFromSegments(
     throw new Error('No segments provided');
   }
 
-  const normalizedSegments = normalizeTranscriptionSegments(segments);
+  // When clipId is provided, segment times are SOURCE-relative to the clip's
+  // asset and must be mapped to timeline time before any further handling.
+  // Without clipId, times are assumed to be timeline-relative (passthrough).
+  let workingSegments = segments;
+  let mappingSkippedCount = 0;
+  if (clipId !== undefined) {
+    const sequence = getSequence(sequenceId);
+    if (!sequence) {
+      throw new Error(`Sequence '${sequenceId}' not found`);
+    }
+
+    const clip = findClipInSequence(sequence, clipId);
+    if (!clip) {
+      throw new Error(`Clip '${clipId}' not found in sequence '${sequenceId}'`);
+    }
+
+    if (hasActiveTimeRemap(clip)) {
+      throw new Error(
+        `Clip '${clipId}' has an active time remap curve, so source times cannot be mapped with a constant-speed formula. ` +
+          'Use auto_transcribe_sequence to obtain timeline-relative segments instead.',
+      );
+    }
+
+    const mappingResult = mapSourceSegmentsToTimeline(segments, clip);
+    if (mappingResult.segments.length === 0) {
+      throw new Error(
+        `No transcription segments fall within clip '${clipId}' source range. ` +
+          'Verify the segments belong to this clip, or use auto_transcribe_sequence for timeline-relative segments.',
+      );
+    }
+
+    workingSegments = mappingResult.segments;
+    mappingSkippedCount = mappingResult.skippedOutOfRangeCount;
+  }
+
+  const normalizedSegments = normalizeTranscriptionSegments(workingSegments);
   if (normalizedSegments.segments.length === 0) {
     throw new Error('No valid segments provided');
   }
@@ -456,6 +813,10 @@ async function createCaptionsFromSegments(
           : {}),
       })),
       replaceExisting,
+      // Optional style/position passthrough. The Rust ImportGeneratedCaptions
+      // command applies these to every imported caption when present.
+      ...(style ? { style } : {}),
+      ...(position ? { position } : {}),
     });
 
     if (normalizedLanguage) {
@@ -494,7 +855,7 @@ async function createCaptionsFromSegments(
       createdTrack,
       captionCount: createdCaptions.length,
       captions: createdCaptions,
-      skippedSegmentCount: normalizedSegments.skippedCount,
+      skippedSegmentCount: normalizedSegments.skippedCount + mappingSkippedCount,
     };
   } catch (error) {
     const rollbackFailures: string[] = [];
@@ -743,7 +1104,9 @@ const CAPTION_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'style_caption',
-    description: 'Change caption visual style metadata',
+    description:
+      'Change caption visual style metadata. Keep captions readable: high contrast (light text with a dark outline), ' +
+      'about 32-42 characters per line, and at least ~1.5s of on-screen time per caption.',
     category: 'utility',
     parameters: {
       type: 'object',
@@ -840,16 +1203,23 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         position: {
           type: 'string',
           description:
-            'Caption position preset (top, center, bottom). Use xPercent and yPercent for custom placement.',
+            'Caption position preset. "bottom" places the caption in the standard subtitle safe area ' +
+            '(5% margin from the bottom edge), "top" uses a 5% margin from the top edge, and "center" ' +
+            'is vertically centered. The resolved point is the CENTER of the caption box, so the text ' +
+            'stays inside the safe margin. Use xPercent and yPercent for custom placement instead.',
           enum: ['top', 'center', 'bottom'],
         },
         xPercent: {
           type: 'number',
-          description: 'Custom caption X position as percent from the left',
+          description:
+            'Custom caption X position in percent (0-100, origin top-left). This marks the horizontal ' +
+            'center of the caption box for center alignment (left/right alignment anchors the matching edge).',
         },
         yPercent: {
           type: 'number',
-          description: 'Custom caption Y position as percent from the top',
+          description:
+            'Custom caption Y position in percent (0-100, origin top-left). This marks the vertical ' +
+            'center of the caption box. Preview and exported render use the same center anchor.',
         },
       },
       required: ['sequenceId', 'captionId'],
@@ -1009,6 +1379,111 @@ const CAPTION_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'get_caption_style',
+    description:
+      'Read the caption track default style/position and an existing caption\'s style/position so new or appended ' +
+      'captions can match the current look. Call this before styling or importing captions to keep them consistent.',
+    category: 'utility',
+    parameters: {
+      type: 'object',
+      properties: {
+        sequenceId: {
+          type: 'string',
+          description: 'The ID of the sequence',
+        },
+        trackId: {
+          type: 'string',
+          description: 'Optional caption track ID (auto-resolves to a caption track when omitted)',
+        },
+        captionId: {
+          type: 'string',
+          description:
+            'Optional caption ID to read. When omitted, the first caption on the track is used as the reference.',
+        },
+      },
+      required: ['sequenceId'],
+    },
+    handler: async (args) => {
+      try {
+        const sequenceId = args.sequenceId as string;
+        const captionId = args.captionId as string | undefined;
+
+        const sequence = getSequence(sequenceId);
+        if (!sequence) {
+          return { success: false, error: `Sequence '${sequenceId}' not found` };
+        }
+
+        // Resolve the caption track. resolveCaptionTrackId handles explicit
+        // trackId, lookup-by-caption, and first-caption-track fallback.
+        const trackId = resolveCaptionTrackId(
+          sequence,
+          captionId ?? '',
+          args.trackId as string | undefined,
+        );
+        if (!trackId) {
+          return {
+            success: false,
+            error: `Could not resolve a caption track in sequence '${sequenceId}'.`,
+          };
+        }
+
+        const track = sequence.tracks.find((candidate) => candidate.id === trackId);
+        if (!track) {
+          return { success: false, error: `Caption track '${trackId}' not found` };
+        }
+
+        // The frontend project store track does not carry the persisted
+        // CaptionTrack defaultStyle/defaultPosition (those live on the core
+        // CaptionTrack model). Surface the canonical defaults the engine uses
+        // when no override is set, so the agent has a reliable baseline.
+        const trackDefaultStyle: CaptionStyle = DEFAULT_CAPTION_STYLE;
+        const trackDefaultPosition: CaptionPosition = DEFAULT_CAPTION_POSITION;
+
+        // Pick the reference caption: the named one, else the first on the track.
+        const referenceCaption: Clip | undefined = captionId
+          ? track.clips.find((clip) => clip.id === captionId)
+          : track.clips[0];
+
+        if (captionId && !referenceCaption) {
+          return {
+            success: false,
+            error: `Caption '${captionId}' not found on track '${trackId}'.`,
+          };
+        }
+
+        const existingCaption = referenceCaption
+          ? {
+              captionId: referenceCaption.id,
+              text: referenceCaption.label ?? '',
+              // Per-clip overrides (undefined means the track default applies).
+              styleOverride: referenceCaption.captionStyle,
+              positionOverride: referenceCaption.captionPosition,
+            }
+          : null;
+
+        return {
+          success: true,
+          result: {
+            sequenceId,
+            trackId,
+            language: track.captionLanguage,
+            // Track-level defaults are the canonical engine defaults; the
+            // frontend store does not expose the persisted per-track defaults.
+            trackDefaultStyle,
+            trackDefaultPosition,
+            trackDefaultsAreCanonical: true,
+            existingCaption,
+            captionCount: track.clips.length,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('get_caption_style failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+  {
     name: 'transcription_status',
     description:
       'Read local Whisper transcription readiness, model directory, and installed model inventory.',
@@ -1042,8 +1517,19 @@ const CAPTION_TOOLS: ToolDefinition[] = [
       properties: {
         model: {
           type: 'string',
-          enum: ['tiny', 'base', 'small', 'medium', 'large', 'large-v3', 'large-v3-turbo'],
-          description: 'Whisper model to install (default: large-v3-turbo)',
+          enum: [
+            'tiny',
+            'base',
+            'small',
+            'medium',
+            'large',
+            'large-v3',
+            'large-v3-turbo',
+            'large-v3-q5_0',
+            'large-v3-turbo-q8_0',
+            'large-v3-turbo-q5_0',
+          ],
+          description: 'Whisper model to install (default: large-v3-turbo-q5_0)',
         },
         force: {
           type: 'boolean',
@@ -1083,11 +1569,26 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         },
         language: {
           type: 'string',
-          description: 'Language code (e.g., "en", "ko"). Auto-detected if omitted.',
+          description:
+            'Optional BCP-47 language code (e.g. "ko", "en", "ja"). Leave unset for automatic ' +
+            'detection (the engine performs robust multi-window detection). Provide it only if the ' +
+            'user explicitly states the spoken language and wants to override auto-detection.',
         },
         model: {
           type: 'string',
-          enum: ['auto', 'tiny', 'base', 'small', 'medium', 'large', 'large-v3', 'large-v3-turbo'],
+          enum: [
+            'auto',
+            'tiny',
+            'base',
+            'small',
+            'medium',
+            'large',
+            'large-v3',
+            'large-v3-turbo',
+            'large-v3-q5_0',
+            'large-v3-turbo-q8_0',
+            'large-v3-turbo-q5_0',
+          ],
           description: 'Whisper model size (default: best installed model)',
         },
         provider: {
@@ -1111,9 +1612,11 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         let whisperAvailable = false;
         let installedModels: string[] = [];
         let defaultModel = 'large-v3-turbo';
+        let transcriptionStatus: TranscriptionStatusDto | null = null;
         try {
           const status = await commands.getTranscriptionStatus();
           if (status.status === 'ok') {
+            transcriptionStatus = status.data;
             whisperAvailable = status.data.ready;
             defaultModel = selectDefaultWhisperModel(status.data);
             installedModels = status.data.models
@@ -1163,15 +1666,43 @@ const CAPTION_TOOLS: ToolDefinition[] = [
 
         const options: Record<string, unknown> = {};
         if (args.language) options.language = args.language;
+
+        // Resolve the model the engine would use, then HARD-enforce provisioning
+        // of the recommended high-accuracy model when the resolved default is
+        // weak and the caller did not deliberately pick a model. This downloads
+        // the recommended model first when missing (independent of LLM prompt
+        // compliance) so weak models never silently transcribe non-English/sung
+        // audio. An explicit caller choice is always honored as-is.
         const requestedModel = normalizeWhisperModelArg(args.model, defaultModel);
-        if (requestedModel) {
-          if (installedModels.length > 0 && !installedModels.includes(requestedModel)) {
+        const explicitModelChosen = callerSelectedExplicitModel(args.model);
+        let provisioning: ModelProvisioningResult = {
+          model: requestedModel,
+          autoInstalledModel: null,
+          warning: null,
+        };
+        if (transcriptionStatus) {
+          provisioning = await provisionRecommendedModel(
+            transcriptionStatus,
+            requestedModel,
+            explicitModelChosen,
+          );
+        }
+        const effectiveModel = provisioning.model;
+        if (effectiveModel) {
+          // Only enforce the installed-model guard for caller-chosen models. An
+          // auto-provisioned model was just downloaded (or confirmed installed),
+          // so the stale `installedModels` snapshot must not block it.
+          if (
+            explicitModelChosen &&
+            installedModels.length > 0 &&
+            !installedModels.includes(effectiveModel)
+          ) {
             return {
               success: false,
-              error: `Whisper model '${requestedModel}' is not installed. Use transcription_status to inspect models or install_whisper_model after user approval.`,
+              error: `Whisper model '${effectiveModel}' is not installed. Use transcription_status to inspect models or install_whisper_model after user approval.`,
             };
           }
-          options.model = requestedModel;
+          options.model = effectiveModel;
         }
 
         if (args.async) {
@@ -1206,15 +1737,37 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           duration: result.duration,
         });
 
+        // Surface a consolidated, non-fatal model-quality notice as a fallback
+        // signal. The provisioning above is the real fix; this still warns when
+        // the actually-used model is weak (e.g. recommended download failed).
+        const qualityNotice = transcriptionStatus
+          ? buildModelQualityNotice(transcriptionStatus, effectiveModel)
+          : { warning: buildWeakModelWarning(effectiveModel) };
+
+        // Prefer the provisioning warning (download failed) over the generic
+        // quality notice so the agent gets the most actionable message.
+        const combinedWarning = provisioning.warning ?? qualityNotice.warning;
+
         return {
           success: true,
           result: {
             mode: 'sync',
+            model: effectiveModel,
             language: result.language,
             segments: result.segments,
             segmentCount: result.segments.length,
             duration: result.duration,
             fullText: result.fullText,
+            ...(provisioning.autoInstalledModel
+              ? { autoInstalledModel: provisioning.autoInstalledModel }
+              : {}),
+            ...(transcriptionStatus
+              ? {
+                  recommendedModel: (qualityNotice as ModelQualityNotice).recommendedModel,
+                  recommendedInstalled: (qualityNotice as ModelQualityNotice).recommendedInstalled,
+                }
+              : {}),
+            ...(combinedWarning ? { warning: combinedWarning } : {}),
           },
         };
       } catch (error) {
@@ -1238,11 +1791,26 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         },
         language: {
           type: 'string',
-          description: 'Language code (e.g., "en", "ko"). Auto-detected if omitted.',
+          description:
+            'Optional BCP-47 language code (e.g. "ko", "en", "ja"). Leave unset for automatic ' +
+            'detection (the engine performs robust multi-window detection). Provide it only if the ' +
+            'user explicitly states the spoken language and wants to override auto-detection.',
         },
         model: {
           type: 'string',
-          enum: ['auto', 'tiny', 'base', 'small', 'medium', 'large', 'large-v3', 'large-v3-turbo'],
+          enum: [
+            'auto',
+            'tiny',
+            'base',
+            'small',
+            'medium',
+            'large',
+            'large-v3',
+            'large-v3-turbo',
+            'large-v3-q5_0',
+            'large-v3-turbo-q8_0',
+            'large-v3-turbo-q5_0',
+          ],
           description: 'Installed Whisper model size (default: best installed model)',
         },
       },
@@ -1252,9 +1820,11 @@ const CAPTION_TOOLS: ToolDefinition[] = [
       try {
         let defaultModel = 'large-v3-turbo';
         let installedModels: string[] = [];
+        let transcriptionStatus: TranscriptionStatusDto | null = null;
         try {
           const status = await commands.getTranscriptionStatus();
           if (status.status === 'ok') {
+            transcriptionStatus = status.data;
             defaultModel = selectDefaultWhisperModel(status.data);
             installedModels = status.data.models
               .filter((candidate) => candidate.installed)
@@ -1271,8 +1841,33 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           // Fall through to backend command; it will return the concrete availability error.
         }
 
-        const model = normalizeWhisperModelArg(args.model, defaultModel);
-        if (installedModels.length > 0 && !installedModels.includes(model)) {
+        // Resolve the model the engine would use, then HARD-enforce provisioning
+        // of the recommended high-accuracy model when the resolved default is
+        // weak and the caller did not deliberately pick a model (see
+        // provisionRecommendedModel). Honors an explicit caller choice as-is.
+        const requestedModel = normalizeWhisperModelArg(args.model, defaultModel);
+        const explicitModelChosen = callerSelectedExplicitModel(args.model);
+        let provisioning: ModelProvisioningResult = {
+          model: requestedModel,
+          autoInstalledModel: null,
+          warning: null,
+        };
+        if (transcriptionStatus) {
+          provisioning = await provisionRecommendedModel(
+            transcriptionStatus,
+            requestedModel,
+            explicitModelChosen,
+          );
+        }
+        const model = provisioning.model;
+
+        // Only block on the stale installed-model snapshot for caller-chosen
+        // models; an auto-provisioned model was just downloaded or confirmed.
+        if (
+          explicitModelChosen &&
+          installedModels.length > 0 &&
+          !installedModels.includes(model)
+        ) {
           return {
             success: false,
             error: `Whisper model '${model}' is not installed. Use transcription_status to inspect models or install_whisper_model after user approval.`,
@@ -1293,15 +1888,37 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           return { success: false, error: result.error };
         }
 
+        // Surface a consolidated, non-fatal model-quality notice as a fallback
+        // signal. The provisioning above is the real fix; this still warns when
+        // the actually-used model is weak (e.g. recommended download failed).
+        const qualityNotice = transcriptionStatus
+          ? buildModelQualityNotice(transcriptionStatus, model)
+          : { warning: buildWeakModelWarning(model) };
+
+        // Prefer the provisioning warning (download failed) over the generic
+        // quality notice so the agent gets the most actionable message.
+        const combinedWarning = provisioning.warning ?? qualityNotice.warning;
+
         return {
           success: true,
           result: {
             mode: 'sequence',
+            model,
             language: result.data.language,
             segments: result.data.segments,
             segmentCount: result.data.segments.length,
             duration: result.data.duration,
             fullText: result.data.fullText,
+            ...(provisioning.autoInstalledModel
+              ? { autoInstalledModel: provisioning.autoInstalledModel }
+              : {}),
+            ...(transcriptionStatus
+              ? {
+                  recommendedModel: (qualityNotice as ModelQualityNotice).recommendedModel,
+                  recommendedInstalled: (qualityNotice as ModelQualityNotice).recommendedInstalled,
+                }
+              : {}),
+            ...(combinedWarning ? { warning: combinedWarning } : {}),
           },
         };
       } catch (error) {
@@ -1397,6 +2014,12 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           type: 'string',
           description: 'Optional caption track ID (auto-created when omitted)',
         },
+        clipId: {
+          type: 'string',
+          description:
+            "When provided, segment times are treated as SOURCE-relative to this clip's asset and mapped to timeline time. " +
+            'Required to safely import source-asset transcription (auto_transcribe); omit when segments are already timeline-relative (auto_transcribe_sequence).',
+        },
         segments: {
           type: 'array',
           description: 'Array of { startTime, endTime, text } segments from transcription',
@@ -1420,22 +2043,50 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           type: 'string',
           description: 'Optional language code to store on the caption track and imported cues.',
         },
+        style: {
+          type: 'object',
+          description:
+            'Optional caption style applied to every imported caption (matches the style_caption / track default style shape). Omit to use the track default for consistency.',
+        },
+        position: {
+          type: ['string', 'object'],
+          description:
+            'Optional caption position applied to every imported caption: preset (top, center, bottom) or ' +
+            '{ type: "custom", xPercent, yPercent }. Percentages are 0-100 with origin at the top-left; the ' +
+            'resolved point is the center of the caption box. The "bottom" preset uses the 5% subtitle safe ' +
+            'area. Omit to use the track default.',
+        },
       },
       required: ['sequenceId', 'segments'],
     },
     handler: async (args) => {
       try {
+        let position: CaptionPosition | undefined;
+        if (args.position !== undefined) {
+          position = parseAgentCaptionPosition(args.position);
+          if (!position) {
+            return {
+              success: false,
+              error: `Invalid caption position '${String(args.position)}'. Use top, center, bottom, or { type: "custom", xPercent, yPercent }.`,
+            };
+          }
+        }
+
         const result = await createCaptionsFromSegments(
           args.sequenceId as string,
           args.segments as TranscriptionSegmentInput[],
           args.trackId as string | undefined,
           args.replaceExisting === true,
           args.language as string | undefined,
+          args.clipId as string | undefined,
+          args.style as Record<string, unknown> | undefined,
+          position,
         );
 
         logger.info('Captions created from transcription', {
           sequenceId: args.sequenceId,
           trackId: result.trackId,
+          clipId: args.clipId,
           count: result.captionCount,
           skippedCount: result.skippedSegmentCount,
         });
