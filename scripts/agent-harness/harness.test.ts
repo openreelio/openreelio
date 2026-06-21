@@ -65,7 +65,9 @@ function printSection(title: string, data: unknown): void {
 const ALL_PLAYBOOK_TOOLS = [
   // auto_caption
   'auto_transcribe',
+  'auto_transcribe_sequence',
   'add_captions_from_transcription',
+  'find_clips_by_asset',
   // music_bed
   'get_unused_assets',
   'insert_clip',
