@@ -1008,10 +1008,6 @@ fn split_subtitle_text(text: &str, max_chars: usize, max_chunks: usize) -> Vec<S
             current.clear();
         }
 
-        let needs_separator = !current.is_empty()
-            && !is_punctuation_token(&token)
-            && !token_is_cjk(&token)
-            && !current.chars().last().is_some_and(is_cjk);
         if needs_separator {
             current.push(' ');
         }
@@ -1266,8 +1262,8 @@ mod engine_impl {
                 ));
             }
 
-            let model_str = model_path.to_str().unwrap_or_default();
-            let (context, used_gpu) = Self::create_context_with_fallback(model_str)?;
+            let model_str = model_path.to_string_lossy();
+            let (context, used_gpu) = Self::create_context_with_fallback(model_str.as_ref())?;
 
             let model_name = model_path
                 .file_stem()

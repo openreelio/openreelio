@@ -1049,7 +1049,15 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
 
       // Gate the direct (non-agent) path so it never silently runs with a weak
       // model when a more accurate recommended model is available.
-      const status = await getTranscriptionStatus();
+      let status: Awaited<ReturnType<typeof getTranscriptionStatus>> | null = null;
+      try {
+        status = await getTranscriptionStatus();
+      } catch (error) {
+        logger.warn('Failed to load transcription status for model gate; proceeding', {
+          assetId,
+          error,
+        });
+      }
       if (status) {
         const decision = decideTranscriptionGate(options.model, status);
         if (decision.kind === 'use-recommended') {
@@ -1112,11 +1120,19 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
     setTranscriptionGatePrompt({ ...prompt, isInstalling: true });
     setTranscriptionGateProgress(null);
 
-    const installed = await downloadTranscriptionModel(prompt.recommendedModel, {
-      onProgress: (progress) => {
-        setTranscriptionGateProgress(progress.percent ?? null);
-      },
-    });
+    let installed: Awaited<ReturnType<typeof downloadTranscriptionModel>> | null = null;
+    try {
+      installed = await downloadTranscriptionModel(prompt.recommendedModel, {
+        onProgress: (progress) => {
+          setTranscriptionGateProgress(progress.percent ?? null);
+        },
+      });
+    } catch (error) {
+      logger.warn('Failed to install recommended model from gate prompt', {
+        modelId: prompt.recommendedModel,
+        error,
+      });
+    }
 
     if (!installed) {
       // Keep the prompt open so the user can retry or fall back to the weak model.

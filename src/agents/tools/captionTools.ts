@@ -388,12 +388,20 @@ function mapSourceSegmentsToTimeline(
       continue;
     }
 
-    // timelineTime = timelineInSec + (sourceTime - sourceInSec) / speed
-    const startTimeline = timelineIn + (segment.startTime - sourceIn) / safeSpeed;
-    const rawEndTimeline = timelineIn + (segment.endTime - sourceIn) / safeSpeed;
-    // Clamp the end to the clip's timeline extent so spillover does not drift.
-    const clipTimelineOut = timelineIn + (sourceOut - sourceIn) / safeSpeed;
-    const endTimeline = Math.min(rawEndTimeline, clipTimelineOut);
+    const startSource = segment.startTime;
+    const endSource = Math.min(segment.endTime, sourceOut);
+    if (!(endSource > startSource)) {
+      skippedOutOfRangeCount += 1;
+      continue;
+    }
+
+    const toTimeline = (sourceSec: number): number =>
+      clip.reverse
+        ? timelineIn + (sourceOut - sourceSec) / safeSpeed
+        : timelineIn + (sourceSec - sourceIn) / safeSpeed;
+
+    const startTimeline = clip.reverse ? toTimeline(endSource) : toTimeline(startSource);
+    const endTimeline = clip.reverse ? toTimeline(startSource) : toTimeline(endSource);
 
     if (!(endTimeline > startTimeline)) {
       skippedOutOfRangeCount += 1;

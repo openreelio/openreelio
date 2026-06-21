@@ -453,6 +453,36 @@ describe('captionTools', () => {
     });
   });
 
+  it('should account for reversed clips when mapping source segments to timeline', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    // Reversed source [0, 10] starts playback at source 10 on timeline 20.
+    setSequenceWithSourceClip({
+      range: { sourceInSec: 0, sourceOutSec: 10 },
+      place: { timelineInSec: 20, durationSec: 10 },
+      speed: 1,
+      reverse: true,
+    });
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        clipId: 'src-clip',
+        segments: [{ startTime: 8, endTime: 10, text: 'Reverse start' }],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({
+      type: 'ImportGeneratedCaptions',
+      payload: {
+        segments: [{ startSec: 20, endSec: 22, text: 'Reverse start' }],
+      },
+    });
+  });
+
   it('should reject mapping for clips with an active time remap curve', async () => {
     const tool = globalToolRegistry.get('add_captions_from_transcription');
     expect(tool).toBeDefined();

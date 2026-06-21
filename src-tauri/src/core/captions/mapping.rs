@@ -14,11 +14,19 @@
 //!
 //! # Mapping formula
 //!
-//! For a clip with constant speed:
+//! For a forward clip with constant speed:
 //!
 //! ```text
 //! timeline_sec = clip.place.timeline_in_sec
 //!              + (source_sec - clip.range.source_in_sec) / safe_speed
+//! ```
+//!
+//! For a reversed clip, source coordinates are mirrored across the clip's source
+//! out-point:
+//!
+//! ```text
+//! timeline_sec = clip.place.timeline_in_sec
+//!              + (clip.range.source_out_sec - source_sec) / safe_speed
 //! ```
 //!
 //! where `safe_speed = clip.speed` when positive, otherwise `1.0`.
@@ -79,10 +87,6 @@ pub fn map_source_segments_to_timeline(
     let source_in = clip.range.source_in_sec;
     let source_out = clip.range.source_out_sec;
     let timeline_in = clip.place.timeline_in_sec;
-    // Timeline out-point derived from the source window and speed, so spillover
-    // past the clip's source out-point is clamped to the clip's timeline extent.
-    let clip_timeline_out = timeline_in + (source_out - source_in) / safe_speed;
-
     let mut mapped = Vec::with_capacity(segments.len());
     let mut skipped_out_of_range = 0usize;
 
@@ -93,9 +97,26 @@ pub fn map_source_segments_to_timeline(
             continue;
         }
 
-        let start_timeline = timeline_in + (segment.start_sec - source_in) / safe_speed;
-        let raw_end_timeline = timeline_in + (segment.end_sec - source_in) / safe_speed;
-        let end_timeline = raw_end_timeline.min(clip_timeline_out);
+        let start_source = segment.start_sec;
+        let end_source = segment.end_sec.min(source_out);
+        if end_source <= start_source {
+            skipped_out_of_range += 1;
+            continue;
+        }
+
+        let to_timeline = |source_sec: f64| -> f64 {
+            if clip.reverse {
+                timeline_in + (source_out - source_sec) / safe_speed
+            } else {
+                timeline_in + (source_sec - source_in) / safe_speed
+            }
+        };
+
+        let (start_timeline, end_timeline) = if clip.reverse {
+            (to_timeline(end_source), to_timeline(start_source))
+        } else {
+            (to_timeline(start_source), to_timeline(end_source))
+        };
 
         // Skip cues that collapse to a non-positive timeline duration after the
         // clamp. `<=` avoids a negated partial-ord comparison and treats NaN as
@@ -165,6 +186,22 @@ mod tests {
         // source 4s -> timeline 0 + 4/2 = 2.0s; source 6s -> 3.0s.
         assert!((result.segments[0].start_sec - 2.0).abs() < 1e-9);
         assert!((result.segments[0].end_sec - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn maps_reverse_clip_source_range_to_forward_timeline_interval() {
+        // Reversed source [0s, 10s) placed at timeline 20s. Source 8..10 is the
+        // first two seconds of playback and therefore maps to timeline 20..22.
+        let mut clip = source_clip(20.0, 10.0, 0.0, 10.0, 1.0);
+        clip.reverse = true;
+        let segments = vec![GeneratedCaptionSegment::new(8.0, 10.0, "Reverse start")];
+
+        let result = map_source_segments_to_timeline(&segments, &clip).unwrap();
+
+        assert_eq!(result.segments.len(), 1);
+        assert_eq!(result.skipped_out_of_range, 0);
+        assert!((result.segments[0].start_sec - 20.0).abs() < 1e-9);
+        assert!((result.segments[0].end_sec - 22.0).abs() < 1e-9);
     }
 
     #[test]
