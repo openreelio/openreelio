@@ -1309,13 +1309,14 @@ fn resolve_runnable_candidates(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::ensure_private_codex_home_dir;
     use super::{
         codex_shell_command_prefix_from_spec, collect_codex_executable_candidates_for_platform,
         collect_wsl_codex_candidates_from_windows_roots, default_reasoning_efforts,
-        ensure_private_codex_home_dir, format_codex_io_error, normalize_codex_model_for_version,
-        parse_codex_auth_status, parse_codex_model_catalog, parse_codex_version,
-        parse_codex_version_numbers, resolve_codex_catalog_default,
-        resolve_first_runnable_candidate, select_codex_command_spec,
+        format_codex_io_error, normalize_codex_model_for_version, parse_codex_auth_status,
+        parse_codex_model_catalog, parse_codex_version, parse_codex_version_numbers,
+        resolve_codex_catalog_default, resolve_first_runnable_candidate, select_codex_command_spec,
         windows_path_to_wsl_mount_path, CodexCommandMode, CodexCommandSource, CodexCommandSpec,
         CodexExecutablePlatform, DEFAULT_CODEX_MODEL,
     };

@@ -199,11 +199,11 @@ jobs:
 
       - name: Run clippy
         working-directory: src-tauri
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --features dev-full -- -D warnings
 
       - name: Run tests
         working-directory: src-tauri
-        run: cargo test --locked --all-features --verbose
+        run: cargo test --locked --features dev-full --verbose
 
   # ==========================================================================
   # Build Check
