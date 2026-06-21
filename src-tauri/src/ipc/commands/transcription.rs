@@ -97,12 +97,37 @@ pub struct TranscriptionStatusDto {
     pub ready: bool,
     /// Directory where OpenReelio expects whisper.cpp ggml models
     pub models_dir: String,
-    /// Default model ID used when no model is provided
+    /// Default model ID used when no model is provided.
+    ///
+    /// This is the best installed model (or the recommended candidate when nothing
+    /// is installed). It is always safe to transcribe with, so it never points at an
+    /// uninstalled model.
     pub default_model: String,
+    /// Recommended model ID for best quality/performance balance.
+    ///
+    /// This is OpenReelio's preferred model (`large-v3-turbo-q5_0`) regardless of
+    /// install state. Combined with `recommended_installed`, the agent/UI can detect
+    /// that a better model should be fetched even when an inferior model is already
+    /// installed and currently used as the default.
+    #[serde(default)]
+    pub recommended_model: String,
+    /// Whether the recommended model's file exists in `models_dir`.
+    ///
+    /// When `false`, the recommended model is not installed and the agent/UI can
+    /// surface a download prompt to upgrade transcription quality.
+    #[serde(default)]
+    pub recommended_installed: bool,
     /// Number of installed supported models
     pub installed_count: usize,
     /// Supported models and install status
     pub models: Vec<TranscriptionModelDto>,
+    /// Acceleration backend compiled into this build.
+    ///
+    /// One of "cuda", "metal", "vulkan", "coreml", "openblas", or "cpu". This is
+    /// additive and lets the UI surface "GPU accelerated" status. Default builds
+    /// report "cpu".
+    #[serde(default)]
+    pub acceleration: String,
 }
 
 /// Progress emitted while downloading a local Whisper model.
@@ -267,10 +292,11 @@ fn build_transcription_model_dto(
         is_default: model == default_model,
         recommended: matches!(
             model,
-            WhisperModel::Base
-                | WhisperModel::Small
-                | WhisperModel::LargeV3
+            WhisperModel::LargeV3TurboQ5
                 | WhisperModel::LargeV3Turbo
+                | WhisperModel::LargeV3
+                | WhisperModel::Small
+                | WhisperModel::Base
         ),
         download_url: model.download_url().to_string(),
         estimated_size_bytes: model.estimated_size_bytes(),
@@ -324,6 +350,8 @@ pub async fn get_transcription_status() -> Result<TranscriptionStatusDto, String
     let feature_available = crate::core::captions::whisper::is_whisper_available();
     let models_dir = crate::core::captions::whisper::default_models_dir();
     let default_model = WhisperModel::default_for_dir(&models_dir);
+    let recommended_model = WhisperModel::recommended_default();
+    let recommended_installed = recommended_model.is_installed_in(&models_dir);
     let models = WhisperModel::all()
         .iter()
         .map(|model| build_transcription_model_dto(*model, &models_dir, default_model))
@@ -335,8 +363,11 @@ pub async fn get_transcription_status() -> Result<TranscriptionStatusDto, String
         ready: feature_available && installed_count > 0,
         models_dir: models_dir.display().to_string(),
         default_model: default_model.name().to_string(),
+        recommended_model: recommended_model.name().to_string(),
+        recommended_installed,
         installed_count,
         models,
+        acceleration: crate::core::captions::whisper::compiled_acceleration_backend().to_string(),
     })
 }
 
@@ -1066,4 +1097,107 @@ pub async fn is_shot_detection_available(
     let mut guard = ffmpeg_state.write().await;
     let _ = guard.initialize(None);
     Ok(guard.is_available())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_transcription_status_includes_acceleration_field() {
+        // The status DTO must report the compiled acceleration backend. On the
+        // default CPU test build this is "cpu".
+        let status = get_transcription_status()
+            .await
+            .expect("status should be available");
+        assert_eq!(status.acceleration, "cpu");
+    }
+
+    #[tokio::test]
+    async fn get_transcription_status_reports_recommended_model() {
+        use crate::core::captions::whisper::WhisperModel;
+
+        // The status DTO must always advertise the recommended model id so the
+        // agent/UI can detect a recommended-model gap, independent of what is
+        // currently installed as the default.
+        let status = get_transcription_status()
+            .await
+            .expect("status should be available");
+        assert_eq!(status.recommended_model, "large-v3-turbo-q5_0");
+        // `recommended_installed` must reflect the actual presence of the
+        // recommended model file in the resolved models directory.
+        let models_dir = crate::core::captions::whisper::default_models_dir();
+        let expected = WhisperModel::recommended_default().is_installed_in(&models_dir);
+        assert_eq!(status.recommended_installed, expected);
+    }
+
+    #[test]
+    fn recommended_installed_reflects_file_presence() {
+        use crate::core::captions::whisper::WhisperModel;
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "openreelio-transcription-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("temp models dir should be creatable");
+
+        // RAII cleanup so the temp directory does not leak across test runs.
+        struct DirGuard(std::path::PathBuf);
+        impl Drop for DirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = DirGuard(temp_dir.clone());
+
+        let recommended = WhisperModel::recommended_default();
+
+        // Empty directory: the recommended model is not installed.
+        assert!(!recommended.is_installed_in(&temp_dir));
+
+        // After writing a non-empty model file, it must be reported as installed.
+        let model_path = temp_dir.join(recommended.filename());
+        std::fs::write(&model_path, b"ggml-model-stub").expect("model file should be writable");
+        assert!(recommended.is_installed_in(&temp_dir));
+    }
+
+    #[test]
+    fn transcription_status_dto_recommended_fields_are_backward_compatible() {
+        // A legacy payload without the recommended-model fields must still
+        // deserialize, defaulting `recommended_model` to empty and
+        // `recommended_installed` to false (additive, serde-default).
+        let json = r#"{
+            "featureAvailable": true,
+            "ready": false,
+            "modelsDir": "/models",
+            "defaultModel": "small",
+            "installedCount": 1,
+            "models": []
+        }"#;
+        let status: TranscriptionStatusDto =
+            serde_json::from_str(json).expect("legacy status should deserialize");
+        assert!(status.recommended_model.is_empty());
+        assert!(!status.recommended_installed);
+    }
+
+    #[test]
+    fn transcription_status_dto_acceleration_is_backward_compatible() {
+        // A legacy payload without `acceleration` must still deserialize, with the
+        // field defaulting to an empty string (additive, serde-default).
+        let json = r#"{
+            "featureAvailable": true,
+            "ready": false,
+            "modelsDir": "/models",
+            "defaultModel": "large-v3-turbo-q5_0",
+            "installedCount": 0,
+            "models": []
+        }"#;
+        let status: TranscriptionStatusDto =
+            serde_json::from_str(json).expect("legacy status should deserialize");
+        assert!(status.acceleration.is_empty());
+    }
 }

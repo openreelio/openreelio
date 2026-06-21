@@ -91,6 +91,12 @@ const MODEL_SELECTION_PREFERENCE = [
   'tiny',
 ];
 
+/** Models considered too weak for accurate subtitles (sung/non-English audio). */
+const WEAK_MODELS = new Set(['tiny', 'base', 'small']);
+
+/** Preferred high-accuracy model to recommend when only weak models are installed. */
+const PREFERRED_RECOMMENDED_MODEL = 'large-v3-turbo-q5_0';
+
 /** Duration threshold (in seconds) to show warning */
 const LONG_DURATION_THRESHOLD = 600; // 10 minutes
 
@@ -136,6 +142,33 @@ function choosePreferredInstalledModel(modelStatuses: TranscriptionModelInfo[]):
   return (
     preferred ?? modelStatuses.find((candidate) => candidate.installed)?.id ?? 'large-v3-turbo'
   );
+}
+
+/**
+ * Find a high-accuracy recommended model that is NOT yet installed, preferring
+ * {@link PREFERRED_RECOMMENDED_MODEL}. Returns `null` when none qualify.
+ */
+function findRecommendedUninstalledModel(
+  modelStatuses: TranscriptionModelInfo[],
+): TranscriptionModelInfo | null {
+  const preferred = modelStatuses.find(
+    (candidate) => candidate.id === PREFERRED_RECOMMENDED_MODEL && !candidate.installed,
+  );
+  if (preferred) {
+    return preferred;
+  }
+  return (
+    modelStatuses.find(
+      (candidate) =>
+        candidate.recommended && !candidate.installed && !WEAK_MODELS.has(candidate.id),
+    ) ?? null
+  );
+}
+
+/** Whether every installed model is a weak model. */
+function onlyWeakModelsInstalled(modelStatuses: TranscriptionModelInfo[]): boolean {
+  const installed = modelStatuses.filter((candidate) => candidate.installed);
+  return installed.length > 0 && installed.every((candidate) => WEAK_MODELS.has(candidate.id));
 }
 
 // =============================================================================
@@ -184,6 +217,14 @@ export const TranscriptionDialog: React.FC<TranscriptionDialogProps> = ({
   );
   const installedModelIds = useMemo(
     () => modelStatuses.filter((candidate) => candidate.installed).map((candidate) => candidate.id),
+    [modelStatuses],
+  );
+  // Recommended high-accuracy model to suggest when only weak models are installed.
+  const recommendedUninstalledModel = useMemo(
+    () =>
+      onlyWeakModelsInstalled(modelStatuses)
+        ? findRecommendedUninstalledModel(modelStatuses)
+        : null,
     [modelStatuses],
   );
 
@@ -414,6 +455,12 @@ export const TranscriptionDialog: React.FC<TranscriptionDialogProps> = ({
               <p className="mt-1 text-xs text-neutral-500">
                 Larger models are more accurate but slower.
               </p>
+              {recommendedUninstalledModel && (
+                <p className="mt-1 text-xs text-blue-300">
+                  For accurate subtitles on sung or non-English audio, install the recommended{' '}
+                  {recommendedUninstalledModel.displayName} model below.
+                </p>
+              )}
             </div>
           )}
 

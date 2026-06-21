@@ -17,9 +17,10 @@ import {
   type DragEvent,
 } from 'react';
 import { isTauri } from '@tauri-apps/api/core';
-import { Search, X, FolderPlus, RefreshCw, Upload } from 'lucide-react';
+import { Search, X, FolderPlus, RefreshCw, Upload, MessageSquare, Loader2 } from 'lucide-react';
 import { useProjectStore, useWorkspaceStore } from '@/stores';
 import { useTranscriptionWithIndexing } from '@/hooks';
+import { decideTranscriptionGate } from '@/hooks/transcriptionModelGate';
 import { useFileOperations } from '@/hooks/useFileOperations';
 import { commands, type TranscriptionModelDto } from '@/bindings';
 import { createLogger } from '@/services/logger';
@@ -300,6 +301,32 @@ function buildCaptionSegmentPayloads(
   return payloads;
 }
 
+/**
+ * Pending decision when the dialog would transcribe with a weak Whisper model
+ * (tiny/base/small) while a more accurate recommended model is available but not
+ * yet installed. The user must choose to install the recommended model or to
+ * proceed with the weak one.
+ */
+interface TranscriptionGatePromptState {
+  /** Asset to transcribe once the choice is made. */
+  assetId: string;
+  /** Options selected in the dialog (model resolved at confirm time). */
+  options: TranscriptionOptions;
+  /** Weak model that would otherwise be used. */
+  weakModel: string;
+  /** Recommended model to install and then use. */
+  recommendedModel: string;
+  /** Whether the recommended model is currently downloading. */
+  isInstalling: boolean;
+}
+
+function formatModelLabel(modelId: string): string {
+  if (modelId === 'large-v3') return 'Large v3';
+  if (modelId === 'large-v3-turbo') return 'Large v3 Turbo';
+  if (modelId === 'large-v3-turbo-q5_0') return 'Large v3 Turbo (Q5_0)';
+  return modelId.charAt(0).toUpperCase() + modelId.slice(1);
+}
+
 export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) {
   const rootRef = useRef<HTMLDivElement>(null);
   const lastExternalDropRef = useRef<{ key: string; timestampMs: number } | null>(null);
@@ -357,6 +384,11 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
   const [transcriptionInstallProgress, setTranscriptionInstallProgress] = useState<number | null>(
     null,
   );
+  // Pending gate prompt shown when the effective model is weak and a better
+  // recommended model is available but not yet installed.
+  const [transcriptionGatePrompt, setTranscriptionGatePrompt] =
+    useState<TranscriptionGatePromptState | null>(null);
+  const [transcriptionGateProgress, setTranscriptionGateProgress] = useState<number | null>(null);
 
   // Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -939,16 +971,16 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
     [assets],
   );
 
-  const handleTranscriptionConfirm = useCallback(
-    async (options: TranscriptionOptions) => {
-      if (!transcriptionAsset) return;
-      const assetId = transcriptionAsset.id;
-      setTranscriptionAsset(null);
+  // Core transcription + caption insertion, shared by the direct path and the
+  // install-recommended-then-transcribe path. `modelOverride` forces a specific
+  // model (e.g. the recommended one) regardless of the dialog's selection.
+  const runTranscription = useCallback(
+    async (assetId: string, options: TranscriptionOptions, modelOverride?: string): Promise<void> => {
       setTranscribingAssets((prev) => new Set(prev).add(assetId));
       try {
         const result = await transcribeAndIndex(assetId, {
           language: options.language === 'auto' ? undefined : options.language,
-          model: options.model,
+          model: modelOverride ?? options.model,
           skipIndexing: !options.indexForSearch,
         });
 
@@ -1006,7 +1038,41 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
         });
       }
     },
-    [transcriptionAsset, transcribeAndIndex, activeSequenceId, sequences, executeCommand],
+    [transcribeAndIndex, activeSequenceId, sequences, executeCommand],
+  );
+
+  const handleTranscriptionConfirm = useCallback(
+    async (options: TranscriptionOptions) => {
+      if (!transcriptionAsset) return;
+      const assetId = transcriptionAsset.id;
+      setTranscriptionAsset(null);
+
+      // Gate the direct (non-agent) path so it never silently runs with a weak
+      // model when a more accurate recommended model is available.
+      const status = await getTranscriptionStatus();
+      if (status) {
+        const decision = decideTranscriptionGate(options.model, status);
+        if (decision.kind === 'use-recommended') {
+          await runTranscription(assetId, options, decision.model);
+          return;
+        }
+        if (decision.kind === 'offer-install') {
+          // Defer the actual transcription until the user chooses.
+          setTranscriptionGatePrompt({
+            assetId,
+            options,
+            weakModel: decision.weakModel,
+            recommendedModel: decision.recommendedModel,
+            isInstalling: false,
+          });
+          setTranscriptionGateProgress(null);
+          return;
+        }
+      }
+
+      await runTranscription(assetId, options);
+    },
+    [transcriptionAsset, getTranscriptionStatus, runTranscription],
   );
 
   const handleTranscriptionCancel = useCallback(() => {
@@ -1035,6 +1101,53 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
     },
     [downloadTranscriptionModel, refreshTranscriptionStatus],
   );
+
+  // Install the recommended model from the gate prompt, then transcribe with it.
+  const handleGateInstallRecommended = useCallback(async (): Promise<void> => {
+    const prompt = transcriptionGatePrompt;
+    if (!prompt || prompt.isInstalling) {
+      return;
+    }
+
+    setTranscriptionGatePrompt({ ...prompt, isInstalling: true });
+    setTranscriptionGateProgress(null);
+
+    const installed = await downloadTranscriptionModel(prompt.recommendedModel, {
+      onProgress: (progress) => {
+        setTranscriptionGateProgress(progress.percent ?? null);
+      },
+    });
+
+    if (!installed) {
+      // Keep the prompt open so the user can retry or fall back to the weak model.
+      setTranscriptionGatePrompt({ ...prompt, isInstalling: false });
+      setTranscriptionGateProgress(null);
+      setTranscriptionModelStatusMessage(
+        `Failed to install Whisper model '${prompt.recommendedModel}'.`,
+      );
+      return;
+    }
+
+    setTranscriptionGatePrompt(null);
+    setTranscriptionGateProgress(null);
+    await runTranscription(prompt.assetId, prompt.options, prompt.recommendedModel);
+  }, [transcriptionGatePrompt, downloadTranscriptionModel, runTranscription]);
+
+  // Proceed with the weak model the user originally selected.
+  const handleGateProceedWithWeak = useCallback(async (): Promise<void> => {
+    const prompt = transcriptionGatePrompt;
+    if (!prompt || prompt.isInstalling) {
+      return;
+    }
+    setTranscriptionGatePrompt(null);
+    setTranscriptionGateProgress(null);
+    await runTranscription(prompt.assetId, prompt.options, prompt.weakModel);
+  }, [transcriptionGatePrompt, runTranscription]);
+
+  const handleGateCancel = useCallback((): void => {
+    setTranscriptionGatePrompt((prev) => (prev && prev.isInstalling ? prev : null));
+    setTranscriptionGateProgress(null);
+  }, []);
 
   // ===========================================================================
   // Filtered Tree
@@ -1308,6 +1421,89 @@ export function ProjectExplorer({ onAddToTimeline }: ProjectExplorerProps = {}) 
           installProgress={transcriptionInstallProgress}
           isProcessing={isTranscribing}
         />
+      )}
+
+      {/* Recommended-model gate: shown when the selected model is weak and the
+          recommended model is available but not installed. */}
+      {transcriptionGatePrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div
+            data-testid="transcription-gate-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="transcription-gate-title"
+            className="bg-neutral-900 rounded-lg shadow-xl border border-neutral-700 w-full max-w-md mx-4"
+          >
+            <div className="p-4 border-b border-neutral-700">
+              <h2
+                id="transcription-gate-title"
+                className="text-lg font-semibold text-white flex items-center gap-2"
+              >
+                <MessageSquare className="w-5 h-5 text-blue-400" />
+                Use a more accurate model?
+              </h2>
+            </div>
+            <div className="p-4 space-y-3 text-sm text-neutral-300">
+              <p>
+                The selected model{' '}
+                <span className="font-medium text-white">
+                  {formatModelLabel(transcriptionGatePrompt.weakModel)}
+                </span>{' '}
+                produces inaccurate subtitles for sung or non-English audio. Installing{' '}
+                <span className="font-medium text-white">
+                  {formatModelLabel(transcriptionGatePrompt.recommendedModel)}
+                </span>{' '}
+                (~574MB) gives far more accurate results.
+              </p>
+              {transcriptionGatePrompt.isInstalling && (
+                <p className="text-xs text-blue-300">
+                  Downloading {formatModelLabel(transcriptionGatePrompt.recommendedModel)}
+                  {transcriptionGateProgress !== null
+                    ? ` (${Math.round(transcriptionGateProgress)}%)`
+                    : '...'}
+                </p>
+              )}
+            </div>
+            <div className="flex flex-col gap-2 p-4 border-t border-neutral-700">
+              <button
+                type="button"
+                onClick={() => void handleGateInstallRecommended()}
+                disabled={transcriptionGatePrompt.isInstalling}
+                className="px-4 py-2 text-sm rounded bg-blue-600 text-white hover:bg-blue-500
+                  disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+              >
+                {transcriptionGatePrompt.isInstalling ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    {transcriptionGateProgress !== null
+                      ? `Installing ${Math.round(transcriptionGateProgress)}%`
+                      : 'Installing...'}
+                  </>
+                ) : (
+                  `Install ${formatModelLabel(transcriptionGatePrompt.recommendedModel)} & transcribe`
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleGateProceedWithWeak()}
+                disabled={transcriptionGatePrompt.isInstalling}
+                className="px-4 py-2 text-sm rounded border border-neutral-600 text-neutral-300
+                  hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                Transcribe now with {formatModelLabel(transcriptionGatePrompt.weakModel)}
+              </button>
+              <button
+                type="button"
+                onClick={handleGateCancel}
+                disabled={transcriptionGatePrompt.isInstalling}
+                className="px-4 py-2 text-sm rounded text-neutral-400 hover:text-white
+                  disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
