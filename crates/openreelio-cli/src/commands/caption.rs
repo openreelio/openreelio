@@ -3,9 +3,9 @@
 use crate::output;
 use crate::validate;
 use clap::Subcommand;
-use openreelio_core::captions::{parse_srt, parse_vtt, Caption};
+use openreelio_core::captions::{map_source_segments_to_timeline, parse_srt, parse_vtt, Caption};
 use openreelio_core::commands::*;
-use openreelio_core::timeline::{Sequence, TrackKind};
+use openreelio_core::timeline::{Clip, Sequence, TrackKind};
 use openreelio_core::ActiveProject;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -161,6 +161,19 @@ pub enum CaptionAction {
         /// Sequence ID (defaults to active)
         #[arg(long)]
         sequence: Option<String>,
+
+        /// Clip ID to map SOURCE-relative transcript times onto the timeline
+        /// (transcript-json format only).
+        ///
+        /// A transcript JSON produced from a SOURCE ASSET holds times relative
+        /// to the source media (0 = start of file). If that asset is trimmed,
+        /// moved, or sped up on the timeline, the cues drift. Pass the hosting
+        /// clip to remap each cue to its timeline position. When omitted, cues
+        /// are imported as-is (use this only when the times are already
+        /// timeline-relative, such as a transcript exported from a sequence).
+        /// Ignored for SRT/VTT input, which is always timeline-relative.
+        #[arg(long)]
+        source_clip: Option<String>,
     },
 
     /// Export captions to SRT or VTT format
@@ -613,6 +626,114 @@ fn get_sequence<'a>(project: &'a ActiveProject, sequence_id: &str) -> anyhow::Re
         .sequences
         .get(sequence_id)
         .ok_or_else(|| anyhow::anyhow!("Sequence '{}' not found", sequence_id))
+}
+
+/// Finds a clip by ID anywhere in the sequence.
+fn find_clip_in_sequence<'a>(sequence: &'a Sequence, clip_id: &str) -> Option<&'a Clip> {
+    sequence
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .find(|clip| clip.id == clip_id)
+}
+
+/// Returns the single clip on the sequence that hosts `asset_id`, or `None` when
+/// the asset is absent or placed more than once (ambiguous, cannot auto-resolve).
+fn unique_clip_for_asset<'a>(sequence: &'a Sequence, asset_id: &str) -> Option<&'a Clip> {
+    let mut matches = sequence
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .filter(|clip| clip.asset_id == asset_id);
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+/// Resolves the hosting clip for a source-relative transcription and rewrites
+/// `segments` to timeline coordinates in place.
+///
+/// Resolution order:
+/// 1. An explicit `--source-clip <CLIP_ID>` is resolved and used (required when
+///    a source asset was transcribed and placed with a trim/move/speed).
+/// 2. Otherwise, if `source_asset_id` is placed as exactly one clip on the
+///    sequence, that clip is auto-resolved and a note is logged to stderr.
+/// 3. Otherwise no mapping is applied (the segments are assumed
+///    timeline-relative, e.g. a sequence-audio transcription or a transcript
+///    JSON that already holds timeline times).
+///
+/// Returns metadata describing whether mapping was applied for inclusion in the
+/// JSON command result. On a successful mapping, `segments` is replaced with the
+/// mapped set; an empty mapped set is treated as an error so the caller does not
+/// import zero captions silently.
+pub(crate) fn map_segments_for_source_clip(
+    project: &ActiveProject,
+    sequence_id: &str,
+    source_clip: Option<&str>,
+    source_asset_id: Option<&str>,
+    segments: &mut Vec<GeneratedCaptionSegment>,
+) -> anyhow::Result<Map<String, Value>> {
+    let sequence = get_sequence(project, sequence_id)?;
+
+    // Resolve the hosting clip and whether it was auto-resolved.
+    let (clip, auto_resolved) = match source_clip {
+        Some(clip_id) => {
+            let clip = find_clip_in_sequence(sequence, clip_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Source clip '{}' not found in sequence '{}'",
+                    clip_id,
+                    sequence_id
+                )
+            })?;
+            (clip, false)
+        }
+        None => match source_asset_id.and_then(|asset| unique_clip_for_asset(sequence, asset)) {
+            Some(clip) => (clip, true),
+            None => {
+                let mut info = Map::new();
+                info.insert("mappingApplied".to_string(), Value::Bool(false));
+                return Ok(info);
+            }
+        },
+    };
+
+    let clip_id = clip.id.clone();
+    let mapping = map_source_segments_to_timeline(segments, clip)
+        .map_err(|error| anyhow::anyhow!("Source-to-timeline mapping failed: {}", error))?;
+
+    if mapping.segments.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No transcription segments fall within source clip '{}' range. Verify the segments \
+             belong to this clip, or transcribe the sequence audio mix for timeline-relative segments.",
+            clip_id
+        ));
+    }
+
+    if auto_resolved {
+        // stdout is reserved for JSON output; informational notes go to stderr.
+        eprintln!(
+            "Source-to-timeline mapping applied: asset placed as single clip '{}'.",
+            clip_id
+        );
+    }
+
+    let skipped = mapping.skipped_out_of_range;
+    *segments = mapping.segments;
+
+    let mut info = Map::new();
+    info.insert("mappingApplied".to_string(), Value::Bool(true));
+    info.insert("mappingClipId".to_string(), Value::String(clip_id));
+    info.insert(
+        "mappingAutoResolved".to_string(),
+        Value::Bool(auto_resolved),
+    );
+    info.insert(
+        "mappingSkippedSegments".to_string(),
+        Value::Number(skipped.into()),
+    );
+    Ok(info)
 }
 
 pub(crate) fn ensure_caption_track(
@@ -1073,6 +1194,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             position,
             position_json,
             sequence,
+            source_clip,
         } => {
             let subtitle_path = std::fs::canonicalize(&file).map_err(|e| {
                 anyhow::anyhow!("Subtitle file '{}' not found: {}", file.display(), e)
@@ -1097,7 +1219,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
 
             let mut created_ids = Vec::new();
             if matches!(format, CaptionFileFormat::TranscriptJson) {
-                let segments = captions
+                let mut segments: Vec<GeneratedCaptionSegment> = captions
                     .iter()
                     .map(|caption| {
                         let mut segment = GeneratedCaptionSegment::new(
@@ -1109,6 +1231,24 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                         segment
                     })
                     .collect();
+
+                // Map source-relative transcript times onto the timeline when an
+                // explicit hosting clip is provided. No asset is known here, so
+                // there is no auto-resolution for the standalone import command.
+                if let Err(error) = map_segments_for_source_clip(
+                    &project,
+                    &seq_id,
+                    source_clip.as_deref(),
+                    None,
+                    &mut segments,
+                ) {
+                    if created_track {
+                        let cmd = RemoveTrackCommand::new(&seq_id, &track_id);
+                        let _ = project.executor.execute(Box::new(cmd), &mut project.state);
+                    }
+                    return Err(error);
+                }
+
                 let cmd = ImportGeneratedCaptionsCommand::new(&seq_id, &track_id, segments)
                     .with_style(style.clone())
                     .with_position(position.clone());

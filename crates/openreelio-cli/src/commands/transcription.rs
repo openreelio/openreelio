@@ -26,8 +26,9 @@ pub enum TranscriptionAction {
 
     /// Download and install a local Whisper model
     Install {
-        /// Whisper model: tiny, base, small, medium, large, large-v3, or large-v3-turbo
-        #[arg(long, default_value = "large-v3-turbo")]
+        /// Whisper model: tiny, base, small, medium, large, large-v3,
+        /// large-v3-turbo, large-v3-turbo-q5_0, large-v3-turbo-q8_0, or large-v3-q5_0
+        #[arg(long, default_value = "large-v3-turbo-q5_0")]
         model: String,
 
         /// Replace an existing model file
@@ -76,6 +77,19 @@ pub enum TranscriptionAction {
         /// Replace existing captions on the target caption track during import
         #[arg(long)]
         replace_existing: bool,
+
+        /// Clip ID to map SOURCE-relative transcript times onto the timeline
+        /// during import.
+        ///
+        /// Transcribing an ASSET yields times relative to the source media
+        /// (0 = start of file). If the asset is trimmed, moved, or sped up on
+        /// the timeline, those times drift. Pass the clip that hosts this asset
+        /// to remap each segment to its timeline position. When omitted, the
+        /// segments are imported as-is (use this only when the times are already
+        /// timeline-relative). If the asset is placed as exactly one clip on the
+        /// target sequence, that clip is auto-resolved and mapping is applied.
+        #[arg(long)]
+        source_clip: Option<String>,
     },
 
     /// Generate transcript segments from the audible audio mix of a sequence
@@ -205,6 +219,7 @@ pub fn execute(action: TranscriptionAction) -> anyhow::Result<()> {
             track,
             sequence,
             replace_existing,
+            source_clip,
         } => {
             let mut project = super::load_project(&path)?;
             let transcription =
@@ -224,6 +239,8 @@ pub fn execute(action: TranscriptionAction) -> anyhow::Result<()> {
                     track,
                     replace_existing,
                     &transcription,
+                    source_clip,
+                    Some(&asset),
                 )?;
                 super::save_project(&mut project)?;
                 response["importResult"] = import_result;
@@ -260,6 +277,8 @@ pub fn execute(action: TranscriptionAction) -> anyhow::Result<()> {
             }
 
             if import_to_timeline {
+                // Sequence transcription already produces timeline-relative
+                // segment times, so no source-clip mapping is applied here.
                 let import_result = import_generated_captions(
                     &mut project,
                     Some(sequence_id),
@@ -276,6 +295,8 @@ pub fn execute(action: TranscriptionAction) -> anyhow::Result<()> {
                         full_text: transcription.full_text.clone(),
                         segments: transcription.segments.clone(),
                     },
+                    None,
+                    None,
                 )?;
                 super::save_project(&mut project)?;
                 response["importResult"] = import_result;
@@ -573,12 +594,15 @@ pub(crate) fn generate_sequence_transcription(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn import_generated_captions(
     project: &mut ActiveProject,
     sequence: Option<String>,
     track: Option<String>,
     replace_existing: bool,
     transcription: &TranscriptionCliOutput,
+    source_clip: Option<String>,
+    source_asset_id: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     if transcription.segments.is_empty() {
         return Err(anyhow::anyhow!(
@@ -587,15 +611,27 @@ fn import_generated_captions(
     }
 
     let sequence_id = super::resolve_sequence_id(project, sequence)?;
-    let (track_id, created_track) =
-        super::caption::ensure_caption_track(project, &sequence_id, track.as_deref())?;
-    let segments = transcription
+    let mut segments = transcription
         .segments
         .iter()
         .map(|segment| {
             GeneratedCaptionSegment::new(segment.start_time, segment.end_time, segment.text.clone())
         })
         .collect::<Vec<_>>();
+
+    // Map source-relative transcript times onto the timeline when a hosting clip
+    // is identified, either explicitly via --source-clip or auto-resolved when
+    // the transcribed asset is placed as exactly one clip on the sequence.
+    let mapping_info = super::caption::map_segments_for_source_clip(
+        project,
+        &sequence_id,
+        source_clip.as_deref(),
+        source_asset_id,
+        &mut segments,
+    )?;
+
+    let (track_id, created_track) =
+        super::caption::ensure_caption_track(project, &sequence_id, track.as_deref())?;
     let command = ImportGeneratedCaptionsCommand::new(&sequence_id, &track_id, segments)
         .replace_existing(replace_existing);
 
@@ -603,14 +639,20 @@ fn import_generated_captions(
         .executor
         .execute(Box::new(command), &mut project.state)
     {
-        Ok(result) => Ok(serde_json::json!({
-            "sequenceId": sequence_id,
-            "trackId": track_id,
-            "opId": result.op_id,
-            "createdIds": result.created_ids,
-            "deletedIds": result.deleted_ids,
-            "replaceExisting": replace_existing
-        })),
+        Ok(result) => {
+            let mut payload = serde_json::json!({
+                "sequenceId": sequence_id,
+                "trackId": track_id,
+                "opId": result.op_id,
+                "createdIds": result.created_ids,
+                "deletedIds": result.deleted_ids,
+                "replaceExisting": replace_existing
+            });
+            if let serde_json::Value::Object(map) = &mut payload {
+                map.extend(mapping_info);
+            }
+            Ok(payload)
+        }
         Err(error) => {
             if created_track {
                 let command = RemoveTrackCommand::new(&sequence_id, &track_id);
