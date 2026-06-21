@@ -166,6 +166,16 @@ bundled-ffmpeg = [
 ]
 # Enable Whisper transcription support and local model downloads
 whisper = ["dep:whisper-rs", "dep:reqwest"]
+# Optional Whisper acceleration backends. Each implies the base `whisper`
+# feature and forwards to the matching whisper-rs backend. These are NOT in
+# `default` because they require GPU/SDK toolchains (CUDA, Metal, Vulkan, CoreML,
+# OpenBLAS) that are not present on a standard CPU build. Enable explicitly, e.g.
+# `cargo build --features whisper-cuda`.
+whisper-metal = ["whisper", "whisper-rs/metal"]
+whisper-cuda = ["whisper", "whisper-rs/cuda"]
+whisper-vulkan = ["whisper", "whisper-rs/vulkan"]
+whisper-coreml = ["whisper", "whisper-rs/coreml"]
+whisper-openblas = ["whisper", "whisper-rs/openblas"]
 # Enable Meilisearch full-text search
 meilisearch = ["dep:meilisearch-sdk", "dep:futures", "dep:reqwest"]
 # Enable AI providers (OpenAI, Anthropic, Ollama)

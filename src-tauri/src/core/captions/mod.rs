@@ -39,6 +39,7 @@
 
 pub mod audio;
 mod formats;
+pub mod mapping;
 mod models;
 pub mod whisper;
 
@@ -53,3 +54,6 @@ pub use formats::{
     captions_to_track, export_srt, export_vtt, parse_srt, parse_vtt, track_to_srt, track_to_vtt,
     ParseError,
 };
+
+// Re-export source-to-timeline mapping helper
+pub use mapping::{map_source_segments_to_timeline, SourceToTimelineMapping};

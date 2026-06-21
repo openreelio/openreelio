@@ -437,6 +437,7 @@ describe('buildOrchestrationPlaybook', () => {
       'insert_clip',
       'auto_transcribe',
       'add_captions_from_transcription',
+      'find_clips_by_asset',
     ]);
     const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
 
@@ -461,6 +462,7 @@ describe('buildOrchestrationPlaybook', () => {
       'insert_clip',
       'auto_transcribe',
       'add_captions_from_transcription',
+      'find_clips_by_asset',
     ]);
     const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
 
@@ -520,15 +522,22 @@ describe('buildOrchestrationPlaybook', () => {
       needsMoreInfo: false,
     };
 
-    const toolExecutor = createToolExecutor(['auto_transcribe', 'add_captions_from_transcription']);
+    const toolExecutor = createToolExecutor([
+      'auto_transcribe',
+      'add_captions_from_transcription',
+      'find_clips_by_asset',
+    ]);
     const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
 
     expect(match).not.toBeNull();
     expect(match?.id).toBe('auto_caption');
     expect(match?.confidence).toBe(0.91);
-    expect(match?.plan.steps).toHaveLength(2);
+    // Asset fallback inserts a find_clips_by_asset discovery step so source-relative
+    // segment times can be mapped to the timeline clip (no caption drift).
+    expect(match?.plan.steps).toHaveLength(3);
     expect(match?.plan.steps[0].tool).toBe('auto_transcribe');
-    expect(match?.plan.steps[1].tool).toBe('add_captions_from_transcription');
+    expect(match?.plan.steps[1].tool).toBe('find_clips_by_asset');
+    expect(match?.plan.steps[2].tool).toBe('add_captions_from_transcription');
   });
 
   it('should chain auto-caption steps with step references for segments', () => {
@@ -540,7 +549,11 @@ describe('buildOrchestrationPlaybook', () => {
       needsMoreInfo: false,
     };
 
-    const toolExecutor = createToolExecutor(['auto_transcribe', 'add_captions_from_transcription']);
+    const toolExecutor = createToolExecutor([
+      'auto_transcribe',
+      'add_captions_from_transcription',
+      'find_clips_by_asset',
+    ]);
     const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
 
     expect(match).not.toBeNull();
@@ -550,7 +563,14 @@ describe('buildOrchestrationPlaybook', () => {
       $fromStep: 'playbook_auto_transcribe',
       $path: 'data.segments',
     });
+    // The asset fallback threads the discovered clipId so source-relative times
+    // are mapped to the timeline clip.
+    expect(captionStep?.args.clipId).toMatchObject({
+      $fromStep: 'playbook_find_clips',
+      $path: 'data[0].id',
+    });
     expect(captionStep?.dependsOn).toContain('playbook_auto_transcribe');
+    expect(captionStep?.dependsOn).toContain('playbook_find_clips');
   });
 
   it('should match auto-caption for "auto-caption" keyword', () => {
@@ -562,7 +582,11 @@ describe('buildOrchestrationPlaybook', () => {
       needsMoreInfo: false,
     };
 
-    const toolExecutor = createToolExecutor(['auto_transcribe', 'add_captions_from_transcription']);
+    const toolExecutor = createToolExecutor([
+      'auto_transcribe',
+      'add_captions_from_transcription',
+      'find_clips_by_asset',
+    ]);
     const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
 
     expect(match).not.toBeNull();
@@ -630,7 +654,11 @@ describe('buildOrchestrationPlaybook', () => {
       needsMoreInfo: false,
     };
 
-    const toolExecutor = createToolExecutor(['auto_transcribe', 'add_captions_from_transcription']);
+    const toolExecutor = createToolExecutor([
+      'auto_transcribe',
+      'add_captions_from_transcription',
+      'find_clips_by_asset',
+    ]);
     const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
 
     // Both requirements match caption scope patterns, so playbook should match

@@ -203,6 +203,75 @@ describe('TranscriptionDialog', () => {
       const modelSelect = screen.getByLabelText(/model/i);
       expect(modelSelect).toHaveValue('small');
     });
+
+    it('suggests the recommended model when only weak models are installed', () => {
+      const asset = createTestAsset();
+      render(
+        <TranscriptionDialog
+          asset={asset}
+          isOpen={true}
+          onConfirm={mockOnConfirm}
+          onCancel={mockOnCancel}
+          onInstallModel={mockOnInstallModel}
+          models={[
+            {
+              id: 'small',
+              displayName: 'Small',
+              filename: 'ggml-small.bin',
+              installed: true,
+              sizeBytes: 466000000,
+              estimatedSizeBytes: 466000000,
+              isDefault: false,
+              recommended: false,
+              source: 'ggerganov/whisper.cpp',
+              license: 'MIT',
+            },
+            {
+              id: 'large-v3-turbo-q5_0',
+              displayName: 'Large v3 Turbo (Q5_0)',
+              filename: 'ggml-large-v3-turbo-q5_0.bin',
+              installed: false,
+              sizeBytes: null,
+              estimatedSizeBytes: 574000000,
+              isDefault: false,
+              recommended: true,
+              source: 'ggerganov/whisper.cpp',
+              license: 'MIT',
+            },
+          ]}
+        />,
+      );
+
+      expect(screen.getByText(/install the recommended large v3 turbo/i)).toBeInTheDocument();
+    });
+
+    it('does not suggest the recommended model when a strong model is installed', () => {
+      const asset = createTestAsset();
+      render(
+        <TranscriptionDialog
+          asset={asset}
+          isOpen={true}
+          onConfirm={mockOnConfirm}
+          onCancel={mockOnCancel}
+          models={[
+            {
+              id: 'large-v3-turbo-q5_0',
+              displayName: 'Large v3 Turbo (Q5_0)',
+              filename: 'ggml-large-v3-turbo-q5_0.bin',
+              installed: true,
+              sizeBytes: 574000000,
+              estimatedSizeBytes: 574000000,
+              isDefault: false,
+              recommended: true,
+              source: 'ggerganov/whisper.cpp',
+              license: 'MIT',
+            },
+          ]}
+        />,
+      );
+
+      expect(screen.queryByText(/install the recommended/i)).not.toBeInTheDocument();
+    });
   });
 
   describe('Actions', () => {

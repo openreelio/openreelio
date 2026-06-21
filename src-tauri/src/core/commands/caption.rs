@@ -15,6 +15,13 @@ use crate::core::{
 
 const CAPTION_ASSET_ID: &str = "caption";
 
+/// Minimum on-screen duration (seconds) for an imported caption cue.
+///
+/// Generators occasionally emit extremely short cues that flicker on screen.
+/// When there is room before the next cue, a short cue is extended up to this
+/// floor without ever creating a new overlap.
+const MIN_CAPTION_DURATION_SEC: TimeSec = 0.3;
+
 fn is_valid_time_sec(value: TimeSec) -> bool {
     value.is_finite() && value >= 0.0
 }
@@ -284,7 +291,70 @@ impl ImportGeneratedCaptionsCommand {
                 .then_with(|| left.text.cmp(&right.text))
         });
 
-        Ok(segments)
+        Ok(Self::enforce_readability(segments))
+    }
+
+    /// Enforces caption readability rules on segments already sorted by start
+    /// time. Returns the surviving cues, still sorted by start time.
+    ///
+    /// Rules (deterministic, conservative, text is never merged):
+    /// 1. **No overlap.** Each cue's `end_sec` is clamped to the next cue's
+    ///    `start_sec` whenever they overlap.
+    /// 2. **Drop collapsed cues.** A cue whose duration becomes non-positive
+    ///    after the overlap clamp is dropped.
+    /// 3. **Minimum duration floor.** A cue shorter than
+    ///    [`MIN_CAPTION_DURATION_SEC`] is extended toward its floor using only
+    ///    the room available before the next cue's start; it never creates a new
+    ///    overlap. The last cue has unbounded room and is always extended to the
+    ///    floor.
+    ///
+    /// The time-ordering guarantee from the prior sort is preserved: clamping
+    /// and extension only ever move an `end_sec` and never reorder cues.
+    fn enforce_readability(
+        sorted_segments: Vec<GeneratedCaptionSegment>,
+    ) -> Vec<GeneratedCaptionSegment> {
+        let mut result: Vec<GeneratedCaptionSegment> = Vec::with_capacity(sorted_segments.len());
+
+        for segment in sorted_segments {
+            // Step 1 + 2: prevent overlap with the previously kept cue by
+            // shrinking the earlier cue's end down to this cue's start. Drop the
+            // earlier cue if that collapses it to a non-positive duration.
+            if let Some(previous) = result.last_mut() {
+                if previous.end_sec > segment.start_sec {
+                    previous.end_sec = segment.start_sec;
+                    if previous.end_sec <= previous.start_sec {
+                        result.pop();
+                    }
+                }
+            }
+
+            // Skip cues that are degenerate on their own before placement.
+            if segment.end_sec <= segment.start_sec {
+                continue;
+            }
+
+            result.push(segment);
+        }
+
+        // Step 3: apply the minimum-duration floor using the room before the
+        // next cue. Iterate from the end so each cue sees its already-placed
+        // successor.
+        for index in (0..result.len()).rev() {
+            let next_start = result.get(index + 1).map(|next| next.start_sec);
+            let segment = &mut result[index];
+            let current_duration = segment.end_sec - segment.start_sec;
+            if current_duration >= MIN_CAPTION_DURATION_SEC {
+                continue;
+            }
+
+            let desired_end = segment.start_sec + MIN_CAPTION_DURATION_SEC;
+            segment.end_sec = match next_start {
+                Some(next) => desired_end.min(next),
+                None => desired_end,
+            };
+        }
+
+        result
     }
 }
 
@@ -764,6 +834,100 @@ mod tests {
         assert_eq!(track.clips.len(), 1);
         assert_eq!(track.clips[0].id, existing_id);
         assert_eq!(track.clips[0].label.as_deref(), Some("Old"));
+    }
+
+    #[test]
+    fn import_generated_captions_clamps_overlapping_cues() {
+        let (mut state, seq_id, track_id) = state_with_caption_track();
+        // Second cue starts before the first ends; the first must be clamped.
+        let mut cmd = ImportGeneratedCaptionsCommand::new(
+            &seq_id,
+            &track_id,
+            vec![
+                GeneratedCaptionSegment::new(0.0, 2.0, "First"),
+                GeneratedCaptionSegment::new(1.0, 3.0, "Second"),
+            ],
+        );
+
+        cmd.execute(&mut state).unwrap();
+
+        let sequence = state.get_sequence(&seq_id).unwrap();
+        let track = sequence.get_track(&track_id).unwrap();
+        assert_eq!(track.clips.len(), 2);
+        // First clamped to start of second (1.0): place 0.0..1.0.
+        assert!((track.clips[0].place.timeline_in_sec - 0.0).abs() < 1e-9);
+        assert!((track.clips[0].place.timeline_out_sec() - 1.0).abs() < 1e-9);
+        // Second unchanged: 1.0..3.0.
+        assert!((track.clips[1].place.timeline_in_sec - 1.0).abs() < 1e-9);
+        assert!((track.clips[1].place.timeline_out_sec() - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn import_generated_captions_drops_fully_covered_cue() {
+        let (mut state, seq_id, track_id) = state_with_caption_track();
+        // The second cue starts at the same instant as the first, so clamping
+        // collapses the first to zero duration and it is dropped.
+        let mut cmd = ImportGeneratedCaptionsCommand::new(
+            &seq_id,
+            &track_id,
+            vec![
+                GeneratedCaptionSegment::new(0.0, 2.0, "Covered"),
+                GeneratedCaptionSegment::new(0.0, 3.0, "Keeper"),
+            ],
+        );
+
+        cmd.execute(&mut state).unwrap();
+
+        let sequence = state.get_sequence(&seq_id).unwrap();
+        let track = sequence.get_track(&track_id).unwrap();
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0].label.as_deref(), Some("Keeper"));
+    }
+
+    #[test]
+    fn import_generated_captions_extends_short_cue_to_min_duration() {
+        let (mut state, seq_id, track_id) = state_with_caption_track();
+        // A 0.1s cue with ample room before the next cue should be extended to
+        // the 0.3s floor.
+        let mut cmd = ImportGeneratedCaptionsCommand::new(
+            &seq_id,
+            &track_id,
+            vec![
+                GeneratedCaptionSegment::new(0.0, 0.1, "Short"),
+                GeneratedCaptionSegment::new(5.0, 6.0, "Later"),
+            ],
+        );
+
+        cmd.execute(&mut state).unwrap();
+
+        let sequence = state.get_sequence(&seq_id).unwrap();
+        let track = sequence.get_track(&track_id).unwrap();
+        assert_eq!(track.clips.len(), 2);
+        assert!((track.clips[0].place.timeline_out_sec() - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn import_generated_captions_limits_min_duration_to_available_room() {
+        let (mut state, seq_id, track_id) = state_with_caption_track();
+        // A 0.05s cue followed closely by another: extension stops at the next
+        // cue's start (0.2s) rather than reaching the 0.3s floor.
+        let mut cmd = ImportGeneratedCaptionsCommand::new(
+            &seq_id,
+            &track_id,
+            vec![
+                GeneratedCaptionSegment::new(0.0, 0.05, "Tight"),
+                GeneratedCaptionSegment::new(0.2, 1.0, "Next"),
+            ],
+        );
+
+        cmd.execute(&mut state).unwrap();
+
+        let sequence = state.get_sequence(&seq_id).unwrap();
+        let track = sequence.get_track(&track_id).unwrap();
+        assert_eq!(track.clips.len(), 2);
+        // Extended only up to the next cue's start (0.2), never overlapping.
+        assert!((track.clips[0].place.timeline_out_sec() - 0.2).abs() < 1e-9);
+        assert!((track.clips[1].place.timeline_in_sec - 0.2).abs() < 1e-9);
     }
 
     #[test]

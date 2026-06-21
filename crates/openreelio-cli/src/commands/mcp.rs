@@ -1068,7 +1068,7 @@ fn build_command_schema() -> Value {
                 "tool": "openreelio.transcription.generate",
                 "required": [],
                 "optional": ["assetId", "sequenceAudio", "sequenceId", "language", "model", "translate"],
-                "note": "Use assetId for source asset transcription, or sequenceAudio=true to transcribe the audible edited timeline mix before ImportGeneratedCaptions."
+                "note": "sequenceAudio=true transcribes the audible edited timeline mix and returns TIMELINE-relative segment times that pass straight to ImportGeneratedCaptions; this is the default path for captioning. assetId transcribes one source asset and returns SOURCE-relative times (0-based to the asset) that are NOT safe as direct timeline caption times; map them to the placed clip before ImportGeneratedCaptions."
             },
             "transcriptionStatus": {
                 "tool": "openreelio.transcription.status",
@@ -1111,8 +1111,8 @@ fn build_command_schema() -> Value {
             "timedSubtitles": [
                 "Call openreelio.transcription.status first and explain missing model installation before attempting automatic subtitles.",
                 "If no model is installed, tell the user to install one through the OpenReelio UI or `openreelio-cli transcription install --model large-v3-turbo` before transcription.generate.",
-                "Call openreelio.transcription.generate(assetId, language=\"auto\", model=\"auto\") for speech-to-text segments before creating generated subtitles.",
-                "For edited timeline audio, call openreelio.transcription.generate(sequenceAudio=true, sequenceId, language=\"auto\", model=\"auto\") so cuts, trims, overlaps, and volume are reflected.",
+                "Prefer openreelio.transcription.generate(sequenceAudio=true, sequenceId, language=\"auto\", model=\"auto\") as the default captioning path: its segment times are TIMELINE-relative and reflect cuts, trims, overlaps, and volume, so they pass straight to ImportGeneratedCaptions.",
+                "Use openreelio.transcription.generate(assetId, language=\"auto\", model=\"auto\") for source-asset analysis only: its times are SOURCE-relative (0-based to the asset) and must be mapped to the placed clip before ImportGeneratedCaptions, not used as direct timeline caption times.",
                 "Use ImportGeneratedCaptions for AI transcript segments or CreateCaption/UpdateCaption for individual caption lines.",
                 "Use caption style/position metadata for subtitle readability instead of editable overlay text when the user wants semantic subtitles."
             ],

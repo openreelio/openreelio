@@ -800,6 +800,9 @@ function buildAutoCaptionPlaybook(
   const canTranscribeAsset = hasTools(toolExecutor, [
     'auto_transcribe',
     'add_captions_from_transcription',
+    // Asset transcription returns SOURCE-relative segment times, so we must
+    // discover the timeline clip to map them. Require find_clips_by_asset.
+    'find_clips_by_asset',
   ]);
 
   if (!canTranscribeSequence && !canTranscribeAsset) {
@@ -818,6 +821,9 @@ function buildAutoCaptionPlaybook(
     return null;
   }
 
+  // Prefer sequence transcription: it returns timeline-relative segment times
+  // that pass straight to add_captions_from_transcription. Asset transcription
+  // is only a fallback (source-relative times) when sequence tools are absent.
   const steps: PlanStep[] = [
     {
       id: 'playbook_auto_transcribe',
@@ -833,7 +839,12 @@ function buildAutoCaptionPlaybook(
       riskLevel: 'low',
       estimatedDuration: 5000,
     },
-    {
+  ];
+
+  if (canTranscribeSequence) {
+    // Sequence transcription yields timeline-relative segments. Pass them
+    // straight through without a clipId so they are not re-mapped.
+    steps.push({
       id: 'playbook_add_captions',
       tool: 'add_captions_from_transcription',
       args: {
@@ -844,8 +855,38 @@ function buildAutoCaptionPlaybook(
       riskLevel: 'low',
       estimatedDuration: 500,
       dependsOn: ['playbook_auto_transcribe'],
-    },
-  ];
+    });
+  } else {
+    // Asset transcription yields SOURCE-relative segments. Discover the
+    // timeline clip that uses the asset so add_captions_from_transcription can
+    // map source times onto the timeline (preventing caption drift). The
+    // discovery tool returns ClipSnapshot[] in `data`, so the first clip's id
+    // is at `data[0].id`.
+    steps.push({
+      id: 'playbook_find_clips',
+      tool: 'find_clips_by_asset',
+      args: {
+        assetId: targetAssetId,
+      },
+      description: 'Find the timeline clip that uses the transcribed asset',
+      riskLevel: 'low',
+      estimatedDuration: 200,
+      dependsOn: ['playbook_auto_transcribe'],
+    });
+    steps.push({
+      id: 'playbook_add_captions',
+      tool: 'add_captions_from_transcription',
+      args: {
+        sequenceId,
+        clipId: makeReference('playbook_find_clips', 'data[0].id'),
+        segments: makeReference('playbook_auto_transcribe', 'data.segments'),
+      },
+      description: 'Create caption clips from transcription segments mapped to the timeline clip',
+      riskLevel: 'low',
+      estimatedDuration: 500,
+      dependsOn: ['playbook_auto_transcribe', 'playbook_find_clips'],
+    });
+  }
 
   return {
     id: 'auto_caption',

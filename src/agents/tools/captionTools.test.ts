@@ -21,8 +21,67 @@ vi.mock('@/bindings', () => ({
   commands: {
     analyzeAsset: vi.fn(),
     getAvailableProviders: vi.fn(),
+    getTranscriptionStatus: vi.fn(),
+    transcribeSequence: vi.fn(),
+    downloadWhisperModel: vi.fn(),
   },
 }));
+
+/**
+ * Build a transcription status with the given installed/weak default model and
+ * an optional recommended large-v3-turbo-q5_0 entry. Keeps the per-test status
+ * fixtures concise.
+ */
+function buildTranscriptionStatus(options: {
+  defaultModel: string;
+  installedWeak: string;
+  recommendedInstalled: boolean;
+}): {
+  status: 'ok';
+  data: import('@/bindings').TranscriptionStatusDto;
+} {
+  const models: import('@/bindings').TranscriptionModelDto[] = [
+    {
+      id: options.installedWeak,
+      displayName: 'Weak',
+      filename: `ggml-${options.installedWeak}.bin`,
+      installed: true,
+      path: `/models/ggml-${options.installedWeak}.bin`,
+      sizeBytes: 100,
+      isDefault: options.defaultModel === options.installedWeak,
+      recommended: false,
+      downloadUrl: 'https://example.com/weak',
+      estimatedSizeBytes: 100,
+      source: 'upstream',
+      license: 'MIT',
+    },
+    {
+      id: 'large-v3-turbo-q5_0',
+      displayName: 'Large v3 Turbo Q5',
+      filename: 'ggml-large-v3-turbo-q5_0.bin',
+      installed: options.recommendedInstalled,
+      path: '/models/ggml-large-v3-turbo-q5_0.bin',
+      sizeBytes: options.recommendedInstalled ? 574000000 : null,
+      isDefault: false,
+      recommended: true,
+      downloadUrl: 'https://example.com/turbo',
+      estimatedSizeBytes: 574000000,
+      source: 'upstream',
+      license: 'MIT',
+    },
+  ];
+  return {
+    status: 'ok',
+    data: {
+      featureAvailable: true,
+      ready: true,
+      modelsDir: '/models',
+      defaultModel: options.defaultModel,
+      installedCount: models.filter((model) => model.installed).length,
+      models,
+    },
+  };
+}
 
 const CTX: AgentContext = {
   projectId: 'project-1',
@@ -113,6 +172,12 @@ describe('captionTools', () => {
     vi.mocked(commands.getAvailableProviders).mockResolvedValue({
       status: 'ok',
       data: [],
+    });
+    // Default: local Whisper status unavailable so auto_transcribe takes the
+    // analysis-provider fallback path. Individual tests override as needed.
+    vi.mocked(commands.getTranscriptionStatus).mockResolvedValue({
+      status: 'error',
+      error: 'Local Whisper is not available in this build.',
     });
 
     const sequence = createSequence({
@@ -293,6 +358,347 @@ describe('captionTools', () => {
     expect(result.result).toMatchObject({
       captionCount: 1,
       skippedSegmentCount: 2,
+    });
+  });
+
+  function setSequenceWithSourceClip(clipOverrides: Partial<Clip>): void {
+    const sequence = createSequence({
+      tracks: [
+        createTrack({
+          id: 'track-video-1',
+          kind: 'video',
+          clips: [createClip({ id: 'src-clip', assetId: 'asset-video-1', ...clipOverrides })],
+        }),
+        createTrack({
+          id: 'track-caption-1',
+          kind: 'caption',
+          clips: [],
+        }),
+      ],
+    });
+    vi.mocked(useProjectStore.getState).mockReturnValue({
+      isLoaded: true,
+      meta: { id: 'project-1', name: 'Test Project' },
+      sequences: new Map([[sequence.id, sequence]]),
+      executeCommand: executeCommandMock,
+    } as unknown as ReturnType<typeof useProjectStore.getState>);
+  }
+
+  it('should map source-relative segments to timeline time when clipId is provided (constant speed)', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    // Clip places source [10, 16] at timeline 4s, speed 1.
+    setSequenceWithSourceClip({
+      range: { sourceInSec: 10, sourceOutSec: 16 },
+      place: { timelineInSec: 4, durationSec: 6 },
+      speed: 1,
+    });
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        clipId: 'src-clip',
+        segments: [
+          { startTime: 10, endTime: 12, text: 'First' },
+          { startTime: 13, endTime: 15, text: 'Second' },
+        ],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeCommandMock).toHaveBeenCalledTimes(1);
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({
+      type: 'ImportGeneratedCaptions',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-caption-1',
+        // timelineInSec(4) + (source - sourceInSec(10)) / speed(1)
+        segments: [
+          { startSec: 4, endSec: 6, text: 'First' },
+          { startSec: 7, endSec: 9, text: 'Second' },
+        ],
+      },
+    });
+  });
+
+  it('should account for clip speed when mapping source segments to timeline', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    // Speed 2: 4s of source maps to 2s of timeline.
+    setSequenceWithSourceClip({
+      range: { sourceInSec: 0, sourceOutSec: 8 },
+      place: { timelineInSec: 1, durationSec: 4 },
+      speed: 2,
+    });
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        clipId: 'src-clip',
+        segments: [{ startTime: 4, endTime: 8, text: 'Fast' }],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    // timelineInSec(1) + (4 - 0) / 2 = 3 ; (8 - 0) / 2 = 4 -> timeline end 5
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({
+      type: 'ImportGeneratedCaptions',
+      payload: {
+        segments: [{ startSec: 3, endSec: 5, text: 'Fast' }],
+      },
+    });
+  });
+
+  it('should account for reversed clips when mapping source segments to timeline', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    // Reversed source [0, 10] starts playback at source 10 on timeline 20.
+    setSequenceWithSourceClip({
+      range: { sourceInSec: 0, sourceOutSec: 10 },
+      place: { timelineInSec: 20, durationSec: 10 },
+      speed: 1,
+      reverse: true,
+    });
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        clipId: 'src-clip',
+        segments: [{ startTime: 8, endTime: 10, text: 'Reverse start' }],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({
+      type: 'ImportGeneratedCaptions',
+      payload: {
+        segments: [{ startSec: 20, endSec: 22, text: 'Reverse start' }],
+      },
+    });
+  });
+
+  it('should reject mapping for clips with an active time remap curve', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    setSequenceWithSourceClip({
+      range: { sourceInSec: 0, sourceOutSec: 10 },
+      place: { timelineInSec: 0, durationSec: 10 },
+      speed: 1,
+      timeRemap: {
+        keyframes: [
+          { timelineTime: 0, sourceTime: 0, interpolation: 'linear' },
+          { timelineTime: 10, sourceTime: 5, interpolation: 'linear' },
+        ],
+      },
+    });
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        clipId: 'src-clip',
+        segments: [{ startTime: 1, endTime: 2, text: 'Remapped' }],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('time remap');
+    expect(result.error).toContain('auto_transcribe_sequence');
+    expect(executeCommandMock).not.toHaveBeenCalled();
+  });
+
+  it('should drop out-of-range source segments and report them in skippedSegmentCount', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    setSequenceWithSourceClip({
+      range: { sourceInSec: 5, sourceOutSec: 10 },
+      place: { timelineInSec: 0, durationSec: 5 },
+      speed: 1,
+    });
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        clipId: 'src-clip',
+        segments: [
+          { startTime: 2, endTime: 4, text: 'Before range' },
+          { startTime: 6, endTime: 7, text: 'In range' },
+          { startTime: 11, endTime: 12, text: 'After range' },
+        ],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.result).toMatchObject({
+      captionCount: 1,
+      skippedSegmentCount: 2,
+    });
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({
+      type: 'ImportGeneratedCaptions',
+      payload: {
+        // timelineInSec(0) + (6 - 5) = 1 ; (7 - 5) = 2
+        segments: [{ startSec: 1, endSec: 2, text: 'In range' }],
+      },
+    });
+  });
+
+  it('should pass segment times through unchanged when clipId is omitted', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        segments: [
+          { startTime: 10, endTime: 12, text: 'Raw one' },
+          { startTime: 13, endTime: 15, text: 'Raw two' },
+        ],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({
+      type: 'ImportGeneratedCaptions',
+      payload: {
+        segments: [
+          { startSec: 10, endSec: 12, text: 'Raw one' },
+          { startSec: 13, endSec: 15, text: 'Raw two' },
+        ],
+      },
+    });
+  });
+
+  it('should forward style and position to ImportGeneratedCaptions', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        segments: [{ startTime: 0, endTime: 2, text: 'Styled caption' }],
+        style: { fontFamily: 'Arial', fontSize: 48 },
+        position: 'bottom',
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({
+      type: 'ImportGeneratedCaptions',
+      payload: {
+        style: { fontFamily: 'Arial', fontSize: 48 },
+        position: { type: 'preset', vertical: 'bottom', marginPercent: 5 },
+      },
+    });
+  });
+
+  it('should omit style and position from ImportGeneratedCaptions when not provided', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        segments: [{ startTime: 0, endTime: 2, text: 'Plain caption' }],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    const payload = executeCommandMock.mock.calls[0][0].payload as Record<string, unknown>;
+    expect(payload.style).toBeUndefined();
+    expect(payload.position).toBeUndefined();
+  });
+
+  it('should return track defaults and an existing caption style from get_caption_style', async () => {
+    const tool = globalToolRegistry.get('get_caption_style');
+    expect(tool).toBeDefined();
+
+    const styledSequence = createSequence({
+      tracks: [
+        createTrack({
+          id: 'track-caption-1',
+          kind: 'caption',
+          captionLanguage: 'en',
+          clips: [
+            createClip({
+              id: 'cap-styled',
+              assetId: 'caption',
+              label: 'styled caption',
+              captionStyle: {
+                fontFamily: 'Roboto',
+                fontSize: 36,
+                fontWeight: 'normal',
+                color: { r: 255, g: 200, b: 0, a: 255 },
+                outlineColor: { r: 0, g: 0, b: 0, a: 255 },
+                outlineWidth: 3,
+                shadowOffset: 2,
+                alignment: 'center',
+                italic: false,
+                underline: false,
+              },
+              captionPosition: { type: 'preset', vertical: 'bottom', marginPercent: 8 },
+            }),
+          ],
+        }),
+      ],
+    });
+    vi.mocked(useProjectStore.getState).mockReturnValue({
+      isLoaded: true,
+      meta: { id: 'project-1', name: 'Test Project' },
+      sequences: new Map([[styledSequence.id, styledSequence]]),
+      executeCommand: executeCommandMock,
+    } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+    const result = await tool!.handler({ sequenceId: 'seq-1' }, CTX);
+
+    expect(result.success).toBe(true);
+    expect(result.result).toMatchObject({
+      sequenceId: 'seq-1',
+      trackId: 'track-caption-1',
+      language: 'en',
+      trackDefaultStyle: { fontFamily: 'Arial', fontSize: 48 },
+      trackDefaultPosition: { type: 'preset', vertical: 'bottom', marginPercent: 5 },
+      existingCaption: {
+        captionId: 'cap-styled',
+        styleOverride: { fontFamily: 'Roboto', fontSize: 36 },
+        positionOverride: { type: 'preset', vertical: 'bottom', marginPercent: 8 },
+      },
+      captionCount: 1,
+    });
+  });
+
+  it('should report no existing caption when the track is empty in get_caption_style', async () => {
+    const tool = globalToolRegistry.get('get_caption_style');
+    expect(tool).toBeDefined();
+
+    const emptySequence = createSequence({
+      tracks: [createTrack({ id: 'track-caption-1', kind: 'caption', clips: [] })],
+    });
+    vi.mocked(useProjectStore.getState).mockReturnValue({
+      isLoaded: true,
+      meta: { id: 'project-1', name: 'Test Project' },
+      sequences: new Map([[emptySequence.id, emptySequence]]),
+      executeCommand: executeCommandMock,
+    } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+    const result = await tool!.handler({ sequenceId: 'seq-1' }, CTX);
+
+    expect(result.success).toBe(true);
+    expect(result.result).toMatchObject({
+      trackId: 'track-caption-1',
+      existingCaption: null,
+      captionCount: 0,
     });
   });
 
@@ -577,6 +983,151 @@ describe('captionTools', () => {
       segments: [{ startTime: 0, endTime: 1.5, text: 'Hello from provider' }],
       fullText: 'Hello from provider',
     });
+  });
+
+  it('should auto-install the recommended model when only a weak default is present and no model is chosen', async () => {
+    const tool = globalToolRegistry.get('auto_transcribe');
+    expect(tool).toBeDefined();
+
+    // Weak default (`small`) installed; recommended model NOT installed; caller
+    // did not choose a model -> hard-enforce: download recommended first, then
+    // transcribe with it.
+    vi.mocked(commands.getTranscriptionStatus).mockResolvedValueOnce(
+      buildTranscriptionStatus({
+        defaultModel: 'small',
+        installedWeak: 'small',
+        recommendedInstalled: false,
+      }),
+    );
+    vi.mocked(commands.downloadWhisperModel).mockResolvedValueOnce({
+      status: 'ok',
+      data: {} as import('@/bindings').TranscriptionModelDto,
+    });
+    vi.mocked(invoke).mockResolvedValueOnce({
+      language: 'ko',
+      segments: [{ startTime: 0, endTime: 1, text: '가사' }],
+      duration: 1,
+      fullText: '가사',
+    });
+
+    const result = await tool!.handler({ assetId: 'asset-video-1' }, CTX);
+
+    expect(result.success).toBe(true);
+    expect(commands.downloadWhisperModel).toHaveBeenCalledWith('large-v3-turbo-q5_0', false);
+    expect(result.result).toMatchObject({
+      mode: 'sync',
+      model: 'large-v3-turbo-q5_0',
+      autoInstalledModel: 'large-v3-turbo-q5_0',
+    });
+    // The transcription must run with the recommended model, not the weak one.
+    expect(invoke).toHaveBeenCalledWith(
+      'transcribe_asset',
+      expect.objectContaining({
+        options: expect.objectContaining({ model: 'large-v3-turbo-q5_0' }),
+      }),
+    );
+  });
+
+  it('should transcribe with the recommended model without downloading when it is already installed', async () => {
+    const tool = globalToolRegistry.get('auto_transcribe');
+    expect(tool).toBeDefined();
+
+    // Weak default but recommended model already installed -> switch to it, no download.
+    vi.mocked(commands.getTranscriptionStatus).mockResolvedValueOnce(
+      buildTranscriptionStatus({
+        defaultModel: 'small',
+        installedWeak: 'small',
+        recommendedInstalled: true,
+      }),
+    );
+    vi.mocked(invoke).mockResolvedValueOnce({
+      language: 'ko',
+      segments: [{ startTime: 0, endTime: 1, text: '가사' }],
+      duration: 1,
+      fullText: '가사',
+    });
+
+    const result = await tool!.handler({ assetId: 'asset-video-1' }, CTX);
+
+    expect(result.success).toBe(true);
+    expect(commands.downloadWhisperModel).not.toHaveBeenCalled();
+    expect(result.result).toMatchObject({ mode: 'sync', model: 'large-v3-turbo-q5_0' });
+    expect(result.result).not.toHaveProperty('autoInstalledModel');
+    expect(invoke).toHaveBeenCalledWith(
+      'transcribe_asset',
+      expect.objectContaining({
+        options: expect.objectContaining({ model: 'large-v3-turbo-q5_0' }),
+      }),
+    );
+  });
+
+  it('should honor an explicit weak model choice without downloading or overriding', async () => {
+    const tool = globalToolRegistry.get('auto_transcribe');
+    expect(tool).toBeDefined();
+
+    vi.mocked(commands.getTranscriptionStatus).mockResolvedValueOnce(
+      buildTranscriptionStatus({
+        defaultModel: 'small',
+        installedWeak: 'small',
+        recommendedInstalled: false,
+      }),
+    );
+    vi.mocked(invoke).mockResolvedValueOnce({
+      language: 'en',
+      segments: [{ startTime: 0, endTime: 1, text: 'hello' }],
+      duration: 1,
+      fullText: 'hello',
+    });
+
+    const result = await tool!.handler({ assetId: 'asset-video-1', model: 'small' }, CTX);
+
+    expect(result.success).toBe(true);
+    expect(commands.downloadWhisperModel).not.toHaveBeenCalled();
+    expect(result.result).toMatchObject({ mode: 'sync', model: 'small' });
+    expect(result.result).not.toHaveProperty('autoInstalledModel');
+    expect(invoke).toHaveBeenCalledWith(
+      'transcribe_asset',
+      expect.objectContaining({
+        options: expect.objectContaining({ model: 'small' }),
+      }),
+    );
+  });
+
+  it('should fall back to the weak model with a warning when the recommended download fails', async () => {
+    const tool = globalToolRegistry.get('auto_transcribe');
+    expect(tool).toBeDefined();
+
+    vi.mocked(commands.getTranscriptionStatus).mockResolvedValueOnce(
+      buildTranscriptionStatus({
+        defaultModel: 'small',
+        installedWeak: 'small',
+        recommendedInstalled: false,
+      }),
+    );
+    vi.mocked(commands.downloadWhisperModel).mockRejectedValueOnce(new Error('network down'));
+    vi.mocked(invoke).mockResolvedValueOnce({
+      language: 'ko',
+      segments: [{ startTime: 0, endTime: 1, text: '가사' }],
+      duration: 1,
+      fullText: '가사',
+    });
+
+    const result = await tool!.handler({ assetId: 'asset-video-1' }, CTX);
+
+    expect(result.success).toBe(true);
+    expect(commands.downloadWhisperModel).toHaveBeenCalledWith('large-v3-turbo-q5_0', false);
+    // Transcription still runs, but with the original weak model.
+    expect(result.result).toMatchObject({ mode: 'sync', model: 'small' });
+    expect(result.result).not.toHaveProperty('autoInstalledModel');
+    const warning = (result.result as { warning?: string }).warning;
+    expect(warning).toContain('large-v3-turbo-q5_0');
+    expect(warning).toContain('could not be installed');
+    expect(invoke).toHaveBeenCalledWith(
+      'transcribe_asset',
+      expect.objectContaining({
+        options: expect.objectContaining({ model: 'small' }),
+      }),
+    );
   });
 
   it('should explain unavailable auto transcription when no transcript provider is configured', async () => {

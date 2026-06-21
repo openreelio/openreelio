@@ -81,6 +81,18 @@ describe('metaTools', () => {
     expect(properties.safeMargin).toBeDefined();
   });
 
+  it('routes get_caption_style through the text meta-tool', () => {
+    const adapter = createToolRegistryAdapter(globalToolRegistry);
+
+    const valid = adapter.validateArgs('text', {
+      action: 'get_caption_style',
+      sequenceId: 'seq-1',
+    });
+
+    expect(valid.valid).toBe(true);
+    expect(globalToolRegistry.get('get_caption_style')).toBeDefined();
+  });
+
   it('allows rich editable text creation without explicit sequenceId when context can supply it', () => {
     const adapter = createToolRegistryAdapter(globalToolRegistry);
 

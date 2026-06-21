@@ -6388,19 +6388,6 @@ export type SetSourcePointPayload = {
 timeSec: number }
 export type ShortcutSettingsDto = { customShortcuts: { [key in string]: string } }
 /**
- * Configuration options for shot detection
- */
-export type ShotDetectionConfig = {
-/**
- * Scene change detection threshold (0.0 - 1.0)
- * Lower values detect more scene changes
- */
-threshold: number | null;
-/**
- * Minimum shot duration in seconds
- */
-minShotDuration: number | null }
-/**
  * Configuration for shot detection
  */
 export type ShotDetectionConfig = {
@@ -6417,6 +6404,19 @@ minDurationSec?: number;
  * Generate keyframe thumbnails
  */
 generateKeyframes?: boolean }
+/**
+ * Configuration options for shot detection
+ */
+export type ShotDetectionConfig = {
+/**
+ * Scene change detection threshold (0.0 - 1.0)
+ * Lower values detect more scene changes
+ */
+threshold: number | null;
+/**
+ * Minimum shot duration in seconds
+ */
+minShotDuration: number | null }
 /**
  * Result of shot detection operation
  */
@@ -7729,9 +7729,29 @@ ready: boolean;
  */
 modelsDir: string;
 /**
- * Default model ID used when no model is provided
+ * Default model ID used when no model is provided.
+ *
+ * This is the best installed model (or the recommended candidate when nothing
+ * is installed). It is always safe to transcribe with, so it never points at an
+ * uninstalled model.
  */
 defaultModel: string;
+/**
+ * Recommended model ID for best quality/performance balance.
+ *
+ * This is OpenReelio's preferred model (`large-v3-turbo-q5_0`) regardless of
+ * install state. Combined with `recommended_installed`, the agent/UI can detect
+ * that a better model should be fetched even when an inferior model is already
+ * installed and currently used as the default.
+ */
+recommendedModel?: string;
+/**
+ * Whether the recommended model's file exists in `models_dir`.
+ *
+ * When `false`, the recommended model is not installed and the agent/UI can
+ * surface a download prompt to upgrade transcription quality.
+ */
+recommendedInstalled?: boolean;
 /**
  * Number of installed supported models
  */
@@ -7739,7 +7759,15 @@ installedCount: number;
 /**
  * Supported models and install status
  */
-models: TranscriptionModelDto[] }
+models: TranscriptionModelDto[];
+/**
+ * Acceleration backend compiled into this build.
+ *
+ * One of "cuda", "metal", "vulkan", "coreml", "openblas", or "cpu". This is
+ * additive and lets the UI surface "GPU accelerated" status. Default builds
+ * report "cpu".
+ */
+acceleration?: string }
 /**
  * 2D Transform for clips
  */
