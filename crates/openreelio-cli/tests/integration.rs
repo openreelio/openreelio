@@ -109,6 +109,10 @@ fn ffmpeg_supports_encoder(ffmpeg_path: &std::path::Path, encoder: &str) -> bool
 }
 
 fn create_sample_video(path: &std::path::Path) -> bool {
+    create_sample_video_with_duration(path, 1)
+}
+
+fn create_sample_video_with_duration(path: &std::path::Path, duration_secs: u32) -> bool {
     let Some(ffmpeg_path) = system_ffmpeg_path() else {
         return false;
     };
@@ -128,7 +132,7 @@ fn create_sample_video(path: &std::path::Path) -> bool {
         "-f",
         "lavfi",
         "-i",
-        "color=c=black:s=320x240:d=1",
+        &format!("color=c=black:s=320x240:d={duration_secs}"),
         "-c:v",
         video_encoder,
     ]);
@@ -146,6 +150,34 @@ fn create_sample_video(path: &std::path::Path) -> bool {
     }
 
     status.success()
+}
+
+fn system_ffprobe_path() -> Option<PathBuf> {
+    openreelio_core::ffmpeg::detect_system_ffmpeg()
+        .ok()
+        .map(|info| info.ffprobe_path)
+}
+
+/// Probe the total duration (in seconds) of a media file via ffprobe.
+/// Returns `None` if ffprobe is unavailable or the output cannot be parsed.
+fn ffprobe_duration_secs(path: &std::path::Path) -> Option<f64> {
+    let ffprobe_path = system_ffprobe_path()?;
+    let output = Command::new(ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 // =============================================================================
@@ -1400,4 +1432,139 @@ fn test_version_flag() {
     let (stdout, _stderr, success) = run_cli(&["--version"]);
     assert!(success);
     assert!(stdout.contains("openreelio-cli"));
+}
+
+// =============================================================================
+// Core User-Flow Regression Guard
+// =============================================================================
+
+// ponytail: This is THE single end-to-end guard for the core user flow that
+// ships the product: create project -> import video -> split + trim clip ->
+// add caption -> render to a real video file. It drives the real CLI binary
+// (real command pipeline, real event-sourced ops, real FFmpeg render) and
+// asserts a genuine non-empty output file with a valid probed duration.
+//
+// It deliberately does NOT cover: GUI/Tauri paths, codec/quality correctness,
+// caption pixel-burn-in correctness, multi-track compositing, audio mixing, or
+// render presets beyond the default. Those have their own focused tests. This
+// guard exists only to catch a SILENT break of the whole pipeline before
+// shipping. It skips cleanly (returns, does not fail) when FFmpeg is absent so
+// it never red-flags CI on machines without ffmpeg installed.
+#[test]
+fn test_core_flow_create_import_edit_caption_render_end_to_end() {
+    // Skip cleanly if FFmpeg is genuinely unavailable in this environment.
+    if system_ffmpeg_path().is_none() {
+        eprintln!("Skipping core-flow E2E test: ffmpeg not found");
+        return;
+    }
+
+    // 1. Create project.
+    let dir = create_temp_project("core_flow_e2e");
+    let path = project_path(&dir, "core_flow_e2e");
+
+    // 2. Import a real 2s video (long enough to split/trim within range).
+    let source_path = dir.path().join("core_flow_source.mp4");
+    if !create_sample_video_with_duration(&source_path, 2) {
+        // Encoder/generation unavailable -> skip cleanly.
+        return;
+    }
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source_path.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    // 3. Insert the clip onto the Video track.
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    // Resolve the inserted clip id from the timeline.
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let clip_id = clips["clips"][0]["id"].as_str().unwrap().to_string();
+
+    // 4. Split the clip at 1.0s -> yields two clips.
+    let split = run_cli_ok(&[
+        "timeline", "split", "--path", &path, "--clip", &clip_id, "--track", &track_id, "--at",
+        "1.0",
+    ]);
+    assert_eq!(split["status"], "ok");
+
+    // 5. Trim the first (original) clip's source range.
+    let trim = run_cli_ok(&[
+        "timeline",
+        "trim",
+        "--path",
+        &path,
+        "--clip",
+        &clip_id,
+        "--track",
+        &track_id,
+        "--source-in",
+        "0.0",
+        "--source-out",
+        "0.8",
+    ]);
+    assert_eq!(trim["status"], "ok");
+
+    // 6. Add a caption/text overlay.
+    let caption = run_cli_ok(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Hello OpenReelio",
+        "--start",
+        "0.0",
+        "--end",
+        "0.8",
+    ]);
+    assert_eq!(caption["status"], "ok");
+
+    // 7. Render the sequence to a real output file.
+    let output_path = dir.path().join("core_flow_output.mp4");
+    let result = run_cli_ok(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert_eq!(result["status"], "ok");
+
+    // 8. Assert the render produced a real, non-trivial video file.
+    assert!(
+        output_path.exists(),
+        "Expected rendered output file to exist"
+    );
+    assert!(
+        output_path.metadata().unwrap().len() > 0,
+        "Expected rendered output file to be non-empty"
+    );
+
+    // If ffprobe is available, assert the output is a valid video with a
+    // plausible, non-zero duration. If ffprobe is unavailable we still have
+    // the existence + size guard above.
+    if let Some(duration) = ffprobe_duration_secs(&output_path) {
+        assert!(
+            duration > 0.0,
+            "Expected rendered output to have a positive duration, got {duration}"
+        );
+    }
 }
