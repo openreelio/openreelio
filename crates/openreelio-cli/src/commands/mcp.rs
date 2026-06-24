@@ -5,19 +5,13 @@ use crate::{
     output,
 };
 use clap::Args;
-use openreelio_core::assets::AssetKind;
-use openreelio_core::commands::{
-    get_text_data, is_text_clip, AddTrackCommand, InsertClipCommand, LinkClipsCommand,
-    SetClipMuteCommand,
-};
+use openreelio_core::commands::{get_text_data, is_text_clip, InsertMediaCommand};
 use openreelio_core::ipc::CommandPayload;
 use openreelio_core::timeline::TrackKind;
 use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-
-const DEFAULT_MEDIA_INSERT_DURATION_SEC: f64 = 10.0;
 
 #[derive(Args)]
 pub struct McpAction {
@@ -1204,154 +1198,6 @@ fn optional_non_negative_number(arguments: &Value, key: &str) -> Result<Option<f
     Ok(Some(number))
 }
 
-fn media_insert_source_range(
-    asset_id: &str,
-    asset_duration_sec: Option<f64>,
-    source_in: Option<f64>,
-    source_out: Option<f64>,
-) -> Result<(Option<(f64, f64)>, f64), ToolError> {
-    let has_explicit_range = source_in.is_some() || source_out.is_some();
-    let source_start = source_in.unwrap_or(0.0);
-
-    if !has_explicit_range && asset_duration_sec.is_none() {
-        return Ok((None, DEFAULT_MEDIA_INSERT_DURATION_SEC));
-    }
-
-    let source_end = source_out
-        .or(asset_duration_sec)
-        .unwrap_or(source_start + DEFAULT_MEDIA_INSERT_DURATION_SEC);
-    let clamped_source_end = asset_duration_sec
-        .map(|duration| source_end.min(duration))
-        .unwrap_or(source_end);
-
-    if source_start >= clamped_source_end {
-        return Err(ToolError::InvalidArguments(format!(
-            "Invalid source range for asset '{asset_id}': sourceOut must be greater than sourceIn"
-        )));
-    }
-
-    Ok((
-        Some((source_start, clamped_source_end)),
-        clamped_source_end - source_start,
-    ))
-}
-
-fn validate_media_track_compatibility(
-    asset_id: &str,
-    asset_kind: &AssetKind,
-    track_id: &str,
-    track_kind: &TrackKind,
-    audio_only: bool,
-) -> Result<(), ToolError> {
-    match asset_kind {
-        AssetKind::Video => {
-            if matches!(track_kind, TrackKind::Audio) {
-                if audio_only {
-                    return Ok(());
-                }
-                return Err(ToolError::InvalidArguments(format!(
-                    "Video asset '{asset_id}' was targeted at audio track '{track_id}'. That creates an audio-only clip and will not show in preview. Use a video/overlay track, or set audioOnly true intentionally."
-                )));
-            }
-            if matches!(track_kind, TrackKind::Video | TrackKind::Overlay) {
-                return Ok(());
-            }
-        }
-        AssetKind::Audio if matches!(track_kind, TrackKind::Audio) => return Ok(()),
-        AssetKind::Image if matches!(track_kind, TrackKind::Video | TrackKind::Overlay) => {
-            return Ok(())
-        }
-        AssetKind::Subtitle if matches!(track_kind, TrackKind::Caption) => return Ok(()),
-        _ => {}
-    }
-
-    Err(ToolError::InvalidArguments(format!(
-        "Cannot place {asset_kind:?} asset '{asset_id}' on {track_kind:?} track '{track_id}'"
-    )))
-}
-
-fn track_has_overlap(
-    track: &openreelio_core::timeline::Track,
-    timeline_start: f64,
-    duration_sec: f64,
-) -> bool {
-    let timeline_end = timeline_start + duration_sec;
-    track.clips.iter().any(|clip| {
-        let clip_start = clip.place.timeline_in_sec;
-        let clip_end = clip.place.timeline_in_sec + clip.place.duration_sec;
-        timeline_start < clip_end && timeline_end > clip_start
-    })
-}
-
-fn find_available_audio_track_id(
-    sequence: &openreelio_core::timeline::Sequence,
-    timeline_start: f64,
-    duration_sec: f64,
-) -> Option<String> {
-    sequence
-        .tracks
-        .iter()
-        .find(|track| {
-            matches!(track.kind, TrackKind::Audio)
-                && !track.locked
-                && !track.muted
-                && !track_has_overlap(track, timeline_start, duration_sec)
-        })
-        .map(|track| track.id.clone())
-}
-
-fn next_audio_track_name(sequence: &openreelio_core::timeline::Sequence) -> String {
-    let mut highest_index = 0usize;
-    for track in &sequence.tracks {
-        if !matches!(track.kind, TrackKind::Audio) {
-            continue;
-        }
-        let name = track.name.trim();
-        if name == "Audio" {
-            highest_index = highest_index.max(1);
-        } else if let Some(index) = name
-            .strip_prefix("Audio ")
-            .and_then(|value| value.parse::<usize>().ok())
-        {
-            highest_index = highest_index.max(index);
-        }
-    }
-    format!("Audio {}", highest_index + 1)
-}
-
-fn default_audio_track_position(sequence: &openreelio_core::timeline::Sequence) -> usize {
-    sequence
-        .tracks
-        .iter()
-        .enumerate()
-        .filter(|(_, track)| matches!(track.kind, TrackKind::Audio))
-        .map(|(index, _)| index + 1)
-        .next_back()
-        .unwrap_or(sequence.tracks.len())
-}
-
-fn apply_source_range(
-    mut command: InsertClipCommand,
-    source_range: Option<(f64, f64)>,
-) -> InsertClipCommand {
-    if let Some((source_in, source_out)) = source_range {
-        command = command.with_source_range(source_in, source_out);
-    }
-    command
-}
-
-fn rollback_media_insert(
-    project: &mut openreelio_core::ActiveProject,
-    applied_count: usize,
-) -> Result<(), ToolError> {
-    for _ in 0..applied_count {
-        project.executor.undo(&mut project.state).map_err(|error| {
-            ToolError::Execution(format!("Media insert rollback failed: {error}"))
-        })?;
-    }
-    Ok(())
-}
-
 fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
     let expected_token = state.active_approval_token(None)?;
     let actual_token = arguments
@@ -1392,170 +1238,103 @@ fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value,
         .map_err(|error| ToolError::Execution(error.to_string()))?;
     state.ensure_media_insert_token_scope(&project.state.meta.id)?;
 
-    let asset = project
-        .state
-        .assets
-        .get(&asset_id)
-        .ok_or_else(|| ToolError::InvalidArguments(format!("Asset '{asset_id}' not found")))?;
-    let asset_kind = asset.kind.clone();
-    let asset_duration_sec = asset.duration_sec;
-    let asset_has_audio = asset.audio.is_some();
-    let sequence = project.state.sequences.get(&sequence_id).ok_or_else(|| {
-        ToolError::InvalidArguments(format!("Sequence '{sequence_id}' not found"))
-    })?;
-    let track = sequence
-        .tracks
-        .iter()
-        .find(|track| track.id == track_id)
-        .ok_or_else(|| ToolError::InvalidArguments(format!("Track '{track_id}' not found")))?;
-    let target_track_kind = track.kind.clone();
-    validate_media_track_compatibility(
-        &asset_id,
-        &asset_kind,
-        &track_id,
-        &target_track_kind,
-        audio_only,
-    )?;
-    let (source_range, duration_sec) =
-        media_insert_source_range(&asset_id, asset_duration_sec, source_in, source_out)?;
-
-    state.consume_approval_token()?;
-
-    let mut applied_count = 0usize;
-    let operation = (|| -> Result<Value, ToolError> {
-        let primary_command = apply_source_range(
-            InsertClipCommand::new(&sequence_id, &track_id, &asset_id, timeline_start),
-            source_range,
-        );
-        let primary_result = project
-            .executor
-            .execute(Box::new(primary_command), &mut project.state)
-            .map_err(|error| ToolError::Execution(format!("Media InsertClip failed: {error}")))?;
-        applied_count += 1;
-        let primary_clip_id = primary_result.created_ids.first().cloned().ok_or_else(|| {
-            ToolError::Execution("InsertClip did not return a created clip id".to_string())
-        })?;
-
-        let mut linked_audio = Value::Null;
-        let should_extract_linked_audio = auto_extract_linked_audio
-            && matches!(asset_kind, AssetKind::Video)
-            && !audio_only
-            && matches!(target_track_kind, TrackKind::Video | TrackKind::Overlay)
-            && asset_has_audio;
-
-        if should_extract_linked_audio {
-            let sequence = project.state.sequences.get(&sequence_id).ok_or_else(|| {
-                ToolError::Execution(format!("Sequence '{sequence_id}' not found after insert"))
-            })?;
-            let (audio_track_id, created_track) = if let Some(audio_track_id) =
-                find_available_audio_track_id(sequence, timeline_start, duration_sec)
-            {
-                (audio_track_id, false)
-            } else {
-                let track_name = next_audio_track_name(sequence);
-                let position = default_audio_track_position(sequence);
-                let create_result = project
-                    .executor
-                    .execute(
-                        Box::new(
-                            AddTrackCommand::new(&sequence_id, &track_name, TrackKind::Audio)
-                                .at_position(position),
-                        ),
-                        &mut project.state,
-                    )
-                    .map_err(|error| {
-                        ToolError::Execution(format!("Create linked audio track failed: {error}"))
-                    })?;
-                applied_count += 1;
-                let created_track_id =
-                    create_result.created_ids.first().cloned().ok_or_else(|| {
-                        ToolError::Execution(
-                            "Create linked audio track did not return an id".to_string(),
-                        )
-                    })?;
-                (created_track_id, true)
-            };
-
-            let audio_command = apply_source_range(
-                InsertClipCommand::new(&sequence_id, &audio_track_id, &asset_id, timeline_start),
-                source_range,
-            );
-            let audio_result = project
-                .executor
-                .execute(Box::new(audio_command), &mut project.state)
-                .map_err(|error| {
-                    ToolError::Execution(format!("Linked audio InsertClip failed: {error}"))
-                })?;
-            applied_count += 1;
-            let audio_clip_id = audio_result.created_ids.first().cloned().ok_or_else(|| {
-                ToolError::Execution("Linked audio InsertClip did not return a clip id".to_string())
-            })?;
-
-            project
-                .executor
-                .execute(
-                    Box::new(LinkClipsCommand::new(
-                        &sequence_id,
-                        vec![
-                            (track_id.clone(), primary_clip_id.clone()),
-                            (audio_track_id.clone(), audio_clip_id.clone()),
-                        ],
-                    )),
-                    &mut project.state,
-                )
-                .map_err(|error| ToolError::Execution(format!("LinkClips failed: {error}")))?;
-            applied_count += 1;
-
-            project
-                .executor
-                .execute(
-                    Box::new(SetClipMuteCommand::new(
-                        &sequence_id,
-                        &track_id,
-                        &primary_clip_id,
-                        true,
-                    )),
-                    &mut project.state,
-                )
-                .map_err(|error| ToolError::Execution(format!("SetClipMute failed: {error}")))?;
-            applied_count += 1;
-
-            linked_audio = serde_json::json!({
-                "trackId": audio_track_id,
-                "clipId": audio_clip_id,
-                "createdTrack": created_track
-            });
-        }
-
-        Ok(serde_json::json!({
-            "status": "ok",
-            "message": "Media inserted through the drag-and-drop parity path.",
-            "opId": primary_result.op_id,
-            "createdIds": primary_result.created_ids,
-            "clipId": primary_clip_id,
+    // Validate the inputs against the canonical command schema, then run the
+    // single canonical InsertMedia command. All linked-audio business logic now
+    // lives once in `openreelio_core::commands::InsertMediaCommand`, applied as a
+    // single undoable unit.
+    CommandPayload::parse(
+        "InsertMedia".to_string(),
+        serde_json::json!({
             "sequenceId": sequence_id,
             "trackId": track_id,
             "assetId": asset_id,
             "timelineStart": timeline_start,
-            "sourceIn": source_range.map(|range| range.0),
-            "sourceOut": source_range.map(|range| range.1),
-            "durationSec": duration_sec,
-            "linkedAudio": linked_audio
-        }))
-    })();
+            "sourceIn": source_in,
+            "sourceOut": source_out,
+            "audioOnly": audio_only,
+            "autoExtractLinkedAudio": auto_extract_linked_audio,
+        }),
+    )
+    .map_err(ToolError::InvalidArguments)?;
 
-    let result = match operation {
-        Ok(value) => value,
-        Err(error) => {
-            if applied_count > 0 {
-                rollback_media_insert(&mut project, applied_count)?;
-            }
-            return Err(error);
-        }
-    };
+    state.consume_approval_token()?;
+
+    let command = InsertMediaCommand::new(&sequence_id, &track_id, &asset_id, timeline_start)
+        .with_source_range(source_in, source_out)
+        .with_audio_only(audio_only)
+        .with_auto_extract_linked_audio(auto_extract_linked_audio);
+
+    // Run through the canonical executor path (single op + single undo entry).
+    let command_result = project
+        .executor
+        .execute(Box::new(command), &mut project.state)
+        .map_err(|error| ToolError::Execution(format!("Media insert failed: {error}")))?;
 
     super::save_project(&mut project).map_err(|error| ToolError::Execution(error.to_string()))?;
-    Ok(result)
+
+    // Reconstruct the response details from the realized state. The primary clip
+    // is the first created ID; linked audio (if any) is the partner clip sharing
+    // the primary clip's link group.
+    let primary_clip_id = command_result.created_ids.first().cloned().ok_or_else(|| {
+        ToolError::Execution("Media insert did not return a created clip id".to_string())
+    })?;
+    let sequence = project.state.sequences.get(&sequence_id).ok_or_else(|| {
+        ToolError::Execution(format!("Sequence '{sequence_id}' not found after insert"))
+    })?;
+    let primary_clip = sequence
+        .tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .and_then(|t| t.clips.iter().find(|c| c.id == primary_clip_id))
+        .ok_or_else(|| {
+            ToolError::Execution("Inserted clip not found after media insert".to_string())
+        })?;
+    let source_range = Some((
+        primary_clip.range.source_in_sec,
+        primary_clip.range.source_out_sec,
+    ));
+    let duration_sec = primary_clip.place.duration_sec;
+
+    let linked_audio = match primary_clip.link_group_id.clone() {
+        Some(link_group_id) => sequence
+            .tracks
+            .iter()
+            .find_map(|t| {
+                t.clips
+                    .iter()
+                    .find(|c| {
+                        c.id != primary_clip_id
+                            && c.link_group_id.as_deref() == Some(link_group_id.as_str())
+                    })
+                    .map(|c| (t.id.clone(), c.id.clone()))
+            })
+            .map(|(audio_track_id, audio_clip_id)| {
+                let created_track = command_result.created_ids.contains(&audio_track_id);
+                serde_json::json!({
+                    "trackId": audio_track_id,
+                    "clipId": audio_clip_id,
+                    "createdTrack": created_track,
+                })
+            })
+            .unwrap_or(Value::Null),
+        None => Value::Null,
+    };
+
+    Ok(serde_json::json!({
+        "status": "ok",
+        "message": "Media inserted through the drag-and-drop parity path.",
+        "opId": command_result.op_id,
+        "createdIds": command_result.created_ids,
+        "clipId": primary_clip_id,
+        "sequenceId": sequence_id,
+        "trackId": track_id,
+        "assetId": asset_id,
+        "timelineStart": timeline_start,
+        "sourceIn": source_range.map(|range| range.0),
+        "sourceOut": source_range.map(|range| range.1),
+        "durationSec": duration_sec,
+        "linkedAudio": linked_audio
+    }))
 }
 
 fn validate_command(arguments: Value) -> Result<Value, ToolError> {

@@ -789,7 +789,8 @@ pub async fn apply_edit_script(
         CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand, CreateFolderCommand,
         CreateFreezeFrameCommand, CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand,
         DetachAudioCommand, ExtractEditCommand, GeneratedCaptionSegment, GroupClipsCommand,
-        ImportGeneratedCaptionsCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
+        ImportGeneratedCaptionsCommand, InsertClipCommand, InsertEditCommand, InsertMediaCommand,
+        LiftCommand,
         LinkClipsCommand, MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand,
         OverwriteEditCommand, RemoveAssetCommand, RemoveAudioKeyframeCommand, RemoveClipCommand,
         RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
@@ -899,6 +900,23 @@ pub async fn apply_edit_script(
                     &p.asset_id,
                     p.timeline_start,
                 ))
+            }
+            CommandPayload::InsertMedia(p) => {
+                if let Err(e) = validate_time_sec("timelineStart", p.timeline_start) {
+                    errors.push(format!("Command validation failed (InsertMedia): {e}"));
+                    continue;
+                }
+                Box::new(
+                    InsertMediaCommand::new(
+                        &p.sequence_id,
+                        &p.track_id,
+                        &p.asset_id,
+                        p.timeline_start,
+                    )
+                    .with_source_range(p.source_in, p.source_out)
+                    .with_audio_only(p.audio_only)
+                    .with_auto_extract_linked_audio(p.auto_extract_linked_audio),
+                )
             }
             CommandPayload::InsertEdit(p) => {
                 if let Err(e) = validate_time_sec("timelinePosition", p.timeline_position) {

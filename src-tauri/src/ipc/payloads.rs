@@ -31,6 +31,37 @@ pub struct InsertClipPayload {
     pub source_out: Option<TimeSec>,
 }
 
+/// Payload for Insert Media (drag-and-drop parity composite insert).
+///
+/// Inserts a primary clip and, for video assets that carry audio, also creates
+/// or reuses an audio track, inserts a linked audio clip, links the two clips,
+/// and mutes the video clip. The whole composite is a single undoable unit.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InsertMediaPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub asset_id: AssetId,
+    /// Timeline position to insert at.
+    #[serde(alias = "timelineIn")]
+    pub timeline_start: TimeSec,
+    /// Optional source start time for partial-range inserts.
+    pub source_in: Option<TimeSec>,
+    /// Optional source end time for partial-range inserts.
+    pub source_out: Option<TimeSec>,
+    /// Place a video asset on an audio track intentionally (no preview clip).
+    #[serde(default)]
+    pub audio_only: bool,
+    /// Auto-extract a linked audio clip for video assets that have audio.
+    #[serde(default = "default_true")]
+    pub auto_extract_linked_audio: bool,
+}
+
+/// Default value helper for `auto_extract_linked_audio` (defaults to enabled).
+fn default_true() -> bool {
+    true
+}
+
 /// Payload for Insert Edit (ripple insert — pushes downstream clips).
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1067,6 +1098,9 @@ pub enum CommandPayload {
     #[serde(alias = "insertClip", alias = "InsertClip")]
     InsertClip(InsertClipPayload),
 
+    #[serde(alias = "insertMedia", alias = "InsertMedia")]
+    InsertMedia(InsertMediaPayload),
+
     #[serde(alias = "insertEdit", alias = "InsertEdit")]
     InsertEdit(InsertEditPayload),
 
@@ -1367,6 +1401,7 @@ pub enum CommandPayload {
 impl CommandPayload {
     pub const SUPPORTED_COMMAND_TYPES: &'static [&'static str] = &[
         "InsertClip",
+        "InsertMedia",
         "InsertEdit",
         "OverwriteEdit",
         "RippleDelete",
@@ -1502,7 +1537,7 @@ impl CommandPayload {
             CreateFreezeFrameCommand, CreateSequenceCommand, DeleteCaptionCommand,
             DeleteFileCommand, DetachAudioCommand, ExtractEditCommand, GeneratedCaptionSegment,
             GroupClipsCommand, ImportAssetCommand, ImportGeneratedCaptionsCommand,
-            InsertClipCommand, InsertEditCommand, LiftCommand, LinkClipsCommand,
+            InsertClipCommand, InsertEditCommand, InsertMediaCommand, LiftCommand, LinkClipsCommand,
             MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand, OverwriteEditCommand,
             RemoveAssetCommand, RemoveAudioKeyframeCommand, RemoveClipCommand, RemoveEffectCommand,
             RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand,
@@ -1534,6 +1569,18 @@ impl CommandPayload {
                 );
                 command.source_start = p.source_in;
                 command.source_end = p.source_out;
+                Box::new(command)
+            }
+            CommandPayload::InsertMedia(p) => {
+                let command = InsertMediaCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.asset_id,
+                    p.timeline_start,
+                )
+                .with_source_range(p.source_in, p.source_out)
+                .with_audio_only(p.audio_only)
+                .with_auto_extract_linked_audio(p.auto_extract_linked_audio);
                 Box::new(command)
             }
             CommandPayload::InsertEdit(p) => {

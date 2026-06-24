@@ -1022,6 +1022,144 @@ impl CommandExecutor {
         }))
     }
 
+    fn build_insert_media_batch_payload(
+        command_json: &serde_json::Value,
+        result: &CommandResult,
+        state: &ProjectState,
+    ) -> CoreResult<serde_json::Value> {
+        fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+            value.get(key).and_then(|v| v.as_str())
+        }
+
+        fn to_value<T: serde::Serialize>(value: &T) -> CoreResult<serde_json::Value> {
+            serde_json::to_value(value).map_err(|e| {
+                CoreError::Internal(format!("Failed to serialize operation payload: {e}"))
+            })
+        }
+
+        // `command_json` carries the static inputs (sequence/track); the realized
+        // entity IDs are derived from `result.created_ids` + state so the batch is
+        // built from the post-execute snapshot (command_json is captured before
+        // execute, when realized IDs are not yet known).
+        let seq_id = get_str(command_json, "sequenceId").ok_or_else(|| {
+            CoreError::Internal("InsertMedia payload missing sequenceId".to_string())
+        })?;
+        let track_id = get_str(command_json, "trackId").ok_or_else(|| {
+            CoreError::Internal("InsertMedia payload missing trackId".to_string())
+        })?;
+        let primary_clip_id = result.created_ids.first().ok_or_else(|| {
+            CoreError::Internal("InsertMedia missing primary created clip id".to_string())
+        })?;
+
+        let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+            CoreError::Internal(format!("InsertMedia could not find sequence: {seq_id}"))
+        })?;
+        let primary_track = sequence.get_track(track_id).ok_or_else(|| {
+            CoreError::Internal(format!("InsertMedia could not find track: {track_id}"))
+        })?;
+        let primary_clip = primary_track.get_clip(primary_clip_id).ok_or_else(|| {
+            CoreError::Internal(format!(
+                "InsertMedia could not find primary clip: {primary_clip_id}"
+            ))
+        })?;
+
+        let mut operations = Vec::new();
+
+        // Linked audio (if any) is the partner clip sharing the primary clip's
+        // link group on a different track.
+        let linked_audio = primary_clip.link_group_id.as_deref().and_then(|link_group_id| {
+            sequence.tracks.iter().find_map(|track| {
+                track
+                    .clips
+                    .iter()
+                    .find(|clip| {
+                        clip.id != *primary_clip_id
+                            && clip.link_group_id.as_deref() == Some(link_group_id)
+                    })
+                    .map(|clip| (track, clip, link_group_id.to_string()))
+            })
+        });
+
+        if let Some((audio_track, audio_clip, link_group_id)) = linked_audio {
+            let audio_track_id = audio_track.id.clone();
+            let audio_clip_id = audio_clip.id.clone();
+            let created_track = result.created_ids.iter().any(|id| *id == audio_track_id);
+
+            // When a linked audio track was created, replay it before the clip.
+            if created_track {
+                let position = sequence
+                    .tracks
+                    .iter()
+                    .position(|track| track.id == audio_track_id);
+                operations.push(Operation::new(
+                    OpKind::TrackAdd,
+                    serde_json::json!({
+                        "sequenceId": seq_id,
+                        "track": to_value(audio_track)?,
+                        "position": position,
+                    }),
+                ));
+            }
+
+            // Primary clip add.
+            operations.push(Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": to_value(primary_clip)?,
+                }),
+            ));
+
+            // Linked audio clip add.
+            operations.push(Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": audio_track_id,
+                    "clip": to_value(audio_clip)?,
+                }),
+            ));
+
+            // Link the two clips under their realized link group.
+            operations.push(Operation::new(
+                OpKind::ClipLink,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "linkGroupId": link_group_id,
+                    "clipRefs": [
+                        { "trackId": track_id, "clipId": primary_clip_id },
+                        { "trackId": audio_track_id, "clipId": audio_clip_id },
+                    ],
+                }),
+            ));
+
+            // Mute the primary clip's audio (replayed via full audio payload).
+            operations.push(Operation::new(
+                OpKind::ClipUpdate,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": primary_clip_id,
+                    "audio": to_value(&primary_clip.audio)?,
+                }),
+            ));
+        } else {
+            // No linked audio: a single primary clip add.
+            operations.push(Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": to_value(primary_clip)?,
+                }),
+            ));
+        }
+
+        Ok(serde_json::json!({
+            "operations": operations,
+        }))
+    }
+
     fn build_operation_payload(
         type_name: &str,
         op_kind: OpKind,
@@ -1708,6 +1846,9 @@ impl CommandExecutor {
                     result,
                     state,
                 ),
+                "InsertMedia" => {
+                    Self::build_insert_media_batch_payload(&command_json, result, state)
+                }
                 unknown => Err(CoreError::Internal(format!(
                     "Unregistered batch command type: {unknown}"
                 ))),
@@ -1897,7 +2038,7 @@ impl CommandExecutor {
         match type_name {
             "InsertClip" | "AddClip" => OpKind::ClipAdd,
             "InsertEdit" | "OverwriteEdit" | "RippleDelete" | "CloseGap" | "CloseAllGaps"
-            | "Lift" | "ExtractEdit" => OpKind::Batch,
+            | "Lift" | "ExtractEdit" | "InsertMedia" => OpKind::Batch,
             "RemoveClip" | "DeleteClip" => OpKind::ClipRemove,
             "MoveClip" => OpKind::ClipMove,
             "TrimClip" => OpKind::ClipTrim,
