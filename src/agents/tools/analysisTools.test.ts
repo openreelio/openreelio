@@ -4870,13 +4870,15 @@ describe('reference style transfer analysis tools', () => {
         insertedClipCount: 1,
       });
       expect(vi.mocked(executeAgentCommand)).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(executeAgentCommand)).toHaveBeenCalledWith('InsertClip', {
+      expect(vi.mocked(executeAgentCommand)).toHaveBeenCalledWith('InsertMedia', {
         sequenceId: 'seq_001',
         trackId: 'selects-track',
         assetId: 'select-apply',
         timelineStart: 0,
         sourceIn: 0,
         sourceOut: 4.25,
+        audioOnly: false,
+        autoExtractLinkedAudio: true,
       });
     });
 
@@ -5007,8 +5009,8 @@ describe('reference style transfer analysis tools', () => {
       expect(result.error).toContain('InsertClip exploded');
       expect(vi.mocked(executeAgentCommand).mock.calls.map(([name]) => name)).toEqual([
         'CreateTrack',
-        'InsertClip',
-        'InsertClip',
+        'InsertMedia',
+        'InsertMedia',
         'RemoveClip',
         'RemoveTrack',
       ]);

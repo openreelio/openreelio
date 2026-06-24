@@ -2,55 +2,41 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useProjectStore } from '@/stores/projectStore';
 import { insertAgentMediaClip } from './mediaInsertion';
-import type { Asset, Command, CommandResult, Sequence, Track } from '@/types';
+import type { Clip, Command, CommandResult, Sequence, Track } from '@/types';
 
 const originalExecuteCommand = useProjectStore.getState().executeCommand;
-const originalUndo = useProjectStore.getState().undo;
 
-function createTrack(id: string, kind: Track['kind'], name: string): Track {
+function createClip(id: string, linkGroupId?: string): Clip {
+  return {
+    id,
+    assetId: 'asset-video',
+    range: { sourceInSec: 1, sourceOutSec: 5 },
+    place: { timelineInSec: 2, durationSec: 4 },
+    transform: {
+      position: { x: 0, y: 0 },
+      scale: { x: 1, y: 1 },
+      rotationDeg: 0,
+      anchor: { x: 0.5, y: 0.5 },
+    },
+    opacity: 1,
+    speed: 1,
+    effects: [],
+    audio: { volumeDb: 0, pan: 0, muted: false },
+    linkGroupId,
+  };
+}
+
+function createTrack(id: string, kind: Track['kind'], name: string, clips: Clip[] = []): Track {
   return {
     id,
     kind,
     name,
-    clips: [],
+    clips,
     blendMode: 'normal',
     muted: false,
     locked: false,
     visible: true,
     volume: 1,
-  };
-}
-
-function createVideoAsset(overrides: Partial<Asset> = {}): Asset {
-  return {
-    id: 'asset-video',
-    kind: 'video',
-    name: 'Interview',
-    uri: '/project/media/interview.mp4',
-    hash: 'hash-video',
-    durationSec: 12,
-    fileSize: 1024,
-    importedAt: '2026-05-26T00:00:00.000Z',
-    video: {
-      width: 1920,
-      height: 1080,
-      fps: { num: 30, den: 1 },
-      codec: 'h264',
-      hasAlpha: false,
-    },
-    audio: {
-      sampleRate: 48000,
-      channels: 2,
-      codec: 'aac',
-    },
-    license: {
-      source: 'user',
-      licenseType: 'unknown',
-      allowedUse: [],
-    },
-    tags: [],
-    proxyStatus: 'notNeeded',
-    ...overrides,
   };
 }
 
@@ -72,27 +58,20 @@ function createSequence(tracks: Track[]): Sequence {
 describe('insertAgentMediaClip', () => {
   let executeCommand: ReturnType<typeof vi.fn>;
 
-  beforeEach(() => {
-    executeCommand = vi.fn(async (command: Command): Promise<CommandResult> => {
-      if (command.type === 'InsertClip') {
-        return {
-          opId: command.payload.trackId === 'audio-1' ? 'op-audio' : 'op-video',
-          changes: [],
-          createdIds: [command.payload.trackId === 'audio-1' ? 'clip-audio' : 'clip-video'],
-          deletedIds: [],
-        };
-      }
-
-      return {
-        opId: `op-${command.type}`,
-        changes: [],
-        createdIds: [],
-        deletedIds: [],
-      };
+  function setProjectSequence(tracks: Track[]): void {
+    useProjectStore.setState({
+      sequences: new Map([['seq-1', createSequence(tracks)]]),
     });
+  }
 
-    const videoTrack = createTrack('video-1', 'video', 'Video 1');
-    const audioTrack = createTrack('audio-1', 'audio', 'Audio 1');
+  beforeEach(() => {
+    executeCommand = vi.fn(async (): Promise<CommandResult> => ({
+      opId: 'op-insert-media',
+      changes: [],
+      createdIds: ['clip-video', 'clip-audio'],
+      deletedIds: [],
+    }));
+
     useProjectStore.setState({
       isLoaded: true,
       meta: {
@@ -102,28 +81,27 @@ describe('insertAgentMediaClip', () => {
         createdAt: '2026-05-26T00:00:00.000Z',
         modifiedAt: '2026-05-26T00:00:00.000Z',
       },
-      assets: new Map([['asset-video', createVideoAsset()]]),
-      sequences: new Map([['seq-1', createSequence([videoTrack, audioTrack])]]),
       activeSequenceId: 'seq-1',
       executeCommand: executeCommand as unknown as (command: Command) => Promise<CommandResult>,
-      undo: vi.fn(async () => ({ success: true, canUndo: false, canRedo: false })),
     });
+    setProjectSequence([
+      createTrack('video-1', 'video', 'Video 1', [createClip('clip-video', 'link-1')]),
+      createTrack('audio-1', 'audio', 'Audio 1', [createClip('clip-audio', 'link-1')]),
+    ]);
   });
 
   afterEach(() => {
     useProjectStore.setState({
       isLoaded: false,
       meta: null,
-      assets: new Map(),
       sequences: new Map(),
       activeSequenceId: null,
       executeCommand: originalExecuteCommand,
-      undo: originalUndo,
     });
   });
 
-  it('should insert video through visual track and mirror the source range to linked audio', async () => {
-    const result = await insertAgentMediaClip({
+  it('should dispatch a single InsertMedia command with the resolved payload', async () => {
+    await insertAgentMediaClip({
       sequenceId: 'seq-1',
       trackId: 'video-1',
       assetId: 'asset-video',
@@ -132,8 +110,34 @@ describe('insertAgentMediaClip', () => {
       sourceOut: 5,
     });
 
+    expect(executeCommand).toHaveBeenCalledTimes(1);
+    expect(executeCommand).toHaveBeenCalledWith({
+      type: 'InsertMedia',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'video-1',
+        assetId: 'asset-video',
+        timelineStart: 2,
+        sourceIn: 1,
+        sourceOut: 5,
+        audioOnly: false,
+        autoExtractLinkedAudio: true,
+      },
+    });
+  });
+
+  it('should surface the primary clip and linked audio from refreshed state', async () => {
+    const result = await insertAgentMediaClip({
+      sequenceId: 'seq-1',
+      trackId: 'video-1',
+      assetId: 'asset-video',
+      timelineStart: 2,
+    });
+
     expect(result).toMatchObject({
       clipId: 'clip-video',
+      sourceIn: 1,
+      sourceOut: 5,
       durationSec: 4,
       linkedAudio: {
         trackId: 'audio-1',
@@ -141,63 +145,56 @@ describe('insertAgentMediaClip', () => {
         createdTrack: false,
       },
     });
-    expect(executeCommand).toHaveBeenNthCalledWith(1, {
-      type: 'InsertClip',
-      payload: {
-        sequenceId: 'seq-1',
-        trackId: 'video-1',
-        assetId: 'asset-video',
-        timelineStart: 2,
-        sourceIn: 1,
-        sourceOut: 5,
-      },
+  });
+
+  it('should flag a newly created linked audio track when its id is in createdIds', async () => {
+    executeCommand.mockResolvedValueOnce({
+      opId: 'op-insert-media',
+      changes: [],
+      createdIds: ['clip-video', 'audio-2', 'clip-audio'],
+      deletedIds: [],
     });
-    expect(executeCommand).toHaveBeenNthCalledWith(2, {
-      type: 'InsertClip',
-      payload: {
-        sequenceId: 'seq-1',
-        trackId: 'audio-1',
-        assetId: 'asset-video',
-        timelineStart: 2,
-        sourceIn: 1,
-        sourceOut: 5,
-      },
+    setProjectSequence([
+      createTrack('video-1', 'video', 'Video 1', [createClip('clip-video', 'link-1')]),
+      createTrack('audio-2', 'audio', 'Audio 2', [createClip('clip-audio', 'link-1')]),
+    ]);
+
+    const result = await insertAgentMediaClip({
+      sequenceId: 'seq-1',
+      trackId: 'video-1',
+      assetId: 'asset-video',
+      timelineStart: 2,
     });
-    expect(executeCommand).toHaveBeenNthCalledWith(3, {
-      type: 'LinkClips',
-      payload: {
-        sequenceId: 'seq-1',
-        clipRefs: [
-          { trackId: 'video-1', clipId: 'clip-video' },
-          { trackId: 'audio-1', clipId: 'clip-audio' },
-        ],
-      },
-    });
-    expect(executeCommand).toHaveBeenNthCalledWith(4, {
-      type: 'SetClipMute',
-      payload: {
-        sequenceId: 'seq-1',
-        trackId: 'video-1',
-        clipId: 'clip-video',
-        muted: true,
-      },
+
+    expect(result.linkedAudio).toEqual({
+      trackId: 'audio-2',
+      clipId: 'clip-audio',
+      createdTrack: true,
     });
   });
 
-  it('should reject accidental video insertion onto audio tracks before creating invisible preview clips', async () => {
-    await expect(
-      insertAgentMediaClip({
-        sequenceId: 'seq-1',
-        trackId: 'audio-1',
-        assetId: 'asset-video',
-        timelineStart: 0,
-      }),
-    ).rejects.toThrow('will not show in preview');
+  it('should omit linked audio when the primary clip has no link group', async () => {
+    executeCommand.mockResolvedValueOnce({
+      opId: 'op-insert-media',
+      changes: [],
+      createdIds: ['clip-video'],
+      deletedIds: [],
+    });
+    setProjectSequence([
+      createTrack('video-1', 'video', 'Video 1', [createClip('clip-video')]),
+    ]);
 
-    expect(executeCommand).not.toHaveBeenCalled();
+    const result = await insertAgentMediaClip({
+      sequenceId: 'seq-1',
+      trackId: 'video-1',
+      assetId: 'asset-video',
+      timelineStart: 2,
+    });
+
+    expect(result.linkedAudio).toBeUndefined();
   });
 
-  it('should reject invalid timeline starts before executing commands', async () => {
+  it('should reject invalid timeline starts before dispatching any command', async () => {
     await expect(
       insertAgentMediaClip({
         sequenceId: 'seq-1',
@@ -210,27 +207,16 @@ describe('insertAgentMediaClip', () => {
     expect(executeCommand).not.toHaveBeenCalled();
   });
 
-  it('should rollback already-applied media commands when linked audio insertion fails', async () => {
-    const undo = vi.fn(async () => ({ success: true, canUndo: false, canRedo: false }));
-    useProjectStore.setState({ undo });
-    executeCommand
-      .mockResolvedValueOnce({
-        opId: 'op-video',
-        changes: [],
-        createdIds: ['clip-video'],
-        deletedIds: [],
-      })
-      .mockRejectedValueOnce(new Error('linked audio insert failed'));
+  it('should propagate backend validation errors from the InsertMedia command', async () => {
+    executeCommand.mockRejectedValueOnce(new Error('will not show in preview'));
 
     await expect(
       insertAgentMediaClip({
         sequenceId: 'seq-1',
-        trackId: 'video-1',
+        trackId: 'audio-1',
         assetId: 'asset-video',
-        timelineStart: 2,
+        timelineStart: 0,
       }),
-    ).rejects.toThrow('linked audio insert failed');
-
-    expect(undo).toHaveBeenCalledTimes(1);
+    ).rejects.toThrow('will not show in preview');
   });
 });
