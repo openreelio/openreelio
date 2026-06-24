@@ -124,10 +124,13 @@ let cachedFeatureFlagsSnapshot: FeatureFlags | null = null;
  */
 const DEFAULT_FLAGS: FeatureFlags = {
   USE_AGENTIC_ENGINE: true,
-  USE_VIDEO_GENERATION: false,
-  USE_AGENT_LOOP: false,
   USE_BACKEND_TOOLS: true,
   USE_META_TOOLS: true,
+  // Release-gated, off by default. These speculative subsystems must NOT ship
+  // enabled. Do not flip to true in committed code; enable per-environment via
+  // VITE_FF_<FLAG>=true or a localStorage override during development only.
+  USE_VIDEO_GENERATION: false,
+  USE_AGENT_LOOP: false,
   USE_EXTERNAL_AGENT_HOST: false,
   USE_CODEX_AGENT: false,
 };
