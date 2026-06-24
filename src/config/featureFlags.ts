@@ -50,14 +50,6 @@ export interface FeatureFlags {
   USE_VIDEO_GENERATION: boolean;
 
   /**
-   * Enable the simplified Agent Loop (opencode-style stream → tool → loop)
-   * for compatibility verification and internal entry points.
-   * This does not replace the shipping AI sidebar runtime.
-   * @default false
-   */
-  USE_AGENT_LOOP: boolean;
-
-  /**
    * Enable backend tool execution for editing tools
    * When true, editing tools route through backend IPC (execute_agent_plan)
    * and analysis tools stay on frontend. When false, all tools use frontend.
@@ -101,8 +93,6 @@ export interface AgentSidebarRuntimePolicy {
   canonicalRuntime: 'tpao';
   selectedRuntime: AgentSidebarRuntime;
   track: AgentSidebarRuntimeTrack;
-  compatibilityRuntime: 'fast' | null;
-  compatibilityRuntimeEnabled: boolean;
 }
 
 // =============================================================================
@@ -130,7 +120,6 @@ const DEFAULT_FLAGS: FeatureFlags = {
   // enabled. Do not flip to true in committed code; enable per-environment via
   // VITE_FF_<FLAG>=true or a localStorage override during development only.
   USE_VIDEO_GENERATION: false,
-  USE_AGENT_LOOP: false,
   USE_EXTERNAL_AGENT_HOST: false,
   USE_CODEX_AGENT: false,
 };
@@ -141,7 +130,6 @@ const DEFAULT_FLAGS: FeatureFlags = {
 export const FEATURE_FLAG_KEYS: readonly FeatureFlagKey[] = [
   'USE_AGENTIC_ENGINE',
   'USE_VIDEO_GENERATION',
-  'USE_AGENT_LOOP',
   'USE_BACKEND_TOOLS',
   'USE_META_TOOLS',
   'USE_EXTERNAL_AGENT_HOST',
@@ -359,15 +347,12 @@ export function useFeatureFlags(): FeatureFlags {
 
 export function useSidebarRuntimePolicy(): AgentSidebarRuntimePolicy {
   const flags = useFeatureFlags();
-  const compatibilityRuntimeEnabled = flags.USE_AGENT_LOOP;
 
   if (flags.USE_AGENTIC_ENGINE) {
     return {
       canonicalRuntime: 'tpao',
       selectedRuntime: 'tpao',
       track: 'canonical',
-      compatibilityRuntime: compatibilityRuntimeEnabled ? 'fast' : null,
-      compatibilityRuntimeEnabled,
     };
   }
 
@@ -375,8 +360,6 @@ export function useSidebarRuntimePolicy(): AgentSidebarRuntimePolicy {
     canonicalRuntime: 'tpao',
     selectedRuntime: 'disabled',
     track: 'disabled',
-    compatibilityRuntime: compatibilityRuntimeEnabled ? 'fast' : null,
-    compatibilityRuntimeEnabled,
   };
 }
 
@@ -442,35 +425,17 @@ export function isVideoGenerationEnabled(): boolean {
 }
 
 /**
- * Check if the simplified Agent Loop compatibility runtime is enabled.
- *
- * When true, internal debug or harness-oriented entry points may use
- * AgentLoop (stream → tool → loop) for compatibility verification.
- *
- * @returns true if the compatibility runtime should be available
- */
-export function isAgentLoopEnabled(): boolean {
-  return getFeatureFlag('USE_AGENT_LOOP');
-}
-
-/**
  * Resolve the sidebar runtime policy from the current feature-flag matrix.
  *
- * TPAO remains the canonical interactive runtime. The fast AgentLoop runtime
- * may remain available for compatibility verification, but it does not replace
- * the shipping sidebar runtime.
+ * TPAO is the canonical (and only) interactive sidebar runtime. When the
+ * agentic engine is disabled, the sidebar surfaces an explicit disabled state.
  */
 export function resolveSidebarRuntimePolicy(): AgentSidebarRuntimePolicy {
-  const compatibilityRuntimeEnabled = isAgentLoopEnabled();
-  const tpaoRuntimeEnabled = isAgenticEngineEnabled();
-
-  if (tpaoRuntimeEnabled) {
+  if (isAgenticEngineEnabled()) {
     return {
       canonicalRuntime: 'tpao',
       selectedRuntime: 'tpao',
       track: 'canonical',
-      compatibilityRuntime: compatibilityRuntimeEnabled ? 'fast' : null,
-      compatibilityRuntimeEnabled,
     };
   }
 
@@ -478,8 +443,6 @@ export function resolveSidebarRuntimePolicy(): AgentSidebarRuntimePolicy {
     canonicalRuntime: 'tpao',
     selectedRuntime: 'disabled',
     track: 'disabled',
-    compatibilityRuntime: compatibilityRuntimeEnabled ? 'fast' : null,
-    compatibilityRuntimeEnabled,
   };
 }
 

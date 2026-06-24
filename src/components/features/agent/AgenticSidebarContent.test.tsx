@@ -300,15 +300,6 @@ describe('AgenticSidebarContent', () => {
     expect(screen.queryByTestId('agent-runtime-disabled-state')).not.toBeInTheDocument();
   });
 
-  it('should keep the canonical runtime selected when USE_AGENT_LOOP is enabled', () => {
-    setFeatureFlag('USE_AGENT_LOOP', true);
-
-    render(<AgenticSidebarContent />);
-
-    expect(screen.getByTestId('agentic-chat')).toBeInTheDocument();
-    expect(screen.queryByTestId('agent-runtime-disabled-state')).not.toBeInTheDocument();
-  });
-
   it('should render the Codex external runtime when Codex account agent is selected', async () => {
     useSettingsStore.setState((state) => ({
       ...state,
@@ -526,7 +517,6 @@ describe('AgenticSidebarContent', () => {
 
   it('should render an explicit disabled state when the canonical runtime is disabled', () => {
     setFeatureFlag('USE_AGENTIC_ENGINE', false);
-    setFeatureFlag('USE_AGENT_LOOP', true);
 
     render(<AgenticSidebarContent />);
 

@@ -11,7 +11,6 @@ import {
   setFeatureFlag,
   resetFeatureFlags,
   isAgenticEngineEnabled,
-  isAgentLoopEnabled,
   isCodexAgentEnabled,
   isExternalAgentHostEnabled,
   resolveSidebarRuntimePolicy,
@@ -237,21 +236,6 @@ describe('featureFlags', () => {
         canonicalRuntime: 'tpao',
         selectedRuntime: 'tpao',
         track: 'canonical',
-        compatibilityRuntime: null,
-        compatibilityRuntimeEnabled: false,
-      });
-    });
-
-    it('should keep the canonical runtime selected when USE_AGENT_LOOP is enabled', () => {
-      setFeatureFlag('USE_AGENT_LOOP', true);
-
-      expect(isAgentLoopEnabled()).toBe(true);
-      expect(resolveSidebarRuntimePolicy()).toEqual({
-        canonicalRuntime: 'tpao',
-        selectedRuntime: 'tpao',
-        track: 'canonical',
-        compatibilityRuntime: 'fast',
-        compatibilityRuntimeEnabled: true,
       });
     });
 
@@ -265,36 +249,17 @@ describe('featureFlags', () => {
         canonicalRuntime: 'tpao',
         selectedRuntime: 'tpao',
         track: 'canonical',
-        compatibilityRuntime: null,
-        compatibilityRuntimeEnabled: false,
       });
     });
 
-    it('should disable the shipping sidebar instead of selecting the fast runtime', () => {
+    it('should select the disabled state when the agentic engine is disabled', () => {
       setFeatureFlag('USE_AGENTIC_ENGINE', false);
-      setFeatureFlag('USE_AGENT_LOOP', true);
-
-      expect(resolveSidebarRuntimePolicy()).toEqual({
-        canonicalRuntime: 'tpao',
-        selectedRuntime: 'disabled',
-        track: 'disabled',
-        compatibilityRuntime: 'fast',
-        compatibilityRuntimeEnabled: true,
-      });
-    });
-
-    it('should select the disabled state when both runtimes are disabled', () => {
-      setFeatureFlag('USE_AGENTIC_ENGINE', false);
-      setFeatureFlag('USE_AGENT_LOOP', false);
 
       expect(isAgenticEngineEnabled()).toBe(false);
-      expect(isAgentLoopEnabled()).toBe(false);
       expect(resolveSidebarRuntimePolicy()).toEqual({
         canonicalRuntime: 'tpao',
         selectedRuntime: 'disabled',
         track: 'disabled',
-        compatibilityRuntime: null,
-        compatibilityRuntimeEnabled: false,
       });
     });
   });
