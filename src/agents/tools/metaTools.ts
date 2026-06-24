@@ -20,6 +20,7 @@
 
 import { globalToolRegistry, type AgentContext, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
+import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { getAnalysisToolNames } from './analysisTools';
 import { getMediaAnalysisToolNames } from './mediaAnalysisTools';
 import { getAssetDiscoveryToolNames } from './assetDiscoveryTools';
@@ -976,8 +977,14 @@ export function unregisterMetaTools(): void {
 /** Pre-computed meta-tool names (static after module load). */
 const META_TOOL_NAMES: readonly string[] = META_TOOLS.map((t) => t.name);
 const LEGACY_META_TOOL_NAMES = new Set(['execute_plan']);
+
+/**
+ * Meta-tools gated behind feature flags. These remain registered for direct
+ * dispatch but must not be advertised to the LLM when their flag is off.
+ */
+const FLAG_GATED_META_TOOL_NAMES = new Set(['generate']);
 const VISIBLE_META_TOOL_NAMES: readonly string[] = META_TOOL_NAMES.filter(
-  (name) => !LEGACY_META_TOOL_NAMES.has(name),
+  (name) => !LEGACY_META_TOOL_NAMES.has(name) && !FLAG_GATED_META_TOOL_NAMES.has(name),
 );
 
 /**
@@ -989,9 +996,16 @@ export function getMetaToolNames(): readonly string[] {
 
 /**
  * Get the meta-tools that should be visible to the default runtime prompt
- * surface. Legacy compatibility tools remain registered but hidden.
+ * surface. Legacy compatibility tools remain registered but hidden. Speculative
+ * meta-tools (e.g. `generate`) are only advertised when their feature flag is on
+ * so the LLM does not see capabilities that are pinned off for release.
  */
 export function getVisibleMetaToolNames(): readonly string[] {
+  if (isVideoGenerationEnabled()) {
+    // `generate` is the only video-generation-gated meta-tool today; re-add it
+    // in flag-declaration order so the visible surface stays stable.
+    return META_TOOL_NAMES.filter((name) => !LEGACY_META_TOOL_NAMES.has(name));
+  }
   return VISIBLE_META_TOOL_NAMES;
 }
 
