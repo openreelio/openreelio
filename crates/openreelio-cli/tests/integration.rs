@@ -1140,6 +1140,64 @@ fn test_command_schema_exposes_backend_payload_surface() {
     assert!(commands.iter().any(|value| value == "RenameTrack"));
 }
 
+/// Drift guard: the `command schema` output is the only agent-facing surface for
+/// the canonical backend command list, and it must be derived from
+/// `CommandPayload::SUPPORTED_COMMAND_TYPES` rather than a hand-written copy.
+///
+/// This asserts exact parity in both directions so a new `CommandPayload`
+/// variant (or a removed one) can never silently diverge from the schema agents
+/// bootstrap against.
+#[test]
+fn test_command_schema_matches_canonical_supported_command_types() {
+    use openreelio_core::ipc::CommandPayload;
+
+    let result = run_cli_ok(&["command", "schema"]);
+    let schema_commands: Vec<&str> = result["commands"]
+        .as_array()
+        .expect("command schema must expose a commands array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("command schema entries should be strings")
+        })
+        .collect();
+
+    let canonical: Vec<&str> = CommandPayload::SUPPORTED_COMMAND_TYPES.to_vec();
+
+    let schema_set: HashSet<&str> = schema_commands.iter().copied().collect();
+    let canonical_set: HashSet<&str> = canonical.iter().copied().collect();
+
+    let missing_from_schema: Vec<&str> = canonical
+        .iter()
+        .filter(|c| !schema_set.contains(*c))
+        .copied()
+        .collect();
+    let unexpected_in_schema: Vec<&str> = schema_commands
+        .iter()
+        .filter(|c| !canonical_set.contains(*c))
+        .copied()
+        .collect();
+
+    assert!(
+        missing_from_schema.is_empty(),
+        "command schema is missing canonical command types: {missing_from_schema:?}"
+    );
+    assert!(
+        unexpected_in_schema.is_empty(),
+        "command schema exposes command types absent from SUPPORTED_COMMAND_TYPES: {unexpected_in_schema:?}"
+    );
+    assert_eq!(
+        schema_commands, canonical,
+        "command schema order must match SUPPORTED_COMMAND_TYPES"
+    );
+    assert_eq!(
+        result["count"].as_u64().unwrap() as usize,
+        canonical.len(),
+        "command schema count must equal SUPPORTED_COMMAND_TYPES length"
+    );
+}
+
 #[test]
 fn test_command_validate_uses_shared_payload_aliases() {
     let result = run_cli_ok(&[
