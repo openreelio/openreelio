@@ -87,6 +87,10 @@ export const TIMELINE_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
+        if (typeof args.trackId === 'string' && !getTrackById(args.trackId)) {
+          return { success: false, error: `Track '${args.trackId}' not found` };
+        }
+
         const result = findGaps(
           args.trackId as string | undefined,
           (args.minDuration as number | undefined) ?? 0,
@@ -121,6 +125,10 @@ export const TIMELINE_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
+        if (typeof args.trackId === 'string' && !getTrackById(args.trackId)) {
+          return { success: false, error: `Track '${args.trackId}' not found` };
+        }
+
         const result = findOverlaps(args.trackId as string | undefined);
 
         logger.debug('find_overlaps executed', { found: result.length });

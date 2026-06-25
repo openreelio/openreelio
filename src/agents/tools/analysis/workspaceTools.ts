@@ -14,6 +14,16 @@ import {
 
 const logger = createLogger('AnalysisTools');
 
+function parseWorkspaceKind(kind: unknown): 'video' | 'audio' | 'image' | undefined {
+  if (kind === undefined || kind === null) {
+    return undefined;
+  }
+  if (kind === 'video' || kind === 'audio' || kind === 'image') {
+    return kind;
+  }
+  throw new Error('kind must be one of: video, audio, image');
+}
+
 export const WORKSPACE_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   // Get Workspace Files
@@ -35,10 +45,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     },
     handler: async (args: Record<string, unknown>) => {
       try {
-        const kind = args.kind as string | undefined;
-        const validKinds = ['video', 'audio', 'image'];
-        const filterKind =
-          kind && validKinds.includes(kind) ? (kind as 'video' | 'audio' | 'image') : undefined;
+        const filterKind = parseWorkspaceKind(args.kind);
 
         const files = getWorkspaceFiles(filterKind);
         logger.debug('get_workspace_files executed', { count: files.length });
@@ -110,10 +117,7 @@ export const WORKSPACE_TOOLS: ToolDefinition[] = [
     },
     handler: async (args: Record<string, unknown>) => {
       try {
-        const kind = args.kind as string | undefined;
-        const validKinds = ['video', 'audio', 'image'];
-        const filterKind =
-          kind && validKinds.includes(kind) ? (kind as 'video' | 'audio' | 'image') : undefined;
+        const filterKind = parseWorkspaceKind(args.kind);
 
         const files = getUnregisteredWorkspaceFiles(filterKind);
         logger.debug('get_unregistered_files executed', { count: files.length });

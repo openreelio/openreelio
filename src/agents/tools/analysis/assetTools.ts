@@ -135,10 +135,16 @@ export const ASSET_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = findClipsByAsset(args.assetId as string);
+        const assetId = args.assetId as string;
+        const asset = getAssetSnapshotById(assetId);
+        if (!asset) {
+          return { success: false, error: `Asset '${assetId}' not found` };
+        }
+
+        const result = findClipsByAsset(assetId);
 
         logger.debug('find_clips_by_asset executed', {
-          assetId: args.assetId,
+          assetId,
           found: result.length,
         });
         return { success: true, result };

@@ -771,6 +771,26 @@ export function clampSelectRange(
   };
 }
 
+type SourceSelectSegment = {
+  index: number;
+  assetId: string;
+  assetName: string;
+  sectionType: SourceLibraryMatch['sectionType'];
+  score: number;
+  whyMatched: string[];
+  preview: string;
+  keyframePath: string | null;
+  onTimeline: boolean;
+  timelineClipCount: number;
+  rawScore: number;
+  rankingNotes: string[];
+  metadata: SourceLibraryMatch['metadata'];
+  sourceInSec: number;
+  sourceOutSec: number;
+  durationSec: number;
+  timelineStartSec: number;
+};
+
 export function buildSourceSelectSegments(
   matches: SourceLibraryMatch[],
   options: { paddingSec: number; gapSec: number },
@@ -779,15 +799,21 @@ export function buildSourceSelectSegments(
   const dedupedMatches = dedupeSourceLibraryMatches(matches, 0.25);
   let cursorSec = 0;
 
-  return dedupedMatches.map((match, index) => {
+  const selects: SourceSelectSegment[] = [];
+
+  for (const match of dedupedMatches) {
     const asset = assetCatalog.assets.find((entry) => entry.id === match.assetId);
     const clampedRange = clampSelectRange(
       asset?.durationSec,
       match.startSec - options.paddingSec,
       match.endSec + options.paddingSec,
     );
+    if (clampedRange.durationSec <= 0) {
+      continue;
+    }
+
     const select = {
-      index,
+      index: selects.length,
       assetId: match.assetId,
       assetName: match.assetName,
       sectionType: match.sectionType,
@@ -806,8 +832,10 @@ export function buildSourceSelectSegments(
       timelineStartSec: roundTo(cursorSec) ?? 0,
     };
     cursorSec += clampedRange.durationSec + options.gapSec;
-    return select;
-  });
+    selects.push(select);
+  }
+
+  return selects;
 }
 
 export function resolveSelectsSequence(sequenceId?: string) {

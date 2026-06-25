@@ -166,10 +166,32 @@ impl InsertMediaCommand {
         self.sub_commands.push(command);
         Ok(result)
     }
-}
 
-impl Command for InsertMediaCommand {
-    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+    /// Rolls back all successfully executed sub-commands after a composite
+    /// failure so callers never observe a partially applied InsertMedia command.
+    fn rollback_applied_sub_commands(&mut self, state: &mut ProjectState) -> CoreResult<()> {
+        let mut rollback_errors = Vec::new();
+        for command in self.sub_commands.iter().rev() {
+            if let Err(error) = command.undo(state) {
+                rollback_errors.push(error.to_string());
+            }
+        }
+
+        self.sub_commands.clear();
+        self.primary_clip_id = None;
+        self.linked_audio = None;
+
+        if rollback_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(CoreError::Internal(format!(
+                "InsertMedia rollback failed: {}",
+                rollback_errors.join("; ")
+            )))
+        }
+    }
+
+    fn execute_inner(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
         // --- Resolve asset + target metadata up front ---
         let asset = state
             .assets
@@ -298,6 +320,22 @@ impl Command for InsertMediaCommand {
         result.created_ids = aggregated_created;
         Ok(result)
     }
+}
+
+impl Command for InsertMediaCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        match self.execute_inner(state) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                if !self.sub_commands.is_empty() {
+                    if let Err(rollback_error) = self.rollback_applied_sub_commands(state) {
+                        return Err(CoreError::Internal(format!("{error}; {rollback_error}")));
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
 
     fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
         // Undo sub-commands in reverse execution order so the composite is
@@ -343,6 +381,21 @@ pub fn media_insert_source_range(
     source_in: Option<TimeSec>,
     source_out: Option<TimeSec>,
 ) -> CoreResult<(Option<(TimeSec, TimeSec)>, TimeSec)> {
+    fn validate_time(value: Option<TimeSec>, field_name: &str) -> CoreResult<()> {
+        if let Some(time) = value {
+            if !time.is_finite() || time < 0.0 {
+                return Err(CoreError::ValidationError(format!(
+                    "{field_name} must be a finite non-negative number"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    validate_time(asset_duration_sec, "asset duration")?;
+    validate_time(source_in, "sourceIn")?;
+    validate_time(source_out, "sourceOut")?;
+
     let has_explicit_range = source_in.is_some() || source_out.is_some();
     let source_start = source_in.unwrap_or(0.0);
 
@@ -467,4 +520,84 @@ pub fn default_audio_track_position(sequence: &Sequence) -> usize {
         .map(|(index, _)| index + 1)
         .next_back()
         .unwrap_or(sequence.tracks.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::assets::{Asset, VideoInfo};
+
+    fn project_with_video_asset() -> (ProjectState, SequenceId, TrackId, AssetId) {
+        let mut state = ProjectState::new("Insert Media Test");
+        let sequence_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state
+            .sequences
+            .get(&sequence_id)
+            .unwrap()
+            .tracks
+            .iter()
+            .find(|track| matches!(track.kind, TrackKind::Video))
+            .unwrap()
+            .id
+            .clone();
+
+        let asset =
+            Asset::new_video("clip.mp4", "/clip.mp4", VideoInfo::default()).with_duration(12.0);
+        let asset_id = asset.id.clone();
+        state.assets.insert(asset_id.clone(), asset);
+
+        (state, sequence_id, track_id, asset_id)
+    }
+
+    #[test]
+    fn media_insert_source_range_rejects_invalid_times() {
+        assert!(media_insert_source_range("asset", Some(f64::NAN), None, None).is_err());
+        assert!(media_insert_source_range("asset", Some(12.0), Some(-1.0), None).is_err());
+        assert!(
+            media_insert_source_range("asset", Some(12.0), Some(0.0), Some(f64::INFINITY)).is_err()
+        );
+    }
+
+    #[test]
+    fn rollback_applied_sub_commands_removes_successful_clip_insert() {
+        let (mut state, sequence_id, track_id, asset_id) = project_with_video_asset();
+        let mut command = InsertMediaCommand::new(&sequence_id, &track_id, &asset_id, 0.0);
+
+        let result = command
+            .run_sub_command(
+                Box::new(InsertClipCommand::new(
+                    &sequence_id,
+                    &track_id,
+                    &asset_id,
+                    0.0,
+                )),
+                &mut state,
+                "test clip insert",
+            )
+            .unwrap();
+        let created_clip_id = result.created_ids.first().unwrap().clone();
+
+        let track = state
+            .sequences
+            .get(&sequence_id)
+            .unwrap()
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .unwrap();
+        assert!(track.get_clip(&created_clip_id).is_some());
+
+        command.rollback_applied_sub_commands(&mut state).unwrap();
+
+        let track = state
+            .sequences
+            .get(&sequence_id)
+            .unwrap()
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .unwrap();
+        assert!(track.get_clip(&created_clip_id).is_none());
+        assert!(command.sub_commands.is_empty());
+    }
 }

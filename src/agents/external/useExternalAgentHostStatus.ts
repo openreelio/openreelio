@@ -54,11 +54,19 @@ export function useExternalAgentHostStatus(
 
     async function refresh(): Promise<void> {
       setLoading(true);
-      // Lazy-load the Codex adapter so its heavy tool definitions are not
-      // bundled into the main app when the external host is disabled.
-      const { CodexReferenceAdapter } = await import('./adapters/CodexReferenceAdapter');
-      const codexAdapter = new CodexReferenceAdapter(codexProbeRef.current);
+      if (!hostEnabled && !codexEnabled) {
+        if (!cancelled) {
+          setSummary(EMPTY_SUMMARY);
+          setLoading(false);
+        }
+        return;
+      }
+
       try {
+        // Lazy-load the Codex adapter so its heavy tool definitions are only
+        // fetched when an external runtime can be surfaced.
+        const { CodexReferenceAdapter } = await import('./adapters/CodexReferenceAdapter');
+        const codexAdapter = new CodexReferenceAdapter(codexProbeRef.current);
         const codexCapabilities = await codexAdapter.capabilities();
         const codexStatus =
           hostEnabled && codexEnabled
@@ -96,8 +104,8 @@ export function useExternalAgentHostStatus(
 
         const message = error instanceof Error ? error.message : String(error);
         const fallbackStatus: ExternalAgentRuntimeStatus = {
-          runtimeId: codexAdapter.id,
-          displayName: codexAdapter.displayName,
+          runtimeId: 'codex',
+          displayName: 'Codex',
           installStatus: 'unknown',
           authStatus: 'error',
           available: false,

@@ -733,6 +733,10 @@ describe('analysisTools', () => {
       const clipC = createClip({ id: 'clipC', assetId: 'asset_001' });
 
       setupStores({
+        assets: [
+          createAsset({ id: 'asset_001', name: 'primary.mp4', kind: 'video' }),
+          createAsset({ id: 'asset_002', name: 'cutaway.mp4', kind: 'video' }),
+        ],
         tracks: [
           createTrack({ id: 'V1', clips: [clipA, clipB] }),
           createTrack({ id: 'V2', clips: [clipC] }),
@@ -747,13 +751,26 @@ describe('analysisTools', () => {
     });
 
     it('should return empty array when no clips found', async () => {
+      setupStores({
+        assets: [createAsset({ id: 'unused_asset', name: 'unused.mp4', kind: 'video' })],
+        tracks: [createTrack({ id: 'V1' })],
+      });
+
+      const result = await globalToolRegistry.execute('find_clips_by_asset', {
+        assetId: 'unused_asset',
+      });
+      const clips = getToolResult<Array<{ id: string }>>(result);
+      expect(clips).toEqual([]);
+    });
+
+    it('should fail when the asset does not exist', async () => {
       setupStores({ tracks: [createTrack({ id: 'V1' })] });
 
       const result = await globalToolRegistry.execute('find_clips_by_asset', {
         assetId: 'nonexistent_asset',
       });
-      const clips = getToolResult<Array<{ id: string }>>(result);
-      expect(clips).toEqual([]);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Asset 'nonexistent_asset' not found");
     });
   });
 
@@ -1565,6 +1582,15 @@ describe('reference style transfer analysis tools', () => {
             },
           }),
         ],
+      });
+      useProjectStore.setState({
+        meta: {
+          id: 'project-memory',
+          name: 'Memory Project',
+          path: '/project-memory',
+          createdAt: '2026-01-01T00:00:00Z',
+          modifiedAt: '2026-01-01T00:00:00Z',
+        },
       });
 
       vi.mocked(invoke)

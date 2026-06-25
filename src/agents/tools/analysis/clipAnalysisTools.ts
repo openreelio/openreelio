@@ -86,13 +86,21 @@ function resolveClipPerceptionOptions(args: Record<string, unknown>): ClipPercep
 }
 
 function resolveSemanticEditAction(value: unknown): SemanticTemporalEditAction {
-  return value === 'highlight' ||
+  if (value === undefined || value === null || value === '') {
+    return 'blur';
+  }
+
+  if (
+    value === 'highlight' ||
     value === 'remove' ||
     value === 'marker' ||
     value === 'addText' ||
     value === 'blur'
-    ? value
-    : 'blur';
+  ) {
+    return value;
+  }
+
+  throw new Error('action must be one of: highlight, remove, marker, addText, blur');
 }
 
 function resolveSemanticEditPlanOptions(
@@ -133,30 +141,50 @@ function resolveTimelineClipTarget(args: Record<string, unknown>): {
     typeof args.sequenceId === 'string' && args.sequenceId.trim().length > 0
       ? args.sequenceId.trim()
       : selection.sequenceId;
+  const explicitSequenceId =
+    typeof args.sequenceId === 'string' && args.sequenceId.trim().length > 0
+      ? args.sequenceId.trim()
+      : null;
   const explicitClipId =
     typeof args.clipId === 'string' && args.clipId.trim().length > 0 ? args.clipId.trim() : null;
+  const explicitTrackId =
+    typeof args.trackId === 'string' && args.trackId.trim().length > 0 ? args.trackId.trim() : null;
+  const canUseActiveSelection = !explicitSequenceId || explicitSequenceId === selection.sequenceId;
   const clipId =
     explicitClipId ??
-    (selection.selectedClipIds.length === 1 ? selection.selectedClipIds[0] : null);
+    (canUseActiveSelection && selection.selectedClipIds.length === 1
+      ? selection.selectedClipIds[0]
+      : null);
+
+  if (explicitSequenceId && explicitSequenceId !== selection.sequenceId) {
+    if (!explicitClipId || !explicitTrackId) {
+      throw new Error(
+        'clipId and trackId are required when sequenceId does not match the active sequence',
+      );
+    }
+    return { sequenceId: explicitSequenceId, trackId: explicitTrackId, clipId: explicitClipId };
+  }
+
+  const resolvedClipId =
+    clipId ?? (selection.selectedClipIds.length === 1 ? selection.selectedClipIds[0] : null);
 
   if (!sequenceId) {
     throw new Error('sequenceId is required because there is no active sequence');
   }
-  if (!clipId) {
+  if (!resolvedClipId) {
     throw new Error('clipId is required unless exactly one timeline clip is selected');
   }
 
-  const clip = getClipById(clipId);
-  const trackId =
-    typeof args.trackId === 'string' && args.trackId.trim().length > 0
-      ? args.trackId.trim()
-      : clip?.trackId;
+  const clip = getClipById(resolvedClipId);
+  const trackId = explicitTrackId ?? clip?.trackId;
 
   if (!trackId) {
-    throw new Error(`trackId is required because clip '${clipId}' was not found in the snapshot`);
+    throw new Error(
+      `trackId is required because clip '${resolvedClipId}' was not found in the snapshot`,
+    );
   }
 
-  return { sequenceId, trackId, clipId };
+  return { sequenceId, trackId, clipId: resolvedClipId };
 }
 
 function resolveTimelineTimes(args: Record<string, unknown>): number[] {

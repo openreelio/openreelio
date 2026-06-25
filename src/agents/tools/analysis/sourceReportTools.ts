@@ -914,17 +914,6 @@ export const SOURCE_REPORT_TOOLS: ToolDefinition[] = [
           insertedClipCount: number;
         } | null = null;
 
-        await saveRetrievalMemoryEntries(
-          searchResult.query,
-          selects.map((select) => ({
-            assetId: select.assetId,
-            sectionType: select.sectionType,
-            index: select.index,
-            sourceInSec: select.sourceInSec,
-            sourceOutSec: select.sourceOutSec,
-          })),
-        );
-
         if (args.apply === true) {
           const { sequence } = resolveSelectsSequence(
             typeof args.sequenceId === 'string' ? args.sequenceId : undefined,
@@ -1024,6 +1013,17 @@ export const SOURCE_REPORT_TOOLS: ToolDefinition[] = [
             };
           }
         }
+
+        await saveRetrievalMemoryEntries(
+          searchResult.query,
+          selects.map((select) => ({
+            assetId: select.assetId,
+            sectionType: select.sectionType,
+            index: select.index,
+            sourceInSec: select.sourceInSec,
+            sourceOutSec: select.sourceOutSec,
+          })),
+        );
 
         return {
           success: true,

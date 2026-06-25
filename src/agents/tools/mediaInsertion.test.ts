@@ -65,12 +65,14 @@ describe('insertAgentMediaClip', () => {
   }
 
   beforeEach(() => {
-    executeCommand = vi.fn(async (): Promise<CommandResult> => ({
-      opId: 'op-insert-media',
-      changes: [],
-      createdIds: ['clip-video', 'clip-audio'],
-      deletedIds: [],
-    }));
+    executeCommand = vi.fn(
+      async (): Promise<CommandResult> => ({
+        opId: 'op-insert-media',
+        changes: [],
+        createdIds: ['clip-video', 'clip-audio'],
+        deletedIds: [],
+      }),
+    );
 
     useProjectStore.setState({
       isLoaded: true,
@@ -180,9 +182,7 @@ describe('insertAgentMediaClip', () => {
       createdIds: ['clip-video'],
       deletedIds: [],
     });
-    setProjectSequence([
-      createTrack('video-1', 'video', 'Video 1', [createClip('clip-video')]),
-    ]);
+    setProjectSequence([createTrack('video-1', 'video', 'Video 1', [createClip('clip-video')])]);
 
     const result = await insertAgentMediaClip({
       sequenceId: 'seq-1',
@@ -205,6 +205,38 @@ describe('insertAgentMediaClip', () => {
     ).rejects.toThrow('timelineStart must be a finite non-negative number');
 
     expect(executeCommand).not.toHaveBeenCalled();
+  });
+
+  it('should reject invalid explicit source ranges before dispatching any command', async () => {
+    await expect(
+      insertAgentMediaClip({
+        sequenceId: 'seq-1',
+        trackId: 'video-1',
+        assetId: 'asset-video',
+        timelineStart: 2,
+        sourceIn: -1,
+      }),
+    ).rejects.toThrow('sourceIn must be a finite non-negative number');
+
+    expect(executeCommand).not.toHaveBeenCalled();
+  });
+
+  it('should reject InsertMedia responses without a primary clip id', async () => {
+    executeCommand.mockResolvedValueOnce({
+      opId: 'op-insert-media',
+      changes: [],
+      createdIds: [],
+      deletedIds: [],
+    });
+
+    await expect(
+      insertAgentMediaClip({
+        sequenceId: 'seq-1',
+        trackId: 'video-1',
+        assetId: 'asset-video',
+        timelineStart: 2,
+      }),
+    ).rejects.toThrow('InsertMedia did not return a created clip id');
   });
 
   it('should propagate backend validation errors from the InsertMedia command', async () => {

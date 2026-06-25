@@ -418,7 +418,63 @@ export async function indexSourceReportChunks(report: SourceAnalysisReport): Pro
 
 export function getCurrentProjectId(): string | null {
   const meta = useProjectStore.getState().meta;
-  return meta?.id ?? meta?.path ?? 'current-project';
+  return meta?.id ?? meta?.path ?? null;
+}
+
+const SOURCE_ANALYSIS_SECTIONS: ReadonlySet<string> = new Set([
+  'moments',
+  'chapters',
+  'highlights',
+  'speakerTurns',
+  'visual',
+]);
+
+function parseRetrievalMemoryEntry(value: string, key?: string): RetrievalMemoryEntry | null {
+  try {
+    const parsed = JSON.parse(value) as Partial<RetrievalMemoryEntry>;
+    const [, keySectionType, keySectionIndex] = key?.match(/^[^:]+:([^:]+):(\d+)$/) ?? [];
+    const sectionType =
+      typeof parsed.sectionType === 'string' ? parsed.sectionType : keySectionType;
+    const sectionIndex =
+      typeof parsed.sectionIndex === 'number'
+        ? parsed.sectionIndex
+        : keySectionIndex !== undefined
+          ? Number(keySectionIndex)
+          : NaN;
+    const selectedAt = typeof parsed.selectedAt === 'string' ? parsed.selectedAt : null;
+    const selectedAtMs = selectedAt ? Date.parse(selectedAt) : NaN;
+
+    if (
+      typeof parsed.assetId !== 'string' ||
+      typeof sectionType !== 'string' ||
+      !SOURCE_ANALYSIS_SECTIONS.has(sectionType) ||
+      typeof parsed.startSec !== 'number' ||
+      typeof parsed.endSec !== 'number' ||
+      typeof parsed.query !== 'string' ||
+      selectedAt === null ||
+      !Number.isInteger(sectionIndex) ||
+      sectionIndex < 0 ||
+      !Number.isFinite(parsed.startSec) ||
+      !Number.isFinite(parsed.endSec) ||
+      parsed.startSec < 0 ||
+      parsed.endSec <= parsed.startSec ||
+      !Number.isFinite(selectedAtMs)
+    ) {
+      return null;
+    }
+
+    return {
+      assetId: parsed.assetId,
+      sectionType: sectionType as SourceAnalysisSection,
+      sectionIndex,
+      startSec: parsed.startSec,
+      endSec: parsed.endSec,
+      query: parsed.query,
+      selectedAt,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function loadRetrievalMemoryEntries(): Promise<RetrievalMemoryEntry[]> {
@@ -437,13 +493,7 @@ export async function loadRetrievalMemoryEntries(): Promise<RetrievalMemoryEntry
     );
 
     return entries
-      .map((entry) => {
-        try {
-          return JSON.parse(entry.value) as RetrievalMemoryEntry;
-        } catch {
-          return null;
-        }
-      })
+      .map((entry) => parseRetrievalMemoryEntry(entry.value, entry.key))
       .filter((entry): entry is RetrievalMemoryEntry => entry !== null);
   } catch (error) {
     logger.warn('Failed to load retrieval memory', {

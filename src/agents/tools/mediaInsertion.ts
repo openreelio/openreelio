@@ -30,8 +30,14 @@ export interface AgentMediaInsertResult {
   };
 }
 
-function finiteNonNegative(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+function optionalFiniteNonNegative(value: unknown, fieldName: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${fieldName} must be a finite non-negative number.`);
+  }
+  return value;
 }
 
 /**
@@ -86,8 +92,8 @@ export async function insertAgentMediaClip(
     trackId: options.trackId,
     assetId: options.assetId,
     timelineStart: options.timelineStart,
-    sourceIn: finiteNonNegative(options.sourceIn),
-    sourceOut: finiteNonNegative(options.sourceOut),
+    sourceIn: optionalFiniteNonNegative(options.sourceIn, 'sourceIn'),
+    sourceOut: optionalFiniteNonNegative(options.sourceOut, 'sourceOut'),
     audioOnly: options.audioOnly === true,
     autoExtractLinkedAudio: options.autoExtractLinkedAudio !== false,
   });
