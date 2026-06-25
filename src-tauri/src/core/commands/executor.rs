@@ -1086,7 +1086,7 @@ impl CommandExecutor {
         if let Some((audio_track, audio_clip, link_group_id)) = linked_audio {
             let audio_track_id = audio_track.id.clone();
             let audio_clip_id = audio_clip.id.clone();
-            let created_track = result.created_ids.iter().any(|id| *id == audio_track_id);
+            let created_track = result.created_ids.contains(&audio_track_id);
 
             // When a linked audio track was created, replay it before the clip.
             if created_track {
