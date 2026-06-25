@@ -2800,6 +2800,107 @@ needsConfirmation: boolean | null;
  */
 intent: AIIntentDto | null }
 export type AISettingsDto = { assistantRuntime?: AssistantRuntimeDto; codexModel?: string; codexReasoningEffort?: CodexReasoningEffortDto; primaryProvider: ProviderTypeDto; primaryModel: string; visionProvider: ProviderTypeDto | null; visionModel: string | null; openaiApiKey: string | null; anthropicApiKey: string | null; googleApiKey: string | null; ollamaUrl: string | null; temperature: number; maxTokens: number; frameExtractionRate: number; monthlyBudgetCents: number | null; perRequestLimitCents: number; currentMonthUsageCents: number; currentUsageMonth: number | null; autoAnalyzeOnImport: boolean; autoCaptionOnImport: boolean; proposalReviewMode: ProposalReviewModeDto; cacheDurationHours: number; localOnlyMode: boolean; seedanceApiKey?: string | null; videoGenProvider?: string | null; videoGenDefaultQuality?: string; videoGenBudgetCents?: number | null; videoGenPerRequestLimitCents?: number }
+export type AddAudioKeyframePayload = { sequenceId: string; trackId: string; clipId: string; timeOffset: number; valueDb: number; interpolation?: KeyframeInterpolation }
+/**
+ * Payload for adding an effect to a clip.
+ */
+export type AddEffectPayload = { sequenceId: string; trackId: string; clipId: string; effectType: EffectType; params?: { [key in string]: ParamValue }; keyframes?: { [key in string]: Keyframe[] }; 
+/**
+ * Optional position in the effect list (None = append at end)
+ */
+position: number | null }
+export type AddMarkerPayload = { sequenceId: string; timeSec: number; label: string; color?: Color | null; markerType?: MarkerType | null }
+/**
+ * Payload for adding a mask to an effect.
+ * 
+ * Masks enable selective effect application through shape-based regions.
+ * 
+ * # Example
+ * 
+ * ```json
+ * {
+ * "sequenceId": "seq_001",
+ * "trackId": "video_001",
+ * "clipId": "clip_001",
+ * "effectId": "eff_001",
+ * "shape": {
+ * "type": "rectangle",
+ * "x": 0.5,
+ * "y": 0.5,
+ * "width": 0.5,
+ * "height": 0.5,
+ * "cornerRadius": 0.0,
+ * "rotation": 0.0
+ * },
+ * "name": "Vignette Mask",
+ * "feather": 0.1,
+ * "inverted": false
+ * }
+ * ```
+ */
+export type AddMaskPayload = { sequenceId: string; trackId: string; clipId: string; effectId: string; 
+/**
+ * Mask shape (rectangle, ellipse, polygon, or bezier)
+ */
+shape: MaskShape; 
+/**
+ * Optional mask name
+ */
+name?: string | null; 
+/**
+ * Feather amount (0.0-1.0 for edge softness)
+ */
+feather?: number; 
+/**
+ * Whether the mask is inverted
+ */
+inverted?: boolean; 
+/**
+ * Optional shape animation keyframes, commonly generated from tracking data
+ */
+keyframes?: MaskKeyframe[]; 
+/**
+ * Optional tracking effect/source ID that generated the keyframes
+ */
+trackingSourceId?: string | null }
+/**
+ * Payload for adding a text clip to a track.
+ * 
+ * Creates a new clip with a virtual text asset and applies a TextOverlay
+ * effect containing the text styling data.
+ * 
+ * # Example
+ * 
+ * ```json
+ * {
+ * "sequenceId": "seq_001",
+ * "trackId": "video_001",
+ * "timelineIn": 5.0,
+ * "duration": 3.0,
+ * "textData": {
+ * "content": "Hello World",
+ * "style": {
+ * "fontFamily": "Arial",
+ * "fontSize": 48,
+ * "color": "#FFFFFF"
+ * }
+ * }
+ * }
+ * ```
+ */
+export type AddTextClipPayload = { sequenceId: string; trackId: string; 
+/**
+ * Timeline position to insert the text clip at (seconds)
+ */
+timelineIn: number; 
+/**
+ * Duration of the text clip (seconds)
+ */
+duration: number; 
+/**
+ * Text content and styling data
+ */
+textData: TextClipData }
 /**
  * A plan produced by the AI planner, consisting of ordered steps
  * to be executed atomically with rollback support.
@@ -3185,6 +3286,7 @@ export type AppearanceSettingsDto = { theme: string; accentColor: string; uiScal
  * Payload for the audio ducking IPC command.
  */
 export type ApplyAudioDuckingArgs = { sequenceId: string; speechTrackId: string; musicTrackId: string; musicClipId: string; params: AudioDuckingParams }
+export type ApplyAudioDuckingPayload = { sequenceId: string; trackId: string; clipId: string; keyframes: AudioKeyframe[] }
 /**
  * Result of applying an EditScript.
  */
@@ -3388,6 +3490,34 @@ duration: number | null;
  */
 tags: string[] }
 export type AssistantRuntimeDto = "api" | "codex"
+/**
+ * Flags indicating which attributes to paste from the clipboard.
+ */
+export type AttributeSelection = { 
+/**
+ * Indices of effects in the source list to paste (empty = no effects)
+ */
+effectIndices?: number[]; 
+/**
+ * Whether to paste transform (position, scale, rotation)
+ */
+transform?: boolean; 
+/**
+ * Whether to paste opacity
+ */
+opacity?: boolean; 
+/**
+ * Whether to paste blend mode
+ */
+blendMode?: boolean; 
+/**
+ * Whether to paste speed/reverse
+ */
+speed?: boolean; 
+/**
+ * Whether to paste audio settings (volume, pan, fades)
+ */
+audioSettings?: boolean }
 /**
  * Audio codec selection
  */
@@ -3639,6 +3769,34 @@ totalItems: number;
  */
 status: string }
 /**
+ * Bezier curve mask shape
+ */
+export type BezierMask = { 
+/**
+ * Bezier control points
+ */
+points: BezierPoint[]; 
+/**
+ * Whether the path is closed
+ */
+closed?: boolean }
+/**
+ * Bezier control point for curve masks
+ */
+export type BezierPoint = { 
+/**
+ * Anchor point
+ */
+anchor: Point2D; 
+/**
+ * Control point for incoming tangent (relative to anchor)
+ */
+handleIn?: Point2D | null; 
+/**
+ * Control point for outgoing tangent (relative to anchor)
+ */
+handleOut?: Point2D | null }
+/**
  * Blend mode for video tracks and clips
  */
 export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "add" | "subtract" | "darken" | "lighten" | "colorBurn" | "colorDodge" | "linearBurn" | "linearDodge" | "softLight" | "hardLight" | "vividLight" | "linearLight" | "pinLight" | "difference" | "exclusion"
@@ -3830,6 +3988,7 @@ sequenceId: string;
  * Whether the operation succeeded
  */
 cleared: boolean }
+export type ClearTimeRemapPayload = { sequenceId: string; trackId: string; clipId: string }
 /**
  * Clip (media segment on timeline)
  */
@@ -3926,6 +4085,10 @@ export type ClipAnalysisQualityStatus = "ready" | "partial" | "insufficient"
 export type ClipAnalysisResponse = { source: ClipAnalysisBundleSource; bundle: ClipAnalysisBundle }
 export type ClipAnalysisWindow = { windowId: string; timelineStartSec: number; timelineEndSec: number; sourceStartSec: number; sourceEndSec: number; sampleIds: string[] }
 /**
+ * Serialized clip attributes for paste operations.
+ */
+export type ClipAttributeValues = { transform?: JsonValue | null; opacity?: number | null; blendMode?: JsonValue | null; speed?: number | null; reverse?: boolean | null; audio?: JsonValue | null }
+/**
  * Clip event payload.
  */
 export type ClipEvent = { 
@@ -3975,9 +4138,29 @@ sourceInSec: number;
  * End time within source (seconds)
  */
 sourceOutSec: number }
+/**
+ * Clip reference: a (trackId, clipId) pair used in multi-clip commands.
+ */
+export type ClipRef = { trackId: string; clipId: string }
 export type ClipSamplePolicy = { mode: ClipAnalysisMode; targetIntervalSec: number; maxSamples: number; includeEdges: boolean; requestedTimelineStartSec: number; requestedTimelineEndSec: number; effectiveTimelineStartSec: number; effectiveTimelineEndSec: number }
 export type ClipSemanticCoverage = "semantic" | "sourceReuse" | "localFallback" | "missing"
 export type ClipSemanticObservation = { sampleId: string; timelineSec: number; sourceSec: number; frameIndex?: number | null; imagePath: string; description: string; subjects?: string[]; actions?: string[]; visibleText?: string[]; objects?: string[]; setting?: string | null; editUsefulness?: string | null; confidence: number; evidenceSource: ClipPerceptionEvidenceSource; provider: PerceptionProviderMetadata }
+/**
+ * Payload for Close All Gaps (remove all gaps on a track).
+ */
+export type CloseAllGapsPayload = { sequenceId: string; trackId: string }
+/**
+ * Payload for Close Gap (close a specific gap by shifting downstream clips).
+ */
+export type CloseGapPayload = { sequenceId: string; trackId: string; 
+/**
+ * Start of the gap to close.
+ */
+gapStart: number; 
+/**
+ * End of the gap to close.
+ */
+gapEnd: number }
 export type CodexAgentLoginResult = { success: boolean; authStatus: string; message: string | null }
 export type CodexAgentLogoutResult = { success: boolean; authStatus: string; message: string | null }
 export type CodexAppServerSessionInput = { serverId: string }
@@ -4036,6 +4219,7 @@ temperatureShift: number }
  * RGBA color in straight alpha byte space.
  */
 export type ColorRgba = { r: number; g: number; b: number; a: number }
+export type CommandPayload = { commandType: "insertClip"; payload: InsertClipPayload } | { commandType: "insertMedia"; payload: InsertMediaPayload } | { commandType: "insertEdit"; payload: InsertEditPayload } | { commandType: "overwriteEdit"; payload: OverwriteEditPayload } | { commandType: "rippleDelete"; payload: RippleDeletePayload } | { commandType: "lift"; payload: LiftPayload } | { commandType: "extractEdit"; payload: ExtractEditPayload } | { commandType: "closeGap"; payload: CloseGapPayload } | { commandType: "closeAllGaps"; payload: CloseAllGapsPayload } | { commandType: "removeClip"; payload: RemoveClipPayload } | { commandType: "moveClip"; payload: MoveClipPayload } | { commandType: "trimClip"; payload: TrimClipPayload } | { commandType: "splitClip"; payload: SplitClipPayload } | { commandType: "setClipTransform"; payload: SetClipTransformPayload } | { commandType: "setClipMotionKeyframes"; payload: SetClipMotionKeyframesPayload } | { commandType: "setClipOpacity"; payload: SetClipOpacityPayload } | { commandType: "setClipSpeed"; payload: SetClipSpeedPayload } | { commandType: "setClipSlowMotionInterpolation"; payload: SetClipSlowMotionInterpolationPayload } | { commandType: "reverseClip"; payload: ReverseClipPayload } | { commandType: "setClipEnabled"; payload: SetClipEnabledPayload } | { commandType: "linkClips"; payload: LinkClipsPayload } | { commandType: "unlinkClips"; payload: UnlinkClipsPayload } | { commandType: "groupClips"; payload: GroupClipsPayload } | { commandType: "ungroupClips"; payload: UngroupClipsPayload } | { commandType: "detachAudio"; payload: DetachAudioPayload } | { commandType: "createFreezeFrame"; payload: CreateFreezeFramePayload } | { commandType: "setTimeRemap"; payload: SetTimeRemapPayload } | { commandType: "clearTimeRemap"; payload: ClearTimeRemapPayload } | { commandType: "setClipMute"; payload: SetClipMutePayload } | { commandType: "setClipAudio"; payload: SetClipAudioPayload } | { commandType: "addAudioKeyframe"; payload: AddAudioKeyframePayload } | { commandType: "removeAudioKeyframe"; payload: RemoveAudioKeyframePayload } | { commandType: "moveAudioKeyframe"; payload: MoveAudioKeyframePayload } | { commandType: "setAudioKeyframeValue"; payload: SetAudioKeyframeValuePayload } | { commandType: "setAudioFadeIn"; payload: SetAudioFadeInPayload } | { commandType: "setAudioFadeOut"; payload: SetAudioFadeOutPayload } | { commandType: "setTrackBlendMode"; payload: SetTrackBlendModePayload } | { commandType: "setClipBlendMode"; payload: SetClipBlendModePayload } | { commandType: "importAsset"; payload: ImportAssetPayload } | { commandType: "removeAsset"; payload: RemoveAssetPayload } | { commandType: "updateAsset"; payload: UpdateAssetPayload } | { commandType: "createSequence"; payload: CreateSequencePayload } | { commandType: "setMasterVolume"; payload: SetMasterVolumePayload } | { commandType: "updateSequenceHdrSettings"; payload: UpdateSequenceHdrSettingsPayload } | { commandType: "createTrack"; payload: CreateTrackPayload } | { commandType: "removeTrack"; payload: RemoveTrackPayload } | { commandType: "renameTrack"; payload: RenameTrackPayload } | { commandType: "setCaptionTrackLanguage"; payload: SetCaptionTrackLanguagePayload } | { commandType: "reorderTracks"; payload: ReorderTracksPayload } | { commandType: "setTrackVolume"; payload: SetTrackVolumePayload } | { commandType: "toggleTrackMute"; payload: ToggleTrackMutePayload } | { commandType: "toggleTrackLock"; payload: ToggleTrackLockPayload } | { commandType: "toggleTrackVisibility"; payload: ToggleTrackVisibilityPayload } | { commandType: "addMarker"; payload: AddMarkerPayload } | { commandType: "removeMarker"; payload: RemoveMarkerPayload } | { commandType: "createCaption"; payload: CreateCaptionPayload } | { commandType: "importGeneratedCaptions"; payload: ImportGeneratedCaptionsPayload } | { commandType: "deleteCaption"; payload: DeleteCaptionPayload } | { commandType: "updateCaption"; payload: UpdateCaptionPayload } | { commandType: "addEffect"; payload: AddEffectPayload } | { commandType: "removeEffect"; payload: RemoveEffectPayload } | { commandType: "updateEffect"; payload: UpdateEffectPayload } | { commandType: "addMask"; payload: AddMaskPayload } | { commandType: "updateMask"; payload: UpdateMaskPayload } | { commandType: "removeMask"; payload: RemoveMaskPayload } | { commandType: "addTextClip"; payload: AddTextClipPayload } | { commandType: "updateTextClip"; payload: UpdateTextClipPayload } | { commandType: "removeTextClip"; payload: RemoveTextClipPayload } | { commandType: "createFolder"; payload: CreateFolderPayload } | { commandType: "renameFile"; payload: RenameFilePayload } | { commandType: "moveFile"; payload: MoveFilePayload } | { commandType: "deleteFile"; payload: DeleteFilePayload } | { commandType: "applyAudioDucking"; payload: ApplyAudioDuckingPayload } | { commandType: "createCompoundClip"; payload: CreateCompoundClipPayload } | { commandType: "unnestCompoundClip"; payload: UnnestCompoundClipPayload } | { commandType: "createAdjustmentLayer"; payload: CreateAdjustmentLayerPayload } | { commandType: "pasteEffects"; payload: PasteEffectsPayload } | { commandType: "pasteAttributes"; payload: PasteAttributesPayload } | { commandType: "removeAttributes"; payload: RemoveAttributesPayload }
 /**
  * Result of executing an edit command.
  */
@@ -4239,23 +4423,30 @@ breakdown: CostBreakdownItem[] }
  * Arguments for creating an adjustment layer.
  */
 export type CreateAdjustmentLayerArgs = { sequenceId: string; trackId: string; position: number; duration: number; name: string | null }
+export type CreateAdjustmentLayerPayload = { sequenceId: string; trackId: string; position: number; duration: number; name: string | null }
 /**
  * Input payload for creating an agent session kernel row.
  */
 export type CreateAgentSessionInputDto = { projectId: string; sequenceId: string | null; title: string | null; runtimeKind: string | null; agentProfileId: string | null; sessionMode: string | null; parentSessionId: string | null; branchFromSessionId: string | null; rootSessionId: string | null; modelProvider: string | null; modelId: string | null; id: string | null }
+export type CreateCaptionPayload = { sequenceId: string; trackId: string; text: string; startSec: number; endSec: number; style: JsonValue | null; position: JsonValue | null }
 /**
  * Arguments for creating a compound clip from selected clips.
  */
 export type CreateCompoundClipArgs = { sequenceId: string; trackId: string; clipIds: string[]; name: string | null }
+export type CreateCompoundClipPayload = { sequenceId: string; trackId: string; clipIds: string[]; name: string | null }
 /**
  * Input payload for creating a delegation record.
  */
 export type CreateDelegationRecordInput = { id: string | null; parentSessionId: string; childSessionId: string; parentRunId: string; agentProfileId: string; delegatedGoal: string; contextPacketJson: string; allowedToolsDeltaJson: string | null; permissionSnapshotJson: string | null; status: string | null; mergeStatus: string | null; summaryMessageId: string | null; resultJson: string | null; errorMessage: string | null; completedAt: number | null }
 export type CreateExternalAgentApprovalTokenInput = { sessionId: string; runId: string | null; planId: string | null; projectId: string; runtimeId: string; scopes: string[]; ttlMs: number | null }
+export type CreateFolderPayload = { relativePath: string }
+export type CreateFreezeFramePayload = { sequenceId: string; trackId: string; clipId: string; playheadSec: number; durationSec?: number }
 /**
  * Input payload for creating a resume checkpoint.
  */
 export type CreateResumeCheckpointInput = { id: string | null; sessionId: string; runId: string | null; checkpointKind: string; status: string | null; resumeCursorJson: string; sessionStateJson: string; pendingWorkJson: string | null; createdAt: number | null }
+export type CreateSequencePayload = { name: string; format: string | null }
+export type CreateTrackPayload = { sequenceId: string; kind: TrackKind; name: string; position: number | null }
 /**
  * Status of credentials for each provider
  */
@@ -4264,6 +4455,8 @@ export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google:
  * Persisted delegation DTO aligned with the frontend session kernel vocabulary.
  */
 export type DelegationRecordDto = { id: string; parentSessionId: string; childSessionId: string; parentRunId: string; agentProfileId: string; delegatedGoal: string; contextPacketJson: string; allowedToolsDeltaJson: string | null; permissionSnapshotJson: string | null; status: string; mergeStatus: string; summaryMessageId: string | null; resultJson: string | null; errorMessage: string | null; createdAt: number; updatedAt: number; completedAt: number | null }
+export type DeleteCaptionPayload = { sequenceId: string; trackId: string; captionId: string }
+export type DeleteFilePayload = { relativePath: string }
 /**
  * Arguments for deleting a transcript time range from a clip.
  */
@@ -4288,6 +4481,7 @@ startSec: number;
  * End time in source-relative seconds
  */
 endSec: number }
+export type DetachAudioPayload = { sequenceId: string; trackId: string; clipId: string; targetAudioTrackId?: string | null }
 /**
  * Arguments for detecting filler words in a transcript.
  */
@@ -4358,6 +4552,10 @@ distance: number;
  * Full warping path for visualization/debugging (same as alignment)
  */
 path: ([number, number])[] }
+/**
+ * Easing function for keyframe interpolation
+ */
+export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out" | "cubic_bezier" | "step" | "hold"
 /**
  * Edit action from AI
  */
@@ -4485,6 +4683,34 @@ cameraPatterns: FrameAnalysis[] }
 export type EditorSettingsDto = { defaultTimelineZoom: number; snapToGrid: boolean; snapTolerance: number; showClipThumbnails: boolean; showAudioWaveforms: boolean; rippleEditDefault: boolean; favoriteEffects: string[] }
 export type EffectCapabilityDto = { effectType: string; preview: string; export: string; renderCache: string; ffmpegFilter: string | null; exportReason: string | null; previewReason: string | null }
 /**
+ * Predefined effect types
+ */
+export type EffectType = "brightness" | "contrast" | "saturation" | "hue" | "color_balance" | "color_wheels" | "gamma" | "levels" | "curves" | "temperature_tint" | "lut" | "crop" | "flip" | "mirror" | "rotate" | "gaussian_blur" | "box_blur" | "motion_blur" | "radial_blur" | "sharpen" | "unsharp_mask" | "vignette" | "glow" | "film_grain" | "chromatic_aberration" | "noise" | "pixelate" | "posterize" | "cross_dissolve" | "fade" | "wipe" | "slide" | "zoom" | "volume" | "gain" | "eq_band" | "compressor" | "limiter" | "noise_reduction" | "reverb" | "delay" | "text_overlay" | "subtitle" | "chroma_key" | "luma_key" | "blend_mode" | "opacity" | "hsl_qualifier" | "loudness_normalize" | "stabilize" | "background_removal" | "auto_reframe" | "face_blur" | "object_tracking" | { custom: string }
+/**
+ * Ellipse mask shape
+ */
+export type EllipseMask = { 
+/**
+ * Center X (normalized 0.0-1.0)
+ */
+x: number; 
+/**
+ * Center Y (normalized 0.0-1.0)
+ */
+y: number; 
+/**
+ * Horizontal radius (normalized)
+ */
+radiusX: number; 
+/**
+ * Vertical radius (normalized)
+ */
+radiusY: number; 
+/**
+ * Rotation in degrees
+ */
+rotation?: number }
+/**
  * Summary information for listing ESDs without loading full documents
  */
 export type EsdSummary = { 
@@ -4559,6 +4785,18 @@ export type ExternalWorkspaceImportResultDto = { importedFiles: ExternalWorkspac
  * A file imported into the workspace from an external OS file drop.
  */
 export type ExternalWorkspaceImportedFileDto = { sourcePath: string; relativePath: string; name: string; kind: AssetKind; fileSize: number; assetId: string | null; alreadyInWorkspace: boolean }
+/**
+ * Payload for Extract Edit (remove In/Out range + close gap).
+ */
+export type ExtractEditPayload = { sequenceId: string; trackId: string; 
+/**
+ * In point (start of extraction range).
+ */
+inPoint: number; 
+/**
+ * Out point (end of extraction range).
+ */
+outPoint: number }
 /**
  * FFmpeg availability and version information.
  */
@@ -4788,6 +5026,7 @@ end: number;
  */
 duration: number }
 export type GeneralSettingsDto = { language: string; showWelcomeOnStartup: boolean; hasCompletedSetup: boolean; recentProjectsLimit: number; checkUpdatesOnStartup: boolean; defaultProjectLocation: string | null }
+export type GeneratedCaptionSegmentPayload = { startSec: number; endSec: number; text: string; confidence: number | null; speaker: string | null; language: string | null }
 /**
  * Response for get_annotation command
  */
@@ -4852,6 +5091,39 @@ hasEncode: boolean; hasDecode: boolean;
  * Whether this is the primary/active device
  */
 isPrimary: boolean }
+/**
+ * Gradient mask shape for soft power windows
+ * 
+ * Creates a smooth alpha transition between fully opaque and fully transparent.
+ * For linear gradients: alpha varies along the perpendicular to the start→end line.
+ * For radial gradients: alpha varies with distance from the start point.
+ */
+export type GradientMask = { 
+/**
+ * Start point of the gradient (normalized 0.0-1.0)
+ */
+start: Point2D; 
+/**
+ * End point of the gradient (normalized 0.0-1.0)
+ */
+end: Point2D; 
+/**
+ * Gradient type (linear or radial)
+ */
+gradientType?: GradientType }
+/**
+ * Gradient type for gradient masks
+ */
+export type GradientType = 
+/**
+ * Linear gradient along a line between start and end points
+ */
+"linear" | 
+/**
+ * Radial gradient emanating from start point with radius to end point
+ */
+"radial"
+export type GroupClipsPayload = { sequenceId: string; clipRefs: ClipRef[] }
 /**
  * Hardware encoder backend
  */
@@ -4990,6 +5262,67 @@ undoCount: number;
  * Number of operations in redo stack
  */
 redoCount: number }
+export type ImportAssetPayload = { name: string; uri: string }
+export type ImportGeneratedCaptionsPayload = { sequenceId: string; trackId: string; segments: GeneratedCaptionSegmentPayload[]; style: JsonValue | null; position: JsonValue | null; replaceExisting?: boolean }
+export type InsertClipPayload = { sequenceId: string; trackId: string; assetId: string; 
+/**
+ * Timeline position to insert at.
+ * 
+ * Accepts both `timelineStart` and legacy `timelineIn`.
+ */
+timelineStart: number; 
+/**
+ * Optional source start time for partial-range inserts.
+ */
+sourceIn: number | null; 
+/**
+ * Optional source end time for partial-range inserts.
+ */
+sourceOut: number | null }
+/**
+ * Payload for Insert Edit (ripple insert — pushes downstream clips).
+ */
+export type InsertEditPayload = { sequenceId: string; trackId: string; assetId: string; 
+/**
+ * Playhead / timeline position to insert at.
+ */
+timelinePosition: number; 
+/**
+ * Optional source start time for partial-range inserts.
+ */
+sourceIn: number | null; 
+/**
+ * Optional source end time for partial-range inserts.
+ */
+sourceOut: number | null }
+/**
+ * Payload for Insert Media (drag-and-drop parity composite insert).
+ * 
+ * Inserts a primary clip and, for video assets that carry audio, also creates
+ * or reuses an audio track, inserts a linked audio clip, links the two clips,
+ * and mutes the video clip. The whole composite is a single undoable unit.
+ */
+export type InsertMediaPayload = { sequenceId: string; trackId: string; assetId: string; 
+/**
+ * Timeline position to insert at.
+ */
+timelineStart: number; 
+/**
+ * Optional source start time for partial-range inserts.
+ */
+sourceIn: number | null; 
+/**
+ * Optional source end time for partial-range inserts.
+ */
+sourceOut: number | null; 
+/**
+ * Place a video asset on an audio track intentionally (no preview clip).
+ */
+audioOnly?: boolean; 
+/**
+ * Auto-extract a linked audio clip for video assets that have audio.
+ */
+autoExtractLinkedAudio?: boolean }
 /**
  * Result of an interchange format export operation
  */
@@ -5124,6 +5457,22 @@ export type JobStatusDto =
 { type: "cancelled" }
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue }
 /**
+ * A keyframe for parameter animation
+ */
+export type Keyframe = { 
+/**
+ * Time offset from effect start (seconds)
+ */
+timeOffset: number;
+/**
+ * Parameter value at this keyframe
+ */
+value: ParamValue; 
+/**
+ * Easing to next keyframe
+ */
+easing?: Easing }
+/**
  * Interpolation method for time remap keyframes.
  */
 export type KeyframeInterpolation = 
@@ -5220,6 +5569,15 @@ export type LicenseSource = "user" | "stockProvider" | "generated" | "plugin"
  */
 export type LicenseType = "royalty_free" | "cc_0" | "cc_by" | "cc_by_sa" | "editorial" | "custom" | "unknown"
 /**
+ * Payload for Lift (remove clips, leave gaps).
+ */
+export type LiftPayload = { sequenceId: string; trackId: string; 
+/**
+ * One or more clip IDs to remove.
+ */
+clipIds: string[] }
+export type LinkClipsPayload = { sequenceId: string; clipRefs: ClipRef[] }
+/**
  * Timeline marker
  */
 export type Marker = { id: string; timeSec: number; label: string; color: Color; markerType: MarkerType }
@@ -5227,6 +5585,69 @@ export type Marker = { id: string; timeSec: number; label: string; color: Color;
  * Marker type enumeration
  */
 export type MarkerType = "generic" | "chapter" | "hook" | "cta" | "todo"
+/**
+ * Blend mode for mask edges
+ */
+export type MaskBlendMode = 
+/**
+ * Add to existing mask
+ */
+"add" | 
+/**
+ * Subtract from existing mask
+ */
+"subtract" | 
+/**
+ * Intersect with existing mask
+ */
+"intersect" | 
+/**
+ * Difference with existing mask
+ */
+"difference"
+/**
+ * A keyframe for mask shape animation.
+ * 
+ * Stores a complete mask shape snapshot at a point in time, enabling
+ * smooth interpolation between shapes across the clip duration.
+ */
+export type MaskKeyframe = { 
+/**
+ * Time offset from clip start (seconds)
+ */
+timeOffset: number;
+/**
+ * Complete mask shape at this keyframe
+ */
+shape: MaskShape; 
+/**
+ * Easing function to next keyframe
+ */
+easing?: Easing }
+/**
+ * Mask shape types
+ */
+export type MaskShape = 
+/**
+ * Rectangle mask
+ */
+({ type: "rectangle" } & RectMask) | 
+/**
+ * Ellipse/circle mask
+ */
+({ type: "ellipse" } & EllipseMask) | 
+/**
+ * Polygon mask (closed path)
+ */
+({ type: "polygon" } & PolygonMask) | 
+/**
+ * Bezier curve mask
+ */
+({ type: "bezier" } & BezierMask) | 
+/**
+ * Gradient mask (linear or radial soft transition)
+ */
+({ type: "gradient" } & GradientMask)
 /**
  * Result of a match frame operation.
  */
@@ -5343,6 +5764,19 @@ export type MotionDirection =
  * Unable to determine (local fallback)
  */
 "unknown"
+export type MoveAudioKeyframePayload = { sequenceId: string; trackId: string; clipId: string; keyframeIndex: number; newTimeOffset: number }
+export type MoveClipPayload = { sequenceId: string; 
+/**
+ * Source track (required for strict input validation; ignored by core move logic).
+ */
+trackId: string; clipId: string; 
+/**
+ * New timeline position.
+ * 
+ * Accepts both `newTimelineIn` and legacy `newStart`.
+ */
+newTimelineIn: number; newTrackId: string | null }
+export type MoveFilePayload = { sourcePath: string; destFolderPath: string }
 /**
  * A detected object in a frame
  */
@@ -5364,6 +5798,22 @@ confidence: number;
  */
 boundingBox?: BoundingBox | null }
 /**
+ * Payload for Overwrite Edit (replaces content in time range — trims/removes overlapping clips).
+ */
+export type OverwriteEditPayload = { sequenceId: string; trackId: string; assetId: string; 
+/**
+ * Playhead / timeline position to place the clip.
+ */
+timelinePosition: number; 
+/**
+ * Optional source start time for partial-range overwrites.
+ */
+sourceIn: number | null; 
+/**
+ * Optional source end time for partial-range overwrites.
+ */
+sourceOut: number | null }
+/**
  * A point on the normalized pacing curve
  */
 export type PacingPoint = { 
@@ -5376,9 +5826,41 @@ normalizedPosition: number;
  */
 normalizedDuration: number }
 /**
+ * Effect parameter value types
+ */
+export type ParamValue = number | boolean | string | [number, number, number, number] | [number, number]
+/**
  * A content part within a message (text, tool call, tool result, etc.).
  */
 export type PartDto = { id: string; messageId: string; sortOrder: number; partType: string; dataJson: string; compactedAt: number | null }
+/**
+ * Payload for selective paste of effects and attributes.
+ */
+export type PasteAttributesPayload = { sequenceId: string; targetClips: ClipRef[]; 
+/**
+ * All source effects (from copy_clip_effects IPC result)
+ */
+sourceEffects: JsonValue[]; 
+/**
+ * Source clip attributes (from copy_clip_effects IPC result)
+ */
+sourceAttributes: ClipAttributeValues; 
+/**
+ * Which effects and attributes to paste
+ */
+selection: AttributeSelection }
+/**
+ * Payload for pasting all copied effects onto target clips.
+ */
+export type PasteEffectsPayload = { sequenceId: string; 
+/**
+ * Target clips to receive the pasted effects: [{trackId, clipId}]
+ */
+targetClips: ClipRef[]; 
+/**
+ * Serialized source effects (from copy_clip_effects IPC result)
+ */
+sourceEffects: JsonValue[] }
 /**
  * Metadata describing the model that produced semantic perception signals.
  */
@@ -5470,9 +5952,29 @@ updatedAt: string }
  */
 export type Point2D = { x: number; y: number }
 /**
+ * A 2D point with normalized coordinates (0.0-1.0)
+ */
+export type Point2D = { 
+/**
+ * X coordinate (0.0 = left, 1.0 = right)
+ */
+x: number; 
+/**
+ * Y coordinate (0.0 = top, 1.0 = bottom)
+ */
+y: number }
+/**
  * Response for poll_generation_job
  */
 export type PollGenerationJobResponse = { status: string; progress: number | null; message: string | null; downloadUrl: string | null; durationSec: number | null; hasAudio: boolean | null; error: string | null }
+/**
+ * Polygon mask shape (closed path of points)
+ */
+export type PolygonMask = { 
+/**
+ * Polygon vertices (minimum 3)
+ */
+points: Point2D[] }
 /**
  * Memory pool statistics.
  */
@@ -5797,6 +6299,34 @@ export type RecordCompactionInput = { id: string | null; sessionId: string; runI
  */
 export type RecordPermissionDecisionInput = { id: string | null; sessionId: string; runId: string | null; stepId: string | null; subjectType: string; subject: string; action: string; source: string; reason: string | null; createdAt: number | null }
 /**
+ * Rectangle mask shape
+ */
+export type RectMask = { 
+/**
+ * Center X (normalized 0.0-1.0)
+ */
+x: number; 
+/**
+ * Center Y (normalized 0.0-1.0)
+ */
+y: number; 
+/**
+ * Width (normalized 0.0-1.0)
+ */
+width: number; 
+/**
+ * Height (normalized 0.0-1.0)
+ */
+height: number; 
+/**
+ * Corner radius for rounded rectangles (normalized)
+ */
+cornerRadius?: number; 
+/**
+ * Rotation in degrees
+ */
+rotation?: number }
+/**
  * Classification of a detected cleanup region
  */
 export type RegionType = 
@@ -5808,6 +6338,21 @@ export type RegionType =
  * Detected filler word
  */
 "filler_word"
+export type RemoveAssetPayload = { assetId: string }
+/**
+ * Payload for removing effects and/or resetting attributes on a clip.
+ */
+export type RemoveAttributesPayload = { sequenceId: string; trackId: string; clipId: string; 
+/**
+ * Effect IDs to remove
+ */
+effectIds?: string[]; 
+/**
+ * Which attributes to reset to defaults
+ */
+resetTransform?: boolean; resetOpacity?: boolean; resetBlendMode?: boolean; resetSpeed?: boolean; resetAudio?: boolean }
+export type RemoveAudioKeyframePayload = { sequenceId: string; trackId: string; clipId: string; keyframeIndex: number }
+export type RemoveClipPayload = { sequenceId: string; trackId: string; clipId: string }
 /**
  * Arguments for batch-removing detected regions from a clip.
  */
@@ -5832,6 +6377,45 @@ regions: DetectedRegion[];
  * Inward padding in seconds to apply to each region boundary (default: 0.05)
  */
 paddingSec: number }
+/**
+ * Payload for removing an effect from a clip.
+ */
+export type RemoveEffectPayload = { sequenceId: string; trackId: string; clipId: string; effectId: string }
+export type RemoveMarkerPayload = { sequenceId: string; markerId: string }
+/**
+ * Payload for removing a mask from an effect.
+ * 
+ * # Example
+ * 
+ * ```json
+ * {
+ * "effectId": "eff_001",
+ * "maskId": "mask_001"
+ * }
+ * ```
+ */
+export type RemoveMaskPayload = { effectId: string; maskId: string }
+/**
+ * Payload for removing a text clip from a track.
+ * 
+ * Removes both the clip and its associated TextOverlay effect.
+ * Only text clips (clips with virtual text asset IDs) can be removed
+ * using this command.
+ * 
+ * # Example
+ * 
+ * ```json
+ * {
+ * "sequenceId": "seq_001",
+ * "trackId": "video_001",
+ * "clipId": "clip_001"
+ * }
+ * ```
+ */
+export type RemoveTextClipPayload = { sequenceId: string; trackId: string; clipId: string }
+export type RemoveTrackPayload = { sequenceId: string; trackId: string }
+export type RenameFilePayload = { oldRelativePath: string; newName: string }
+export type RenameTrackPayload = { sequenceId: string; trackId: string; newName: string }
 /**
  * Result of starting a render cache job
  */
@@ -5952,6 +6536,7 @@ outputPath: string;
  * Initial status ("started")
  */
 status: string }
+export type ReorderTracksPayload = { sequenceId: string; newOrder: string[] }
 /**
  * Arguments for reordering a transcript segment within a clip.
  */
@@ -6020,6 +6605,7 @@ params: JsonValue | null }
  * Persisted resume checkpoint DTO aligned with the frontend session kernel vocabulary.
  */
 export type ResumeCheckpointDto = { id: string; sessionId: string; runId: string | null; checkpointKind: string; status: string; resumeCursorJson: string; sessionStateJson: string; pendingWorkJson: string | null; createdAt: number; consumedAt: number | null }
+export type ReverseClipPayload = { sequenceId: string; trackId: string; clipId: string }
 /**
  * Result of a reverse match frame operation.
  */
@@ -6070,6 +6656,14 @@ maxDuration: number;
  * Overall tempo classification
  */
 tempoClassification: TempoClassification }
+/**
+ * Payload for Ripple Delete (remove clips + close gaps).
+ */
+export type RippleDeletePayload = { sequenceId: string; trackId: string; 
+/**
+ * One or more clip IDs to remove.
+ */
+clipIds: string[] }
 /**
  * Risk assessment for an AI-generated edit.
  */
@@ -6346,6 +6940,20 @@ export type SessionSummaryDto = { id: string; projectId: string; title: string; 
  * Full session with all its messages and parts.
  */
 export type SessionWithMessagesDto = { session: SessionSummaryDto; messages: MessageDto[] }
+export type SetAudioFadeInPayload = { sequenceId: string; trackId: string; clipId: string; duration: number; fadeType?: FadeType }
+export type SetAudioFadeOutPayload = { sequenceId: string; trackId: string; clipId: string; duration: number; fadeType?: FadeType }
+export type SetAudioKeyframeValuePayload = { sequenceId: string; trackId: string; clipId: string; keyframeIndex: number; valueDb: number; interpolation: KeyframeInterpolation | null }
+export type SetCaptionTrackLanguagePayload = { sequenceId: string; trackId: string; language: string }
+export type SetClipAudioPayload = { sequenceId: string; trackId: string; clipId: string; volumeDb: number | null; pan: number | null; muted: boolean | null; fadeInSec: number | null; fadeOutSec: number | null; audioRole: string | null; audioTags: string[] | null }
+export type SetClipBlendModePayload = { sequenceId: string; trackId: string; clipId: string; blendMode: BlendMode }
+export type SetClipEnabledPayload = { sequenceId: string; trackId: string; clipId: string; enabled: boolean }
+export type SetClipMotionKeyframesPayload = { sequenceId: string; trackId: string; clipId: string; keyframes: TransformKeyframe[] }
+export type SetClipMutePayload = { sequenceId: string; trackId: string; clipId: string; muted: boolean }
+export type SetClipOpacityPayload = { sequenceId: string; trackId: string; clipId: string; opacity: number }
+export type SetClipSlowMotionInterpolationPayload = { sequenceId: string; trackId: string; clipId: string; interpolation: SlowMotionInterpolation }
+export type SetClipSpeedPayload = { sequenceId: string; trackId: string; clipId: string; speed: number; reverse?: boolean }
+export type SetClipTransformPayload = { sequenceId: string; trackId: string; clipId: string; transform: Transform }
+export type SetMasterVolumePayload = { sequenceId: string; volumeDb: number }
 /**
  * Input payload for runtime playhead synchronization.
  */
@@ -6386,6 +6994,13 @@ export type SetSourcePointPayload = {
  * Time in seconds for the In or Out point.
  */
 timeSec: number }
+export type SetTimeRemapPayload = { sequenceId: string; trackId: string; clipId: string; timeRemap: TimeRemapCurve }
+export type SetTrackBlendModePayload = { sequenceId: string; trackId: string; blendMode: BlendMode }
+export type SetTrackVolumePayload = { sequenceId: string; trackId: string; 
+/**
+ * Linear track volume, where 1.0 is unity and 2.0 is +6 dB.
+ */
+volume: number }
 export type ShortcutSettingsDto = { customShortcuts: { [key in string]: string } }
 /**
  * Configuration for shot detection
@@ -6606,6 +7221,7 @@ startSec: number;
  * End time in seconds
  */
 endSec: number }
+export type SplitClipPayload = { sequenceId: string; trackId: string; clipId: string; splitTime: number }
 /**
  * Arguments for the stabilize_clip command.
  */
@@ -7361,6 +7977,9 @@ sourceTime: number;
 interpolation?: KeyframeInterpolation }
 export type TimelineRangeSummary = { timelineInSec: number; timelineOutSec: number; durationSec: number }
 export type TimelineSourceMappingEntry = { timelineSec: number; timelineOffsetSec: number; sourceSec?: number | null; frameIndex?: number | null; insideClip: boolean; reason: string }
+export type ToggleTrackLockPayload = { sequenceId: string; trackId: string; locked: boolean }
+export type ToggleTrackMutePayload = { sequenceId: string; trackId: string; muted: boolean }
+export type ToggleTrackVisibilityPayload = { sequenceId: string; trackId: string; visible: boolean }
 /**
  * Summary information about a single agent trace file.
  */
@@ -7840,6 +8459,11 @@ typeFrequency: { [key in string]: number };
  * Most frequently used transition type
  */
 dominantType: string }
+export type TrimClipPayload = { sequenceId: string; 
+/**
+ * Track containing the clip.
+ */
+trackId: string; clipId: string; newSourceIn: number | null; newSourceOut: number | null; newTimelineIn: number | null }
 /**
  * Lightweight history entry for IPC transport.
  */
@@ -7892,14 +8516,19 @@ canUndo: boolean;
  * Whether more redo operations are available
  */
 canRedo: boolean }
+export type UngroupClipsPayload = { sequenceId: string; clipRefs: ClipRef[] }
+export type UnlinkClipsPayload = { sequenceId: string; clipRefs: ClipRef[] }
 /**
  * Arguments for unnesting a compound clip.
  */
 export type UnnestCompoundClipArgs = { sequenceId: string; trackId: string; clipId: string }
+export type UnnestCompoundClipPayload = { sequenceId: string; trackId: string; clipId: string }
 /**
  * Input payload for updating an agent run phase and syncing session state.
  */
 export type UpdateAgentRunPhaseInput = { runId: string; phase: string; traceId: string | null; toolCallsUsed: number | null; plannedStepCount: number | null; completedStepCount: number | null; outputMessageId: string | null; rollbackReportJson: string | null; errorCode: string | null; errorMessage: string | null; currentPlanId: string | null; pendingApprovalId: string | null; activeCheckpointId: string | null; permissionStateVersion: number | null; compactionVersion: number | null; resumeCursorVersion: number | null; lastCompactedAt: number | null; lastResumedAt: number | null; endedAt: number | null }
+export type UpdateAssetPayload = { assetId: string; name: string | null; tags: string[] | null; license: LicenseInfo | null; thumbnailUrl: string | null; proxyStatus: ProxyStatus | null; proxyUrl: string | null; uri: string | null; durationSec: number | null; fileSize: number | null; video: VideoInfo | null; audio: AudioInfo | null; relativePath: string | null; workspaceManaged: boolean | null; missing: boolean | null }
+export type UpdateCaptionPayload = { sequenceId: string; trackId: string; captionId: string; text: string | null; startSec: number | null; endSec: number | null; style: JsonValue | null; position: JsonValue | null }
 /**
  * DTO for update check result
  */
@@ -7908,6 +8537,107 @@ export type UpdateCheckResultDto = { status: string; version: string | null; not
  * Input payload for updating a delegation record.
  */
 export type UpdateDelegationRecordInput = { id: string; status: string | null; mergeStatus: string | null; summaryMessageId: string | null; resultJson: string | null; errorMessage: string | null; completedAt: number | null }
+/**
+ * Payload for updating effect parameters.
+ */
+export type UpdateEffectPayload = { effectId: string; params?: { [key in string]: ParamValue }; 
+/**
+ * Optional - toggle effect enabled state
+ */
+enabled: boolean | null }
+/**
+ * Payload for updating a mask's properties.
+ * 
+ * All fields except `effectId` and `maskId` are optional.
+ * Only provided fields will be updated.
+ * 
+ * # Example
+ * 
+ * ```json
+ * {
+ * "effectId": "eff_001",
+ * "maskId": "mask_001",
+ * "feather": 0.2,
+ * "opacity": 0.8
+ * }
+ * ```
+ */
+export type UpdateMaskPayload = { effectId: string; maskId: string; 
+/**
+ * New mask shape
+ */
+shape?: MaskShape | null; 
+/**
+ * New mask name
+ */
+name?: string | null; 
+/**
+ * New feather amount (0.0-1.0)
+ */
+feather?: number | null; 
+/**
+ * New opacity (0.0-1.0)
+ */
+opacity?: number | null; 
+/**
+ * New expansion value (-1.0 to 1.0)
+ */
+expansion?: number | null; 
+/**
+ * Toggle mask inversion
+ */
+inverted?: boolean | null; 
+/**
+ * New blend mode
+ */
+blendMode?: MaskBlendMode | null; 
+/**
+ * Toggle mask enabled state
+ */
+enabled?: boolean | null; 
+/**
+ * Toggle mask locked state
+ */
+locked?: boolean | null; 
+/**
+ * Replacement shape animation keyframes
+ */
+keyframes?: MaskKeyframe[] | null; 
+/**
+ * Tracking effect/source ID that generated the keyframes
+ */
+trackingSourceId?: string | null }
+export type UpdateSequenceHdrSettingsPayload = { sequenceId: string; settings: SequenceHdrSettings }
+/**
+ * Payload for updating a text clip's content and styling.
+ * 
+ * Updates the TextOverlay effect parameters associated with a text clip.
+ * Only text clips (clips with virtual text asset IDs) can be updated.
+ * 
+ * # Example
+ * 
+ * ```json
+ * {
+ * "sequenceId": "seq_001",
+ * "trackId": "video_001",
+ * "clipId": "clip_001",
+ * "textData": {
+ * "content": "Updated Text",
+ * "style": {
+ * "fontFamily": "Helvetica",
+ * "fontSize": 64,
+ * "color": "#FF0000",
+ * "bold": true
+ * }
+ * }
+ * }
+ * ```
+ */
+export type UpdateTextClipPayload = { sequenceId: string; trackId: string; clipId: string; 
+/**
+ * New text content and styling data
+ */
+textData: TextClipData }
 /**
  * Input payload for creating or updating an external runtime session link.
  */

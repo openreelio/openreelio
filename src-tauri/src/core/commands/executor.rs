@@ -1067,18 +1067,21 @@ impl CommandExecutor {
 
         // Linked audio (if any) is the partner clip sharing the primary clip's
         // link group on a different track.
-        let linked_audio = primary_clip.link_group_id.as_deref().and_then(|link_group_id| {
-            sequence.tracks.iter().find_map(|track| {
-                track
-                    .clips
-                    .iter()
-                    .find(|clip| {
-                        clip.id != *primary_clip_id
-                            && clip.link_group_id.as_deref() == Some(link_group_id)
-                    })
-                    .map(|clip| (track, clip, link_group_id.to_string()))
-            })
-        });
+        let linked_audio = primary_clip
+            .link_group_id
+            .as_deref()
+            .and_then(|link_group_id| {
+                sequence.tracks.iter().find_map(|track| {
+                    track
+                        .clips
+                        .iter()
+                        .find(|clip| {
+                            clip.id != *primary_clip_id
+                                && clip.link_group_id.as_deref() == Some(link_group_id)
+                        })
+                        .map(|clip| (track, clip, link_group_id.to_string()))
+                })
+            });
 
         if let Some((audio_track, audio_clip, link_group_id)) = linked_audio {
             let audio_track_id = audio_track.id.clone();

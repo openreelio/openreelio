@@ -219,7 +219,10 @@ fn main() {
         .typ::<openreelio_lib::ipc::JobFailedEvent>()
         .typ::<openreelio_lib::ipc::RenderLifecycleEvent>()
         .typ::<openreelio_lib::ipc::TranscriptionModelDownloadProgressDto>()
-        .typ::<openreelio_lib::core::analysis::dtw::DtwResult>();
+        .typ::<openreelio_lib::core::analysis::dtw::DtwResult>()
+        // Canonical command payload union: emits `CommandPayload` and all payload
+        // structs so the IPC command schema has a single Rust source of truth.
+        .typ::<openreelio_lib::ipc::CommandPayload>();
 
     let out_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")

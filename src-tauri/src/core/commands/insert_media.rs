@@ -75,12 +75,7 @@ pub struct InsertMediaCommand {
 
 impl InsertMediaCommand {
     /// Creates a new insert media command targeting the given clip placement.
-    pub fn new(
-        sequence_id: &str,
-        track_id: &str,
-        asset_id: &str,
-        timeline_start: TimeSec,
-    ) -> Self {
+    pub fn new(sequence_id: &str, track_id: &str, asset_id: &str, timeline_start: TimeSec) -> Self {
         Self {
             sequence_id: sequence_id.to_string(),
             track_id: track_id.to_string(),
@@ -99,7 +94,11 @@ impl InsertMediaCommand {
     }
 
     /// Sets an explicit source range.
-    pub fn with_source_range(mut self, source_in: Option<TimeSec>, source_out: Option<TimeSec>) -> Self {
+    pub fn with_source_range(
+        mut self,
+        source_in: Option<TimeSec>,
+        source_out: Option<TimeSec>,
+    ) -> Self {
         self.source_in = source_in;
         self.source_out = source_out;
         self
@@ -140,8 +139,12 @@ impl InsertMediaCommand {
 
     /// Builds an `InsertClipCommand` with the optional source range applied.
     fn build_insert_clip(&self, track_id: &str) -> InsertClipCommand {
-        let command =
-            InsertClipCommand::new(&self.sequence_id, track_id, &self.asset_id, self.timeline_start);
+        let command = InsertClipCommand::new(
+            &self.sequence_id,
+            track_id,
+            &self.asset_id,
+            self.timeline_start,
+        );
         match self.resolved_source_range {
             Some((source_in, source_out)) => command.with_source_range(source_in, source_out),
             None => command,
@@ -207,13 +210,9 @@ impl Command for InsertMediaCommand {
         // --- 1) Insert the primary clip ---
         let primary_command = Box::new(self.build_insert_clip(&self.track_id.clone()));
         let primary_result = self.run_sub_command(primary_command, state, "InsertClip")?;
-        let primary_clip_id = primary_result
-            .created_ids
-            .first()
-            .cloned()
-            .ok_or_else(|| {
-                CoreError::Internal("InsertMedia InsertClip did not return a clip id".to_string())
-            })?;
+        let primary_clip_id = primary_result.created_ids.first().cloned().ok_or_else(|| {
+            CoreError::Internal("InsertMedia InsertClip did not return a clip id".to_string())
+        })?;
         self.primary_clip_id = Some(primary_clip_id.clone());
 
         let mut aggregated_changes = primary_result.changes.clone();
@@ -227,9 +226,10 @@ impl Command for InsertMediaCommand {
             && asset_has_audio;
 
         if should_extract_linked_audio {
-            let sequence = state.sequences.get(&self.sequence_id).ok_or_else(|| {
-                CoreError::SequenceNotFound(self.sequence_id.clone())
-            })?;
+            let sequence = state
+                .sequences
+                .get(&self.sequence_id)
+                .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
 
             let (audio_track_id, created_track) = if let Some(audio_track_id) =
                 find_available_audio_track_id(sequence, self.timeline_start, duration_sec)
@@ -242,8 +242,7 @@ impl Command for InsertMediaCommand {
                     AddTrackCommand::new(&self.sequence_id, &track_name, TrackKind::Audio)
                         .at_position(position),
                 );
-                let create_result =
-                    self.run_sub_command(create_command, state, "AddTrack")?;
+                let create_result = self.run_sub_command(create_command, state, "AddTrack")?;
                 let created_track_id =
                     create_result.created_ids.first().cloned().ok_or_else(|| {
                         CoreError::Internal(
