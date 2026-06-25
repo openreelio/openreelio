@@ -10,7 +10,10 @@ import {
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 
-import { useExternalAgentHostStatus, EXTERNAL_AGENT_STATUS_REFRESH_EVENT } from '@/agents/external';
+import {
+  useExternalAgentHostStatus,
+  EXTERNAL_AGENT_STATUS_REFRESH_EVENT,
+} from '@/agents/external/useExternalAgentHostStatus';
 import type { AISettings, AssistantRuntime } from '@/stores/settingsStore';
 import { useProjectStore } from '@/stores';
 

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { isCodexAgentEnabled, isExternalAgentHostEnabled } from '@/config/featureFlags';
 
-import { CodexReferenceAdapter, type CodexStatusProbe } from './adapters/CodexReferenceAdapter';
+import type { CodexStatusProbe } from './adapters/CodexReferenceAdapter';
 import { buildExternalAgentHostSummary, type ExternalAgentHostSummary } from './host';
 import type { ExternalAgentRuntimeCapabilities, ExternalAgentRuntimeStatus } from './types';
 
@@ -54,6 +54,9 @@ export function useExternalAgentHostStatus(
 
     async function refresh(): Promise<void> {
       setLoading(true);
+      // Lazy-load the Codex adapter so its heavy tool definitions are not
+      // bundled into the main app when the external host is disabled.
+      const { CodexReferenceAdapter } = await import('./adapters/CodexReferenceAdapter');
       const codexAdapter = new CodexReferenceAdapter(codexProbeRef.current);
       try {
         const codexCapabilities = await codexAdapter.capabilities();
