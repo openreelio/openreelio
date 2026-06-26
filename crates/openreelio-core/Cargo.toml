@@ -1,6 +1,6 @@
 [package]
 name = "openreelio-core"
-version = "0.1.5"
+version = "0.1.6"
 description = "Core library for OpenReelio — AI agent-driven video editing engine"
 authors = ["OpenReelio Team"]
 license = "MIT"

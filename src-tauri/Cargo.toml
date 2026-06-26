@@ -1,6 +1,6 @@
 [package]
 name = "openreelio"
-version = "0.1.5"
+version = "0.1.6"
 description = "AI Agent-driven Prompt-based Video Editing IDE"
 authors = ["OpenReelio Team"]
 license = "MIT"
