@@ -13,7 +13,7 @@ import { createDefaultLayout, useWorkspaceLayoutStore } from '@/stores/workspace
 import { loadProjectPromptContext } from '@/agents/engine/core/projectPromptContext';
 import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
 import { createBackendToolExecutor } from '@/agents/engine/adapters/tools/BackendToolExecutor';
-import { useExternalAgentHostStatus } from '@/agents/external';
+import { useExternalAgentHostStatus } from '@/agents/external/useExternalAgentHostStatus';
 import { AgenticSidebarContent } from './AgenticSidebarContent';
 
 let latestSessionListProps: Record<string, unknown> | null = null;
@@ -38,7 +38,7 @@ vi.mock('./ExternalAgentChat', () => ({
   }),
 }));
 
-vi.mock('@/agents/external', () => ({
+vi.mock('@/agents/external/useExternalAgentHostStatus', () => ({
   EXTERNAL_AGENT_STATUS_REFRESH_EVENT: 'openreelio:external-agent-status-refresh',
   useExternalAgentHostStatus: vi.fn(() => ({
     loading: false,
@@ -300,15 +300,6 @@ describe('AgenticSidebarContent', () => {
     expect(screen.queryByTestId('agent-runtime-disabled-state')).not.toBeInTheDocument();
   });
 
-  it('should keep the canonical runtime selected when USE_AGENT_LOOP is enabled', () => {
-    setFeatureFlag('USE_AGENT_LOOP', true);
-
-    render(<AgenticSidebarContent />);
-
-    expect(screen.getByTestId('agentic-chat')).toBeInTheDocument();
-    expect(screen.queryByTestId('agent-runtime-disabled-state')).not.toBeInTheDocument();
-  });
-
   it('should render the Codex external runtime when Codex account agent is selected', async () => {
     useSettingsStore.setState((state) => ({
       ...state,
@@ -363,7 +354,7 @@ describe('AgenticSidebarContent', () => {
       await Promise.resolve();
     });
 
-    expect(screen.getByTestId('external-agent-chat')).toBeInTheDocument();
+    expect(await screen.findByTestId('external-agent-chat')).toBeInTheDocument();
     expect(screen.queryByTestId('agentic-chat')).not.toBeInTheDocument();
     expect(latestExternalAgentChatProps).toMatchObject({
       projectId: 'project-1',
@@ -526,7 +517,6 @@ describe('AgenticSidebarContent', () => {
 
   it('should render an explicit disabled state when the canonical runtime is disabled', () => {
     setFeatureFlag('USE_AGENTIC_ENGINE', false);
-    setFeatureFlag('USE_AGENT_LOOP', true);
 
     render(<AgenticSidebarContent />);
 

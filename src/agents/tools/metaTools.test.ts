@@ -4,10 +4,12 @@ import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRe
 import { registerCaptionTools, unregisterCaptionTools } from './captionTools';
 import { registerTextTools, unregisterTextTools } from './textTools';
 import {
+  getVisibleMetaToolNames,
   normalizeMetaToolArgsForValidation,
   registerMetaTools,
   unregisterMetaTools,
 } from './metaTools';
+import { setFeatureFlag, resetFeatureFlags } from '@/config/featureFlags';
 
 describe('metaTools', () => {
   beforeEach(() => {
@@ -178,6 +180,30 @@ describe('metaTools', () => {
       type: 'audio',
       count: 4,
     });
+  });
+
+  it('hides the generate meta-tool from the LLM surface when video generation is off', () => {
+    resetFeatureFlags();
+
+    const visible = getVisibleMetaToolNames();
+
+    expect(visible).toEqual(['query', 'edit', 'audio', 'effects', 'text']);
+    expect(visible).not.toContain('generate');
+    expect(visible).not.toContain('execute_plan');
+  });
+
+  it('exposes the generate meta-tool when video generation is enabled', () => {
+    setFeatureFlag('USE_VIDEO_GENERATION', true);
+
+    try {
+      const visible = getVisibleMetaToolNames();
+
+      expect(visible).toContain('generate');
+      // Legacy compatibility tools stay hidden regardless of the flag.
+      expect(visible).not.toContain('execute_plan');
+    } finally {
+      resetFeatureFlags();
+    }
   });
 
   it('forwards execution context from generate meta-tool to the underlying action', async () => {

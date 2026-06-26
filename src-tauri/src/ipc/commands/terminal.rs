@@ -334,7 +334,7 @@ fn push_profile(
 #[cfg(windows)]
 fn decode_command_output(bytes: &[u8]) -> String {
     let looks_utf16 = bytes.len() >= 2
-        && bytes.len() % 2 == 0
+        && bytes.len().is_multiple_of(2)
         && bytes
             .iter()
             .skip(1)

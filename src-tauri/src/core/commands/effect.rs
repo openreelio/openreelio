@@ -601,7 +601,7 @@ impl Command for PasteEffectsCommand {
 // =============================================================================
 
 /// Flags indicating which attributes to paste from the clipboard.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AttributeSelection {
     /// Indices of effects in the source list to paste (empty = no effects)
@@ -625,7 +625,7 @@ pub struct AttributeSelection {
 }
 
 /// Serialized clip attributes for paste operations.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipAttributeValues {
     #[serde(skip_serializing_if = "Option::is_none")]

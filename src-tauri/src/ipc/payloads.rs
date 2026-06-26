@@ -14,7 +14,7 @@ use std::collections::HashMap;
 // Payload Structs (Strict / Injection-Resistant)
 // =============================================================================
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InsertClipPayload {
     pub sequence_id: SequenceId,
@@ -31,8 +31,39 @@ pub struct InsertClipPayload {
     pub source_out: Option<TimeSec>,
 }
 
+/// Payload for Insert Media (drag-and-drop parity composite insert).
+///
+/// Inserts a primary clip and, for video assets that carry audio, also creates
+/// or reuses an audio track, inserts a linked audio clip, links the two clips,
+/// and mutes the video clip. The whole composite is a single undoable unit.
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InsertMediaPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub asset_id: AssetId,
+    /// Timeline position to insert at.
+    #[serde(alias = "timelineIn")]
+    pub timeline_start: TimeSec,
+    /// Optional source start time for partial-range inserts.
+    pub source_in: Option<TimeSec>,
+    /// Optional source end time for partial-range inserts.
+    pub source_out: Option<TimeSec>,
+    /// Place a video asset on an audio track intentionally (no preview clip).
+    #[serde(default)]
+    pub audio_only: bool,
+    /// Auto-extract a linked audio clip for video assets that have audio.
+    #[serde(default = "default_true")]
+    pub auto_extract_linked_audio: bool,
+}
+
+/// Default value helper for `auto_extract_linked_audio` (defaults to enabled).
+fn default_true() -> bool {
+    true
+}
+
 /// Payload for Insert Edit (ripple insert — pushes downstream clips).
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InsertEditPayload {
     pub sequence_id: SequenceId,
@@ -47,7 +78,7 @@ pub struct InsertEditPayload {
 }
 
 /// Payload for Overwrite Edit (replaces content in time range — trims/removes overlapping clips).
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OverwriteEditPayload {
     pub sequence_id: SequenceId,
@@ -62,7 +93,7 @@ pub struct OverwriteEditPayload {
 }
 
 /// Payload for Ripple Delete (remove clips + close gaps).
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RippleDeletePayload {
     pub sequence_id: SequenceId,
@@ -108,7 +139,7 @@ impl<'de> Deserialize<'de> for RippleDeletePayload {
 }
 
 /// Payload for Lift (remove clips, leave gaps).
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LiftPayload {
     pub sequence_id: SequenceId,
@@ -118,7 +149,7 @@ pub struct LiftPayload {
 }
 
 /// Payload for Extract Edit (remove In/Out range + close gap).
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtractEditPayload {
     pub sequence_id: SequenceId,
@@ -130,7 +161,7 @@ pub struct ExtractEditPayload {
 }
 
 /// Payload for Find Gaps (query — returns gap info without mutating state).
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FindGapsPayload {
     pub sequence_id: SequenceId,
@@ -138,7 +169,7 @@ pub struct FindGapsPayload {
 }
 
 /// Payload for Close Gap (close a specific gap by shifting downstream clips).
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CloseGapPayload {
     pub sequence_id: SequenceId,
@@ -150,14 +181,14 @@ pub struct CloseGapPayload {
 }
 
 /// Payload for Close All Gaps (remove all gaps on a track).
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CloseAllGapsPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveClipPayload {
     pub sequence_id: SequenceId,
@@ -165,7 +196,7 @@ pub struct RemoveClipPayload {
     pub clip_id: ClipId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MoveClipPayload {
     pub sequence_id: SequenceId,
@@ -181,7 +212,7 @@ pub struct MoveClipPayload {
     pub new_track_id: Option<TrackId>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetTrackBlendModePayload {
     pub sequence_id: SequenceId,
@@ -189,7 +220,7 @@ pub struct SetTrackBlendModePayload {
     pub blend_mode: BlendMode,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipBlendModePayload {
     pub sequence_id: SequenceId,
@@ -198,7 +229,7 @@ pub struct SetClipBlendModePayload {
     pub blend_mode: BlendMode,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TrimClipPayload {
     pub sequence_id: SequenceId,
@@ -213,7 +244,7 @@ pub struct TrimClipPayload {
     pub new_timeline_in: Option<TimeSec>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipTransformPayload {
     pub sequence_id: SequenceId,
@@ -222,7 +253,7 @@ pub struct SetClipTransformPayload {
     pub transform: Transform,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipMotionKeyframesPayload {
     pub sequence_id: SequenceId,
@@ -231,7 +262,7 @@ pub struct SetClipMotionKeyframesPayload {
     pub keyframes: Vec<TransformKeyframe>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipOpacityPayload {
     pub sequence_id: SequenceId,
@@ -240,7 +271,7 @@ pub struct SetClipOpacityPayload {
     pub opacity: f32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipSpeedPayload {
     pub sequence_id: SequenceId,
@@ -251,7 +282,7 @@ pub struct SetClipSpeedPayload {
     pub reverse: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipSlowMotionInterpolationPayload {
     pub sequence_id: SequenceId,
@@ -260,7 +291,7 @@ pub struct SetClipSlowMotionInterpolationPayload {
     pub interpolation: crate::core::timeline::SlowMotionInterpolation,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReverseClipPayload {
     pub sequence_id: SequenceId,
@@ -268,7 +299,7 @@ pub struct ReverseClipPayload {
     pub clip_id: ClipId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipEnabledPayload {
     pub sequence_id: SequenceId,
@@ -278,42 +309,42 @@ pub struct SetClipEnabledPayload {
 }
 
 /// Clip reference: a (trackId, clipId) pair used in multi-clip commands.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClipRef {
     pub track_id: TrackId,
     pub clip_id: ClipId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LinkClipsPayload {
     pub sequence_id: SequenceId,
     pub clip_refs: Vec<ClipRef>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UnlinkClipsPayload {
     pub sequence_id: SequenceId,
     pub clip_refs: Vec<ClipRef>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GroupClipsPayload {
     pub sequence_id: SequenceId,
     pub clip_refs: Vec<ClipRef>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UngroupClipsPayload {
     pub sequence_id: SequenceId,
     pub clip_refs: Vec<ClipRef>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DetachAudioPayload {
     pub sequence_id: SequenceId,
@@ -323,7 +354,7 @@ pub struct DetachAudioPayload {
     pub target_audio_track_id: Option<TrackId>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateFreezeFramePayload {
     pub sequence_id: SequenceId,
@@ -338,7 +369,7 @@ fn default_freeze_duration() -> f64 {
     crate::core::commands::DEFAULT_FREEZE_FRAME_DURATION
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetTimeRemapPayload {
     pub sequence_id: SequenceId,
@@ -347,7 +378,7 @@ pub struct SetTimeRemapPayload {
     pub time_remap: crate::core::timeline::TimeRemapCurve,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClearTimeRemapPayload {
     pub sequence_id: SequenceId,
@@ -355,7 +386,7 @@ pub struct ClearTimeRemapPayload {
     pub clip_id: ClipId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipMutePayload {
     pub sequence_id: SequenceId,
@@ -364,7 +395,7 @@ pub struct SetClipMutePayload {
     pub muted: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipAudioPayload {
     pub sequence_id: SequenceId,
@@ -379,7 +410,7 @@ pub struct SetClipAudioPayload {
     pub audio_tags: Option<Vec<String>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddAudioKeyframePayload {
     pub sequence_id: SequenceId,
@@ -391,7 +422,7 @@ pub struct AddAudioKeyframePayload {
     pub interpolation: crate::core::timeline::KeyframeInterpolation,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveAudioKeyframePayload {
     pub sequence_id: SequenceId,
@@ -400,7 +431,7 @@ pub struct RemoveAudioKeyframePayload {
     pub keyframe_index: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MoveAudioKeyframePayload {
     pub sequence_id: SequenceId,
@@ -410,7 +441,7 @@ pub struct MoveAudioKeyframePayload {
     pub new_time_offset: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetAudioKeyframeValuePayload {
     pub sequence_id: SequenceId,
@@ -421,7 +452,7 @@ pub struct SetAudioKeyframeValuePayload {
     pub interpolation: Option<crate::core::timeline::KeyframeInterpolation>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetAudioFadeInPayload {
     pub sequence_id: SequenceId,
@@ -432,7 +463,7 @@ pub struct SetAudioFadeInPayload {
     pub fade_type: crate::core::timeline::FadeType,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetAudioFadeOutPayload {
     pub sequence_id: SequenceId,
@@ -443,7 +474,7 @@ pub struct SetAudioFadeOutPayload {
     pub fade_type: crate::core::timeline::FadeType,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SplitClipPayload {
     pub sequence_id: SequenceId,
@@ -453,20 +484,20 @@ pub struct SplitClipPayload {
     pub split_time: TimeSec,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImportAssetPayload {
     pub name: String,
     pub uri: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveAssetPayload {
     pub asset_id: AssetId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateAssetPayload {
     pub asset_id: AssetId,
@@ -486,28 +517,28 @@ pub struct UpdateAssetPayload {
     pub missing: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateSequencePayload {
     pub name: String,
     pub format: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetMasterVolumePayload {
     pub sequence_id: SequenceId,
     pub volume_db: f32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateSequenceHdrSettingsPayload {
     pub sequence_id: SequenceId,
     pub settings: SequenceHdrSettings,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateTrackPayload {
     pub sequence_id: SequenceId,
@@ -516,14 +547,14 @@ pub struct CreateTrackPayload {
     pub position: Option<usize>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveTrackPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameTrackPayload {
     pub sequence_id: SequenceId,
@@ -532,7 +563,7 @@ pub struct RenameTrackPayload {
     pub new_name: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetCaptionTrackLanguagePayload {
     pub sequence_id: SequenceId,
@@ -540,14 +571,14 @@ pub struct SetCaptionTrackLanguagePayload {
     pub language: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReorderTracksPayload {
     pub sequence_id: SequenceId,
     pub new_order: Vec<TrackId>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetTrackVolumePayload {
     pub sequence_id: SequenceId,
@@ -556,7 +587,7 @@ pub struct SetTrackVolumePayload {
     pub volume: f32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToggleTrackMutePayload {
     pub sequence_id: SequenceId,
@@ -564,7 +595,7 @@ pub struct ToggleTrackMutePayload {
     pub muted: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToggleTrackLockPayload {
     pub sequence_id: SequenceId,
@@ -572,7 +603,7 @@ pub struct ToggleTrackLockPayload {
     pub locked: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToggleTrackVisibilityPayload {
     pub sequence_id: SequenceId,
@@ -584,7 +615,7 @@ pub struct ToggleTrackVisibilityPayload {
 // Marker Payloads
 // =============================================================================
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddMarkerPayload {
     pub sequence_id: SequenceId,
@@ -597,14 +628,14 @@ pub struct AddMarkerPayload {
     pub marker_type: Option<MarkerType>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveMarkerPayload {
     pub sequence_id: SequenceId,
     pub marker_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateCaptionPayload {
     pub sequence_id: SequenceId,
@@ -622,7 +653,7 @@ pub struct UpdateCaptionPayload {
     pub position: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateCaptionPayload {
     pub sequence_id: SequenceId,
@@ -638,7 +669,7 @@ pub struct CreateCaptionPayload {
     pub position: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GeneratedCaptionSegmentPayload {
     #[serde(alias = "startTime", alias = "start")]
@@ -652,7 +683,7 @@ pub struct GeneratedCaptionSegmentPayload {
     pub language: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImportGeneratedCaptionsPayload {
     pub sequence_id: SequenceId,
@@ -664,7 +695,7 @@ pub struct ImportGeneratedCaptionsPayload {
     pub replace_existing: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeleteCaptionPayload {
     pub sequence_id: SequenceId,
@@ -678,7 +709,7 @@ pub struct DeleteCaptionPayload {
 // =============================================================================
 
 /// Payload for adding an effect to a clip.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddEffectPayload {
     pub sequence_id: SequenceId,
@@ -694,7 +725,7 @@ pub struct AddEffectPayload {
 }
 
 /// Payload for removing an effect from a clip.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveEffectPayload {
     pub sequence_id: SequenceId,
@@ -704,7 +735,7 @@ pub struct RemoveEffectPayload {
 }
 
 /// Payload for updating effect parameters.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateEffectPayload {
     pub effect_id: EffectId,
@@ -719,7 +750,7 @@ pub struct UpdateEffectPayload {
 // =============================================================================
 
 /// Payload for pasting all copied effects onto target clips.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PasteEffectsPayload {
     pub sequence_id: SequenceId,
@@ -730,7 +761,7 @@ pub struct PasteEffectsPayload {
 }
 
 /// Payload for selective paste of effects and attributes.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PasteAttributesPayload {
     pub sequence_id: SequenceId,
@@ -744,7 +775,7 @@ pub struct PasteAttributesPayload {
 }
 
 /// Payload for removing effects and/or resetting attributes on a clip.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveAttributesPayload {
     pub sequence_id: SequenceId,
@@ -796,7 +827,7 @@ pub struct RemoveAttributesPayload {
 ///     "inverted": false
 /// }
 /// ```
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddMaskPayload {
     pub sequence_id: SequenceId,
@@ -837,7 +868,7 @@ pub struct AddMaskPayload {
 ///     "opacity": 0.8
 /// }
 /// ```
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateMaskPayload {
     pub effect_id: EffectId,
@@ -887,7 +918,7 @@ pub struct UpdateMaskPayload {
 ///     "maskId": "mask_001"
 /// }
 /// ```
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveMaskPayload {
     pub effect_id: EffectId,
@@ -921,7 +952,7 @@ pub struct RemoveMaskPayload {
 ///     }
 /// }
 /// ```
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddTextClipPayload {
     pub sequence_id: SequenceId,
@@ -958,7 +989,7 @@ pub struct AddTextClipPayload {
 ///     }
 /// }
 /// ```
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateTextClipPayload {
     pub sequence_id: SequenceId,
@@ -983,7 +1014,7 @@ pub struct UpdateTextClipPayload {
 ///     "clipId": "clip_001"
 /// }
 /// ```
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveTextClipPayload {
     pub sequence_id: SequenceId,
@@ -995,33 +1026,33 @@ pub struct RemoveTextClipPayload {
 // Filesystem Payloads
 // =============================================================================
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateFolderPayload {
     pub relative_path: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameFilePayload {
     pub old_relative_path: String,
     pub new_name: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MoveFilePayload {
     pub source_path: String,
     pub dest_folder_path: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeleteFilePayload {
     pub relative_path: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApplyAudioDuckingPayload {
     pub sequence_id: SequenceId,
@@ -1030,7 +1061,7 @@ pub struct ApplyAudioDuckingPayload {
     pub keyframes: Vec<crate::core::timeline::AudioKeyframe>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateCompoundClipPayload {
     pub sequence_id: SequenceId,
@@ -1039,7 +1070,7 @@ pub struct CreateCompoundClipPayload {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UnnestCompoundClipPayload {
     pub sequence_id: SequenceId,
@@ -1047,7 +1078,7 @@ pub struct UnnestCompoundClipPayload {
     pub clip_id: ClipId,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateAdjustmentLayerPayload {
     pub sequence_id: SequenceId,
@@ -1061,11 +1092,14 @@ pub struct CreateAdjustmentLayerPayload {
 // Tagged Union
 // =============================================================================
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(tag = "commandType", content = "payload", rename_all = "camelCase")]
 pub enum CommandPayload {
     #[serde(alias = "insertClip", alias = "InsertClip")]
     InsertClip(InsertClipPayload),
+
+    #[serde(alias = "insertMedia", alias = "InsertMedia")]
+    InsertMedia(InsertMediaPayload),
 
     #[serde(alias = "insertEdit", alias = "InsertEdit")]
     InsertEdit(InsertEditPayload),
@@ -1367,6 +1401,7 @@ pub enum CommandPayload {
 impl CommandPayload {
     pub const SUPPORTED_COMMAND_TYPES: &'static [&'static str] = &[
         "InsertClip",
+        "InsertMedia",
         "InsertEdit",
         "OverwriteEdit",
         "RippleDelete",
@@ -1502,21 +1537,22 @@ impl CommandPayload {
             CreateFreezeFrameCommand, CreateSequenceCommand, DeleteCaptionCommand,
             DeleteFileCommand, DetachAudioCommand, ExtractEditCommand, GeneratedCaptionSegment,
             GroupClipsCommand, ImportAssetCommand, ImportGeneratedCaptionsCommand,
-            InsertClipCommand, InsertEditCommand, LiftCommand, LinkClipsCommand,
-            MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand, OverwriteEditCommand,
-            RemoveAssetCommand, RemoveAudioKeyframeCommand, RemoveClipCommand, RemoveEffectCommand,
-            RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand,
-            RenameFileCommand, RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand,
-            RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
-            SetAudioKeyframeValueCommand, SetCaptionTrackLanguageCommand, SetClipAudioCommand,
-            SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMotionKeyframesCommand,
-            SetClipMuteCommand, SetClipOpacityCommand, SetClipSlowMotionInterpolationCommand,
-            SetClipSpeedCommand, SetClipTransformCommand, SetMasterVolumeCommand,
-            SetTimeRemapCommand, SetTrackBlendModeCommand, SetTrackVolumeCommand, SplitClipCommand,
-            ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
-            TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
-            UpdateAssetCommand, UpdateEffectCommand, UpdateMaskCommand,
-            UpdateSequenceHdrSettingsCommand, UpdateTextCommand,
+            InsertClipCommand, InsertEditCommand, InsertMediaCommand, LiftCommand,
+            LinkClipsCommand, MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand,
+            OverwriteEditCommand, RemoveAssetCommand, RemoveAudioKeyframeCommand,
+            RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand,
+            RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand, RenameTrackCommand,
+            ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand, SetAudioFadeInCommand,
+            SetAudioFadeOutCommand, SetAudioKeyframeValueCommand, SetCaptionTrackLanguageCommand,
+            SetClipAudioCommand, SetClipBlendModeCommand, SetClipEnabledCommand,
+            SetClipMotionKeyframesCommand, SetClipMuteCommand, SetClipOpacityCommand,
+            SetClipSlowMotionInterpolationCommand, SetClipSpeedCommand, SetClipTransformCommand,
+            SetMasterVolumeCommand, SetTimeRemapCommand, SetTrackBlendModeCommand,
+            SetTrackVolumeCommand, SplitClipCommand, ToggleTrackLockCommand,
+            ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand,
+            UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand, UpdateAssetCommand,
+            UpdateEffectCommand, UpdateMaskCommand, UpdateSequenceHdrSettingsCommand,
+            UpdateTextCommand,
         };
 
         use crate::core::commands::{
@@ -1534,6 +1570,18 @@ impl CommandPayload {
                 );
                 command.source_start = p.source_in;
                 command.source_end = p.source_out;
+                Box::new(command)
+            }
+            CommandPayload::InsertMedia(p) => {
+                let command = InsertMediaCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.asset_id,
+                    p.timeline_start,
+                )
+                .with_source_range(p.source_in, p.source_out)
+                .with_audio_only(p.audio_only)
+                .with_auto_extract_linked_audio(p.auto_extract_linked_audio);
                 Box::new(command)
             }
             CommandPayload::InsertEdit(p) => {

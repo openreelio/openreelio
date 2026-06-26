@@ -5,10 +5,9 @@
  * Renders the canonical TPAO runtime for the shipping AI sidebar.
  */
 
-import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef, lazy, Suspense } from 'react';
 import { X } from 'lucide-react';
 import { AgenticChat } from './AgenticChat';
-import { ExternalAgentChat } from './ExternalAgentChat';
 import { AgentArtifactReviewPanel } from './AgentArtifactReviewPanel';
 import type { AgentRuntimeChatHandle } from './AgentRuntimeChatShell';
 import { AgenticSidebarWorkspace } from './AgenticSidebarWorkspace';
@@ -30,7 +29,7 @@ import {
   type ProjectPromptContext,
 } from '@/agents/engine/core/projectPromptContext';
 import { useFeatureFlag, useSidebarRuntimePolicy } from '@/config/featureFlags';
-import { useExternalAgentHostStatus } from '@/agents/external';
+import { useExternalAgentHostStatus } from '@/agents/external/useExternalAgentHostStatus';
 import { useConversationStore, useProjectStore } from '@/stores';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useAgentArtifactReviewStore } from '@/stores/agentArtifactReviewStore';
@@ -57,6 +56,12 @@ import {
 } from './agentSidebarDelegationViewModels';
 import { resolveLatestParentRunId } from './agentDelegationUi';
 import { useAgentSessionTransition } from './useAgentSessionTransition';
+
+// Lazy-loaded so the external/Codex agent host (and its heavy tool
+// definitions) is only fetched when that runtime is actually selected.
+const ExternalAgentChat = lazy(() =>
+  import('./ExternalAgentChat').then((module) => ({ default: module.ExternalAgentChat })),
+);
 
 const logger = createLogger('AgenticSidebarContent');
 const EMPTY_DELEGATIONS: readonly DelegationRecord[] = [];
@@ -736,20 +741,24 @@ export function AgenticSidebarContent({
           <AgentArtifactReviewPanel className="min-h-0 flex-1" layout="compact" />
         </section>
       ) : useCodexExternalRuntime ? (
-        <ExternalAgentChat
-          key={`external-agent-workspace-${chatSurfaceKey}`}
-          ref={chatHandleRef}
-          projectId={currentProjectId}
-          projectPath={currentProjectPath}
-          ready={codexRuntimeReady}
-          unavailableReason={codexUnavailableReason}
-          onComplete={handleExternalComplete}
-          onAbort={handleExternalAbort}
-          onError={handleExternalError}
-          onStartSession={createNewExternalSession}
-          disabled={isSessionTransitionPending || externalAgentStatus.loading || !codexRuntimeReady}
-          className="flex-1"
-        />
+        <Suspense fallback={<div className="flex-1" />}>
+          <ExternalAgentChat
+            key={`external-agent-workspace-${chatSurfaceKey}`}
+            ref={chatHandleRef}
+            projectId={currentProjectId}
+            projectPath={currentProjectPath}
+            ready={codexRuntimeReady}
+            unavailableReason={codexUnavailableReason}
+            onComplete={handleExternalComplete}
+            onAbort={handleExternalAbort}
+            onError={handleExternalError}
+            onStartSession={createNewExternalSession}
+            disabled={
+              isSessionTransitionPending || externalAgentStatus.loading || !codexRuntimeReady
+            }
+            className="flex-1"
+          />
+        </Suspense>
       ) : (
         <AgenticChat
           key={`agent-workspace-${chatSurfaceKey}`}

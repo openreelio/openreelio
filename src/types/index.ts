@@ -922,6 +922,7 @@ export type CommandType =
   | 'MoveFile'
   | 'DeleteFile'
   | 'InsertClip'
+  | 'InsertMedia'
   | 'InsertEdit'
   | 'OverwriteEdit'
   | 'SetClipTransform'

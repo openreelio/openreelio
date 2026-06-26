@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { isCodexAgentEnabled, isExternalAgentHostEnabled } from '@/config/featureFlags';
 
-import { CodexReferenceAdapter, type CodexStatusProbe } from './adapters/CodexReferenceAdapter';
+import type { CodexStatusProbe } from './adapters/CodexReferenceAdapter';
 import { buildExternalAgentHostSummary, type ExternalAgentHostSummary } from './host';
 import type { ExternalAgentRuntimeCapabilities, ExternalAgentRuntimeStatus } from './types';
 
@@ -35,6 +35,16 @@ const FALLBACK_CODEX_CAPABILITIES: ExternalAgentRuntimeCapabilities = {
   structuredToolCalls: false,
 };
 
+const DISABLED_CODEX_STATUS: ExternalAgentRuntimeStatus = {
+  runtimeId: 'codex',
+  displayName: 'Codex',
+  installStatus: 'unknown',
+  authStatus: 'unknown',
+  available: false,
+  version: null,
+  reason: null,
+};
+
 export function useExternalAgentHostStatus(
   options: UseExternalAgentHostStatusOptions = {},
 ): UseExternalAgentHostStatusResult {
@@ -54,8 +64,30 @@ export function useExternalAgentHostStatus(
 
     async function refresh(): Promise<void> {
       setLoading(true);
-      const codexAdapter = new CodexReferenceAdapter(codexProbeRef.current);
+      if (!hostEnabled && !codexEnabled) {
+        if (!cancelled) {
+          setSummary(
+            buildExternalAgentHostSummary({
+              hostEnabled,
+              runtimes: [
+                {
+                  status: DISABLED_CODEX_STATUS,
+                  capabilities: FALLBACK_CODEX_CAPABILITIES,
+                  adapterEnabled: codexEnabled,
+                },
+              ],
+            }),
+          );
+          setLoading(false);
+        }
+        return;
+      }
+
       try {
+        // Lazy-load the Codex adapter so its heavy tool definitions are only
+        // fetched when an external runtime can be surfaced.
+        const { CodexReferenceAdapter } = await import('./adapters/CodexReferenceAdapter');
+        const codexAdapter = new CodexReferenceAdapter(codexProbeRef.current);
         const codexCapabilities = await codexAdapter.capabilities();
         const codexStatus =
           hostEnabled && codexEnabled
@@ -93,8 +125,8 @@ export function useExternalAgentHostStatus(
 
         const message = error instanceof Error ? error.message : String(error);
         const fallbackStatus: ExternalAgentRuntimeStatus = {
-          runtimeId: codexAdapter.id,
-          displayName: codexAdapter.displayName,
+          runtimeId: 'codex',
+          displayName: 'Codex',
           installStatus: 'unknown',
           authStatus: 'error',
           available: false,

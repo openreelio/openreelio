@@ -356,7 +356,12 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             validate::time_non_negative(at, "at")?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
-            let cmd = InsertClipCommand::new(&seq_id, &track, &asset, at);
+            // Delegate to the canonical composite InsertMedia command so the CLI
+            // gets drag-and-drop parity (linked-audio extraction for video assets
+            // that carry audio) instead of re-implementing a bare single-clip
+            // insert. For audio-less assets this behaves identically to a plain
+            // clip insert.
+            let cmd = InsertMediaCommand::new(&seq_id, &track, &asset, at);
             let result = project
                 .executor
                 .execute(Box::new(cmd), &mut project.state)
