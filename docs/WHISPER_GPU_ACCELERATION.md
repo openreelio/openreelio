@@ -1,7 +1,7 @@
 # Whisper GPU Acceleration and Quantized Models
 
-Status: code implemented; macOS Metal release builds enabled for Phase 1.
-Date: 2026-06-21
+Status: code implemented; macOS Intel Metal release builds enabled for Phase 1.
+Date: 2026-06-27
 
 ## Goal
 
@@ -56,16 +56,17 @@ automatically when available, with CPU fallback as the safety path.
 
 ## Release Rollout
 
-Phase 1 enables Metal on both macOS release targets:
+Phase 1 enables Metal on the Intel macOS release target:
 
 - `x86_64-apple-darwin`
-- `aarch64-apple-darwin`
 
 Metal is low risk because it ships with macOS and does not require an extra
 runtime dependency from users.
 
 Future phases can add:
 
+- Metal for `aarch64-apple-darwin` after the Apple Silicon CI linker failure is
+  resolved (`___isPlatformVersionAtLeast` from `ggml-metal-device.m.o`).
 - Vulkan for Windows and Linux after CI SDK installation and smoke validation.
 - CUDA as an optional NVIDIA-focused artifact if the packaging cost of CUDA
   runtime libraries is acceptable.
@@ -73,8 +74,10 @@ Future phases can add:
 ## Verification Notes
 
 - Default local builds should continue to report `acceleration = "cpu"`.
-- macOS release builds compiled with `whisper-metal` should report
+- Intel macOS release builds compiled with `whisper-metal` should report
   `acceleration = "metal"`.
+- Apple Silicon release builds currently remain CPU Whisper builds and should
+  report `acceleration = "cpu"`.
 - GPU initialization failure must not abort transcription; it should fall back to
   CPU.
 - TypeScript bindings must be regenerated whenever transcription status fields

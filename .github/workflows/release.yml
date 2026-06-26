@@ -301,14 +301,14 @@ jobs:
             platform: macos-intel
             target: x86_64-apple-darwin
             # Phase 1 GPU acceleration: Metal ships with macOS (no extra SDK to
-            # install in CI), so Whisper transcription runs on the GPU with an
-            # automatic CPU fallback at runtime. Linux/Windows stay CPU until the
-            # Vulkan build is validated (see docs/WHISPER_GPU_ACCELERATION.md).
+            # install in CI), so Intel macOS release builds enable GPU Whisper
+            # with automatic CPU fallback at runtime. Linux/Windows and Apple
+            # Silicon stay CPU until their GPU builds are validated (see
+            # docs/WHISPER_GPU_ACCELERATION.md).
             whisperFeatures: whisper-metal
           - os: macos-15
             platform: macos-arm
             target: aarch64-apple-darwin
-            whisperFeatures: whisper-metal
 
     steps:
       - name: Checkout repository
