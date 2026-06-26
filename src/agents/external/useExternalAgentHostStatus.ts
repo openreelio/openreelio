@@ -35,6 +35,16 @@ const FALLBACK_CODEX_CAPABILITIES: ExternalAgentRuntimeCapabilities = {
   structuredToolCalls: false,
 };
 
+const DISABLED_CODEX_STATUS: ExternalAgentRuntimeStatus = {
+  runtimeId: 'codex',
+  displayName: 'Codex',
+  installStatus: 'unknown',
+  authStatus: 'unknown',
+  available: false,
+  version: null,
+  reason: null,
+};
+
 export function useExternalAgentHostStatus(
   options: UseExternalAgentHostStatusOptions = {},
 ): UseExternalAgentHostStatusResult {
@@ -56,7 +66,18 @@ export function useExternalAgentHostStatus(
       setLoading(true);
       if (!hostEnabled && !codexEnabled) {
         if (!cancelled) {
-          setSummary(EMPTY_SUMMARY);
+          setSummary(
+            buildExternalAgentHostSummary({
+              hostEnabled,
+              runtimes: [
+                {
+                  status: DISABLED_CODEX_STATUS,
+                  capabilities: FALLBACK_CODEX_CAPABILITIES,
+                  adapterEnabled: codexEnabled,
+                },
+              ],
+            }),
+          );
           setLoading(false);
         }
         return;
