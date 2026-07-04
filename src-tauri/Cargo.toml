@@ -121,7 +121,7 @@ wasmtime-wasi = "36.0.11"
 
 # Workspace filesystem scanning and watching
 notify = { version = "7", features = ["macos_fsevent"] }
-notify-debouncer-mini = "0.5"
+notify-debouncer-mini = "0.7"
 walkdir = "2"
 globset = "0.4"
 portable-pty = "0.9"
