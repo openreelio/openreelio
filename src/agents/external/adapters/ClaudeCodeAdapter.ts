@@ -102,6 +102,12 @@ interface ClaudeSessionState {
   sawTransportMessage: boolean;
   /** Whether the one-time "starting fresh" resume-failure notice was emitted. */
   resumeFailureNotified: boolean;
+  /**
+   * In-flight lazy respawn, shared so concurrent sends await ONE resume
+   * instead of each spawning a duplicate transport. `null` when no resume is
+   * running.
+   */
+  resumePromise: Promise<void> | null;
 }
 
 const DEFAULT_CLAUDE_AUTH_MODE: ClaudeAuthMode = 'subscription';
@@ -197,17 +203,27 @@ export class ClaudeCodeAdapter implements ExternalAgentRuntimeAdapter {
       resumeInFlightId: null,
       sawTransportMessage: false,
       resumeFailureNotified: false,
+      resumePromise: null,
     };
     this.sessions.set(sessionId, session);
 
     // Order matters: register the MCP session (awaiting the subscription) BEFORE
     // wiring the message stream, then send the first prompt so tool calls can
     // never race an inactive bridge subscription.
-    await this.attachTransport(sessionId, session, transport, null);
+    try {
+      await this.attachTransport(sessionId, session, transport, null);
 
-    const initialPrompt = input.prompt?.trim() ? input.prompt : null;
-    if (initialPrompt) {
-      await this.writeUserMessage(session, initialPrompt);
+      const initialPrompt = input.prompt?.trim() ? input.prompt : null;
+      if (initialPrompt) {
+        await this.writeUserMessage(session, initialPrompt);
+      }
+    } catch (setupError) {
+      // A failed attach/first-write means no handle is ever returned, so
+      // nothing would ever shut this session down — remove the record and
+      // tear the spawned process down before propagating.
+      this.sessions.delete(sessionId);
+      await this.deactivateSession(session).catch(() => undefined);
+      throw setupError;
     }
 
     return { sessionId, runtimeId: this.id };
@@ -218,9 +234,13 @@ export class ClaudeCodeAdapter implements ExternalAgentRuntimeAdapter {
     session.cwd = message.cwd ?? session.cwd;
     // The process may have been torn down by a previous interrupt (or died on
     // its own). Transparently resume before writing so the conversation
-    // continues from where it left off.
+    // continues from where it left off. Single-flight: concurrent sends share
+    // one resume instead of spawning duplicate transports.
     if (!session.processAlive || !session.transport) {
-      await this.resumeTransport(sessionId, session);
+      session.resumePromise ??= this.resumeTransport(sessionId, session).finally(() => {
+        session.resumePromise = null;
+      });
+      await session.resumePromise;
     }
     await this.writeUserMessage(session, message.content);
   }

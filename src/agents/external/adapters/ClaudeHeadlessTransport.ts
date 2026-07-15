@@ -155,6 +155,8 @@ export class ClaudeHeadlessTransport {
   private readonly exitHandlers = new Set<(info: ClaudeHeadlessExitInfo) => void>();
   private readonly unlistenPromise: Promise<UnlistenFn>;
   private disposed = false;
+  /** Single-flight backend stop; reset on failure so a later dispose retries. */
+  private stopPromise: Promise<void> | null = null;
   private lastStderrLine: string | null = null;
   // Events that arrive before a consumer registers are buffered and replayed on
   // registration so they are never silently dropped.
@@ -294,22 +296,32 @@ export class ClaudeHeadlessTransport {
   }
 
   async dispose(): Promise<void> {
-    if (this.disposed) {
-      return;
+    if (!this.disposed) {
+      this.disposed = true;
+
+      // Best-effort: a failed listener registration must not block the
+      // process stop below.
+      const unlisten = await this.unlistenPromise.catch(() => undefined);
+      unlisten?.();
+      this.messageHandlers.clear();
+      this.errorHandlers.clear();
+      this.exitHandlers.clear();
+      this.bufferedMessages.length = 0;
+      this.bufferedErrors.length = 0;
+      this.bufferedExits.length = 0;
     }
-    this.disposed = true;
 
-    const unlisten = await this.unlistenPromise;
-    unlisten();
-    this.messageHandlers.clear();
-    this.errorHandlers.clear();
-    this.exitHandlers.clear();
-    this.bufferedMessages.length = 0;
-    this.bufferedErrors.length = 0;
-    this.bufferedExits.length = 0;
-
+    // Kept OUTSIDE the `disposed` guard: a failed backend stop resets the
+    // single-flight promise so a later dispose() can retry instead of
+    // silently leaving the process alive behind an already-true flag.
     if (this.options.autoStopOnDispose ?? true) {
-      await this.stopSession({ serverId: this.startResult.serverId });
+      this.stopPromise ??= this.stopSession({ serverId: this.startResult.serverId }).catch(
+        (stopError: unknown) => {
+          this.stopPromise = null;
+          throw stopError;
+        },
+      );
+      await this.stopPromise;
     }
   }
 

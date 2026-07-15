@@ -145,7 +145,22 @@ export class OpenReelioMcpBridge {
     }
     // Await both listeners so registration only resolves once the bridge is
     // actually receiving events (the call subscription is the load-bearing one).
-    await Promise.all([this.callSubscription, this.cancelSubscription]);
+    try {
+      await Promise.all([this.callSubscription, this.cancelSubscription]);
+    } catch (subscribeError) {
+      // Detach whichever listener DID attach and clear the cached promises, so
+      // the next registration retries instead of re-awaiting a rejected
+      // promise forever (which would permanently break the bridge).
+      const settled = await Promise.allSettled([this.callSubscription, this.cancelSubscription]);
+      for (const outcome of settled) {
+        if (outcome.status === 'fulfilled') {
+          outcome.value?.();
+        }
+      }
+      this.callSubscription = null;
+      this.cancelSubscription = null;
+      throw subscribeError;
+    }
   }
 
   private handleCancel(payload: OpenReelioMcpCancelEvent): void {
