@@ -46,7 +46,12 @@ static CLAUDE_PREFER_SYSTEM: std::sync::atomic::AtomicBool =
 /// Records whether the user opted into system Claude launcher discovery.
 #[cfg(feature = "gui")]
 pub fn set_claude_prefer_system(prefer_system: bool) {
-    CLAUDE_PREFER_SYSTEM.store(prefer_system, std::sync::atomic::Ordering::Relaxed);
+    let previous = CLAUDE_PREFER_SYSTEM.swap(prefer_system, std::sync::atomic::Ordering::Relaxed);
+    // The toggle changes both which launchers are discovered and their priority,
+    // so the cached probe (spec + version) must not survive the flip.
+    if previous != prefer_system {
+        invalidate_claude_probe_cache();
+    }
 }
 
 /// Whether discovery should include system PATH / platform / WSL launchers.
@@ -61,6 +66,23 @@ fn claude_include_system_discovery() -> bool {
     #[cfg(not(feature = "gui"))]
     {
         true
+    }
+}
+
+/// Whether system launchers should WIN over the managed runtime.
+///
+/// The GUI toggle is documented as "prefer a system install over the managed
+/// native binary", so an opted-in system launcher must sort first. The CLI
+/// always discovers system launchers but keeps them as a fallback behind the
+/// managed runtime (no user-facing priority promise there).
+fn claude_prefer_system_launcher() -> bool {
+    #[cfg(feature = "gui")]
+    {
+        CLAUDE_PREFER_SYSTEM.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "gui"))]
+    {
+        false
     }
 }
 
@@ -506,21 +528,29 @@ fn collect_claude_command_specs() -> Vec<ClaudeCommandSpec> {
 
     // 3. System PATH / platform locations / WSL — only when the user opts in.
     if claude_include_system_discovery() {
-        specs.extend(
-            collect_system_claude_executables()
-                .into_iter()
-                .map(|executable| ClaudeCommandSpec {
-                    label: executable.display().to_string(),
-                    executable,
-                    prefix_args: Vec::new(),
-                    mode: ClaudeCommandMode::Native,
-                    source: ClaudeCommandSource::System,
-                    config_home: config_home.clone(),
-                }),
-        );
+        let mut system_specs: Vec<ClaudeCommandSpec> = collect_system_claude_executables()
+            .into_iter()
+            .map(|executable| ClaudeCommandSpec {
+                label: executable.display().to_string(),
+                executable,
+                prefix_args: Vec::new(),
+                mode: ClaudeCommandMode::Native,
+                source: ClaudeCommandSource::System,
+                config_home: config_home.clone(),
+            })
+            .collect();
 
         if let Some(spec) = resolve_wsl_claude_command_spec() {
-            specs.push(spec);
+            system_specs.push(spec);
+        }
+
+        if claude_prefer_system_launcher() {
+            // The GUI toggle promises system installs WIN over the managed
+            // runtime, so opted-in system launchers sort first.
+            system_specs.append(&mut specs);
+            specs = system_specs;
+        } else {
+            specs.append(&mut system_specs);
         }
     }
 
