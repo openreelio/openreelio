@@ -57,6 +57,28 @@ impl ClaudeHeadlessProcessHandle {
         let _ = std::fs::remove_file(&self.mcp_config_path);
     }
 
+    /// Reaps the child after its stdout closed, returning the real exit code.
+    ///
+    /// stdout EOF almost always means the process is exiting, so a short
+    /// bounded wait harvests the status without risking a stuck reader task; a
+    /// child that still lingers past the deadline is killed and reaped.
+    async fn reap_exit_code(&self) -> Option<i32> {
+        const REAP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+        let mut child_guard = self.child.lock().await;
+        let child = child_guard.as_mut()?;
+        let status = match tokio::time::timeout(REAP_DEADLINE, child.wait()).await {
+            Ok(Ok(status)) => Some(status),
+            Ok(Err(_)) => None,
+            Err(_elapsed) => {
+                let _ = child.kill().await;
+                child.wait().await.ok()
+            }
+        };
+        child_guard.take();
+        status.and_then(|status| status.code())
+    }
+
     async fn write_message(&self, message: &Value) -> Result<(), String> {
         let line = encode_json_rpc_line(message)?;
         let mut stdin_guard = self.stdin.lock().await;
@@ -476,15 +498,12 @@ fn spawn_stdout_reader(
                     let _ = app.emit(&event_name, event);
                 }
                 Ok(None) => {
-                    finalize_headless_session(&app, &server_id, &handle).await;
-                    let _ = app.emit(
-                        &event_name,
-                        ClaudeHeadlessStreamEvent::Exit { exit_code: None },
-                    );
+                    let exit_code = finalize_headless_session(&app, &server_id, &handle).await;
+                    let _ = app.emit(&event_name, ClaudeHeadlessStreamEvent::Exit { exit_code });
                     break;
                 }
                 Err(error) => {
-                    finalize_headless_session(&app, &server_id, &handle).await;
+                    let _ = finalize_headless_session(&app, &server_id, &handle).await;
                     let _ = app.emit(
                         &event_name,
                         ClaudeHeadlessStreamEvent::Error {
@@ -504,7 +523,10 @@ async fn finalize_headless_session(
     app: &tauri::AppHandle,
     server_id: &str,
     handle: &Arc<ClaudeHeadlessProcessHandle>,
-) {
+) -> Option<i32> {
+    // Reap first so the emitted Exit event can carry the real exit code
+    // instead of an unconditional `None`.
+    let exit_code = handle.reap_exit_code().await;
     deregister_headless_token(app, &handle.token).await;
     // Remove the on-disk MCP config (holds the bearer token) once the process
     // has exited on its own; `stop()` covers the explicit-teardown path.
@@ -519,6 +541,8 @@ async fn finalize_headless_session(
     if should_remove {
         sessions.remove(server_id);
     }
+
+    exit_code
 }
 
 fn spawn_stderr_reader(

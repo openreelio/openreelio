@@ -275,15 +275,31 @@ pub fn write_mcp_config_file(path: &Path, mcp_url: &str, token: &str) -> Result<
     });
     let encoded = serde_json::to_string(&config)
         .map_err(|error| format!("Failed to encode Claude MCP config: {error}"))?;
-    std::fs::write(path, encoded.as_bytes())
-        .map_err(|error| format!("Failed to write Claude MCP config file: {error}"))?;
 
+    // Create the file with owner-only permissions up front (unix) instead of
+    // tightening after the write, so the bearer token is never briefly
+    // readable through the default umask.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| format!("Failed to create Claude MCP config file: {error}"))?;
+        file.write_all(encoded.as_bytes())
+            .map_err(|error| format!("Failed to write Claude MCP config file: {error}"))?;
+        // An existing file keeps its old mode despite `.mode()`, so re-assert.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .map_err(|error| format!("Failed to secure Claude MCP config file: {error}"))?;
     }
+
+    #[cfg(not(unix))]
+    std::fs::write(path, encoded.as_bytes())
+        .map_err(|error| format!("Failed to write Claude MCP config file: {error}"))?;
 
     Ok(())
 }
