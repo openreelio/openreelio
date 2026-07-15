@@ -23,6 +23,7 @@ import {
 
 import { hasActiveTimeRemap, type TimeRemapCurve } from '@/types';
 import type { ExternalAgentApprovalDecisionProvider, ExternalAgentApprovalRequest } from '../types';
+import { isCodexDynamicToolCallOutputTextItem } from './CodexAppServerClient';
 import type {
   CodexAppServerRequest,
   CodexDynamicToolCallResponse,
@@ -39,7 +40,7 @@ export interface OpenReelioCodexSessionContext {
 }
 
 export interface OpenReelioCodexToolContext extends OpenReelioCodexSessionContext {
-  runtimeId: 'codex';
+  runtimeId: 'codex' | 'claude_code';
   sessionId: string;
   sessionKnown?: boolean;
   approvalDecisionProvider?: ExternalAgentApprovalDecisionProvider;
@@ -1100,6 +1101,81 @@ export async function handleOpenReelioCodexDynamicToolCall(
       false,
     );
   }
+}
+
+/**
+ * Result of invoking an OpenReelio dynamic tool via {@link executeOpenReelioAgentToolCall}.
+ *
+ * `text` is a JSON-encoded payload suitable for an MCP `tools/call` text result;
+ * `isError` mirrors the tool's failure state.
+ */
+export interface OpenReelioAgentToolCallResult {
+  text: string;
+  isError: boolean;
+}
+
+/**
+ * Input for {@link executeOpenReelioAgentToolCall}.
+ */
+export interface ExecuteOpenReelioAgentToolCallInput {
+  /** Bare OpenReelio tool name (e.g. `project_state`). */
+  toolName: string;
+  /** Raw tool arguments as received from the agent runtime. */
+  args: unknown;
+  /** Session context identifying the project, cwd, and approval provider. */
+  context: OpenReelioCodexToolContext;
+}
+
+// Monotonic request id for synthesized dynamic-tool-call requests. The value is
+// only used to correlate a single call within the shared Codex handler, so a
+// process-local counter is sufficient.
+let openReelioAgentToolCallRequestId = 0;
+
+/**
+ * Runtime-agnostic entry point that reuses the Codex dynamic-tool handler for
+ * any external-agent backend (Codex, Claude Code, ...).
+ *
+ * It synthesizes an `item/tool/call` request from a bare tool name plus
+ * arguments, dispatches it through {@link handleOpenReelioCodexDynamicToolCall},
+ * and flattens the structured response into `{ text, isError }`.
+ */
+export async function executeOpenReelioAgentToolCall(
+  input: ExecuteOpenReelioAgentToolCallInput,
+): Promise<OpenReelioAgentToolCallResult> {
+  const args = asObject(input.args) ?? {};
+  const request: CodexAppServerRequest = {
+    id: (openReelioAgentToolCallRequestId += 1),
+    method: 'item/tool/call',
+    params: {
+      tool: input.toolName,
+      arguments: args,
+    },
+  };
+
+  const response = await handleOpenReelioCodexDynamicToolCall(request, input.context);
+  if (!response) {
+    return {
+      text: JSON.stringify({ status: 'error', message: 'unknown tool' }),
+      isError: true,
+    };
+  }
+
+  return {
+    text: flattenToolCallResponseText(response),
+    isError: !response.success,
+  };
+}
+
+/**
+ * Collapse a dynamic-tool response's content items into a single text payload.
+ * Text items are concatenated; non-text items (e.g. images) are represented by
+ * their JSON so no information is silently dropped.
+ */
+function flattenToolCallResponseText(response: CodexDynamicToolCallResponse): string {
+  const parts = response.contentItems.map((item) =>
+    isCodexDynamicToolCallOutputTextItem(item) ? item.text : JSON.stringify(item),
+  );
+  return parts.join('\n');
 }
 
 function normalizeOpenReelioDynamicToolCall(
