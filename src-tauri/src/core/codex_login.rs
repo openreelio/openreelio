@@ -150,13 +150,24 @@ impl CodexLoginSessionHandle {
         }
     }
 
-    /// Reaps the child after it has closed its output (normal exit). Does NOT
-    /// kill: the CLI has already written credentials and is exiting on its own,
-    /// so we wait for it to finish rather than risk truncating that write.
+    /// Reaps the child after it has closed its output (normal exit). Prefers
+    /// NOT to kill — the CLI has already written credentials and is exiting on
+    /// its own — but bounds the wait: an unbounded `wait` here holds the child
+    /// mutex forever if the process wedges after closing stdout, which would
+    /// block `terminate()` (cancel / shutdown) on the same lock. The deadline
+    /// is generous; the credential write completes in milliseconds.
     async fn wait_for_exit(&self) {
+        const EXIT_REAP_DEADLINE: Duration = Duration::from_secs(10);
+
         let mut guard = self.child.lock().await;
         if let Some(child) = guard.as_mut() {
-            let _ = child.wait().await;
+            if tokio::time::timeout(EXIT_REAP_DEADLINE, child.wait())
+                .await
+                .is_err()
+            {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            }
         }
         guard.take();
     }

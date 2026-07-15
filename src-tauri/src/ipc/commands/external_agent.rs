@@ -199,11 +199,21 @@ pub async fn start_codex_login_session(
 
     // Drop the session from the map when the reader task ends (natural exit,
     // completion, timeout, or error). Async because the removal awaits the lock.
+    // Remove only OUR handle (ptr_eq): a same-id session started after a cancel
+    // must not be evicted by the old reader's late finalizer.
     let finalize_app = app.clone();
     let finalize_id = session_id.clone();
+    let finalize_handle = Arc::clone(&handle);
     let on_finished = move || async move {
         let state = finalize_app.state::<AppState>();
-        state.codex_login_sessions.lock().await.remove(&finalize_id);
+        let mut sessions = state.codex_login_sessions.lock().await;
+        let is_current = sessions
+            .get(&finalize_id)
+            .map(|current| Arc::ptr_eq(current, &finalize_handle))
+            .unwrap_or(false);
+        if is_current {
+            sessions.remove(&finalize_id);
+        }
     };
 
     start_codex_login_reader(
