@@ -1478,7 +1478,7 @@ describe('ExternalAgentRuntimeSettings', () => {
           Promise.resolve({
             success: true,
             version: 'claude 1.2.0',
-            attemptedCommand: 'npm install -g @anthropic-ai/claude-code',
+            attemptedCommand: 'Install Claude Code v1.2.0 (native binary)',
             message: 'Claude Code installation completed.',
           }),
       });

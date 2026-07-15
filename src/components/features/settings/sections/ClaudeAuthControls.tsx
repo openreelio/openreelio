@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { KeyRound, Loader2, UploadCloud } from 'lucide-react';
 
 import type { ClaudeAuthMode } from '@/stores/settingsStore';
@@ -52,6 +52,13 @@ export function ClaudeAuthControls({
 }: ClaudeAuthControlsProps): JSX.Element {
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [tokenInput, setTokenInput] = useState('');
+
+  // Never carry a typed secret across an auth-mode switch: a hidden input
+  // would otherwise silently retain (and later re-show) the raw credential.
+  useEffect(() => {
+    setApiKeyInput('');
+    setTokenInput('');
+  }, [authMode]);
 
   const handleSaveApiKey = useCallback(async () => {
     const key = apiKeyInput.trim();

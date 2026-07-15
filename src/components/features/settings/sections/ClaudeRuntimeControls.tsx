@@ -107,10 +107,13 @@ export function ClaudeRuntimeControls({
   );
   const statusKnown = Boolean(setupResult || statusProbe) && !statusLoading;
   const canInstall = Boolean(statusKnown && !claudeInstalled && !launcherExecutableError);
+  // A legacy npm-managed install is always update-eligible: "update" migrates
+  // it to the managed native binary even when its version matches the pin (the
+  // status line explicitly tells the user to do exactly that).
   const canUpdate = Boolean(
     claudeInstalled &&
     !launcherExecutableError &&
-    isRuntimeUpdateAvailable(claudeVersion, pinnedVersion),
+    (isRuntimeUpdateAvailable(claudeVersion, pinnedVersion) || isLegacyManagedRuntime),
   );
   const isPresetModel = (CLAUDE_MODEL_ALIASES as readonly string[]).includes(settings.claudeModel);
   const usingCustomModel = showCustomModel || !isPresetModel;
@@ -161,12 +164,14 @@ export function ClaudeRuntimeControls({
           ),
         );
       }
-      refreshExternalAgentStatus();
     } catch (error) {
       setActionError(formatActionError(error, showDiagnostics));
     } finally {
       setIsConfiguring(false);
       setStatusLoading(false);
+      // Refresh unconditionally: auth may have changed even when the configure
+      // call itself failed, and callers rely on this single dispatch.
+      refreshExternalAgentStatus();
     }
   }, [projectPath, refreshExternalAgentStatus, settings.claudeAuthMode, showDiagnostics]);
 
@@ -224,9 +229,10 @@ export function ClaudeRuntimeControls({
     return () => {
       cancelled = true;
     };
-    // Initial mount-time probe only; configureClaude covers later mode changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    // Re-probe on auth mode changes: the auto-configure effect below is keyed
+    // on auth STATUS, so a subscription <-> api-key switch alone would
+    // otherwise leave this probe stale.
+  }, [settings.claudeAuthMode]);
 
   useEffect(() => {
     const autoConfigureKey = `${projectPath ?? 'no-project'}:${effectiveAuthStatus}`;
@@ -312,7 +318,6 @@ export function ClaudeRuntimeControls({
         }
         applySuccessfulAuthResult(result);
         await configureClaude();
-        refreshExternalAgentStatus();
       } catch (error) {
         setActionError(formatActionError(error, showDiagnostics));
       } finally {
@@ -348,7 +353,6 @@ export function ClaudeRuntimeControls({
         }
         applySuccessfulAuthResult(result);
         await configureClaude();
-        refreshExternalAgentStatus();
       } catch (error) {
         setActionError(formatActionError(error, showDiagnostics));
       } finally {
@@ -372,7 +376,6 @@ export function ClaudeRuntimeControls({
       }
       applySuccessfulAuthResult(result);
       await configureClaude();
-      refreshExternalAgentStatus();
     } catch (error) {
       setActionError(formatActionError(error, showDiagnostics));
     } finally {
@@ -397,7 +400,6 @@ export function ClaudeRuntimeControls({
         return;
       }
       await configureClaude();
-      refreshExternalAgentStatus();
     } catch (error) {
       setActionError(formatActionError(error, showDiagnostics));
     } finally {
@@ -418,7 +420,6 @@ export function ClaudeRuntimeControls({
         return;
       }
       await configureClaude();
-      refreshExternalAgentStatus();
     } catch (error) {
       setActionError(formatActionError(error, showDiagnostics));
     } finally {

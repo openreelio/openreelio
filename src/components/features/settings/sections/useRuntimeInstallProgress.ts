@@ -40,13 +40,18 @@ export function useRuntimeInstallProgress(
         }
         setInstallProgress(event.payload);
       },
-    ).then((fn) => {
-      if (cancelled) {
-        fn();
-        return;
-      }
-      unlisten = fn;
-    });
+    )
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      })
+      .catch(() => {
+        // Progress display is best-effort: a failed subscription just means no
+        // progress line, and must not surface as an unhandled rejection.
+      });
     return () => {
       cancelled = true;
       unlisten?.();

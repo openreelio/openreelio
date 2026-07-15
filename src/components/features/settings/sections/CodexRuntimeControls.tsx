@@ -179,11 +179,15 @@ export function CodexRuntimeControls({
   const codexHome = setupResult?.codexHome ?? codexRuntime?.codexHome ?? null;
   const runtimeSource = setupResult?.runtimeSource ?? codexRuntime?.runtimeSource ?? null;
   const pinnedVersion = setupResult?.pinnedVersion ?? null;
-  const codexNeedsUpdate = Boolean(
-    codexInstalled && isRuntimeUpdateAvailable(codexVersion, pinnedVersion),
-  );
   const runtimeSourceLabel = formatRuntimeSource(runtimeSource);
   const isLegacyManagedRuntime = runtimeSource === 'managed-legacy';
+  // A legacy npm-managed install is always update-eligible: "update" migrates
+  // it to the managed native binary even when its version matches the pin (the
+  // status line explicitly tells the user to do exactly that).
+  const codexNeedsUpdate = Boolean(
+    codexInstalled &&
+    (isRuntimeUpdateAvailable(codexVersion, pinnedVersion) || isLegacyManagedRuntime),
+  );
   const launcherExecutableError = isLauncherExecutableError(
     setupResult?.message ?? codexRuntime?.reason,
   );
@@ -232,9 +236,26 @@ export function CodexRuntimeControls({
           codexReasoningEffort:
             defaultModel.defaultReasoningEffort as AISettings['codexReasoningEffort'],
         });
+        return;
+      }
+      // The model survived, but its supported efforts may have changed across
+      // catalog versions; an unsupported saved effort would fail session
+      // starts, so reconcile it to the model's default.
+      const activeModel = result.models.find((model) => model.slug === configuredModel);
+      const configuredEffort = settings.codexReasoningEffort;
+      if (
+        activeModel &&
+        configuredEffort &&
+        activeModel.supportedReasoningEfforts.length > 0 &&
+        !activeModel.supportedReasoningEfforts.includes(configuredEffort)
+      ) {
+        onUpdate({
+          codexReasoningEffort:
+            activeModel.defaultReasoningEffort as AISettings['codexReasoningEffort'],
+        });
       }
     },
-    [onUpdate, settings.codexModel],
+    [onUpdate, settings.codexModel, settings.codexReasoningEffort],
   );
 
   const loadCodexModels = useCallback(async () => {
