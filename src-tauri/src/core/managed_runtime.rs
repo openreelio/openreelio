@@ -390,14 +390,23 @@ where
         InstallStage::Installing,
     );
     let executable_path = descriptor.executable_path(version);
-    if executable_path.exists() {
-        std::fs::remove_file(&executable_path)
-            .map_err(|error| format!("Failed to replace existing runtime binary: {error}"))?;
-    }
+    // Stage next to the final path and only swap once the new binary proved
+    // runnable, so a failed placement/validation never destroys a working
+    // binary of the same version (a same-version reinstall/repair would
+    // otherwise leave the `current` pointer dangling).
+    let staged_name = format!(
+        "staged-{}",
+        executable_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("runtime-binary")
+    );
+    let staged_path = executable_path.with_file_name(staged_name);
+    let _ = std::fs::remove_file(&staged_path);
 
     match artifact_spec.format {
         ArtifactFormat::RawExecutable => {
-            std::fs::rename(&part_path, &executable_path)
+            std::fs::rename(&part_path, &staged_path)
                 .map_err(|error| format!("Failed to install runtime binary: {error}"))?;
             guard.keep();
         }
@@ -413,8 +422,8 @@ where
             let found = find_binary_in_dir(&extract_dir, inner_name).ok_or_else(|| {
                 format!("Runtime binary '{inner_name}' was not found in the downloaded archive.")
             })?;
-            std::fs::rename(&found, &executable_path).or_else(|_| {
-                std::fs::copy(&found, &executable_path)
+            std::fs::rename(&found, &staged_path).or_else(|_| {
+                std::fs::copy(&found, &staged_path)
                     .map(|_| ())
                     .map_err(|error| format!("Failed to install runtime binary: {error}"))
             })?;
@@ -423,15 +432,23 @@ where
         }
     }
 
-    // --- Make executable + sanity-run ---------------------------------------
+    // --- Make executable + sanity-run (still on the staged file) -------------
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&executable_path, std::fs::Permissions::from_mode(0o755))
+        std::fs::set_permissions(&staged_path, std::fs::Permissions::from_mode(0o755))
             .map_err(|error| format!("Failed to mark runtime binary executable: {error}"))?;
     }
 
-    verify_runnable(&executable_path)?;
+    verify_runnable(&staged_path)?;
+
+    // --- Swap into place ------------------------------------------------------
+    if executable_path.exists() {
+        std::fs::remove_file(&executable_path)
+            .map_err(|error| format!("Failed to replace existing runtime binary: {error}"))?;
+    }
+    std::fs::rename(&staged_path, &executable_path)
+        .map_err(|error| format!("Failed to activate runtime binary: {error}"))?;
 
     // --- Activate ------------------------------------------------------------
     descriptor.write_pointer(version)?;
