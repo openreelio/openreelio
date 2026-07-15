@@ -534,7 +534,9 @@ where
     // probe below re-discovers the freshly installed runtime.
     claude_code::invalidate_claude_probe_cache();
     let after = probe_claude_status().await;
-    let success = after.installed && is_native_managed_claude(&after);
+    // Require the install itself to succeed: a leftover managed binary from an
+    // earlier install must not mask a failed download/verify as success.
+    let success = install_result.is_ok() && after.installed && is_native_managed_claude(&after);
 
     ClaudeCliInstallResult {
         success,
@@ -574,7 +576,9 @@ where
     // The binary changed; drop any cached launcher spec/version before re-probing.
     claude_code::invalidate_claude_probe_cache();
     let after = probe_claude_status().await;
-    let success = after.installed && is_native_managed_claude(&after);
+    // Require the install itself to succeed: the pre-update managed binary
+    // still probing as "managed" must not mask a failed update as success.
+    let success = install_result.is_ok() && after.installed && is_native_managed_claude(&after);
 
     ClaudeCliUpdateResult {
         success,

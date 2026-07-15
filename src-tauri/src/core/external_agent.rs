@@ -642,7 +642,9 @@ where
     let attempted_command = format!("Install Codex CLI v{version} (native binary)");
     let install_result = install_codex_version(version, on_progress).await;
     let after = crate::core::codex::probe_codex_status().await;
-    let success = after.installed && is_native_managed_codex(&after);
+    // Require the install itself to succeed: a leftover managed binary from an
+    // earlier install must not mask a failed download/verify as success.
+    let success = install_result.is_ok() && after.installed && is_native_managed_codex(&after);
 
     CodexCliInstallResult {
         success,
@@ -678,7 +680,9 @@ where
     let attempted_command = format!("Update Codex CLI to pinned v{version} (native binary)");
     let install_result = install_codex_version(version, on_progress).await;
     let after = crate::core::codex::probe_codex_status().await;
-    let success = after.installed && is_native_managed_codex(&after);
+    // Require the install itself to succeed: the pre-update managed binary
+    // still probing as "managed" must not mask a failed update as success.
+    let success = install_result.is_ok() && after.installed && is_native_managed_codex(&after);
 
     CodexCliUpdateResult {
         success,
