@@ -201,26 +201,50 @@ export function useClaudeLoginSession(
       return;
     }
 
-    const result = await commands.startClaudeLoginSession(sessionId);
-    if (result.status === 'error') {
-      detachListener();
-      setPhase('error');
-      setError(result.error);
-      optionsRef.current.onError?.(result.error);
-      return;
-    }
+    // Expose the id BEFORE the backend call so `cancel()` during startup can
+    // reach the session instead of finding a null ref.
+    sessionIdRef.current = sessionId;
 
-    sessionIdRef.current = result.data.sessionId;
-    // The event name is deterministic, but honor the backend value if it drifts.
-    if (result.data.eventName !== eventName) {
+    try {
+      const result = await commands.startClaudeLoginSession(sessionId);
+      if (sessionIdRef.current !== sessionId) {
+        // cancel() (or a newer start) ran while startup was in flight. The
+        // backend session may have outlived the cancel that raced it — cancel
+        // again now that it definitely exists, and leave the UI state alone.
+        detachListener();
+        void commands.cancelClaudeLoginSession(sessionId).catch(() => undefined);
+        return;
+      }
+      if (result.status === 'error') {
+        detachListener();
+        sessionIdRef.current = null;
+        setPhase('error');
+        setError(result.error);
+        optionsRef.current.onError?.(result.error);
+        return;
+      }
+      // The event name is deterministic, but honor the backend value if it drifts.
+      if (result.data.eventName !== eventName) {
+        detachListener();
+        unlistenRef.current = await listen<ClaudeLoginStreamEvent>(
+          result.data.eventName,
+          (event) => handleEvent(event.payload),
+        );
+      }
+      // Only advance out of `starting` if a stream event has not already moved us.
+      setPhase((current) => (current === 'starting' ? 'browser' : current));
+    } catch (startError) {
+      // An IPC-level rejection (not a command-declared error) would otherwise
+      // strand the UI in `starting` with a leaked listener and possibly a live
+      // PTY session — tear everything down and surface the failure.
       detachListener();
-      unlistenRef.current = await listen<ClaudeLoginStreamEvent>(
-        result.data.eventName,
-        (event) => handleEvent(event.payload),
-      );
+      sessionIdRef.current = null;
+      void commands.cancelClaudeLoginSession(sessionId).catch(() => undefined);
+      const message = startError instanceof Error ? startError.message : String(startError);
+      setPhase('error');
+      setError(message);
+      optionsRef.current.onError?.(message);
     }
-    // Only advance out of `starting` if a stream event has not already moved us.
-    setPhase((current) => (current === 'starting' ? 'browser' : current));
   }, [detachListener, handleEvent]);
 
   const submitCode = useCallback(async (code: string) => {
@@ -231,10 +255,17 @@ export function useClaudeLoginSession(
     }
     setPhase('submitting');
     setError(null);
-    const result = await commands.submitClaudeLoginCode(sessionId, trimmed);
-    if (result.status === 'error') {
+    try {
+      const result = await commands.submitClaudeLoginCode(sessionId, trimmed);
+      if (result.status === 'error') {
+        setPhase('awaitingCode');
+        setError(result.error);
+      }
+    } catch (submitError) {
+      // Return to the code prompt instead of hanging in `submitting`.
+      const message = submitError instanceof Error ? submitError.message : String(submitError);
       setPhase('awaitingCode');
-      setError(result.error);
+      setError(message);
     }
   }, []);
 
@@ -246,7 +277,8 @@ export function useClaudeLoginSession(
     setUrl(null);
     setError(null);
     if (sessionId) {
-      await commands.cancelClaudeLoginSession(sessionId);
+      // Best-effort: the UI is already reset either way.
+      await commands.cancelClaudeLoginSession(sessionId).catch(() => undefined);
     }
   }, [detachListener]);
 

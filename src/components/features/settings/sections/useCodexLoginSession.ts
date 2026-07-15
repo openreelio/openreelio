@@ -174,26 +174,51 @@ export function useCodexLoginSession(
       return;
     }
 
-    const result = await commands.startCodexLoginSession(sessionId);
-    if (result.status === 'error') {
-      detachListener();
-      setPhase('error');
-      setError(result.error);
-      optionsRef.current.onError?.(result.error);
-      return;
-    }
+    // Expose the id BEFORE the backend call so `cancel()` during startup can
+    // reach the session instead of finding a null ref.
+    sessionIdRef.current = sessionId;
 
-    sessionIdRef.current = result.data.sessionId;
-    // The event name is deterministic, but honor the backend value if it drifts.
-    if (result.data.eventName !== eventName) {
+    try {
+      const result = await commands.startCodexLoginSession(sessionId);
+      if (sessionIdRef.current !== sessionId) {
+        // cancel() (or a newer start) ran while startup was in flight. The
+        // backend session may have outlived the cancel that raced it — cancel
+        // again now that it definitely exists, and leave the UI state alone.
+        detachListener();
+        void commands.cancelCodexLoginSession(sessionId).catch(() => undefined);
+        return;
+      }
+      if (result.status === 'error') {
+        detachListener();
+        sessionIdRef.current = null;
+        setPhase('error');
+        setError(result.error);
+        optionsRef.current.onError?.(result.error);
+        return;
+      }
+
+      // The event name is deterministic, but honor the backend value if it drifts.
+      if (result.data.eventName !== eventName) {
+        detachListener();
+        unlistenRef.current = await listen<CodexLoginStreamEvent>(
+          result.data.eventName,
+          (event) => handleEvent(event.payload),
+        );
+      }
+      // Only advance out of `starting` if a stream event has not already moved us.
+      setPhase((current) => (current === 'starting' ? 'browser' : current));
+    } catch (startError) {
+      // An IPC-level rejection (not a command-declared error) would otherwise
+      // strand the UI in `starting` with a leaked listener and possibly a live
+      // login session — tear everything down and surface the failure.
       detachListener();
-      unlistenRef.current = await listen<CodexLoginStreamEvent>(
-        result.data.eventName,
-        (event) => handleEvent(event.payload),
-      );
+      sessionIdRef.current = null;
+      void commands.cancelCodexLoginSession(sessionId).catch(() => undefined);
+      const message = startError instanceof Error ? startError.message : String(startError);
+      setPhase('error');
+      setError(message);
+      optionsRef.current.onError?.(message);
     }
-    // Only advance out of `starting` if a stream event has not already moved us.
-    setPhase((current) => (current === 'starting' ? 'browser' : current));
   }, [detachListener, handleEvent]);
 
   const cancel = useCallback(async () => {
@@ -204,7 +229,8 @@ export function useCodexLoginSession(
     setUrl(null);
     setError(null);
     if (sessionId) {
-      await commands.cancelCodexLoginSession(sessionId);
+      // Best-effort: the UI is already reset either way.
+      await commands.cancelCodexLoginSession(sessionId).catch(() => undefined);
     }
   }, [detachListener]);
 
