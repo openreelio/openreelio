@@ -393,6 +393,7 @@ pub fn create_claude_command() -> Result<Command, String> {
 fn create_claude_command_from_spec(spec: &ClaudeCommandSpec) -> Result<Command, String> {
     ensure_private_claude_config_dir(&spec.config_home)?;
     let mut command = Command::new(&spec.executable);
+    crate::core::process::configure_tokio_command(&mut command);
     command.args(&spec.prefix_args);
     command.env(CLAUDE_CONFIG_DIR_ENV_VAR, claude_config_dir_env_value(spec));
     // The app owns runtime updates; disable the CLI's built-in self-update.
@@ -417,7 +418,6 @@ fn create_claude_command_from_spec(spec: &ClaudeCommandSpec) -> Result<Command, 
             command.env_remove(CLAUDE_CODE_OAUTH_TOKEN_ENV_VAR);
         }
     }
-    crate::core::process::configure_tokio_command(&mut command);
     command.kill_on_drop(true);
     Ok(command)
 }

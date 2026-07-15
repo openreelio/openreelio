@@ -377,9 +377,10 @@ fn launch_setup_token_terminal(config_home: &str, claude_display: &str) -> Resul
     #[cfg(target_os = "macos")]
     {
         let script_path = write_setup_token_script(config_home, claude_display, "command")?;
-        Command::new("open")
-            .args(["-a", "Terminal"])
-            .arg(&script_path)
+        let mut command = Command::new("open");
+        command.args(["-a", "Terminal"]).arg(&script_path);
+        crate::core::process::configure_std_command(&mut command);
+        command
             .spawn()
             .map(|_| ())
             .map_err(|error| format!("Failed to open Terminal: {error}"))
@@ -398,8 +399,10 @@ fn launch_setup_token_terminal(config_home: &str, claude_display: &str) -> Resul
             ("xterm", &["-e", "bash"]),
         ];
         for (terminal, args) in candidates {
-            let spawned = Command::new(terminal).args(args).arg(&script_path).spawn();
-            if spawned.is_ok() {
+            let mut command = Command::new(terminal);
+            command.args(args).arg(&script_path);
+            crate::core::process::configure_std_command(&mut command);
+            if command.spawn().is_ok() {
                 return Ok(());
             }
         }
@@ -694,6 +697,7 @@ pub fn verify_claude_auth_blocking() -> ClaudeAuthProbe {
     };
 
     let mut command = Command::new(executable);
+    crate::core::process::configure_std_command(&mut command);
     command
         .args([
             "-p",
@@ -718,7 +722,6 @@ pub fn verify_claude_auth_blocking() -> ClaudeAuthProbe {
     } else if let Some(key) = stored_anthropic_api_key() {
         command.env("ANTHROPIC_API_KEY", key);
     }
-    crate::core::process::configure_std_command(&mut command);
 
     let mut child = match command.spawn() {
         Ok(child) => child,
