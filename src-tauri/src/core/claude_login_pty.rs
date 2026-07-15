@@ -505,11 +505,16 @@ impl ClaudeLoginSessionHandle {
 /// CLI's own (URL-truncating) browser launch does nothing. Returns its path.
 ///
 /// Cross-platform: a `.cmd` that exits 0 on Windows, an executable `sh` that
-/// exits 0 elsewhere. Written once to the temp dir and reused.
+/// exits 0 elsewhere. Written inside the private managed config dir (NOT the
+/// shared temp dir, where a fixed filename invites symlink/TOCTOU swaps by
+/// other local users) and reused.
 fn write_noop_browser_script() -> Result<PathBuf, String> {
+    let script_dir = crate::core::claude_code::managed_claude_config_dir();
+    crate::core::claude_code::ensure_private_claude_config_dir(&script_dir)?;
+
     #[cfg(windows)]
     {
-        let path = std::env::temp_dir().join("openreelio-noop-browser.cmd");
+        let path = script_dir.join("openreelio-noop-browser.cmd");
         std::fs::write(&path, b"@exit /b 0\r\n")
             .map_err(|error| format!("Failed to write no-op browser script: {error}"))?;
         Ok(path)
@@ -517,7 +522,7 @@ fn write_noop_browser_script() -> Result<PathBuf, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join("openreelio-noop-browser.sh");
+        let path = script_dir.join("openreelio-noop-browser.sh");
         std::fs::write(&path, b"#!/bin/sh\nexit 0\n")
             .map_err(|error| format!("Failed to write no-op browser script: {error}"))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
@@ -526,6 +531,7 @@ fn write_noop_browser_script() -> Result<PathBuf, String> {
     }
     #[cfg(not(any(windows, unix)))]
     {
+        let _ = script_dir;
         Err("No-op browser script is not supported on this platform.".to_string())
     }
 }

@@ -445,7 +445,7 @@ pub fn claude_login_pty_env() -> Result<Vec<(String, OsString)>, String> {
     ])
 }
 
-fn ensure_private_claude_config_dir(path: &Path) -> Result<(), String> {
+pub(crate) fn ensure_private_claude_config_dir(path: &Path) -> Result<(), String> {
     std::fs::create_dir_all(path)
         .map_err(|error| format!("Failed to create OpenReelio Claude config home: {error}"))?;
 

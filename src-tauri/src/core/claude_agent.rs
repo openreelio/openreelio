@@ -437,7 +437,12 @@ fn write_windows_setup_token_script(
          echo You can close this window afterwards.\r\n\
          pause\r\n"
     );
-    let path = std::env::temp_dir().join("openreelio-claude-login.cmd");
+    // Written inside the private managed config dir, NOT the shared temp dir:
+    // a fixed filename in a world-writable location invites symlink/TOCTOU
+    // swaps by other local users.
+    let script_dir = std::path::Path::new(config_home);
+    claude_code::ensure_private_claude_config_dir(script_dir)?;
+    let path = script_dir.join("openreelio-claude-login.cmd");
     std::fs::write(&path, script.as_bytes())
         .map_err(|error| format!("Failed to write login script: {error}"))?;
     Ok(path)
@@ -457,7 +462,12 @@ fn write_setup_token_script(
     let script = format!(
         "#!/bin/bash\nexport {CLAUDE_CONFIG_DIR_ENV_VAR}=\"{config_home}\"\n\"{claude_display}\" setup-token\necho\necho \"Copy the token above and paste it back into OpenReelio.\"\n"
     );
-    let path = std::env::temp_dir().join(format!("openreelio-claude-login.{extension}"));
+    // Written inside the private (0700) managed config dir, NOT the shared
+    // temp dir: a fixed filename in /tmp invites symlink/TOCTOU swaps by
+    // other local users.
+    let script_dir = std::path::Path::new(config_home);
+    claude_code::ensure_private_claude_config_dir(script_dir)?;
+    let path = script_dir.join(format!("openreelio-claude-login.{extension}"));
     std::fs::write(&path, script.as_bytes())
         .map_err(|error| format!("Failed to write login script: {error}"))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
