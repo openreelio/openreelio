@@ -6,9 +6,7 @@
 #[cfg(feature = "bundled-ffmpeg")]
 use std::fs::File;
 #[cfg(feature = "bundled-ffmpeg")]
-use std::io::{Read, Write};
-#[cfg(feature = "bundled-ffmpeg")]
-use std::path::Component;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -223,22 +221,8 @@ pub fn get_ffprobe_download_url(
 /// Verify file checksum using SHA256
 #[cfg(feature = "bundled-ffmpeg")]
 pub fn verify_checksum(file_path: &Path, expected_sha256: &str) -> BundlerResult<bool> {
-    use sha2::{Digest, Sha256};
-
-    let mut file = File::open(file_path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
-
-    loop {
-        let bytes_read = file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
-    }
-
-    let hash = format!("{:x}", hasher.finalize());
-    Ok(hash.eq_ignore_ascii_case(expected_sha256))
+    crate::core::artifact::verify_sha256(file_path, expected_sha256)
+        .map_err(|error| BundlerError::VerificationFailed(error.to_string()))
 }
 
 #[cfg(not(feature = "bundled-ffmpeg"))]
@@ -326,79 +310,23 @@ pub fn extract_archive(_archive_path: &Path, _output_dir: &Path) -> BundlerResul
     ))
 }
 
+/// Maps a shared-artifact extraction error onto [`BundlerError`].
 #[cfg(feature = "bundled-ffmpeg")]
-fn archive_entry_destination(output_root: &Path, entry_name: &Path) -> BundlerResult<PathBuf> {
-    let mut destination = output_root.to_path_buf();
-    let mut saw_component = false;
-
-    for component in entry_name.components() {
-        match component {
-            Component::Normal(segment) => {
-                saw_component = true;
-                destination.push(segment);
-            }
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(BundlerError::ExtractionFailed(format!(
-                    "Archive entry escapes extraction directory: {}",
-                    entry_name.display()
-                )));
-            }
+fn map_artifact_error(error: crate::core::artifact::ArtifactError) -> BundlerError {
+    match error {
+        crate::core::artifact::ArtifactError::Io(io) => BundlerError::IoError(io),
+        crate::core::artifact::ArtifactError::Extraction(message) => {
+            BundlerError::ExtractionFailed(message)
         }
     }
-
-    if !saw_component {
-        return Err(BundlerError::ExtractionFailed(
-            "Archive entry has an empty path".to_string(),
-        ));
-    }
-
-    Ok(destination)
-}
-
-#[cfg(feature = "bundled-ffmpeg")]
-fn ensure_no_existing_symlink_in_destination(
-    output_root: &Path,
-    destination: &Path,
-) -> BundlerResult<()> {
-    let relative = destination.strip_prefix(output_root).map_err(|_| {
-        BundlerError::ExtractionFailed(format!(
-            "Archive entry escapes extraction directory: {}",
-            destination.display()
-        ))
-    })?;
-
-    let mut current = output_root.to_path_buf();
-    for component in relative.components() {
-        match component {
-            Component::Normal(segment) => current.push(segment),
-            Component::CurDir => continue,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(BundlerError::ExtractionFailed(format!(
-                    "Archive entry escapes extraction directory: {}",
-                    destination.display()
-                )));
-            }
-        }
-
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(BundlerError::ExtractionFailed(format!(
-                    "Archive destination contains a symlink: {}",
-                    current.display()
-                )));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(BundlerError::IoError(error)),
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(feature = "bundled-ffmpeg")]
 fn extract_zip(archive: &Path, output: &Path) -> BundlerResult<()> {
+    use crate::core::artifact::{
+        archive_entry_destination, ensure_no_existing_symlink_in_destination,
+    };
+
     let file = File::open(archive)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to open zip: {}", e)))?;
@@ -423,8 +351,10 @@ fn extract_zip(archive: &Path, output: &Path) -> BundlerResult<()> {
                 file.name()
             ))
         })?;
-        let destination = archive_entry_destination(&output_root, &entry_name)?;
-        ensure_no_existing_symlink_in_destination(&output_root, &destination)?;
+        let destination =
+            archive_entry_destination(&output_root, &entry_name).map_err(map_artifact_error)?;
+        ensure_no_existing_symlink_in_destination(&output_root, &destination)
+            .map_err(map_artifact_error)?;
 
         if file.is_dir() {
             std::fs::create_dir_all(&destination)?;
@@ -451,82 +381,16 @@ fn extract_zip(archive: &Path, output: &Path) -> BundlerResult<()> {
 }
 
 #[cfg(feature = "bundled-ffmpeg")]
-fn extract_tar_entries<R: Read>(
-    mut archive: tar::Archive<R>,
-    output: &Path,
-    format: &str,
-) -> BundlerResult<()> {
-    let output_root = output.canonicalize()?;
-
-    for entry in archive
-        .entries()
-        .map_err(|e| BundlerError::ExtractionFailed(format!("Failed to read {}: {}", format, e)))?
-    {
-        let mut entry = entry.map_err(|e| {
-            BundlerError::ExtractionFailed(format!("Failed to read {} entry: {}", format, e))
-        })?;
-        let entry_type = entry.header().entry_type();
-
-        if entry_type.is_gnu_longname()
-            || entry_type.is_gnu_longlink()
-            || entry_type.is_pax_global_extensions()
-            || entry_type.is_pax_local_extensions()
-        {
-            continue;
-        }
-
-        if entry_type.is_symlink() || entry_type.is_hard_link() {
-            return Err(BundlerError::ExtractionFailed(format!(
-                "Archive link entries are not allowed: {}",
-                entry
-                    .path()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default()
-            )));
-        }
-
-        if !entry_type.is_file() && !entry_type.is_dir() && !entry_type.is_contiguous() {
-            return Err(BundlerError::ExtractionFailed(format!(
-                "Unsupported archive entry type in {}: {:?}",
-                format, entry_type
-            )));
-        }
-
-        let entry_path = entry.path().map_err(|e| {
-            BundlerError::ExtractionFailed(format!("Failed to read {} entry path: {}", format, e))
-        })?;
-        let destination = archive_entry_destination(&output_root, entry_path.as_ref())?;
-        ensure_no_existing_symlink_in_destination(&output_root, &destination)?;
-
-        if entry_type.is_dir() {
-            std::fs::create_dir_all(&destination)?;
-            continue;
-        }
-
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        entry.unpack(&destination).map_err(|e| {
-            BundlerError::ExtractionFailed(format!("Failed to extract {} entry: {}", format, e))
-        })?;
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "bundled-ffmpeg")]
 fn extract_tar_xz(archive: &Path, output: &Path) -> BundlerResult<()> {
     let file = File::open(archive)?;
     let decompressor = xz2::read::XzDecoder::new(file);
-    extract_tar_entries(tar::Archive::new(decompressor), output, "tar.xz")
+    crate::core::artifact::extract_tar_entries(tar::Archive::new(decompressor), output, "tar.xz")
+        .map_err(map_artifact_error)
 }
 
 #[cfg(feature = "bundled-ffmpeg")]
 fn extract_tar_gz(archive: &Path, output: &Path) -> BundlerResult<()> {
-    let file = File::open(archive)?;
-    let decompressor = flate2::read::GzDecoder::new(file);
-    extract_tar_entries(tar::Archive::new(decompressor), output, "tar.gz")
+    crate::core::artifact::extract_tar_gz(archive, output).map_err(map_artifact_error)
 }
 
 // ============================================================================
@@ -922,9 +786,10 @@ mod tests {
     #[cfg(feature = "bundled-ffmpeg")]
     #[test]
     fn test_archive_entry_destination_rejects_path_traversal() {
+        use crate::core::artifact::{archive_entry_destination, ArtifactError};
         let temp_dir = tempfile::tempdir().unwrap();
         let result = archive_entry_destination(temp_dir.path(), Path::new("../evil.txt"));
-        assert!(matches!(result, Err(BundlerError::ExtractionFailed(_))));
+        assert!(matches!(result, Err(ArtifactError::Extraction(_))));
     }
 
     #[cfg(all(feature = "bundled-ffmpeg", unix))]
