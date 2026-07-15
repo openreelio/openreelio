@@ -636,7 +636,9 @@ where
 
                         let stripped = strip_ansi(&raw);
                         if !stripped.trim().is_empty() {
-                            let safe = secret_regex.replace_all(&stripped, "sk-ant-****").into_owned();
+                            let safe = secret_regex
+                                .replace_all(&stripped, "sk-ant-****")
+                                .into_owned();
                             emit(&app, &event_name, ClaudeLoginEvent::Output { text: safe });
                         }
 

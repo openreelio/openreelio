@@ -2038,7 +2038,10 @@ mod tests {
 
         assert_eq!(saved.ai.codex_reasoning_effort, CodexReasoningEffort::Ultra);
         assert_eq!(loaded.ai.codex_model, "gpt-5.6-terra");
-        assert_eq!(loaded.ai.codex_reasoning_effort, CodexReasoningEffort::Ultra);
+        assert_eq!(
+            loaded.ai.codex_reasoning_effort,
+            CodexReasoningEffort::Ultra
+        );
     }
 
     #[test]
