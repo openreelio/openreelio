@@ -54,6 +54,15 @@ struct McpSessionEntry {
     server_id: String,
     session_id: String,
     tools: Vec<ClaudeMcpToolSpec>,
+    /// Whether the CLI has fetched this session's tool list yet.
+    ///
+    /// Claude connects to MCP servers asynchronously and starts the model turn
+    /// without waiting, so a first user message sent immediately after spawn
+    /// runs with NO tools (observed live: the model then role-plays the tool
+    /// calls as text, fabricating results). Serving `tools/list` is the
+    /// definitive "connected" signal the adapter waits for before the first
+    /// message.
+    tools_listed: bool,
 }
 
 /// A pending `tools/call` awaiting a frontend response.
@@ -75,8 +84,19 @@ pub struct OpenReelioMcpShared {
 
 impl OpenReelioMcpShared {
     async fn tools_for(&self, token: &str) -> Option<Vec<ClaudeMcpToolSpec>> {
+        let mut sessions = self.sessions.lock().await;
+        sessions.get_mut(token).map(|entry| {
+            entry.tools_listed = true;
+            entry.tools.clone()
+        })
+    }
+
+    /// Whether `tools/list` has been served for the session with `server_id`.
+    async fn tools_listed_for_server(&self, server_id: &str) -> bool {
         let sessions = self.sessions.lock().await;
-        sessions.get(token).map(|entry| entry.tools.clone())
+        sessions
+            .values()
+            .any(|entry| entry.server_id == server_id && entry.tools_listed)
     }
 
     /// Emits a best-effort cancel event for a pending call.
@@ -125,6 +145,7 @@ impl OpenReelioMcpServer {
         sessions.insert(
             token,
             McpSessionEntry {
+                tools_listed: false,
                 server_id,
                 session_id,
                 tools,
@@ -207,6 +228,43 @@ pub async fn ensure_openreelio_mcp_server(
     });
     *guard = Some(server.clone());
     Ok(server)
+}
+
+/// Waits until Claude has fetched the MCP tool list for `server_id`.
+///
+/// Claude connects to MCP servers asynchronously and does not wait before
+/// starting the model turn, so a user message sent immediately after spawn
+/// runs with NO tools and the model role-plays the calls as text (verified by
+/// probing: an immediate first message yields `mcp_servers: pending` and
+/// `tools: []`, a delayed one yields `connected` and real tool calls). Serving
+/// `tools/list` is the definitive readiness signal. Returns `true` when ready;
+/// `false` after `timeout_ms` (default 15s) so callers can proceed degraded.
+#[tauri::command]
+#[specta::specta]
+pub async fn wait_openreelio_mcp_ready(
+    state: State<'_, AppState>,
+    server_id: String,
+    timeout_ms: Option<u32>,
+) -> Result<bool, String> {
+    let server = {
+        let guard = state.openreelio_mcp.lock().await;
+        guard.as_ref().cloned()
+    };
+    let Some(server) = server else {
+        return Ok(false);
+    };
+
+    let deadline =
+        std::time::Instant::now() + Duration::from_millis(u64::from(timeout_ms.unwrap_or(15_000)));
+    loop {
+        if server.shared.tools_listed_for_server(&server_id).await {
+            return Ok(true);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Delivers a frontend tool-call result back to a pending `tools/call`.

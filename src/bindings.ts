@@ -1205,6 +1205,24 @@ async respondOpenreelioMcpCall(callId: string, response: OpenReelioMcpCallRespon
 }
 },
 /**
+ * Waits until Claude has fetched the MCP tool list for `server_id`.
+ * 
+ * Claude connects to MCP servers asynchronously and does not wait before
+ * starting the model turn, so a user message sent immediately after spawn
+ * runs with NO tools and the model role-plays the calls as text (verified by
+ * probing: an immediate first message yields `mcp_servers: pending` and
+ * `tools: []`, a delayed one yields `connected` and real tool calls). Serving
+ * `tools/list` is the definitive readiness signal. Returns `true` when ready;
+ * `false` after `timeout_ms` (default 15s) so callers can proceed degraded.
+ */
+async waitOpenreelioMcpReady(serverId: string, timeoutMs: number | null) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("wait_openreelio_mcp_ready", { serverId, timeoutMs }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Creates a new AI conversation session for the given project.
  * 
  * Returns the newly created session as a `SessionSummaryDto`.

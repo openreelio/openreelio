@@ -324,6 +324,19 @@ export class ClaudeCodeAdapter implements ExternalAgentRuntimeAdapter {
     });
 
     session.processAlive = true;
+
+    // Hold the first message until Claude has actually fetched the MCP tool
+    // list. The CLI connects to MCP servers asynchronously and starts the
+    // model turn without waiting, so a message sent immediately runs with NO
+    // tools — the model then role-plays the OpenReelio tool calls as plain
+    // text, fabricating results (observed live). Best-effort: on timeout or
+    // command failure the message proceeds degraded rather than blocking.
+    try {
+      await commands.waitOpenreelioMcpReady(serverId, null);
+    } catch {
+      // Older backend without the command, or a transient IPC failure: the
+      // session still works, just with the original race window.
+    }
   }
 
   /**

@@ -1441,6 +1441,7 @@ mod tauri_app {
                 $crate::ipc::write_claude_headless_message,
                 $crate::ipc::stop_claude_headless,
                 $crate::ipc::respond_openreelio_mcp_call,
+                $crate::ipc::wait_openreelio_mcp_ready,
                 // AI Conversation persistence commands
                 $crate::core::ai::conversation_commands::create_ai_session,
                 $crate::core::ai::conversation_commands::list_ai_sessions,
@@ -1967,6 +1968,7 @@ mod tauri_app {
             ipc::write_claude_headless_message,
             ipc::stop_claude_headless,
             ipc::respond_openreelio_mcp_call,
+            ipc::wait_openreelio_mcp_ready,
             // AI Conversation persistence commands
             crate::core::ai::conversation_commands::create_ai_session,
             crate::core::ai::conversation_commands::list_ai_sessions,
