@@ -120,8 +120,8 @@ export type ProviderType = 'openai' | 'anthropic' | 'gemini' | 'local';
 /** Top-level assistant runtime selection */
 export type AssistantRuntime = 'api' | 'codex' | 'claude_code';
 
-/** Codex reasoning effort selection */
-export type CodexReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+/** Codex reasoning effort selection (gpt-5.6 models add `max` and `ultra`) */
+export type CodexReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 
 /** Claude Code effort selection (mirrors `claude --effort`) */
 export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';

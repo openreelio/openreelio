@@ -88,26 +88,26 @@ interface CodexModelCatalogResult {
 
 const FALLBACK_CODEX_MODELS: CodexModelInfo[] = [
   {
+    slug: 'gpt-5.6-terra',
+    displayName: 'GPT-5.6-Terra',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+  },
+  {
+    slug: 'gpt-5.6-luna',
+    displayName: 'GPT-5.6-Luna',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  },
+  {
     slug: 'gpt-5.5',
     displayName: 'gpt-5.5',
     defaultReasoningEffort: 'medium',
     supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
   },
   {
-    slug: 'gpt-5.4',
-    displayName: 'gpt-5.4',
-    defaultReasoningEffort: 'medium',
-    supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
-  },
-  {
     slug: 'gpt-5.4-mini',
     displayName: 'GPT-5.4-Mini',
-    defaultReasoningEffort: 'medium',
-    supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
-  },
-  {
-    slug: 'gpt-5.3-codex',
-    displayName: 'gpt-5.3-codex',
     defaultReasoningEffort: 'medium',
     supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
   },

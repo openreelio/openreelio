@@ -843,32 +843,40 @@ fn default_codex_models() -> Vec<CodexModelInfo> {
 }
 
 fn default_codex_models_for_version(version: Option<&str>) -> Vec<CodexModelInfo> {
-    let entries: &[(&str, &str)] = if codex_version_supports_gpt_5_5(version) {
+    // (slug, display name, extra efforts beyond the default low..xhigh set).
+    // The gpt-5.6 generation adds `max` (both) and `ultra` (terra only);
+    // offering them here keeps the offline fallback consistent with the live
+    // `codex debug models` catalog of the pinned CLI.
+    let entries: &[(&str, &str, &[&str])] = if codex_version_supports_gpt_5_5(version) {
         &[
-            ("gpt-5.5", "gpt-5.5"),
-            ("gpt-5.4", "gpt-5.4"),
-            ("gpt-5.4-mini", "GPT-5.4-Mini"),
-            ("gpt-5.3-codex", "gpt-5.3-codex"),
-            ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"),
-            ("gpt-5.2", "gpt-5.2"),
+            ("gpt-5.6-terra", "GPT-5.6-Terra", &["max", "ultra"]),
+            ("gpt-5.6-luna", "GPT-5.6-Luna", &["max"]),
+            ("gpt-5.5", "gpt-5.5", &[]),
+            ("gpt-5.4", "gpt-5.4", &[]),
+            ("gpt-5.4-mini", "GPT-5.4-Mini", &[]),
+            ("gpt-5.3-codex", "gpt-5.3-codex", &[]),
         ]
     } else {
         &[
-            ("gpt-5.4", "gpt-5.4"),
-            ("gpt-5.4-mini", "GPT-5.4-Mini"),
-            ("gpt-5.3-codex", "gpt-5.3-codex"),
-            ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"),
-            ("gpt-5.2", "gpt-5.2"),
+            ("gpt-5.4", "gpt-5.4", &[]),
+            ("gpt-5.4-mini", "GPT-5.4-Mini", &[]),
+            ("gpt-5.3-codex", "gpt-5.3-codex", &[]),
+            ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark", &[]),
+            ("gpt-5.2", "gpt-5.2", &[]),
         ]
     };
 
     entries
         .iter()
-        .map(|(slug, display_name)| CodexModelInfo {
-            slug: (*slug).to_string(),
-            display_name: (*display_name).to_string(),
-            default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
-            supported_reasoning_efforts: default_reasoning_efforts(),
+        .map(|(slug, display_name, extra_efforts)| {
+            let mut efforts = default_reasoning_efforts();
+            efforts.extend(extra_efforts.iter().map(|effort| (*effort).to_string()));
+            CodexModelInfo {
+                slug: (*slug).to_string(),
+                display_name: (*display_name).to_string(),
+                default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
+                supported_reasoning_efforts: efforts,
+            }
         })
         .collect()
 }

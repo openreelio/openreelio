@@ -646,6 +646,11 @@ pub enum CodexReasoningEffort {
     Medium,
     High,
     Xhigh,
+    /// Offered by gpt-5.6-generation models; rejecting it here failed the
+    /// ENTIRE settings save whenever the user picked it in the UI.
+    Max,
+    /// gpt-5.6-terra only: maximum reasoning with automatic task delegation.
+    Ultra,
 }
 
 fn default_codex_model() -> String {
@@ -1999,6 +2004,41 @@ mod tests {
             serde_json::to_string(&AssistantRuntime::ClaudeCode).expect("serialize"),
             "\"claude_code\""
         );
+    }
+
+    #[test]
+    fn test_gpt_5_6_reasoning_efforts_round_trip_through_wire() {
+        // The gpt-5.6 generation offers `max` and `ultra`; rejecting either
+        // here failed the ENTIRE settings save when the user picked them.
+        for (wire, expected) in [
+            ("\"max\"", CodexReasoningEffort::Max),
+            ("\"ultra\"", CodexReasoningEffort::Ultra),
+        ] {
+            let value: CodexReasoningEffort =
+                serde_json::from_str(wire).expect("deserialize new effort");
+            assert_eq!(value, expected);
+            assert_eq!(
+                serde_json::to_string(&expected).expect("serialize"),
+                wire.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn test_save_preserves_gpt_5_6_reasoning_effort() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = SettingsManager::new(temp_dir.path().to_path_buf());
+
+        let mut settings = AppSettings::default();
+        settings.ai.codex_model = "gpt-5.6-terra".to_string();
+        settings.ai.codex_reasoning_effort = CodexReasoningEffort::Ultra;
+
+        let saved = manager.save(&settings).unwrap();
+        let loaded = manager.load();
+
+        assert_eq!(saved.ai.codex_reasoning_effort, CodexReasoningEffort::Ultra);
+        assert_eq!(loaded.ai.codex_model, "gpt-5.6-terra");
+        assert_eq!(loaded.ai.codex_reasoning_effort, CodexReasoningEffort::Ultra);
     }
 
     #[test]

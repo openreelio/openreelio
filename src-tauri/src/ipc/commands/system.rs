@@ -213,6 +213,8 @@ pub enum CodexReasoningEffortDto {
     Medium,
     High,
     Xhigh,
+    Max,
+    Ultra,
 }
 
 fn default_codex_model_dto() -> String {
@@ -393,6 +395,12 @@ impl From<AppSettings> for AppSettingsDto {
                     crate::core::settings::CodexReasoningEffort::Xhigh => {
                         CodexReasoningEffortDto::Xhigh
                     }
+                    crate::core::settings::CodexReasoningEffort::Max => {
+                        CodexReasoningEffortDto::Max
+                    }
+                    crate::core::settings::CodexReasoningEffort::Ultra => {
+                        CodexReasoningEffortDto::Ultra
+                    }
                 },
                 claude_model: s.ai.claude_model,
                 claude_effort: s.ai.claude_effort,
@@ -523,6 +531,8 @@ impl From<AppSettingsDto> for AppSettings {
                     CodexReasoningEffortDto::Medium => CodexReasoningEffort::Medium,
                     CodexReasoningEffortDto::High => CodexReasoningEffort::High,
                     CodexReasoningEffortDto::Xhigh => CodexReasoningEffort::Xhigh,
+                    CodexReasoningEffortDto::Max => CodexReasoningEffort::Max,
+                    CodexReasoningEffortDto::Ultra => CodexReasoningEffort::Ultra,
                 },
                 claude_model: dto.ai.claude_model,
                 claude_effort: dto.ai.claude_effort,
