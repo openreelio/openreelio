@@ -56,6 +56,11 @@ pub struct StartClaudeHeadlessInput {
     /// under the managed `CLAUDE_CONFIG_DIR`, so resume works across restarts.
     /// This backs the frontend's interrupt-then-continue flow.
     pub resume_session_id: Option<String>,
+    /// OpenReelio developer instructions appended to the system prompt
+    /// (`--append-system-prompt`). Without them Claude behaves like a generic
+    /// coding agent instead of driving the OpenReelio MCP tools.
+    #[serde(default)]
+    pub developer_instructions: Option<String>,
 }
 
 /// Result of `start_claude_headless`.
@@ -174,6 +179,7 @@ pub fn build_claude_headless_args(
     mcp_config_path: &str,
     session_id: &str,
     resume_session_id: Option<&str>,
+    developer_instructions: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
@@ -200,6 +206,21 @@ pub fn build_claude_headless_args(
         "--setting-sources".to_string(),
         "user".to_string(),
     ];
+
+    // Append the OpenReelio developer instructions to the default system
+    // prompt. Without them Claude behaves like a generic coding agent in an
+    // empty bridge directory (observed: it explored the cwd and attempted
+    // shell commands instead of calling the OpenReelio MCP tools).
+    if let Some(instructions) = developer_instructions {
+        // Double quotes would make the argv unsafe for the legacy npm `.cmd`
+        // shim (Rust refuses quoted args to batch files); single quotes keep
+        // the prose readable and the argument shim-safe everywhere.
+        let sanitized = instructions.trim().replace('"', "'");
+        if !sanitized.is_empty() {
+            args.push("--append-system-prompt".to_string());
+            args.push(sanitized);
+        }
+    }
 
     match resume_session_id {
         Some(resume_id) => {
@@ -351,8 +372,37 @@ mod tests {
     }
 
     #[test]
+    fn appends_sanitized_developer_instructions() {
+        let args = build_claude_headless_args(
+            "sonnet",
+            "medium",
+            "/tmp/mcp.json",
+            "sid-1",
+            None,
+            Some("You are OpenReelio's \"editing\" agent. Use mcp__openreelio__project_state."),
+        );
+        let position = args
+            .iter()
+            .position(|arg| arg == "--append-system-prompt")
+            .expect("append-system-prompt flag present");
+        let value = &args[position + 1];
+        assert!(value.contains("mcp__openreelio__project_state"));
+        // Double quotes are rewritten so the argv stays .cmd-shim safe.
+        assert!(!value.contains('"'));
+        assert!(value.contains("'editing'"));
+    }
+
+    #[test]
+    fn omits_developer_instructions_when_absent() {
+        let args =
+            build_claude_headless_args("sonnet", "medium", "/tmp/mcp.json", "sid-1", None, None);
+        assert!(!args.contains(&"--append-system-prompt".to_string()));
+    }
+
+    #[test]
     fn builds_expected_headless_arg_vector() {
-        let args = build_claude_headless_args("sonnet", "medium", "/tmp/mcp.json", "sid-1", None);
+        let args =
+            build_claude_headless_args("sonnet", "medium", "/tmp/mcp.json", "sid-1", None, None);
         assert!(args.contains(&"-p".to_string()));
         assert!(args.contains(&"--tools".to_string()));
         assert!(args.contains(&"mcp__openreelio__*".to_string()));
@@ -373,8 +423,14 @@ mod tests {
 
     #[test]
     fn resume_session_replaces_session_id_flag() {
-        let args =
-            build_claude_headless_args("sonnet", "medium", "/tmp/mcp.json", "sid-1", Some("prev"));
+        let args = build_claude_headless_args(
+            "sonnet",
+            "medium",
+            "/tmp/mcp.json",
+            "sid-1",
+            Some("prev"),
+            None,
+        );
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--resume".to_string(), "prev".to_string()]));

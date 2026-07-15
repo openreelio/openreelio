@@ -77,6 +77,12 @@ export interface CreateClaudeHeadlessTransportInput {
    * turn is always written by the caller after the transport is wired.
    */
   resumeSessionId?: string | null;
+  /**
+   * OpenReelio developer instructions appended to the system prompt. Without
+   * them Claude behaves like a generic coding agent instead of driving the
+   * OpenReelio MCP tools.
+   */
+  developerInstructions?: string | null;
 }
 
 export interface ClaudeHeadlessTransportOptions {
@@ -207,6 +213,7 @@ export class ClaudeHeadlessTransport {
         apiKey: input.apiKey ?? null,
         tools: input.tools,
         resumeSessionId: input.resumeSessionId ?? null,
+        developerInstructions: input.developerInstructions ?? null,
       });
     } catch (error) {
       sink = () => undefined;

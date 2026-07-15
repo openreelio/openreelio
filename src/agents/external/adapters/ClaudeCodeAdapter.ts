@@ -28,7 +28,10 @@ import {
   type ClaudeHeadlessExitInfo,
   type CreateClaudeHeadlessTransportInput,
 } from './ClaudeHeadlessTransport';
-import { OPENREELIO_CODEX_DYNAMIC_TOOLS } from './openreelioCodexTools';
+import {
+  buildOpenReelioCodexDeveloperInstructions,
+  OPENREELIO_CODEX_DYNAMIC_TOOLS,
+} from './openreelioCodexTools';
 
 /**
  * Probe result describing the local Claude CLI install and auth state.
@@ -175,7 +178,7 @@ export class ClaudeCodeAdapter implements ExternalAgentRuntimeAdapter {
   async startSession(input: StartAgentSessionInput): Promise<ExternalAgentSessionHandle> {
     const cwd = input.cwd ?? null;
     // Spawn the process first; the backend no longer sends the first turn.
-    const transport = await this.spawnTransport(cwd, null);
+    const transport = await this.spawnTransport(input.projectId, cwd, null);
 
     // The OpenReelio-facing session id is the first transport's server id. It
     // stays stable for the whole conversation even after a resume swaps the
@@ -244,6 +247,7 @@ export class ClaudeCodeAdapter implements ExternalAgentRuntimeAdapter {
 
   /** Spawn a fresh headless transport for this session (optionally resuming). */
   private async spawnTransport(
+    projectId: string,
     cwd: string | null,
     resumeSessionId: string | null,
   ): Promise<ClaudeHeadlessTransport> {
@@ -255,6 +259,7 @@ export class ClaudeCodeAdapter implements ExternalAgentRuntimeAdapter {
       apiKey: this.options.apiKey ?? null,
       tools: buildClaudeToolCatalog(),
       resumeSessionId,
+      developerInstructions: buildClaudeDeveloperInstructions(projectId, cwd),
     });
   }
 
@@ -366,7 +371,7 @@ export class ClaudeCodeAdapter implements ExternalAgentRuntimeAdapter {
     session: ClaudeSessionState,
   ): Promise<void> {
     const resumeSessionId = session.mapperState.claudeSessionId ?? null;
-    const transport = await this.spawnTransport(session.cwd, resumeSessionId);
+    const transport = await this.spawnTransport(session.projectId, session.cwd, resumeSessionId);
     await this.attachTransport(sessionId, session, transport, resumeSessionId);
   }
 
@@ -456,6 +461,26 @@ export class ClaudeCodeAdapter implements ExternalAgentRuntimeAdapter {
 function formatClaudeExitMessage(info: ClaudeHeadlessExitInfo): string {
   const base = 'Claude Code stopped unexpectedly before finishing the response.';
   return info.lastStderrLine ? `${base} Last output: ${info.lastStderrLine}` : base;
+}
+
+/**
+ * Build the OpenReelio developer instructions for a Claude session.
+ *
+ * Reuses the shared instruction text but rewrites every tool reference from
+ * Codex's `openreelio.<name>` form to the `mcp__openreelio__<name>` names
+ * Claude actually sees, so the guidance points at callable tools. Without
+ * these instructions Claude behaves like a generic coding agent in an empty
+ * bridge directory (observed: it explored the cwd and attempted shell
+ * commands instead of using the OpenReelio tools).
+ */
+function buildClaudeDeveloperInstructions(projectId: string, cwd: string | null): string {
+  let instructions = buildOpenReelioCodexDeveloperInstructions({ projectId, cwd });
+  for (const tool of OPENREELIO_CODEX_DYNAMIC_TOOLS) {
+    instructions = instructions
+      .split(`openreelio.${tool.name}`)
+      .join(`mcp__openreelio__${tool.name}`);
+  }
+  return instructions;
 }
 
 /**

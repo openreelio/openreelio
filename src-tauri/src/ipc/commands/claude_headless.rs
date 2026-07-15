@@ -196,6 +196,7 @@ pub async fn start_claude_headless(
         &mcp_config_arg,
         &session_id,
         resume_session_id,
+        input.developer_instructions.as_deref(),
     );
 
     let command_label = crate::core::claude_code::claude_command_label();

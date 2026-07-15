@@ -7769,7 +7769,13 @@ tools: ClaudeMcpToolSpec[];
  * under the managed `CLAUDE_CONFIG_DIR`, so resume works across restarts.
  * This backs the frontend's interrupt-then-continue flow.
  */
-resumeSessionId: string | null }
+resumeSessionId: string | null; 
+/**
+ * OpenReelio developer instructions appended to the system prompt
+ * (`--append-system-prompt`). Without them Claude behaves like a generic
+ * coding agent instead of driving the OpenReelio MCP tools.
+ */
+developerInstructions?: string | null }
 /**
  * Input for `start_claude_login`.
  */
