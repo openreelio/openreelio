@@ -9,7 +9,9 @@ import {
   useExternalAgentChatRuntime,
   type ExternalAgentApprovalDecision,
   type ExternalAgentApprovalRequest,
+  type ExternalAgentRuntimeAdapter,
 } from '@/agents/external';
+import { ClaudeCodeAdapter } from '@/agents/external/adapters/ClaudeCodeAdapter';
 import { usePermissionStore } from '@/stores/permissionStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 
@@ -74,18 +76,38 @@ export const ExternalAgentChat = forwardRef<AgentRuntimeChatHandle, ExternalAgen
       [resolveExternalApprovalPolicy],
     );
     const sessionPersistence = useMemo(() => createTauriExternalAgentSessionPersistence(), []);
+    const assistantRuntime = useSettingsStore((state) => state.settings.ai.assistantRuntime);
     const codexModel = useSettingsStore((state) => state.settings.ai.codexModel);
     const codexReasoningEffort = useSettingsStore(
       (state) => state.settings.ai.codexReasoningEffort,
     );
-    const adapter = useMemo(
+    const claudeModel = useSettingsStore((state) => state.settings.ai.claudeModel);
+    const claudeEffort = useSettingsStore((state) => state.settings.ai.claudeEffort);
+    const claudeAuthMode = useSettingsStore((state) => state.settings.ai.claudeAuthMode);
+    const isClaude = assistantRuntime === 'claude_code';
+    const adapter = useMemo<ExternalAgentRuntimeAdapter>(
       () =>
-        new CodexReferenceAdapter(undefined, {
-          approvalDecisionProvider: approvalBroker.requestDecision,
-          model: codexModel,
-          reasoningEffort: codexReasoningEffort,
-        }),
-      [approvalBroker, codexModel, codexReasoningEffort],
+        isClaude
+          ? new ClaudeCodeAdapter(undefined, {
+              approvalDecisionProvider: approvalBroker.requestDecision,
+              model: claudeModel,
+              effort: claudeEffort,
+              authMode: claudeAuthMode,
+            })
+          : new CodexReferenceAdapter(undefined, {
+              approvalDecisionProvider: approvalBroker.requestDecision,
+              model: codexModel,
+              reasoningEffort: codexReasoningEffort,
+            }),
+      [
+        isClaude,
+        approvalBroker,
+        codexModel,
+        codexReasoningEffort,
+        claudeModel,
+        claudeEffort,
+        claudeAuthMode,
+      ],
     );
     const runtime = useExternalAgentChatRuntime({
       adapter,
@@ -100,7 +122,11 @@ export const ExternalAgentChat = forwardRef<AgentRuntimeChatHandle, ExternalAgen
       onError,
     });
 
-    const disabledReason = unavailableReason ?? 'Codex is not ready for this project.';
+    const agentName = isClaude ? 'Claude Code' : 'Codex';
+    const disabledReason = unavailableReason ?? `${agentName} is not ready for this project.`;
+    const readyDescription = isClaude
+      ? 'Using your local Claude Code account.'
+      : 'Using your local Codex account through app-server.';
 
     return (
       <AgentRuntimeChatShell
@@ -123,12 +149,10 @@ export const ExternalAgentChat = forwardRef<AgentRuntimeChatHandle, ExternalAgen
         plan={null}
         pendingClarificationQuestion={null}
         pendingToolPermissionRequest={runtime.pendingToolPermissionRequest}
-        placeholder="Ask Codex to help edit this project..."
+        placeholder={`Ask ${agentName} to help edit this project...`}
         disabled={disabled || !ready}
-        currentAgentName="Codex"
-        currentAgentDescription={
-          ready ? 'Using your local Codex account through app-server.' : disabledReason
-        }
+        currentAgentName={agentName}
+        currentAgentDescription={ready ? readyDescription : disabledReason}
         isExperimentalSession
         specialistDefinitions={[]}
         onStartSession={onStartSession}

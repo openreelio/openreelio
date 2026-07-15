@@ -79,6 +79,13 @@ export interface FeatureFlags {
    * @default false
    */
   USE_CODEX_AGENT: boolean;
+
+  /**
+   * Enable the Claude Code adapter for the External Agent Host.
+   * This flag has no effect unless USE_EXTERNAL_AGENT_HOST is enabled.
+   * @default false
+   */
+  USE_CLAUDE_CODE_AGENT: boolean;
 }
 
 /**
@@ -122,6 +129,7 @@ const DEFAULT_FLAGS: FeatureFlags = {
   USE_VIDEO_GENERATION: false,
   USE_EXTERNAL_AGENT_HOST: false,
   USE_CODEX_AGENT: false,
+  USE_CLAUDE_CODE_AGENT: false,
 };
 
 /**
@@ -134,6 +142,7 @@ export const FEATURE_FLAG_KEYS: readonly FeatureFlagKey[] = [
   'USE_META_TOOLS',
   'USE_EXTERNAL_AGENT_HOST',
   'USE_CODEX_AGENT',
+  'USE_CLAUDE_CODE_AGENT',
 ] as const;
 
 // =============================================================================
@@ -481,6 +490,13 @@ export function isExternalAgentHostEnabled(): boolean {
  */
 export function isCodexAgentEnabled(): boolean {
   return isExternalAgentHostEnabled() && getFeatureFlag('USE_CODEX_AGENT');
+}
+
+/**
+ * Check if the Claude Code adapter is enabled for External Agent Host.
+ */
+export function isClaudeCodeAgentEnabled(): boolean {
+  return isExternalAgentHostEnabled() && getFeatureFlag('USE_CLAUDE_CODE_AGENT');
 }
 
 // =============================================================================
