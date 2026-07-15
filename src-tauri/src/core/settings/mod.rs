@@ -634,6 +634,8 @@ pub enum AssistantRuntime {
     /// Use the user's locally authenticated Codex agent through app-server.
     #[default]
     Codex,
+    /// Use the user's locally authenticated Claude Code CLI (headless).
+    ClaudeCode,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -649,6 +651,24 @@ pub enum CodexReasoningEffort {
 fn default_codex_model() -> String {
     crate::core::codex::DEFAULT_CODEX_MODEL.to_string()
 }
+
+fn default_claude_model() -> String {
+    "sonnet".to_string()
+}
+
+fn default_claude_effort() -> String {
+    "medium".to_string()
+}
+
+fn default_claude_auth_mode() -> String {
+    "subscription".to_string()
+}
+
+/// Supported Claude Code reasoning-effort levels.
+const CLAUDE_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// Supported Claude Code auth modes.
+const CLAUDE_AUTH_MODES: &[&str] = &["subscription", "api-key"];
 
 const MAX_CODEX_MODEL_LENGTH: usize = 128;
 
@@ -668,6 +688,28 @@ pub struct AISettings {
     /// Codex reasoning effort used by turn/start.
     #[serde(default)]
     pub codex_reasoning_effort: CodexReasoningEffort,
+
+    /// Claude Code model alias used by the headless runtime (e.g. `sonnet`).
+    #[serde(default = "default_claude_model")]
+    pub claude_model: String,
+
+    /// Claude Code reasoning effort (`low|medium|high|xhigh|max`).
+    #[serde(default = "default_claude_effort")]
+    pub claude_effort: String,
+
+    /// Claude Code auth mode (`subscription|api-key`).
+    #[serde(default = "default_claude_auth_mode")]
+    pub claude_auth_mode: String,
+
+    /// When true, Codex discovery may use system launchers (PATH/WSL), not just
+    /// the app-managed native runtime. Defaults to managed-only.
+    #[serde(default)]
+    pub codex_prefer_system: bool,
+
+    /// When true, Claude discovery may use system launchers (PATH/WSL), not just
+    /// the app-managed native runtime. Defaults to managed-only.
+    #[serde(default)]
+    pub claude_prefer_system: bool,
 
     // === Provider Configuration ===
     /// Primary AI provider for reasoning/editing tasks
@@ -845,6 +887,11 @@ impl Default for AISettings {
             assistant_runtime: AssistantRuntime::default(),
             codex_model: default_codex_model(),
             codex_reasoning_effort: CodexReasoningEffort::default(),
+            claude_model: default_claude_model(),
+            claude_effort: default_claude_effort(),
+            claude_auth_mode: default_claude_auth_mode(),
+            codex_prefer_system: false,
+            claude_prefer_system: false,
             primary_provider: ProviderType::default(),
             primary_model: default_primary_model(),
             vision_provider: None,
@@ -877,7 +924,33 @@ impl Default for AISettings {
 impl AISettings {
     /// Normalize and clamp AI settings values to valid ranges
     pub fn normalize(&mut self) {
-        self.assistant_runtime = AssistantRuntime::Codex;
+        // Migrate the legacy API-backed runtime to Codex, but preserve an
+        // explicit Claude Code selection.
+        if self.assistant_runtime == AssistantRuntime::Api {
+            self.assistant_runtime = AssistantRuntime::Codex;
+        }
+
+        // Claude Code model: trim and default when empty.
+        self.claude_model = self.claude_model.trim().to_string();
+        if self.claude_model.is_empty() {
+            self.claude_model = default_claude_model();
+        }
+
+        // Claude Code effort: coerce to a supported level (case-insensitive).
+        let claude_effort = self.claude_effort.trim().to_ascii_lowercase();
+        self.claude_effort = if CLAUDE_EFFORT_LEVELS.contains(&claude_effort.as_str()) {
+            claude_effort
+        } else {
+            default_claude_effort()
+        };
+
+        // Claude Code auth mode: coerce to a supported value (case-insensitive).
+        let claude_auth_mode = self.claude_auth_mode.trim().to_ascii_lowercase();
+        self.claude_auth_mode = if CLAUDE_AUTH_MODES.contains(&claude_auth_mode.as_str()) {
+            claude_auth_mode
+        } else {
+            default_claude_auth_mode()
+        };
 
         self.codex_model = self
             .codex_model
@@ -1886,7 +1959,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ai_settings_normalization_forces_codex_runtime() {
+    fn test_ai_settings_normalization_migrates_api_to_codex() {
         let mut settings = AISettings {
             assistant_runtime: AssistantRuntime::Api,
             ..Default::default()
@@ -1895,6 +1968,73 @@ mod tests {
         settings.normalize();
 
         assert_eq!(settings.assistant_runtime, AssistantRuntime::Codex);
+    }
+
+    #[test]
+    fn test_ai_settings_normalization_preserves_claude_code() {
+        let mut settings = AISettings {
+            assistant_runtime: AssistantRuntime::ClaudeCode,
+            claude_effort: "NONSENSE".to_string(),
+            claude_auth_mode: "bogus".to_string(),
+            claude_model: "  ".to_string(),
+            ..Default::default()
+        };
+
+        settings.normalize();
+
+        assert_eq!(settings.assistant_runtime, AssistantRuntime::ClaudeCode);
+        // Unknown effort/auth-mode fall back to defaults; empty model defaults.
+        assert_eq!(settings.claude_effort, "medium");
+        assert_eq!(settings.claude_auth_mode, "subscription");
+        assert_eq!(settings.claude_model, "sonnet");
+    }
+
+    #[test]
+    fn test_claude_code_runtime_round_trips_through_wire() {
+        // The frontend sends the runtime as the string "claude_code".
+        let value: AssistantRuntime =
+            serde_json::from_str("\"claude_code\"").expect("deserialize claude_code");
+        assert_eq!(value, AssistantRuntime::ClaudeCode);
+        assert_eq!(
+            serde_json::to_string(&AssistantRuntime::ClaudeCode).expect("serialize"),
+            "\"claude_code\""
+        );
+    }
+
+    #[test]
+    fn test_save_preserves_claude_code_runtime() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = SettingsManager::new(temp_dir.path().to_path_buf());
+
+        let mut settings = AppSettings::default();
+        settings.ai.assistant_runtime = AssistantRuntime::ClaudeCode;
+        settings.ai.claude_model = "opus".to_string();
+        settings.ai.claude_effort = "high".to_string();
+        settings.ai.claude_auth_mode = "api-key".to_string();
+
+        let saved = manager.save(&settings).unwrap();
+        let loaded = manager.load();
+
+        assert_eq!(saved.ai.assistant_runtime, AssistantRuntime::ClaudeCode);
+        assert_eq!(loaded.ai.assistant_runtime, AssistantRuntime::ClaudeCode);
+        assert_eq!(loaded.ai.claude_model, "opus");
+        assert_eq!(loaded.ai.claude_effort, "high");
+        assert_eq!(loaded.ai.claude_auth_mode, "api-key");
+    }
+
+    #[test]
+    fn test_old_settings_without_claude_fields_deserialize() {
+        // Pre-Claude settings files omit the claude_* fields entirely.
+        let json = r#"{ "assistantRuntime": "codex", "codexModel": "gpt-5.4",
+            "primaryProvider": "anthropic", "primaryModel": "claude-sonnet-4-5-20251015",
+            "temperature": 0.3, "maxTokens": 4096, "frameExtractionRate": 1.0,
+            "perRequestLimitCents": 50, "currentMonthUsageCents": 0,
+            "autoAnalyzeOnImport": false, "autoCaptionOnImport": false,
+            "cacheDurationHours": 24, "localOnlyMode": false }"#;
+        let settings: AISettings = serde_json::from_str(json).expect("deserialize legacy settings");
+        assert_eq!(settings.claude_model, "sonnet");
+        assert_eq!(settings.claude_effort, "medium");
+        assert_eq!(settings.claude_auth_mode, "subscription");
     }
 
     #[test]

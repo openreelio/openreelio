@@ -203,6 +203,7 @@ pub enum ProposalReviewModeDto {
 pub enum AssistantRuntimeDto {
     Api,
     Codex,
+    ClaudeCode,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
@@ -232,6 +233,16 @@ pub struct AISettingsDto {
     pub codex_model: String,
     #[serde(default = "default_codex_reasoning_effort_dto")]
     pub codex_reasoning_effort: CodexReasoningEffortDto,
+    #[serde(default = "default_claude_model_dto")]
+    pub claude_model: String,
+    #[serde(default = "default_claude_effort_dto")]
+    pub claude_effort: String,
+    #[serde(default = "default_claude_auth_mode_dto")]
+    pub claude_auth_mode: String,
+    #[serde(default)]
+    pub codex_prefer_system: bool,
+    #[serde(default)]
+    pub claude_prefer_system: bool,
 
     // Provider Configuration
     pub primary_provider: ProviderTypeDto,
@@ -280,6 +291,18 @@ pub struct AISettingsDto {
 
 fn default_assistant_runtime_dto() -> AssistantRuntimeDto {
     AssistantRuntimeDto::Codex
+}
+
+fn default_claude_model_dto() -> String {
+    "sonnet".to_string()
+}
+
+fn default_claude_effort_dto() -> String {
+    "medium".to_string()
+}
+
+fn default_claude_auth_mode_dto() -> String {
+    "subscription".to_string()
 }
 
 fn default_video_gen_default_quality_dto() -> String {
@@ -352,6 +375,9 @@ impl From<AppSettings> for AppSettingsDto {
                 assistant_runtime: match s.ai.assistant_runtime {
                     crate::core::settings::AssistantRuntime::Api => AssistantRuntimeDto::Api,
                     crate::core::settings::AssistantRuntime::Codex => AssistantRuntimeDto::Codex,
+                    crate::core::settings::AssistantRuntime::ClaudeCode => {
+                        AssistantRuntimeDto::ClaudeCode
+                    }
                 },
                 codex_model: s.ai.codex_model,
                 codex_reasoning_effort: match s.ai.codex_reasoning_effort {
@@ -368,6 +394,11 @@ impl From<AppSettings> for AppSettingsDto {
                         CodexReasoningEffortDto::Xhigh
                     }
                 },
+                claude_model: s.ai.claude_model,
+                claude_effort: s.ai.claude_effort,
+                claude_auth_mode: s.ai.claude_auth_mode,
+                codex_prefer_system: s.ai.codex_prefer_system,
+                claude_prefer_system: s.ai.claude_prefer_system,
                 primary_provider: match s.ai.primary_provider {
                     crate::core::settings::ProviderType::OpenAI => ProviderTypeDto::Openai,
                     crate::core::settings::ProviderType::Anthropic => ProviderTypeDto::Anthropic,
@@ -484,6 +515,7 @@ impl From<AppSettingsDto> for AppSettings {
                 assistant_runtime: match dto.ai.assistant_runtime {
                     AssistantRuntimeDto::Api => AssistantRuntime::Api,
                     AssistantRuntimeDto::Codex => AssistantRuntime::Codex,
+                    AssistantRuntimeDto::ClaudeCode => AssistantRuntime::ClaudeCode,
                 },
                 codex_model: dto.ai.codex_model,
                 codex_reasoning_effort: match dto.ai.codex_reasoning_effort {
@@ -492,6 +524,11 @@ impl From<AppSettingsDto> for AppSettings {
                     CodexReasoningEffortDto::High => CodexReasoningEffort::High,
                     CodexReasoningEffortDto::Xhigh => CodexReasoningEffort::Xhigh,
                 },
+                claude_model: dto.ai.claude_model,
+                claude_effort: dto.ai.claude_effort,
+                claude_auth_mode: dto.ai.claude_auth_mode,
+                codex_prefer_system: dto.ai.codex_prefer_system,
+                claude_prefer_system: dto.ai.claude_prefer_system,
                 primary_provider: match dto.ai.primary_provider {
                     ProviderTypeDto::Openai => ProviderType::OpenAI,
                     ProviderTypeDto::Anthropic => ProviderType::Anthropic,
@@ -835,6 +872,8 @@ pub async fn app_cleanup(_state: State<'_, AppState>) -> Result<AppCleanupResult
 
     crate::ipc::shutdown_all_terminal_sessions(&_state).await;
     crate::ipc::shutdown_all_codex_app_servers(&_state).await;
+    crate::ipc::shutdown_all_claude_headless_sessions(&_state).await;
+    crate::ipc::shutdown_all_claude_login_sessions(&_state).await;
     crate::ipc::stop_workspace_watcher(&_state).await;
     let workers_shutdown = _state.shutdown_worker_pool().await;
 
@@ -915,6 +954,18 @@ pub async fn get_playhead_position(
 // Settings Commands
 // =============================================================================
 
+/// Pushes runtime-discovery + auth-mode preferences into the process-wide flags
+/// so codex/claude executable resolution honors the user's `preferSystem`
+/// settings and the Claude probe agrees with the persisted `claudeAuthMode`.
+///
+/// Called from every settings-mutating command and once at startup (see
+/// `run()` in `lib.rs`) so the flags are set before any probe can run.
+pub(crate) fn apply_runtime_discovery_prefs(settings: &AppSettings) {
+    crate::core::codex::set_codex_prefer_system(settings.ai.codex_prefer_system);
+    crate::core::claude_code::set_claude_prefer_system(settings.ai.claude_prefer_system);
+    crate::core::claude_code::set_claude_auth_mode(&settings.ai.claude_auth_mode);
+}
+
 /// Gets application settings
 #[tauri::command]
 #[specta::specta]
@@ -928,6 +979,7 @@ pub async fn get_settings(
     if migrate_legacy_credentials_from_settings(&app_data_dir, &state, &mut settings).await? {
         manager.save(&settings)?;
     }
+    apply_runtime_discovery_prefs(&settings);
     Ok(settings.into())
 }
 
@@ -948,7 +1000,9 @@ pub async fn set_settings(
     let mut existing_settings = manager.load();
     migrate_legacy_credentials_from_settings(&app_data_dir, &state, &mut existing_settings).await?;
     let app_settings: AppSettings = settings.into();
-    manager.save(&app_settings).map(|_| ())
+    manager.save(&app_settings)?;
+    apply_runtime_discovery_prefs(&app_settings);
+    Ok(())
 }
 
 /// Updates a partial section of settings (merge with existing)
@@ -981,6 +1035,7 @@ pub async fn update_settings(
 
     // Save and return
     let saved = manager.save(&updated)?;
+    apply_runtime_discovery_prefs(&saved);
     Ok(saved.into())
 }
 
@@ -991,6 +1046,7 @@ pub async fn reset_settings(app: tauri::AppHandle) -> Result<AppSettingsDto, Str
     let app_data_dir = get_app_data_dir(&app)?;
     let manager = SettingsManager::new(app_data_dir);
     let settings = manager.reset()?;
+    apply_runtime_discovery_prefs(&settings);
     Ok(settings.into())
 }
 

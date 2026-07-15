@@ -970,9 +970,46 @@ async configureCodexAgentRuntime(input: ConfigureCodexAgentRuntimeInput) : Promi
     return { status: "error", error: e  as any };
 }
 },
+/**
+ * Legacy blocking Codex sign-in.
+ * 
+ * Retained as a non-streamed fallback: it runs `codex login` to completion and
+ * only reports the outcome afterward. The visible, streamed flow is
+ * [`start_codex_login_session`]; the UI uses that path.
+ */
 async startCodexLogin() : Promise<Result<CodexAgentLoginResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("start_codex_login") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Starts a streamed, visible Codex sign-in.
+ * 
+ * Spawns `codex login` under the managed `CODEX_HOME` with piped stdout/stderr
+ * (no PTY: the Codex CLI is pipe-friendly). Login progress — the sign-in URL,
+ * the browser opening, and completion — is streamed on `codex:login:{sessionId}`.
+ * The reader parses the OAuth URL, opens it with the full URL, and detects
+ * completion by the process exiting followed by a re-probe of the managed
+ * profile. Credentials are written into `CODEX_HOME` by the CLI and never travel
+ * over the event channel.
+ * 
+ * If Codex is not installed the command errors with actionable text.
+ */
+async startCodexLoginSession(sessionId: string | null) : Promise<Result<CodexLoginSessionStartResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_codex_login_session", { sessionId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Cancels a running streamed Codex login session, killing its child process.
+ */
+async cancelCodexLoginSession(sessionId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_codex_login_session", { sessionId }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -1008,6 +1045,161 @@ async consumeExternalAgentApprovalToken(input: ConsumeExternalAgentApprovalToken
 async revokeExternalAgentApprovalToken(input: RevokeExternalAgentApprovalTokenInput) : Promise<Result<RevokeExternalAgentApprovalTokenResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("revoke_external_agent_approval_token", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Probes the local Claude Code CLI for install and authentication state.
+ * 
+ * `input.authMode`, when supplied, overrides the persisted global auth mode for
+ * this probe so a status check issued right after a UI subscription↔api-key
+ * switch is evaluated against the mode the user just selected (not the stale
+ * debounced-save global). The argument is optional for wire compatibility.
+ */
+async getClaudeStatus(input: GetClaudeStatusInput | null) : Promise<Result<ClaudeStatusProbeResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_claude_status", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Reports Claude Code runtime readiness (installed + authenticated).
+ */
+async configureClaudeAgentRuntime(input: ConfigureClaudeAgentRuntimeInput) : Promise<Result<ConfigureClaudeAgentRuntimeResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("configure_claude_agent_runtime", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Starts a Claude Code login flow (`api-key`, `subscription`, or `oauth-token`).
+ */
+async startClaudeLogin(input: StartClaudeLoginInput) : Promise<Result<StartClaudeLoginResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_claude_login", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Starts a fully in-app Claude subscription sign-in.
+ * 
+ * Spawns `claude setup-token` under a pseudo-terminal (ConPTY on Windows, which
+ * creates no visible window) so the Ink UI renders and opens the browser
+ * itself. Login progress — browser opening, a fallback URL, the paste-code
+ * prompt, and completion — is streamed on `claude:login:{sessionId}`. The
+ * resulting OAuth token is captured and persisted server-side; it never travels
+ * over the event channel.
+ * 
+ * On ConPTY spawn failure the error message includes the exact manual
+ * `setup-token` command so the user can fall back to the paste-a-token path.
+ */
+async startClaudeLoginSession(sessionId: string | null) : Promise<Result<ClaudeLoginSessionStartResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_claude_login_session", { sessionId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Submits the authorization code pasted by the user to a running login session.
+ */
+async submitClaudeLoginCode(sessionId: string, code: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("submit_claude_login_code", { sessionId, code }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Cancels a running login session, killing its child process.
+ */
+async cancelClaudeLoginSession(sessionId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_claude_login_session", { sessionId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Signs out of the managed Claude profile and clears stored credentials.
+ * 
+ * Also tears down any running headless sessions first so no child keeps using
+ * the credentials that are about to be cleared.
+ */
+async logoutClaudeAgentRuntime() : Promise<Result<ClaudeAgentLogoutResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("logout_claude_agent_runtime") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Installs the OpenReelio-managed Claude Code CLI as a pinned native binary.
+ * 
+ * Tears down any running headless sessions first so no child keeps the old
+ * binary open while it is replaced.
+ */
+async installClaudeCli() : Promise<Result<ClaudeCliInstallResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("install_claude_cli") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Updates the OpenReelio-managed Claude Code CLI to the latest native binary.
+ */
+async updateClaudeCli() : Promise<Result<ClaudeCliUpdateResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_claude_cli") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Spawns a `claude -p` headless session and bridges its stream to the WebView.
+ * 
+ * Registers a loopback MCP session, writes its config (with the bearer token)
+ * to a per-session file, and starts the process. The first user turn is sent by
+ * the frontend afterwards via [`write_claude_headless_message`].
+ */
+async startClaudeHeadless(input: StartClaudeHeadlessInput) : Promise<Result<ClaudeHeadlessStartResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_claude_headless", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Writes one NDJSON message to a running headless session's stdin (a user turn).
+ */
+async writeClaudeHeadlessMessage(input: ClaudeHeadlessWriteInput) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("write_claude_headless_message", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stops a running headless session and cleans up its MCP registration/config.
+ */
+async stopClaudeHeadless(input: ClaudeHeadlessSessionInput) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("stop_claude_headless", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delivers a frontend tool-call result back to a pending `tools/call`.
+ */
+async respondOpenreelioMcpCall(callId: string, response: OpenReelioMcpCallResponse) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("respond_openreelio_mcp_call", { callId, response }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -2818,7 +3010,7 @@ needsConfirmation: boolean | null;
  * AI's understanding of the intent
  */
 intent: AIIntentDto | null }
-export type AISettingsDto = { assistantRuntime?: AssistantRuntimeDto; codexModel?: string; codexReasoningEffort?: CodexReasoningEffortDto; primaryProvider: ProviderTypeDto; primaryModel: string; visionProvider: ProviderTypeDto | null; visionModel: string | null; openaiApiKey: string | null; anthropicApiKey: string | null; googleApiKey: string | null; ollamaUrl: string | null; temperature: number; maxTokens: number; frameExtractionRate: number; monthlyBudgetCents: number | null; perRequestLimitCents: number; currentMonthUsageCents: number; currentUsageMonth: number | null; autoAnalyzeOnImport: boolean; autoCaptionOnImport: boolean; proposalReviewMode: ProposalReviewModeDto; cacheDurationHours: number; localOnlyMode: boolean; seedanceApiKey?: string | null; videoGenProvider?: string | null; videoGenDefaultQuality?: string; videoGenBudgetCents?: number | null; videoGenPerRequestLimitCents?: number }
+export type AISettingsDto = { assistantRuntime?: AssistantRuntimeDto; codexModel?: string; codexReasoningEffort?: CodexReasoningEffortDto; claudeModel?: string; claudeEffort?: string; claudeAuthMode?: string; codexPreferSystem?: boolean; claudePreferSystem?: boolean; primaryProvider: ProviderTypeDto; primaryModel: string; visionProvider: ProviderTypeDto | null; visionModel: string | null; openaiApiKey: string | null; anthropicApiKey: string | null; googleApiKey: string | null; ollamaUrl: string | null; temperature: number; maxTokens: number; frameExtractionRate: number; monthlyBudgetCents: number | null; perRequestLimitCents: number; currentMonthUsageCents: number; currentUsageMonth: number | null; autoAnalyzeOnImport: boolean; autoCaptionOnImport: boolean; proposalReviewMode: ProposalReviewModeDto; cacheDurationHours: number; localOnlyMode: boolean; seedanceApiKey?: string | null; videoGenProvider?: string | null; videoGenDefaultQuality?: string; videoGenBudgetCents?: number | null; videoGenPerRequestLimitCents?: number }
 export type AddAudioKeyframePayload = { sequenceId: string; trackId: string; clipId: string; timeOffset: number; valueDb: number; interpolation?: KeyframeInterpolation }
 /**
  * Payload for adding an effect to a clip.
@@ -3508,7 +3700,7 @@ duration: number | null;
  * Associated tags
  */
 tags: string[] }
-export type AssistantRuntimeDto = "api" | "codex"
+export type AssistantRuntimeDto = "api" | "codex" | "claude_code"
 /**
  * Flags indicating which attributes to paste from the clipboard.
  */
@@ -3980,6 +4172,174 @@ text: string;
  */
 speaker: string | null }
 /**
+ * Result of `logout_claude_agent_runtime`.
+ */
+export type ClaudeAgentLogoutResult = { 
+/**
+ * Whether the sign-out completed.
+ */
+success: boolean; 
+/**
+ * Resulting auth status.
+ */
+authStatus: string; 
+/**
+ * Human-readable status message.
+ */
+message: string | null }
+/**
+ * Result of `install_claude_cli`.
+ */
+export type ClaudeCliInstallResult = { 
+/**
+ * Whether an OpenReelio-managed install is present after the attempt.
+ */
+success: boolean; 
+/**
+ * Detected version after the attempt.
+ */
+version: string | null; 
+/**
+ * Human-readable description of the install/update action that was attempted.
+ */
+attemptedCommand: string | null; 
+/**
+ * Human-readable status message.
+ */
+message: string | null }
+/**
+ * Result of `update_claude_cli`.
+ */
+export type ClaudeCliUpdateResult = { 
+/**
+ * Whether the update completed.
+ */
+success: boolean; 
+/**
+ * Version before the update.
+ */
+beforeVersion: string | null; 
+/**
+ * Version after the update.
+ */
+afterVersion: string | null; 
+/**
+ * Human-readable description of the install/update action that was attempted.
+ */
+attemptedCommand: string | null; 
+/**
+ * Human-readable status message.
+ */
+message: string | null }
+/**
+ * Selector input for session-scoped commands (stop).
+ */
+export type ClaudeHeadlessSessionInput = { 
+/**
+ * Target session id.
+ */
+serverId: string }
+/**
+ * Result of `start_claude_headless`.
+ */
+export type ClaudeHeadlessStartResult = { 
+/**
+ * Resolved session id.
+ */
+serverId: string; 
+/**
+ * Tauri event name that carries this session's stream events.
+ */
+eventName: string; 
+/**
+ * The launcher command label.
+ */
+command: string; 
+/**
+ * The full argument vector passed to `claude`.
+ */
+args: string[]; 
+/**
+ * Working directory used for the Claude process.
+ */
+bridgeCwd: string; 
+/**
+ * Loopback MCP endpoint URL registered for this session.
+ */
+mcpUrl: string }
+/**
+ * Input for `write_claude_headless_message`.
+ */
+export type ClaudeHeadlessWriteInput = { 
+/**
+ * Target session id.
+ */
+serverId: string; 
+/**
+ * The JSON message written as one NDJSON line to the child's stdin.
+ */
+message: JsonValue }
+/**
+ * Result of starting an in-app Claude login session.
+ */
+export type ClaudeLoginSessionStartResult = { 
+/**
+ * The session id (used to target `submit`/`cancel`).
+ */
+sessionId: string; 
+/**
+ * The Tauri event name that carries this session's stream events.
+ */
+eventName: string }
+/**
+ * A single MCP tool the OpenReelio loopback server exposes to Claude.
+ * 
+ * The frontend owns the `openreelio.*` catalog and passes it here so the tool
+ * JSON schemas are single-sourced in TypeScript. `name` is the bare MCP tool
+ * name; Claude sees it as `mcp__openreelio__<name>`.
+ */
+export type ClaudeMcpToolSpec = { 
+/**
+ * Bare MCP tool name (no `openreelio.` prefix, no `mcp__` prefix).
+ */
+name: string; 
+/**
+ * Human-readable tool description surfaced to Claude.
+ */
+description: string; 
+/**
+ * JSON Schema describing the tool arguments (MCP `inputSchema`).
+ */
+inputSchema: JsonValue }
+/**
+ * Result of probing the local Claude CLI installation and authentication state.
+ */
+export type ClaudeStatusProbeResult = { 
+/**
+ * Whether a runnable `claude` executable was found.
+ */
+installed: boolean; 
+/**
+ * Reported CLI version, when available.
+ */
+version: string | null; 
+/**
+ * One of `signed-in`, `api-key`, `signed-out`, `unknown`, or `error`.
+ */
+authStatus: string; 
+/**
+ * Human-readable explanation for non-authenticated / error states.
+ */
+reason: string | null; 
+/**
+ * Runtime provenance (`managed` or `system`), when resolved.
+ */
+runtimeSource: string | null; 
+/**
+ * The managed `CLAUDE_CONFIG_DIR` used for this runtime.
+ */
+configHome: string | null }
+/**
  * Result of a cleanup detection operation.
  */
 export type CleanupDetectionResult = { 
@@ -4187,6 +4547,18 @@ export type CodexAppServerStartResult = { serverId: string; eventName: string; c
 export type CodexAppServerWriteInput = { serverId: string; message: JsonValue }
 export type CodexCliInstallResult = { success: boolean; version: string | null; attemptedCommand: string | null; message: string | null }
 export type CodexCliUpdateResult = { success: boolean; beforeVersion: string | null; afterVersion: string | null; attemptedCommand: string | null; message: string | null }
+/**
+ * Result of starting a streamed Codex login session.
+ */
+export type CodexLoginSessionStartResult = { 
+/**
+ * The session id (used to target `cancel`).
+ */
+sessionId: string; 
+/**
+ * The Tauri event name that carries this session's stream events.
+ */
+eventName: string }
 export type CodexModelCatalogResult = { installed: boolean; defaultModel: string; defaultReasoningEffort: string; models: CodexModelInfo[]; reason: string | null }
 export type CodexModelInfo = { slug: string; displayName: string; defaultReasoningEffort: string; supportedReasoningEfforts: string[] }
 export type CodexReasoningEffortDto = "low" | "medium" | "high" | "xhigh"
@@ -4259,8 +4631,69 @@ deletedIds: string[] }
  * Persisted compaction record DTO aligned with the frontend session kernel vocabulary.
  */
 export type CompactionRecordDto = { id: string; sessionId: string; runId: string | null; tier: string; trigger: string; summaryMessageId: string | null; sourceMessageCount: number; retainedMessageCount: number; estimatedTokensSaved: number | null; continuationSummaryJson: string | null; stateRehydrationJson: string | null; createdAt: number }
+/**
+ * Input for `configure_claude_agent_runtime`.
+ */
+export type ConfigureClaudeAgentRuntimeInput = { 
+/**
+ * Optional project path (accepted for parity with Codex; currently unused).
+ */
+projectPath: string | null; 
+/**
+ * Optional auth mode (`"subscription"` or `"api-key"`) the probe should
+ * evaluate credential presence against, overriding the persisted global.
+ * 
+ * The UI passes its currently-selected mode so a probe issued right after a
+ * mode switch is not evaluated against the stale debounced-save global.
+ * Absent (serde default) preserves the persisted-mode behavior.
+ */
+authMode?: string | null }
+/**
+ * Result of `configure_claude_agent_runtime`.
+ */
+export type ConfigureClaudeAgentRuntimeResult = { 
+/**
+ * Whether the Claude CLI is installed.
+ */
+installed: boolean; 
+/**
+ * Detected CLI version.
+ */
+version: string | null; 
+/**
+ * Auth status (`signed-in`, `api-key`, `signed-out`, `unknown`, `error`).
+ */
+authStatus: string; 
+/**
+ * Whether the runtime is ready (installed and authenticated).
+ */
+ready: boolean; 
+/**
+ * Whether the user must complete a login flow.
+ */
+requiresLogin: boolean; 
+/**
+ * Human-readable status message.
+ */
+message: string | null; 
+/**
+ * Runtime provenance (`managed`, `managed-legacy`, or `system`).
+ */
+runtimeSource: string | null; 
+/**
+ * Managed `CLAUDE_CONFIG_DIR`.
+ */
+configHome: string | null; 
+/**
+ * Pinned Claude version the app installs/updates to (for staleness UI).
+ */
+pinnedVersion: string | null }
 export type ConfigureCodexAgentRuntimeInput = { projectPath: string | null }
-export type ConfigureCodexAgentRuntimeResult = { installed: boolean; version: string | null; authStatus: string; ready: boolean; requiresLogin: boolean; pluginMarketplaceConfigured: boolean; mcpConfigured: boolean; message: string | null; runtimeSource: string | null; codexHome: string | null }
+export type ConfigureCodexAgentRuntimeResult = { installed: boolean; version: string | null; authStatus: string; ready: boolean; requiresLogin: boolean; pluginMarketplaceConfigured: boolean; mcpConfigured: boolean; message: string | null; runtimeSource: string | null; codexHome: string | null; 
+/**
+ * Pinned Codex version the app installs/updates to (for staleness UI).
+ */
+pinnedVersion: string | null }
 /**
  * Response for configure_seedance_provider
  */
@@ -5071,6 +5504,18 @@ annotation: AssetAnnotation | null;
  */
 status: AnalysisStatus }
 /**
+ * Input for `get_claude_status`.
+ * 
+ * Optional so the command stays wire-compatible with callers that pass nothing;
+ * present callers supply the UI's current auth mode to avoid a stale-mode probe.
+ */
+export type GetClaudeStatusInput = { 
+/**
+ * Optional auth mode override for the probe (see
+ * [`ConfigureClaudeAgentRuntimeInput::auth_mode`]).
+ */
+authMode?: string | null }
+/**
  * Input payload for loading an external runtime session link.
  */
 export type GetExternalAgentSessionLinkInput = { conversationSessionId: string; runtimeId: string }
@@ -5828,6 +6273,21 @@ confidence: number;
  * Bounding box (if available)
  */
 boundingBox?: BoundingBox | null }
+/**
+ * Response body for `respond_openreelio_mcp_call`.
+ * 
+ * The MCP server wraps this uniformly as
+ * `{ content: [{ type: "text", text }], isError }` for the `tools/call` result.
+ */
+export type OpenReelioMcpCallResponse = { 
+/**
+ * Textual tool result (may be a JSON-encoded payload).
+ */
+text: string; 
+/**
+ * Whether the tool call resulted in an error.
+ */
+isError: boolean }
 /**
  * Payload for Overwrite Edit (replaces content in time range — trims/removes overlapping clips).
  */
@@ -7269,6 +7729,80 @@ transformsPath: string }
  * Input payload for starting a new agent run.
  */
 export type StartAgentRunInput = { sessionId: string; runtimeKind: string | null; trigger: string | null; maxIterations: number | null; maxToolCalls: number | null; plannedStepCount: number | null; inputMessageId: string | null; traceId: string | null; id: string | null }
+/**
+ * Input for `start_claude_headless`.
+ */
+export type StartClaudeHeadlessInput = { 
+/**
+ * Optional caller-provided session id; a UUID is generated when absent.
+ */
+serverId: string | null; 
+/**
+ * Working project path; canonicalized and confined to the open project.
+ */
+projectPath: string | null; 
+/**
+ * Model alias/name (defaults to `sonnet`).
+ */
+model: string | null; 
+/**
+ * Reasoning effort level (defaults to `medium`).
+ */
+effort: string | null; 
+/**
+ * `"subscription"` or `"api-key"`. Controls `ANTHROPIC_API_KEY` injection.
+ */
+authMode: string; 
+/**
+ * Optional inline API key for one-off api-key runs (falls back to stored key).
+ */
+apiKey: string | null; 
+/**
+ * OpenReelio MCP tool catalog exposed to this session.
+ */
+tools: ClaudeMcpToolSpec[]; 
+/**
+ * Optional prior Claude session id to resume via `--resume <id>`.
+ * 
+ * When present, the session is resumed instead of started fresh (the
+ * mutually exclusive `--session-id <uuid>` is omitted). Sessions persist
+ * under the managed `CLAUDE_CONFIG_DIR`, so resume works across restarts.
+ * This backs the frontend's interrupt-then-continue flow.
+ */
+resumeSessionId: string | null }
+/**
+ * Input for `start_claude_login`.
+ */
+export type StartClaudeLoginInput = { 
+/**
+ * Login mode:
+ * - `"subscription"`: launch `claude setup-token` in a visible terminal.
+ * - `"oauth-token"`: persist the token the user pasted back after that flow.
+ * - `"api-key"`: persist a raw Anthropic API key.
+ */
+mode: string; 
+/**
+ * Credential payload. For `mode == "api-key"` this is the Anthropic API key;
+ * for `mode == "oauth-token"` this same field carries the pasted OAuth token
+ * produced by `claude setup-token`. Unused for `mode == "subscription"`.
+ */
+apiKey: string | null }
+/**
+ * Result of `start_claude_login`.
+ */
+export type StartClaudeLoginResult = { 
+/**
+ * Whether the login flow completed successfully.
+ */
+success: boolean; 
+/**
+ * Resulting auth status.
+ */
+authStatus: string; 
+/**
+ * Human-readable status message.
+ */
+message: string | null }
 export type StartCodexAppServerInput = { serverId: string | null; projectPath: string | null; model: string | null; reasoningEffort: string | null }
 export type StartTerminalSessionInput = { sessionId: string; cwd: string | null; cols: number | null; rows: number | null; profileId?: string | null; shell?: string | null; shellArgs?: string[] | null }
 /**
