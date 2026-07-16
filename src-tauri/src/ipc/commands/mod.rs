@@ -37,9 +37,12 @@ pub mod helpers;
 // Domain modules (extracted from commands_legacy.rs)
 pub mod ai_legacy;
 pub mod asset;
+pub mod claude;
+pub mod claude_headless;
 pub mod codex;
 pub mod codex_app_server;
 pub mod jobs;
+pub mod openreelio_mcp;
 pub mod project;
 pub mod render;
 pub mod search;
@@ -84,9 +87,12 @@ pub mod transcript_editing;
 // Re-export all domain modules
 pub use ai_legacy::*;
 pub use asset::*;
+pub use claude::*;
+pub use claude_headless::*;
 pub use codex::*;
 pub use codex_app_server::*;
 pub use jobs::*;
+pub use openreelio_mcp::*;
 pub use project::*;
 pub use render::*;
 pub use search::*;

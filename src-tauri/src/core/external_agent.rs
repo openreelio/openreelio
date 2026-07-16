@@ -88,6 +88,8 @@ pub struct ConfigureCodexAgentRuntimeResult {
     pub message: Option<String>,
     pub runtime_source: Option<String>,
     pub codex_home: Option<String>,
+    /// Pinned Codex version the app installs/updates to (for staleness UI).
+    pub pinned_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -225,6 +227,7 @@ pub async fn configure_codex_agent_runtime(
                 .or_else(|| Some("Codex CLI is not installed.".to_string())),
             runtime_source: status.runtime_source,
             codex_home: status.codex_home,
+            pinned_version: Some(crate::core::codex::CODEX_PINNED_VERSION.to_string()),
         };
     }
 
@@ -242,6 +245,7 @@ pub async fn configure_codex_agent_runtime(
         message,
         runtime_source: status.runtime_source,
         codex_home: status.codex_home,
+        pinned_version: Some(crate::core::codex::CODEX_PINNED_VERSION.to_string()),
     }
 }
 
@@ -608,13 +612,24 @@ fn is_authenticated(auth_status: &str) -> bool {
     matches!(auth_status, "signed-in" | "api-key")
 }
 
-fn is_managed_codex_runtime(status: &crate::core::codex::CodexStatusProbeResult) -> bool {
+/// Whether the probe reports the app-managed *native* Codex runtime (not legacy).
+#[cfg(feature = "gui")]
+fn is_native_managed_codex(status: &crate::core::codex::CodexStatusProbeResult) -> bool {
     status.runtime_source.as_deref() == Some("managed")
 }
 
-pub async fn install_codex_cli() -> CodexCliInstallResult {
+/// Installs the pinned Codex CLI as an official native binary.
+///
+/// Replaces the previous npm-based install: downloads the pinned version, verifies
+/// its checksum, and swaps the managed `current` pointer atomically. `on_progress`
+/// receives streaming download/verify/install updates for the UI.
+#[cfg(feature = "gui")]
+pub async fn install_codex_cli<F>(on_progress: F) -> CodexCliInstallResult
+where
+    F: Fn(crate::core::managed_runtime::InstallProgress) + Send + 'static,
+{
     let before = crate::core::codex::probe_codex_status().await;
-    if before.installed && is_managed_codex_runtime(&before) {
+    if before.installed && is_native_managed_codex(&before) {
         return CodexCliInstallResult {
             success: true,
             version: before.version,
@@ -623,210 +638,82 @@ pub async fn install_codex_cli() -> CodexCliInstallResult {
         };
     }
 
-    let npm = match find_npm_command().await {
-        Some(command) => command,
-        None => {
-            return CodexCliInstallResult {
-                success: false,
-                version: None,
-                attempted_command: Some(format_managed_npm_install_command("npm")),
-                message: Some(
-                    "npm was not found. Install Node.js with npm, then install the OpenReelio-managed Codex runtime again."
-                        .to_string(),
-                ),
-            };
-        }
-    };
-    let attempted_command = format_managed_npm_install_command(&npm);
-    let install_result = run_managed_npm_codex_install(&npm).await;
+    let version = crate::core::codex::CODEX_PINNED_VERSION.to_string();
+    let attempted_command = format!("Install Codex CLI v{version} (native binary)");
+    let install_result = install_codex_version(version, on_progress).await;
     let after = crate::core::codex::probe_codex_status().await;
-    let success = after.installed && is_managed_codex_runtime(&after);
+    // Require the install itself to succeed: a leftover managed binary from an
+    // earlier install must not mask a failed download/verify as success.
+    let success = install_result.is_ok() && after.installed && is_native_managed_codex(&after);
 
     CodexCliInstallResult {
         success,
         version: after.version,
         attempted_command: Some(attempted_command),
-        message: if success {
-            Some("OpenReelio-managed Codex CLI installation completed.".to_string())
+        message: Some(if success {
+            "OpenReelio-managed Codex CLI installation completed.".to_string()
         } else {
-            Some(match install_result {
-                Ok(output) if output.is_empty() && after.installed => "OpenReelio-managed Codex CLI installation did not complete. A system Codex CLI is still available as fallback.".to_string(),
-                Ok(output) if output.is_empty() => "OpenReelio-managed Codex CLI installation did not complete.".to_string(),
-                Ok(output) => output,
+            match install_result {
+                Ok(()) => "OpenReelio-managed Codex CLI installation did not complete.".to_string(),
                 Err(error) => error,
-            })
-        },
+            }
+        }),
     }
 }
 
-pub async fn update_codex_cli() -> CodexCliUpdateResult {
+/// Updates the managed Codex CLI to the app-pinned KNOWN-GOOD version.
+///
+/// The distribution model pins one version per release, so update installs
+/// exactly [`crate::core::codex::CODEX_PINNED_VERSION`] rather than GitHub's
+/// latest. This keeps the version the update UI shows/compares against and the
+/// version actually installed in agreement (installing a newer "latest" would
+/// mislabel the result and could leave the update button permanently offering an
+/// update the app never pins to).
+#[cfg(feature = "gui")]
+pub async fn update_codex_cli<F>(on_progress: F) -> CodexCliUpdateResult
+where
+    F: Fn(crate::core::managed_runtime::InstallProgress) + Send + 'static,
+{
     let before = crate::core::codex::probe_codex_status().await;
-    if !before.installed {
-        return CodexCliUpdateResult {
-            success: false,
-            before_version: before.version,
-            after_version: None,
-            attempted_command: None,
-            message: before
-                .reason
-                .or_else(|| Some("Codex CLI is not installed.".to_string())),
-        };
-    }
 
-    if !is_managed_codex_runtime(&before) {
-        let Some((attempted_command, install_result)) = run_npm_codex_install().await else {
-            return CodexCliUpdateResult {
-                success: false,
-                before_version: before.version,
-                after_version: None,
-                attempted_command: Some(format_managed_npm_install_command("npm")),
-                message: Some(
-                    "npm was not found. Install Node.js with npm, then install the OpenReelio-managed Codex runtime again."
-                        .to_string(),
-                ),
-            };
-        };
-        let after = crate::core::codex::probe_codex_status().await;
-        let success = after.installed
-            && is_managed_codex_runtime(&after)
-            && !codex_cli_version_needs_update(&after.version);
-        return CodexCliUpdateResult {
-            success,
-            before_version: before.version,
-            after_version: after.version.clone(),
-            attempted_command: Some(attempted_command),
-            message: if success {
-                Some("OpenReelio-managed Codex CLI update completed.".to_string())
-            } else {
-                Some(match install_result {
-                    Ok(output) if output.is_empty() && after.installed => "OpenReelio-managed Codex CLI update did not complete. A system Codex CLI is still available as fallback.".to_string(),
-                    Ok(output) if output.is_empty() => {
-                        "OpenReelio-managed Codex CLI update did not complete.".to_string()
-                    }
-                    Ok(output) => output,
-                    Err(error) => error,
-                })
-            },
-        };
-    }
-
-    let mut attempted_commands = vec!["codex update".to_string()];
-    let mut update_result = run_codex_command(&["update"], &[], Duration::from_secs(300)).await;
-
-    if update_result
-        .as_ref()
-        .err()
-        .is_some_and(|error| is_unsupported_update_command(error))
-    {
-        attempted_commands.push("codex --upgrade".to_string());
-        update_result = run_codex_command(&["--upgrade"], &[], Duration::from_secs(300)).await;
-    }
-
-    let mut after = crate::core::codex::probe_codex_status().await;
-    if update_result.is_err() || detected_codex_version_still_needs_update(&before, &after) {
-        match run_npm_codex_install().await {
-            Some((attempted_command, npm_result)) => {
-                attempted_commands.push(attempted_command);
-                update_result = npm_result;
-                after = crate::core::codex::probe_codex_status().await;
-            }
-            None if update_result.is_err() => {
-                attempted_commands.push(format_managed_npm_install_command("npm"));
-                update_result = Err(
-                    "npm was not found. Install Node.js with npm, then update the OpenReelio-managed Codex runtime again."
-                        .to_string(),
-                );
-            }
-            None => {}
-        }
-    }
-
-    let success = update_result.is_ok()
-        && after.installed
-        && is_managed_codex_runtime(&after)
-        && !codex_cli_version_needs_update(&after.version);
-    let before_version = before.version.clone();
-    let after_version = after.version.clone();
+    let version = crate::core::codex::CODEX_PINNED_VERSION.to_string();
+    let attempted_command = format!("Update Codex CLI to pinned v{version} (native binary)");
+    let install_result = install_codex_version(version, on_progress).await;
+    let after = crate::core::codex::probe_codex_status().await;
+    // Require the install itself to succeed: the pre-update managed binary
+    // still probing as "managed" must not mask a failed update as success.
+    let success = install_result.is_ok() && after.installed && is_native_managed_codex(&after);
 
     CodexCliUpdateResult {
         success,
-        before_version,
-        after_version: after_version.clone(),
-        attempted_command: Some(attempted_commands.join(" -> ")),
-        message: if success {
-            Some("OpenReelio-managed Codex CLI update completed.".to_string())
-        } else if update_result.is_ok() && after.installed {
-            Some(format!(
-                "Codex update command completed, but OpenReelio still detects {}. Reconnect Codex or reinstall the managed runtime if this persists.",
-                after_version
-                    .as_deref()
-                    .unwrap_or("the same Codex CLI version")
-            ))
+        before_version: before.version,
+        after_version: after.version,
+        attempted_command: Some(attempted_command),
+        message: Some(if success {
+            "OpenReelio-managed Codex CLI update completed.".to_string()
         } else {
-            Some(match update_result {
-                Ok(output) if output.is_empty() => {
-                    "OpenReelio-managed Codex CLI update did not complete.".to_string()
-                }
-                Ok(output) => output,
+            match install_result {
+                Ok(()) => "OpenReelio-managed Codex CLI update did not complete.".to_string(),
                 Err(error) => error,
-            })
-        },
+            }
+        }),
     }
 }
 
-async fn run_npm_codex_install() -> Option<(String, Result<String, String>)> {
-    let npm = find_npm_command().await?;
-    let attempted_command = format_managed_npm_install_command(&npm);
-    let result = run_managed_npm_codex_install(&npm).await;
-    Some((attempted_command, result))
-}
-
-fn format_managed_npm_install_command(npm: &str) -> String {
-    format!(
-        "{} install --prefix {} @openai/codex@latest",
-        quote_command_arg(npm),
-        quote_command_arg(
-            &crate::core::codex::managed_codex_runtime_dir()
-                .display()
-                .to_string()
-        )
-    )
-}
-
-async fn run_managed_npm_codex_install(npm: &str) -> Result<String, String> {
-    let runtime_dir = crate::core::codex::managed_codex_runtime_dir();
-    std::fs::create_dir_all(&runtime_dir)
-        .map_err(|error| format!("Failed to create OpenReelio Codex runtime directory: {error}"))?;
-    run_external_command_owned(
-        npm,
-        vec![
-            "install".to_string(),
-            "--prefix".to_string(),
-            runtime_dir.display().to_string(),
-            "@openai/codex@latest".to_string(),
-        ],
-        Duration::from_secs(300),
-    )
+/// Resolves + downloads + installs a specific Codex version on a blocking thread.
+#[cfg(feature = "gui")]
+async fn install_codex_version<F>(version: String, on_progress: F) -> Result<(), String>
+where
+    F: Fn(crate::core::managed_runtime::InstallProgress) + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let descriptor = crate::core::codex::codex_managed_descriptor();
+        let artifact = crate::core::codex::resolve_codex_artifact_blocking(&version)?;
+        crate::core::managed_runtime::install_version(&descriptor, &version, &artifact, on_progress)
+            .map(|_| ())
+    })
     .await
-}
-
-fn detected_codex_version_still_needs_update(
-    before: &crate::core::codex::CodexStatusProbeResult,
-    after: &crate::core::codex::CodexStatusProbeResult,
-) -> bool {
-    codex_cli_version_needs_update(&before.version)
-        && codex_cli_version_needs_update(&after.version)
-}
-
-fn codex_cli_version_needs_update(version: &Option<String>) -> bool {
-    let Some((major, minor, _patch)) = version
-        .as_deref()
-        .and_then(crate::core::codex::parse_codex_version_numbers)
-    else {
-        return false;
-    };
-
-    major == 0 && minor < 130
+    .map_err(|error| format!("Codex install task failed: {error}"))?
 }
 
 async fn run_codex_command(
@@ -880,88 +767,6 @@ async fn run_codex_command_owned(
     } else {
         Err(combined)
     }
-}
-
-async fn find_npm_command() -> Option<String> {
-    for candidate in npm_command_candidates() {
-        if run_external_command(candidate, &["--version"], Duration::from_secs(10))
-            .await
-            .is_ok()
-        {
-            return Some((*candidate).to_string());
-        }
-    }
-
-    None
-}
-
-fn npm_command_candidates() -> &'static [&'static str] {
-    if cfg!(windows) {
-        &["npm.cmd", "npm"]
-    } else {
-        &["npm"]
-    }
-}
-
-async fn run_external_command(
-    executable: &str,
-    args: &[&str],
-    timeout_duration: Duration,
-) -> Result<String, String> {
-    run_external_command_owned(
-        executable,
-        args.iter().map(|arg| (*arg).to_string()).collect(),
-        timeout_duration,
-    )
-    .await
-}
-
-async fn run_external_command_owned(
-    executable: &str,
-    args: Vec<String>,
-    timeout_duration: Duration,
-) -> Result<String, String> {
-    let mut command = tokio::process::Command::new(executable);
-    crate::core::process::configure_tokio_command(&mut command);
-    command.args(args).stdin(std::process::Stdio::null());
-
-    let output = timeout(timeout_duration, command.output())
-        .await
-        .map_err(|_| format!("{executable} command timed out."))?
-        .map_err(|error| {
-            crate::core::codex::format_codex_io_error(
-                &format!("Failed to run {executable} command"),
-                &error,
-            )
-        })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = stdout
-        .lines()
-        .chain(stderr.lines())
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if output.status.success() {
-        Ok(combined)
-    } else if combined.is_empty() {
-        Err(format!(
-            "{executable} command failed with status {}",
-            output.status
-        ))
-    } else {
-        Err(combined)
-    }
-}
-
-fn is_unsupported_update_command(output: &str) -> bool {
-    let lower = output.to_lowercase();
-    lower.contains("unexpected argument")
-        || lower.contains("unrecognized subcommand")
-        || lower.contains("unknown command")
 }
 
 fn invalid_validation(reason: impl Into<String>) -> ExternalAgentApprovalTokenValidation {

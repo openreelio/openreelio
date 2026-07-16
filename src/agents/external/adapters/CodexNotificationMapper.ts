@@ -1,5 +1,6 @@
 import type { ExternalAgentRuntimeEvent, ExternalAgentRuntimeId } from '../types';
 import type { CodexAppServerNotification, CodexJsonObject } from './CodexAppServerClient';
+import { asObject, getBoolean, getNumber, getString } from './jsonNarrowing';
 
 export interface MapCodexNotificationInput {
   notification: CodexAppServerNotification;
@@ -378,26 +379,4 @@ function getFirstString(input: CodexJsonObject | null | undefined, keys: string[
     }
   }
   return null;
-}
-
-function getString(input: CodexJsonObject | null | undefined, key: string): string | null {
-  const value = input?.[key];
-  return typeof value === 'string' ? value : null;
-}
-
-function getNumber(input: CodexJsonObject | null | undefined, key: string): number | null {
-  const value = input?.[key];
-  return typeof value === 'number' ? value : null;
-}
-
-function getBoolean(input: CodexJsonObject | null | undefined, key: string): boolean | null {
-  const value = input?.[key];
-  return typeof value === 'boolean' ? value : null;
-}
-
-function asObject(value: unknown): CodexJsonObject | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-  return value as CodexJsonObject;
 }

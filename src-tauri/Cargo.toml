@@ -104,6 +104,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Async channels
 async-trait = "0.1"
 
+# Loopback MCP server for the Claude Code headless runtime (GUI-only).
+axum = { version = "0.7", optional = true }
+
 # Audio processing for transcription
 hound = "3.5"
 webrtc-vad = "0.4"
@@ -125,6 +128,12 @@ notify-debouncer-mini = "0.5"
 walkdir = "2"
 globset = "0.4"
 portable-pty = "0.9"
+
+# Open the Claude sign-in URL in the default browser ourselves. Claude Code's
+# own browser launch truncates the OAuth URL at the first `&` on Windows; the
+# `open` crate uses ShellExecuteW/xdg-open and delivers the full URL intact
+# (verified via a loopback fidelity probe).
+open = { version = "5", optional = true }
 
 # Filesystem operations (send to OS trash)
 trash = "5"
@@ -153,6 +162,14 @@ gui = [
     "dep:tauri-plugin-stronghold",
     "dep:tauri-specta",
     "dep:specta-typescript",
+    "dep:axum",
+    # Managed native runtime installer (codex/claude): download + checksum + tar.gz extract.
+    "dep:reqwest",
+    "dep:sha2",
+    "dep:tar",
+    "dep:flate2",
+    # Browser launcher for the in-app Claude sign-in flow.
+    "dep:open",
 ]
 custom-protocol = ["gui", "tauri/custom-protocol"]
 # Enable FFmpeg bundling (downloads FFmpeg during build)

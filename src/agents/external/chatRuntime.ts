@@ -97,6 +97,16 @@ const INITIAL_STATE: ExternalAgentChatRuntimeState = {
 
 const CODEX_OPENREELIO_TOOL_PROTOCOL_VERSION = 3;
 
+/**
+ * Runtimes that drive edits through the shared OpenReelio dynamic-tool contract
+ * (Codex app-server and Claude Code headless). They stamp and validate the tool
+ * protocol version on persisted sessions so a resumed thread whose tool contract
+ * has since changed is discarded rather than replayed against a stale schema.
+ */
+function usesOpenReelioToolProtocol(id: string): boolean {
+  return id === 'codex' || id === 'claude_code';
+}
+
 function createInitialRuntimeState(): ExternalAgentChatRuntimeState {
   return {
     ...INITIAL_STATE,
@@ -262,7 +272,7 @@ export class ExternalAgentChatRuntimeController {
           phase: 'starting',
           isRunning: true,
           error: null,
-          currentActivity: 'Starting Codex session',
+          currentActivity: `Starting ${this.options.adapter.displayName} session`,
           runStartedAt: startedAt,
           lastActivityAt: startedAt,
         },
@@ -417,20 +427,25 @@ export class ExternalAgentChatRuntimeController {
   }
 
   private buildExternalSessionMetadata(): Record<string, unknown> {
-    if (this.options.adapter.id === 'codex') {
+    // Codex runs through the app-server transport; Claude Code runs through
+    // the headless stream-json transport. Record the actual transport so
+    // future resume logic never routes a session down the wrong path.
+    const source = this.options.adapter.id === 'claude_code' ? 'headless' : 'appServer';
+
+    if (usesOpenReelioToolProtocol(this.options.adapter.id)) {
       return {
-        source: 'appServer',
+        source,
         openReelioToolProtocolVersion: CODEX_OPENREELIO_TOOL_PROTOCOL_VERSION,
       };
     }
 
-    return { source: 'appServer' };
+    return { source };
   }
 
   private isPersistedExternalSessionCompatible(
     externalSession: ExternalAgentSessionHandle,
   ): boolean {
-    if (this.options.adapter.id !== 'codex') {
+    if (!usesOpenReelioToolProtocol(this.options.adapter.id)) {
       return true;
     }
 
@@ -622,7 +637,7 @@ export class ExternalAgentChatRuntimeController {
 
     const parts = this.options.conversation.getMessageParts(messageId) ?? [];
     const partIndex = parts.length;
-    const approvalId = `codex:${event.requestId}`;
+    const approvalId = `${this.options.adapter.id}:${event.requestId}`;
     const existingIndex = parts.findIndex(
       (part) => part.type === 'tool_approval' && part.stepId === approvalId,
     );
@@ -634,16 +649,19 @@ export class ExternalAgentChatRuntimeController {
     this.options.conversation.appendPart(messageId, {
       type: 'tool_approval',
       stepId: approvalId,
-      tool: event.tool ?? formatApprovalTool(event.approvalType),
+      tool: event.tool ?? formatApprovalTool(event.approvalType, this.options.adapter.displayName),
       args: event.args ?? {},
-      description: event.description ?? event.reason ?? 'Approve Codex request',
+      description:
+        event.description ??
+        event.reason ??
+        `Approve ${this.options.adapter.displayName} request`,
       riskLevel: inferApprovalRiskLevel(event.approvalType),
       status: 'pending',
     });
     this.approvalPartIndex.set(approvalId, { messageId, partIndex });
     this.markActivityForExternalSession(
       event.sessionId,
-      `Waiting for approval: ${event.tool ?? formatApprovalTool(event.approvalType)}`,
+      `Waiting for approval: ${event.tool ?? formatApprovalTool(event.approvalType, this.options.adapter.displayName)}`,
     );
   }
 
@@ -668,7 +686,10 @@ export class ExternalAgentChatRuntimeController {
       stepId: request.id,
       tool: request.tool,
       args: request.args,
-      description: request.description || request.reason || 'Approve Codex request',
+      description:
+        request.description ||
+        request.reason ||
+        `Approve ${this.options.adapter.displayName} request`,
       riskLevel: inferApprovalRiskLevel(request.approvalType),
       status: 'pending',
     });
@@ -680,7 +701,9 @@ export class ExternalAgentChatRuntimeController {
     event: Extract<ExternalAgentRuntimeEvent, { type: 'turn_completed' }>,
   ): void {
     if (event.status === 'failed') {
-      const error = new Error(event.error ?? 'Codex turn failed');
+      const error = new Error(
+        event.error ?? `${this.options.adapter.displayName} turn failed`,
+      );
       this.fail(error, event.sessionId);
       return;
     }
@@ -1109,12 +1132,13 @@ function formatToolNameForActivity(tool: string): string {
 
 function formatApprovalTool(
   approvalType: Extract<ExternalAgentRuntimeEvent, { type: 'approval_requested' }>['approvalType'],
+  runtimeDisplayName: string,
 ): string {
   if (approvalType === 'os_command') {
-    return 'Codex OS command';
+    return `${runtimeDisplayName} OS command`;
   }
   if (approvalType === 'file_change') {
-    return 'Codex file change';
+    return `${runtimeDisplayName} file change`;
   }
   if (approvalType === 'openreelio_edit_command') {
     return 'OpenReelio edit';
@@ -1125,7 +1149,7 @@ function formatApprovalTool(
   if (approvalType === 'openreelio_workspace_command') {
     return 'OpenReelio workspace change';
   }
-  return 'Codex approval';
+  return `${runtimeDisplayName} approval`;
 }
 
 function mapApprovalRequestToPermissionRequest(request: ExternalAgentApprovalRequest): {

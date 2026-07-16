@@ -415,6 +415,7 @@ pub async fn create_project(
     if previous_scope.is_some() {
         super::workspace::stop_workspace_watcher(&state).await;
         super::codex_app_server::shutdown_all_codex_app_servers(&state).await;
+        super::claude_headless::shutdown_all_claude_headless_sessions(&state).await;
     }
 
     // Store in app state
@@ -479,6 +480,7 @@ pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<Pr
     if previous_scope.is_some() {
         super::workspace::stop_workspace_watcher(&state).await;
         super::codex_app_server::shutdown_all_codex_app_servers(&state).await;
+        super::claude_headless::shutdown_all_claude_headless_sessions(&state).await;
     }
 
     // Store in app state
@@ -610,6 +612,7 @@ pub async fn open_or_init_project(
     if previous_scope.is_some() {
         super::workspace::stop_workspace_watcher(&state).await;
         super::codex_app_server::shutdown_all_codex_app_servers(&state).await;
+        super::claude_headless::shutdown_all_claude_headless_sessions(&state).await;
     }
 
     // Store in app state
@@ -658,6 +661,7 @@ pub async fn close_project(
     forbid_project_asset_protocol(&state, &previous_scope.0, &previous_scope.1);
     super::workspace::stop_workspace_watcher(&state).await;
     super::codex_app_server::shutdown_all_codex_app_servers(&state).await;
+    super::claude_headless::shutdown_all_claude_headless_sessions(&state).await;
     reset_runtime_state_for_project_change(&state).await;
     Ok(true)
 }

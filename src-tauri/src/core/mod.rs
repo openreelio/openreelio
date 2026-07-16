@@ -6,10 +6,18 @@
 pub mod ai;
 pub mod analysis;
 pub mod annotations;
+pub mod artifact;
 pub mod assets;
 pub mod captions;
+pub mod claude_agent;
+pub mod claude_code;
+pub mod claude_headless;
+#[cfg(feature = "gui")]
+pub mod claude_login_pty;
 pub mod codex;
 pub mod codex_app_server;
+#[cfg(feature = "gui")]
+pub mod codex_login;
 pub mod commands;
 pub mod credentials;
 pub mod effects;
@@ -20,6 +28,8 @@ pub mod generative;
 pub mod indexing;
 pub mod interchange;
 pub mod jobs;
+#[cfg(feature = "gui")]
+pub mod managed_runtime;
 pub mod masks;
 pub mod performance;
 pub mod plugin;

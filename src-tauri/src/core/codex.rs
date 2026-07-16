@@ -15,7 +15,69 @@ pub const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
 pub const DEFAULT_CODEX_REASONING_EFFORT: &str = "medium";
 
+/// Pinned Codex CLI version, distributed as an official native binary.
+///
+/// Update this constant to roll the bundled Codex runtime forward; the app owns
+/// updates and disables the CLI's own self-update via [`CODEX_UPDATE_DISABLED_ENV_VAR`].
+pub const CODEX_PINNED_VERSION: &str = "0.144.4";
+
+/// Environment variable that disables the Codex CLI's built-in self-update.
+pub const CODEX_UPDATE_DISABLED_ENV_VAR: &str = "CODEX_UPDATE_DISABLED";
+
 static VERIFIED_CODEX_COMMAND_SPEC: Mutex<Option<CodexCommandSpec>> = Mutex::new(None);
+
+/// When `true`, discovery also considers system PATH / platform / WSL launchers.
+///
+/// Managed-only discovery is the default in the GUI (killing PATH version drift);
+/// users opt back into system launchers via the `codexPreferSystem` setting.
+#[cfg(feature = "gui")]
+static CODEX_PREFER_SYSTEM: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Records whether the user opted into system Codex launcher discovery.
+#[cfg(feature = "gui")]
+pub fn set_codex_prefer_system(prefer_system: bool) {
+    let previous = CODEX_PREFER_SYSTEM.swap(prefer_system, std::sync::atomic::Ordering::Relaxed);
+    // The toggle changes both which launchers are discovered and their priority,
+    // so a previously verified spec must not survive the flip.
+    if previous != prefer_system {
+        if let Ok(mut guard) = VERIFIED_CODEX_COMMAND_SPEC.lock() {
+            *guard = None;
+        }
+    }
+}
+
+/// Whether discovery should include system PATH / platform / WSL launchers.
+///
+/// Non-GUI builds (the CLI) always include system discovery; the GUI gates it on
+/// the user's `codexPreferSystem` setting.
+fn codex_include_system_discovery() -> bool {
+    #[cfg(feature = "gui")]
+    {
+        CODEX_PREFER_SYSTEM.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "gui"))]
+    {
+        true
+    }
+}
+
+/// Whether system launchers should WIN over the managed runtime.
+///
+/// The GUI toggle is documented as "prefer a system install over the managed
+/// native binary", so an opted-in system launcher must sort first. The CLI
+/// always discovers system launchers but keeps them as a fallback behind the
+/// managed runtime (no user-facing priority promise there).
+fn codex_prefer_system_launcher() -> bool {
+    #[cfg(feature = "gui")]
+    {
+        CODEX_PREFER_SYSTEM.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "gui"))]
+    {
+        false
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CodexExecutablePlatform {
@@ -45,7 +107,10 @@ struct CodexCommandSpec {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CodexCommandSource {
+    /// App-managed pinned native binary (the current distribution model).
     Managed,
+    /// Legacy npm-managed runtime under `.../codex/runtime` (existing installs).
+    ManagedLegacy,
     System,
 }
 
@@ -53,6 +118,7 @@ impl CodexCommandSource {
     fn as_str(self) -> &'static str {
         match self {
             Self::Managed => "managed",
+            Self::ManagedLegacy => "managed-legacy",
             Self::System => "system",
         }
     }
@@ -236,20 +302,38 @@ fn remember_verified_codex_command_spec(spec: &CodexCommandSpec) {
 
 fn collect_codex_command_specs() -> Vec<CodexCommandSpec> {
     let codex_home = managed_codex_home_dir();
-    let mut specs = collect_managed_codex_executables()
-        .into_iter()
-        .map(|executable| CodexCommandSpec {
+    let mut specs: Vec<CodexCommandSpec> = Vec::new();
+
+    // 1. Managed native runtime: the pinned official binary installed by the app.
+    #[cfg(feature = "gui")]
+    if let Some(executable) = codex_managed_descriptor().current_executable() {
+        specs.push(CodexCommandSpec {
             label: executable.display().to_string(),
             executable,
             prefix_args: Vec::new(),
             mode: CodexCommandMode::Native,
             source: CodexCommandSource::Managed,
             codex_home: codex_home.clone(),
-        })
-        .collect::<Vec<_>>();
+        });
+    }
 
+    // 2. Legacy npm-managed runtime, kept working for existing installs.
     specs.extend(
-        collect_system_codex_executables()
+        collect_managed_codex_executables()
+            .into_iter()
+            .map(|executable| CodexCommandSpec {
+                label: executable.display().to_string(),
+                executable,
+                prefix_args: Vec::new(),
+                mode: CodexCommandMode::Native,
+                source: CodexCommandSource::ManagedLegacy,
+                codex_home: codex_home.clone(),
+            }),
+    );
+
+    // 3. System PATH / platform locations / WSL — only when the user opts in.
+    if codex_include_system_discovery() {
+        let mut system_specs: Vec<CodexCommandSpec> = collect_system_codex_executables()
             .into_iter()
             .map(|executable| CodexCommandSpec {
                 label: executable.display().to_string(),
@@ -258,14 +342,48 @@ fn collect_codex_command_specs() -> Vec<CodexCommandSpec> {
                 mode: CodexCommandMode::Native,
                 source: CodexCommandSource::System,
                 codex_home: codex_home.clone(),
-            }),
-    );
+            })
+            .collect();
 
-    if let Some(spec) = resolve_wsl_codex_command_spec() {
-        specs.push(spec);
+        if let Some(spec) = resolve_wsl_codex_command_spec() {
+            system_specs.push(spec);
+        }
+
+        if codex_prefer_system_launcher() {
+            // The GUI toggle promises system installs WIN over the managed
+            // runtime, so opted-in system launchers sort first.
+            system_specs.append(&mut specs);
+            specs = system_specs;
+        } else {
+            specs.append(&mut system_specs);
+        }
     }
 
     dedupe_codex_command_specs(specs)
+}
+
+/// Descriptor for the app-managed native Codex runtime install location.
+#[cfg(feature = "gui")]
+pub(crate) fn codex_managed_descriptor() -> crate::core::managed_runtime::ManagedRuntimeDescriptor {
+    let root_dir = managed_codex_home_dir()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| app_data_root().join("OpenReelio").join("codex"));
+    crate::core::managed_runtime::ManagedRuntimeDescriptor {
+        runtime_id: "codex",
+        root_dir,
+        binary_name: codex_managed_binary_name().to_string(),
+    }
+}
+
+/// Final installed binary filename for the managed Codex runtime.
+#[cfg(feature = "gui")]
+fn codex_managed_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "codex.exe"
+    } else {
+        "codex"
+    }
 }
 
 fn collect_managed_codex_executables() -> Vec<PathBuf> {
@@ -536,6 +654,8 @@ fn create_codex_command_from_spec(spec: &CodexCommandSpec) -> Result<Command, St
     let mut command = Command::new(&spec.executable);
     command.args(&spec.prefix_args);
     command.env(CODEX_HOME_ENV_VAR, codex_home_env_value(spec));
+    // The app owns runtime updates; disable the CLI's built-in self-update.
+    command.env(CODEX_UPDATE_DISABLED_ENV_VAR, "1");
     crate::core::process::configure_tokio_command(&mut command);
     command.kill_on_drop(true);
     Ok(command)
@@ -755,32 +875,40 @@ fn default_codex_models() -> Vec<CodexModelInfo> {
 }
 
 fn default_codex_models_for_version(version: Option<&str>) -> Vec<CodexModelInfo> {
-    let entries: &[(&str, &str)] = if codex_version_supports_gpt_5_5(version) {
+    // (slug, display name, extra efforts beyond the default low..xhigh set).
+    // The gpt-5.6 generation adds `max` (both) and `ultra` (terra only);
+    // offering them here keeps the offline fallback consistent with the live
+    // `codex debug models` catalog of the pinned CLI.
+    let entries: &[(&str, &str, &[&str])] = if codex_version_supports_gpt_5_5(version) {
         &[
-            ("gpt-5.5", "gpt-5.5"),
-            ("gpt-5.4", "gpt-5.4"),
-            ("gpt-5.4-mini", "GPT-5.4-Mini"),
-            ("gpt-5.3-codex", "gpt-5.3-codex"),
-            ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"),
-            ("gpt-5.2", "gpt-5.2"),
+            ("gpt-5.6-terra", "GPT-5.6-Terra", &["max", "ultra"]),
+            ("gpt-5.6-luna", "GPT-5.6-Luna", &["max"]),
+            ("gpt-5.5", "gpt-5.5", &[]),
+            ("gpt-5.4", "gpt-5.4", &[]),
+            ("gpt-5.4-mini", "GPT-5.4-Mini", &[]),
+            ("gpt-5.3-codex", "gpt-5.3-codex", &[]),
         ]
     } else {
         &[
-            ("gpt-5.4", "gpt-5.4"),
-            ("gpt-5.4-mini", "GPT-5.4-Mini"),
-            ("gpt-5.3-codex", "gpt-5.3-codex"),
-            ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"),
-            ("gpt-5.2", "gpt-5.2"),
+            ("gpt-5.4", "gpt-5.4", &[]),
+            ("gpt-5.4-mini", "GPT-5.4-Mini", &[]),
+            ("gpt-5.3-codex", "gpt-5.3-codex", &[]),
+            ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark", &[]),
+            ("gpt-5.2", "gpt-5.2", &[]),
         ]
     };
 
     entries
         .iter()
-        .map(|(slug, display_name)| CodexModelInfo {
-            slug: (*slug).to_string(),
-            display_name: (*display_name).to_string(),
-            default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
-            supported_reasoning_efforts: default_reasoning_efforts(),
+        .map(|(slug, display_name, extra_efforts)| {
+            let mut efforts = default_reasoning_efforts();
+            efforts.extend(extra_efforts.iter().map(|effort| (*effort).to_string()));
+            CodexModelInfo {
+                slug: (*slug).to_string(),
+                display_name: (*display_name).to_string(),
+                default_reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_string(),
+                supported_reasoning_efforts: efforts,
+            }
         })
         .collect()
 }
@@ -1307,6 +1435,234 @@ fn resolve_runnable_candidates(
         .collect()
 }
 
+// =============================================================================
+// Managed native runtime: artifact resolution (GitHub releases)
+// =============================================================================
+
+/// GitHub releases API base for the Codex repository.
+#[cfg(feature = "gui")]
+const CODEX_GITHUB_RELEASES_API: &str = "https://api.github.com/repos/openai/codex/releases";
+
+/// Builds the GitHub API URL for a specific Codex release tag (`rust-vX.Y.Z`).
+#[cfg(feature = "gui")]
+fn codex_release_tag_url(version: &str) -> String {
+    format!("{CODEX_GITHUB_RELEASES_API}/tags/rust-v{version}")
+}
+
+/// Resolves the release-asset name, artifact format, and inner binary name for
+/// the current platform, or an error on unsupported platforms.
+#[cfg(feature = "gui")]
+fn codex_artifact_target() -> Result<
+    (
+        &'static str,
+        crate::core::managed_runtime::ArtifactFormat,
+        Option<String>,
+    ),
+    String,
+> {
+    use crate::core::managed_runtime::ArtifactFormat;
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        return Ok((
+            "codex-x86_64-pc-windows-msvc.exe",
+            ArtifactFormat::RawExecutable,
+            None,
+        ));
+    }
+    // The tarballs contain a SINGLE file named with the full target triple
+    // (verified against rust-v0.144.4: `codex-x86_64-apple-darwin.tar.gz`
+    // holds `codex-x86_64-apple-darwin`, not `codex`), so the inner binary
+    // name must be the asset name minus `.tar.gz`.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        return Ok((
+            "codex-x86_64-apple-darwin.tar.gz",
+            ArtifactFormat::TarGz,
+            Some("codex-x86_64-apple-darwin".to_string()),
+        ));
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        return Ok((
+            "codex-aarch64-apple-darwin.tar.gz",
+            ArtifactFormat::TarGz,
+            Some("codex-aarch64-apple-darwin".to_string()),
+        ));
+    }
+    // musl, not gnu: the pinned release publishes only the statically-linked
+    // musl build for linux x64 (no `-gnu` codex asset exists in rust-v0.144.4),
+    // and musl also avoids any glibc-version dependency.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        return Ok((
+            "codex-x86_64-unknown-linux-musl.tar.gz",
+            ArtifactFormat::TarGz,
+            Some("codex-x86_64-unknown-linux-musl".to_string()),
+        ));
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = ArtifactFormat::RawExecutable;
+        Err("The managed Codex runtime is not available for this platform.".to_string())
+    }
+}
+
+/// Parses a GitHub `digest` field (`"sha256:<hex>"`) into a bare hex string.
+#[cfg(feature = "gui")]
+fn parse_sha256_digest(digest: &str) -> Result<String, String> {
+    let hex = digest
+        .trim()
+        .strip_prefix("sha256:")
+        .ok_or_else(|| format!("Unexpected asset digest format: {digest}"))?
+        .trim();
+    if hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Ok(hex.to_ascii_lowercase())
+    } else {
+        Err(format!("Invalid SHA-256 digest: {digest}"))
+    }
+}
+
+/// Extracts the download URL and SHA-256 for a named asset from a GitHub release
+/// JSON body. Pure (no network) so it can be unit-tested with fixtures.
+#[cfg(feature = "gui")]
+fn codex_asset_from_release_json(body: &str, asset_name: &str) -> Result<(String, String), String> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| format!("Failed to parse Codex release metadata: {error}"))?;
+    let assets = value
+        .get("assets")
+        .and_then(|assets| assets.as_array())
+        .ok_or_else(|| "Codex release metadata is missing an assets list.".to_string())?;
+
+    let asset = assets
+        .iter()
+        .find(|asset| asset.get("name").and_then(|name| name.as_str()) == Some(asset_name))
+        .ok_or_else(|| format!("Codex release asset '{asset_name}' was not found."))?;
+
+    let url = asset
+        .get("browser_download_url")
+        .and_then(|url| url.as_str())
+        .ok_or_else(|| format!("Codex release asset '{asset_name}' has no download URL."))?
+        .to_string();
+    let digest = asset
+        .get("digest")
+        .and_then(|digest| digest.as_str())
+        .ok_or_else(|| format!("Codex release asset '{asset_name}' has no digest."))?;
+
+    Ok((url, parse_sha256_digest(digest)?))
+}
+
+/// Parses the `tag_name` (`rust-vX.Y.Z`) from a release JSON body into `X.Y.Z`.
+///
+/// Only exercised by [`codex_latest_version_blocking`] (itself retained but
+/// unused by the pinned-install update flow) and its unit test.
+#[cfg(feature = "gui")]
+#[allow(dead_code)]
+fn codex_version_from_release_json(body: &str) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| format!("Failed to parse Codex release metadata: {error}"))?;
+    let tag = value
+        .get("tag_name")
+        .and_then(|tag| tag.as_str())
+        .ok_or_else(|| "Codex release metadata is missing a tag name.".to_string())?;
+    Ok(tag.trim().trim_start_matches("rust-v").to_string())
+}
+
+/// Returns a friendly rate-limit message when the status/header pair indicates a
+/// GitHub API rate limit (HTTP 403 with `X-RateLimit-Remaining: 0`), else `None`.
+///
+/// Pure (status + header value are passed in) so it can be unit-tested.
+#[cfg(feature = "gui")]
+fn github_rate_limit_message(status: u16, rate_limit_remaining: Option<&str>) -> Option<String> {
+    if status == 403 && rate_limit_remaining.map(str::trim) == Some("0") {
+        Some("GitHub API rate limit reached — try again in about an hour.".to_string())
+    } else {
+        None
+    }
+}
+
+/// Extracts the rate-limit message (if any) from a blocking GitHub response.
+#[cfg(feature = "gui")]
+fn github_rate_limit_error(response: &reqwest::blocking::Response) -> Option<String> {
+    let remaining = response
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok());
+    github_rate_limit_message(response.status().as_u16(), remaining)
+}
+
+/// Builds a blocking reqwest client with the required GitHub User-Agent header.
+///
+/// Only small release metadata is fetched here, so a 60s total timeout is ample;
+/// it also bounds the body read, which the previous connect-only timeout did not.
+/// The shared helper's `OpenReelio/... runtime-manager` UA satisfies GitHub's
+/// User-Agent requirement.
+#[cfg(feature = "gui")]
+fn github_blocking_client() -> Result<reqwest::blocking::Client, String> {
+    crate::core::artifact::blocking_http_client(std::time::Duration::from_secs(60))
+}
+
+/// Resolves the download URL + checksum for a Codex version (blocking network).
+#[cfg(feature = "gui")]
+pub(crate) fn resolve_codex_artifact_blocking(
+    version: &str,
+) -> Result<crate::core::managed_runtime::ResolvedArtifact, String> {
+    let (asset_name, format, archive_binary_name) = codex_artifact_target()?;
+    let client = github_blocking_client()?;
+    let response = client
+        .get(codex_release_tag_url(version))
+        .send()
+        .map_err(|error| format!("Failed to fetch Codex release metadata: {error}"))?;
+    if !response.status().is_success() {
+        if let Some(message) = github_rate_limit_error(&response) {
+            return Err(message);
+        }
+        return Err(format!(
+            "Codex release metadata request failed with HTTP status {}",
+            response.status()
+        ));
+    }
+    let body = response
+        .text()
+        .map_err(|error| format!("Failed to read Codex release metadata: {error}"))?;
+    let (url, sha256) = codex_asset_from_release_json(&body, asset_name)?;
+
+    Ok(crate::core::managed_runtime::ResolvedArtifact {
+        url,
+        sha256,
+        format,
+        archive_binary_name,
+    })
+}
+
+/// Fetches the latest published Codex version from GitHub (blocking network).
+///
+/// Retained for a possible future "check for updates" affordance, but no longer
+/// called by the update flow: the app installs the KNOWN-GOOD
+/// [`CODEX_PINNED_VERSION`] per release (see [`crate::core::external_agent::update_codex_cli`]).
+#[cfg(feature = "gui")]
+#[allow(dead_code)]
+pub(crate) fn codex_latest_version_blocking() -> Result<String, String> {
+    let client = github_blocking_client()?;
+    let response = client
+        .get(format!("{CODEX_GITHUB_RELEASES_API}/latest"))
+        .send()
+        .map_err(|error| format!("Failed to fetch latest Codex release: {error}"))?;
+    if !response.status().is_success() {
+        if let Some(message) = github_rate_limit_error(&response) {
+            return Err(message);
+        }
+        return Err(format!(
+            "Latest Codex release request failed with HTTP status {}",
+            response.status()
+        ));
+    }
+    let body = response
+        .text()
+        .map_err(|error| format!("Failed to read latest Codex release: {error}"))?;
+    codex_version_from_release_json(&body)
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -1330,6 +1686,24 @@ mod tests {
             parse_codex_version("codex 0.50.0\n", ""),
             Some("codex 0.50.0".to_string())
         );
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn detects_github_rate_limit_response() {
+        use super::github_rate_limit_message;
+
+        // HTTP 403 with no remaining budget is the rate-limit signal.
+        assert_eq!(
+            github_rate_limit_message(403, Some("0")),
+            Some("GitHub API rate limit reached — try again in about an hour.".to_string())
+        );
+        // 403 with remaining budget (e.g. a genuine permission error) is not.
+        assert!(github_rate_limit_message(403, Some("57")).is_none());
+        // Other statuses keep their existing messages even at 0 remaining.
+        assert!(github_rate_limit_message(404, Some("0")).is_none());
+        // Missing header -> not a rate-limit error.
+        assert!(github_rate_limit_message(403, None).is_none());
     }
 
     #[test]
@@ -1917,5 +2291,95 @@ mod tests {
             ),
             "gpt-5.4"
         );
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn builds_codex_release_tag_url() {
+        assert_eq!(
+            super::codex_release_tag_url("0.144.4"),
+            "https://api.github.com/repos/openai/codex/releases/tags/rust-v0.144.4"
+        );
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn resolves_a_codex_asset_name_for_the_host_platform() {
+        let (asset_name, _format, inner) =
+            super::codex_artifact_target().expect("supported platform");
+        assert!(asset_name.starts_with("codex-"));
+        // Windows ships a raw exe; other platforms ship a tar.gz whose single
+        // inner file is named after the FULL target triple (asset name minus
+        // ".tar.gz"), not plain "codex" — verified against rust-v0.144.4.
+        if cfg!(windows) {
+            assert!(asset_name.ends_with(".exe"));
+            assert!(inner.is_none());
+        } else {
+            assert!(asset_name.ends_with(".tar.gz"));
+            let expected_inner = asset_name.trim_end_matches(".tar.gz");
+            assert_eq!(inner.as_deref(), Some(expected_inner));
+        }
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn parses_codex_sha256_digest_field() {
+        let hex = "a".repeat(64);
+        assert_eq!(
+            super::parse_sha256_digest(&format!("sha256:{hex}")),
+            Ok(hex.clone())
+        );
+        assert!(super::parse_sha256_digest("md5:abc").is_err());
+        assert!(super::parse_sha256_digest("sha256:short").is_err());
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn extracts_codex_asset_url_and_checksum_from_release_json() {
+        let hex = "b".repeat(64);
+        let body = format!(
+            r#"{{"tag_name":"rust-v0.144.4","assets":[
+                {{"name":"codex-app-server-x86_64.tar.gz","browser_download_url":"https://example/ignore","digest":"sha256:{other}"}},
+                {{"name":"codex-x86_64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example/codex.tar.gz","digest":"sha256:{hex}"}}
+            ]}}"#,
+            other = "c".repeat(64),
+            hex = hex,
+        );
+
+        let (url, sha256) =
+            super::codex_asset_from_release_json(&body, "codex-x86_64-unknown-linux-gnu.tar.gz")
+                .expect("asset");
+        assert_eq!(url, "https://example/codex.tar.gz");
+        assert_eq!(sha256, hex);
+
+        assert!(super::codex_asset_from_release_json(&body, "missing-asset").is_err());
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn strips_rust_v_prefix_from_release_tag() {
+        let body = r#"{"tag_name":"rust-v0.144.4","assets":[]}"#;
+        assert_eq!(
+            super::codex_version_from_release_json(body),
+            Ok("0.144.4".to_string())
+        );
+    }
+
+    #[test]
+    fn managed_legacy_source_label_is_stable() {
+        assert_eq!(CodexCommandSource::Managed.as_str(), "managed");
+        assert_eq!(CodexCommandSource::ManagedLegacy.as_str(), "managed-legacy");
+        assert_eq!(CodexCommandSource::System.as_str(), "system");
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn prefer_system_gates_system_discovery() {
+        // Managed-only by default; opting in enables system-launcher discovery.
+        super::set_codex_prefer_system(false);
+        assert!(!super::codex_include_system_discovery());
+        super::set_codex_prefer_system(true);
+        assert!(super::codex_include_system_discovery());
+        super::set_codex_prefer_system(false);
     }
 }

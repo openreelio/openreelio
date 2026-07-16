@@ -118,10 +118,16 @@ export interface PerformanceSettings {
 export type ProviderType = 'openai' | 'anthropic' | 'gemini' | 'local';
 
 /** Top-level assistant runtime selection */
-export type AssistantRuntime = 'api' | 'codex';
+export type AssistantRuntime = 'api' | 'codex' | 'claude_code';
 
-/** Codex reasoning effort selection */
-export type CodexReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+/** Codex reasoning effort selection (gpt-5.6 models add `max` and `ultra`) */
+export type CodexReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+
+/** Claude Code effort selection (mirrors `claude --effort`) */
+export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/** How OpenReelio authenticates the local Claude Code CLI */
+export type ClaudeAuthMode = 'subscription' | 'api-key';
 
 /** Proposal review mode */
 export type ProposalReviewMode = 'always' | 'smart' | 'auto_apply';
@@ -132,6 +138,13 @@ export interface AISettings {
   assistantRuntime: AssistantRuntime;
   codexModel: string;
   codexReasoningEffort: CodexReasoningEffort;
+  claudeModel: string;
+  claudeEffort: ClaudeEffort;
+  claudeAuthMode: ClaudeAuthMode;
+  /** Prefer a system/PATH Codex install over the managed native binary */
+  codexPreferSystem: boolean;
+  /** Prefer a system/PATH Claude Code install over the managed native binary */
+  claudePreferSystem: boolean;
 
   // Provider Configuration
   primaryProvider: ProviderType;
@@ -311,6 +324,11 @@ const DEFAULT_SETTINGS: AppSettings = {
     assistantRuntime: 'codex',
     codexModel: 'gpt-5.5',
     codexReasoningEffort: 'medium',
+    claudeModel: 'sonnet',
+    claudeEffort: 'medium',
+    claudeAuthMode: 'subscription',
+    codexPreferSystem: false,
+    claudePreferSystem: false,
     primaryProvider: 'anthropic',
     primaryModel: 'claude-sonnet-4-5-20251015',
     visionProvider: null,
@@ -353,10 +371,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function coerceAssistantRuntime(value: unknown): AssistantRuntime {
-  if (value === 'api') {
-    return DEFAULT_SETTINGS.ai.assistantRuntime;
-  }
-  return value === 'codex' ? value : DEFAULT_SETTINGS.ai.assistantRuntime;
+  // Legacy 'api' runtime and any unknown value fall back to the default runtime.
+  return value === 'codex' || value === 'claude_code'
+    ? value
+    : DEFAULT_SETTINGS.ai.assistantRuntime;
 }
 
 function coerceAppSettings(value: unknown): AppSettings {

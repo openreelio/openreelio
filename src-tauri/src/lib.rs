@@ -937,6 +937,28 @@ pub struct AppState {
     pub codex_app_server_sessions:
         Mutex<HashMap<String, Arc<crate::ipc::codex_app_server::CodexAppServerProcessHandle>>>,
 
+    /// Active Claude Code headless process transports keyed by server ID.
+    pub claude_headless_sessions:
+        Mutex<HashMap<String, Arc<crate::ipc::claude_headless::ClaudeHeadlessProcessHandle>>>,
+
+    /// Active in-app Claude login (`setup-token`) PTY sessions keyed by session ID.
+    pub claude_login_sessions:
+        Mutex<HashMap<String, Arc<crate::core::claude_login_pty::ClaudeLoginSessionHandle>>>,
+
+    /// Active streamed Codex login (`codex login`) sessions keyed by session ID.
+    pub codex_login_sessions:
+        Mutex<HashMap<String, Arc<crate::core::codex_login::CodexLoginSessionHandle>>>,
+
+    /// Lazily-started loopback MCP server that fronts OpenReelio tools for the
+    /// Claude Code headless runtime. Started on first `start_claude_headless`.
+    pub openreelio_mcp: Mutex<Option<Arc<crate::ipc::openreelio_mcp::OpenReelioMcpServer>>>,
+
+    /// Managed-runtime ids (`"codex"` / `"claude"`) with an install/update in
+    /// flight. Guards against concurrent install/update of the same runtime,
+    /// which would race the binary/pointer swap. A plain `std::sync::Mutex` (not
+    /// tokio) so the RAII release can run in `Drop` without awaiting.
+    pub runtime_install_locks: std::sync::Mutex<std::collections::HashSet<&'static str>>,
+
     /// Runtime-only approval tokens issued for external agent mutation windows.
     pub external_agent_approval_tokens:
         Mutex<crate::core::external_agent::ExternalAgentApprovalTokenStore>,
@@ -1083,6 +1105,11 @@ impl AppState {
             workspace_event_loop: Mutex::new(None),
             terminal_sessions: Mutex::new(HashMap::new()),
             codex_app_server_sessions: Mutex::new(HashMap::new()),
+            claude_headless_sessions: Mutex::new(HashMap::new()),
+            claude_login_sessions: Mutex::new(HashMap::new()),
+            codex_login_sessions: Mutex::new(HashMap::new()),
+            openreelio_mcp: Mutex::new(None),
+            runtime_install_locks: std::sync::Mutex::new(std::collections::HashSet::new()),
             external_agent_approval_tokens: Mutex::new(
                 crate::core::external_agent::ExternalAgentApprovalTokenStore::default(),
             ),
@@ -1393,11 +1420,28 @@ mod tauri_app {
                 $crate::ipc::get_external_agent_setup_info,
                 $crate::ipc::configure_codex_agent_runtime,
                 $crate::ipc::start_codex_login,
+                $crate::ipc::start_codex_login_session,
+                $crate::ipc::cancel_codex_login_session,
                 $crate::ipc::logout_codex_agent_runtime,
                 $crate::ipc::install_codex_cli,
                 $crate::ipc::update_codex_cli,
                 $crate::ipc::consume_external_agent_approval_token,
                 $crate::ipc::revoke_external_agent_approval_token,
+                // Claude Code external agent commands
+                $crate::ipc::get_claude_status,
+                $crate::ipc::configure_claude_agent_runtime,
+                $crate::ipc::start_claude_login,
+                $crate::ipc::start_claude_login_session,
+                $crate::ipc::submit_claude_login_code,
+                $crate::ipc::cancel_claude_login_session,
+                $crate::ipc::logout_claude_agent_runtime,
+                $crate::ipc::install_claude_cli,
+                $crate::ipc::update_claude_cli,
+                $crate::ipc::start_claude_headless,
+                $crate::ipc::write_claude_headless_message,
+                $crate::ipc::stop_claude_headless,
+                $crate::ipc::respond_openreelio_mcp_call,
+                $crate::ipc::wait_openreelio_mcp_ready,
                 // AI Conversation persistence commands
                 $crate::core::ai::conversation_commands::create_ai_session,
                 $crate::core::ai::conversation_commands::list_ai_sessions,
@@ -1608,7 +1652,7 @@ mod tauri_app {
             builder
         };
 
-        let result = builder.setup(move |app| {
+        let built = builder.setup(move |app| {
             // Initialize logging (safe to call multiple times).
             init_logging(app.handle());
 
@@ -1619,6 +1663,15 @@ mod tauri_app {
             // only for opened projects and imported assets.
             let app_state: tauri::State<'_, AppState> = app.state();
             app_state.set_app_handle(app.handle().clone());
+
+            // Initialize process-wide runtime-discovery and Claude auth-mode flags
+            // from persisted settings BEFORE any probe can run, so executable
+            // discovery (codex/claude preferSystem) and the Claude readiness probe
+            // honor the user's saved preferences on first use.
+            if let Ok(app_data_dir) = app.path().app_data_dir() {
+                let settings = crate::core::settings::SettingsManager::new(app_data_dir).load();
+                crate::ipc::system::apply_runtime_discovery_prefs(&settings);
+            }
 
             // Allow app-managed cache/data directories first.
             // These directories are used for proxies, thumbnails, frames, and other generated files.
@@ -1894,11 +1947,28 @@ mod tauri_app {
             ipc::get_external_agent_setup_info,
             ipc::configure_codex_agent_runtime,
             ipc::start_codex_login,
+            ipc::start_codex_login_session,
+            ipc::cancel_codex_login_session,
             ipc::logout_codex_agent_runtime,
             ipc::install_codex_cli,
             ipc::update_codex_cli,
             ipc::consume_external_agent_approval_token,
             ipc::revoke_external_agent_approval_token,
+            // Claude Code external agent commands
+            ipc::get_claude_status,
+            ipc::configure_claude_agent_runtime,
+            ipc::start_claude_login,
+            ipc::start_claude_login_session,
+            ipc::submit_claude_login_code,
+            ipc::cancel_claude_login_session,
+            ipc::logout_claude_agent_runtime,
+            ipc::install_claude_cli,
+            ipc::update_claude_cli,
+            ipc::start_claude_headless,
+            ipc::write_claude_headless_message,
+            ipc::stop_claude_headless,
+            ipc::respond_openreelio_mcp_call,
+            ipc::wait_openreelio_mcp_ready,
             // AI Conversation persistence commands
             crate::core::ai::conversation_commands::create_ai_session,
             crate::core::ai::conversation_commands::list_ai_sessions,
@@ -2082,12 +2152,39 @@ mod tauri_app {
             ipc::detect_filler_words,
             ipc::remove_detected_regions,
         ])
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!());
 
-        if let Err(e) = result {
-            tracing::error!("Error while running tauri application: {e}");
-            std::process::exit(1);
-        }
+        let app = match built {
+            Ok(app) => app,
+            Err(e) => {
+                tracing::error!("Error while building tauri application: {e}");
+                std::process::exit(1);
+            }
+        };
+
+        // Deterministic teardown on exit: synchronously stop external-agent child
+        // processes so no orphaned `claude`/`codex` process outlives the app.
+        //
+        // NOTE: `kill_on_drop(true)` on the child handles is best-effort and is
+        // NOT guaranteed when the process ends via `std::process::exit` (Rust
+        // destructors do not run on `exit`), so teardown is performed explicitly
+        // here. Windows Job Objects (kill the whole child tree on parent death)
+        // would be the stronger guarantee and are a possible future hardening;
+        // they are intentionally out of scope for now.
+        app.run(|app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let state = app_handle.state::<AppState>();
+                // Defensive: ignore individual teardown errors so exit always
+                // proceeds. `block_on` is safe here — the run callback executes
+                // on the main thread, not a tokio worker.
+                tauri::async_runtime::block_on(async {
+                    crate::ipc::shutdown_all_claude_headless_sessions(&state).await;
+                    crate::ipc::shutdown_all_claude_login_sessions(&state).await;
+                    crate::ipc::shutdown_all_codex_login_sessions(&state).await;
+                    crate::ipc::shutdown_all_codex_app_servers(&state).await;
+                });
+            }
+        });
     }
 }
 
