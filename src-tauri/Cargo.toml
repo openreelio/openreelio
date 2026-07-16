@@ -96,7 +96,7 @@ sysinfo = "0.32"
 # Type export for TypeScript bindings (Code-as-Documentation)
 specta = { version = "2.0.0-rc.20", features = ["derive", "serde_json"] }
 tauri-specta = { version = "2.0.0-rc.20", features = ["derive", "typescript"], optional = true }
-specta-typescript = { version = "0.0.7", optional = true }
+specta-typescript = { version = "0.0.12", optional = true }
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
