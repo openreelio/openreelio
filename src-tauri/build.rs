@@ -521,16 +521,11 @@ fn verify_downloaded_archive(
 ) -> BundlerResult<()> {
     use sha2::{Digest, Sha256};
 
-    let expected = match resolve_expected_sha256(source, final_url, config.timeout_seconds) {
-        Ok(expected) => expected,
-        Err(error) => {
-            println!(
-                "cargo:warning=Failed to resolve checksum for {}: {error}",
-                source.url
-            );
-            None
-        }
-    };
+    // A candidate URL whose DECLARED checksum source fails to resolve is
+    // rejected (the caller moves on to the next URL) instead of silently
+    // falling through to the unverified-download path. `Ok(None)` still means
+    // the manifest declares no checksum source for this URL at all.
+    let expected = resolve_expected_sha256(source, final_url, config.timeout_seconds)?;
 
     let Some(expected) = expected else {
         return handle_unverified_download(source, path, config);

@@ -49,7 +49,14 @@ function loadTargetConfig(sourceManifest, releaseTarget) {
     process.exit(1);
   }
 
-  for (const archive of targetConfig.archives ?? []) {
+  if (!Array.isArray(targetConfig.archives) || targetConfig.archives.length === 0) {
+    console.error(
+      `Invalid manifest entry for ${releaseTarget}: "archives" must be a non-empty array.`,
+    );
+    process.exit(1);
+  }
+
+  for (const archive of targetConfig.archives) {
     if (
       !archive.name ||
       !archive.format ||
@@ -244,16 +251,25 @@ async function resolveExpectedSha256(source, resolvedUrl) {
     return null;
   }
 
-  const response = await fetch(sidecarUrl, {
-    headers: { 'User-Agent': 'OpenReelio release asset downloader' },
-  });
-  if (!response.ok) {
-    throw new Error(
-      `Failed to fetch checksum sidecar ${sidecarUrl}: HTTP ${response.status}`,
-    );
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+  let sidecarText;
+  try {
+    const response = await fetch(sidecarUrl, {
+      headers: { 'User-Agent': 'OpenReelio release asset downloader' },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch checksum sidecar ${sidecarUrl}: HTTP ${response.status}`,
+      );
+    }
+    sidecarText = await response.text();
+  } finally {
+    clearTimeout(timeout);
   }
 
-  const digest = parseSha256Sidecar(await response.text(), source.url);
+  const digest = parseSha256Sidecar(sidecarText, source.url);
   if (!digest) {
     throw new Error(`No matching SHA-256 digest found in ${sidecarUrl}`);
   }

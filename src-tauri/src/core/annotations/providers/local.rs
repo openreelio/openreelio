@@ -18,7 +18,6 @@ use crate::core::annotations::{
     AnalysisProvider as ProviderType, AnalysisProviderTrait, AnalysisRequest, AnalysisResponse,
     AnalysisResult, AnalysisType, CostEstimate, ProviderCapabilities, ShotResult,
 };
-use crate::core::ffmpeg::{resolved_ffmpeg_path, resolved_ffprobe_path};
 use crate::core::indexing::shots::{ShotDetector, ShotDetectorConfig};
 use crate::core::{CoreError, CoreResult};
 
@@ -38,12 +37,16 @@ pub struct LocalAnalysisProvider {
 }
 
 impl LocalAnalysisProvider {
-    /// Creates a new local analysis provider using the globally resolved
-    /// FFmpeg/FFprobe paths (bundled, dev-mode, or system PATH)
+    /// Creates a new local analysis provider that resolves FFmpeg/FFprobe
+    /// paths lazily at point of use via the global resolver.
+    ///
+    /// Storing `None` here (instead of snapshotting the resolver at
+    /// construction) ensures a provider created before a managed FFmpeg
+    /// install completes still picks up the freshly registered paths.
     pub fn new() -> Self {
         Self {
-            ffmpeg_path: Some(resolved_ffmpeg_path()),
-            ffprobe_path: Some(resolved_ffprobe_path()),
+            ffmpeg_path: None,
+            ffprobe_path: None,
         }
     }
 
@@ -67,6 +70,9 @@ impl LocalAnalysisProvider {
             min_shot_duration: config.map(|c| c.min_duration_sec).unwrap_or(0.5),
             generate_keyframes: config.map(|c| c.generate_keyframes).unwrap_or(false),
             keyframe_dir: None,
+            // `None` makes the detector fall back to the global resolver at
+            // spawn time, so late registrations (e.g. an in-app FFmpeg
+            // install) are always honored.
             ffmpeg_path: self.ffmpeg_path.clone(),
             ffprobe_path: self.ffprobe_path.clone(),
             ..Default::default()
@@ -239,9 +245,11 @@ mod tests {
     #[test]
     fn test_local_provider_default() {
         let provider = LocalAnalysisProvider::default();
-        // Default construction resolves paths through the global resolver.
-        assert!(provider.ffmpeg_path.is_some());
-        assert!(provider.ffprobe_path.is_some());
+        // Default construction stores no paths: they are resolved lazily via
+        // the global resolver at point of use, so a provider created before a
+        // managed FFmpeg install still picks up the fresh paths.
+        assert!(provider.ffmpeg_path.is_none());
+        assert!(provider.ffprobe_path.is_none());
     }
 
     #[tokio::test]

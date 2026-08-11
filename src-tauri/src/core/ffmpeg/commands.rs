@@ -108,12 +108,11 @@ pub async fn check_ffmpeg(
     }
 
     // Not available yet: retry initialization (lazy re-init, mirrors the
-    // transcription command path). Failure is not an error here — the status
-    // simply reports unavailable.
-    let mut state = ffmpeg_state.write().await;
-    if !state.is_available() {
-        let _ = state.initialize(Some(&app));
-    }
+    // transcription command path). Detection runs on the blocking pool without
+    // holding the state lock. Failure is not an error here — the status simply
+    // reports unavailable.
+    let _ = super::initialize_shared_ffmpeg(ffmpeg_state.inner(), Some(app)).await;
+    let state = ffmpeg_state.read().await;
     Ok(build_ffmpeg_status(&state))
 }
 
@@ -206,12 +205,13 @@ pub async fn install_ffmpeg(
     );
 
     // Re-run state initialization so the fresh install is detected and the
-    // globally resolved paths are published (`set_resolved_paths` runs inside
-    // `FFmpegState::initialize` via `apply_info`).
-    let mut ffmpeg = ffmpeg_state.write().await;
-    ffmpeg
-        .initialize(Some(&app))
+    // globally resolved paths are published (`set_resolved_paths` runs when
+    // the detected info is applied). Detection runs on the blocking pool
+    // without holding the state lock.
+    super::initialize_shared_ffmpeg(ffmpeg_state.inner(), Some(app))
+        .await
         .map_err(|error| format!("FFmpeg was installed but initialization failed: {error}"))?;
+    let ffmpeg = ffmpeg_state.read().await;
     Ok(build_ffmpeg_status(&ffmpeg))
 }
 

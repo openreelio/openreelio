@@ -320,16 +320,20 @@ async fn resolve_transcription_ffmpeg_path(
     }
 
     {
-        let mut guard = ffmpeg_state.write().await;
         #[cfg(test)]
         {
+            let mut guard = ffmpeg_state.write().await;
             let _ = guard.initialize();
         }
         #[cfg(all(not(test), feature = "gui"))]
         {
-            let _ = guard.initialize(app);
+            // Detection runs on the blocking pool without holding the lock.
+            let _ =
+                crate::core::ffmpeg::initialize_shared_ffmpeg(ffmpeg_state.inner(), app.cloned())
+                    .await;
         }
 
+        let guard = ffmpeg_state.read().await;
         if let Some(info) = guard.info() {
             return Ok(info.ffmpeg_path.to_string_lossy().into_owned());
         }
@@ -910,10 +914,11 @@ pub async fn detect_shots(
     let ffmpeg_info = match ffmpeg_info {
         Some(info) => info,
         None => {
-            // Best-effort initialization (system FFmpeg only) in case the command
-            // is called before app startup initialization completes.
-            let mut guard = ffmpeg_state.write().await;
-            let _ = guard.initialize(None);
+            // Best-effort initialization (no app handle) in case the command
+            // is called before app startup initialization completes. Detection
+            // runs on the blocking pool without holding the state lock.
+            let _ = crate::core::ffmpeg::initialize_shared_ffmpeg(ffmpeg_state.inner(), None).await;
+            let guard = ffmpeg_state.read().await;
             guard
                 .info()
                 .cloned()
@@ -1103,8 +1108,9 @@ pub async fn is_shot_detection_available(
         }
     }
 
-    let mut guard = ffmpeg_state.write().await;
-    let _ = guard.initialize(None);
+    // Detection runs on the blocking pool without holding the state lock.
+    let _ = crate::core::ffmpeg::initialize_shared_ffmpeg(ffmpeg_state.inner(), None).await;
+    let guard = ffmpeg_state.read().await;
     Ok(guard.is_available())
 }
 

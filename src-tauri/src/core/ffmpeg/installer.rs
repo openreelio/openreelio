@@ -459,11 +459,16 @@ where
             },
             Ok(None) => {
                 tracing::warn!(
+                    archive = archive.name,
                     url = source.url,
-                    "No checksum source in manifest; accepting unverified FFmpeg download"
+                    "FFmpeg archive download could not be checksum-verified: \
+                     the manifest declares no checksum source for this URL"
                 );
                 false
             }
+            // A DECLARED checksum source that fails to resolve rejects this
+            // candidate URL (move on to the next one) instead of silently
+            // downgrading the download to unverified.
             Err(error) => {
                 errors.push(format!("{}: {error}", source.url));
                 let _ = std::fs::remove_file(&part_path);

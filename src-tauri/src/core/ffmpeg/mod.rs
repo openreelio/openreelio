@@ -40,6 +40,8 @@ pub use runner::{
     WaveformData,
 };
 pub use state::{create_ffmpeg_state, FFmpegState, SharedFFmpegState};
+#[cfg(all(not(test), feature = "gui"))]
+pub use state::{detect_ffmpeg, initialize_shared_ffmpeg};
 
 /// FFmpeg-related error types
 #[derive(Debug, thiserror::Error)]

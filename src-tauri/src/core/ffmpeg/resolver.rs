@@ -110,5 +110,9 @@ mod tests {
         set_resolved_paths(custom_ffmpeg.clone(), custom_ffprobe.clone());
         assert_eq!(resolved_ffmpeg_path(), custom_ffmpeg);
         assert_eq!(resolved_ffprobe_path(), custom_ffprobe);
+
+        // Restore the initially resolved paths so later tests in this binary
+        // never observe the synthetic /custom registration.
+        set_resolved_paths(lazy_ffmpeg, lazy_ffprobe);
     }
 }

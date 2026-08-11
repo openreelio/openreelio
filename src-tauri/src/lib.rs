@@ -1706,13 +1706,14 @@ mod tauri_app {
                 }
             }
 
-            // Initialize FFmpeg
+            // Initialize FFmpeg (detection probes run on the blocking pool so
+            // the async runtime is never blocked while holding the state lock)
             let ffmpeg = ffmpeg_state.clone();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let mut state = ffmpeg.write().await;
-                match state.initialize(Some(&handle)) {
+                match crate::core::ffmpeg::initialize_shared_ffmpeg(&ffmpeg, Some(handle)).await {
                     Ok(()) => {
+                        let state = ffmpeg.read().await;
                         if let Some(info) = state.info() {
                             tracing::info!(
                                 "FFmpeg initialized: version {} (bundled: {})",
