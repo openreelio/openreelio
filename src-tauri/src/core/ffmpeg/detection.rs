@@ -9,6 +9,31 @@ use std::process::Command;
 use super::{FFmpegError, FFmpegResult};
 use crate::core::process::configure_std_command;
 
+/// Where a detected FFmpeg installation came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FFmpegSource {
+    /// Bundled with the application (resource directory).
+    Bundled,
+    /// Installed by the in-app managed installer.
+    Managed,
+    /// Development-mode binaries under `src-tauri/binaries/`.
+    Dev,
+    /// System-installed FFmpeg (PATH or common locations).
+    System,
+}
+
+impl FFmpegSource {
+    /// Stable lowercase identifier surfaced to the frontend.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FFmpegSource::Bundled => "bundled",
+            FFmpegSource::Managed => "managed",
+            FFmpegSource::Dev => "dev",
+            FFmpegSource::System => "system",
+        }
+    }
+}
+
 /// Information about detected FFmpeg installation
 #[derive(Debug, Clone)]
 pub struct FFmpegInfo {
@@ -20,6 +45,8 @@ pub struct FFmpegInfo {
     pub version: String,
     /// Whether this is a bundled (sidecar) installation
     pub is_bundled: bool,
+    /// Where the installation was detected from
+    pub source: FFmpegSource,
 }
 
 /// Detect FFmpeg from bundled sidecar binaries
@@ -31,22 +58,8 @@ pub struct FFmpegInfo {
 /// are downloaded during the build process.
 #[cfg(feature = "gui")]
 pub fn detect_bundled_ffmpeg(app_handle: &tauri::AppHandle) -> FFmpegResult<FFmpegInfo> {
-    use tauri::Manager;
-
-    // Get the resource directory (works in production)
-    let resource_dir = app_handle
-        .path()
-        .resource_dir()
-        .map_err(|_| FFmpegError::NotFound)?;
-
-    tracing::debug!("Checking resource directory: {:?}", resource_dir);
-
     // Try resource directory first (production path)
-    if let Ok(info) = detect_bundled_at_path(&resource_dir) {
-        tracing::info!(
-            "Found bundled FFmpeg at resource directory: {:?}",
-            info.ffmpeg_path
-        );
+    if let Ok(info) = detect_bundled_resources(app_handle) {
         return Ok(info);
     }
 
@@ -63,12 +76,57 @@ pub fn detect_bundled_ffmpeg(app_handle: &tauri::AppHandle) -> FFmpegResult<FFmp
     Err(FFmpegError::NotFound)
 }
 
+/// Detect FFmpeg from the application resource directory only (no dev-mode
+/// fallback), so callers can interleave other sources in the resolution order.
+#[cfg(feature = "gui")]
+pub fn detect_bundled_resources(app_handle: &tauri::AppHandle) -> FFmpegResult<FFmpegInfo> {
+    use tauri::Manager;
+
+    // Get the resource directory (works in production)
+    let resource_dir = app_handle
+        .path()
+        .resource_dir()
+        .map_err(|_| FFmpegError::NotFound)?;
+
+    tracing::debug!("Checking resource directory: {:?}", resource_dir);
+
+    let info = detect_bundled_at_path(&resource_dir)?;
+    tracing::info!(
+        "Found bundled FFmpeg at resource directory: {:?}",
+        info.ffmpeg_path
+    );
+    Ok(info)
+}
+
+/// Detect FFmpeg binaries installed by the in-app managed installer.
+///
+/// Looks in `{data_local}/openreelio/ffmpeg/bin/` (see
+/// [`super::installer::managed_install_dir`]).
+pub fn detect_managed_ffmpeg() -> FFmpegResult<FFmpegInfo> {
+    let install_dir = super::installer::managed_install_dir();
+    let (ffmpeg_name, ffprobe_name) = get_bundled_binary_names();
+    let ffmpeg_path = install_dir.join(ffmpeg_name);
+    let ffprobe_path = install_dir.join(ffprobe_name);
+
+    if !ffmpeg_path.exists() || !ffprobe_path.exists() {
+        return Err(FFmpegError::NotFound);
+    }
+
+    let version = get_ffmpeg_version(&ffmpeg_path)?;
+    Ok(FFmpegInfo {
+        ffmpeg_path,
+        ffprobe_path,
+        version,
+        is_bundled: false,
+        source: FFmpegSource::Managed,
+    })
+}
+
 /// Detect FFmpeg binaries in development mode
 ///
 /// During development (`npm run tauri dev`), binaries are in `src-tauri/binaries/`
 /// which is not the same as the resource directory. This function checks that path.
-#[cfg(any(test, feature = "gui"))]
-fn detect_dev_mode_binaries() -> FFmpegResult<FFmpegInfo> {
+pub(crate) fn detect_dev_mode_binaries() -> FFmpegResult<FFmpegInfo> {
     // Get the path to src-tauri/binaries from CARGO_MANIFEST_DIR or relative to executable
     let dev_binaries_paths = get_dev_mode_paths();
 
@@ -107,6 +165,7 @@ fn detect_dev_mode_binaries() -> FFmpegResult<FFmpegInfo> {
                         ffprobe_path,
                         version,
                         is_bundled: true,
+                        source: FFmpegSource::Dev,
                     });
                 }
             }
@@ -117,7 +176,6 @@ fn detect_dev_mode_binaries() -> FFmpegResult<FFmpegInfo> {
 }
 
 /// Get possible paths where dev mode binaries might be located
-#[cfg(any(test, feature = "gui"))]
 fn get_dev_mode_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
@@ -184,6 +242,7 @@ pub fn detect_bundled_at_path(resource_dir: &Path) -> FFmpegResult<FFmpegInfo> {
         ffprobe_path,
         version,
         is_bundled: true,
+        source: FFmpegSource::Bundled,
     })
 }
 
@@ -211,6 +270,7 @@ pub fn detect_system_ffmpeg() -> FFmpegResult<FFmpegInfo> {
         ffprobe_path,
         version,
         is_bundled: false,
+        source: FFmpegSource::System,
     })
 }
 
@@ -542,6 +602,7 @@ mod tests {
             ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
             version: "6.0".to_string(),
             is_bundled: false,
+            source: FFmpegSource::System,
         };
 
         let cloned = info.clone();
@@ -558,6 +619,7 @@ mod tests {
             ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
             version: "6.0".to_string(),
             is_bundled: true,
+            source: FFmpegSource::Bundled,
         };
 
         let debug_str = format!("{:?}", info);

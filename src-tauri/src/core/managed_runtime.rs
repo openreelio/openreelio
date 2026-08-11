@@ -465,12 +465,18 @@ where
 }
 
 /// Runs `<binary> --version` to confirm the freshly installed file is runnable.
+fn verify_runnable(path: &Path) -> Result<(), String> {
+    verify_runnable_with_arg(path, "--version")
+}
+
+/// Runs `<binary> <version_arg>` to confirm a freshly installed file is runnable.
 ///
 /// This is blocking code, so the wait is bounded by [`VERIFY_RUNNABLE_TIMEOUT`]:
 /// the child is spawned, polled with `try_wait`, and killed if it does not exit
-/// in time. Without this, a hung `<bin> --version` would block the install (and
-/// its `RuntimeInstallGuard`) forever.
-fn verify_runnable(path: &Path) -> Result<(), String> {
+/// in time. Without this, a hung version probe would block the install (and its
+/// install guard) forever. Shared with the FFmpeg installer, whose binaries use
+/// the single-dash `-version` flag.
+pub(crate) fn verify_runnable_with_arg(path: &Path, version_arg: &str) -> Result<(), String> {
     if !path.exists() {
         return Err(format!(
             "Installed runtime binary does not exist: {}",
@@ -483,7 +489,7 @@ fn verify_runnable(path: &Path) -> Result<(), String> {
     // Output is discarded (only the exit status matters); null'ing the pipes also
     // avoids any chance of a full-pipe deadlock during the bounded wait.
     let mut child = command
-        .arg("--version")
+        .arg(version_arg)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

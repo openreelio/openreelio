@@ -31,22 +31,33 @@ impl FFmpegState {
 
     /// Initialize FFmpeg by detecting installation.
     ///
-    /// In non-test builds, this optionally attempts bundled FFmpeg detection first.
+    /// Resolution order: bundled resources → managed install → dev-mode
+    /// binaries → system PATH.
     #[cfg(all(not(test), feature = "gui"))]
     pub fn initialize(&mut self, app_handle: Option<&tauri::AppHandle>) -> Result<(), FFmpegError> {
-        // Try bundled first (if app_handle provided)
+        // Try bundled resources first (if app_handle provided)
         if let Some(handle) = app_handle {
-            if let Ok(info) = super::detect_bundled_ffmpeg(handle) {
-                self.info = Some(info.clone());
-                self.runner = Some(FFmpegRunner::new(info));
+            if let Ok(info) = super::detect_bundled_resources(handle) {
+                self.apply_info(info);
                 return Ok(());
             }
         }
 
+        // Managed install (in-app FFmpeg installer)
+        if let Ok(info) = super::detect_managed_ffmpeg() {
+            self.apply_info(info);
+            return Ok(());
+        }
+
+        // Dev-mode binaries (src-tauri/binaries during `npm run tauri dev`)
+        if let Ok(info) = super::detection::detect_dev_mode_binaries() {
+            self.apply_info(info);
+            return Ok(());
+        }
+
         // Fall back to system FFmpeg
         let info = detect_system_ffmpeg()?;
-        self.info = Some(info.clone());
-        self.runner = Some(FFmpegRunner::new(info));
+        self.apply_info(info);
         Ok(())
     }
 
@@ -56,9 +67,16 @@ impl FFmpegState {
     #[cfg(test)]
     pub fn initialize(&mut self) -> Result<(), FFmpegError> {
         let info = detect_system_ffmpeg()?;
+        self.apply_info(info);
+        Ok(())
+    }
+
+    /// Store detected info and publish the paths to the global resolver.
+    #[cfg(any(test, feature = "gui"))]
+    fn apply_info(&mut self, info: FFmpegInfo) {
+        super::set_resolved_paths(info.ffmpeg_path.clone(), info.ffprobe_path.clone());
         self.info = Some(info.clone());
         self.runner = Some(FFmpegRunner::new(info));
-        Ok(())
     }
 
     /// Get the FFmpeg runner.

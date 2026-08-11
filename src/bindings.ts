@@ -1550,10 +1550,28 @@ async abortAiStream(streamId: string) : Promise<Result<null, string>> {
 },
 /**
  * Check if FFmpeg is available and return its status
+ * 
+ * When the shared state reports FFmpeg as unavailable, this re-attempts
+ * initialization so a freshly installed (or slow-to-initialize) FFmpeg is
+ * picked up without restarting the app.
  */
 async checkFfmpeg() : Promise<Result<FFmpegStatus, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_ffmpeg") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Download and install FFmpeg/FFprobe into the managed install directory.
+ * 
+ * Emits [`FFMPEG_INSTALL_PROGRESS_EVENT`] while running, then re-initializes
+ * the shared FFmpeg state (publishing resolved paths) and returns the fresh
+ * status. Concurrent installs are rejected.
+ */
+async installFfmpeg() : Promise<Result<FFmpegStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("install_ffmpeg") };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -5302,7 +5320,11 @@ ffmpegPath: string | null;
 /**
  * Path to ffprobe executable
  */
-ffprobePath: string | null }
+ffprobePath: string | null; 
+/**
+ * Where the binaries came from (`bundled`/`managed`/`dev`/`system`)
+ */
+source: string | null }
 /**
  * A detected face in a frame
  */

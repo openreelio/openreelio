@@ -6,12 +6,20 @@
 use std::path::PathBuf;
 
 use specta::Type;
+use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
 
-use super::{MediaInfo, SharedFFmpegState};
+use super::{FFmpegState, MediaInfo, SharedFFmpegState};
+use crate::core::ffmpeg::installer;
 use crate::core::fs::{validate_local_input_path, validate_scoped_output_path};
 use crate::AppState;
+
+/// Tauri event name for in-app FFmpeg install progress.
+pub const FFMPEG_INSTALL_PROGRESS_EVENT: &str = "ffmpeg-install-progress";
+
+/// Lock id inside [`AppState::runtime_install_locks`] for the FFmpeg installer.
+const FFMPEG_INSTALL_LOCK_ID: &str = "ffmpeg";
 
 async fn build_allowed_output_roots(
     state: &State<'_, AppState>,
@@ -54,33 +62,157 @@ pub struct FFmpegStatus {
     pub ffmpeg_path: Option<String>,
     /// Path to ffprobe executable
     pub ffprobe_path: Option<String>,
+    /// Where the binaries came from (`bundled`/`managed`/`dev`/`system`)
+    pub source: Option<String>,
 }
 
-/// Check if FFmpeg is available and return its status
-#[tauri::command]
-#[specta::specta]
-pub async fn check_ffmpeg(
-    ffmpeg_state: tauri::State<'_, SharedFFmpegState>,
-) -> Result<FFmpegStatus, String> {
-    let state = ffmpeg_state.read().await;
-
+/// Builds the IPC status payload from the shared FFmpeg state.
+fn build_ffmpeg_status(state: &FFmpegState) -> FFmpegStatus {
     if let Some(info) = state.info() {
-        Ok(FFmpegStatus {
+        FFmpegStatus {
             available: true,
             version: Some(info.version.clone()),
             is_bundled: info.is_bundled,
             ffmpeg_path: Some(info.ffmpeg_path.to_string_lossy().to_string()),
             ffprobe_path: Some(info.ffprobe_path.to_string_lossy().to_string()),
-        })
+            source: Some(info.source.as_str().to_string()),
+        }
     } else {
-        Ok(FFmpegStatus {
+        FFmpegStatus {
             available: false,
             version: None,
             is_bundled: false,
             ffmpeg_path: None,
             ffprobe_path: None,
-        })
+            source: None,
+        }
     }
+}
+
+/// Check if FFmpeg is available and return its status
+///
+/// When the shared state reports FFmpeg as unavailable, this re-attempts
+/// initialization so a freshly installed (or slow-to-initialize) FFmpeg is
+/// picked up without restarting the app.
+#[tauri::command]
+#[specta::specta]
+pub async fn check_ffmpeg(
+    app: tauri::AppHandle,
+    ffmpeg_state: tauri::State<'_, SharedFFmpegState>,
+) -> Result<FFmpegStatus, String> {
+    {
+        let state = ffmpeg_state.read().await;
+        if state.is_available() {
+            return Ok(build_ffmpeg_status(&state));
+        }
+    }
+
+    // Not available yet: retry initialization (lazy re-init, mirrors the
+    // transcription command path). Failure is not an error here — the status
+    // simply reports unavailable.
+    let mut state = ffmpeg_state.write().await;
+    if !state.is_available() {
+        let _ = state.initialize(Some(&app));
+    }
+    Ok(build_ffmpeg_status(&state))
+}
+
+/// Progress payload emitted on [`FFMPEG_INSTALL_PROGRESS_EVENT`].
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FFmpegInstallProgressPayload {
+    /// Install stage (`downloading|verifying|extracting|installing|done`).
+    stage: String,
+    /// Logical binary/archive name the stage applies to.
+    binary: String,
+    /// Bytes downloaded so far for the current archive.
+    downloaded_bytes: u64,
+    /// Total bytes for the current archive, when known.
+    total_bytes: Option<u64>,
+}
+
+/// RAII guard ensuring only one FFmpeg install runs at a time.
+///
+/// Mirrors `RuntimeInstallGuard` in `ipc::commands::external_agent`, sharing
+/// [`AppState::runtime_install_locks`] so `Drop` releases the lock on every
+/// exit path.
+struct FFmpegInstallGuard<'a> {
+    state: &'a AppState,
+}
+
+impl<'a> FFmpegInstallGuard<'a> {
+    fn acquire(state: &'a AppState) -> Result<Self, String> {
+        let mut locks = state
+            .runtime_install_locks
+            .lock()
+            .map_err(|_| "FFmpeg install lock is poisoned".to_string())?;
+        if !locks.insert(FFMPEG_INSTALL_LOCK_ID) {
+            return Err(
+                "An FFmpeg installation is already in progress. Wait for it to finish.".to_string(),
+            );
+        }
+        Ok(Self { state })
+    }
+}
+
+impl Drop for FFmpegInstallGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut locks) = self.state.runtime_install_locks.lock() {
+            locks.remove(FFMPEG_INSTALL_LOCK_ID);
+        }
+    }
+}
+
+/// Download and install FFmpeg/FFprobe into the managed install directory.
+///
+/// Emits [`FFMPEG_INSTALL_PROGRESS_EVENT`] while running, then re-initializes
+/// the shared FFmpeg state (publishing resolved paths) and returns the fresh
+/// status. Concurrent installs are rejected.
+#[tauri::command]
+#[specta::specta]
+pub async fn install_ffmpeg(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    ffmpeg_state: tauri::State<'_, SharedFFmpegState>,
+) -> Result<FFmpegStatus, String> {
+    let _guard = FFmpegInstallGuard::acquire(&state)?;
+
+    let progress_app = app.clone();
+    let install = tokio::task::spawn_blocking(move || {
+        installer::install_managed_ffmpeg(move |progress| {
+            let payload = FFmpegInstallProgressPayload {
+                stage: progress.stage.as_str().to_string(),
+                binary: progress.binary,
+                downloaded_bytes: progress.downloaded_bytes,
+                total_bytes: progress.total_bytes,
+            };
+            if let Err(error) = progress_app.emit(FFMPEG_INSTALL_PROGRESS_EVENT, payload) {
+                tracing::debug!("Failed to emit FFmpeg install progress: {error}");
+            }
+        })
+    })
+    .await
+    .map_err(|error| format!("FFmpeg install task failed: {error}"))??;
+
+    if !install.verified {
+        tracing::warn!(
+            "FFmpeg was installed without checksum verification (no checksum source in manifest)"
+        );
+    }
+    tracing::info!(
+        ffmpeg = %install.ffmpeg_path.display(),
+        ffprobe = %install.ffprobe_path.display(),
+        "Managed FFmpeg install completed"
+    );
+
+    // Re-run state initialization so the fresh install is detected and the
+    // globally resolved paths are published (`set_resolved_paths` runs inside
+    // `FFmpegState::initialize` via `apply_info`).
+    let mut ffmpeg = ffmpeg_state.write().await;
+    ffmpeg
+        .initialize(Some(&app))
+        .map_err(|error| format!("FFmpeg was installed but initialization failed: {error}"))?;
+    Ok(build_ffmpeg_status(&ffmpeg))
 }
 
 /// Extract a single frame from a video
@@ -217,6 +349,7 @@ mod tests {
             is_bundled: false,
             ffmpeg_path: Some("/usr/bin/ffmpeg".to_string()),
             ffprobe_path: Some("/usr/bin/ffprobe".to_string()),
+            source: Some("system".to_string()),
         };
 
         let json = serde_json::to_string(&status).unwrap();

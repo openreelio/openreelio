@@ -18,6 +18,7 @@ use crate::core::annotations::{
     AnalysisProvider as ProviderType, AnalysisProviderTrait, AnalysisRequest, AnalysisResponse,
     AnalysisResult, AnalysisType, CostEstimate, ProviderCapabilities, ShotResult,
 };
+use crate::core::ffmpeg::{resolved_ffmpeg_path, resolved_ffprobe_path};
 use crate::core::indexing::shots::{ShotDetector, ShotDetectorConfig};
 use crate::core::{CoreError, CoreResult};
 
@@ -30,18 +31,19 @@ use crate::core::{CoreError, CoreResult};
 /// This provider is free and works offline, but only supports shot detection.
 /// It wraps the existing `ShotDetector` from the indexing module.
 pub struct LocalAnalysisProvider {
-    /// FFmpeg binary path (optional, uses PATH if not set)
+    /// FFmpeg binary path (falls back to the global resolver if not set)
     ffmpeg_path: Option<PathBuf>,
-    /// FFprobe binary path (optional, uses PATH if not set)
+    /// FFprobe binary path (falls back to the global resolver if not set)
     ffprobe_path: Option<PathBuf>,
 }
 
 impl LocalAnalysisProvider {
-    /// Creates a new local analysis provider
+    /// Creates a new local analysis provider using the globally resolved
+    /// FFmpeg/FFprobe paths (bundled, dev-mode, or system PATH)
     pub fn new() -> Self {
         Self {
-            ffmpeg_path: None,
-            ffprobe_path: None,
+            ffmpeg_path: Some(resolved_ffmpeg_path()),
+            ffprobe_path: Some(resolved_ffprobe_path()),
         }
     }
 
@@ -179,7 +181,7 @@ impl AnalysisProviderTrait for LocalAnalysisProvider {
             Ok(())
         } else {
             Err(CoreError::NotSupported(
-                "FFmpeg not found in PATH".to_string(),
+                "FFmpeg not found (bundled, dev, or system PATH)".to_string(),
             ))
         }
     }
@@ -237,8 +239,9 @@ mod tests {
     #[test]
     fn test_local_provider_default() {
         let provider = LocalAnalysisProvider::default();
-        assert!(provider.ffmpeg_path.is_none());
-        assert!(provider.ffprobe_path.is_none());
+        // Default construction resolves paths through the global resolver.
+        assert!(provider.ffmpeg_path.is_some());
+        assert!(provider.ffprobe_path.is_some());
     }
 
     #[tokio::test]

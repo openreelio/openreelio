@@ -1477,6 +1477,7 @@ mod tauri_app {
                 $crate::core::ai::streaming::abort_ai_stream,
                 // FFmpeg commands
                 $crate::core::ffmpeg::check_ffmpeg,
+                $crate::core::ffmpeg::install_ffmpeg,
                 $crate::core::ffmpeg::extract_frame,
                 $crate::core::ffmpeg::generate_thumbnail,
                 $crate::core::ffmpeg::probe_media,
@@ -2004,6 +2005,7 @@ mod tauri_app {
             crate::core::ai::streaming::abort_ai_stream,
             // FFmpeg commands
             crate::core::ffmpeg::check_ffmpeg,
+            crate::core::ffmpeg::install_ffmpeg,
             crate::core::ffmpeg::extract_frame,
             crate::core::ffmpeg::generate_thumbnail,
             crate::core::ffmpeg::probe_media,
