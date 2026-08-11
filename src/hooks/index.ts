@@ -58,6 +58,14 @@ export type { UseWaveformPeaksOptions, UseWaveformPeaksReturn } from './useWavef
 export { useFFmpegStatus } from './useFFmpegStatus';
 export type { FFmpegStatus, UseFFmpegStatusResult } from './useFFmpegStatus';
 
+export { useFFmpegInstaller } from './useFFmpegInstaller';
+export type {
+  FFmpegInstallProgress,
+  FFmpegInstallStage,
+  UseFFmpegInstallerOptions,
+  UseFFmpegInstallerResult,
+} from './useFFmpegInstaller';
+
 export { useAutoSave } from './useAutoSave';
 export type { UseAutoSaveOptions, UseAutoSaveReturn } from './useAutoSave';
 

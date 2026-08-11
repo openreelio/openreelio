@@ -20,6 +20,8 @@ import {
   ArrowLeft,
 } from 'lucide-react';
 import { useFFmpegStatus } from '@/hooks/useFFmpegStatus';
+import { useFFmpegInstaller } from '@/hooks/useFFmpegInstaller';
+import { FFmpegInstallProgress } from '@/components/ui/FFmpegInstallProgress';
 import { useSettings } from '@/hooks/useSettings';
 import { createLogger } from '@/services/logger';
 
@@ -102,6 +104,14 @@ function WelcomeStep({ onNext, onSkip }: StepProps & { version?: string }): JSX.
 /** FFmpeg check step */
 function FFmpegStep({ onNext, onBack }: StepProps): JSX.Element {
   const { isAvailable, isLoading, error, recheck } = useFFmpegStatus();
+  const {
+    install,
+    isInstalling,
+    progress,
+    error: installError,
+  } = useFFmpegInstaller({
+    onInstalled: () => void recheck(),
+  });
 
   return (
     <div className="flex flex-col items-center text-center p-8">
@@ -161,6 +171,21 @@ function FFmpegStep({ onNext, onBack }: StepProps): JSX.Element {
                 </li>
               </ul>
             </div>
+
+            {isInstalling ? (
+              <FFmpegInstallProgress progress={progress} />
+            ) : (
+              <button
+                onClick={() => void install()}
+                data-testid="setup-ffmpeg-install"
+                className="w-full py-2 bg-primary-600 hover:bg-primary-500 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                Install FFmpeg Automatically
+              </button>
+            )}
+            {installError && (
+              <p className="text-xs text-status-error">Installation failed: {installError}</p>
+            )}
 
             <button
               onClick={() => void recheck()}

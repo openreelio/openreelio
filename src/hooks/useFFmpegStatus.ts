@@ -17,6 +17,8 @@ export interface FFmpegStatus {
   isBundled: boolean;
   ffmpegPath: string | null;
   ffprobePath: string | null;
+  /** Where the binaries came from: 'bundled' | 'managed' | 'dev' | 'system' */
+  source: string | null;
 }
 
 export interface UseFFmpegStatusResult {
@@ -42,6 +44,7 @@ const INITIAL_STATUS: FFmpegStatus = {
   isBundled: false,
   ffmpegPath: null,
   ffprobePath: null,
+  source: null,
 };
 
 // =============================================================================
@@ -65,6 +68,7 @@ export function useFFmpegStatus(): UseFFmpegStatusResult {
         isBundled: result.isBundled,
         ffmpegPath: result.ffmpegPath ?? null,
         ffprobePath: result.ffprobePath ?? null,
+        source: result.source ?? null,
       });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
