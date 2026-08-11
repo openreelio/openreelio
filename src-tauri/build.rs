@@ -4,8 +4,15 @@
 //! 1. Standard Tauri build process
 //! 2. Automatic FFmpeg binary download for bundling
 //!
-//! FFmpeg is automatically downloaded if binaries don't exist.
-//! Set SKIP_FFMPEG_DOWNLOAD=1 to disable automatic download.
+//! Download sources come from `scripts/ffmpeg-sources.json`, the single
+//! manifest shared with `scripts/prepare-bundled-ffmpeg.mjs`.
+//!
+//! Download policy:
+//! - `SKIP_FFMPEG_DOWNLOAD=1` disables all automatic downloads.
+//! - `OPENREELIO_DOWNLOAD_FFMPEG=1` or the `bundled-ffmpeg` feature opts in
+//!   explicitly (release-style, checksum-strict).
+//! - Debug, non-CI builds auto-download when neither bundled binaries nor a
+//!   system FFmpeg/FFprobe on PATH are available (best-effort verification).
 
 use std::env;
 use std::path::PathBuf;
@@ -26,6 +33,7 @@ fn configure_build_command(command: &mut std::process::Command) {
 fn main() {
     println!("cargo:rerun-if-changed=icons");
     println!("cargo:rerun-if-changed=tauri.conf.json");
+    println!("cargo:rerun-if-changed={FFMPEG_SOURCES_MANIFEST_PATH}");
 
     // Standard Tauri build (only when GUI feature is enabled)
     #[cfg(feature = "gui")]
@@ -50,9 +58,9 @@ fn main() {
     emit_windows_test_manifest_if_requested();
 
     // Download FFmpeg binaries if needed
-    if should_download_ffmpeg() {
+    if let Some(mode) = should_download_ffmpeg() {
         println!("cargo:warning=FFmpeg binaries not found, downloading...");
-        match download_ffmpeg_for_build() {
+        match download_ffmpeg_for_build(mode) {
             Ok(paths) => {
                 println!("cargo:warning=FFmpeg downloaded successfully");
                 println!("cargo:warning=  ffmpeg: {}", paths.ffmpeg.display());
@@ -111,33 +119,78 @@ fn emit_windows_test_manifest_if_requested() {
     );
 }
 
-/// Determine if FFmpeg should be downloaded during build
-fn should_download_ffmpeg() -> bool {
-    // Require explicit opt-in to avoid non-reproducible builds and supply-chain surprises.
-    // Enable by setting `OPENREELIO_DOWNLOAD_FFMPEG=1` after pinned checksums are configured,
-    // or by building with the `bundled-ffmpeg` feature.
-    let opted_in = env::var("OPENREELIO_DOWNLOAD_FFMPEG").ok().as_deref() == Some("1")
-        || env::var("CARGO_FEATURE_BUNDLED_FFMPEG").is_ok();
-    if !opted_in {
-        return false;
-    }
+/// How a build-time FFmpeg download was requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadMode {
+    /// Explicit opt-in via `OPENREELIO_DOWNLOAD_FFMPEG=1` or the
+    /// `bundled-ffmpeg` feature. Unverified sources hard-fail unless
+    /// `OPENREELIO_ALLOW_UNVERIFIED_FFMPEG=1` is set.
+    Explicit,
+    /// Automatic developer convenience download for debug, non-CI builds.
+    /// Unverified sources emit a warning instead of failing the build.
+    DevAuto,
+}
 
+/// Determine if FFmpeg should be downloaded during build, and in which mode
+fn should_download_ffmpeg() -> Option<DownloadMode> {
     // Skip if explicitly disabled
     if env::var("SKIP_FFMPEG_DOWNLOAD").is_ok() {
-        return false;
+        return None;
     }
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
     let binaries_dir = PathBuf::from(&manifest_dir).join("binaries");
 
+    // Explicit opt-in via env var or the `bundled-ffmpeg` feature.
+    let opted_in = env::var("OPENREELIO_DOWNLOAD_FFMPEG").ok().as_deref() == Some("1")
+        || env::var("CARGO_FEATURE_BUNDLED_FFMPEG").is_ok();
+    if opted_in {
+        if bundled_ffmpeg_binaries_are_usable(&binaries_dir) {
+            return None;
+        }
+
+        println!(
+            "cargo:warning=Bundled FFmpeg binaries are missing or not executable for this platform; downloading replacements."
+        );
+        return Some(DownloadMode::Explicit);
+    }
+
+    // Dev convenience: debug, non-CI builds fetch FFmpeg automatically when
+    // neither bundled binaries nor a system FFmpeg on PATH are available.
+    let is_debug_build = env::var("PROFILE").ok().as_deref() == Some("debug");
+    if !is_debug_build || env::var("CI").is_ok() {
+        return None;
+    }
+
     if bundled_ffmpeg_binaries_are_usable(&binaries_dir) {
-        return false;
+        return None;
+    }
+
+    if system_ffmpeg_available() {
+        return None;
     }
 
     println!(
-        "cargo:warning=Bundled FFmpeg binaries are missing or not executable for this platform; downloading replacements."
+        "cargo:warning=No bundled FFmpeg binaries and no system ffmpeg/ffprobe on PATH; downloading FFmpeg for this debug build (sources: scripts/ffmpeg-sources.json). Set SKIP_FFMPEG_DOWNLOAD=1 to opt out."
     );
-    true
+    Some(DownloadMode::DevAuto)
+}
+
+/// Check whether both `ffmpeg` and `ffprobe` are resolvable on PATH
+fn system_ffmpeg_available() -> bool {
+    let locator = if cfg!(windows) { "where" } else { "which" };
+
+    ["ffmpeg", "ffprobe"].iter().all(|tool| {
+        let mut command = std::process::Command::new(locator);
+        configure_build_command(&mut command);
+        command
+            .arg(tool)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    })
 }
 
 fn bundled_ffmpeg_binaries_are_usable(binaries_dir: &Path) -> bool {
@@ -170,17 +223,17 @@ fn bundled_ffmpeg_binaries_are_usable(binaries_dir: &Path) -> bool {
 }
 
 /// Download FFmpeg binaries to OUT_DIR
-fn download_ffmpeg_for_build() -> Result<FFmpegPaths, String> {
+fn download_ffmpeg_for_build(mode: DownloadMode) -> Result<FFmpegPaths, String> {
     let out_dir = env::var("OUT_DIR").map_err(|e| format!("OUT_DIR not set: {e}"))?;
     let output_dir = PathBuf::from(out_dir);
 
     let config = BundlerConfig {
-        verify_checksums: env::var("OPENREELIO_REQUIRE_FFMPEG_CHECKSUMS")
+        mode,
+        require_checksums: env::var("OPENREELIO_REQUIRE_FFMPEG_CHECKSUMS")
             .ok()
             .as_deref()
             == Some("1"),
         timeout_seconds: 600, // 10 minutes timeout for CI
-        cache_dir: None,
     };
 
     download_ffmpeg(&output_dir, &config).map_err(|e| e.to_string())
@@ -243,9 +296,9 @@ pub enum Arch {
 
 #[derive(Debug)]
 pub struct BundlerConfig {
-    pub verify_checksums: bool,
-    pub timeout_seconds: u64,
-    pub cache_dir: Option<PathBuf>,
+    mode: DownloadMode,
+    require_checksums: bool,
+    timeout_seconds: u64,
 }
 
 #[derive(Debug)]
@@ -308,59 +361,71 @@ pub fn get_binary_names(platform: Platform) -> (&'static str, &'static str) {
     }
 }
 
-struct DownloadSource {
-    url: String,
-    fallback_urls: Vec<String>,
-    filename: String,
-    sha256: Option<String>,
+/// Relative path (from `CARGO_MANIFEST_DIR`) to the shared FFmpeg source manifest
+const FFMPEG_SOURCES_MANIFEST_PATH: &str = "../scripts/ffmpeg-sources.json";
+
+/// Attempts per download URL before falling through to the next candidate
+const DOWNLOAD_ATTEMPTS_PER_URL: u32 = 3;
+
+/// Shared FFmpeg source manifest (`scripts/ffmpeg-sources.json`)
+#[derive(Debug, serde::Deserialize)]
+struct SourceManifest {
+    targets: std::collections::HashMap<String, TargetSources>,
 }
 
-fn get_ffmpeg_download_url(platform: Platform, arch: Arch) -> BundlerResult<DownloadSource> {
+/// Download sources for a single target triple
+#[derive(Debug, serde::Deserialize)]
+struct TargetSources {
+    archives: Vec<ArchiveSource>,
+}
+
+/// One downloadable archive and the binaries it provides
+#[derive(Debug, serde::Deserialize)]
+struct ArchiveSource {
+    name: String,
+    filename: String,
+    binaries: Vec<String>,
+    urls: Vec<UrlSource>,
+}
+
+/// A candidate download URL with optional checksum sources
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UrlSource {
+    url: String,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    sha256_url: Option<String>,
+    #[serde(default)]
+    sha256_sidecar: Option<String>,
+}
+
+fn load_source_manifest() -> BundlerResult<SourceManifest> {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR")
+        .map_err(|e| BundlerError::DownloadFailed(format!("CARGO_MANIFEST_DIR not set: {e}")))?;
+    let manifest_path = PathBuf::from(manifest_dir).join(FFMPEG_SOURCES_MANIFEST_PATH);
+    let contents = std::fs::read_to_string(&manifest_path)?;
+
+    serde_json::from_str(&contents).map_err(|e| {
+        BundlerError::DownloadFailed(format!("Failed to parse {}: {e}", manifest_path.display()))
+    })
+}
+
+/// Map the build platform/arch to a manifest target-triple key
+fn manifest_target_key(platform: Platform, arch: Arch) -> BundlerResult<&'static str> {
     match (platform, arch) {
-        (Platform::Windows, Arch::X64) => Ok(DownloadSource {
-            url: "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip".to_string(),
-            fallback_urls: Vec::new(),
-            filename: "ffmpeg-release-essentials.zip".to_string(),
-            sha256: None,
-        }),
-        (Platform::MacOS, Arch::X64) | (Platform::MacOS, Arch::Arm64) => Ok(DownloadSource {
-            url: "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip".to_string(),
-            fallback_urls: Vec::new(),
-            filename: "ffmpeg.zip".to_string(),
-            sha256: None,
-        }),
-        (Platform::Linux, Arch::X64) => Ok(DownloadSource {
-            url: "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-                .to_string(),
-            fallback_urls: vec![
-                "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
-                    .to_string(),
-            ],
-            filename: "ffmpeg-release-amd64-static.tar.xz".to_string(),
-            sha256: None,
-        }),
+        (Platform::Windows, Arch::X64) => Ok("x86_64-pc-windows-msvc"),
+        (Platform::MacOS, Arch::X64) => Ok("x86_64-apple-darwin"),
+        (Platform::MacOS, Arch::Arm64) => Ok("aarch64-apple-darwin"),
+        (Platform::Linux, Arch::X64) => Ok("x86_64-unknown-linux-gnu"),
         _ => Err(BundlerError::UnsupportedPlatform(format!(
             "{platform:?} {arch:?}"
         ))),
     }
 }
 
-fn get_ffprobe_download_url(
-    platform: Platform,
-    arch: Arch,
-) -> BundlerResult<Option<DownloadSource>> {
-    match (platform, arch) {
-        (Platform::MacOS, Arch::X64) | (Platform::MacOS, Arch::Arm64) => Ok(Some(DownloadSource {
-            url: "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip".to_string(),
-            fallback_urls: Vec::new(),
-            filename: "ffprobe.zip".to_string(),
-            sha256: None,
-        })),
-        _ => Ok(None),
-    }
-}
-
-fn download_file_blocking(url: &str, output: &Path, timeout_secs: u64) -> BundlerResult<()> {
+fn download_file_blocking(url: &str, output: &Path, timeout_secs: u64) -> BundlerResult<String> {
     use reqwest::header::{ACCEPT, USER_AGENT};
     use std::time::Duration;
 
@@ -386,6 +451,7 @@ fn download_file_blocking(url: &str, output: &Path, timeout_secs: u64) -> Bundle
         )));
     }
 
+    let final_url = response.url().to_string();
     let bytes = response
         .bytes()
         .map_err(|e| BundlerError::DownloadFailed(format!("Failed to read response: {e}")))?;
@@ -399,63 +465,215 @@ fn download_file_blocking(url: &str, output: &Path, timeout_secs: u64) -> Bundle
         output.display()
     );
 
-    Ok(())
+    Ok(final_url)
 }
 
-fn download_source_blocking(
-    source: &DownloadSource,
+/// Download one manifest archive, trying each candidate URL with retries and
+/// verifying checksums per the bundler config policy
+fn download_archive_blocking(
+    archive: &ArchiveSource,
     output: &Path,
-    timeout_secs: u64,
+    config: &BundlerConfig,
 ) -> BundlerResult<()> {
     let mut errors = Vec::new();
 
-    for url in std::iter::once(&source.url).chain(source.fallback_urls.iter()) {
-        match download_file_blocking(url, output, timeout_secs) {
-            Ok(()) => return Ok(()),
-            Err(error) => errors.push(format!("{url}: {error}")),
+    for source in &archive.urls {
+        let mut download_result = Err(BundlerError::DownloadFailed(format!(
+            "No download attempted for {}",
+            source.url
+        )));
+        for attempt in 1..=DOWNLOAD_ATTEMPTS_PER_URL {
+            download_result = download_file_blocking(&source.url, output, config.timeout_seconds);
+            match &download_result {
+                Ok(_) => break,
+                Err(error) if attempt < DOWNLOAD_ATTEMPTS_PER_URL => {
+                    println!(
+                        "cargo:warning=Attempt {attempt}/{DOWNLOAD_ATTEMPTS_PER_URL} failed for {}: {error}",
+                        source.url
+                    );
+                }
+                Err(_) => {}
+            }
+        }
+
+        match download_result {
+            Ok(final_url) => match verify_downloaded_archive(source, output, &final_url, config) {
+                Ok(()) => return Ok(()),
+                Err(error) => errors.push(format!("{}: {error}", source.url)),
+            },
+            Err(error) => errors.push(format!("{}: {error}", source.url)),
         }
     }
 
     Err(BundlerError::DownloadFailed(format!(
-        "All FFmpeg download URLs failed: {}",
+        "All download URLs failed for {}: {}",
+        archive.name,
         errors.join("; ")
     )))
 }
 
-fn verify_archive_checksum(path: &Path, expected_sha256: Option<&str>) -> BundlerResult<()> {
+/// Verify a downloaded archive against the manifest checksum sources
+fn verify_downloaded_archive(
+    source: &UrlSource,
+    path: &Path,
+    final_url: &str,
+    config: &BundlerConfig,
+) -> BundlerResult<()> {
     use sha2::{Digest, Sha256};
 
-    let Some(expected_sha256) = expected_sha256 else {
-        if std::env::var("OPENREELIO_ALLOW_UNVERIFIED_FFMPEG")
-            .ok()
-            .as_deref()
-            == Some("1")
-        {
+    let expected = match resolve_expected_sha256(source, final_url, config.timeout_seconds) {
+        Ok(expected) => expected,
+        Err(error) => {
             println!(
-                "cargo:warning=OPENREELIO_ALLOW_UNVERIFIED_FFMPEG=1 set; skipping checksum for {}",
-                path.display()
+                "cargo:warning=Failed to resolve checksum for {}: {error}",
+                source.url
             );
-            return Ok(());
+            None
         }
+    };
 
-        return Err(BundlerError::VerificationFailed(format!(
-            "Missing pinned SHA-256 for downloaded FFmpeg archive: {}",
-            path.display()
-        )));
+    let Some(expected) = expected else {
+        return handle_unverified_download(source, path, config);
     };
 
     let bytes = std::fs::read(path)?;
     let actual = format!("{:x}", Sha256::digest(&bytes));
-    if !actual.eq_ignore_ascii_case(expected_sha256) {
+    if !actual.eq_ignore_ascii_case(&expected) {
         return Err(BundlerError::VerificationFailed(format!(
             "Checksum mismatch for {}: expected {}, got {}",
             path.display(),
-            expected_sha256,
+            expected,
             actual
         )));
     }
 
+    println!(
+        "cargo:warning=Verified SHA-256 for {}: {actual}",
+        path.display()
+    );
     Ok(())
+}
+
+/// Decide whether an archive without a verifiable checksum may be used
+fn handle_unverified_download(
+    source: &UrlSource,
+    path: &Path,
+    config: &BundlerConfig,
+) -> BundlerResult<()> {
+    let allow_unverified = env::var("OPENREELIO_ALLOW_UNVERIFIED_FFMPEG")
+        .ok()
+        .as_deref()
+        == Some("1");
+
+    if allow_unverified {
+        println!(
+            "cargo:warning=OPENREELIO_ALLOW_UNVERIFIED_FFMPEG=1 set; skipping checksum for {}",
+            path.display()
+        );
+        return Ok(());
+    }
+
+    if config.mode == DownloadMode::DevAuto && !config.require_checksums {
+        println!(
+            "cargo:warning=No verifiable SHA-256 for {}; accepting unverified download in dev auto-download mode.",
+            source.url
+        );
+        return Ok(());
+    }
+
+    Err(BundlerError::VerificationFailed(format!(
+        "Missing pinned SHA-256 for downloaded FFmpeg archive: {} (set OPENREELIO_ALLOW_UNVERIFIED_FFMPEG=1 to override)",
+        path.display()
+    )))
+}
+
+/// Resolve the expected SHA-256 digest from the manifest entry, fetching a
+/// checksum sidecar when one is configured
+fn resolve_expected_sha256(
+    source: &UrlSource,
+    final_url: &str,
+    timeout_secs: u64,
+) -> BundlerResult<Option<String>> {
+    if let Some(sha256) = &source.sha256 {
+        return Ok(Some(sha256.clone()));
+    }
+
+    let sidecar_url = if let Some(sha256_url) = &source.sha256_url {
+        sha256_url.clone()
+    } else if let Some(suffix) = &source.sha256_sidecar {
+        format!("{final_url}{suffix}")
+    } else {
+        return Ok(None);
+    };
+
+    use reqwest::header::USER_AGENT;
+    use std::time::Duration;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| BundlerError::DownloadFailed(e.to_string()))?;
+
+    let response = client
+        .get(&sidecar_url)
+        .header(USER_AGENT, "OpenReelio release asset downloader")
+        .send()
+        .map_err(|e| BundlerError::DownloadFailed(format!("Sidecar request failed: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(BundlerError::DownloadFailed(format!(
+            "HTTP {}: {sidecar_url}",
+            response.status()
+        )));
+    }
+
+    let sidecar_text = response
+        .text()
+        .map_err(|e| BundlerError::DownloadFailed(format!("Failed to read sidecar: {e}")))?;
+
+    match parse_sha256_sidecar(&sidecar_text, &source.url) {
+        Some(digest) => Ok(Some(digest)),
+        None => Err(BundlerError::VerificationFailed(format!(
+            "No matching SHA-256 digest found in {sidecar_url}"
+        ))),
+    }
+}
+
+/// Parse a checksum sidecar (bare digest, or `digest  filename` lines) and
+/// return the digest matching the manifest URL's basename
+fn parse_sha256_sidecar(sidecar_text: &str, source_url: &str) -> Option<String> {
+    // Match against the manifest URL basename: redirect targets (for example
+    // GitHub release assets) often resolve to opaque object-storage paths.
+    let url_path = source_url.split('?').next().unwrap_or(source_url);
+    let download_basename = url_path.rsplit('/').next().unwrap_or(url_path);
+    let mut digests = Vec::new();
+
+    for line in sidecar_text.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let Some(digest) = tokens.first() else {
+            continue;
+        };
+        if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+
+        if tokens.len() > 1 {
+            let file_token = tokens[tokens.len() - 1].trim_start_matches('*');
+            let file_basename = file_token.rsplit('/').next().unwrap_or(file_token);
+            if file_basename.eq_ignore_ascii_case(download_basename) {
+                return Some((*digest).to_string());
+            }
+        }
+
+        digests.push((*digest).to_string());
+    }
+
+    // A bare-digest sidecar (single digest, no filename) applies to the download.
+    if digests.len() == 1 {
+        return digests.pop();
+    }
+
+    None
 }
 
 fn extract_archive(archive_path: &Path, output_dir: &Path) -> BundlerResult<()> {
@@ -718,8 +936,13 @@ fn verify_binary(path: &Path) -> BundlerResult<()> {
 pub fn download_ffmpeg(output_dir: &Path, config: &BundlerConfig) -> BundlerResult<FFmpegPaths> {
     let platform = detect_platform();
     let arch = detect_arch();
-    let source = get_ffmpeg_download_url(platform, arch)?;
-    let ffprobe_source = get_ffprobe_download_url(platform, arch)?;
+    let manifest = load_source_manifest()?;
+    let target_key = manifest_target_key(platform, arch)?;
+    let target = manifest.targets.get(target_key).ok_or_else(|| {
+        BundlerError::UnsupportedPlatform(format!(
+            "No entry for {target_key} in {FFMPEG_SOURCES_MANIFEST_PATH}"
+        ))
+    })?;
     let (ffmpeg_name, ffprobe_name) = get_binary_names(platform);
 
     // Create directories
@@ -731,44 +954,40 @@ pub fn download_ffmpeg(output_dir: &Path, config: &BundlerConfig) -> BundlerResu
     let binaries_dir = output_dir.join("binaries");
     std::fs::create_dir_all(&binaries_dir)?;
 
-    // Download main FFmpeg archive
-    let archive_path = temp_dir.join(&source.filename);
-    download_source_blocking(&source, &archive_path, config.timeout_seconds)?;
-    if config.verify_checksums {
-        verify_archive_checksum(&archive_path, source.sha256.as_deref())?;
-    }
+    // Download and extract every archive listed for this target, then stage
+    // the binaries each archive provides.
+    let mut staged_binaries: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
 
-    // Extract main archive
-    println!("cargo:warning=Extracting FFmpeg archive...");
-    extract_archive(&archive_path, &extract_dir)?;
+    for archive in &target.archives {
+        let archive_path = temp_dir.join(&archive.filename);
+        let archive_extract_dir = extract_dir.join(format!("{}-extracted", archive.name));
+        std::fs::create_dir_all(&archive_extract_dir)?;
 
-    // Find and copy ffmpeg binary
-    let ffmpeg_found = find_binary_in_dir(&extract_dir, ffmpeg_name)?;
-    let final_ffmpeg = binaries_dir.join(ffmpeg_name);
-    std::fs::copy(&ffmpeg_found, &final_ffmpeg)?;
+        download_archive_blocking(archive, &archive_path, config)?;
 
-    // Handle ffprobe
-    let final_ffprobe = binaries_dir.join(ffprobe_name);
+        println!("cargo:warning=Extracting {} archive...", archive.name);
+        extract_archive(&archive_path, &archive_extract_dir)?;
 
-    if let Some(ffprobe_src) = ffprobe_source {
-        // macOS: Download separate ffprobe
-        let ffprobe_archive = temp_dir.join(&ffprobe_src.filename);
-        download_source_blocking(&ffprobe_src, &ffprobe_archive, config.timeout_seconds)?;
-        if config.verify_checksums {
-            verify_archive_checksum(&ffprobe_archive, ffprobe_src.sha256.as_deref())?;
+        for binary_name in &archive.binaries {
+            let found = find_binary_in_dir(&archive_extract_dir, binary_name)?;
+            staged_binaries.insert(binary_name.clone(), found);
         }
-
-        let ffprobe_extract_dir = extract_dir.join("ffprobe_extracted");
-        std::fs::create_dir_all(&ffprobe_extract_dir)?;
-        extract_archive(&ffprobe_archive, &ffprobe_extract_dir)?;
-
-        let ffprobe_found = find_binary_in_dir(&ffprobe_extract_dir, ffprobe_name)?;
-        std::fs::copy(&ffprobe_found, &final_ffprobe)?;
-    } else {
-        // Windows/Linux: ffprobe is in main archive
-        let ffprobe_found = find_binary_in_dir(&extract_dir, ffprobe_name)?;
-        std::fs::copy(&ffprobe_found, &final_ffprobe)?;
     }
+
+    let copy_staged = |binary_name: &str| -> BundlerResult<PathBuf> {
+        let source_path = staged_binaries.get(binary_name).ok_or_else(|| {
+            BundlerError::BinaryNotFound(format!(
+                "{binary_name} is not provided by any archive for {target_key}"
+            ))
+        })?;
+        let destination = binaries_dir.join(binary_name);
+        std::fs::copy(source_path, &destination)?;
+        Ok(destination)
+    };
+
+    let final_ffmpeg = copy_staged(ffmpeg_name)?;
+    let final_ffprobe = copy_staged(ffprobe_name)?;
 
     // Set executable permissions on Unix
     #[cfg(unix)]

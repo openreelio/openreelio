@@ -51,6 +51,17 @@ Codex CLI is not bundled as a guaranteed runtime dependency. If a feature requir
 
 Release CI prepares FFmpeg/FFprobe with `scripts/prepare-bundled-ffmpeg.mjs` before the Tauri bundle step, then verifies each binary. This avoids requiring users to install FFmpeg separately and avoids a duplicate Rust release build just to fetch runtime tools.
 
+FFmpeg download sources live in a single manifest, `scripts/ffmpeg-sources.json`, shared by the release script and the `src-tauri/build.rs` dev auto-download path. Per target triple:
+
+| Target                     | Provider                        | Fallback                | Checksum                    |
+| -------------------------- | ------------------------------- | ----------------------- | --------------------------- |
+| `x86_64-pc-windows-msvc`   | gyan.dev (release essentials)   | BtbN GitHub builds      | SHA-256 sidecar (both)      |
+| `x86_64-apple-darwin`      | martin-riedl.de (amd64 release) | evermeet.cx             | SHA-256 sidecar (primary)   |
+| `aarch64-apple-darwin`     | martin-riedl.de (arm64 release) | osxexperts.net          | SHA-256 sidecar (primary)   |
+| `x86_64-unknown-linux-gnu` | johnvansickle.com (static)      | BtbN GitHub builds      | SHA-256 sidecar (fallback)  |
+
+macOS installers ship architecture-native binaries: the `aarch64-apple-darwin` build bundles native arm64 FFmpeg/FFprobe instead of x86_64 builds running under Rosetta. Downloads with a checksum source are verified; URLs without one require `OPENREELIO_ALLOW_UNVERIFIED_FFMPEG=1` (set in the release workflow).
+
 ---
 
 ## User Installation Guide
