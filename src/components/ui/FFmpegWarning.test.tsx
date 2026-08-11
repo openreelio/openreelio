@@ -193,6 +193,28 @@ describe('FFmpegWarning', () => {
     expect(mockOnRecheck).toHaveBeenCalled();
   });
 
+  it('should clear the stale success state when the dialog reopens', async () => {
+    vi.mocked(invoke).mockResolvedValue(INSTALLED_STATUS);
+
+    const { rerender } = render(
+      <FFmpegWarning isOpen={true} onDismiss={mockOnDismiss} onRecheck={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByTestId('ffmpeg-warning-install'));
+    await waitFor(() => {
+      expect(screen.getByTestId('ffmpeg-install-success')).toBeInTheDocument();
+    });
+
+    // Close, then reopen: the status check found no usable FFmpeg after all,
+    // so the dialog must offer the install button again instead of the stale
+    // success message.
+    rerender(<FFmpegWarning isOpen={false} onDismiss={mockOnDismiss} onRecheck={vi.fn()} />);
+    rerender(<FFmpegWarning isOpen={true} onDismiss={mockOnDismiss} onRecheck={vi.fn()} />);
+
+    expect(screen.queryByTestId('ffmpeg-install-success')).not.toBeInTheDocument();
+    expect(screen.getByTestId('ffmpeg-warning-install')).toBeInTheDocument();
+  });
+
   it('should show an error message when the install fails', async () => {
     const mockOnRecheck = vi.fn();
     vi.mocked(invoke).mockRejectedValue('All download URLs failed for ffmpeg');

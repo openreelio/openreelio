@@ -72,9 +72,13 @@ export function FFmpegWarning({
   // ===========================================================================
 
   useEffect(() => {
-    if (isOpen && installButtonRef.current) {
-      installButtonRef.current.focus();
+    if (!isOpen) {
+      return;
     }
+    // A reopen means the follow-up status check still found no usable FFmpeg,
+    // so stale success state must not hide the install/manual options.
+    setInstallSucceeded(false);
+    installButtonRef.current?.focus();
   }, [isOpen]);
 
   // ===========================================================================

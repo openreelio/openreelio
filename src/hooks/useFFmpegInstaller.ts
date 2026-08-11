@@ -61,7 +61,9 @@ export function useFFmpegInstaller(
   const [error, setError] = useState<string | null>(null);
 
   const onInstalledRef = useRef(options.onInstalled);
-  onInstalledRef.current = options.onInstalled;
+  useEffect(() => {
+    onInstalledRef.current = options.onInstalled;
+  }, [options.onInstalled]);
 
   const isMountedRef = useRef(true);
   const isInstallingRef = useRef(false);
@@ -91,7 +93,9 @@ export function useFFmpegInstaller(
       });
 
       const status = await invoke<FFmpegStatus>('install_ffmpeg');
-      onInstalledRef.current?.(status);
+      if (isMountedRef.current) {
+        onInstalledRef.current?.(status);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (isMountedRef.current) {
