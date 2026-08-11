@@ -111,7 +111,7 @@ Prerequisites:
 
 - [Rust](https://rustup.rs/) 1.88+
 - [Node.js](https://nodejs.org/) 20+
-- [FFmpeg](https://ffmpeg.org/) 6+ or bundled FFmpeg binaries in `src-tauri/binaries`
+- [FFmpeg](https://ffmpeg.org/) 6+ (optional): a system FFmpeg/FFprobe on PATH is used if present; otherwise the first debug build automatically downloads bundled binaries into `src-tauri/binaries` (sources pinned in `scripts/ffmpeg-sources.json`; opt out with `SKIP_FFMPEG_DOWNLOAD=1`)
 - (Optional) LLVM/Clang for Whisper: building with `--features whisper` requires `libclang` (bindgen). On Windows, install LLVM and set `LIBCLANG_PATH` to the folder containing `libclang.dll`.
 
 ```bash

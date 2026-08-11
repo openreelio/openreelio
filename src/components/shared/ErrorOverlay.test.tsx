@@ -229,6 +229,29 @@ describe('ErrorOverlay', () => {
   });
 
   // ===========================================================================
+  // Recovery Suggestions
+  // ===========================================================================
+
+  describe('recovery suggestions', () => {
+    it('should suggest installing FFmpeg when the binary is missing', () => {
+      render(<ErrorOverlay error={new Error('FFmpeg not found')} onDismiss={vi.fn()} />);
+      expect(screen.getByText(/Install FFmpeg Automatically/)).toBeInTheDocument();
+    });
+
+    it('should suggest installing FFmpeg when the binary is unavailable', () => {
+      render(<ErrorOverlay error={new Error('FFmpeg not available')} onDismiss={vi.fn()} />);
+      expect(screen.getByText(/Install FFmpeg Automatically/)).toBeInTheDocument();
+    });
+
+    it('should keep the codec suggestion for FFmpeg processing failures', () => {
+      render(
+        <ErrorOverlay error={new Error('FFmpeg encoder failed: bad codec')} onDismiss={vi.fn()} />,
+      );
+      expect(screen.getByText(/Try a different format or codec/)).toBeInTheDocument();
+    });
+  });
+
+  // ===========================================================================
   // useErrorOverlay Hook
   // ===========================================================================
 

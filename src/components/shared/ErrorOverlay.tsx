@@ -247,7 +247,7 @@ export function ErrorOverlay({
   // Categorize error
   const category = categorizeError(error);
   const displayTitle = title ?? getErrorTitle(category);
-  const suggestion = getRecoverySuggestion(category);
+  const suggestion = getRecoverySuggestion(category, error.message);
 
   return (
     <div style={styles.overlay}>

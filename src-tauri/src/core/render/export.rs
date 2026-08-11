@@ -4925,10 +4925,11 @@ pub fn build_complex_filter_args_with_audio_info(
 ) -> Result<Vec<String>, ExportError> {
     let engine = ExportEngine::new(crate::core::ffmpeg::FFmpegRunner::new(
         crate::core::ffmpeg::FFmpegInfo {
-            ffmpeg_path: PathBuf::from("ffmpeg"),
-            ffprobe_path: PathBuf::from("ffprobe"),
+            ffmpeg_path: crate::core::ffmpeg::resolved_ffmpeg_path(),
+            ffprobe_path: crate::core::ffmpeg::resolved_ffprobe_path(),
             version: "test-builder".to_string(),
             is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
         },
     ));
 
@@ -5195,6 +5196,7 @@ mod tests {
             ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
             version: "test".to_string(),
             is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
         }));
         let ass_path = PathBuf::from("/tmp/openreelio:text,overlay.ass");
 
@@ -6734,6 +6736,7 @@ mod tests {
             ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
             version: "test".to_string(),
             is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
         }));
         let settings =
             ExportSettings::from_preset(ExportPreset::WebmVp9, PathBuf::from("output.webm"));
@@ -7173,6 +7176,7 @@ mod tests {
             ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
             version: "test".to_string(),
             is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
         }));
         let settings = AudioExportSettings {
             format: AudioExportFormat::Mp3,
@@ -7259,6 +7263,7 @@ mod tests {
             ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
             version: "test".to_string(),
             is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
         }));
         let settings = AudioExportSettings {
             format: AudioExportFormat::Wav,
@@ -9008,6 +9013,7 @@ mod tests {
             ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
             version: "test".to_string(),
             is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
         }));
 
         let (clip, asset) = engine

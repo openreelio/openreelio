@@ -21,6 +21,8 @@ pub mod bundler;
 #[cfg(all(not(test), feature = "gui"))]
 mod commands;
 mod detection;
+pub mod installer;
+mod resolver;
 mod runner;
 mod state;
 
@@ -30,11 +32,16 @@ pub use bundler::{
 #[cfg(all(not(test), feature = "gui"))]
 pub use commands::*;
 pub use detection::*;
+pub use resolver::{
+    resolved_ffmpeg_path, resolved_ffprobe_path, set_resolved_paths, ResolvedFFmpeg,
+};
 pub use runner::{
     AudioStreamInfo, FFmpegProgress, FFmpegRunner, MediaInfo, RenderSettings, VideoStreamInfo,
     WaveformData,
 };
 pub use state::{create_ffmpeg_state, FFmpegState, SharedFFmpegState};
+#[cfg(all(not(test), feature = "gui"))]
+pub use state::{detect_ffmpeg, initialize_shared_ffmpeg};
 
 /// FFmpeg-related error types
 #[derive(Debug, thiserror::Error)]

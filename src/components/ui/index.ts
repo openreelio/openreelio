@@ -14,6 +14,8 @@ export {
   type MenuItemOrDivider,
 } from './ContextMenu';
 export { FFmpegWarning, type FFmpegWarningProps } from './FFmpegWarning';
+export { FFmpegInstallProgress, type FFmpegInstallProgressProps } from './FFmpegInstallProgress';
+export { FFmpegManualInstructions } from './FFmpegManualInstructions';
 export {
   Skeleton,
   SkeletonText,

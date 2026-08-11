@@ -3,10 +3,11 @@
 //! Provides audio extraction functionality for transcription using FFmpeg.
 //! Extracts audio as 16kHz mono WAV format suitable for Whisper.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
+use crate::core::ffmpeg::resolved_ffmpeg_path;
 use crate::core::process::configure_std_command;
 use crate::core::project::ProjectState;
 use crate::core::render::build_render_graph;
@@ -61,7 +62,7 @@ pub struct SequenceAudioMixdownResult {
 ///
 /// * `input_path` - Path to the input video/audio file
 /// * `output_path` - Path where the WAV file should be saved
-/// * `ffmpeg_path` - Optional path to FFmpeg binary (defaults to "ffmpeg")
+/// * `ffmpeg_path` - Optional path to FFmpeg binary (defaults to the globally resolved path)
 ///
 /// # Returns
 ///
@@ -100,7 +101,9 @@ pub fn extract_audio_for_transcription(
     }
 
     // Build FFmpeg command
-    let ffmpeg = ffmpeg_path.unwrap_or("ffmpeg");
+    let ffmpeg = ffmpeg_path
+        .map(PathBuf::from)
+        .unwrap_or_else(resolved_ffmpeg_path);
     let mut cmd = Command::new(ffmpeg);
     configure_std_command(&mut cmd);
     let output = cmd
@@ -175,7 +178,9 @@ pub fn mix_sequence_audio_for_transcription(
         ));
     }
 
-    let ffmpeg = ffmpeg_path.unwrap_or("ffmpeg");
+    let ffmpeg = ffmpeg_path
+        .map(PathBuf::from)
+        .unwrap_or_else(resolved_ffmpeg_path);
     let mut cmd = Command::new(ffmpeg);
     configure_std_command(&mut cmd);
     cmd.arg("-y").arg("-hide_banner");

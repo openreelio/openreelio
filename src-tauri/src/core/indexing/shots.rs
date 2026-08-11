@@ -11,6 +11,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::db::IndexDb;
+use crate::core::ffmpeg::{resolved_ffmpeg_path, resolved_ffprobe_path};
 use crate::core::process::{configure_std_command, configure_tokio_command};
 use crate::core::{AssetId, CoreError, CoreResult};
 
@@ -261,8 +262,8 @@ impl ShotDetector {
         let ffprobe_bin = self
             .config
             .ffprobe_path
-            .as_deref()
-            .unwrap_or_else(|| Path::new("ffprobe"));
+            .clone()
+            .unwrap_or_else(resolved_ffprobe_path);
 
         let mut cmd = Command::new(ffprobe_bin);
         configure_tokio_command(&mut cmd);
@@ -324,8 +325,8 @@ impl ShotDetector {
         let ffmpeg_bin = self
             .config
             .ffmpeg_path
-            .as_deref()
-            .unwrap_or_else(|| Path::new("ffmpeg"));
+            .clone()
+            .unwrap_or_else(resolved_ffmpeg_path);
 
         let filter = format!("select='gt(scene,{})',showinfo", self.config.threshold);
 
@@ -633,9 +634,9 @@ impl ShotDetector {
         Ok(shots)
     }
 
-    /// Checks if FFmpeg is available on the system
+    /// Checks if FFmpeg is available (bundled, dev-mode, or system PATH)
     pub fn is_ffmpeg_available() -> bool {
-        let mut command = std::process::Command::new("ffmpeg");
+        let mut command = std::process::Command::new(resolved_ffmpeg_path());
         configure_std_command(&mut command);
         command
             .arg("-version")

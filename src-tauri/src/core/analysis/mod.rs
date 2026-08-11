@@ -81,9 +81,9 @@ const CONTACT_SHEET_FILENAME: &str = "contact-sheet.jpg";
 pub struct AnalysisJobRunner {
     /// Project root directory
     project_dir: PathBuf,
-    /// Path to FFmpeg binary (uses PATH if not set)
+    /// Path to FFmpeg binary (globally resolved by default)
     ffmpeg_path: PathBuf,
-    /// Path to FFprobe binary (uses PATH if not set)
+    /// Path to FFprobe binary (globally resolved by default)
     ffprobe_path: PathBuf,
 }
 
@@ -92,8 +92,8 @@ impl AnalysisJobRunner {
     pub fn new(project_dir: &Path) -> Self {
         Self {
             project_dir: project_dir.to_path_buf(),
-            ffmpeg_path: PathBuf::from("ffmpeg"),
-            ffprobe_path: PathBuf::from("ffprobe"),
+            ffmpeg_path: crate::core::ffmpeg::resolved_ffmpeg_path(),
+            ffprobe_path: crate::core::ffmpeg::resolved_ffprobe_path(),
         }
     }
 

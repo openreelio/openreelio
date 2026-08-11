@@ -2,11 +2,15 @@
  * FFmpegWarning Component
  *
  * Displays a warning modal when FFmpeg is not available on the system.
- * Provides installation instructions and links.
+ * Offers a one-click automatic installation (primary) and manual
+ * installation instructions (collapsed, secondary).
  */
 
-import { useCallback, useId, useRef, useEffect, type KeyboardEvent } from 'react';
+import { useCallback, useId, useRef, useEffect, useState, type KeyboardEvent } from 'react';
+import { useFFmpegInstaller } from '@/hooks/useFFmpegInstaller';
 import { ModalShell } from './ModalShell';
+import { FFmpegInstallProgress } from './FFmpegInstallProgress';
+import { FFmpegManualInstructions } from './FFmpegManualInstructions';
 
 // =============================================================================
 // Types
@@ -19,16 +23,9 @@ export interface FFmpegWarningProps {
   onDismiss: () => void;
   /** Whether to allow dismissing (user may want to force install) */
   allowDismiss?: boolean;
+  /** Re-checks FFmpeg status (after install or manual installation) */
+  onRecheck?: () => void | Promise<void>;
 }
-
-// =============================================================================
-// Constants
-// =============================================================================
-
-const FFMPEG_DOWNLOAD_URL = 'https://ffmpeg.org/download.html';
-const FFMPEG_WINDOWS_URL = 'https://www.gyan.dev/ffmpeg/builds/';
-const FFMPEG_MAC_HOMEBREW = 'brew install ffmpeg';
-const FFMPEG_LINUX_APT = 'sudo apt install ffmpeg';
 
 // =============================================================================
 // Component
@@ -38,9 +35,18 @@ export function FFmpegWarning({
   isOpen,
   onDismiss,
   allowDismiss = true,
+  onRecheck,
 }: FFmpegWarningProps): JSX.Element | null {
   const titleId = useId();
-  const dismissButtonRef = useRef<HTMLButtonElement>(null);
+  const installButtonRef = useRef<HTMLButtonElement>(null);
+  const [installSucceeded, setInstallSucceeded] = useState(false);
+
+  const { install, isInstalling, progress, error } = useFFmpegInstaller({
+    onInstalled: () => {
+      setInstallSucceeded(true);
+      void onRecheck?.();
+    },
+  });
 
   // ===========================================================================
   // Handlers
@@ -61,18 +67,18 @@ export function FFmpegWarning({
     }
   }, [allowDismiss, onDismiss]);
 
-  const handleOpenLink = useCallback((url: string) => {
-    window.open(url, '_blank', 'noopener,noreferrer');
-  }, []);
-
   // ===========================================================================
   // Effects
   // ===========================================================================
 
   useEffect(() => {
-    if (isOpen && dismissButtonRef.current) {
-      dismissButtonRef.current.focus();
+    if (!isOpen) {
+      return;
     }
+    // A reopen means the follow-up status check still found no usable FFmpeg,
+    // so stale success state must not hide the install/manual options.
+    setInstallSucceeded(false);
+    installButtonRef.current?.focus();
   }, [isOpen]);
 
   // ===========================================================================
@@ -124,16 +130,18 @@ export function FFmpegWarning({
       }
       footer={
         <div className="flex flex-col-reverse gap-2 px-6 pb-6 sm:flex-row sm:justify-end sm:gap-3">
-          <button
-            type="button"
-            className="rounded bg-surface-active px-4 py-2 text-sm font-medium text-text-secondary transition-colors hover:bg-surface-highest"
-            onClick={() => handleOpenLink(FFMPEG_DOWNLOAD_URL)}
-          >
-            Official Download
-          </button>
+          {onRecheck && (
+            <button
+              type="button"
+              data-testid="ffmpeg-warning-recheck"
+              className="rounded bg-surface-active px-4 py-2 text-sm font-medium text-text-secondary transition-colors hover:bg-surface-highest"
+              onClick={() => void onRecheck()}
+            >
+              Check Again
+            </button>
+          )}
           {allowDismiss && (
             <button
-              ref={dismissButtonRef}
               data-testid="ffmpeg-warning-dismiss"
               type="button"
               className="rounded bg-status-warning px-4 py-2 text-sm font-medium text-white transition-colors hover:brightness-110"
@@ -145,54 +153,41 @@ export function FFmpegWarning({
         </div>
       }
     >
-      <div className="break-words px-6 py-4 [overflow-wrap:anywhere]">
-        <div className="rounded-lg bg-surface-base p-4">
-          <h3 className="mb-3 text-sm font-medium text-text-secondary">
-            Installation Instructions
-          </h3>
-
-          <div className="mb-3 min-w-0">
-            <div className="mb-1 flex items-center gap-2 text-sm text-text-secondary">
-              <span className="font-medium text-text-primary">Windows:</span>
-            </div>
-            <ol className="ml-2 list-inside list-decimal space-y-1 text-xs text-text-secondary">
-              <li>
-                Download from{' '}
-                <button
-                  type="button"
-                  className="break-all text-primary-400 underline hover:text-primary-300"
-                  onClick={() => handleOpenLink(FFMPEG_WINDOWS_URL)}
-                >
-                  gyan.dev/ffmpeg/builds
-                </button>
-              </li>
-              <li>Extract to a folder (e.g., C:\ffmpeg)</li>
-              <li>Add the bin folder to your system PATH</li>
-            </ol>
+      <div className="space-y-4 break-words px-6 py-4 [overflow-wrap:anywhere]">
+        {installSucceeded ? (
+          <div
+            data-testid="ffmpeg-install-success"
+            className="rounded-lg bg-status-success/10 p-4 text-sm text-status-success"
+          >
+            FFmpeg was installed successfully. Video processing is ready to use.
           </div>
-
-          <div className="mb-3">
-            <div className="mb-1 flex items-center gap-2 text-sm text-text-secondary">
-              <span className="font-medium text-text-primary">macOS:</span>
-            </div>
-            <code className="ml-2 block whitespace-pre-wrap break-all rounded bg-surface-active px-2 py-1 font-mono text-xs text-status-success">
-              {FFMPEG_MAC_HOMEBREW}
-            </code>
+        ) : (
+          <div className="space-y-3">
+            {isInstalling ? (
+              <FFmpegInstallProgress progress={progress} />
+            ) : (
+              <button
+                ref={installButtonRef}
+                type="button"
+                data-testid="ffmpeg-warning-install"
+                className="w-full rounded bg-primary-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-primary-500"
+                onClick={() => void install()}
+              >
+                Install FFmpeg Automatically
+              </button>
+            )}
+            {error && (
+              <p data-testid="ffmpeg-install-error" className="text-xs text-status-error">
+                Installation failed: {error}
+              </p>
+            )}
+            <FFmpegManualInstructions />
+            <p className="text-xs text-text-muted">
+              After installing FFmpeg manually, click &quot;Check Again&quot; to detect it — no
+              restart needed.
+            </p>
           </div>
-
-          <div>
-            <div className="mb-1 flex items-center gap-2 text-sm text-text-secondary">
-              <span className="font-medium text-text-primary">Linux (Debian/Ubuntu):</span>
-            </div>
-            <code className="ml-2 block whitespace-pre-wrap break-all rounded bg-surface-active px-2 py-1 font-mono text-xs text-status-success">
-              {FFMPEG_LINUX_APT}
-            </code>
-          </div>
-        </div>
-
-        <p className="mt-4 text-xs text-text-muted">
-          After installing FFmpeg, restart OpenReelio for changes to take effect.
-        </p>
+        )}
       </div>
     </ModalShell>
   );

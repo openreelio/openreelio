@@ -1477,6 +1477,7 @@ mod tauri_app {
                 $crate::core::ai::streaming::abort_ai_stream,
                 // FFmpeg commands
                 $crate::core::ffmpeg::check_ffmpeg,
+                $crate::core::ffmpeg::install_ffmpeg,
                 $crate::core::ffmpeg::extract_frame,
                 $crate::core::ffmpeg::generate_thumbnail,
                 $crate::core::ffmpeg::probe_media,
@@ -1705,13 +1706,14 @@ mod tauri_app {
                 }
             }
 
-            // Initialize FFmpeg
+            // Initialize FFmpeg (detection probes run on the blocking pool so
+            // the async runtime is never blocked while holding the state lock)
             let ffmpeg = ffmpeg_state.clone();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let mut state = ffmpeg.write().await;
-                match state.initialize(Some(&handle)) {
+                match crate::core::ffmpeg::initialize_shared_ffmpeg(&ffmpeg, Some(handle)).await {
                     Ok(()) => {
+                        let state = ffmpeg.read().await;
                         if let Some(info) = state.info() {
                             tracing::info!(
                                 "FFmpeg initialized: version {} (bundled: {})",
@@ -2004,6 +2006,7 @@ mod tauri_app {
             crate::core::ai::streaming::abort_ai_stream,
             // FFmpeg commands
             crate::core::ffmpeg::check_ffmpeg,
+            crate::core::ffmpeg::install_ffmpeg,
             crate::core::ffmpeg::extract_frame,
             crate::core::ffmpeg::generate_thumbnail,
             crate::core::ffmpeg::probe_media,

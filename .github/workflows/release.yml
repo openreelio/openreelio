@@ -353,8 +353,9 @@ jobs:
 
       - name: Prepare FFmpeg binaries for target platform
         env:
-          # Current upstream FFmpeg URLs are mutable. Keep this explicit so the
-          # release job does not pretend these downloads are checksum-pinned.
+          # Sources come from scripts/ffmpeg-sources.json. Primary URLs are
+          # verified against provider-published SHA-256 sidecars; this flag
+          # keeps fallback URLs without published checksums usable.
           OPENREELIO_ALLOW_UNVERIFIED_FFMPEG: '1'
         run: node scripts/prepare-bundled-ffmpeg.mjs ${{ matrix.target }}
         timeout-minutes: 15

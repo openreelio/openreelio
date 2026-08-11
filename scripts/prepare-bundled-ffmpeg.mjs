@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { chmod, copyFile, mkdir, readdir, rm } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Readable } from 'node:stream';
@@ -7,100 +8,91 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
 const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
-
-const targets = {
-  'x86_64-pc-windows-msvc': {
-    platform: 'windows',
-    sources: [
-      {
-        name: 'ffmpeg',
-        format: 'zip',
-        url: 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip',
-        fallbackUrls: [
-          'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip',
-        ],
-        filename: 'ffmpeg-release-essentials.zip',
-        binaries: ['ffmpeg.exe', 'ffprobe.exe'],
-      },
-    ],
-  },
-  'x86_64-apple-darwin': {
-    platform: 'macos',
-    sources: [
-      {
-        name: 'ffmpeg',
-        format: 'zip',
-        url: 'https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip',
-        filename: 'ffmpeg.zip',
-        binaries: ['ffmpeg'],
-      },
-      {
-        name: 'ffprobe',
-        format: 'zip',
-        url: 'https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip',
-        filename: 'ffprobe.zip',
-        binaries: ['ffprobe'],
-      },
-    ],
-  },
-  'aarch64-apple-darwin': {
-    platform: 'macos',
-    sources: [
-      {
-        name: 'ffmpeg',
-        format: 'zip',
-        url: 'https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip',
-        filename: 'ffmpeg.zip',
-        binaries: ['ffmpeg'],
-      },
-      {
-        name: 'ffprobe',
-        format: 'zip',
-        url: 'https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip',
-        filename: 'ffprobe.zip',
-        binaries: ['ffprobe'],
-      },
-    ],
-  },
-  'x86_64-unknown-linux-gnu': {
-    platform: 'linux',
-    sources: [
-      {
-        name: 'ffmpeg',
-        format: 'tar.xz',
-        url: 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz',
-        fallbackUrls: [
-          'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz',
-        ],
-        filename: 'ffmpeg-release-amd64-static.tar.xz',
-        binaries: ['ffmpeg', 'ffprobe'],
-      },
-    ],
-  },
-};
+const DOWNLOAD_ATTEMPTS_PER_URL = 3;
+const DOWNLOAD_RETRY_DELAY_MS = 2000;
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
+const manifestPath = path.join(scriptDir, 'ffmpeg-sources.json');
 const binariesDir = path.join(repoRoot, 'src-tauri', 'binaries');
 
-const target = process.argv[2] ?? process.env.OPENREELIO_RELEASE_TARGET;
-const config = targets[target];
+const args = process.argv.slice(2).filter((arg) => arg !== '--dry-run');
+const dryRun = process.argv.includes('--dry-run');
+const target = args[0] ?? process.env.OPENREELIO_RELEASE_TARGET;
 
-if (!config) {
-  console.error(
-    `Unsupported release target "${target ?? ''}". Expected one of: ${Object.keys(targets).join(', ')}`,
-  );
-  process.exit(1);
-}
+const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+const config = loadTargetConfig(manifest, target);
 
-if (process.env.OPENREELIO_ALLOW_UNVERIFIED_FFMPEG !== '1') {
-  console.error(
-    'FFmpeg release downloads are not checksum-pinned yet. Set OPENREELIO_ALLOW_UNVERIFIED_FFMPEG=1 only in the controlled release workflow.',
-  );
-  process.exit(1);
+if (dryRun) {
+  console.log(`Manifest entry for ${target} is valid:`);
+  for (const archive of config.archives) {
+    console.log(
+      `  ${archive.name} (${archive.format}) -> ${archive.binaries.join(', ')}`,
+    );
+    for (const source of archive.urls) {
+      console.log(`    ${source.url} [${describeChecksum(source)}]`);
+    }
+  }
+  process.exit(0);
 }
 
 await prepareBundledFfmpeg(target, config);
+
+function loadTargetConfig(sourceManifest, releaseTarget) {
+  const targets = sourceManifest.targets ?? {};
+  const targetConfig = targets[releaseTarget];
+
+  if (!targetConfig) {
+    console.error(
+      `Unsupported release target "${releaseTarget ?? ''}". Expected one of: ${Object.keys(targets).join(', ')}`,
+    );
+    process.exit(1);
+  }
+
+  if (!Array.isArray(targetConfig.archives) || targetConfig.archives.length === 0) {
+    console.error(
+      `Invalid manifest entry for ${releaseTarget}: "archives" must be a non-empty array.`,
+    );
+    process.exit(1);
+  }
+
+  for (const archive of targetConfig.archives) {
+    if (
+      !archive.name ||
+      !archive.format ||
+      !archive.filename ||
+      !Array.isArray(archive.binaries) ||
+      archive.binaries.length === 0 ||
+      !Array.isArray(archive.urls) ||
+      archive.urls.length === 0 ||
+      archive.urls.some((source) => typeof source.url !== 'string')
+    ) {
+      console.error(
+        `Invalid manifest entry for ${releaseTarget}: archive "${archive.name ?? '?'}" is missing required fields.`,
+      );
+      process.exit(1);
+    }
+  }
+
+  return targetConfig;
+}
+
+function describeChecksum(source) {
+  if (source.sha256) {
+    return 'pinned sha256';
+  }
+  if (source.sha256Url) {
+    return 'sha256 sidecar url';
+  }
+  if (source.sha256Sidecar) {
+    return `sha256 sidecar suffix ${source.sha256Sidecar}`;
+  }
+  return 'unverified';
+}
+
+function hasChecksumSource(source) {
+  return Boolean(source.sha256 || source.sha256Url || source.sha256Sidecar);
+}
 
 async function prepareBundledFfmpeg(releaseTarget, releaseConfig) {
   const downloadRoot = path.join(
@@ -110,28 +102,29 @@ async function prepareBundledFfmpeg(releaseTarget, releaseConfig) {
     `ffmpeg-download-${releaseTarget}`,
   );
   const stagedBinaries = new Map();
+  const allowUnverified = process.env.OPENREELIO_ALLOW_UNVERIFIED_FFMPEG === '1';
 
   await rm(downloadRoot, { recursive: true, force: true });
   await mkdir(downloadRoot, { recursive: true });
   await mkdir(binariesDir, { recursive: true });
 
   try {
-    for (const source of releaseConfig.sources) {
-      const archivePath = path.join(downloadRoot, source.filename);
-      const extractDir = path.join(downloadRoot, `${source.name}-extracted`);
+    for (const archive of releaseConfig.archives) {
+      const archivePath = path.join(downloadRoot, archive.filename);
+      const extractDir = path.join(downloadRoot, `${archive.name}-extracted`);
 
       await mkdir(extractDir, { recursive: true });
-      await downloadFile(source, archivePath);
-      await extractArchive(source.format, archivePath, extractDir);
+      await downloadArchive(archive, archivePath, allowUnverified);
+      await extractArchive(archive.format, archivePath, extractDir);
 
-      for (const binaryName of source.binaries) {
+      for (const binaryName of archive.binaries) {
         const binaryPath = await findBinary(extractDir, binaryName);
         stagedBinaries.set(binaryName, binaryPath);
       }
     }
 
     const expectedBinaries = [
-      ...new Set(releaseConfig.sources.flatMap((source) => source.binaries)),
+      ...new Set(releaseConfig.archives.flatMap((archive) => archive.binaries)),
     ];
     for (const binaryName of expectedBinaries) {
       const sourcePath = stagedBinaries.get(binaryName);
@@ -154,45 +147,165 @@ async function prepareBundledFfmpeg(releaseTarget, releaseConfig) {
   }
 }
 
-async function downloadFile(source, outputPath) {
-  const urls = [source.url, ...(source.fallbackUrls ?? [])];
-  let lastError;
+async function downloadArchive(archive, outputPath, allowUnverified) {
+  const errors = [];
 
-  for (const url of urls) {
+  for (const source of archive.urls) {
+    if (!hasChecksumSource(source) && !allowUnverified) {
+      errors.push(
+        `${source.url}: no checksum source in manifest and OPENREELIO_ALLOW_UNVERIFIED_FFMPEG is not set to 1`,
+      );
+      continue;
+    }
+
     try {
-      await downloadUrl(url, outputPath);
+      const resolvedUrl = await downloadUrl(source.url, outputPath);
+      await verifyDownload(source, outputPath, resolvedUrl);
       return;
     } catch (error) {
-      lastError = error;
-      console.warn(`Download failed for ${url}: ${error.message}`);
+      errors.push(`${source.url}: ${error.message}`);
+      console.warn(`Download failed for ${source.url}: ${error.message}`);
     }
   }
 
-  throw lastError ?? new Error(`No download URLs configured for ${source.name}`);
+  throw new Error(
+    `All download URLs failed for ${archive.name}: ${errors.join('; ')}`,
+  );
 }
 
 async function downloadUrl(url, outputPath) {
-  console.log(`Downloading ${url}`);
+  let lastError;
+
+  for (let attempt = 1; attempt <= DOWNLOAD_ATTEMPTS_PER_URL; attempt += 1) {
+    console.log(
+      `Downloading ${url}${attempt > 1 ? ` (attempt ${attempt}/${DOWNLOAD_ATTEMPTS_PER_URL})` : ''}`,
+    );
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/octet-stream, application/x-xz, application/zip, */*',
+          'User-Agent': 'OpenReelio release asset downloader',
+        },
+      });
+      if (!response.ok || !response.body) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      await pipeline(Readable.fromWeb(response.body), createWriteStream(outputPath));
+      return response.url || url;
+    } catch (error) {
+      lastError = error;
+      console.warn(`Attempt ${attempt} failed for ${url}: ${error.message}`);
+      if (attempt < DOWNLOAD_ATTEMPTS_PER_URL) {
+        await new Promise((resolve) => setTimeout(resolve, DOWNLOAD_RETRY_DELAY_MS));
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw lastError ?? new Error(`Download failed: ${url}`);
+}
+
+async function verifyDownload(source, archivePath, resolvedUrl) {
+  const expected = await resolveExpectedSha256(source, resolvedUrl);
+
+  if (!expected) {
+    console.warn(
+      `No checksum source for ${source.url}; accepting unverified download (OPENREELIO_ALLOW_UNVERIFIED_FFMPEG=1).`,
+    );
+    return;
+  }
+
+  const actual = createHash('sha256')
+    .update(await readFile(archivePath))
+    .digest('hex');
+
+  if (actual.toLowerCase() !== expected.toLowerCase()) {
+    throw new Error(
+      `SHA-256 mismatch for ${path.basename(archivePath)}: expected ${expected}, got ${actual}`,
+    );
+  }
+
+  console.log(`Verified SHA-256 for ${path.basename(archivePath)}: ${actual}`);
+}
+
+async function resolveExpectedSha256(source, resolvedUrl) {
+  if (source.sha256) {
+    return source.sha256;
+  }
+
+  let sidecarUrl = null;
+  if (source.sha256Url) {
+    sidecarUrl = source.sha256Url;
+  } else if (source.sha256Sidecar) {
+    sidecarUrl = `${resolvedUrl}${source.sha256Sidecar}`;
+  }
+
+  if (!sidecarUrl) {
+    return null;
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
-
+  let sidecarText;
   try {
-    const response = await fetch(url, {
+    const response = await fetch(sidecarUrl, {
+      headers: { 'User-Agent': 'OpenReelio release asset downloader' },
       signal: controller.signal,
-      headers: {
-        Accept: 'application/octet-stream, application/x-xz, application/zip, */*',
-        'User-Agent': 'OpenReelio release asset downloader',
-      },
     });
-    if (!response.ok || !response.body) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch checksum sidecar ${sidecarUrl}: HTTP ${response.status}`,
+      );
     }
-
-    await pipeline(Readable.fromWeb(response.body), createWriteStream(outputPath));
+    sidecarText = await response.text();
   } finally {
     clearTimeout(timeout);
   }
+
+  const digest = parseSha256Sidecar(sidecarText, source.url);
+  if (!digest) {
+    throw new Error(`No matching SHA-256 digest found in ${sidecarUrl}`);
+  }
+
+  return digest;
+}
+
+function parseSha256Sidecar(sidecarText, sourceUrl) {
+  // Match against the manifest URL basename: redirect targets (for example
+  // GitHub release assets) often resolve to opaque object-storage paths.
+  const downloadBasename = path.posix
+    .basename(new URL(sourceUrl).pathname)
+    .toLowerCase();
+  const digestPattern = /^[0-9a-f]{64}$/i;
+  const digests = [];
+
+  for (const line of sidecarText.split(/\r?\n/)) {
+    const tokens = line.trim().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0 || !digestPattern.test(tokens[0])) {
+      continue;
+    }
+
+    // Match "digest  filename" lines against the downloaded file first.
+    const fileToken = tokens[tokens.length - 1].replace(/^\*/, '');
+    if (
+      tokens.length > 1 &&
+      path.posix.basename(fileToken).toLowerCase() === downloadBasename
+    ) {
+      return tokens[0];
+    }
+
+    digests.push(tokens[0]);
+  }
+
+  // A bare-digest sidecar (single digest, no filename) applies to the download.
+  return digests.length === 1 ? digests[0] : null;
 }
 
 async function extractArchive(format, archivePath, outputDir) {
@@ -208,6 +321,11 @@ async function extractArchive(format, archivePath, outputDir) {
 
   if (format === 'tar.xz') {
     await run('tar', ['-xJf', archivePath, '-C', outputDir]);
+    return;
+  }
+
+  if (format === 'tar.gz') {
+    await run('tar', ['-xzf', archivePath, '-C', outputDir]);
     return;
   }
 

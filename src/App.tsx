@@ -74,7 +74,11 @@ function App(): JSX.Element {
   const { general, isLoaded: settingsLoaded } = useSettings();
 
   // FFmpeg status check
-  const { isAvailable: isFFmpegAvailable, isLoading: isFFmpegLoading } = useFFmpegStatus();
+  const {
+    isAvailable: isFFmpegAvailable,
+    isLoading: isFFmpegLoading,
+    recheck: recheckFFmpeg,
+  } = useFFmpegStatus();
   const [showFFmpegWarning, setShowFFmpegWarning] = useState(false);
   const [ffmpegWarningDismissed, setFFmpegWarningDismissed] = useState(false);
 
@@ -102,9 +106,15 @@ function App(): JSX.Element {
   // Application lifecycle management (close handlers)
   useAppLifecycle();
 
-  // Show FFmpeg warning when check completes and FFmpeg is not available
+  // Show FFmpeg warning when check completes and FFmpeg is not available;
+  // hide it as soon as FFmpeg becomes available (e.g. after auto-install).
   useEffect(() => {
-    if (!isFFmpegLoading && !isFFmpegAvailable && !ffmpegWarningDismissed) {
+    if (isFFmpegLoading) {
+      return;
+    }
+    if (isFFmpegAvailable) {
+      setShowFFmpegWarning(false);
+    } else if (!ffmpegWarningDismissed) {
       setShowFFmpegWarning(true);
     }
   }, [isFFmpegLoading, isFFmpegAvailable, ffmpegWarningDismissed]);
@@ -221,6 +231,7 @@ function App(): JSX.Element {
           isOpen={showFFmpegWarning}
           onDismiss={handleDismissFFmpegWarning}
           allowDismiss={true}
+          onRecheck={recheckFFmpeg}
         />
         <ToastContainer toasts={toasts} onClose={dismissToast} />
       </>
@@ -277,6 +288,7 @@ function App(): JSX.Element {
         isOpen={showFFmpegWarning}
         onDismiss={handleDismissFFmpegWarning}
         allowDismiss={true}
+        onRecheck={recheckFFmpeg}
       />
       <ToastContainer toasts={toasts} onClose={dismissToast} />
     </>

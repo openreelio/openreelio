@@ -31,22 +31,15 @@ impl FFmpegState {
 
     /// Initialize FFmpeg by detecting installation.
     ///
-    /// In non-test builds, this optionally attempts bundled FFmpeg detection first.
+    /// Resolution order: bundled resources → managed install → dev-mode
+    /// binaries → system PATH.
+    ///
+    /// This runs blocking process probes; async callers must use
+    /// [`initialize_shared_ffmpeg`] instead so the async runtime never blocks.
     #[cfg(all(not(test), feature = "gui"))]
     pub fn initialize(&mut self, app_handle: Option<&tauri::AppHandle>) -> Result<(), FFmpegError> {
-        // Try bundled first (if app_handle provided)
-        if let Some(handle) = app_handle {
-            if let Ok(info) = super::detect_bundled_ffmpeg(handle) {
-                self.info = Some(info.clone());
-                self.runner = Some(FFmpegRunner::new(info));
-                return Ok(());
-            }
-        }
-
-        // Fall back to system FFmpeg
-        let info = detect_system_ffmpeg()?;
-        self.info = Some(info.clone());
-        self.runner = Some(FFmpegRunner::new(info));
+        let info = detect_ffmpeg(app_handle)?;
+        self.apply_info(info);
         Ok(())
     }
 
@@ -56,9 +49,16 @@ impl FFmpegState {
     #[cfg(test)]
     pub fn initialize(&mut self) -> Result<(), FFmpegError> {
         let info = detect_system_ffmpeg()?;
+        self.apply_info(info);
+        Ok(())
+    }
+
+    /// Store detected info and publish the paths to the global resolver.
+    #[cfg(any(test, feature = "gui"))]
+    fn apply_info(&mut self, info: FFmpegInfo) {
+        super::set_resolved_paths(info.ffmpeg_path.clone(), info.ffprobe_path.clone());
         self.info = Some(info.clone());
         self.runner = Some(FFmpegRunner::new(info));
-        Ok(())
     }
 
     /// Get the FFmpeg runner.
@@ -83,8 +83,60 @@ impl Default for FFmpegState {
     }
 }
 
+/// Detects an FFmpeg installation without touching any shared state.
+///
+/// Resolution order: bundled resources → managed install → dev-mode
+/// binaries → system PATH. This spawns blocking `ffmpeg -version` process
+/// probes, so async callers must run it inside `spawn_blocking` (see
+/// [`initialize_shared_ffmpeg`]).
+#[cfg(all(not(test), feature = "gui"))]
+pub fn detect_ffmpeg(app_handle: Option<&tauri::AppHandle>) -> Result<FFmpegInfo, FFmpegError> {
+    // Try bundled resources first (if app_handle provided)
+    if let Some(handle) = app_handle {
+        if let Ok(info) = super::detect_bundled_resources(handle) {
+            return Ok(info);
+        }
+    }
+
+    // Managed install (in-app FFmpeg installer)
+    if let Ok(info) = super::detect_managed_ffmpeg() {
+        return Ok(info);
+    }
+
+    // Dev-mode binaries (src-tauri/binaries during `npm run tauri dev`)
+    if let Ok(info) = super::detection::detect_dev_mode_binaries() {
+        return Ok(info);
+    }
+
+    // Fall back to system FFmpeg
+    detect_system_ffmpeg()
+}
+
 /// Shared FFmpeg state for the async runtime.
 pub type SharedFFmpegState = Arc<RwLock<FFmpegState>>;
+
+/// Initializes the shared FFmpeg state without blocking the async runtime.
+///
+/// Detection (which spawns `ffmpeg -version` process probes) runs on the
+/// blocking thread pool while no lock is held; the write lock is taken only
+/// to apply the detected info and publish the resolved paths. If concurrent
+/// initializations race, the last writer wins, which is acceptable because
+/// they detect the same installation.
+#[cfg(all(not(test), feature = "gui"))]
+pub async fn initialize_shared_ffmpeg(
+    state: &SharedFFmpegState,
+    app_handle: Option<tauri::AppHandle>,
+) -> Result<(), FFmpegError> {
+    let info = tokio::task::spawn_blocking(move || detect_ffmpeg(app_handle.as_ref()))
+        .await
+        .map_err(|error| {
+            FFmpegError::ExecutionFailed(format!("FFmpeg detection task failed: {error}"))
+        })??;
+
+    let mut guard = state.write().await;
+    guard.apply_info(info);
+    Ok(())
+}
 
 /// Create a new shared FFmpeg state.
 pub fn create_ffmpeg_state() -> SharedFFmpegState {

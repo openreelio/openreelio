@@ -89,8 +89,15 @@ export function getErrorTitle(category: ErrorCategory): string {
 
 /**
  * Get recovery suggestion based on error category.
+ *
+ * When the FFmpeg category stems from a missing binary (rather than a
+ * processing failure), suggest installing FFmpeg instead of changing codecs.
  */
-export function getRecoverySuggestion(category: ErrorCategory): string {
+export function getRecoverySuggestion(category: ErrorCategory, message?: string): string {
+  if (category === 'ffmpeg' && message && /not (found|available)/i.test(message)) {
+    return 'FFmpeg is not installed. Use "Install FFmpeg Automatically" in the FFmpeg warning dialog (or Setup wizard), or install it manually and check again.';
+  }
+
   switch (category) {
     case 'network':
       return 'Please check your internet connection and try again.';
