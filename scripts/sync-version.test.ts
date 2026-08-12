@@ -21,6 +21,7 @@ import {
   checkVersionSync,
   syncVersions,
   validateSemver,
+  type VersionTarget,
 } from './sync-version';
 
 // Test fixtures directory
@@ -28,6 +29,23 @@ const TEST_DIR = join(__dirname, '__test_fixtures__');
 const TEST_PACKAGE_JSON = join(TEST_DIR, 'package.json');
 const TEST_CARGO_TOML = join(TEST_DIR, 'Cargo.toml');
 const TEST_TAURI_CONF = join(TEST_DIR, 'tauri.conf.json');
+const TEST_CRATE_CARGO_TOML = join(TEST_DIR, 'crate-Cargo.toml');
+const TEST_MISSING_PACKAGE_JSON = join(TEST_DIR, 'missing', 'package.json');
+
+/** Targets mirroring the production descriptor list, minus the optional entry */
+const requiredTargets: VersionTarget[] = [
+  { file: 'Cargo.toml', path: TEST_CARGO_TOML, kind: 'cargo-toml' },
+  { file: 'tauri.conf.json', path: TEST_TAURI_CONF, kind: 'tauri-conf' },
+  { file: 'crates/demo/Cargo.toml', path: TEST_CRATE_CARGO_TOML, kind: 'cargo-toml' },
+];
+
+/** Optional target that does not exist on disk */
+const optionalMissingTarget: VersionTarget = {
+  file: 'npm/demo/package.json',
+  path: TEST_MISSING_PACKAGE_JSON,
+  kind: 'package-json',
+  optional: true,
+};
 
 describe('Version Sync Script', () => {
   beforeEach(() => {
@@ -47,6 +65,16 @@ describe('Version Sync Script', () => {
       TEST_CARGO_TOML,
       `[package]
 name = "test"
+version = "1.0.0"
+edition = "2021"
+`
+    );
+
+    // Create test crate Cargo.toml
+    writeFileSync(
+      TEST_CRATE_CARGO_TOML,
+      `[package]
+name = "demo-crate"
 version = "1.0.0"
 edition = "2021"
 `
@@ -199,30 +227,111 @@ edition = "2021"
 
       const result = checkVersionSync({
         packageJson: TEST_PACKAGE_JSON,
-        cargoToml: TEST_CARGO_TOML,
-        tauriConf: TEST_TAURI_CONF,
+        targets: requiredTargets,
       });
 
       expect(result.synced).toBe(true);
       expect(result.mismatches).toEqual([]);
+      expect(result.skipped).toEqual([]);
     });
 
     it('should return mismatches when versions differ', () => {
       const result = checkVersionSync({
         packageJson: TEST_PACKAGE_JSON, // version: 1.2.3
-        cargoToml: TEST_CARGO_TOML, // version: 1.0.0
-        tauriConf: TEST_TAURI_CONF, // version: 1.0.0
+        targets: requiredTargets, // all fixtures: 1.0.0
       });
 
       expect(result.synced).toBe(false);
       expect(result.sourceVersion).toBe('1.2.3');
-      expect(result.mismatches).toHaveLength(2);
+      expect(result.mismatches).toHaveLength(3);
       expect(result.mismatches).toContainEqual({
         file: 'Cargo.toml',
         path: TEST_CARGO_TOML,
+        kind: 'cargo-toml',
         currentVersion: '1.0.0',
         expectedVersion: '1.2.3',
       });
+    });
+
+    it('should report a workspace crate Cargo.toml as mismatched when it lags behind', () => {
+      writeFileSync(
+        TEST_PACKAGE_JSON,
+        JSON.stringify({ name: 'test', version: '1.0.0' }, null, 2)
+      );
+      updateCargoVersion(TEST_CRATE_CARGO_TOML, '0.9.0');
+
+      const result = checkVersionSync({
+        packageJson: TEST_PACKAGE_JSON,
+        targets: requiredTargets,
+      });
+
+      expect(result.synced).toBe(false);
+      expect(result.mismatches).toEqual([
+        {
+          file: 'crates/demo/Cargo.toml',
+          path: TEST_CRATE_CARGO_TOML,
+          kind: 'cargo-toml',
+          currentVersion: '0.9.0',
+          expectedVersion: '1.0.0',
+        },
+      ]);
+    });
+
+    it('should skip an optional target that does not exist yet', () => {
+      writeFileSync(
+        TEST_PACKAGE_JSON,
+        JSON.stringify({ name: 'test', version: '1.0.0' }, null, 2)
+      );
+
+      const result = checkVersionSync({
+        packageJson: TEST_PACKAGE_JSON,
+        targets: [...requiredTargets, optionalMissingTarget],
+      });
+
+      expect(result.synced).toBe(true);
+      expect(result.skipped).toEqual([
+        {
+          file: 'npm/demo/package.json',
+          path: TEST_MISSING_PACKAGE_JSON,
+          reason: 'file not present',
+        },
+      ]);
+    });
+
+    it('should check an optional target once the file exists', () => {
+      mkdirSync(dirname(TEST_MISSING_PACKAGE_JSON), { recursive: true });
+      writeFileSync(
+        TEST_MISSING_PACKAGE_JSON,
+        JSON.stringify({ name: 'demo', version: '0.9.0' }, null, 2)
+      );
+      writeFileSync(
+        TEST_PACKAGE_JSON,
+        JSON.stringify({ name: 'test', version: '1.0.0' }, null, 2)
+      );
+
+      const result = checkVersionSync({
+        packageJson: TEST_PACKAGE_JSON,
+        targets: [optionalMissingTarget],
+      });
+
+      expect(result.synced).toBe(false);
+      expect(result.skipped).toEqual([]);
+      expect(result.mismatches).toContainEqual({
+        file: 'npm/demo/package.json',
+        path: TEST_MISSING_PACKAGE_JSON,
+        kind: 'package-json',
+        currentVersion: '0.9.0',
+        expectedVersion: '1.0.0',
+      });
+    });
+
+    it('should throw when a required target is missing', () => {
+      expect(() =>
+        checkVersionSync({
+          packageJson: TEST_PACKAGE_JSON,
+          targets: [{ ...optionalMissingTarget, optional: false }],
+        })
+      ).toThrow('File not found');
     });
   });
 
@@ -230,16 +339,16 @@ edition = "2021"
     it('should sync all versions to match package.json', () => {
       const result = syncVersions({
         packageJson: TEST_PACKAGE_JSON, // version: 1.2.3
-        cargoToml: TEST_CARGO_TOML,
-        tauriConf: TEST_TAURI_CONF,
+        targets: requiredTargets,
       });
 
       expect(result.success).toBe(true);
-      expect(result.updatedFiles).toHaveLength(2);
+      expect(result.updatedFiles).toHaveLength(3);
 
       // Verify the files were updated
       expect(readCargoVersion(TEST_CARGO_TOML)).toBe('1.2.3');
       expect(readTauriVersion(TEST_TAURI_CONF)).toBe('1.2.3');
+      expect(readCargoVersion(TEST_CRATE_CARGO_TOML)).toBe('1.2.3');
     });
 
     it('should return success with no updates when already synced', () => {
@@ -250,12 +359,39 @@ edition = "2021"
 
       const result = syncVersions({
         packageJson: TEST_PACKAGE_JSON,
-        cargoToml: TEST_CARGO_TOML,
-        tauriConf: TEST_TAURI_CONF,
+        targets: requiredTargets,
       });
 
       expect(result.success).toBe(true);
       expect(result.updatedFiles).toHaveLength(0);
+    });
+
+    it('should not create an optional target that does not exist yet', () => {
+      const result = syncVersions({
+        packageJson: TEST_PACKAGE_JSON, // version: 1.2.3
+        targets: [...requiredTargets, optionalMissingTarget],
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.updatedFiles).not.toContain('npm/demo/package.json');
+      expect(result.skipped).toHaveLength(1);
+      expect(existsSync(TEST_MISSING_PACKAGE_JSON)).toBe(false);
+    });
+
+    it('should sync an optional target once the file exists', () => {
+      mkdirSync(dirname(TEST_MISSING_PACKAGE_JSON), { recursive: true });
+      writeFileSync(
+        TEST_MISSING_PACKAGE_JSON,
+        JSON.stringify({ name: 'demo', version: '0.9.0' }, null, 2)
+      );
+
+      const result = syncVersions({
+        packageJson: TEST_PACKAGE_JSON, // version: 1.2.3
+        targets: [optionalMissingTarget],
+      });
+
+      expect(result.updatedFiles).toEqual(['npm/demo/package.json']);
+      expect(readPackageVersion(TEST_MISSING_PACKAGE_JSON)).toBe('1.2.3');
     });
   });
 });

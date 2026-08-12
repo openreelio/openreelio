@@ -4,7 +4,9 @@
  * @fileoverview Version Sync Script for OpenReelio
  *
  * Single Source of Truth: package.json
- * Sync Targets: Cargo.toml, tauri.conf.json
+ * Sync Targets: every entry in the target descriptor list (see getDefaultConfig),
+ * currently the Tauri app manifests plus the openreelio-core / openreelio-cli
+ * crates and the published npm shim package.
  *
  * Usage:
  *   npx tsx scripts/sync-version.ts --check   # Verify versions are synced (CI mode)
@@ -80,18 +82,23 @@ export function readCargoVersion(filePath: string): string {
  * Reads version from tauri.conf.json
  */
 export function readTauriVersion(filePath: string): string {
-  if (!existsSync(filePath)) {
-    throw new Error(`File not found: ${filePath}`);
+  return readPackageVersion(filePath);
+}
+
+/**
+ * Updates the version field of a JSON manifest, preserving 2-space indentation
+ */
+function updateJsonVersion(filePath: string, newVersion: string): void {
+  if (!validateSemver(newVersion)) {
+    throw new Error(`Invalid semver: ${newVersion}`);
   }
 
   const content = readFileSync(filePath, 'utf-8');
-  const json = JSON.parse(content) as { version?: string };
+  const json = JSON.parse(content) as Record<string, unknown>;
 
-  if (!json.version) {
-    throw new Error(`version field not found in ${filePath}`);
-  }
+  json.version = newVersion;
 
-  return json.version;
+  writeFileSync(filePath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
 }
 
 /**
@@ -117,71 +124,112 @@ export function updateCargoVersion(filePath: string, newVersion: string): void {
  * Updates version in tauri.conf.json
  */
 export function updateTauriVersion(filePath: string, newVersion: string): void {
-  if (!validateSemver(newVersion)) {
-    throw new Error(`Invalid semver: ${newVersion}`);
-  }
+  updateJsonVersion(filePath, newVersion);
+}
 
-  const content = readFileSync(filePath, 'utf-8');
-  const json = JSON.parse(content) as Record<string, unknown>;
+/**
+ * Updates version in a package.json manifest
+ */
+export function updatePackageVersion(filePath: string, newVersion: string): void {
+  updateJsonVersion(filePath, newVersion);
+}
 
-  json.version = newVersion;
+/** Manifest formats the sync script knows how to read and write */
+export type VersionFileKind = 'package-json' | 'cargo-toml' | 'tauri-conf';
 
-  // Preserve formatting with 2-space indentation
-  writeFileSync(filePath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
+const VERSION_READERS: Record<VersionFileKind, (filePath: string) => string> = {
+  'package-json': readPackageVersion,
+  'cargo-toml': readCargoVersion,
+  'tauri-conf': readTauriVersion,
+};
+
+const VERSION_WRITERS: Record<
+  VersionFileKind,
+  (filePath: string, newVersion: string) => void
+> = {
+  'package-json': updatePackageVersion,
+  'cargo-toml': updateCargoVersion,
+  'tauri-conf': updateTauriVersion,
+};
+
+/** A single file that must carry the same version as package.json */
+export interface VersionTarget {
+  /** Human-readable label used in reports (repo-relative path is clearest) */
+  file: string;
+  /** Absolute path to the manifest */
+  path: string;
+  /** Manifest format, selects the reader/writer pair */
+  kind: VersionFileKind;
+  /**
+   * When true, a missing file is reported as skipped instead of failing.
+   * Used for manifests that are generated or land in a later change.
+   */
+  optional?: boolean;
+}
+
+export interface VersionSyncConfig {
+  /** Single source of truth */
+  packageJson: string;
+  /** Files that must match the source version */
+  targets: VersionTarget[];
 }
 
 export interface VersionMismatch {
   file: string;
   path: string;
+  kind: VersionFileKind;
   currentVersion: string;
   expectedVersion: string;
+}
+
+export interface SkippedTarget {
+  file: string;
+  path: string;
+  reason: string;
 }
 
 export interface CheckResult {
   synced: boolean;
   sourceVersion: string;
   mismatches: VersionMismatch[];
-}
-
-export interface FilePaths {
-  packageJson: string;
-  cargoToml: string;
-  tauriConf: string;
+  skipped: SkippedTarget[];
 }
 
 /**
  * Checks if all version files are in sync with package.json
  */
-export function checkVersionSync(paths: FilePaths): CheckResult {
-  const sourceVersion = readPackageVersion(paths.packageJson);
+export function checkVersionSync(config: VersionSyncConfig): CheckResult {
+  const sourceVersion = readPackageVersion(config.packageJson);
   const mismatches: VersionMismatch[] = [];
+  const skipped: SkippedTarget[] = [];
 
-  // Check Cargo.toml
-  const cargoVersion = readCargoVersion(paths.cargoToml);
-  if (cargoVersion !== sourceVersion) {
-    mismatches.push({
-      file: 'Cargo.toml',
-      path: paths.cargoToml,
-      currentVersion: cargoVersion,
-      expectedVersion: sourceVersion,
-    });
-  }
+  for (const target of config.targets) {
+    if (target.optional && !existsSync(target.path)) {
+      skipped.push({
+        file: target.file,
+        path: target.path,
+        reason: 'file not present',
+      });
+      continue;
+    }
 
-  // Check tauri.conf.json
-  const tauriVersion = readTauriVersion(paths.tauriConf);
-  if (tauriVersion !== sourceVersion) {
-    mismatches.push({
-      file: 'tauri.conf.json',
-      path: paths.tauriConf,
-      currentVersion: tauriVersion,
-      expectedVersion: sourceVersion,
-    });
+    const currentVersion = VERSION_READERS[target.kind](target.path);
+    if (currentVersion !== sourceVersion) {
+      mismatches.push({
+        file: target.file,
+        path: target.path,
+        kind: target.kind,
+        currentVersion,
+        expectedVersion: sourceVersion,
+      });
+    }
   }
 
   return {
     synced: mismatches.length === 0,
     sourceVersion,
     mismatches,
+    skipped,
   };
 }
 
@@ -189,30 +237,18 @@ export interface SyncResult {
   success: boolean;
   version: string;
   updatedFiles: string[];
+  skipped: SkippedTarget[];
 }
 
 /**
  * Syncs all version files to match package.json
  */
-export function syncVersions(paths: FilePaths): SyncResult {
-  const checkResult = checkVersionSync(paths);
+export function syncVersions(config: VersionSyncConfig): SyncResult {
+  const checkResult = checkVersionSync(config);
   const updatedFiles: string[] = [];
 
-  if (checkResult.synced) {
-    return {
-      success: true,
-      version: checkResult.sourceVersion,
-      updatedFiles,
-    };
-  }
-
-  // Update mismatched files
   for (const mismatch of checkResult.mismatches) {
-    if (mismatch.file === 'Cargo.toml') {
-      updateCargoVersion(mismatch.path, checkResult.sourceVersion);
-    } else if (mismatch.file === 'tauri.conf.json') {
-      updateTauriVersion(mismatch.path, checkResult.sourceVersion);
-    }
+    VERSION_WRITERS[mismatch.kind](mismatch.path, checkResult.sourceVersion);
     updatedFiles.push(mismatch.file);
   }
 
@@ -220,18 +256,47 @@ export function syncVersions(paths: FilePaths): SyncResult {
     success: true,
     version: checkResult.sourceVersion,
     updatedFiles,
+    skipped: checkResult.skipped,
   };
 }
 
 /**
- * Gets default file paths relative to project root
+ * Gets the default sync configuration relative to project root
  */
-function getDefaultPaths(): FilePaths {
+function getDefaultConfig(): VersionSyncConfig {
   const projectRoot = resolve(__dirname, '..');
   return {
     packageJson: resolve(projectRoot, 'package.json'),
-    cargoToml: resolve(projectRoot, 'src-tauri', 'Cargo.toml'),
-    tauriConf: resolve(projectRoot, 'src-tauri', 'tauri.conf.json'),
+    targets: [
+      {
+        file: 'src-tauri/Cargo.toml',
+        path: resolve(projectRoot, 'src-tauri', 'Cargo.toml'),
+        kind: 'cargo-toml',
+      },
+      {
+        file: 'src-tauri/tauri.conf.json',
+        path: resolve(projectRoot, 'src-tauri', 'tauri.conf.json'),
+        kind: 'tauri-conf',
+      },
+      {
+        file: 'crates/openreelio-core/Cargo.toml',
+        path: resolve(projectRoot, 'crates', 'openreelio-core', 'Cargo.toml'),
+        kind: 'cargo-toml',
+      },
+      {
+        file: 'crates/openreelio-cli/Cargo.toml',
+        path: resolve(projectRoot, 'crates', 'openreelio-cli', 'Cargo.toml'),
+        kind: 'cargo-toml',
+      },
+      {
+        // The npm distribution shim is optional so version:check stays green
+        // both before and after that package lands.
+        file: 'npm/openreelio-cli/package.json',
+        path: resolve(projectRoot, 'npm', 'openreelio-cli', 'package.json'),
+        kind: 'package-json',
+        optional: true,
+      },
+    ],
   };
 }
 
@@ -242,18 +307,25 @@ function main(): void {
   const args = process.argv.slice(2);
   const mode = args.includes('--fix') ? 'fix' : 'check';
 
-  const paths = getDefaultPaths();
+  const config = getDefaultConfig();
 
   console.log('OpenReelio Version Sync');
   console.log('========================');
   console.log(`Source: package.json`);
   console.log(`Mode: ${mode}\n`);
 
+  const reportSkipped = (skipped: SkippedTarget[]): void => {
+    for (const target of skipped) {
+      console.log(`  - Skipped ${target.file} (${target.reason})`);
+    }
+  };
+
   try {
     if (mode === 'check') {
-      const result = checkVersionSync(paths);
+      const result = checkVersionSync(config);
 
       console.log(`Source version: ${result.sourceVersion}`);
+      reportSkipped(result.skipped);
 
       if (result.synced) {
         console.log('\n✓ All versions are in sync!');
@@ -268,9 +340,10 @@ function main(): void {
       }
     } else {
       // Fix mode
-      const result = syncVersions(paths);
+      const result = syncVersions(config);
 
       console.log(`Target version: ${result.version}`);
+      reportSkipped(result.skipped);
 
       if (result.updatedFiles.length === 0) {
         console.log('\n✓ All versions already in sync!');
