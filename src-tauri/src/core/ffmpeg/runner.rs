@@ -22,6 +22,12 @@ fn is_nonempty_file(path: &Path) -> bool {
 /// Default MJPEG quality (1-31, lower is better) used for extracted frames.
 const DEFAULT_FRAME_JPEG_QUALITY: u8 = 2;
 
+/// Best MJPEG quality FFmpeg's `-q:v` accepts.
+const MIN_FRAME_JPEG_QUALITY: u8 = 1;
+
+/// Worst MJPEG quality FFmpeg's `-q:v` accepts.
+const MAX_FRAME_JPEG_QUALITY: u8 = 31;
+
 /// Builds a downscale-only `scale` filter that preserves the aspect ratio.
 ///
 /// `min(max_width, iw)` keeps sources narrower than `max_width` untouched, and
@@ -44,6 +50,9 @@ pub struct FrameExtractOptions {
     /// Sources narrower than the limit are left at their native size.
     pub max_width: Option<u32>,
     /// MJPEG quality (1-31, lower is better). Ignored for PNG output.
+    ///
+    /// Values outside the range are clamped to it, so the option can never
+    /// produce a command line FFmpeg refuses.
     pub quality: Option<u8>,
 }
 
@@ -384,10 +393,14 @@ impl FFmpegRunner {
             ]);
         } else {
             args.push("-q:v".to_string());
+            // FFmpeg rejects a `-q:v` outside 1-31 and the failure would surface
+            // as an opaque stderr dump, so an out-of-range option is clamped
+            // rather than handed to the encoder.
             args.push(
                 options
                     .quality
                     .unwrap_or(DEFAULT_FRAME_JPEG_QUALITY)
+                    .clamp(MIN_FRAME_JPEG_QUALITY, MAX_FRAME_JPEG_QUALITY)
                     .to_string(),
             );
         }
@@ -1190,6 +1203,11 @@ const STDERR_ERROR_TAIL_LINES: usize = 20;
 /// each retained line costs its text (~60 bytes for these filters) plus the
 /// `String` header and sequence number, i.e. under 100 bytes, so a full buffer
 /// stays below ~50 MB.
+///
+/// The cap is per capture, not per process. `AudioProfiler::analyze` runs its
+/// passes concurrently and two of them retain filter output in full, so a
+/// single long asset can hold two near-full buffers, and analysing assets in
+/// parallel multiplies that again.
 const MAX_RETAINED_FILTER_LINES: usize = 500_000;
 
 /// Maximum number of trailing lines retained regardless of content.

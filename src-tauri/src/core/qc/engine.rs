@@ -182,6 +182,11 @@ pub struct QCReport {
     #[serde(default)]
     pub errored_rules: Vec<RuleFailure>,
     /// One record per registered rule, in registration order
+    ///
+    /// A run that ends early (`stopped_early`) stops recording at the rule that
+    /// tripped `stop_on_critical`, so every rule after it has no outcome. A
+    /// consumer mapping outcomes to check IDs must read `stopped_early` to tell
+    /// "not reached" from "not registered".
     #[serde(default)]
     pub rule_outcomes: Vec<RuleOutcome>,
     /// Whether the check was stopped early

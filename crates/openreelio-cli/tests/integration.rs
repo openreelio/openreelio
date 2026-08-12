@@ -2879,7 +2879,7 @@ fn timeline_program_end_sec(project_path: &str) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
-// ponytail: This is THE single end-to-end guard for the headless perception
+// This is THE single end-to-end guard for the headless perception
 // loop an external agent drives: perceive (shots + silence) -> edit informed by
 // what was perceived -> render a proxy -> look at the result (still + contact
 // sheet) -> verify the render. It drives the real CLI binary and asserts only

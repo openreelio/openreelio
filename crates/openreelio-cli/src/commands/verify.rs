@@ -279,6 +279,13 @@ fn build_engine_config(engine: &QCEngine, args: &VerifyArgs) -> anyhow::Result<Q
 
     if let Some(requested) = args.checks.as_ref() {
         let requested = normalize_ids(requested);
+        // An empty selection would disable every rule and report a clean run
+        // over nothing checked, which an agent reads as "verified".
+        if requested.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Invalid value for --checks: at least one check ID is required"
+            ));
+        }
         for id in &requested {
             if !known_ids.contains(id) {
                 return Err(unknown_check_error(id, &known_ids));
@@ -565,7 +572,7 @@ fn build_checks(report: &QCReport, engine: &QCEngine) -> Vec<CheckEntry> {
             let suggested_fix = violations
                 .iter()
                 .find_map(|violation| violation.suggested_fix.as_ref())
-                .map(to_edit_script);
+                .and_then(to_edit_script);
 
             CheckEntry {
                 id: outcome.check_id.clone(),
@@ -608,7 +615,7 @@ fn build_checks(report: &QCReport, engine: &QCEngine) -> Vec<CheckEntry> {
                         entities: violation.affected_entities.clone(),
                         metrics: to_json_map(&violation.metrics),
                         auto_fixable: violation.auto_fixable,
-                        suggested_fix: violation.suggested_fix.as_ref().map(to_edit_script),
+                        suggested_fix: violation.suggested_fix.as_ref().and_then(to_edit_script),
                     })
                     .collect(),
             }
@@ -670,12 +677,16 @@ fn to_json_map(metrics: &std::collections::BTreeMap<String, Value>) -> Map<Strin
 /// QC rules describe fixes as flat `{"type": …, …}` command descriptors; edit
 /// plans expect `{"commandType": …, "payload": {…}}`. Translating here keeps the
 /// suggestion directly executable instead of merely descriptive.
-fn to_edit_script(fix: &openreelio_core::qc::ViolationFix) -> Value {
-    let steps: Vec<Value> = fix
+///
+/// Returns `None` when any command cannot be translated: a plan missing steps
+/// would still carry the full description and apply only part of the fix. Each
+/// step depends on its predecessor so `plan execute` preserves command order.
+fn to_edit_script(fix: &openreelio_core::qc::ViolationFix) -> Option<Value> {
+    let steps: Option<Vec<Value>> = fix
         .commands
         .iter()
         .enumerate()
-        .filter_map(|(index, command)| {
+        .map(|(index, command)| {
             let object = command.as_object()?;
             let command_type = object.get("type")?.as_str()?.to_string();
 
@@ -685,20 +696,26 @@ fn to_edit_script(fix: &openreelio_core::qc::ViolationFix) -> Value {
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect();
 
+            let depends_on: Vec<String> = if index == 0 {
+                Vec::new()
+            } else {
+                vec![format!("fix_{}", index)]
+            };
+
             Some(serde_json::json!({
                 "id": format!("fix_{}", index + 1),
                 "commandType": command_type,
                 "payload": payload,
-                "dependsOn": [],
+                "dependsOn": depends_on,
             }))
         })
         .collect();
 
-    serde_json::json!({
+    Some(serde_json::json!({
         "description": fix.description,
         "confidence": fix.confidence,
-        "steps": steps,
-    })
+        "steps": steps?,
+    }))
 }
 
 // ============================================================================
@@ -854,12 +871,66 @@ mod tests {
             })],
         );
 
-        let script = to_edit_script(&fix);
+        let script = to_edit_script(&fix).expect("fix translates");
 
         assert_eq!(script["description"], "Close the gap");
         assert_eq!(script["steps"][0]["commandType"], "CloseGap");
         assert_eq!(script["steps"][0]["payload"]["trackId"], "track_v1");
         assert!(script["steps"][0]["payload"].get("type").is_none());
+        assert_eq!(script["steps"][0]["dependsOn"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_to_edit_script_should_chain_steps_in_command_order() {
+        let fix = ViolationFix::new(
+            "Two ordered commands",
+            vec![
+                serde_json::json!({ "type": "SplitClip", "clipId": "clip_1" }),
+                serde_json::json!({ "type": "RemoveClip", "clipId": "clip_2" }),
+            ],
+        );
+
+        let script = to_edit_script(&fix).expect("fix translates");
+
+        assert_eq!(script["steps"][0]["id"], "fix_1");
+        assert_eq!(script["steps"][1]["id"], "fix_2");
+        assert_eq!(
+            script["steps"][1]["dependsOn"],
+            serde_json::json!(["fix_1"])
+        );
+    }
+
+    #[test]
+    fn test_to_edit_script_should_reject_a_fix_it_cannot_translate_in_full() {
+        let fix = ViolationFix::new(
+            "Half-translatable",
+            vec![
+                serde_json::json!({ "type": "CloseGap", "trackId": "track_v1" }),
+                serde_json::json!({ "missingType": true }),
+            ],
+        );
+
+        assert!(to_edit_script(&fix).is_none());
+    }
+
+    #[test]
+    fn test_empty_checks_selection_should_be_rejected() {
+        let engine = QCEngine::new();
+        let args = VerifyArgs {
+            path: PathBuf::from("."),
+            sequence: None,
+            file: None,
+            structural_only: true,
+            checks: Some(vec![String::new(), "  ".to_string()]),
+            skip: None,
+            target_lufs: None,
+            max_true_peak: None,
+            fail_on: "error".to_string(),
+            timeout_sec: 600,
+            json_pretty: false,
+        };
+
+        assert!(build_engine_config(&engine, &args).is_err());
     }
 
     #[test]

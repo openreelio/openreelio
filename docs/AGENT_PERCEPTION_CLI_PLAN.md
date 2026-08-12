@@ -60,7 +60,7 @@ These were decided during implementation and are deliberate; do not "fix" them b
 Problem: three divergent resolution paths; CLI never checks the managed install (PR #784), so in-app FFmpeg installs are invisible to every CLI verb; non-render CLI verbs never register paths at all and silently fall back to bare `ffmpeg`.
 
 - Add to `core/ffmpeg/resolver.rs`:
-  - `pub struct FFmpegResolveOptions { pub explicit_ffmpeg: Option<PathBuf>, pub explicit_ffprobe: Option<PathBuf>, pub resource_roots: Vec<PathBuf> }`
+  - `pub struct FFmpegResolveOptions { pub explicit_ffmpeg: Option<PathBuf>, pub explicit_ffprobe: Option<PathBuf>, pub resource_roots: Vec<PathBuf>, pub use_env: bool }` — `use_env` decides whether the `OPENREELIO_FFMPEG_PATH` / `OPENREELIO_FFPROBE_PATH` overrides participate; it defaults to `false` so a GUI process never inherits a stray variable, and the CLI sets it to `true` (`crates/openreelio-cli/src/ffmpeg_env.rs`).
   - `pub fn resolve_ffmpeg(&FFmpegResolveOptions) -> FFmpegResult<FFmpegInfo>` — order: explicit → `OPENREELIO_FFMPEG_PATH`/`OPENREELIO_FFPROBE_PATH` env → `resource_roots` via `detect_bundled_at_path` → `detect_managed_ffmpeg()` → `detect_dev_mode_binaries()` → `detect_system_ffmpeg()`. Validate candidates with `get_ffmpeg_version`.
   - `pub fn resolve_and_register(...)` — same + `set_resolved_paths`.
 - GUI `state.rs detect_ffmpeg` delegates with `resource_roots = [resource_dir]` (bundled-resources-first order preserved; env override intentionally CLI-only — pass a flag or skip env in the GUI call).

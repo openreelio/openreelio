@@ -129,10 +129,11 @@ fn subtract_coverage(start: f64, end: f64, covered: &[(f64, f64)]) -> Vec<(f64, 
     remaining
 }
 
-/// Finds gaps on video tracks that no other video track fills.
+/// Finds gaps on visible video tracks that no other visible video track fills.
 ///
 /// A gap on an overlay track above a continuous base track is not a hole in the
-/// program, so only the uncovered remainder is reported.
+/// program, so only the uncovered remainder is reported. Hidden tracks are
+/// ignored on both sides: they neither contribute gaps nor count as coverage.
 ///
 /// Three kinds of hole are reported:
 ///
@@ -147,7 +148,14 @@ fn subtract_coverage(start: f64, end: f64, covered: &[(f64, f64)]) -> Vec<(f64, 
 pub fn uncovered_video_gaps(sequence: &Sequence, min_gap_sec: f64) -> Vec<UncoveredGap> {
     let mut uncovered = Vec::new();
 
-    for track in sequence.tracks.iter().filter(|track| track.is_video()) {
+    // Hidden tracks show nothing, so their gaps are not holes in the program.
+    // `covered_spans` already ignores them on the coverage side; collecting
+    // their gaps here would report holes in a track the viewer never sees.
+    for track in sequence
+        .tracks
+        .iter()
+        .filter(|track| track.is_video() && track.visible)
+    {
         let gaps = find_gaps(track);
         if gaps.is_empty() {
             continue;
@@ -1524,6 +1532,34 @@ mod tests {
         assert!(
             violations.is_empty(),
             "a gap under an uninterrupted base track is not a hole"
+        );
+    }
+
+    /// Feature: Uncovered video gaps
+    /// Scenario: should ignore a hidden track on both sides of the calculation
+    #[tokio::test]
+    async fn test_gap_rule_should_ignore_gaps_on_a_hidden_track() {
+        let mut sequence = sequence_30fps();
+        let mut hidden = Track::new_video("V1");
+        hidden.visible = false;
+        hidden.add_clip(video_clip("asset_1", 0.0, 2.0));
+        hidden.add_clip(video_clip("asset_1", 3.0, 2.0));
+        sequence.add_track(hidden);
+
+        let context = context_for(&sequence);
+        let violations = TimelineGapRule::new()
+            .check(
+                &sequence,
+                &ProjectState::new("p"),
+                &RuleConfig::default(),
+                &context,
+            )
+            .await
+            .expect("rule runs");
+
+        assert!(
+            violations.is_empty(),
+            "a hidden track shows nothing, so its gaps are not holes in the program"
         );
     }
 

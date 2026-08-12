@@ -638,9 +638,9 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "mode": { "type": "string", "required": false, "desc": "Timeline extraction mode: fast (default, topmost clip only) or composite (full render of a minimal window; decodes from timeline zero so cost grows with the timestamp)" },
                     "max-width": { "type": "number", "required": false, "desc": "Maximum output width in pixels, aspect ratio preserved and never upscaled (default: 1280 for timeline modes, native for --asset)" },
                     "format": { "type": "string", "required": false, "desc": "Output image format: png (default) or jpeg. Grid cells are always JPEG; the sheet itself uses this format." },
-                    "grid": { "type": "string", "required": false, "desc": "Contact sheet layout as COLSxROWS (e.g. 3x2); requires --between" },
+                    "grid": { "type": "string", "required": false, "desc": "Contact sheet layout as COLSxROWS (e.g. 3x2), at most 100 cells; requires --between" },
                     "between": { "type": "string", "required": false, "desc": "Timeline range sampled by --grid, given as two values: START END" },
-                    "count": { "type": "number", "required": false, "desc": "Number of grid samples (default: columns * rows; must not exceed the grid capacity)" }
+                    "count": { "type": "number", "required": false, "desc": "Number of grid samples (default: columns * rows; must not exceed the grid capacity). Rows no sample reaches are dropped, so the reported rows can be fewer than --grid asked for." }
                 },
                 "example": "openreelio-cli frame extract --path ./project --time 12.5 --out frame.png"
             },
@@ -651,7 +651,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" },
                     "file": { "type": "string", "required": false, "desc": "Rendered file to measure (black/freeze/silence detection, EBU R128 loudness, peaks). Without it only structural checks run and FFmpeg is never invoked. Measured times are file-relative and are compared against timeline times, so pass a full-sequence render rather than a partial one." },
                     "structural-only": { "type": "boolean", "required": false, "desc": "Run structural checks only and never touch FFmpeg; conflicts with --file" },
-                    "checks": { "type": "string", "required": false, "desc": "Comma-separated check IDs to run exclusively: timeline.gap, clip.orphan, clip.missing_asset, audio.silent_clip, caption.overlap, caption.reading_rate, caption.out_of_bounds, caption.safe_area, shot.length_stats, shot.cut_rhythm, clip.aspect_ratio, asset.license, sequence.duration, render.black_frames, audio.peak, audio.loudness. asset.license and sequence.duration are opt-in and only run when named here." },
+                    "checks": { "type": "string", "required": false, "desc": "Comma-separated check IDs to run exclusively (asset.license and sequence.duration are opt-in and only run when named here): timeline.gap, clip.orphan, clip.missing_asset, audio.silent_clip, caption.overlap, caption.reading_rate, caption.out_of_bounds, caption.safe_area, shot.length_stats, shot.cut_rhythm, clip.aspect_ratio, asset.license, sequence.duration, render.black_frames, audio.peak, audio.loudness" },
                     "skip": { "type": "string", "required": false, "desc": "Comma-separated check IDs to disable" },
                     "target-lufs": { "type": "number", "required": false, "desc": "Integrated loudness target in LUFS (default -14). Deviation over 1 LU warns, over 3 LU errors." },
                     "max-true-peak": { "type": "number", "required": false, "desc": "Maximum acceptable true peak in dBTP (default -1). Sample peak is used when the encoder reports no true peak." },

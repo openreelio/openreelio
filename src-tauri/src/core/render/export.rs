@@ -4411,18 +4411,21 @@ impl ExportEngine {
 
         // FFmpeg exits successfully but writes nothing when the seek lands past
         // the end of the source media, so a missing file is reported as a
-        // seek-out-of-range error instead of a bare IO error.
-        let metadata = tokio::fs::metadata(&settings.output_path)
-            .await
-            .map_err(|_| {
-                ExportError::InvalidSettings(format!(
+        // seek-out-of-range error instead of a bare IO error. Every other IO
+        // failure (permissions, a removed output directory) keeps its own cause.
+        let metadata = match tokio::fs::metadata(&settings.output_path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ExportError::InvalidSettings(format!(
                     "No frame was produced at time {:.3}s (source time {:.3}s in '{}'). \
                      The requested position is likely past the end of the source media.",
                     settings.time_sec,
                     source_time,
                     asset_path.display()
-                ))
-            })?;
+                )));
+            }
+            Err(error) => return Err(ExportError::IoError(error)),
+        };
         let file_size = metadata.len();
 
         // Source dimensions come from the asset's video stream when known,

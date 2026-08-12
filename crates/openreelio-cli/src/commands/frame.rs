@@ -29,6 +29,12 @@ use std::path::{Path, PathBuf};
 /// while staying well under typical image-token limits.
 const DEFAULT_MAX_WIDTH: u32 = 1280;
 
+/// Largest contact sheet accepted, in cells.
+///
+/// Every cell costs one FFmpeg extraction, so an unbounded grid would turn a
+/// single command into thousands of process spawns.
+const MAX_GRID_CELLS: usize = 100;
+
 /// Shortest composited window that FFmpeg can still render.
 ///
 /// `normalize_output_time_range` rejects zero-length ranges, so a single
@@ -145,6 +151,8 @@ enum Selection {
     /// A contact sheet sampled over a timeline range.
     Grid {
         columns: usize,
+        /// Rows the samples fill, which is fewer than `--grid` asked for when
+        /// `--count` does not fill the layout.
         rows: usize,
         times: Vec<f64>,
     },
@@ -162,7 +170,22 @@ fn resolve_selection(args: &ExtractArgs) -> anyhow::Result<Selection> {
         }
         validate::time_range_ordered(range[0], range[1], "between START", "between END")?;
 
-        let capacity = columns * rows;
+        let capacity = columns.checked_mul(rows).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid value for --grid: {}x{} is too large",
+                columns,
+                rows
+            )
+        })?;
+        if capacity > MAX_GRID_CELLS {
+            return Err(anyhow::anyhow!(
+                "Invalid value for --grid: {}x{} needs {} cells, more than the maximum of {}",
+                columns,
+                rows,
+                capacity,
+                MAX_GRID_CELLS
+            ));
+        }
         let count = args.count.unwrap_or(capacity);
         if count < 1 {
             return Err(anyhow::anyhow!("Invalid value for --count: must be >= 1"));
@@ -177,10 +200,15 @@ fn resolve_selection(args: &ExtractArgs) -> anyhow::Result<Selection> {
             ));
         }
 
+        let times = sample_times(range[0], range[1], count);
+
         return Ok(Selection::Grid {
             columns,
-            rows,
-            times: sample_times(range[0], range[1], count),
+            // FFmpeg's `tile` filter fills unused cells with black, so a sheet
+            // built from fewer samples than the requested capacity would carry
+            // dead rows. Keep only the rows the samples reach.
+            rows: times.len().div_ceil(columns),
+            times,
         });
     }
 
@@ -777,6 +805,53 @@ mod tests {
         assert!(parse_grid_spec("0x2").is_err());
         assert!(parse_grid_spec("2x0").is_err());
         assert!(parse_grid_spec("ax2").is_err());
+    }
+
+    fn grid_args(grid: &str, count: Option<usize>) -> ExtractArgs {
+        ExtractArgs {
+            path: PathBuf::from("."),
+            out: PathBuf::from("sheet.jpg"),
+            asset: None,
+            source_time: None,
+            time: None,
+            times: None,
+            sequence: None,
+            mode: "fast".to_string(),
+            max_width: None,
+            format: "jpeg".to_string(),
+            grid: Some(grid.to_string()),
+            between: Some(vec![0.0, 4.0]),
+            count,
+        }
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_grids_beyond_the_cell_budget() {
+        assert!(resolve_selection(&grid_args("11x11", None)).is_err());
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_a_grid_whose_capacity_overflows() {
+        let spec = format!("{}x2", usize::MAX);
+
+        assert!(resolve_selection(&grid_args(&spec, None)).is_err());
+    }
+
+    #[test]
+    fn resolve_selection_should_drop_rows_no_sample_reaches() {
+        let selection = resolve_selection(&grid_args("3x3", Some(5))).expect("selection resolves");
+
+        let Selection::Grid {
+            columns,
+            rows,
+            times,
+        } = selection
+        else {
+            panic!("Expected a grid selection");
+        };
+        assert_eq!(columns, 3);
+        assert_eq!(rows, 2, "Five samples over three columns fill two rows");
+        assert_eq!(times.len(), 5);
     }
 
     #[test]

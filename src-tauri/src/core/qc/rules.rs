@@ -425,7 +425,7 @@ impl QCRule for AudioPeakRule {
                 .with_location(0.0, program_end)
                 .with_details(format!(
                     "Peak is within {:.1} dB of the {:.1} dB ceiling.",
-                    measured_peak - warn_db,
+                    peak_db - measured_peak,
                     peak_db
                 )),
             );

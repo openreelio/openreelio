@@ -162,6 +162,10 @@ pub struct RunArgs {
 // ── Verb entry points ───────────────────────────────────────────────────
 
 /// Detects shot boundaries and persists them for the GUI and the analysis cache.
+///
+/// The three persistence targets are independent: `persisted` names the stores
+/// that were written and `warnings` explains every store that was not, so a
+/// failure halfway through never leaves the agent guessing what changed.
 pub fn shots(args: ShotsArgs) -> anyhow::Result<()> {
     validate::non_empty(&args.id, "id")?;
     validate::time_non_negative(args.min_shot_duration, "min-shot-duration")?;
@@ -206,23 +210,35 @@ pub fn shots(args: ShotsArgs) -> anyhow::Result<()> {
         }
 
         let shot_results = to_shot_results(&detected);
-        let metadata =
-            runtime.block_on(resolve_video_metadata(asset, &media_path, &ffmpeg_info))?;
 
-        AnalysisJobRunner::new(&project.path)
-            .merge_bundle_shots(&args.id, &metadata, shot_results.clone())
-            .map_err(|error| anyhow::anyhow!("Failed to update the analysis bundle: {}", error))?;
-        persisted.push("bundle");
+        // Each target reports its own outcome: an early success followed by a
+        // later failure must still tell the agent which stores now hold the new
+        // shots, so no target aborts the command.
+        let bundle_write = runtime
+            .block_on(resolve_video_metadata(asset, &media_path, &ffmpeg_info))
+            .and_then(|metadata| {
+                AnalysisJobRunner::new(&project.path)
+                    .merge_bundle_shots(&args.id, &metadata, shot_results.clone())
+                    .map_err(|error| {
+                        anyhow::anyhow!("Failed to update the analysis bundle: {}", error)
+                    })
+            });
+        match bundle_write {
+            Ok(_) => persisted.push("bundle"),
+            Err(error) => warnings.push(format!("bundle write skipped: {}", error)),
+        }
 
-        save_shot_annotation(
+        match save_shot_annotation(
             &project.path,
             &args.id,
             &asset.hash,
             shot_results,
             args.threshold,
             args.min_shot_duration,
-        )?;
-        persisted.push("annotations");
+        ) {
+            Ok(()) => persisted.push("annotations"),
+            Err(error) => warnings.push(format!("annotation write skipped: {}", error)),
+        }
     }
 
     let total_duration_sec = detected.last().map(|shot| shot.end_sec).unwrap_or(0.0);
