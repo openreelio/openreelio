@@ -85,6 +85,9 @@ export function readTauriVersion(filePath: string): string {
   return readPackageVersion(filePath);
 }
 
+/** Scope whose sibling packages are released in lockstep with the app version */
+const LOCKSTEP_DEPENDENCY_SCOPE = '@openreelio/';
+
 /**
  * Updates the version field of a JSON manifest, preserving 2-space indentation
  */
@@ -99,6 +102,31 @@ function updateJsonVersion(filePath: string, newVersion: string): void {
   json.version = newVersion;
 
   writeFileSync(filePath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
+}
+
+/**
+ * Repins `@openreelio/*` optional dependencies to the given version.
+ *
+ * The npm shim pins its platform packages exactly, and those packages are
+ * published from the same tag. Left alone, a version bump would ship a shim
+ * pointing at platform packages that do not exist yet; npm treats a missing
+ * optional dependency as a soft failure, so the breakage would only surface
+ * when a user runs the command.
+ */
+function repinLockstepOptionalDependencies(
+  json: Record<string, unknown>,
+  newVersion: string
+): void {
+  const optionalDependencies = json.optionalDependencies;
+  if (typeof optionalDependencies !== 'object' || optionalDependencies === null) {
+    return;
+  }
+
+  for (const name of Object.keys(optionalDependencies)) {
+    if (name.startsWith(LOCKSTEP_DEPENDENCY_SCOPE)) {
+      (optionalDependencies as Record<string, string>)[name] = newVersion;
+    }
+  }
 }
 
 /**
@@ -128,10 +156,20 @@ export function updateTauriVersion(filePath: string, newVersion: string): void {
 }
 
 /**
- * Updates version in a package.json manifest
+ * Updates version in a package.json manifest, keeping `@openreelio/*` optional
+ * dependencies pinned to the same version
  */
 export function updatePackageVersion(filePath: string, newVersion: string): void {
-  updateJsonVersion(filePath, newVersion);
+  if (!validateSemver(newVersion)) {
+    throw new Error(`Invalid semver: ${newVersion}`);
+  }
+
+  const json = JSON.parse(readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
+
+  json.version = newVersion;
+  repinLockstepOptionalDependencies(json, newVersion);
+
+  writeFileSync(filePath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
 }
 
 /** Manifest formats the sync script knows how to read and write */

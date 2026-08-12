@@ -393,5 +393,37 @@ edition = "2021"
       expect(result.updatedFiles).toEqual(['npm/demo/package.json']);
       expect(readPackageVersion(TEST_MISSING_PACKAGE_JSON)).toBe('1.2.3');
     });
+
+    it('should repin lockstep optional dependencies when syncing a package manifest', () => {
+      mkdirSync(dirname(TEST_MISSING_PACKAGE_JSON), { recursive: true });
+      writeFileSync(
+        TEST_MISSING_PACKAGE_JSON,
+        JSON.stringify(
+          {
+            name: 'demo',
+            version: '0.9.0',
+            optionalDependencies: {
+              '@openreelio/cli-linux-x64': '0.9.0',
+              '@openreelio/cli-win32-x64': '0.9.0',
+              'unrelated-package': '^2.0.0',
+            },
+          },
+          null,
+          2
+        )
+      );
+
+      syncVersions({
+        packageJson: TEST_PACKAGE_JSON, // version: 1.2.3
+        targets: [optionalMissingTarget],
+      });
+
+      const updated = JSON.parse(readFileSync(TEST_MISSING_PACKAGE_JSON, 'utf-8'));
+      expect(updated.optionalDependencies).toEqual({
+        '@openreelio/cli-linux-x64': '1.2.3',
+        '@openreelio/cli-win32-x64': '1.2.3',
+        'unrelated-package': '^2.0.0',
+      });
+    });
   });
 });

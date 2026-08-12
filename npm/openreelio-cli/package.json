@@ -1,0 +1,52 @@
+{
+  "name": "openreelio-cli",
+  "version": "0.1.10",
+  "description": "Headless, agent-native video editing CLI and MCP server. Cut, trim, caption, analyze and render real timelines from natural language or scripts instead of hand-writing ffmpeg filtergraphs.",
+  "keywords": [
+    "video-editing",
+    "video",
+    "ai-agent",
+    "agent",
+    "mcp",
+    "mcp-server",
+    "ffmpeg",
+    "ffmpeg-alternative",
+    "nle",
+    "timeline",
+    "captions",
+    "transcription",
+    "render",
+    "headless",
+    "cli"
+  ],
+  "homepage": "https://github.com/openreelio/openreelio#readme",
+  "bugs": {
+    "url": "https://github.com/openreelio/openreelio/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openreelio/openreelio.git",
+    "directory": "npm/openreelio-cli"
+  },
+  "license": "MIT",
+  "author": "Junseo5",
+  "mcpName": "io.github.openreelio/openreelio",
+  "type": "module",
+  "bin": {
+    "openreelio-cli": "bin/openreelio-cli.mjs"
+  },
+  "files": [
+    "bin/openreelio-cli.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@openreelio/cli-darwin-arm64": "0.1.10",
+    "@openreelio/cli-darwin-x64": "0.1.10",
+    "@openreelio/cli-linux-x64": "0.1.10",
+    "@openreelio/cli-win32-x64": "0.1.10"
+  }
+}

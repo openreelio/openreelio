@@ -1,0 +1,2 @@
+# Platform packages are assembled at publish time from release binaries.
+generated/

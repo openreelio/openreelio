@@ -12,7 +12,8 @@ This document explains distribution options for OpenReelio releases.
 6. [macOS Code Signing & Notarization](#macos-code-signing--notarization)
 7. [Tauri Updater Signing](#tauri-updater-signing)
 8. [Release Process](#release-process)
-9. [Troubleshooting](#troubleshooting)
+9. [npm Distribution (CLI)](#npm-distribution-cli)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -312,6 +313,125 @@ The GitHub Actions workflow will automatically:
 2. Review the draft release
 3. Edit release notes
 4. Click "Publish release"
+
+---
+
+## npm Distribution (CLI)
+
+The headless CLI is also published to npm so agents and CI can reach it with a
+single `npx openreelio-cli`. The installers are unaffected; this is a second
+delivery path for the same binary.
+
+### Published packages
+
+| Package                        | Contents                                      |
+| ------------------------------ | --------------------------------------------- |
+| `openreelio-cli`               | Launcher only (`bin/openreelio-cli.mjs`)      |
+| `@openreelio/cli-win32-x64`    | `x86_64-pc-windows-msvc` binary               |
+| `@openreelio/cli-darwin-x64`   | `x86_64-apple-darwin` binary                  |
+| `@openreelio/cli-darwin-arm64` | `aarch64-apple-darwin` binary                 |
+| `@openreelio/cli-linux-x64`    | `x86_64-unknown-linux-gnu` binary             |
+
+The shim lists all four platform packages as `optionalDependencies`; npm
+installs only the one whose `os`/`cpu` matches the host, and the launcher
+resolves its binary through `require.resolve`. `OPENREELIO_CLI_BINARY`
+overrides that lookup with an explicit path.
+
+### Why there is no postinstall download
+
+npm v12 disables dependency lifecycle scripts by default, so the classic
+"postinstall downloads a binary" pattern now fails silently for a growing share
+of installs. The binary therefore has to arrive as package *content*. This is
+the same shape esbuild, Biome and turbo use.
+
+Consequences worth remembering:
+
+- Neither the shim nor the platform packages define **any** install script.
+- Platform packages declare no `bin` and no `exports` field: the shim owns the
+  command name, and an `exports` map would block resolution of
+  `@openreelio/cli-<platform>/package.json`.
+- Installs that pass `--omit=optional` / `--no-optional` get a clear error
+  naming the missing package instead of a mystery `ENOENT`.
+
+**Known limitation:** Linux is glibc only. The release matrix builds no musl
+target, so Alpine users must download a standalone archive and set
+`OPENREELIO_CLI_BINARY`. Adding a musl package means adding a musl target to
+`release.yml` first, then registering it in the generator's `TARGETS` table.
+
+### Assets to packages: the flow
+
+```
+release.yml (build-tauri)
+  └─ openreelio-cli-<version>-<triple>.zip|.tar.gz  + .sha256   (draft release)
+release.yml (publish-release)
+  └─ draft flipped to published -> download URLs resolve
+npm-publish.yml (workflow_run: Release completed)
+  ├─ gh release download 'openreelio-cli-*'
+  ├─ sha256sum --check, then extract to dist/cli-assets/<triple>/
+  ├─ node scripts/build-npm-platform-packages.mjs   (verifies .sha256 again,
+  │    stamps versions, writes 4 platform packages + a stamped shim copy)
+  ├─ npm publish each @openreelio/cli-* package
+  └─ npm publish openreelio-cli
+```
+
+Platform packages are published **before** the shim, because the shim pins them
+exactly.
+
+Run the generator locally to inspect what would be published:
+
+```bash
+cargo build --release -p openreelio-cli
+node scripts/build-npm-platform-packages.mjs \
+  --only win32-x64 \
+  --binary win32-x64=target/release/openreelio-cli.exe \
+  --shim-out npm/platform-packages/generated/openreelio-cli
+```
+
+Generate the non-Windows packages on Linux or macOS: `npm pack` records the file
+mode, and a Windows host cannot set the executable bit.
+
+### Why npm publishing is a separate workflow
+
+The platform packages embed assets from the release, which only become
+downloadable once `publish-release` flips the draft. npm work must run strictly
+afterwards.
+
+The trigger is `workflow_run` on the **Release** workflow rather than
+`release: published`, because GitHub does not start new workflow runs from
+events raised with the built-in `GITHUB_TOKEN` — and `publish-release`
+publishes the draft with exactly that token.
+
+### Setup TODO (not done yet)
+
+npm publishing is **inert until both steps below are completed**. Merging the
+workflow cannot publish anything.
+
+1. **Enable the workflow.** Create repository variable
+   `NPM_PUBLISH_ENABLED = true` (Settings → Secrets and variables → Actions →
+   Variables). Without it, the automatic path is skipped and a manual run
+   refuses to publish (`dry_run: true` still packs and uploads tarballs as a
+   build artifact, which is the safe way to inspect output).
+
+2. **Set up authentication.** Preferred: **Trusted Publishing (OIDC)** — on
+   npmjs.com, configure a GitHub Actions trusted publisher for each of the five
+   packages, pointing at repository `openreelio/openreelio` and workflow
+   `npm-publish.yml`. It needs npm ≥ 11.5.1 (the workflow installs it) and
+   `id-token: write` (already granted), and attaches provenance automatically.
+
+   Chicken-and-egg caveat: a trusted publisher can only be configured on a
+   package that already exists, so the **first** publish of each package must
+   use the fallback — an npm automation token stored as secret `NPM_TOKEN`. The
+   workflow uses it only when present, so it can be deleted once trusted
+   publishing is live.
+
+### Version discipline
+
+`npm/openreelio-cli/package.json` is a `version:check` target, so the shim
+version is enforced against `package.json` in CI. `npm run version:sync` also
+repins the shim's `@openreelio/*` `optionalDependencies` to the new version, and
+the publish workflow re-stamps both the shim and the platform packages from the
+release tag, so a published shim can never point at platform versions that were
+never released.
 
 ---
 
