@@ -33,7 +33,8 @@ pub use bundler::{
 pub use commands::*;
 pub use detection::*;
 pub use resolver::{
-    resolved_ffmpeg_path, resolved_ffprobe_path, set_resolved_paths, ResolvedFFmpeg,
+    resolve_and_register, resolve_ffmpeg, resolved_ffmpeg_path, resolved_ffprobe_path,
+    set_resolved_paths, FFmpegResolveOptions, ResolvedFFmpeg, FFMPEG_PATH_ENV, FFPROBE_PATH_ENV,
 };
 pub use runner::{
     AudioStreamInfo, FFmpegProgress, FFmpegRunner, MediaInfo, RenderSettings, VideoStreamInfo,
@@ -48,6 +49,9 @@ pub use state::{detect_ffmpeg, initialize_shared_ffmpeg};
 pub enum FFmpegError {
     #[error("FFmpeg not found. Please install FFmpeg or ensure bundled binaries are present.")]
     NotFound,
+
+    #[error("FFmpeg not found. Please install FFmpeg or ensure bundled binaries are present. Sources tried: {0}")]
+    NotFoundInSources(String),
 
     #[error("FFmpeg execution failed: {0}")]
     ExecutionFailed(String),

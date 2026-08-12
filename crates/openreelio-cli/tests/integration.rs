@@ -854,6 +854,36 @@ fn test_render_start_invalid_preset() {
 }
 
 #[test]
+fn test_ffmpeg_info_reports_resolved_binaries() {
+    if system_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let result = run_cli_ok(&["ffmpeg", "info"]);
+
+    assert_eq!(result["status"], "ok");
+    assert!(
+        !result["ffmpegPath"].as_str().unwrap_or_default().is_empty(),
+        "Expected a resolved ffmpeg path, got: {}",
+        result
+    );
+    assert!(
+        !result["ffprobePath"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "Expected a resolved ffprobe path, got: {}",
+        result
+    );
+    let source = result["source"].as_str().unwrap_or_default();
+    assert!(
+        ["explicit", "env", "bundled", "managed", "dev", "system"].contains(&source),
+        "Unexpected ffmpeg source: {}",
+        source
+    );
+}
+
+#[test]
 fn test_render_start_exports_video_when_ffmpeg_is_available() {
     if system_ffmpeg_path().is_none() {
         return;

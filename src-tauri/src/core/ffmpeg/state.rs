@@ -9,8 +9,10 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+#[cfg(test)]
+use super::detect_system_ffmpeg;
 #[cfg(any(test, feature = "gui"))]
-use super::{detect_system_ffmpeg, FFmpegError};
+use super::FFmpegError;
 use super::{FFmpegInfo, FFmpegRunner};
 
 /// Global FFmpeg runner state.
@@ -91,25 +93,20 @@ impl Default for FFmpegState {
 /// [`initialize_shared_ffmpeg`]).
 #[cfg(all(not(test), feature = "gui"))]
 pub fn detect_ffmpeg(app_handle: Option<&tauri::AppHandle>) -> Result<FFmpegInfo, FFmpegError> {
-    // Try bundled resources first (if app_handle provided)
-    if let Some(handle) = app_handle {
-        if let Ok(info) = super::detect_bundled_resources(handle) {
-            return Ok(info);
-        }
-    }
+    use tauri::Manager;
 
-    // Managed install (in-app FFmpeg installer)
-    if let Ok(info) = super::detect_managed_ffmpeg() {
-        return Ok(info);
-    }
+    let resource_roots = app_handle
+        .and_then(|handle| handle.path().resource_dir().ok())
+        .into_iter()
+        .collect::<Vec<_>>();
 
-    // Dev-mode binaries (src-tauri/binaries during `npm run tauri dev`)
-    if let Ok(info) = super::detection::detect_dev_mode_binaries() {
-        return Ok(info);
-    }
-
-    // Fall back to system FFmpeg
-    detect_system_ffmpeg()
+    super::resolve_ffmpeg(&super::FFmpegResolveOptions {
+        resource_roots,
+        // Path overrides stay CLI-only: a GUI process must not silently inherit
+        // an FFmpeg override from whatever shell or launcher started it.
+        use_env: false,
+        ..Default::default()
+    })
 }
 
 /// Shared FFmpeg state for the async runtime.

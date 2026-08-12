@@ -1,10 +1,9 @@
 //! Render and export commands.
 
+use crate::ffmpeg_env::ensure_ffmpeg;
 use crate::output;
 use clap::Subcommand;
-use openreelio_core::ffmpeg::{
-    detect_bundled_at_path, detect_system_ffmpeg, set_resolved_paths, FFmpegRunner,
-};
+use openreelio_core::ffmpeg::FFmpegRunner;
 use openreelio_core::render::{
     build_render_graph, build_render_plan, validate_export_settings, AudioCodec, ExportEngine,
     ExportPreset, ExportSettings, HdrMode, VideoCodec,
@@ -114,7 +113,7 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
             }
             let plan_hash = render_plan.plan_hash.clone();
 
-            let ffmpeg_info = detect_cli_ffmpeg()?;
+            let ffmpeg_info = ensure_ffmpeg()?;
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -198,32 +197,4 @@ fn build_export_settings(preset: &str, output_path: PathBuf) -> anyhow::Result<E
     };
 
     Ok(settings)
-}
-
-fn detect_cli_ffmpeg() -> anyhow::Result<openreelio_core::ffmpeg::FFmpegInfo> {
-    let candidate_roots = [
-        std::env::current_dir()
-            .ok()
-            .map(|path| path.join("src-tauri")),
-        std::env::current_dir().ok(),
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(|parent| parent.to_path_buf())),
-    ];
-
-    let info = candidate_roots
-        .into_iter()
-        .flatten()
-        .find_map(|root| detect_bundled_at_path(&root).ok())
-        .map(Ok)
-        .unwrap_or_else(|| {
-            detect_system_ffmpeg()
-                .map_err(|error| anyhow::anyhow!("FFmpeg initialization failed: {}", error))
-        })?;
-
-    // Publish the detected paths so core modules that spawn ffmpeg/ffprobe
-    // directly resolve the same binaries instead of relying on PATH.
-    set_resolved_paths(info.ffmpeg_path.clone(), info.ffprobe_path.clone());
-
-    Ok(info)
 }

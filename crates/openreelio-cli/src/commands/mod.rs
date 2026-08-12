@@ -11,6 +11,7 @@ mod analysis;
 mod asset;
 mod caption;
 mod command;
+mod ffmpeg;
 mod help_json;
 mod mcp;
 mod plan;
@@ -90,6 +91,12 @@ pub enum Commands {
         action: render::RenderAction,
     },
 
+    /// FFmpeg toolchain inspection
+    Ffmpeg {
+        #[command(subcommand)]
+        action: ffmpeg::FfmpegAction,
+    },
+
     /// Batch plan execution (atomic multi-step edits)
     Plan {
         #[command(subcommand)]
@@ -126,6 +133,7 @@ pub fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Transcription { action } => transcription::execute(action),
         Commands::Text { action } => text::execute(action),
         Commands::Render { action } => render::execute(action),
+        Commands::Ffmpeg { action } => ffmpeg::execute(action),
         Commands::Plan { action } => plan::execute(action),
         Commands::Command { action } => command::execute(action),
         Commands::State { action } => state::execute(action),

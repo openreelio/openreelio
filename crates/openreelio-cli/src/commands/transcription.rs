@@ -1,5 +1,6 @@
 //! Speech-to-text transcription commands.
 
+use crate::ffmpeg_env::ensure_ffmpeg;
 use crate::output;
 use clap::Subcommand;
 use openreelio_core::assets::AssetKind;
@@ -459,7 +460,10 @@ pub(crate) fn generate_asset_transcription(
         ));
     }
 
-    let asset_path = PathBuf::from(&asset.uri);
+    // Audio extraction spawns ffmpeg, so the binaries must be registered first.
+    ensure_ffmpeg()?;
+
+    let asset_path = asset.resolved_path(&project.path);
     let temp_dir = std::env::temp_dir()
         .join("openreelio")
         .join("cli-transcription");
@@ -544,6 +548,9 @@ pub(crate) fn generate_sequence_transcription(
             model_size.filename()
         ));
     }
+
+    // The sequence mixdown spawns ffmpeg, so the binaries must be registered first.
+    ensure_ffmpeg()?;
 
     let temp_dir = std::env::temp_dir()
         .join("openreelio")

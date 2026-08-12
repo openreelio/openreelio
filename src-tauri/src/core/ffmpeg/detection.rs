@@ -12,6 +12,10 @@ use crate::core::process::configure_std_command;
 /// Where a detected FFmpeg installation came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FFmpegSource {
+    /// Explicitly configured by the caller (CLI flag or API argument).
+    Explicit,
+    /// Configured through the `OPENREELIO_FFMPEG_PATH` environment override.
+    Env,
     /// Bundled with the application (resource directory).
     Bundled,
     /// Installed by the in-app managed installer.
@@ -26,6 +30,8 @@ impl FFmpegSource {
     /// Stable lowercase identifier surfaced to the frontend.
     pub fn as_str(self) -> &'static str {
         match self {
+            FFmpegSource::Explicit => "explicit",
+            FFmpegSource::Env => "env",
             FFmpegSource::Bundled => "bundled",
             FFmpegSource::Managed => "managed",
             FFmpegSource::Dev => "dev",
@@ -420,9 +426,9 @@ fn get_common_ffmpeg_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// Get FFmpeg version string
-fn get_ffmpeg_version(ffmpeg_path: &PathBuf) -> FFmpegResult<String> {
-    let mut cmd = Command::new(ffmpeg_path);
+/// Run `<binary> -version` and return its first output line
+fn run_version_probe(binary_path: &Path) -> FFmpegResult<String> {
+    let mut cmd = Command::new(binary_path);
     configure_std_command(&mut cmd);
     let output = cmd
         .arg("-version")
@@ -435,22 +441,34 @@ fn get_ffmpeg_version(ffmpeg_path: &PathBuf) -> FFmpegResult<String> {
         ));
     }
 
-    let output_str = String::from_utf8_lossy(&output.stdout);
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(|line| line.to_string())
+        .ok_or_else(|| FFmpegError::ParseError("Could not parse FFmpeg version".to_string()))
+}
+
+/// Get FFmpeg version string
+pub(super) fn get_ffmpeg_version(ffmpeg_path: &Path) -> FFmpegResult<String> {
+    let first_line = run_version_probe(ffmpeg_path)?;
 
     // Parse version from first line: "ffmpeg version X.X.X ..."
-    if let Some(first_line) = output_str.lines().next() {
-        if let Some(version_part) = first_line.strip_prefix("ffmpeg version ") {
-            if let Some(version) = version_part.split_whitespace().next() {
-                return Ok(version.to_string());
-            }
+    if let Some(version_part) = first_line.strip_prefix("ffmpeg version ") {
+        if let Some(version) = version_part.split_whitespace().next() {
+            return Ok(version.to_string());
         }
-        // Return the whole first line if parsing fails
-        return Ok(first_line.to_string());
     }
 
-    Err(FFmpegError::ParseError(
-        "Could not parse FFmpeg version".to_string(),
-    ))
+    // Return the whole first line if parsing fails
+    Ok(first_line)
+}
+
+/// Check that a binary is present and responds to `-version`
+///
+/// Used by the resolver to validate explicitly configured ffprobe binaries,
+/// which are not discovered through the filesystem probes above.
+pub(super) fn probe_binary_runs(binary_path: &Path) -> FFmpegResult<()> {
+    run_version_probe(binary_path).map(|_| ())
 }
 
 /// Validate that FFmpeg binaries are functional

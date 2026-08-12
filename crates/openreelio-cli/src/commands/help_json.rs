@@ -571,6 +571,11 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 },
                 "example": "openreelio-cli render start --path ./project --output output.mp4"
             },
+            "ffmpeg.info": {
+                "description": "Resolve the FFmpeg/FFprobe binaries this CLI will use and report their version and source (explicit, env, bundled, managed, dev, or system)",
+                "params": {},
+                "example": "openreelio-cli ffmpeg info"
+            },
             "mcp": {
                 "description": "Serve read-only OpenReelio MCP tools for external AI agents",
                 "params": {
