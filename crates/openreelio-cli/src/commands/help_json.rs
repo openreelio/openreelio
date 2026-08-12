@@ -76,6 +76,51 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 },
                 "example": "openreelio-cli asset remove --path ./project --id asset_001"
             },
+            "analysis.shots": {
+                "description": "Detect shot boundaries with FFmpeg scene detection and cache them in index.db, the analysis bundle, and the asset annotation",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Asset ID" },
+                    "threshold": { "type": "number", "required": false, "desc": "Scene change threshold 0.0-1.0; lower detects more cuts (default: 0.3)" },
+                    "min-shot-duration": { "type": "number", "required": false, "desc": "Minimum shot duration in seconds; shorter shots are merged (default: 0.5)" },
+                    "timeout-sec": { "type": "number", "required": false, "desc": "FFmpeg scene-detection timeout in seconds (default: 600)" },
+                    "no-persist": { "type": "boolean", "required": false, "desc": "Detect only: skip the index.db, bundle, and annotation writes" }
+                },
+                "example": "openreelio-cli analysis shots --path ./project --id asset_001 --threshold 0.3 --min-shot-duration 0.5"
+            },
+            "analysis.silence": {
+                "description": "Detect silence regions with FFmpeg; results are cached only at the shared -40dB / 0.5s contract, otherwise they are output-only",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Asset ID" },
+                    "threshold-db": { "type": "number", "required": false, "desc": "Silence threshold in dB (default: -40)" },
+                    "min-duration": { "type": "number", "required": false, "desc": "Minimum silence duration in seconds (default: 0.5)" }
+                },
+                "example": "openreelio-cli analysis silence --path ./project --id asset_001 --threshold-db -40 --min-duration 0.5"
+            },
+            "analysis.audio": {
+                "description": "Profile the audio track (silence regions, loudness curve, peak, BPM, speech regions) and cache it in the analysis bundle",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Asset ID" }
+                },
+                "example": "openreelio-cli analysis audio --path ./project --id asset_001"
+            },
+            "analysis.run": {
+                "description": "Run the local analysis pipeline (shots, audio, segments, optional transcript and visual) and cache the resulting bundle; exits non-zero only when every enabled sub-job fails",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Asset ID" },
+                    "shots": { "type": "boolean", "required": false, "desc": "Run shot detection" },
+                    "audio": { "type": "boolean", "required": false, "desc": "Run audio profiling" },
+                    "segments": { "type": "boolean", "required": false, "desc": "Run content segmentation (requires shots and audio)" },
+                    "transcript": { "type": "boolean", "required": false, "desc": "Run transcription (requires an installed Whisper model)" },
+                    "visual": { "type": "boolean", "required": false, "desc": "Run local visual frame analysis" },
+                    "all": { "type": "boolean", "required": false, "desc": "Run every local sub-job; transcription stays off unless --transcript is given" },
+                    "progress": { "type": "boolean", "required": false, "desc": "Stream NDJSON sub-job progress to stderr" }
+                },
+                "example": "openreelio-cli analysis run --path ./project --id asset_001 --all --progress"
+            },
             "analysis.report": {
                 "description": "Build a cached source analysis report for one asset as structured JSON plus embedded Markdown, including moments, chapters, and candidate highlights",
                 "params": {
@@ -676,6 +721,13 @@ mod tests {
         assert!(commands["text.add"]["params"]["font-weight"].is_object());
         assert!(commands["text.update"]["params"]["duration"].is_object());
         assert!(commands["text.transform"]["params"]["scale-x"].is_object());
+        assert!(commands.contains_key("analysis.shots"));
+        assert!(commands.contains_key("analysis.silence"));
+        assert!(commands.contains_key("analysis.audio"));
+        assert!(commands.contains_key("analysis.run"));
+        assert!(commands["analysis.shots"]["params"]["no-persist"].is_object());
+        assert!(commands["analysis.silence"]["params"]["threshold-db"].is_object());
+        assert!(commands["analysis.run"]["params"]["progress"].is_object());
         assert!(commands.contains_key("analysis.report"));
         assert!(commands.contains_key("analysis.search"));
         assert!(commands.contains_key("analysis.search-library"));

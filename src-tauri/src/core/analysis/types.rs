@@ -590,6 +590,42 @@ impl AnalysisBundle {
     pub fn is_complete(&self) -> bool {
         self.errors.is_empty()
     }
+
+    /// Restores result slots that this bundle does not populate from `previous`.
+    ///
+    /// A run that enables only some sub-jobs produces a bundle whose other
+    /// slots are `None`. Writing that bundle over an existing one would discard
+    /// results a previous run already paid for, so callers that re-save a
+    /// partial run merge the older results back in first.
+    ///
+    /// Only empty slots are filled: freshly produced results, metadata, errors,
+    /// and the analysis timestamp always win.
+    pub fn backfill_missing_from(&mut self, previous: &AnalysisBundle) {
+        if self.shots.is_none() {
+            self.shots = previous.shots.clone();
+        }
+        if self.transcript.is_none() {
+            self.transcript = previous.transcript.clone();
+        }
+        if self.transcript_detail.is_none() {
+            self.transcript_detail = previous.transcript_detail.clone();
+        }
+        if self.audio_profile.is_none() {
+            self.audio_profile = previous.audio_profile.clone();
+        }
+        if self.segments.is_none() {
+            self.segments = previous.segments.clone();
+        }
+        if self.frame_analysis.is_none() {
+            self.frame_analysis = previous.frame_analysis.clone();
+        }
+        if self.frame_observations.is_none() {
+            self.frame_observations = previous.frame_observations.clone();
+        }
+        if self.contact_sheet.is_none() {
+            self.contact_sheet = previous.contact_sheet.clone();
+        }
+    }
 }
 
 fn current_analysis_schema_version() -> u32 {
@@ -834,6 +870,37 @@ mod tests {
         assert!(!bundle.is_complete());
         assert_eq!(bundle.errors.len(), 1);
         assert!(bundle.errors.contains_key("transcript"));
+    }
+
+    #[test]
+    fn should_restore_missing_slots_when_backfilling_a_partial_bundle() {
+        let mut previous = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        previous.audio_profile = Some(AudioProfile::silent(60.0));
+        previous.shots = Some(vec![ShotResult::new(0.0, 60.0, 1.0)]);
+
+        let mut partial = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        partial.shots = Some(vec![
+            ShotResult::new(0.0, 30.0, 0.9),
+            ShotResult::new(30.0, 60.0, 0.9),
+        ]);
+
+        partial.backfill_missing_from(&previous);
+
+        // Fresh results win, untouched slots are restored.
+        assert_eq!(partial.shots.as_ref().unwrap().len(), 2);
+        assert!(partial.audio_profile.is_some());
+    }
+
+    #[test]
+    fn should_not_backfill_errors_or_metadata_from_a_previous_bundle() {
+        let mut previous = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        previous.add_error("audio", "FFmpeg missing".to_string());
+
+        let mut fresh = AnalysisBundle::new("asset_001", VideoMetadata::new(90.0));
+        fresh.backfill_missing_from(&previous);
+
+        assert!(fresh.errors.is_empty());
+        assert_eq!(fresh.metadata.duration_sec, 90.0);
     }
 
     #[test]

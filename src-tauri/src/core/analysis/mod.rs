@@ -426,6 +426,61 @@ impl AnalysisJobRunner {
         Ok(())
     }
 
+    /// Applies `mutate` to the asset's cached bundle and writes it back.
+    ///
+    /// The bundle is loaded from disk first, so a caller that produces only one
+    /// kind of result (shot detection, an audio profile) updates its own slot
+    /// without discarding what earlier runs stored. When no bundle exists yet,
+    /// a fresh one is created from `fallback_metadata`.
+    ///
+    /// Returns the merged bundle that was persisted.
+    pub fn merge_bundle_update<F>(
+        &self,
+        asset_id: &str,
+        fallback_metadata: &VideoMetadata,
+        mutate: F,
+    ) -> CoreResult<AnalysisBundle>
+    where
+        F: FnOnce(&mut AnalysisBundle),
+    {
+        let mut bundle = match self.load_bundle_optional(asset_id)? {
+            Some(bundle) => bundle,
+            None => AnalysisBundle::new(asset_id, fallback_metadata.clone()),
+        };
+
+        mutate(&mut bundle);
+        bundle.analyzed_at = chrono::Utc::now().to_rfc3339();
+
+        self.save_bundle(&bundle)?;
+        Ok(bundle)
+    }
+
+    /// Merges shot-detection results into the asset's cached bundle.
+    pub fn merge_bundle_shots(
+        &self,
+        asset_id: &str,
+        fallback_metadata: &VideoMetadata,
+        shots: Vec<ShotResult>,
+    ) -> CoreResult<AnalysisBundle> {
+        self.merge_bundle_update(asset_id, fallback_metadata, |bundle| {
+            bundle.shots = Some(shots);
+            bundle.errors.remove("shots");
+        })
+    }
+
+    /// Merges an audio profile into the asset's cached bundle.
+    pub fn merge_bundle_audio_profile(
+        &self,
+        asset_id: &str,
+        fallback_metadata: &VideoMetadata,
+        audio_profile: AudioProfile,
+    ) -> CoreResult<AnalysisBundle> {
+        self.merge_bundle_update(asset_id, fallback_metadata, |bundle| {
+            bundle.audio_profile = Some(audio_profile);
+            bundle.errors.remove("audio");
+        })
+    }
+
     async fn generate_contact_sheet_if_possible(
         &self,
         asset_id: &str,
@@ -784,6 +839,82 @@ mod tests {
         assert_eq!(loaded.shots.as_ref().unwrap().len(), 2);
         assert_eq!(loaded.audio_profile.as_ref().unwrap().bpm, Some(120.0));
         assert_eq!(loaded.contact_sheet.as_ref().unwrap().columns, 2);
+    }
+
+    #[test]
+    fn should_create_bundle_from_fallback_metadata_when_merging_into_nothing() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+        let metadata = VideoMetadata::new(12.0).with_audio(true);
+
+        let merged = runner
+            .merge_bundle_shots(
+                "asset_100",
+                &metadata,
+                vec![ShotResult::new(0.0, 12.0, 0.9)],
+            )
+            .unwrap();
+
+        assert_eq!(merged.metadata.duration_sec, 12.0);
+        assert_eq!(merged.shots.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            runner
+                .load_bundle("asset_100")
+                .unwrap()
+                .shots
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn should_preserve_other_results_when_merging_shots_into_an_existing_bundle() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+
+        let mut existing = AnalysisBundle::new("asset_101", VideoMetadata::new(30.0));
+        existing.audio_profile = Some(AudioProfile::silent(30.0));
+        existing.segments = Some(Vec::new());
+        runner.save_bundle(&existing).unwrap();
+
+        runner
+            .merge_bundle_shots(
+                "asset_101",
+                &VideoMetadata::new(0.0),
+                vec![ShotResult::new(0.0, 30.0, 0.8)],
+            )
+            .unwrap();
+
+        let loaded = runner.load_bundle("asset_101").unwrap();
+        assert_eq!(loaded.shots.as_ref().unwrap().len(), 1);
+        assert!(loaded.audio_profile.is_some());
+        assert!(loaded.segments.is_some());
+        // The fallback metadata must not overwrite what the bundle already knows.
+        assert_eq!(loaded.metadata.duration_sec, 30.0);
+    }
+
+    #[test]
+    fn should_clear_the_matching_error_when_merging_a_successful_result() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+
+        let mut existing = AnalysisBundle::new("asset_102", VideoMetadata::new(30.0));
+        existing.add_error("audio", "FFmpeg missing".to_string());
+        existing.add_error("shots", "FFmpeg missing".to_string());
+        runner.save_bundle(&existing).unwrap();
+
+        runner
+            .merge_bundle_audio_profile(
+                "asset_102",
+                &VideoMetadata::new(30.0),
+                AudioProfile::silent(30.0),
+            )
+            .unwrap();
+
+        let loaded = runner.load_bundle("asset_102").unwrap();
+        assert!(!loaded.errors.contains_key("audio"));
+        assert!(loaded.errors.contains_key("shots"));
     }
 
     #[test]

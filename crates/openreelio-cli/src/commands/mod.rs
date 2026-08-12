@@ -15,6 +15,7 @@ mod ffmpeg;
 mod frame;
 mod help_json;
 mod mcp;
+mod perception;
 mod plan;
 mod project;
 mod render;

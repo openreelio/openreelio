@@ -1,5 +1,11 @@
-//! Analysis inspection commands: cached source analysis reporting.
+//! Analysis commands: local perception generation and cached source analysis
+//! reporting.
+//!
+//! The perception verbs (`shots`, `silence`, `audio`, `run`) produce the
+//! artifacts that the reporting verbs read; their implementations live in
+//! [`super::perception`].
 
+use super::perception::{AudioArgs, RunArgs, ShotsArgs, SilenceArgs};
 use crate::output;
 use chrono::Utc;
 use clap::Subcommand;
@@ -13,6 +19,18 @@ use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
 pub enum AnalysisAction {
+    /// Detect shot boundaries with FFmpeg and cache them for the app and reports
+    Shots(ShotsArgs),
+
+    /// Detect silence regions with FFmpeg
+    Silence(SilenceArgs),
+
+    /// Profile the audio track (silence, loudness, BPM, speech regions)
+    Audio(AudioArgs),
+
+    /// Run the local analysis pipeline and cache the resulting bundle
+    Run(RunArgs),
+
     /// Build a source analysis report for an asset from cached analysis artifacts
     Report {
         /// Project directory path
@@ -346,6 +364,10 @@ struct CachedAnalysisBundle {
 
 pub fn execute(action: AnalysisAction) -> anyhow::Result<()> {
     match action {
+        AnalysisAction::Shots(args) => super::perception::shots(args),
+        AnalysisAction::Silence(args) => super::perception::silence(args),
+        AnalysisAction::Audio(args) => super::perception::audio(args),
+        AnalysisAction::Run(args) => super::perception::run(args),
         AnalysisAction::Report { path, id } => {
             let project_dir = std::fs::canonicalize(&path).map_err(|e| {
                 anyhow::anyhow!("Project path '{}' not found: {}", path.display(), e)

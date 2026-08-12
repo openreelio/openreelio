@@ -152,6 +152,110 @@ fn create_sample_video_with_duration(path: &std::path::Path, duration_secs: u32)
     status.success()
 }
 
+/// Picks the best available H.264-ish encoder, or `None` when ffmpeg has none.
+fn preferred_video_encoder(ffmpeg_path: &std::path::Path) -> Option<&'static str> {
+    if ffmpeg_supports_encoder(ffmpeg_path, "libx264") {
+        Some("libx264")
+    } else if ffmpeg_supports_encoder(ffmpeg_path, "mpeg4") {
+        Some("mpeg4")
+    } else {
+        None
+    }
+}
+
+/// Generates a 4-second video with a hard black-to-white cut at 2s.
+///
+/// Shot detection needs an unambiguous scene change; a single flat colour
+/// source produces none.
+fn create_sample_video_with_scene_change(path: &std::path::Path) -> bool {
+    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+        return false;
+    };
+    let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
+        eprintln!("Skipping perception test: ffmpeg lacks a supported video encoder");
+        return false;
+    };
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=320x240:r=25:d=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=white:s=320x240:r=25:d=2",
+        "-filter_complex",
+        "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+        "-map",
+        "[v]",
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p"]);
+    }
+
+    let status = command
+        .arg(path)
+        .status()
+        .expect("Failed to generate scene-change sample with ffmpeg");
+    if !status.success() {
+        eprintln!("Skipping perception test: ffmpeg could not generate the scene-change sample");
+    }
+    status.success()
+}
+
+/// Generates a 4-second video whose audio is a tone with a silent 1s–3s gap.
+///
+/// Silence detection and audio profiling need a real audio stream; the plain
+/// colour fixture is video-only.
+fn create_sample_video_with_audio(path: &std::path::Path) -> bool {
+    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+        return false;
+    };
+    let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
+        eprintln!("Skipping perception test: ffmpeg lacks a supported video encoder");
+        return false;
+    };
+    if !ffmpeg_supports_encoder(&ffmpeg_path, "aac") {
+        eprintln!("Skipping perception test: ffmpeg lacks the aac encoder");
+        return false;
+    }
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=320x240:r=25:d=4",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=44100:duration=4",
+        "-af",
+        "volume=enable='between(t,1,3)':volume=0",
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p"]);
+    }
+    command.args(["-c:a", "aac", "-shortest"]);
+
+    let status = command
+        .arg(path)
+        .status()
+        .expect("Failed to generate audio sample with ffmpeg");
+    if !status.success() {
+        eprintln!("Skipping perception test: ffmpeg could not generate the audio sample");
+    }
+    status.success()
+}
+
 fn system_ffprobe_path() -> Option<PathBuf> {
     openreelio_core::ffmpeg::detect_system_ffmpeg()
         .ok()
@@ -2022,4 +2126,320 @@ fn test_core_flow_create_import_edit_caption_render_end_to_end() {
             "Expected rendered output to have a positive duration, got {duration}"
         );
     }
+}
+
+// =============================================================================
+// Perception Commands
+// =============================================================================
+
+/// Creates a project and imports media produced by `build_media`.
+///
+/// Returns `None` when FFmpeg cannot produce the fixture so callers can skip.
+fn create_project_with_media(
+    name: &str,
+    file_name: &str,
+    build_media: impl Fn(&std::path::Path) -> bool,
+) -> Option<(tempfile::TempDir, String, String)> {
+    system_ffmpeg_path()?;
+
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+
+    let source_path = dir.path().join(file_name);
+    if !build_media(&source_path) {
+        return None;
+    }
+
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source_path.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    Some((dir, path, asset_id))
+}
+
+/// Path of the cached analysis bundle written by the perception verbs.
+fn bundle_path(project_path: &str, asset_id: &str) -> PathBuf {
+    PathBuf::from(project_path)
+        .join(".openreelio")
+        .join("analysis")
+        .join(asset_id)
+        .join("bundle.json")
+}
+
+#[test]
+fn test_analysis_shots_detects_and_persists_scene_change() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "shots_persist_test",
+        "scene_change.mp4",
+        create_sample_video_with_scene_change,
+    ) else {
+        return;
+    };
+
+    let result = run_cli_ok(&["analysis", "shots", "--path", &path, "--id", &asset_id]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["assetId"], asset_id.as_str());
+    assert!(
+        result["shotCount"].as_u64().unwrap() >= 1,
+        "Expected at least one detected shot, got {}",
+        result["shotCount"]
+    );
+    assert!(result["totalDurationSec"].as_f64().unwrap() > 0.0);
+
+    let persisted: Vec<&str> = result["persisted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(persisted.contains(&"bundle"), "persisted: {:?}", persisted);
+    assert!(
+        persisted.contains(&"annotations"),
+        "persisted: {:?}",
+        persisted
+    );
+    assert!(persisted.contains(&"indexDb"), "persisted: {:?}", persisted);
+
+    assert!(
+        bundle_path(&path, &asset_id).exists(),
+        "Expected the analysis bundle to be written"
+    );
+    assert!(
+        PathBuf::from(&path).join("index.db").exists(),
+        "Expected the shot index database to be written"
+    );
+
+    // The cached artifacts must be visible to the reporting verbs.
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(report["coverage"]["shots"], true);
+    assert_eq!(report["shots"]["count"], result["shotCount"]);
+}
+
+#[test]
+fn test_analysis_shots_writes_nothing_with_no_persist() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "shots_no_persist_test",
+        "scene_change.mp4",
+        create_sample_video_with_scene_change,
+    ) else {
+        return;
+    };
+
+    let result = run_cli_ok(&[
+        "analysis",
+        "shots",
+        "--path",
+        &path,
+        "--id",
+        &asset_id,
+        "--no-persist",
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert!(result["shotCount"].as_u64().unwrap() >= 1);
+    assert_eq!(result["persisted"].as_array().unwrap().len(), 0);
+    assert!(
+        !bundle_path(&path, &asset_id).exists(),
+        "Expected --no-persist to leave the analysis bundle untouched"
+    );
+
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(report["coverage"]["shots"], false);
+}
+
+#[test]
+fn test_analysis_shots_rejects_out_of_range_threshold() {
+    let dir = create_temp_project("shots_threshold_test");
+    let path = project_path(&dir, "shots_threshold_test");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "analysis",
+        "shots",
+        "--path",
+        &path,
+        "--id",
+        "asset_missing",
+        "--threshold",
+        "1.5",
+    ]);
+    assert!(
+        stderr.contains("threshold"),
+        "Expected a threshold validation error, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_analysis_silence_caches_regions_at_default_thresholds() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "silence_default_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let result = run_cli_ok(&["analysis", "silence", "--path", &path, "--id", &asset_id]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["persisted"], true);
+    assert!(result.get("reason").is_none() || result["reason"].is_null());
+    assert!(
+        result["regionCount"].as_u64().unwrap() >= 1,
+        "Expected the muted 1s-3s window to be detected"
+    );
+    assert!(result["totalSilenceSec"].as_f64().unwrap() > 0.0);
+    assert!(
+        bundle_path(&path, &asset_id).exists(),
+        "Expected default-threshold silence to be cached"
+    );
+
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(report["coverage"]["audio"], true);
+}
+
+#[test]
+fn test_analysis_silence_is_output_only_for_non_default_threshold() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "silence_custom_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let result = run_cli_ok(&[
+        "analysis",
+        "silence",
+        "--path",
+        &path,
+        "--id",
+        &asset_id,
+        "--threshold-db",
+        "-30",
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["persisted"], false);
+    assert_eq!(result["reason"], "non-default threshold");
+    assert!(
+        !bundle_path(&path, &asset_id).exists(),
+        "Non-default silence parameters must not poison the shared cache"
+    );
+}
+
+#[test]
+fn test_analysis_audio_profiles_and_caches_the_bundle() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "audio_profile_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let result = run_cli_ok(&["analysis", "audio", "--path", &path, "--id", &asset_id]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["persisted"], true);
+    assert!(result["durationSec"].as_f64().unwrap() > 0.0);
+    assert!(result["silenceRegionCount"].as_u64().unwrap() >= 1);
+    assert!(result["peakDb"].is_number());
+    assert!(
+        bundle_path(&path, &asset_id).exists(),
+        "Expected the audio profile to be cached"
+    );
+
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(report["coverage"]["audio"], true);
+}
+
+#[test]
+fn test_analysis_run_streams_progress_and_caches_the_bundle() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "analysis_run_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let (stdout, stderr, success) = run_cli(&[
+        "analysis",
+        "run",
+        "--path",
+        &path,
+        "--id",
+        &asset_id,
+        "--progress",
+    ]);
+    assert!(
+        success,
+        "analysis run failed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let result: serde_json::Value =
+        serde_json::from_str(&stdout).expect("analysis run must print one JSON object to stdout");
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["options"]["localOnly"], true);
+    assert_eq!(result["options"]["transcript"], false);
+    assert_eq!(result["hasAudioProfile"], true);
+    assert!(result["shotCount"].as_u64().unwrap() >= 1);
+    assert!(result["segmentCount"].as_u64().unwrap() >= 1);
+    assert!(result["errors"].as_object().unwrap().is_empty());
+    assert!(bundle_path(&path, &asset_id).exists());
+
+    // Progress must be NDJSON on stderr so stdout stays a single JSON object.
+    let progress_lines: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .filter(|value| value["type"] == "progress")
+        .collect();
+    assert!(
+        !progress_lines.is_empty(),
+        "Expected NDJSON progress on stderr, got: {stderr}"
+    );
+    assert!(progress_lines
+        .iter()
+        .any(|line| line["job"] == "shots" && line["status"] == "started"));
+    assert!(progress_lines
+        .iter()
+        .any(|line| line["job"] == "bundle" && line["status"] == "saved"));
+
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(report["coverage"]["shots"], true);
+    assert_eq!(report["coverage"]["audio"], true);
+    assert_eq!(report["coverage"]["segments"], true);
+}
+
+#[test]
+fn test_analysis_run_preserves_results_from_earlier_partial_runs() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "analysis_run_merge_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let audio = run_cli_ok(&["analysis", "audio", "--path", &path, "--id", &asset_id]);
+    assert_eq!(audio["status"], "ok");
+
+    // A shots-only run must not drop the audio profile the previous run cached.
+    let result = run_cli_ok(&[
+        "analysis", "run", "--path", &path, "--id", &asset_id, "--shots",
+    ]);
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["options"]["audio"], false);
+    assert_eq!(result["hasAudioProfile"], true);
+
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(report["coverage"]["shots"], true);
+    assert_eq!(report["coverage"]["audio"], true);
 }
