@@ -2443,3 +2443,314 @@ fn test_analysis_run_preserves_results_from_earlier_partial_runs() {
     assert_eq!(report["coverage"]["shots"], true);
     assert_eq!(report["coverage"]["audio"], true);
 }
+
+// =============================================================================
+// verify
+// =============================================================================
+
+/// Runs the CLI and returns (stdout, stderr, exit code).
+///
+/// `verify` distinguishes "found problems" (1) from "could not run" (2), so its
+/// tests need the code itself rather than a success flag.
+fn run_cli_exit(args: &[&str]) -> (String, String, i32) {
+    let output = Command::new(cli_bin())
+        .args(args)
+        .output()
+        .expect("Failed to execute CLI binary");
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+/// Creates a project holding one dummy asset placed on the first video track.
+///
+/// Deliberately FFmpeg-free: structural verification must work on a machine
+/// without a media toolchain.
+fn create_project_with_placed_dummy(name: &str) -> (tempfile::TempDir, String, String, String) {
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+
+    let dummy_file = dir.path().join("clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    (dir, path, asset_id, track_id)
+}
+
+/// Finds a check entry by its stable ID.
+fn find_check<'a>(report: &'a serde_json::Value, check_id: &str) -> &'a serde_json::Value {
+    report["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .find(|check| check["id"] == check_id)
+        .unwrap_or_else(|| panic!("check '{check_id}' missing from report: {report}"))
+}
+
+#[test]
+fn test_verify_structural_only_passes_on_a_healthy_project() {
+    let (_dir, path, _asset_id, _track_id) =
+        create_project_with_placed_dummy("verify_structural_ok");
+
+    let (stdout, stderr, code) = run_cli_exit(&["verify", "--path", &path, "--structural-only"]);
+    assert_eq!(
+        code, 0,
+        "expected a clean structural run.\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["passed"], true);
+    assert_eq!(report["summary"]["error"], 0);
+    assert_eq!(report["summary"]["critical"], 0);
+
+    // Structural runs must never reach for FFmpeg.
+    assert_eq!(report["target"]["measured"], false);
+    assert_eq!(report["measurements"]["measured"], false);
+
+    let stats = find_check(&report, "shot.length_stats");
+    assert_eq!(stats["status"], "passed");
+    assert_eq!(stats["metrics"]["count"], 1);
+    assert!(stats["metrics"]["medianSec"].as_f64().unwrap() > 0.0);
+
+    // A passing check still has to appear, or an agent cannot tell it ran.
+    let gap = find_check(&report, "timeline.gap");
+    assert_eq!(gap["status"], "passed");
+    assert_eq!(gap["violationCount"], 0);
+
+    // Rendered checks are skipped with a reason rather than silently passed.
+    let black = find_check(&report, "render.black_frames");
+    assert_eq!(black["status"], "skipped");
+    assert_eq!(black["passed"], false);
+    assert!(black["skipReason"]
+        .as_str()
+        .unwrap()
+        .contains("measurements"));
+}
+
+#[test]
+fn test_verify_reports_a_timeline_gap_as_an_error_and_exits_one() {
+    let (dir, path, asset_id, track_id) = create_project_with_placed_dummy("verify_gap_error");
+
+    // The dummy asset yields a 10s clip; placing the next one at 11s leaves a
+    // deliberate one-second hole in the picture.
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "11.0",
+    ]);
+
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--structural-only",
+        "--fail-on",
+        "error",
+    ]);
+    assert_eq!(
+        code, 1,
+        "a gap must breach the error threshold.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["passed"], false);
+    assert_eq!(report["summary"]["error"], 1);
+
+    let gap = find_check(&report, "timeline.gap");
+    assert_eq!(gap["status"], "failed");
+    assert_eq!(gap["severity"], "error");
+    assert_eq!(gap["violationCount"], 1);
+    assert!((gap["timeRanges"][0]["startSec"].as_f64().unwrap() - 10.0).abs() < 1e-6);
+    assert!((gap["timeRanges"][0]["endSec"].as_f64().unwrap() - 11.0).abs() < 1e-6);
+
+    // The suggested fix has to be executable, not merely descriptive.
+    let step = &gap["suggestedFix"]["steps"][0];
+    assert_eq!(step["commandType"], "CloseGap");
+    assert_eq!(step["payload"]["trackId"], track_id.as_str());
+
+    let plan_file = dir.path().join("fix-plan.json");
+    std::fs::write(
+        &plan_file,
+        serde_json::json!({
+            "id": "plan_verify_fix",
+            "steps": gap["suggestedFix"]["steps"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let applied = run_cli_ok(&[
+        "plan",
+        "execute",
+        "--path",
+        &path,
+        "--file",
+        plan_file.to_str().unwrap(),
+    ]);
+    assert_eq!(applied["status"], "ok");
+
+    let (stdout, _stderr, code) = run_cli_exit(&["verify", "--path", &path, "--structural-only"]);
+    assert_eq!(code, 0, "the suggested fix must close the gap: {stdout}");
+}
+
+#[test]
+fn test_verify_rejects_an_unknown_check_id_with_the_tool_failure_code() {
+    let (_dir, path, _asset_id, _track_id) = create_project_with_placed_dummy("verify_bad_check");
+
+    let (_stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--structural-only",
+        "--checks",
+        "not.a.real.check",
+    ]);
+
+    assert_eq!(code, 2, "bad arguments are a tool failure, not a finding");
+    assert!(
+        stderr.contains("Unknown check"),
+        "expected the error to list the known checks, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_verify_measures_a_rendered_file() {
+    let Some((dir, path, asset_id)) = create_project_with_media(
+        "verify_rendered_test",
+        "verify_source.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    let render_path = dir.path().join("verify-proxy.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--start",
+        "0",
+        "--end",
+        "2",
+        "--output",
+        render_path.to_str().unwrap(),
+    ]);
+    if !success {
+        eprintln!("Skipping verify render test: proxy render failed.\n{stdout}\n{stderr}");
+        return;
+    }
+
+    // The fixture is a bare test tone, so its absolute loudness says nothing
+    // about the edit; the measurement itself is still asserted below.
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        render_path.to_str().unwrap(),
+        "--skip",
+        "audio.loudness",
+    ]);
+    assert_eq!(
+        code, 0,
+        "rendered verification should run cleanly.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+
+    assert_eq!(report["target"]["measured"], true);
+    assert_eq!(report["measurements"]["measured"], true);
+    assert_eq!(report["measurements"]["videoMeasured"], true);
+    assert_eq!(report["measurements"]["audioMeasured"], true);
+    assert!(report["measurements"]["durationSec"].as_f64().unwrap() > 0.0);
+
+    // Loudness is measured even though the check itself was skipped.
+    assert!(
+        report["measurements"]["integratedLufs"].is_number(),
+        "expected an EBU R128 reading: {}",
+        report["measurements"]
+    );
+
+    let black = find_check(&report, "render.black_frames");
+    assert_ne!(
+        black["status"], "skipped",
+        "rendered checks must run once a file was measured: {black}"
+    );
+
+    let peak = find_check(&report, "audio.peak");
+    assert_ne!(
+        peak["status"], "skipped",
+        "peak check should have run: {peak}"
+    );
+
+    let loudness = find_check(&report, "audio.loudness");
+    assert_eq!(loudness["status"], "skipped");
+}
+
+#[test]
+fn test_verify_reports_a_missing_render_file_as_a_tool_failure() {
+    let (_dir, path, _asset_id, _track_id) =
+        create_project_with_placed_dummy("verify_missing_file");
+
+    let (_stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        "definitely-not-here.mp4",
+    ]);
+
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("does not exist"),
+        "expected a missing-file error, got: {stderr}"
+    );
+}

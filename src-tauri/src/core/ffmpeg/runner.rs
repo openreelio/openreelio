@@ -1121,6 +1121,282 @@ impl FFmpegRunner {
 
         Ok(waveform)
     }
+
+    /// Runs a `-filter_complex` analysis pass and returns the captured stderr.
+    ///
+    /// Analysis filters (`blackdetect`, `freezedetect`, `silencedetect`,
+    /// `ebur128`, `astats`) report their findings to stderr at FFmpeg's INFO
+    /// log level, so the invocation pins `-loglevel info` and discards the
+    /// decoded output with `-f null -`.
+    ///
+    /// `maps` lists the filtergraph output labels to map (for example
+    /// `["[v]", "[a]"]`); an empty slice leaves stream selection to FFmpeg.
+    /// The call is aborted with [`FFmpegError::Timeout`] once `timeout`
+    /// elapses, and stderr retention is bounded (see [`FilterStderrCapture`]),
+    /// so a pathological input can neither hang nor exhaust memory.
+    pub async fn run_filter_capture_stderr(
+        &self,
+        input: &Path,
+        filter_complex: &str,
+        maps: &[&str],
+        timeout: std::time::Duration,
+    ) -> FFmpegResult<String> {
+        let capture = capture_filter_stderr(
+            &self.info.ffmpeg_path,
+            input,
+            FilterMode::Complex {
+                graph: filter_complex,
+                maps,
+            },
+            timeout,
+        )
+        .await?;
+
+        if !capture.success {
+            return Err(FFmpegError::ExecutionFailed(format!(
+                "Filter analysis failed (exit {}). Stderr tail:\n{}",
+                capture.exit_code.unwrap_or(-1),
+                capture.stderr_tail(STDERR_ERROR_TAIL_LINES)
+            )));
+        }
+
+        Ok(capture.stderr)
+    }
+}
+
+// =============================================================================
+// Filter analysis passes
+// =============================================================================
+
+/// Number of stderr tail lines quoted in filter-analysis error messages.
+const STDERR_ERROR_TAIL_LINES: usize = 20;
+
+/// Maximum number of filter-output lines retained from a capture.
+///
+/// Per-frame filters (`ametadata=mode=print`) emit tens of thousands of lines
+/// on long inputs, so retention is capped: the oldest lines are dropped and the
+/// capture is flagged as truncated. The cap is deliberately generous — it exists
+/// to bound memory, not to trim ordinary output.
+const MAX_RETAINED_FILTER_LINES: usize = 200_000;
+
+/// Maximum number of trailing lines retained regardless of content.
+///
+/// The `ebur128` summary block is emitted as indented continuation lines that
+/// carry no filter prefix, so the tail window is what keeps it intact.
+const MAX_RETAINED_TAIL_LINES: usize = 400;
+
+/// Line prefixes/markers that identify output worth keeping in full.
+const FILTER_LINE_MARKERS: &[&str] = &[
+    "[Parsed_",
+    "[silencedetect",
+    "[blackdetect",
+    "[freezedetect",
+    "[Parsed_ebur128",
+    "lavfi.",
+    "silence_start",
+    "silence_end",
+    "black_start",
+    "black_end",
+    "freeze_start",
+    "freeze_end",
+];
+
+/// How a filtergraph is attached to an analysis invocation.
+#[derive(Debug, Clone, Copy)]
+pub enum FilterMode<'a> {
+    /// `-af <filter> -vn`: audio-only pass over the first audio stream.
+    ///
+    /// Kept distinct from [`FilterMode::Complex`] because FFmpeg reports a
+    /// missing audio stream differently for the two forms, and callers match
+    /// on that message to tell "no audio" apart from "analysis failed".
+    Audio(&'a str),
+    /// `-filter_complex <graph>` with the given output labels mapped.
+    Complex {
+        /// The filtergraph description.
+        graph: &'a str,
+        /// Output labels to map, e.g. `["[v]", "[a]"]`.
+        maps: &'a [&'a str],
+    },
+}
+
+/// Result of an analysis pass, including runs that exited non-zero.
+///
+/// Failure is reported as data rather than an error so callers can inspect the
+/// captured stderr first: a missing audio stream, for example, surfaces only in
+/// the log text while FFmpeg exits non-zero.
+#[derive(Debug, Clone)]
+pub struct FilterCapture {
+    /// Retained stderr text (bounded; see [`FilterStderrCapture`]).
+    pub stderr: String,
+    /// Whether FFmpeg exited successfully.
+    pub success: bool,
+    /// Process exit code, when one was reported.
+    pub exit_code: Option<i32>,
+    /// Whether stderr retention dropped lines.
+    pub truncated: bool,
+}
+
+impl FilterCapture {
+    /// Returns the last `lines` lines of the captured stderr.
+    pub fn stderr_tail(&self, lines: usize) -> String {
+        let all: Vec<&str> = self.stderr.lines().collect();
+        let start = all.len().saturating_sub(lines);
+        all[start..].join("\n")
+    }
+}
+
+/// Runs an FFmpeg analysis pass and captures its stderr.
+///
+/// The output is discarded (`-f null -`); only the filter log matters. The
+/// invocation pins `-loglevel info` (filters log their findings at that level)
+/// and `-nostats` (the periodic encode progress line is noise here).
+///
+/// Returns [`FFmpegError::Timeout`] when `timeout` elapses; the child process
+/// is killed before returning so no orphan encoder is left behind.
+pub async fn capture_filter_stderr(
+    ffmpeg_path: &Path,
+    input: &Path,
+    mode: FilterMode<'_>,
+    timeout: std::time::Duration,
+) -> FFmpegResult<FilterCapture> {
+    if !input.exists() {
+        return Err(FFmpegError::InvalidInput(format!(
+            "Input file does not exist: {}",
+            input.display()
+        )));
+    }
+
+    let mut cmd = tokio::process::Command::new(ffmpeg_path);
+    configure_tokio_command(&mut cmd);
+    cmd.args(["-hide_banner", "-nostats", "-nostdin", "-loglevel", "info"]);
+    cmd.arg("-i").arg(input);
+
+    match mode {
+        FilterMode::Audio(filter) => {
+            cmd.arg("-af").arg(filter).arg("-vn");
+        }
+        FilterMode::Complex { graph, maps } => {
+            cmd.arg("-filter_complex").arg(graph);
+            for label in maps {
+                cmd.arg("-map").arg(label);
+            }
+        }
+    }
+
+    cmd.args(["-f", "null", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(FFmpegError::ProcessError)?;
+
+    let stderr = child.stderr.take();
+    let (capture_tx, capture_rx) = tokio::sync::oneshot::channel::<FilterStderrCapture>();
+    let reader_task = tokio::spawn(async move {
+        let mut capture = FilterStderrCapture::new();
+        if let Some(stderr) = stderr {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                capture.push(&line);
+            }
+        }
+        let _ = capture_tx.send(capture);
+    });
+
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(result) => result.map_err(FFmpegError::ProcessError)?,
+        Err(_) => {
+            // Kill first, then drain: the reader task only ends once the child
+            // closes its stderr pipe.
+            let _ = child.kill().await;
+            reader_task.abort();
+            return Err(FFmpegError::Timeout);
+        }
+    };
+
+    let capture = capture_rx.await.unwrap_or_default();
+    let _ = reader_task.await;
+
+    Ok(FilterCapture {
+        stderr: capture.joined(),
+        success: status.success(),
+        exit_code: status.code(),
+        truncated: capture.truncated,
+    })
+}
+
+/// Bounded, order-preserving stderr buffer for analysis passes.
+///
+/// Filter findings can be numerous (one line per detected range) while the
+/// surrounding FFmpeg chatter is irrelevant, so lines that look like filter
+/// output are retained up to a high cap and everything else survives only
+/// inside a short trailing window. Sequence numbers keep the merged result in
+/// emission order without duplicating lines held by both buffers.
+#[derive(Debug, Default)]
+struct FilterStderrCapture {
+    next_seq: usize,
+    filter_lines: std::collections::VecDeque<(usize, String)>,
+    tail_lines: std::collections::VecDeque<(usize, String)>,
+    truncated: bool,
+}
+
+impl FilterStderrCapture {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn push(&mut self, line: &str) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+
+        if is_filter_output_line(line) {
+            if self.filter_lines.len() == MAX_RETAINED_FILTER_LINES {
+                self.filter_lines.pop_front();
+                self.truncated = true;
+            }
+            self.filter_lines.push_back((seq, line.to_string()));
+        }
+
+        // Dropping an old non-filter line is the intended behaviour of the
+        // trailing window, so it does not count as truncation.
+        if self.tail_lines.len() == MAX_RETAINED_TAIL_LINES {
+            self.tail_lines.pop_front();
+        }
+        self.tail_lines.push_back((seq, line.to_string()));
+    }
+
+    /// Merges both buffers back into emission order, without duplicates.
+    fn joined(&self) -> String {
+        let mut merged: Vec<(usize, &str)> =
+            Vec::with_capacity(self.filter_lines.len() + self.tail_lines.len());
+        merged.extend(
+            self.filter_lines
+                .iter()
+                .map(|(seq, line)| (*seq, line.as_str())),
+        );
+        merged.extend(
+            self.tail_lines
+                .iter()
+                .map(|(seq, line)| (*seq, line.as_str())),
+        );
+        merged.sort_by_key(|(seq, _)| *seq);
+        merged.dedup_by_key(|(seq, _)| *seq);
+
+        merged
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Returns whether a stderr line carries filter output worth retaining in full.
+fn is_filter_output_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    FILTER_LINE_MARKERS
+        .iter()
+        .any(|marker| trimmed.starts_with(marker) || trimmed.contains(marker))
 }
 
 /// Parse peak levels from FFmpeg astats filter output
@@ -1446,6 +1722,93 @@ fn parse_audio_stream(stream: &serde_json::Value) -> FFmpegResult<AudioStreamInf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // Filter stderr capture Tests
+    // =========================================================================
+
+    #[test]
+    fn test_filter_capture_should_keep_lines_in_emission_order() {
+        let mut capture = FilterStderrCapture::new();
+        capture.push("[blackdetect @ 0x1] black_start:0 black_end:0.5");
+        capture.push("frame= 10 fps=0.0");
+        capture.push("[silencedetect @ 0x2] silence_start: 1.0");
+
+        let joined = capture.joined();
+        let lines: Vec<&str> = joined.lines().collect();
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("black_start"));
+        assert!(lines[1].contains("frame="));
+        assert!(lines[2].contains("silence_start"));
+        assert!(!capture.truncated);
+    }
+
+    #[test]
+    fn test_filter_capture_should_retain_filter_lines_beyond_the_tail_window() {
+        let mut capture = FilterStderrCapture::new();
+        capture.push("[blackdetect @ 0x1] black_start:0 black_end:0.5");
+        for index in 0..(MAX_RETAINED_TAIL_LINES * 2) {
+            capture.push(&format!("noise line {}", index));
+        }
+
+        let joined = capture.joined();
+
+        assert!(
+            joined.contains("black_start"),
+            "filter output must survive a flood of unrelated stderr"
+        );
+        assert!(
+            !joined.contains("noise line 0"),
+            "unrelated stderr must be bounded"
+        );
+        assert!(!capture.truncated);
+    }
+
+    #[test]
+    fn test_filter_capture_should_not_duplicate_lines_held_by_both_buffers() {
+        let mut capture = FilterStderrCapture::new();
+        capture.push("[silencedetect @ 0x2] silence_start: 1.0");
+        capture.push("[silencedetect @ 0x2] silence_end: 2.0 | silence_duration: 1.0");
+
+        let joined = capture.joined();
+
+        assert_eq!(joined.matches("silence_start").count(), 1);
+        assert_eq!(joined.matches("silence_end").count(), 1);
+    }
+
+    #[test]
+    fn test_filter_capture_should_flag_truncation_when_filter_output_overflows() {
+        let mut capture = FilterStderrCapture::new();
+        for index in 0..(MAX_RETAINED_FILTER_LINES + 5) {
+            capture.push(&format!("[blackdetect @ 0x1] black_start:{}", index));
+        }
+
+        assert!(capture.truncated);
+    }
+
+    #[test]
+    fn test_is_filter_output_line() {
+        assert!(is_filter_output_line("[Parsed_ebur128_0 @ 0x1] Summary:"));
+        assert!(is_filter_output_line(
+            "[freezedetect @ 0x1] lavfi.freezedetect.freeze_start: 2"
+        ));
+        assert!(!is_filter_output_line("  Integrated loudness:"));
+        assert!(!is_filter_output_line("frame= 120 fps=30"));
+    }
+
+    #[test]
+    fn test_filter_capture_stderr_tail() {
+        let capture = FilterCapture {
+            stderr: "a\nb\nc\nd".to_string(),
+            success: false,
+            exit_code: Some(1),
+            truncated: false,
+        };
+
+        assert_eq!(capture.stderr_tail(2), "c\nd");
+        assert_eq!(capture.stderr_tail(10), "a\nb\nc\nd");
+    }
 
     // =========================================================================
     // WaveformData Tests

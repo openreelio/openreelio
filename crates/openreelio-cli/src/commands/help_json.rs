@@ -644,6 +644,23 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 },
                 "example": "openreelio-cli frame extract --path ./project --time 12.5 --out frame.png"
             },
+            "verify": {
+                "description": "Run deterministic quality control over a sequence and, with --file, over a rendered export. Emits one entry per check — including the ones that passed or were skipped — so an agent can tell 'checked and clean' from 'never checked'. Exit codes: 0 = ran without breaching --fail-on, 1 = threshold breached, 2 = tool failure (bad arguments, unreadable file, FFmpeg failure, or a check that errored).",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" },
+                    "file": { "type": "string", "required": false, "desc": "Rendered file to measure (black/freeze/silence detection, EBU R128 loudness, peaks). Without it only structural checks run and FFmpeg is never invoked. Measured times are file-relative and are compared against timeline times, so pass a full-sequence render rather than a partial one." },
+                    "structural-only": { "type": "boolean", "required": false, "desc": "Run structural checks only and never touch FFmpeg; conflicts with --file" },
+                    "checks": { "type": "string", "required": false, "desc": "Comma-separated check IDs to run exclusively: timeline.gap, clip.orphan, clip.missing_asset, audio.silent_clip, caption.overlap, caption.reading_rate, caption.out_of_bounds, caption.safe_area, shot.length_stats, shot.cut_rhythm, clip.aspect_ratio, asset.license, sequence.duration, render.black_frames, audio.peak, audio.loudness. asset.license and sequence.duration are opt-in and only run when named here." },
+                    "skip": { "type": "string", "required": false, "desc": "Comma-separated check IDs to disable" },
+                    "target-lufs": { "type": "number", "required": false, "desc": "Integrated loudness target in LUFS (default -14). Deviation over 1 LU warns, over 3 LU errors." },
+                    "max-true-peak": { "type": "number", "required": false, "desc": "Maximum acceptable true peak in dBTP (default -1). Sample peak is used when the encoder reports no true peak." },
+                    "fail-on": { "type": "string", "required": false, "desc": "Lowest severity that exits 1: info, warning, error (default), critical" },
+                    "timeout-sec": { "type": "number", "required": false, "desc": "Timeout for the rendered-file measurement pass in seconds (default: 600)" },
+                    "json-pretty": { "type": "boolean", "required": false, "desc": "Pretty-print the JSON output" }
+                },
+                "example": "openreelio-cli verify --path ./project --file proxy.mp4 --target-lufs -14 --fail-on error"
+            },
             "mcp": {
                 "description": "Serve read-only OpenReelio MCP tools for external AI agents",
                 "params": {

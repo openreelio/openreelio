@@ -11,8 +11,12 @@ use tokio::sync::RwLock;
 
 use super::context::{QCContext, RenderMeasurements};
 use super::rules::{
-    AspectRatioRule, AudioPeakRule, BlackFrameRule, CaptionSafeAreaRule, CutRhythmRule,
-    DurationRule, LicenseRule, QCRule, RuleConfig,
+    AspectRatioRule, AudioLoudnessRule, AudioPeakRule, BlackFrameRule, CaptionSafeAreaRule,
+    CheckCategory, CutRhythmRule, DurationRule, LicenseRule, QCRule, RuleConfig,
+};
+use super::structural::{
+    CaptionOutOfBoundsRule, CaptionOverlapRule, CaptionReadingRateRule, ClipOrphanRule,
+    MissingAssetRule, ShotLengthStatsRule, SilentClipRule, TimelineGapRule,
 };
 use super::violation::{QCViolation, Severity, ViolationFix};
 use crate::core::project::ProjectState;
@@ -123,6 +127,39 @@ pub struct RuleFailure {
     pub message: String,
 }
 
+/// What happened to a single rule during a check run
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleStatus {
+    /// The rule ran to completion
+    Ran,
+    /// The rule was disabled or could not run against this context
+    Skipped,
+    /// The rule returned an error
+    Errored,
+}
+
+/// Per-rule record of a check run
+///
+/// The violation list alone cannot distinguish "this check passed" from "this
+/// check never ran", which is exactly the distinction an agent acting on the
+/// report needs. One outcome is recorded for every registered rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleOutcome {
+    /// Rule type name
+    pub rule_name: String,
+    /// Stable dotted check ID
+    pub check_id: String,
+    /// What the rule inspects
+    pub category: CheckCategory,
+    /// Whether the rule ran, was skipped, or failed
+    pub status: RuleStatus,
+    /// Why the rule was skipped, or the error it returned
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// QC check report
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QCReport {
@@ -144,6 +181,9 @@ pub struct QCReport {
     /// never be reported as passing while this list is non-empty.
     #[serde(default)]
     pub errored_rules: Vec<RuleFailure>,
+    /// One record per registered rule, in registration order
+    #[serde(default)]
+    pub rule_outcomes: Vec<RuleOutcome>,
     /// Whether the check was stopped early
     pub stopped_early: bool,
     /// Overall pass/fail status
@@ -161,6 +201,7 @@ impl QCReport {
             severity_counts: HashMap::new(),
             skipped_rules: Vec::new(),
             errored_rules: Vec::new(),
+            rule_outcomes: Vec::new(),
             stopped_early: false,
             passed: true,
         }
@@ -185,6 +226,68 @@ impl QCReport {
             message,
         });
         self.passed = false;
+    }
+
+    /// Recomputes the derived counters and pass state from the violations
+    ///
+    /// Callers that re-grade violations after the run (see
+    /// [`crate::core::qc::structural::crossref_black_ranges_with_gaps`]) must
+    /// call this, otherwise the summary describes the pre-grading state.
+    pub fn recompute(&mut self) {
+        self.severity_counts.clear();
+        self.passed = self.errored_rules.is_empty();
+
+        for violation in &self.violations {
+            *self
+                .severity_counts
+                .entry(violation.severity.to_string())
+                .or_insert(0) += 1;
+
+            if violation.severity >= Severity::Error {
+                self.passed = false;
+            }
+        }
+    }
+
+    /// Returns the recorded outcome for a rule, when the run covered it
+    pub fn outcome_for(&self, rule_name: &str) -> Option<&RuleOutcome> {
+        self.rule_outcomes
+            .iter()
+            .find(|outcome| outcome.rule_name == rule_name)
+    }
+
+    /// Records that a rule ran to completion
+    fn record_ran(&mut self, rule: &dyn QCRule) {
+        self.rule_outcomes.push(RuleOutcome {
+            rule_name: rule.name().to_string(),
+            check_id: rule.check_id().to_string(),
+            category: rule.category(),
+            status: RuleStatus::Ran,
+            reason: None,
+        });
+    }
+
+    /// Records that a rule was skipped, and why
+    fn record_skip(&mut self, rule: &dyn QCRule, reason: &str) {
+        self.skipped_rules.push(rule.name().to_string());
+        self.rule_outcomes.push(RuleOutcome {
+            rule_name: rule.name().to_string(),
+            check_id: rule.check_id().to_string(),
+            category: rule.category(),
+            status: RuleStatus::Skipped,
+            reason: Some(reason.to_string()),
+        });
+    }
+
+    /// Records that a rule returned an error
+    fn record_error(&mut self, rule: &dyn QCRule, message: String) {
+        self.rule_outcomes.push(RuleOutcome {
+            rule_name: rule.name().to_string(),
+            check_id: rule.check_id().to_string(),
+            category: rule.category(),
+            status: RuleStatus::Errored,
+            reason: Some(message),
+        });
     }
 
     /// Gets violations of a specific severity
@@ -269,13 +372,25 @@ impl QCEngine {
 
     /// Registers all built-in rules
     fn register_builtin_rules(&mut self) {
-        self.register_rule(Arc::new(BlackFrameRule::new()));
-        self.register_rule(Arc::new(AudioPeakRule::new()));
+        // Structural rules: readable from project state alone.
+        self.register_rule(Arc::new(TimelineGapRule::new()));
+        self.register_rule(Arc::new(ClipOrphanRule::new()));
+        self.register_rule(Arc::new(MissingAssetRule::new()));
+        self.register_rule(Arc::new(SilentClipRule::new()));
+        self.register_rule(Arc::new(CaptionOverlapRule::new()));
+        self.register_rule(Arc::new(CaptionReadingRateRule::new()));
+        self.register_rule(Arc::new(CaptionOutOfBoundsRule::new()));
+        self.register_rule(Arc::new(ShotLengthStatsRule::new()));
         self.register_rule(Arc::new(CaptionSafeAreaRule::new()));
         self.register_rule(Arc::new(CutRhythmRule::new()));
         self.register_rule(Arc::new(LicenseRule::new()));
         self.register_rule(Arc::new(AspectRatioRule::new()));
         self.register_rule(Arc::new(DurationRule::new()));
+
+        // Rendered rules: need measurements from an exported file.
+        self.register_rule(Arc::new(BlackFrameRule::new()));
+        self.register_rule(Arc::new(AudioPeakRule::new()));
+        self.register_rule(Arc::new(AudioLoudnessRule::new()));
     }
 
     /// Registers a custom rule
@@ -283,9 +398,19 @@ impl QCEngine {
         self.rules.push(rule);
     }
 
+    /// Gets all registered rules
+    pub fn rules(&self) -> &[Arc<dyn QCRule>] {
+        &self.rules
+    }
+
     /// Gets all registered rule names
     pub fn rule_names(&self) -> Vec<&str> {
         self.rules.iter().map(|r| r.name()).collect()
+    }
+
+    /// Gets the rule registered for a check ID
+    pub fn get_rule_by_check_id(&self, check_id: &str) -> Option<&Arc<dyn QCRule>> {
+        self.rules.iter().find(|rule| rule.check_id() == check_id)
     }
 
     /// Gets a rule by name
@@ -342,27 +467,29 @@ impl QCEngine {
 
             // Check if rule is disabled
             if !config.is_rule_enabled(rule_name) {
-                report.skipped_rules.push(rule_name.to_string());
+                report.record_skip(rule.as_ref(), "disabled by configuration");
                 continue;
             }
 
             // Get rule-specific config
             let rule_config = config.get_rule_config(rule_name);
             if !rule_config.enabled {
-                report.skipped_rules.push(rule_name.to_string());
+                report.record_skip(rule.as_ref(), "disabled by rule configuration");
                 continue;
             }
 
             // A rule missing its required inputs is skipped, never silently passed
             if let Some(reason) = rule.skip_reason(context) {
                 tracing::debug!("Rule '{}' skipped: {}", rule_name, reason);
-                report.skipped_rules.push(rule_name.to_string());
+                report.record_skip(rule.as_ref(), &reason);
                 continue;
             }
 
             // Run the rule
             match rule.check(sequence, state, &rule_config, context).await {
                 Ok(violations) => {
+                    report.record_ran(rule.as_ref());
+
                     for violation in violations {
                         // Apply severity filter
                         if config.severity_filter.passes(violation.severity) {
@@ -383,6 +510,7 @@ impl QCEngine {
                     // report cannot claim a check that never ran as passing
                     tracing::warn!("Rule '{}' failed: {}", rule_name, e);
                     report.record_rule_failure(rule_name, e.to_string());
+                    report.record_error(rule.as_ref(), e.to_string());
                 }
             }
         }

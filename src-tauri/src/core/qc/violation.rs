@@ -134,6 +134,12 @@ pub struct QCViolation {
     pub details: Option<String>,
     /// Affected entity IDs (clip_id, track_id, etc.)
     pub affected_entities: Vec<String>,
+    /// Machine-readable measurements behind this violation
+    ///
+    /// Keeps numbers out of prose: an agent reading the report can act on
+    /// `{"gapSec": 1.5}` without parsing [`QCViolation::message`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metrics: std::collections::BTreeMap<String, serde_json::Value>,
     /// Whether this violation can be automatically fixed
     pub auto_fixable: bool,
     /// Suggested fix (if available)
@@ -155,6 +161,7 @@ impl QCViolation {
             message: message.into(),
             details: None,
             affected_entities: Vec::new(),
+            metrics: std::collections::BTreeMap::new(),
             auto_fixable: false,
             suggested_fix: None,
         }
@@ -175,6 +182,16 @@ impl QCViolation {
     /// Adds affected entity IDs
     pub fn with_entities(mut self, entities: Vec<String>) -> Self {
         self.affected_entities = entities;
+        self
+    }
+
+    /// Adds a single machine-readable metric
+    pub fn with_metric(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.metrics.insert(key.into(), value.into());
         self
     }
 

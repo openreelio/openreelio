@@ -7,17 +7,15 @@
 //! spectral centroid, and silence region detection.
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use uuid::Uuid;
 use webrtc_vad::{SampleRate as VadSampleRate, Vad, VadMode};
 
 use super::ducking::invert_silence_to_speech;
 use super::types::{AudioProfile, SilenceRegion, SpeechRegion, SILENCE_FLOOR_DB};
 use crate::core::captions::audio::{extract_audio_for_transcription_async, load_audio_samples_i16};
-use crate::core::process::configure_tokio_command;
+use crate::core::ffmpeg::{capture_filter_stderr, FFmpegError, FilterMode};
 use crate::core::{CoreError, CoreResult};
 
 // =============================================================================
@@ -48,6 +46,12 @@ const MAX_BPM: f64 = 300.0;
 
 /// Number of tail lines to keep from FFmpeg stderr for error reporting.
 const STDERR_TAIL_SIZE: usize = 20;
+
+/// Watchdog timeout for a single FFmpeg analysis pass.
+///
+/// Matches the analysis job budget elsewhere in the pipeline; without it a
+/// stalled decoder would hang the calling job forever.
+const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// VAD frame size in milliseconds.
 const VAD_FRAME_MS: usize = 30;
@@ -328,73 +332,42 @@ impl AudioProfiler {
 
     /// Runs FFmpeg with the given audio filter and returns stderr as a string.
     ///
-    /// Handles process spawning errors and non-zero exit codes. Uses
-    /// [`configure_tokio_command`] for Windows compatibility.
+    /// Delegates spawning, bounded stderr retention, and the watchdog timeout to
+    /// [`capture_filter_stderr`]; only the audio-specific interpretation of the
+    /// result (missing audio stream vs. genuine failure) lives here.
     async fn run_ffmpeg_filter(&self, video_path: &Path, filter: &str) -> CoreResult<String> {
-        let mut cmd = Command::new(&self.ffmpeg_path);
-        configure_tokio_command(&mut cmd);
-
-        cmd.arg("-hide_banner")
-            .arg("-nostdin")
-            .arg("-i")
-            .arg(video_path)
-            .arg("-af")
-            .arg(filter)
-            .arg("-vn")
-            .arg("-f")
-            .arg("null")
-            .arg("-")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| CoreError::Internal(format!("Failed to spawn FFmpeg: {}", e)))?;
-
-        let stderr_handle = child
-            .stderr
-            .take()
-            .ok_or_else(|| CoreError::Internal("Failed to capture FFmpeg stderr".to_string()))?;
-
-        let mut reader = BufReader::new(stderr_handle).lines();
-        let mut all_lines: Vec<String> = Vec::new();
-
-        // Stream stderr line by line
-        while let Some(line) = reader
-            .next_line()
-            .await
-            .map_err(|e| CoreError::Internal(format!("Failed reading FFmpeg stderr: {}", e)))?
-        {
-            all_lines.push(line);
-        }
-
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| CoreError::Internal(format!("Failed to wait for FFmpeg: {}", e)))?;
-
-        let full_stderr = all_lines.join("\n");
+        let capture = capture_filter_stderr(
+            &self.ffmpeg_path,
+            video_path,
+            FilterMode::Audio(filter),
+            ANALYSIS_TIMEOUT,
+        )
+        .await
+        .map_err(|error| match error {
+            FFmpegError::Timeout => CoreError::Internal(format!(
+                "Audio analysis timed out after {}s",
+                ANALYSIS_TIMEOUT.as_secs()
+            )),
+            other => CoreError::Internal(format!("Failed to run FFmpeg: {}", other)),
+        })?;
 
         // Check for no-audio-stream condition before checking exit status,
         // because FFmpeg may exit non-zero when there is no audio stream.
-        if has_no_audio_indicator(&full_stderr) {
+        if has_no_audio_indicator(&capture.stderr) {
             return Err(CoreError::Internal(
                 "No audio stream found in input".to_string(),
             ));
         }
 
-        if !status.success() {
-            let code = status.code().unwrap_or(-1);
-            let tail_start = all_lines.len().saturating_sub(STDERR_TAIL_SIZE);
-            let tail = all_lines[tail_start..].join("\n");
+        if !capture.success {
             return Err(CoreError::Internal(format!(
                 "Audio analysis failed (exit {}): {}",
-                code, tail
+                capture.exit_code.unwrap_or(-1),
+                capture.stderr_tail(STDERR_TAIL_SIZE)
             )));
         }
 
-        Ok(full_stderr)
+        Ok(capture.stderr)
     }
 }
 
@@ -533,7 +506,7 @@ fn derive_speech_regions_from_silence(
 /// [silencedetect @ ...] silence_start: 1.234
 /// [silencedetect @ ...] silence_end: 5.678 | silence_duration: 4.444
 /// ```
-fn parse_silence_regions(stderr: &str) -> Vec<SilenceRegion> {
+pub(crate) fn parse_silence_regions(stderr: &str) -> Vec<SilenceRegion> {
     let mut regions = Vec::new();
     let mut current_start: Option<f64> = None;
 

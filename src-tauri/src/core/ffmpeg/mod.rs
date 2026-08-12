@@ -37,8 +37,8 @@ pub use resolver::{
     set_resolved_paths, FFmpegResolveOptions, ResolvedFFmpeg, FFMPEG_PATH_ENV, FFPROBE_PATH_ENV,
 };
 pub use runner::{
-    AudioStreamInfo, FFmpegProgress, FFmpegRunner, FrameExtractOptions, MediaInfo, RenderSettings,
-    VideoStreamInfo, WaveformData,
+    capture_filter_stderr, AudioStreamInfo, FFmpegProgress, FFmpegRunner, FilterCapture,
+    FilterMode, FrameExtractOptions, MediaInfo, RenderSettings, VideoStreamInfo, WaveformData,
 };
 pub use state::{create_ffmpeg_state, FFmpegState, SharedFFmpegState};
 #[cfg(all(not(test), feature = "gui"))]

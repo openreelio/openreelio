@@ -23,6 +23,7 @@ mod state;
 mod text;
 mod timeline;
 mod transcription;
+mod verify;
 
 use clap::{Parser, Subcommand};
 
@@ -123,6 +124,9 @@ pub enum Commands {
         action: state::StateAction,
     },
 
+    /// Deterministic quality control for a sequence and its rendered output
+    Verify(verify::VerifyArgs),
+
     /// Model Context Protocol server for external AI agents
     Mcp(mcp::McpAction),
 
@@ -146,6 +150,7 @@ pub fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Plan { action } => plan::execute(action),
         Commands::Command { action } => command::execute(action),
         Commands::State { action } => state::execute(action),
+        Commands::Verify(args) => verify::execute(args),
         Commands::Mcp(action) => mcp::execute(action),
         Commands::HelpJson => help_json::execute(),
     }

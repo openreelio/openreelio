@@ -59,11 +59,47 @@ impl RuleConfig {
     }
 }
 
+/// What a rule inspects.
+///
+/// Structural rules read the timeline alone; rendered rules need measurements
+/// taken from an exported file, so they are unavailable until one exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckCategory {
+    /// Derived from the project state (timeline, assets, captions)
+    Structural,
+    /// Derived from measurements of a rendered file
+    Rendered,
+}
+
+impl std::fmt::Display for CheckCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CheckCategory::Structural => write!(f, "structural"),
+            CheckCategory::Rendered => write!(f, "rendered"),
+        }
+    }
+}
+
 /// Trait for all QC rules
 #[async_trait]
 pub trait QCRule: Send + Sync {
     /// Returns the unique name of this rule
     fn name(&self) -> &str;
+
+    /// Returns the stable, dotted identifier reported to agents
+    ///
+    /// Rule names are Rust type names; check IDs are the vocabulary the CLI and
+    /// agent surfaces use (`timeline.gap`, `audio.loudness`, …). Defaults to
+    /// the rule name so custom rules stay usable without extra work.
+    fn check_id(&self) -> &str {
+        self.name()
+    }
+
+    /// Returns what this rule inspects
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Structural
+    }
 
     /// Returns a human-readable description
     fn description(&self) -> &str;
@@ -137,6 +173,14 @@ impl BlackFrameRule {
 impl QCRule for BlackFrameRule {
     fn name(&self) -> &str {
         "BlackFrameRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "render.black_frames"
+    }
+
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Rendered
     }
 
     fn description(&self) -> &str {
@@ -280,6 +324,14 @@ impl QCRule for AudioPeakRule {
         "AudioPeakRule"
     }
 
+    fn check_id(&self) -> &str {
+        "audio.peak"
+    }
+
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Rendered
+    }
+
     fn description(&self) -> &str {
         "Detects audio peaks that may cause clipping or distortion"
     }
@@ -380,6 +432,179 @@ impl QCRule for AudioPeakRule {
         }
 
         Ok(violations)
+    }
+
+    fn supports_auto_fix(&self) -> bool {
+        true
+    }
+}
+
+// ============================================================================
+// AudioLoudnessRule - Checks program loudness against a delivery target
+// ============================================================================
+
+/// Rule that compares measured integrated loudness against a delivery target
+///
+/// Platforms normalise playback to a fixed integrated loudness, so a program
+/// that lands far from the target is either turned down (wasting the mix) or
+/// turned up (revealing noise). Only the rendered program has a meaningful
+/// integrated loudness, so this rule reads the measurement pass.
+#[derive(Debug, Default)]
+pub struct AudioLoudnessRule;
+
+impl AudioLoudnessRule {
+    /// Creates a new AudioLoudnessRule
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Default delivery target in LUFS (streaming platform convention)
+    pub const DEFAULT_TARGET_LUFS: f64 = -14.0;
+
+    /// Deviation tolerated without comment, in LU
+    const DEFAULT_TOLERANCE_LU: f64 = 1.0;
+
+    /// Deviation that turns the finding into an error, in LU
+    const DEFAULT_ERROR_TOLERANCE_LU: f64 = 3.0;
+
+    /// Peak ceiling assumed when judging whether a boost is safe, in dB
+    const SAFE_PEAK_CEILING_DB: f64 = -1.0;
+
+    /// Master volume limits accepted by `SetMasterVolumeCommand`
+    const MASTER_MIN_VOLUME_DB: f64 = -60.0;
+    const MASTER_MAX_VOLUME_DB: f64 = 6.0;
+}
+
+#[async_trait]
+impl QCRule for AudioLoudnessRule {
+    fn name(&self) -> &str {
+        "AudioLoudnessRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "audio.loudness"
+    }
+
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Rendered
+    }
+
+    fn description(&self) -> &str {
+        "Compares measured integrated loudness against the delivery target"
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Warning
+    }
+
+    fn skip_reason(&self, context: &QCContext) -> Option<String> {
+        let Some(measurements) = context.measurements.as_ref() else {
+            return Some("no rendered measurements available".to_string());
+        };
+        if measurements.integrated_lufs.is_none() {
+            return Some("no integrated loudness measurement available".to_string());
+        }
+        None
+    }
+
+    async fn check(
+        &self,
+        sequence: &Sequence,
+        _state: &ProjectState,
+        config: &RuleConfig,
+        context: &QCContext,
+    ) -> CoreResult<Vec<QCViolation>> {
+        let Some(measurements) = context.measurements.as_ref() else {
+            // The engine reports this rule as skipped (see `skip_reason`).
+            return Ok(Vec::new());
+        };
+        let Some(integrated_lufs) = measurements.integrated_lufs else {
+            return Ok(Vec::new());
+        };
+
+        let target_lufs = config
+            .get_param::<f64>("target_lufs")
+            .unwrap_or(Self::DEFAULT_TARGET_LUFS);
+        let tolerance_lu = config
+            .get_param::<f64>("tolerance_lu")
+            .unwrap_or(Self::DEFAULT_TOLERANCE_LU)
+            .abs();
+        let error_tolerance_lu = config
+            .get_param::<f64>("error_tolerance_lu")
+            .unwrap_or(Self::DEFAULT_ERROR_TOLERANCE_LU)
+            .abs();
+
+        let deviation = integrated_lufs - target_lufs;
+        if !deviation.is_finite() || deviation.abs() <= tolerance_lu {
+            return Ok(Vec::new());
+        }
+
+        let severity = config.severity_override.unwrap_or_else(|| {
+            if deviation.abs() > error_tolerance_lu {
+                Severity::Error
+            } else {
+                self.default_severity()
+            }
+        });
+
+        let direction = if deviation > 0.0 { "above" } else { "below" };
+        let mut violation = QCViolation::new(
+            self.name(),
+            severity,
+            format!(
+                "Integrated loudness is {:.1} LUFS, {:.1} LU {} the {:.1} LUFS target",
+                integrated_lufs,
+                deviation.abs(),
+                direction,
+                target_lufs
+            ),
+        )
+        .with_location(0.0, sequence.duration())
+        .with_metric("integratedLufs", integrated_lufs)
+        .with_metric("targetLufs", target_lufs)
+        .with_metric("deviationLu", (deviation * 100.0).round() / 100.0);
+
+        if let Some(range) = measurements.loudness_range_lu {
+            violation = violation.with_metric("loudnessRangeLu", range);
+        }
+
+        // A boost is only safe while the measured peak keeps enough headroom;
+        // otherwise the correction has to happen in the mix, not the master.
+        let measured_peak = measurements.true_peak_dbtp.or(measurements.sample_peak_db);
+        let boost_would_clip = deviation < 0.0
+            && measured_peak.is_some_and(|peak| peak - deviation > Self::SAFE_PEAK_CEILING_DB);
+
+        if boost_would_clip {
+            violation = violation.with_details(format!(
+                "Raising the master by {:.1} dB would push the measured peak of {:.1} dB past \
+                 {:.1} dB; rebalance the mix or apply a limiter instead.",
+                -deviation,
+                measured_peak.unwrap_or_default(),
+                Self::SAFE_PEAK_CEILING_DB
+            ));
+        } else {
+            let target_volume_db = (sequence.master_volume_db as f64 - deviation)
+                .clamp(Self::MASTER_MIN_VOLUME_DB, Self::MASTER_MAX_VOLUME_DB);
+
+            violation = violation
+                .with_details(format!(
+                    "Loudness normalisation will change playback level by {:.1} LU.",
+                    -deviation
+                ))
+                .with_fix(
+                    ViolationFix::new(
+                        format!("Set master volume to {:.1} dB", target_volume_db),
+                        vec![serde_json::json!({
+                            "type": "SetMasterVolume",
+                            "sequenceId": sequence.id,
+                            "volumeDb": target_volume_db
+                        })],
+                    )
+                    .with_confidence(0.7),
+                );
+        }
+
+        Ok(vec![violation])
     }
 
     fn supports_auto_fix(&self) -> bool {
@@ -489,6 +714,10 @@ impl CaptionSafeAreaRule {
 impl QCRule for CaptionSafeAreaRule {
     fn name(&self) -> &str {
         "CaptionSafeAreaRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "caption.safe_area"
     }
 
     fn description(&self) -> &str {
@@ -671,6 +900,10 @@ impl QCRule for CutRhythmRule {
         "CutRhythmRule"
     }
 
+    fn check_id(&self) -> &str {
+        "shot.cut_rhythm"
+    }
+
     fn description(&self) -> &str {
         "Checks if video cuts maintain appropriate rhythm and pacing"
     }
@@ -757,6 +990,10 @@ impl LicenseRule {
 impl QCRule for LicenseRule {
     fn name(&self) -> &str {
         "LicenseRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "asset.license"
     }
 
     fn description(&self) -> &str {
@@ -874,6 +1111,10 @@ impl QCRule for AspectRatioRule {
         "AspectRatioRule"
     }
 
+    fn check_id(&self) -> &str {
+        "clip.aspect_ratio"
+    }
+
     fn description(&self) -> &str {
         "Verifies all video clips match the sequence aspect ratio"
     }
@@ -976,6 +1217,10 @@ impl DurationRule {
 impl QCRule for DurationRule {
     fn name(&self) -> &str {
         "DurationRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "sequence.duration"
     }
 
     fn description(&self) -> &str {
