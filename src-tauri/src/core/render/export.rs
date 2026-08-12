@@ -241,6 +241,32 @@ fn sequence_has_exportable_audio(
 // Types
 // =============================================================================
 
+/// Accepted values for [`ExportSettings::encoder_speed`], ordered fastest to slowest.
+///
+/// These are the x264/x265 `-preset` names. Faster values encode quicker at the cost
+/// of compression efficiency, which is the trade-off proxy and preview renders want.
+pub const ENCODER_SPEED_VALUES: &[&str] = &[
+    "ultrafast",
+    "superfast",
+    "veryfast",
+    "faster",
+    "fast",
+    "medium",
+    "slow",
+    "slower",
+    "veryslow",
+    "placebo",
+];
+
+/// Returns true when `value` is a supported software encoder speed preset.
+///
+/// Matching is case-insensitive and ignores surrounding whitespace so CLI and IPC
+/// callers do not have to normalize input themselves.
+pub fn is_valid_encoder_speed(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    ENCODER_SPEED_VALUES.contains(&normalized.as_str())
+}
+
 /// Export preset type
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -448,6 +474,15 @@ pub struct ExportSettings {
     /// When None, falls back to software encoder for the selected video codec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_encoder_name: Option<String>,
+    /// Encoder speed/compression trade-off for software x264/x265 encoding.
+    ///
+    /// Maps directly to FFmpeg's `-preset` argument. Accepted values are listed in
+    /// [`ENCODER_SPEED_VALUES`] (`ultrafast` … `placebo`). When `None` no `-preset`
+    /// argument is emitted and FFmpeg's own default applies. Silently ignored for
+    /// hardware encoders and for codecs that do not accept `-preset` (VP9, ProRes),
+    /// which carry their own tuning parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_speed: Option<String>,
 }
 
 impl Default for ExportSettings {
@@ -473,6 +508,7 @@ impl Default for ExportSettings {
             tonemap_mode: None,
             hardware_accel: super::hardware::HardwareAccelMode::default(),
             resolved_encoder_name: None,
+            encoder_speed: None,
         }
     }
 }
@@ -487,6 +523,27 @@ impl ExportSettings {
             return name.clone();
         }
         super::hardware::software_encoder_name(&self.video_codec)
+    }
+
+    /// Build the `-preset` arguments for the resolved encoder, if any.
+    ///
+    /// Only software x264/x265 accept the `ultrafast … placebo` preset ladder.
+    /// Hardware encoders use their own preset namespace (handled by
+    /// [`resolve_quality_args`](super::hardware::resolve_quality_args)) and VP9/ProRes
+    /// have no equivalent, so this returns an empty vector for them rather than
+    /// emitting an argument FFmpeg would reject.
+    pub fn encoder_speed_args(&self, encoder_name: &str) -> Vec<String> {
+        let Some(speed) = self.encoder_speed.as_deref() else {
+            return Vec::new();
+        };
+        if !matches!(encoder_name, "libx264" | "libx265") {
+            return Vec::new();
+        }
+        let normalized = speed.trim().to_ascii_lowercase();
+        if !is_valid_encoder_speed(&normalized) {
+            return Vec::new();
+        }
+        vec!["-preset".to_string(), normalized]
     }
 
     /// Get the resolved audio encoder name for FFmpeg.
@@ -524,6 +581,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::Mp4Draft => Self {
                 preset: ExportPreset::Mp4Draft,
@@ -546,6 +604,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::Mp4High => Self {
                 preset: ExportPreset::Mp4High,
@@ -568,6 +627,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::Youtube4k => Self {
                 preset: ExportPreset::Youtube4k,
@@ -590,6 +650,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::YoutubeShorts => Self {
                 preset: ExportPreset::YoutubeShorts,
@@ -612,6 +673,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::Twitter => Self {
                 preset: ExportPreset::Twitter,
@@ -634,6 +696,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::Instagram => Self {
                 preset: ExportPreset::Instagram,
@@ -656,6 +719,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::WebmVp9 => Self {
                 preset: ExportPreset::WebmVp9,
@@ -678,6 +742,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::ProRes => Self {
                 preset: ExportPreset::ProRes,
@@ -700,6 +765,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::Custom => Self {
                 preset: ExportPreset::Custom,
@@ -739,6 +805,7 @@ impl ExportSettings {
             tonemap_mode: None,
             hardware_accel: super::hardware::HardwareAccelMode::default(),
             resolved_encoder_name: None,
+            encoder_speed: None,
         })
     }
 
@@ -806,6 +873,48 @@ impl ExportSettings {
             tonemap_mode: None,
             hardware_accel: super::hardware::HardwareAccelMode::default(),
             resolved_encoder_name: None,
+            encoder_speed: None,
+        }
+    }
+
+    /// Create proxy render settings optimized for machine inspection and fast turnaround.
+    ///
+    /// Proxy renders exist so an agent (or a human) can look at what the timeline
+    /// currently produces without paying for a full-quality encode:
+    /// - 854x480 (480p) — enough detail for visual QC, cheap to decode
+    /// - CRF 30 with no target bitrate — quality-driven, small files
+    /// - 96 kbps AAC — intelligible speech, negligible cost
+    /// - `ultrafast` x264 preset — encode speed over compression efficiency
+    /// - Frame rate follows the sequence (`fps: None`)
+    ///
+    /// # Arguments
+    ///
+    /// * `output_path` - Path where the proxy video will be saved
+    /// * `start_time` - Optional start time in seconds for a partial render
+    /// * `end_time` - Optional end time in seconds for a partial render
+    pub fn proxy(output_path: PathBuf, start_time: Option<f64>, end_time: Option<f64>) -> Self {
+        Self {
+            preset: ExportPreset::Custom,
+            output_path,
+            video_codec: VideoCodec::H264,
+            audio_codec: AudioCodec::Aac,
+            width: Some(854),
+            height: Some(480),
+            video_bitrate: None,
+            audio_bitrate: Some("96k".to_string()),
+            fps: None,
+            crf: Some(30),
+            two_pass: false,
+            start_time,
+            end_time,
+            hdr_mode: HdrMode::Sdr,
+            max_cll: None,
+            max_fall: None,
+            bit_depth: None,
+            tonemap_mode: None,
+            hardware_accel: super::hardware::HardwareAccelMode::default(),
+            resolved_encoder_name: None,
+            encoder_speed: Some("ultrafast".to_string()),
         }
     }
 
@@ -1247,6 +1356,16 @@ fn validate_export_settings_options(settings: &ExportSettings) -> Vec<String> {
         errors.push(error);
     }
 
+    if let Some(ref speed) = settings.encoder_speed {
+        if !is_valid_encoder_speed(speed) {
+            errors.push(format!(
+                "Invalid encoder speed '{}'. Supported values: {}",
+                speed,
+                ENCODER_SPEED_VALUES.join(", ")
+            ));
+        }
+    }
+
     errors
 }
 
@@ -1654,6 +1773,7 @@ impl AudioExportSettings {
             tonemap_mode: None,
             hardware_accel: super::hardware::HardwareAccelMode::Cpu,
             resolved_encoder_name: None,
+            encoder_speed: None,
         }
     }
 }
@@ -3727,6 +3847,9 @@ impl ExportEngine {
                 args.extend(super::hardware::resolve_quality_args(&video_codec, crf));
             }
         }
+
+        // Encoder speed/compression trade-off (software x264/x265 only)
+        args.extend(settings.encoder_speed_args(&video_codec));
 
         // HDR metadata
         args.extend(settings.hdr_args());
@@ -6838,6 +6961,252 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair[0] == "-crf" && pair[1] == "31"),
             "expected VP9 CRF args, got: {args:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Encoder speed / proxy render
+    // -------------------------------------------------------------------------
+
+    fn test_export_engine() -> ExportEngine {
+        use crate::core::ffmpeg::{FFmpegInfo, FFmpegRunner};
+
+        ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
+            ffmpeg_path: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
+            version: "test".to_string(),
+            is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
+        }))
+    }
+
+    fn preset_arg_value(args: &[String]) -> Option<&str> {
+        args.windows(2)
+            .find(|pair| pair[0] == "-preset")
+            .map(|pair| pair[1].as_str())
+    }
+
+    /// Feature: Encoder speed validation
+    /// Scenario: should accept the documented x264/x265 preset ladder
+    #[test]
+    fn is_valid_encoder_speed_should_accept_known_presets() {
+        for value in ENCODER_SPEED_VALUES {
+            assert!(
+                is_valid_encoder_speed(value),
+                "expected '{value}' to be accepted"
+            );
+        }
+        assert!(is_valid_encoder_speed("  UltraFast "));
+    }
+
+    /// Feature: Encoder speed validation
+    /// Scenario: should reject values FFmpeg would not understand
+    #[test]
+    fn is_valid_encoder_speed_should_reject_unknown_values() {
+        for value in ["", "turbo", "ultra fast", "p4", "0"] {
+            assert!(
+                !is_valid_encoder_speed(value),
+                "expected '{value}' to be rejected"
+            );
+        }
+    }
+
+    /// Feature: Encoder speed validation
+    /// Scenario: should surface a validation error for a bogus encoder speed
+    #[test]
+    fn validate_export_settings_options_should_reject_bogus_encoder_speed() {
+        let settings = ExportSettings {
+            encoder_speed: Some("turbo".to_string()),
+            ..ExportSettings::default()
+        };
+
+        let errors = validate_export_settings_options(&settings);
+
+        assert!(
+            errors.iter().any(|error| error.contains("turbo")),
+            "expected an encoder speed error, got: {errors:?}"
+        );
+    }
+
+    /// Feature: Encoder speed validation
+    /// Scenario: should accept a valid encoder speed without adding errors
+    #[test]
+    fn validate_export_settings_options_should_accept_valid_encoder_speed() {
+        let settings = ExportSettings {
+            encoder_speed: Some("ultrafast".to_string()),
+            ..ExportSettings::default()
+        };
+
+        let errors = validate_export_settings_options(&settings);
+
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    /// Feature: Proxy render preset
+    /// Scenario: should produce 480p, CRF 30, ultrafast settings that follow the sequence fps
+    #[test]
+    fn proxy_settings_should_use_fast_480p_configuration() {
+        let settings = ExportSettings::proxy(PathBuf::from("proxy.mp4"), None, None);
+
+        assert_eq!(settings.width, Some(854));
+        assert_eq!(settings.height, Some(480));
+        assert_eq!(settings.crf, Some(30));
+        assert_eq!(settings.video_codec, VideoCodec::H264);
+        assert_eq!(settings.audio_codec, AudioCodec::Aac);
+        assert_eq!(settings.audio_bitrate.as_deref(), Some("96k"));
+        assert_eq!(settings.video_bitrate, None);
+        assert_eq!(settings.fps, None);
+        assert_eq!(settings.encoder_speed.as_deref(), Some("ultrafast"));
+        assert!(!settings.two_pass);
+    }
+
+    /// Feature: Proxy render preset
+    /// Scenario: should carry the requested partial render range
+    #[test]
+    fn proxy_settings_should_carry_the_requested_range() {
+        let settings = ExportSettings::proxy(PathBuf::from("proxy.mp4"), Some(1.0), Some(3.5));
+
+        assert_eq!(settings.start_time, Some(1.0));
+        assert_eq!(settings.end_time, Some(3.5));
+    }
+
+    /// Feature: Proxy render preset
+    /// Scenario: should pass the ultrafast preset through to the FFmpeg arguments
+    #[test]
+    fn proxy_settings_should_emit_ultrafast_preset_args() {
+        let engine = test_export_engine();
+        let settings = ExportSettings::proxy(PathBuf::from("proxy.mp4"), None, None);
+
+        let args = engine.build_simple_export_args(Path::new("/tmp/input.mp4"), &settings);
+
+        assert_eq!(
+            preset_arg_value(&args),
+            Some("ultrafast"),
+            "expected ultrafast preset args, got: {args:?}"
+        );
+    }
+
+    /// Feature: Encoder speed argument emission
+    /// Scenario: should keep existing output byte-identical when no encoder speed is set
+    #[test]
+    fn default_settings_should_not_emit_preset_args() {
+        let engine = test_export_engine();
+        let settings = ExportSettings::default();
+
+        let args = engine.build_simple_export_args(Path::new("/tmp/input.mp4"), &settings);
+
+        assert_eq!(preset_arg_value(&args), None, "unexpected args: {args:?}");
+    }
+
+    /// Feature: Encoder speed argument emission
+    /// Scenario: should ignore encoder speed for encoders that do not accept the x264 ladder
+    #[test]
+    fn encoder_speed_args_should_only_apply_to_software_x264_and_x265() {
+        let settings = ExportSettings {
+            encoder_speed: Some("ultrafast".to_string()),
+            ..ExportSettings::default()
+        };
+
+        assert_eq!(
+            settings.encoder_speed_args("libx264"),
+            vec!["-preset".to_string(), "ultrafast".to_string()]
+        );
+        assert_eq!(
+            settings.encoder_speed_args("libx265"),
+            vec!["-preset".to_string(), "ultrafast".to_string()]
+        );
+        assert!(settings.encoder_speed_args("h264_nvenc").is_empty());
+        assert!(settings.encoder_speed_args("h264_videotoolbox").is_empty());
+        assert!(settings.encoder_speed_args("libvpx-vp9").is_empty());
+        assert!(settings.encoder_speed_args("prores_ks").is_empty());
+    }
+
+    /// Feature: Encoder speed argument emission
+    /// Scenario: should drop an invalid encoder speed rather than hand FFmpeg a bad flag
+    #[test]
+    fn encoder_speed_args_should_drop_invalid_values() {
+        let settings = ExportSettings {
+            encoder_speed: Some("turbo".to_string()),
+            ..ExportSettings::default()
+        };
+
+        assert!(settings.encoder_speed_args("libx264").is_empty());
+    }
+
+    /// Feature: Encoder speed argument emission
+    /// Scenario: should reach the plan/filter-complex export path used by `render start`
+    #[test]
+    fn sequence_export_args_should_carry_the_proxy_encoder_speed() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let video_path = create_temp_media_file("proxy_encoder_speed.mp4");
+        let mut video_asset =
+            Asset::new_video("proxy_encoder_speed.mp4", &video_path, VideoInfo::default())
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "video_asset".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+
+        let proxy_args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &audio_info_map,
+            &ExportSettings::proxy(PathBuf::from("proxy.mp4"), None, None),
+        )
+        .expect("proxy settings should build export args");
+
+        assert_eq!(
+            preset_arg_value(&proxy_args),
+            Some("ultrafast"),
+            "expected ultrafast preset args, got: {proxy_args:?}"
+        );
+
+        let default_args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &audio_info_map,
+            &ExportSettings::default(),
+        )
+        .expect("default settings should build export args");
+
+        assert_eq!(
+            preset_arg_value(&default_args),
+            None,
+            "default settings must not emit -preset, got: {default_args:?}"
+        );
+    }
+
+    /// Feature: Encoder speed serialization
+    /// Scenario: should stay absent from JSON when unset so stored settings are unchanged
+    #[test]
+    fn encoder_speed_should_be_omitted_from_serialization_when_unset() {
+        let settings = ExportSettings::default();
+
+        let json = serde_json::to_string(&settings).unwrap();
+
+        assert!(
+            !json.contains("encoderSpeed"),
+            "expected encoderSpeed to be omitted, got: {json}"
         );
     }
 

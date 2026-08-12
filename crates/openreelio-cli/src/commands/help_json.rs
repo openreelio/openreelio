@@ -567,9 +567,13 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "output": { "type": "string", "required": true, "desc": "Output file path" },
                     "preset": { "type": "string", "required": false, "desc": "Render preset name (default: mp4_h264_1080p). Use render.presets for the supported list." },
-                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                    "proxy": { "type": "boolean", "required": false, "desc": "Render a fast 480p proxy for inspection (shorthand for --preset proxy_480p); conflicts with --preset and defaults the output extension to .mp4" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" },
+                    "start": { "type": "number", "required": false, "desc": "Start of the rendered range in timeline seconds (default: 0)" },
+                    "end": { "type": "number", "required": false, "desc": "End of the rendered range in timeline seconds (default: sequence duration); must be greater than --start" },
+                    "progress": { "type": "boolean", "required": false, "desc": "Stream NDJSON encode progress to stderr as {\"type\":\"progress\",\"percent\":..,\"frame\":..,\"totalFrames\":..,\"fps\":..,\"etaSeconds\":..}" }
                 },
-                "example": "openreelio-cli render start --path ./project --output output.mp4"
+                "example": "openreelio-cli render start --path ./project --proxy --start 0 --end 5 --progress --output proxy.mp4"
             },
             "ffmpeg.info": {
                 "description": "Resolve the FFmpeg/FFprobe binaries this CLI will use and report their version and source (explicit, env, bundled, managed, dev, or system)",

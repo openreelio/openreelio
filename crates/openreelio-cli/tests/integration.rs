@@ -180,6 +180,30 @@ fn ffprobe_duration_secs(path: &std::path::Path) -> Option<f64> {
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
+/// Probe the height (in pixels) of the first video stream via ffprobe.
+/// Returns `None` if ffprobe is unavailable or the output cannot be parsed.
+fn ffprobe_video_height(path: &std::path::Path) -> Option<u32> {
+    let ffprobe_path = system_ffprobe_path()?;
+    let output = Command::new(ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=height",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
 // =============================================================================
 // Project Commands
 // =============================================================================
@@ -807,9 +831,17 @@ fn test_validation_caption_inverted_range() {
 fn test_render_presets() {
     let result = run_cli_ok(&["render", "presets"]);
     let presets = result["presets"].as_array().unwrap();
-    assert_eq!(presets.len(), 5);
+    assert_eq!(presets.len(), 7);
     // Verify first preset structure
     assert_eq!(presets[0]["id"], "mp4_h264_1080p");
+    let ids: Vec<&str> = presets
+        .iter()
+        .filter_map(|preset| preset["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"proxy_480p") && ids.contains(&"mp4_draft"),
+        "expected proxy and draft presets, got: {ids:?}"
+    );
 }
 
 #[test]
@@ -942,6 +974,141 @@ fn test_render_start_exports_video_when_ffmpeg_is_available() {
         output_path.metadata().unwrap().len() > 0,
         "Expected rendered output to be non-empty"
     );
+}
+
+#[test]
+fn test_render_start_rejects_proxy_combined_with_preset() {
+    let dir = create_temp_project("render_proxy_conflict");
+    let path = project_path(&dir, "render_proxy_conflict");
+    let (_stdout, stderr) = run_cli_err(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        "proxy.mp4",
+        "--proxy",
+        "--preset",
+        "mp4_h264_1080p",
+    ]);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "Expected a clap conflict error, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_render_start_rejects_inverted_range() {
+    let dir = create_temp_project("render_range_err");
+    let path = project_path(&dir, "render_range_err");
+    let (_stdout, stderr) = run_cli_err(&[
+        "render", "start", "--path", &path, "--output", "out.mp4", "--start", "5", "--end", "1",
+    ]);
+    assert!(
+        stderr.contains("Invalid time range"),
+        "Expected a range validation error, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_render_start_proxy_renders_480p_range_with_progress() {
+    if system_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_proxy_test");
+    let path = project_path(&dir, "render_proxy_test");
+
+    let source_path = dir.path().join("proxy_source.mp4");
+    if !create_sample_video_with_duration(&source_path, 2) {
+        return;
+    }
+
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source_path.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    let output_path = dir.path().join("proxy-output.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--start",
+        "0",
+        "--end",
+        "1",
+        "--progress",
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "Proxy render failed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let result: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("Failed to parse proxy render output: {error}\n{stdout}"));
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["preset"], "proxy_480p");
+
+    assert!(output_path.exists(), "Expected proxy output to exist");
+    assert!(
+        output_path.metadata().unwrap().len() > 0,
+        "Expected proxy output to be non-empty"
+    );
+
+    // Progress must be NDJSON on stderr so stdout stays a single JSON object.
+    let progress_lines: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .filter(|value| value["type"] == "progress")
+        .collect();
+    assert!(
+        !progress_lines.is_empty(),
+        "Expected NDJSON progress on stderr, got: {stderr}"
+    );
+    assert!(
+        progress_lines
+            .iter()
+            .all(|line| line["percent"].is_number() && line["totalFrames"].is_number()),
+        "Expected progress lines to carry percent and totalFrames, got: {progress_lines:?}"
+    );
+
+    if let Some(height) = ffprobe_video_height(&output_path) {
+        assert_eq!(height, 480, "Expected a 480p proxy, got height {height}");
+    }
+
+    if let Some(duration) = ffprobe_duration_secs(&output_path) {
+        assert!(
+            (duration - 1.0).abs() < 0.35,
+            "Expected proxy output duration near 1s, got {duration}"
+        );
+    }
 }
 
 // =============================================================================

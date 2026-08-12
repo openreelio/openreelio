@@ -404,6 +404,8 @@ pub(super) fn build_sequence_ffmpeg_args(
         }
     }
 
+    args.extend(ctx.settings.encoder_speed_args(&video_encoder));
+
     args.extend(ctx.settings.hdr_args());
     append_output_time_range_args(&mut args, ctx.settings.start_time, ctx.settings.end_time);
     args.push("-y".to_string());
