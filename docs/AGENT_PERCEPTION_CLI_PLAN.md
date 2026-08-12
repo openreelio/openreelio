@@ -20,9 +20,11 @@
 
 These were decided during implementation and are deliberate; do not "fix" them back.
 
-- **`ebur128` uses `framelog=quiet`, not `framelog=summary`** (T6). The summary block is
-  emitted regardless, and `framelog=summary` still logs per-frame lines on some builds; `quiet`
-  keeps the single-pass stderr capture small and the parse deterministic.
+- ~~**`ebur128` uses `framelog=quiet`, not `framelog=summary`** (T6).~~ **Reverted.** FFmpeg 4.4
+  and 6.1 only accept `info`/`verbose` for `framelog`, so `quiet` failed option parsing and made
+  `verify --file` exit 2 on every system FFmpeg. The option is now omitted entirely: per-frame
+  lines carry the `[Parsed_ebur128` marker so the bounded filter buffer absorbs them, and the
+  summary parser keys off labels, not position.
 - **`caption.reading_rate` is warning-only** (T6). The plan reserved `error` for >25 CPS on
   Latin script, but reading rate is taste-adjacent and script detection is heuristic, so every
   finding stays a warning. `error` remains reserved for objectively broken output.
@@ -34,7 +36,14 @@ These were decided during implementation and are deliberate; do not "fix" them b
   `reason` of `"non-default threshold"` or `"non-default min-duration"`.
 - **Proxy is an `ExportSettings` constructor, not an enum variant** (T4). `--proxy` is an alias
   that selects the `proxy_480p` preset rather than a new render-mode variant, so the existing
-  preset plumbing and `plan_hash` behaviour are untouched.
+  preset plumbing and `plan_hash` behaviour are untouched. The constructor takes the sequence
+  canvas: a fixed 854x480 frame pillarboxed every non-16:9 edit, so the frame is fitted to the
+  canvas within a 480p budget (long edge ≤ 854, short edge ≤ 480).
+
+- **`analysis silence` only persists into an existing audio profile** (T5). The regions live
+  inside `bundle.audioProfile`, whose other fields are measurements; with no profile to merge
+  into, the run is output-only with `"persisted": false` and a `reason` of
+  `"no audio profile in bundle; run \`analysis audio\` first"`.
 
 ## Design principles
 

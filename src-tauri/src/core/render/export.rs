@@ -27,7 +27,7 @@ use crate::core::{
         execute_ffmpeg_invocation, execute_ffmpeg_output, RenderPlan,
     },
     timeline::{
-        BlendMode, Clip, Sequence, SlowMotionInterpolation, TimelineClock, Track, TrackKind,
+        BlendMode, Canvas, Clip, Sequence, SlowMotionInterpolation, TimelineClock, Track, TrackKind,
     },
 };
 
@@ -881,25 +881,38 @@ impl ExportSettings {
     ///
     /// Proxy renders exist so an agent (or a human) can look at what the timeline
     /// currently produces without paying for a full-quality encode:
-    /// - 854x480 (480p) — enough detail for visual QC, cheap to decode
+    /// - a 480p-class frame that follows the sequence aspect ratio (see
+    ///   [`proxy_frame_dimensions`]) — enough detail for visual QC, cheap to decode
     /// - CRF 30 with no target bitrate — quality-driven, small files
     /// - 96 kbps AAC — intelligible speech, negligible cost
     /// - `ultrafast` x264 preset — encode speed over compression efficiency
     /// - Frame rate follows the sequence (`fps: None`)
     ///
+    /// The canvas is a parameter because a fixed 854x480 frame pillarboxes every
+    /// sequence that is not 16:9 — a 1080x1920 vertical edit would arrive with
+    /// 270 px of usable picture inside a landscape frame.
+    ///
     /// # Arguments
     ///
     /// * `output_path` - Path where the proxy video will be saved
+    /// * `canvas` - The sequence canvas the proxy frame is fitted to
     /// * `start_time` - Optional start time in seconds for a partial render
     /// * `end_time` - Optional end time in seconds for a partial render
-    pub fn proxy(output_path: PathBuf, start_time: Option<f64>, end_time: Option<f64>) -> Self {
+    pub fn proxy(
+        output_path: PathBuf,
+        canvas: &Canvas,
+        start_time: Option<f64>,
+        end_time: Option<f64>,
+    ) -> Self {
+        let (width, height) = proxy_frame_dimensions(canvas.width, canvas.height);
+
         Self {
             preset: ExportPreset::Custom,
             output_path,
             video_codec: VideoCodec::H264,
             audio_codec: AudioCodec::Aac,
-            width: Some(854),
-            height: Some(480),
+            width: Some(width),
+            height: Some(height),
             video_bitrate: None,
             audio_bitrate: Some("96k".to_string()),
             fps: None,
@@ -1592,6 +1605,70 @@ pub fn scaled_frame_dimensions(
     let out_height = (even_steps * 2).max(2).min(u32::MAX as u64) as u32;
 
     (out_width, out_height)
+}
+
+/// Longest edge a 480p-class proxy frame may occupy, in pixels.
+///
+/// 854 is the conventional 16:9 partner of 480 (1920/1080 * 480, rounded up to
+/// an even number).
+const PROXY_MAX_LONG_EDGE: u32 = 854;
+
+/// Shortest edge a 480p-class proxy frame may occupy, in pixels.
+const PROXY_MAX_SHORT_EDGE: u32 = 480;
+
+/// Fits a sequence canvas into the 480p proxy budget, preserving its aspect.
+///
+/// The frame is scaled so its long edge is at most [`PROXY_MAX_LONG_EDGE`] and
+/// its short edge at most [`PROXY_MAX_SHORT_EDGE`], which keeps a proxy of any
+/// aspect ratio roughly as expensive to decode as the classic 854x480 one.
+/// Canvases already inside the budget are left alone — a proxy never upscales.
+///
+/// Both edges come back even, as H.264 with 4:2:0 chroma requires.
+///
+/// Worked examples: 1920x1080 → 854x480, 1080x1920 → 480x854, 1080x1080 →
+/// 480x480, 1920x800 → 854x356, 640x360 → 640x360 (unchanged).
+pub fn proxy_frame_dimensions(canvas_width: u32, canvas_height: u32) -> (u32, u32) {
+    if canvas_width == 0 || canvas_height == 0 {
+        return (PROXY_MAX_LONG_EDGE, PROXY_MAX_SHORT_EDGE);
+    }
+
+    // Fit the short edge first: that is the constraint 480p names. Extreme
+    // aspect ratios can still blow past the long-edge budget afterwards
+    // (2.39:1 at 480 tall is 1152 wide), so the result is re-fitted by the
+    // long edge when it does.
+    let (mut width, mut height) = fit_short_edge(canvas_width, canvas_height, PROXY_MAX_SHORT_EDGE);
+    if width.max(height) > PROXY_MAX_LONG_EDGE {
+        (width, height) = fit_long_edge(canvas_width, canvas_height, PROXY_MAX_LONG_EDGE);
+    }
+
+    (round_down_to_even(width), round_down_to_even(height))
+}
+
+/// Scales `(width, height)` so its shorter edge is at most `max_short_edge`.
+fn fit_short_edge(width: u32, height: u32, max_short_edge: u32) -> (u32, u32) {
+    if width >= height {
+        // `scaled_frame_dimensions` constrains the first axis, so the swap
+        // makes it constrain height instead of width.
+        let (height, width) = scaled_frame_dimensions(height, width, Some(max_short_edge));
+        (width, height)
+    } else {
+        scaled_frame_dimensions(width, height, Some(max_short_edge))
+    }
+}
+
+/// Scales `(width, height)` so its longer edge is at most `max_long_edge`.
+fn fit_long_edge(width: u32, height: u32, max_long_edge: u32) -> (u32, u32) {
+    if width >= height {
+        scaled_frame_dimensions(width, height, Some(max_long_edge))
+    } else {
+        let (height, width) = scaled_frame_dimensions(height, width, Some(max_long_edge));
+        (width, height)
+    }
+}
+
+/// Rounds a dimension down to the nearest even number, never below 2.
+fn round_down_to_even(value: u32) -> u32 {
+    (value & !1).max(2)
 }
 
 /// Reads the real pixel dimensions of a written image via FFprobe.
@@ -4222,11 +4299,16 @@ impl ExportEngine {
     ///
     /// * `sequence` - The sequence containing clips
     /// * `assets` - Map of asset ID to Asset
+    /// * `project_root` - Project directory, used to resolve project-relative
+    ///   asset paths via [`Asset::resolved_path`]. An asset imported relative to
+    ///   the project keeps a `uri` from wherever it was first seen, so a moved
+    ///   or copied project only finds its media through this.
     /// * `settings` - Frame export settings (time, format, output path)
     pub async fn export_frame(
         &self,
         sequence: &Sequence,
         assets: &HashMap<String, Asset>,
+        project_root: &Path,
         settings: &FrameExportSettings,
     ) -> Result<FrameExportResult, ExportError> {
         settings.validate()?;
@@ -4245,12 +4327,12 @@ impl ExportEngine {
         // the clip's timeline position and source offset.
         let source_time = clip_source_time_at(clip, settings.time_sec);
 
-        // Resolve asset path
-        let asset_path = Path::new(&asset.uri);
+        // Resolve asset path, preferring the project-relative location.
+        let asset_path = asset.resolved_path(project_root);
         if !asset_path.exists() {
             return Err(ExportError::InvalidSettings(format!(
                 "Asset file not found: {}",
-                asset.uri
+                asset_path.display()
             )));
         }
 
@@ -4336,7 +4418,9 @@ impl ExportEngine {
                 ExportError::InvalidSettings(format!(
                     "No frame was produced at time {:.3}s (source time {:.3}s in '{}'). \
                      The requested position is likely past the end of the source media.",
-                    settings.time_sec, source_time, asset.uri
+                    settings.time_sec,
+                    source_time,
+                    asset_path.display()
                 ))
             })?;
         let file_size = metadata.len();
@@ -7046,7 +7130,12 @@ mod tests {
     /// Scenario: should produce 480p, CRF 30, ultrafast settings that follow the sequence fps
     #[test]
     fn proxy_settings_should_use_fast_480p_configuration() {
-        let settings = ExportSettings::proxy(PathBuf::from("proxy.mp4"), None, None);
+        let settings = ExportSettings::proxy(
+            PathBuf::from("proxy.mp4"),
+            &Canvas::new(1920, 1080),
+            None,
+            None,
+        );
 
         assert_eq!(settings.width, Some(854));
         assert_eq!(settings.height, Some(480));
@@ -7061,10 +7150,60 @@ mod tests {
     }
 
     /// Feature: Proxy render preset
+    /// Scenario: should follow the sequence aspect instead of pillarboxing it
+    #[test]
+    fn proxy_settings_should_follow_a_vertical_canvas() {
+        let settings = ExportSettings::proxy(
+            PathBuf::from("proxy.mp4"),
+            &Canvas::new(1080, 1920),
+            None,
+            None,
+        );
+
+        assert_eq!(settings.width, Some(480));
+        assert_eq!(settings.height, Some(854));
+    }
+
+    /// Feature: Proxy frame fitting
+    /// Scenario: should fit any canvas inside the 480p budget without upscaling
+    #[test]
+    fn proxy_frame_dimensions_should_fit_the_480p_budget() {
+        // Landscape 16:9 keeps the classic 480p frame.
+        assert_eq!(proxy_frame_dimensions(1920, 1080), (854, 480));
+        // Vertical 9:16 is the same frame turned on its side, not a letterbox.
+        assert_eq!(proxy_frame_dimensions(1080, 1920), (480, 854));
+        // Square fits the short-edge budget on both axes.
+        assert_eq!(proxy_frame_dimensions(1080, 1080), (480, 480));
+        // 2.39:1 would be 1152 wide at 480 tall, so the long edge binds.
+        assert_eq!(proxy_frame_dimensions(1920, 800), (854, 356));
+    }
+
+    /// Feature: Proxy frame fitting
+    /// Scenario: should never upscale a canvas that already fits
+    #[test]
+    fn proxy_frame_dimensions_should_not_upscale_a_small_canvas() {
+        assert_eq!(proxy_frame_dimensions(640, 360), (640, 360));
+        assert_eq!(proxy_frame_dimensions(320, 240), (320, 240));
+    }
+
+    /// Feature: Proxy frame fitting
+    /// Scenario: should fall back to the 16:9 frame for an unusable canvas
+    #[test]
+    fn proxy_frame_dimensions_should_tolerate_a_zero_canvas() {
+        assert_eq!(proxy_frame_dimensions(0, 1080), (854, 480));
+        assert_eq!(proxy_frame_dimensions(1920, 0), (854, 480));
+    }
+
+    /// Feature: Proxy render preset
     /// Scenario: should carry the requested partial render range
     #[test]
     fn proxy_settings_should_carry_the_requested_range() {
-        let settings = ExportSettings::proxy(PathBuf::from("proxy.mp4"), Some(1.0), Some(3.5));
+        let settings = ExportSettings::proxy(
+            PathBuf::from("proxy.mp4"),
+            &Canvas::new(1920, 1080),
+            Some(1.0),
+            Some(3.5),
+        );
 
         assert_eq!(settings.start_time, Some(1.0));
         assert_eq!(settings.end_time, Some(3.5));
@@ -7075,7 +7214,12 @@ mod tests {
     #[test]
     fn proxy_settings_should_emit_ultrafast_preset_args() {
         let engine = test_export_engine();
-        let settings = ExportSettings::proxy(PathBuf::from("proxy.mp4"), None, None);
+        let settings = ExportSettings::proxy(
+            PathBuf::from("proxy.mp4"),
+            &Canvas::new(1920, 1080),
+            None,
+            None,
+        );
 
         let args = engine.build_simple_export_args(Path::new("/tmp/input.mp4"), &settings);
 
@@ -7170,7 +7314,12 @@ mod tests {
             &assets,
             &std::collections::HashMap::new(),
             &audio_info_map,
-            &ExportSettings::proxy(PathBuf::from("proxy.mp4"), None, None),
+            &ExportSettings::proxy(
+                PathBuf::from("proxy.mp4"),
+                &Canvas::new(1920, 1080),
+                None,
+                None,
+            ),
         )
         .expect("proxy settings should build export args");
 
@@ -10797,6 +10946,100 @@ mod tests {
             max_width: Some(0),
         };
         assert!(settings.validate().is_err());
+    }
+
+    /// Builds a one-clip sequence plus an asset whose `uri` no longer resolves
+    /// but whose `relative_path` still points at `relative` inside the project.
+    ///
+    /// This is the shape a project takes after it is moved or copied: the URI
+    /// records where the media was first seen, the relative path records where
+    /// it lives now.
+    fn relocated_project_fixture(
+        relative: &str,
+    ) -> (Sequence, std::collections::HashMap<String, Asset>) {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Relocated", SequenceFormat::youtube_1080());
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut asset = Asset::new_video(
+            "clip.mp4",
+            "/previous/machine/clip.mp4",
+            VideoInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_relative_path(relative);
+        asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("video_asset".to_string(), asset);
+
+        (sequence, assets)
+    }
+
+    /// Feature: Frame export on a relocated project
+    /// Scenario: should resolve media through the project root, not the stale URI
+    #[tokio::test]
+    async fn export_frame_should_resolve_media_relative_to_the_project() {
+        let project = tempfile::tempdir().expect("temp project");
+        let media_dir = project.path().join("media");
+        std::fs::create_dir_all(&media_dir).expect("create media dir");
+        std::fs::write(media_dir.join("clip.mp4"), b"").expect("write media");
+
+        let (sequence, assets) = relocated_project_fixture("media/clip.mp4");
+        let settings = FrameExportSettings {
+            time_sec: 1.0,
+            format: ImageFormat::Png,
+            output_path: project.path().join("frame.png"),
+            quality: None,
+            max_width: None,
+        };
+
+        let error = test_export_engine()
+            .export_frame(&sequence, &assets, project.path(), &settings)
+            .await
+            .expect_err("the fixture FFmpeg path does not exist, so the run cannot succeed");
+
+        // The run gets past asset resolution and fails only on the fake FFmpeg
+        // binary; the stale URI would have stopped it before that.
+        assert!(
+            !error.to_string().contains("Asset file not found"),
+            "media under the project root must resolve, got: {error}"
+        );
+    }
+
+    /// Feature: Frame export on a relocated project
+    /// Scenario: should name the resolved path when the media is genuinely missing
+    #[tokio::test]
+    async fn export_frame_should_report_the_resolved_path_when_media_is_missing() {
+        let project = tempfile::tempdir().expect("temp project");
+        let (sequence, assets) = relocated_project_fixture("media/clip.mp4");
+        let settings = FrameExportSettings {
+            time_sec: 1.0,
+            format: ImageFormat::Png,
+            output_path: project.path().join("frame.png"),
+            quality: None,
+            max_width: None,
+        };
+
+        let error = test_export_engine()
+            .export_frame(&sequence, &assets, project.path(), &settings)
+            .await
+            .expect_err("the media file was never created");
+
+        let message = error.to_string();
+        assert!(message.contains("Asset file not found"), "got: {message}");
+        assert!(
+            message.contains("clip.mp4") && !message.contains("previous"),
+            "the message must name the path that was actually looked up, got: {message}"
+        );
     }
 
     /// Feature: Frame Scaling

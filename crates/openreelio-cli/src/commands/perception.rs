@@ -21,8 +21,7 @@ use openreelio_core::analysis::cleanup::{
     DEFAULT_SILENCE_MIN_DURATION_SEC, DEFAULT_SILENCE_THRESHOLD_DB,
 };
 use openreelio_core::analysis::{
-    AnalysisBundle, AnalysisJobRunner, AnalysisOptions, AudioProfile, VideoMetadata,
-    SILENCE_FLOOR_DB,
+    AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata,
 };
 use openreelio_core::annotations::{
     AnalysisProvider, AnalysisResult, AnnotationStore, AssetAnnotation, ShotResult,
@@ -54,6 +53,9 @@ const SILENCE_PARAMETER_EPSILON: f64 = 0.001;
 
 /// Provider label recorded on annotations written by `analysis shots`.
 const SHOT_DETECTOR_NAME: &str = "ffmpeg-scenedetect";
+
+/// Reported when silence cannot be cached because no audio profile exists yet.
+const NO_AUDIO_PROFILE_REASON: &str = "no audio profile in bundle; run `analysis audio` first";
 
 // ── Arguments ───────────────────────────────────────────────────────────
 
@@ -250,7 +252,10 @@ pub fn shots(args: ShotsArgs) -> anyhow::Result<()> {
 }
 
 /// Detects silence regions, caching them only when the parameters match the
-/// shared cache contract.
+/// shared cache contract and an audio profile already exists to merge into.
+///
+/// Detection always runs and always reports its regions; `persisted` says
+/// whether they also entered the bundle, and `reason` says why not.
 pub fn silence(args: SilenceArgs) -> anyhow::Result<()> {
     validate::non_empty(&args.id, "id")?;
     if !args.threshold_db.is_finite() {
@@ -275,16 +280,35 @@ pub fn silence(args: SilenceArgs) -> anyhow::Result<()> {
         .block_on(profiler.detect_silence_custom(&media_path, args.threshold_db, args.min_duration))
         .map_err(|error| anyhow::anyhow!("Silence detection failed: {}", error))?;
 
-    let rejection = silence_cache_rejection(args.threshold_db, args.min_duration);
+    let mut rejection = silence_cache_rejection(args.threshold_db, args.min_duration);
     if rejection.is_none() {
-        let metadata =
-            runtime.block_on(resolve_video_metadata(asset, &media_path, &ffmpeg_info))?;
-        let cached_regions = regions.clone();
-        AnalysisJobRunner::new(&project.path)
-            .merge_bundle_update(&args.id, &metadata, move |bundle| {
-                apply_silence_regions(bundle, cached_regions)
-            })
-            .map_err(|error| anyhow::anyhow!("Failed to update the analysis bundle: {}", error))?;
+        let runner = AnalysisJobRunner::new(&project.path);
+        // Silence regions live inside the audio profile, and the rest of that
+        // profile is measured, not defaulted. Without an existing profile there
+        // is nothing to merge into, and inventing one would publish invented
+        // measurements to `analysis report` and the GUI cleanup panel.
+        let has_audio_profile = runner
+            .load_bundle_optional(&args.id)
+            .map_err(|error| {
+                anyhow::anyhow!("Failed to read the cached analysis bundle: {}", error)
+            })?
+            .and_then(|bundle| bundle.audio_profile)
+            .is_some();
+
+        if has_audio_profile {
+            let metadata =
+                runtime.block_on(resolve_video_metadata(asset, &media_path, &ffmpeg_info))?;
+            let cached_regions = regions.clone();
+            runner
+                .merge_bundle_update(&args.id, &metadata, move |bundle| {
+                    apply_silence_regions(bundle, cached_regions)
+                })
+                .map_err(|error| {
+                    anyhow::anyhow!("Failed to update the analysis bundle: {}", error)
+                })?;
+        } else {
+            rejection = Some(NO_AUDIO_PROFILE_REASON);
+        }
     }
 
     let total_silence_sec: f64 = regions.iter().map(|region| region.duration()).sum();
@@ -634,26 +658,19 @@ fn save_shot_annotation(
         .map_err(|error| anyhow::anyhow!("Failed to write the asset annotation: {}", error))
 }
 
-/// Writes freshly detected silence into the bundle's audio profile.
+/// Writes freshly detected silence into an existing audio profile.
 ///
-/// When no profile exists yet the remaining fields stay at their unmeasured
-/// defaults; `analysis audio` fills them in.
+/// Does nothing when the bundle carries no profile: every other field of an
+/// [`AudioProfile`](openreelio_core::analysis::AudioProfile) is a measurement,
+/// and a placeholder would be indistinguishable from one. Callers check for the
+/// profile first and report `persisted: false` instead (see
+/// [`NO_AUDIO_PROFILE_REASON`]).
 fn apply_silence_regions(
     bundle: &mut AnalysisBundle,
     regions: Vec<openreelio_core::analysis::SilenceRegion>,
 ) {
-    match bundle.audio_profile.as_mut() {
-        Some(profile) => profile.silence_regions = regions,
-        None => {
-            bundle.audio_profile = Some(AudioProfile {
-                bpm: None,
-                spectral_centroid_hz: 0.0,
-                loudness_profile: Vec::new(),
-                peak_db: SILENCE_FLOOR_DB,
-                silence_regions: regions,
-                speech_regions: Vec::new(),
-            })
-        }
+    if let Some(profile) = bundle.audio_profile.as_mut() {
+        profile.silence_regions = regions;
     }
 }
 
@@ -769,6 +786,7 @@ fn emit_progress_line(job: &str, status: &str, detail: Option<String>) {
 mod tests {
     use super::*;
     use openreelio_core::analysis::cleanup::can_reuse_cached_silence_regions;
+    use openreelio_core::analysis::AudioProfile;
 
     fn run_args() -> RunArgs {
         RunArgs {
@@ -908,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_silence_regions_should_create_a_profile_when_none_exists() {
+    fn apply_silence_regions_should_not_fabricate_a_profile_when_none_exists() {
         let mut bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(10.0));
 
         apply_silence_regions(
@@ -916,10 +934,10 @@ mod tests {
             vec![openreelio_core::analysis::SilenceRegion::new(1.0, 3.0)],
         );
 
-        let profile = bundle.audio_profile.expect("profile must be created");
-        assert_eq!(profile.silence_regions.len(), 1);
-        assert!(profile.loudness_profile.is_empty());
-        assert!(profile.bpm.is_none());
+        assert!(
+            bundle.audio_profile.is_none(),
+            "a placeholder peak level and centroid would read as measurements"
+        );
     }
 
     #[test]

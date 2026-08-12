@@ -23,7 +23,8 @@ use clap::Args;
 use openreelio_core::ffmpeg::FFmpegRunner;
 use openreelio_core::qc::{
     crossref_black_ranges_with_gaps, measure_rendered_file_detailed, MeasureOptions,
-    MeasurementReport, QCEngine, QCEngineConfig, QCReport, QCSeverityFilter, RuleStatus, Severity,
+    MeasurementReport, QCContext, QCEngine, QCEngineConfig, QCReport, QCSeverityFilter, RuleStatus,
+    Severity,
 };
 use openreelio_core::timeline::Sequence;
 use serde::Serialize;
@@ -196,8 +197,10 @@ fn run(args: VerifyArgs) -> anyhow::Result<i32> {
     })?;
 
     // Black pixels only become an error once they are known to sit over a hole
-    // in the timeline, which needs both halves of the report.
-    let frame_duration_sec = frame_duration_sec(sequence);
+    // in the timeline, which needs both halves of the report. The tolerance is
+    // the same one the rules use, so it comes from the shared context rather
+    // than a second definition of "one frame".
+    let frame_duration_sec = QCContext::from_sequence(sequence).frame_duration_sec();
     crossref_black_ranges_with_gaps(&mut report, sequence, frame_duration_sec);
 
     for failure in &report.errored_rules {
@@ -372,16 +375,6 @@ fn enabled_check_ids(engine: &QCEngine, config: &QCEngineConfig) -> Vec<String> 
         .filter(|rule| config.is_rule_enabled(rule.name()))
         .map(|rule| rule.check_id().to_string())
         .collect()
-}
-
-/// Returns the sequence frame duration, falling back to 30 fps.
-fn frame_duration_sec(sequence: &Sequence) -> f64 {
-    let fps = sequence.format.fps.as_f64();
-    if fps.is_finite() && fps > 0.0 {
-        1.0 / fps
-    } else {
-        1.0 / 30.0
-    }
 }
 
 fn flush_stdout() {

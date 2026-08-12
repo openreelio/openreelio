@@ -157,8 +157,8 @@ impl AudioProfiler {
             "silencedetect=n={}:d={}",
             SILENCE_THRESHOLD_DB, SILENCE_MIN_DURATION
         );
-        let stderr = self.run_ffmpeg_filter(video_path, &filter).await?;
-        Ok(parse_silence_regions(&stderr))
+        let capture = self.run_ffmpeg_filter(video_path, &filter).await?;
+        Ok(parse_silence_regions(&capture.stderr))
     }
 
     /// Detects silence regions with custom threshold and minimum duration.
@@ -180,8 +180,8 @@ impl AudioProfiler {
         let threshold = format!("{}dB", threshold_db.clamp(-90.0, 0.0));
         let duration = format!("{:.3}", min_duration_sec.clamp(0.01, 30.0));
         let filter = format!("silencedetect=n={}:d={}", threshold, duration);
-        let stderr = self.run_ffmpeg_filter(video_path, &filter).await?;
-        Ok(parse_silence_regions(&stderr))
+        let capture = self.run_ffmpeg_filter(video_path, &filter).await?;
+        Ok(parse_silence_regions(&capture.stderr))
     }
 
     /// Detect speech regions using a lightweight WebRTC VAD pass.
@@ -230,9 +230,9 @@ impl AudioProfiler {
         video_path: &Path,
     ) -> CoreResult<(Vec<f64>, f64, Vec<f64>)> {
         let filter = "ebur128=metadata=1";
-        let stderr = self.run_ffmpeg_filter(video_path, filter).await?;
-        let (loudness_profile, peak_db) = parse_loudness_and_peak(&stderr);
-        let momentary_values = parse_momentary_loudness_values(&stderr);
+        let capture = self.run_ffmpeg_filter(video_path, filter).await?;
+        let (loudness_profile, peak_db) = parse_loudness_and_peak(&capture.stderr);
+        let momentary_values = parse_momentary_loudness_values(&capture.stderr);
         Ok((loudness_profile, peak_db, momentary_values))
     }
 
@@ -250,7 +250,7 @@ impl AudioProfiler {
             "aspectralstats=measure=centroid,ametadata=mode=print:key=lavfi.aspectralstats.1.centroid";
 
         match self.run_ffmpeg_filter(video_path, filter).await {
-            Ok(stderr) => Ok(parse_spectral_centroid(&stderr)),
+            Ok(capture) => Ok(parse_spectral_centroid(&capture.stderr)),
             Err(err) => {
                 let msg = err.to_string();
                 // Only swallow explicit missing-filter errors; other failures propagate.
@@ -330,12 +330,25 @@ impl AudioProfiler {
     // FFmpeg Helper
     // =========================================================================
 
-    /// Runs FFmpeg with the given audio filter and returns stderr as a string.
+    /// Runs FFmpeg with the given audio filter and returns the whole capture.
     ///
     /// Delegates spawning, bounded stderr retention, and the watchdog timeout to
     /// [`capture_filter_stderr`]; only the audio-specific interpretation of the
     /// result (missing audio stream vs. genuine failure) lives here.
-    async fn run_ffmpeg_filter(&self, video_path: &Path, filter: &str) -> CoreResult<String> {
+    ///
+    /// The [`FilterCapture`] is returned rather than just its text so the
+    /// truncation flag is not silently dropped: per-frame filters such as
+    /// `aspectralstats` overflow the retention limit on very long inputs, and a
+    /// parser fed the surviving tail would average only the end of the file.
+    /// Truncation is logged here — the audio profile has no warnings channel to
+    /// carry it — so an unexpectedly flat measurement is at least traceable.
+    ///
+    /// [`FilterCapture`]: crate::core::ffmpeg::FilterCapture
+    async fn run_ffmpeg_filter(
+        &self,
+        video_path: &Path,
+        filter: &str,
+    ) -> CoreResult<crate::core::ffmpeg::FilterCapture> {
         let capture = capture_filter_stderr(
             &self.ffmpeg_path,
             video_path,
@@ -367,7 +380,16 @@ impl AudioProfiler {
             )));
         }
 
-        Ok(capture.stderr)
+        if capture.truncated {
+            tracing::warn!(
+                filter = %filter,
+                input = %video_path.display(),
+                "FFmpeg filter output exceeded the stderr retention limit; \
+                 the parsed result covers only the end of the input"
+            );
+        }
+
+        Ok(capture)
     }
 }
 

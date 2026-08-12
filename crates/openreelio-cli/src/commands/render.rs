@@ -9,6 +9,7 @@ use openreelio_core::render::{
     build_render_graph, build_render_plan, validate_export_settings, AudioCodec, ExportEngine,
     ExportPreset, ExportProgress, ExportSettings, HdrMode, VideoCodec,
 };
+use openreelio_core::timeline::Canvas;
 use std::path::PathBuf;
 
 /// Canonical list of render presets. Single source of truth for both
@@ -175,7 +176,8 @@ fn start_render(args: StartArgs) -> anyhow::Result<()> {
         .clone();
     let assets = project.state.assets.clone();
     let effects = project.state.effects.clone();
-    let settings = build_export_settings(&preset_id, output_path, start, end)?;
+    let settings =
+        build_export_settings(&preset_id, output_path, &sequence.format.canvas, start, end)?;
     let graph = build_render_graph(&project.state, &seq_id)
         .map_err(|error| anyhow::anyhow!("Failed to build render graph: {}", error))?;
 
@@ -303,9 +305,14 @@ fn default_extension(path: PathBuf, extension: &str) -> PathBuf {
     path.with_extension(extension)
 }
 
+/// Builds export settings for a named preset.
+///
+/// `canvas` is the sequence canvas: the proxy preset fits its frame to it so a
+/// vertical or square edit is not pillarboxed into a 16:9 proxy.
 fn build_export_settings(
     preset: &str,
     output_path: PathBuf,
+    canvas: &Canvas,
     start_time: Option<f64>,
     end_time: Option<f64>,
 ) -> anyhow::Result<ExportSettings> {
@@ -343,7 +350,7 @@ fn build_export_settings(
         "mp4_draft" | "mp4_h264_720p" | "draft" => {
             ExportSettings::from_preset(ExportPreset::Mp4Draft, output_path)
         }
-        "proxy_480p" | "proxy" => ExportSettings::proxy(output_path, start_time, end_time),
+        "proxy_480p" | "proxy" => ExportSettings::proxy(output_path, canvas, start_time, end_time),
         "webm_vp9_1080p" | "webm_vp9" | "webm" => {
             ExportSettings::from_preset(ExportPreset::WebmVp9, output_path)
         }
@@ -380,8 +387,14 @@ mod tests {
 
     #[test]
     fn build_export_settings_should_apply_proxy_dimensions_and_speed() {
-        let settings =
-            build_export_settings(PROXY_PRESET_ID, PathBuf::from("proxy.mp4"), None, None).unwrap();
+        let settings = build_export_settings(
+            PROXY_PRESET_ID,
+            PathBuf::from("proxy.mp4"),
+            &Canvas::new(1920, 1080),
+            None,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(settings.width, Some(854));
         assert_eq!(settings.height, Some(480));
@@ -389,10 +402,26 @@ mod tests {
     }
 
     #[test]
+    fn build_export_settings_should_fit_the_proxy_to_a_vertical_canvas() {
+        let settings = build_export_settings(
+            PROXY_PRESET_ID,
+            PathBuf::from("proxy.mp4"),
+            &Canvas::new(1080, 1920),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(settings.width, Some(480));
+        assert_eq!(settings.height, Some(854));
+    }
+
+    #[test]
     fn build_export_settings_should_carry_the_requested_range() {
         let settings = build_export_settings(
             "mp4_h264_1080p",
             PathBuf::from("out.mp4"),
+            &Canvas::new(1920, 1080),
             Some(1.5),
             Some(4.0),
         )

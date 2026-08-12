@@ -2345,6 +2345,10 @@ fn test_analysis_silence_caches_regions_at_default_thresholds() {
         return;
     };
 
+    // Silence lives inside the audio profile, so the profile has to exist
+    // before there is anything to merge into.
+    run_cli_ok(&["analysis", "audio", "--path", &path, "--id", &asset_id]);
+
     let result = run_cli_ok(&["analysis", "silence", "--path", &path, "--id", &asset_id]);
 
     assert_eq!(result["status"], "ok");
@@ -2362,6 +2366,34 @@ fn test_analysis_silence_caches_regions_at_default_thresholds() {
 
     let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
     assert_eq!(report["coverage"]["audio"], true);
+}
+
+#[test]
+fn test_analysis_silence_is_output_only_without_an_audio_profile() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "silence_no_profile_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let result = run_cli_ok(&["analysis", "silence", "--path", &path, "--id", &asset_id]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["persisted"], false);
+    assert_eq!(
+        result["reason"],
+        "no audio profile in bundle; run `analysis audio` first"
+    );
+    assert!(
+        result["regionCount"].as_u64().unwrap() >= 1,
+        "detection still runs and reports its regions"
+    );
+    assert!(
+        !bundle_path(&path, &asset_id).exists(),
+        "a fabricated audio profile must never reach the bundle"
+    );
 }
 
 #[test]

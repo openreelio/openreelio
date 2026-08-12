@@ -1238,7 +1238,7 @@ pub async fn export_frame(
     };
 
     let result = engine
-        .export_frame(&sequence, &assets, &settings)
+        .export_frame(&sequence, &assets, &project_path, &settings)
         .await
         .map_err(|e| e.to_string())?;
 

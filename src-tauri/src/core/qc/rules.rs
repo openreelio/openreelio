@@ -449,6 +449,10 @@ impl QCRule for AudioPeakRule {
 /// that lands far from the target is either turned down (wasting the mix) or
 /// turned up (revealing noise). Only the rendered program has a meaningful
 /// integrated loudness, so this rule reads the measurement pass.
+///
+/// Findings are warnings at any deviation: the target is a delivery convention
+/// rather than a property of correct output. True-peak and clipping checks stay
+/// errors because they describe damage to the signal itself.
 #[derive(Debug, Default)]
 pub struct AudioLoudnessRule;
 
@@ -463,9 +467,6 @@ impl AudioLoudnessRule {
 
     /// Deviation tolerated without comment, in LU
     const DEFAULT_TOLERANCE_LU: f64 = 1.0;
-
-    /// Deviation that turns the finding into an error, in LU
-    const DEFAULT_ERROR_TOLERANCE_LU: f64 = 3.0;
 
     /// Peak ceiling assumed when judging whether a boost is safe, in dB
     const SAFE_PEAK_CEILING_DB: f64 = -1.0;
@@ -529,23 +530,19 @@ impl QCRule for AudioLoudnessRule {
             .get_param::<f64>("tolerance_lu")
             .unwrap_or(Self::DEFAULT_TOLERANCE_LU)
             .abs();
-        let error_tolerance_lu = config
-            .get_param::<f64>("error_tolerance_lu")
-            .unwrap_or(Self::DEFAULT_ERROR_TOLERANCE_LU)
-            .abs();
 
         let deviation = integrated_lufs - target_lufs;
         if !deviation.is_finite() || deviation.abs() <= tolerance_lu {
             return Ok(Vec::new());
         }
 
-        let severity = config.severity_override.unwrap_or_else(|| {
-            if deviation.abs() > error_tolerance_lu {
-                Severity::Error
-            } else {
-                self.default_severity()
-            }
-        });
+        // Every deviation is a warning, however large. A loudness target is a
+        // platform convention, not a property of correct output — a master
+        // mixed for cinema is not broken because it misses a streaming target —
+        // so `error` stays reserved for the objectively broken (true-peak overs,
+        // clipping). A caller that treats a specific target as a hard
+        // requirement can raise the grade with `severity_override`.
+        let severity = config.severity_override.unwrap_or(self.default_severity());
 
         let direction = if deviation > 0.0 { "above" } else { "below" };
         let mut violation = QCViolation::new(

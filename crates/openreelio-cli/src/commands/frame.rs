@@ -496,7 +496,7 @@ impl TimelineFrameContext<'_> {
                 };
                 let result = self
                     .engine
-                    .export_frame(self.sequence, self.assets(), &settings)
+                    .export_frame(self.sequence, self.assets(), &self.project.path, &settings)
                     .await
                     .map_err(|error| anyhow::anyhow!("Frame export failed: {}", error))?;
 

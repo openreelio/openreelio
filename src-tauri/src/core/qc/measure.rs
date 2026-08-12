@@ -154,7 +154,7 @@ pub async fn measure_rendered_file_detailed(
     let (graph, maps) = build_filter_graph(opts, has_video, has_audio);
     let map_refs: Vec<&str> = maps.iter().map(String::as_str).collect();
 
-    let stderr = runner
+    let capture = runner
         .run_filter_capture_stderr(file, &graph, &map_refs, opts.timeout)
         .await
         .map_err(|error| {
@@ -163,14 +163,25 @@ pub async fn measure_rendered_file_detailed(
 
     // Filters report their findings at FFmpeg's INFO level. If not a single
     // INFO line came back, the log level was overridden somewhere and "no
-    // detections" would be indistinguishable from "detection never ran".
-    if !saw_info_level_output(&stderr) {
+    // detections" would be indistinguishable from "detection never ran". The
+    // flag is recorded while streaming, so a long pass that evicts the header
+    // lines from the retained text still answers correctly.
+    if !capture.saw_info_output {
         return Err(CoreError::AnalysisFailed(
             "FFmpeg produced no INFO-level output, so detection results cannot be trusted"
                 .to_string(),
         ));
     }
 
+    if capture.truncated {
+        notes.push(
+            "Filter output exceeded the stderr retention limit; detections near the start of \
+             the file may be missing"
+                .to_string(),
+        );
+    }
+
+    let stderr = capture.stderr;
     let duration_sec = media.duration_sec;
     let mut measurements = RenderMeasurements::default();
 
@@ -250,11 +261,13 @@ fn build_filter_graph(
     }
 
     if has_audio {
-        // `framelog=quiet` suppresses the per-frame loudness lines; the summary
-        // block is logged from the filter's uninit at INFO level regardless, so
-        // this keeps the log small without losing the values that matter.
+        // `framelog` is deliberately left at its default: FFmpeg 4.4 and 6.1
+        // only accept `info`/`verbose` there, so passing `quiet` fails option
+        // parsing on the builds most users have. The per-frame lines it would
+        // have suppressed carry the `[Parsed_ebur128` marker, so the bounded
+        // filter buffer absorbs them, and the Summary block still prints.
         chains.push(format!(
-            "[0:a]ebur128=peak=true:framelog=quiet,\
+            "[0:a]ebur128=peak=true,\
              silencedetect=n={silence_n:.1}dB:d={silence_d:.3},\
              astats=metadata=0:measure_perchannel=none:measure_overall=Peak_level+Flat_factor[a]",
             silence_n = opts.silence_threshold_db.clamp(-90.0, 0.0),
@@ -288,20 +301,6 @@ pub struct AstatsOverall {
     pub sample_peak_db: Option<f64>,
     /// Flatness factor (high values indicate a clipped or flat signal).
     pub flat_factor: Option<f64>,
-}
-
-/// Returns whether the log contains lines FFmpeg only emits at INFO level.
-///
-/// Used as a canary: detection filters log nothing when they find nothing, so a
-/// silent log is only meaningful if INFO output reached us at all.
-pub fn saw_info_level_output(stderr: &str) -> bool {
-    stderr.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with("Input #")
-            || line.starts_with("Output #")
-            || line.starts_with("Stream mapping:")
-            || line.starts_with("Stream #")
-    })
 }
 
 /// Parses `blackdetect` ranges from FFmpeg stderr.
@@ -534,6 +533,13 @@ mod tests {
   True peak:
     Peak:       -1.2 dBFS";
 
+    /// Real `ebur128` per-frame lines, which print whenever `framelog` is left
+    /// at its default (the only portable setting across FFmpeg builds).
+    const EBUR128_PER_FRAME: &str = "\
+[Parsed_ebur128_0 @ 000001f3f7a0] t: 0.19999   M: -21.4 S:-120.7     I: -21.4 LUFS       LRA:   0.0 LU
+[Parsed_ebur128_0 @ 000001f3f7a0] t: 0.29999   M: -19.8 S:-120.7     I: -20.3 LUFS       LRA:   0.0 LU
+[Parsed_ebur128_0 @ 000001f3f7a0] t: 0.39999   M: -18.9 S: -21.1     I: -19.6 LUFS       LRA:   1.2 LU";
+
     /// Real `astats` overall section with per-channel measurement disabled.
     const ASTATS_LOG: &str = "\
 [Parsed_astats_2 @ 000001f3f8c0] Overall
@@ -659,6 +665,19 @@ Output #0, null, to 'pipe:':";
         assert_eq!(summary.loudness_range_lu, None);
     }
 
+    /// Feature: EBU R128 measurement without `framelog=quiet`
+    /// Scenario: should read the summary out of a log full of per-frame lines
+    #[test]
+    fn test_parse_loudness_summary_should_read_the_summary_after_per_frame_lines() {
+        let log = format!("{EBUR128_PER_FRAME}\n{EBUR128_SUMMARY}");
+
+        let summary = parse_loudness_summary(&log);
+
+        assert_eq!(summary.integrated_lufs, Some(-18.3));
+        assert_eq!(summary.loudness_range_lu, Some(7.4));
+        assert_eq!(summary.true_peak_dbtp, Some(-1.2));
+    }
+
     // ========================================================================
     // astats
     // ========================================================================
@@ -683,15 +702,6 @@ Output #0, null, to 'pipe:':";
     // ========================================================================
     // Shared helpers
     // ========================================================================
-
-    #[test]
-    fn test_saw_info_level_output() {
-        assert!(saw_info_level_output(INFO_HEADER));
-        assert!(!saw_info_level_output(
-            "[silencedetect @ 0x1] silence_start: 1.0"
-        ));
-        assert!(!saw_info_level_output(""));
-    }
 
     #[test]
     fn test_silence_parser_reuse_on_a_combined_log() {
@@ -723,7 +733,11 @@ Output #0, null, to 'pipe:':";
 
         assert!(graph.contains("[0:v]blackdetect="));
         assert!(graph.contains("freezedetect="));
-        assert!(graph.contains("[0:a]ebur128=peak=true:framelog=quiet"));
+        assert!(graph.contains("[0:a]ebur128=peak=true,"));
+        assert!(
+            !graph.contains("framelog"),
+            "framelog is unsupported on FFmpeg 4.4/6.1 and must stay off the graph: {graph}"
+        );
         assert!(graph.contains("silencedetect="));
         assert!(graph.contains("astats=metadata=0"));
         assert_eq!(maps, vec!["[v]".to_string(), "[a]".to_string()]);
