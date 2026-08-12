@@ -19,6 +19,34 @@ fn is_nonempty_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Default MJPEG quality (1-31, lower is better) used for extracted frames.
+const DEFAULT_FRAME_JPEG_QUALITY: u8 = 2;
+
+/// Builds a downscale-only `scale` filter that preserves the aspect ratio.
+///
+/// `min(max_width, iw)` keeps sources narrower than `max_width` untouched, and
+/// `-2` keeps the height on an even number as required by most encoders. The
+/// quotes protect the comma from FFmpeg's filtergraph separator.
+fn downscale_filter(max_width: u32) -> String {
+    format!("scale='min({},iw)':-2", max_width.max(1))
+}
+
+/// Options for [`FFmpegRunner::extract_frame_with_options`].
+#[derive(Clone, Debug, Default)]
+pub struct FrameExtractOptions {
+    /// Re-extract even when a non-empty output file already exists.
+    ///
+    /// The default (`false`) keeps the legacy cache behaviour used by
+    /// thumbnail and clip-analysis passes.
+    pub overwrite: bool,
+    /// Downscale the frame so its width never exceeds this value.
+    ///
+    /// Sources narrower than the limit are left at their native size.
+    pub max_width: Option<u32>,
+    /// MJPEG quality (1-31, lower is better). Ignored for PNG output.
+    pub quality: Option<u8>,
+}
+
 // =============================================================================
 // Waveform Data Types
 // =============================================================================
@@ -268,6 +296,11 @@ impl FFmpegRunner {
 
     /// Extract a single frame from a video file
     ///
+    /// An existing non-empty output file is treated as a cache hit and left
+    /// untouched. Callers that need a freshly decoded frame must use
+    /// [`FFmpegRunner::extract_frame_with_options`] with
+    /// [`FrameExtractOptions::overwrite`] set.
+    ///
     /// # Arguments
     /// * `input` - Path to the input video file
     /// * `time_sec` - Time position in seconds
@@ -278,6 +311,25 @@ impl FFmpegRunner {
         time_sec: f64,
         output: &Path,
     ) -> FFmpegResult<()> {
+        self.extract_frame_with_options(input, time_sec, output, &FrameExtractOptions::default())
+            .await
+    }
+
+    /// Extract a single frame from a video file with explicit caching, scaling
+    /// and quality control.
+    ///
+    /// # Arguments
+    /// * `input` - Path to the input video file
+    /// * `time_sec` - Time position in seconds
+    /// * `output` - Path to save the output image (JPEG or PNG)
+    /// * `options` - Overwrite/scale/quality behaviour
+    pub async fn extract_frame_with_options(
+        &self,
+        input: &Path,
+        time_sec: f64,
+        output: &Path,
+        options: &FrameExtractOptions,
+    ) -> FFmpegResult<()> {
         if !input.exists() {
             return Err(FFmpegError::InvalidInput(format!(
                 "Input file does not exist: {}",
@@ -285,8 +337,9 @@ impl FFmpegRunner {
             )));
         }
 
-        // If already extracted, treat as success.
-        if is_nonempty_file(output) {
+        // Without `overwrite`, an already extracted frame is treated as success
+        // so repeated thumbnail/analysis passes stay cheap.
+        if !options.overwrite && is_nonempty_file(output) {
             return Ok(());
         }
 
@@ -300,32 +353,58 @@ impl FFmpegRunner {
         // Build FFmpeg command
         // -ss before -i for fast seeking
         // -frames:v 1 to extract single frame
-        // -q:v 2 for good JPEG quality
+        let mut args = vec![
+            "-hide_banner".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-nostdin".to_string(),
+            "-ss".to_string(),
+            format!("{:.6}", time_sec),
+            "-i".to_string(),
+            input.to_string_lossy().to_string(),
+            "-frames:v".to_string(),
+            "1".to_string(),
+        ];
+
+        if let Some(max_width) = options.max_width {
+            args.push("-vf".to_string());
+            args.push(downscale_filter(max_width));
+        }
+
+        // PNG ignores `-q:v`; only the MJPEG path is quality controlled.
+        if output
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+        {
+            args.extend([
+                "-c:v".to_string(),
+                "png".to_string(),
+                "-pix_fmt".to_string(),
+                "rgba".to_string(),
+            ]);
+        } else {
+            args.push("-q:v".to_string());
+            args.push(
+                options
+                    .quality
+                    .unwrap_or(DEFAULT_FRAME_JPEG_QUALITY)
+                    .to_string(),
+            );
+        }
+
+        args.push("-y".to_string()); // Overwrite output
+        args.push(output.to_string_lossy().to_string());
+
         let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
         configure_tokio_command(&mut cmd);
-        let output = cmd
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-ss",
-                &format!("{:.6}", time_sec),
-                "-i",
-                &input.to_string_lossy(),
-                "-frames:v",
-                "1",
-                "-q:v",
-                "2",
-                "-y", // Overwrite output
-                &output.to_string_lossy(),
-            ])
+        let result = cmd
+            .args(&args)
             .output()
             .await
             .map_err(FFmpegError::ProcessError)?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
             return Err(FFmpegError::ExecutionFailed(format!(
                 "Frame extraction failed: {}",
                 stderr

@@ -576,6 +576,25 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "params": {},
                 "example": "openreelio-cli ffmpeg info"
             },
+            "frame.extract": {
+                "description": "Extract still frames for visual inspection: one asset-time frame, one or many timeline-time frames, or a contact sheet grid. Timeline 'fast' mode captures the topmost file-backed clip only (no effects, text, or compositing) and falls back to 'composite' automatically when no such clip covers the requested time.",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "out": { "type": "string", "required": true, "desc": "Output image file; must be a directory when --times is used. The extension is normalized to match --format." },
+                    "asset": { "type": "string", "required": false, "desc": "Asset ID to extract from; requires --source-time and cannot be combined with timeline selectors" },
+                    "source-time": { "type": "number", "required": false, "desc": "Time in seconds inside the asset's own media; requires --asset" },
+                    "time": { "type": "number", "required": false, "desc": "Timeline time in seconds for a single still" },
+                    "times": { "type": "string", "required": false, "desc": "Comma-separated timeline times in seconds; --out must be a directory and files are named frame_<ms>.<ext>" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" },
+                    "mode": { "type": "string", "required": false, "desc": "Timeline extraction mode: fast (default, topmost clip only) or composite (full render of a minimal window; decodes from timeline zero so cost grows with the timestamp)" },
+                    "max-width": { "type": "number", "required": false, "desc": "Maximum output width in pixels, aspect ratio preserved and never upscaled (default: 1280 for timeline modes, native for --asset)" },
+                    "format": { "type": "string", "required": false, "desc": "Output image format: png (default) or jpeg. Grid cells are always JPEG; the sheet itself uses this format." },
+                    "grid": { "type": "string", "required": false, "desc": "Contact sheet layout as COLSxROWS (e.g. 3x2); requires --between" },
+                    "between": { "type": "string", "required": false, "desc": "Timeline range sampled by --grid, given as two values: START END" },
+                    "count": { "type": "number", "required": false, "desc": "Number of grid samples (default: columns * rows; must not exceed the grid capacity)" }
+                },
+                "example": "openreelio-cli frame extract --path ./project --time 12.5 --out frame.png"
+            },
             "mcp": {
                 "description": "Serve read-only OpenReelio MCP tools for external AI agents",
                 "params": {

@@ -1233,6 +1233,8 @@ pub async fn export_frame(
         format: image_format,
         output_path: validated_output_path,
         quality,
+        // The GUI still exports stills at the source's native resolution.
+        max_width: None,
     };
 
     let result = engine

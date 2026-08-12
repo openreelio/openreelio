@@ -12,6 +12,7 @@ mod asset;
 mod caption;
 mod command;
 mod ffmpeg;
+mod frame;
 mod help_json;
 mod mcp;
 mod plan;
@@ -97,6 +98,12 @@ pub enum Commands {
         action: ffmpeg::FfmpegAction,
     },
 
+    /// Still frame extraction for visual inspection
+    Frame {
+        #[command(subcommand)]
+        action: frame::FrameAction,
+    },
+
     /// Batch plan execution (atomic multi-step edits)
     Plan {
         #[command(subcommand)]
@@ -134,6 +141,7 @@ pub fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Text { action } => text::execute(action),
         Commands::Render { action } => render::execute(action),
         Commands::Ffmpeg { action } => ffmpeg::execute(action),
+        Commands::Frame { action } => frame::execute(action),
         Commands::Plan { action } => plan::execute(action),
         Commands::Command { action } => command::execute(action),
         Commands::State { action } => state::execute(action),

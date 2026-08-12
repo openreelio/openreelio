@@ -40,10 +40,10 @@ const DEFAULT_COMPLEXITY: f64 = 0.5;
 const CONTACT_SHEET_MAX_FRAMES: usize = 12;
 
 /// Width of each contact-sheet cell.
-const CONTACT_SHEET_CELL_WIDTH: usize = 320;
+pub const CONTACT_SHEET_CELL_WIDTH: usize = 320;
 
 /// Height of each contact-sheet cell.
-const CONTACT_SHEET_CELL_HEIGHT: usize = 180;
+pub const CONTACT_SHEET_CELL_HEIGHT: usize = 180;
 
 /// Minimum shot duration to attempt smarter thumbnail-based selection.
 const SMART_KEYFRAME_MIN_DURATION_SEC: f64 = 1.2;
@@ -212,13 +212,44 @@ impl VisualAnalyzer {
     }
 
     /// Generates a contact-sheet image from a sequence of extracted keyframes.
+    ///
+    /// The grid layout and the frame cap are derived from the keyframe count.
+    /// Use [`VisualAnalyzer::generate_contact_sheet_with_layout`] to pin an
+    /// explicit layout.
     pub async fn generate_contact_sheet(
         &self,
         keyframes: &[PathBuf],
         output_path: &Path,
     ) -> CoreResult<Option<ContactSheetArtifact>> {
+        self.generate_contact_sheet_with_layout(keyframes, output_path, None)
+            .await
+    }
+
+    /// Generates a contact-sheet image with an optional explicit grid layout.
+    ///
+    /// `layout` is a `(columns, rows)` pair. When supplied, its capacity
+    /// (`columns * rows`) replaces the default frame cap so caller-defined
+    /// grids larger than the built-in maximum are honoured. When `None`, a
+    /// compact layout is derived from the keyframe count.
+    ///
+    /// All keyframes must live in the same directory and be named as a
+    /// zero-based `%d.jpg` sequence — FFmpeg reads them as an image sequence.
+    pub async fn generate_contact_sheet_with_layout(
+        &self,
+        keyframes: &[PathBuf],
+        output_path: &Path,
+        layout: Option<(usize, usize)>,
+    ) -> CoreResult<Option<ContactSheetArtifact>> {
         if keyframes.is_empty() {
             return Ok(None);
+        }
+
+        if let Some((columns, rows)) = layout {
+            if columns == 0 || rows == 0 {
+                return Err(CoreError::AnalysisFailed(
+                    "Contact sheet layout requires at least one column and one row".to_string(),
+                ));
+            }
         }
 
         // No fast-path cache: the keyframe set may have changed since the file was written
@@ -234,7 +265,10 @@ impl VisualAnalyzer {
             })?;
         }
 
-        let frame_count = keyframes.len().min(CONTACT_SHEET_MAX_FRAMES);
+        let capacity = layout
+            .map(|(columns, rows)| columns.saturating_mul(rows))
+            .unwrap_or(CONTACT_SHEET_MAX_FRAMES);
+        let frame_count = keyframes.len().min(capacity);
         let first_keyframe = keyframes.first().ok_or_else(|| {
             CoreError::Internal("Contact sheet requires at least one keyframe".to_string())
         })?;
@@ -261,7 +295,7 @@ impl VisualAnalyzer {
             })?;
         }
 
-        let (columns, rows) = contact_sheet_layout(frame_count);
+        let (columns, rows) = layout.unwrap_or_else(|| contact_sheet_layout(frame_count));
         let input_pattern = keyframe_dir.join("%d.jpg");
         let filter = format!(
             "scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,tile={cols}x{rows}:nb_frames={count}:padding=4:margin=2:color=black",

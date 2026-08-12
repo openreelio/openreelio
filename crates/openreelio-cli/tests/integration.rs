@@ -945,6 +945,206 @@ fn test_render_start_exports_video_when_ffmpeg_is_available() {
 }
 
 // =============================================================================
+// Frame Commands
+// =============================================================================
+
+/// Creates a project with `sample.mp4` imported and inserted on a video track.
+///
+/// Returns `None` when FFmpeg cannot produce the sample so callers can skip.
+fn create_project_with_timeline_clip(
+    name: &str,
+    duration_secs: u32,
+) -> Option<(tempfile::TempDir, String, String)> {
+    system_ffmpeg_path()?;
+
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+
+    let source_path = dir.path().join("frame_source.mp4");
+    if !create_sample_video_with_duration(&source_path, duration_secs) {
+        return None;
+    }
+
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source_path.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    Some((dir, path, asset_id))
+}
+
+#[test]
+fn test_frame_extract_writes_still_from_asset_source_time() {
+    let Some((dir, path, asset_id)) = create_project_with_timeline_clip("frame_asset_test", 4)
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("asset_frame.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--asset",
+        &asset_id,
+        "--source-time",
+        "1.0",
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["mode"], "asset");
+    assert_eq!(result["count"], 1);
+    assert_eq!(result["frames"][0]["assetId"], asset_id.as_str());
+    assert_eq!(result["frames"][0]["sourceTimeSec"], 1.0);
+    assert!(output_path.exists(), "Expected extracted frame to exist");
+    assert!(
+        output_path.metadata().unwrap().len() > 0,
+        "Expected extracted frame to be non-empty"
+    );
+}
+
+#[test]
+fn test_frame_extract_writes_still_from_timeline_time() {
+    let Some((dir, path, asset_id)) = create_project_with_timeline_clip("frame_timeline_test", 4)
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("timeline_frame.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "1.5",
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["mode"], "fast");
+    assert_eq!(result["count"], 1);
+    assert_eq!(result["frames"][0]["timeSec"], 1.5);
+    assert_eq!(result["frames"][0]["assetId"], asset_id.as_str());
+    assert!(result["frames"][0]["clipId"].is_string());
+    assert!(result["frames"][0]["width"].as_u64().unwrap() > 0);
+    assert!(output_path.exists(), "Expected extracted frame to exist");
+    assert!(
+        output_path.metadata().unwrap().len() > 0,
+        "Expected extracted frame to be non-empty"
+    );
+}
+
+#[test]
+fn test_frame_extract_writes_one_file_per_requested_time() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_batch_test", 4) else {
+        return;
+    };
+
+    let output_dir = dir.path().join("stills");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--times",
+        "0.5,1.5,2.5",
+        "--out",
+        output_dir.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["count"], 3);
+
+    let frames = result["frames"].as_array().unwrap();
+    assert_eq!(frames.len(), 3);
+    for frame in frames {
+        let frame_path = std::path::Path::new(frame["path"].as_str().unwrap());
+        assert!(
+            frame_path.exists(),
+            "Expected batch frame {} to exist",
+            frame_path.display()
+        );
+        assert!(
+            frame_path.metadata().unwrap().len() > 0,
+            "Expected batch frame {} to be non-empty",
+            frame_path.display()
+        );
+    }
+}
+
+#[test]
+fn test_frame_extract_builds_contact_sheet_for_grid() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_grid_test", 4) else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("sheet.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--between",
+        "0",
+        "4",
+        "--format",
+        "jpeg",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["sheet"]["cols"], 2);
+    assert_eq!(result["sheet"]["rows"], 2);
+
+    let cells = result["sheet"]["cells"].as_array().unwrap();
+    assert_eq!(cells.len(), 4);
+    let times: Vec<f64> = cells
+        .iter()
+        .map(|cell| cell["timelineSec"].as_f64().unwrap())
+        .collect();
+    assert!(
+        times.windows(2).all(|pair| pair[0] < pair[1]),
+        "Expected ascending cell times, got {:?}",
+        times
+    );
+    assert!(times.iter().all(|time| *time > 0.0 && *time < 4.0));
+
+    assert!(sheet_path.exists(), "Expected contact sheet to exist");
+    assert!(
+        sheet_path.metadata().unwrap().len() > 0,
+        "Expected contact sheet to be non-empty"
+    );
+}
+
+// =============================================================================
 // Plan Commands
 // =============================================================================
 

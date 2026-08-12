@@ -1404,6 +1404,13 @@ pub struct FrameExportSettings {
     pub output_path: PathBuf,
     /// Optional JPEG quality (1-31, lower = better; only used for JPEG)
     pub quality: Option<u8>,
+    /// Optional maximum output width in pixels.
+    ///
+    /// `None` exports at the source's native resolution. When set, the frame is
+    /// downscaled to at most this width with the aspect ratio preserved;
+    /// narrower sources are never upscaled.
+    #[serde(default)]
+    pub max_width: Option<u32>,
 }
 
 impl FrameExportSettings {
@@ -1428,8 +1435,66 @@ impl FrameExportSettings {
             }
         }
 
+        if let Some(max_width) = self.max_width {
+            if max_width == 0 {
+                return Err(ExportError::InvalidSettings(
+                    "Maximum width must be greater than zero".to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
+}
+
+/// Computes the output dimensions of FFmpeg's `scale='min(max_width,iw)':-2`.
+///
+/// The width is clamped to `max_width` (never upscaled) and the height keeps
+/// the source aspect ratio rounded to the nearest even number, mirroring how
+/// FFmpeg resolves a `-2` dimension. `None` leaves the source size untouched.
+pub fn scaled_frame_dimensions(
+    src_width: u32,
+    src_height: u32,
+    max_width: Option<u32>,
+) -> (u32, u32) {
+    let Some(max_width) = max_width else {
+        return (src_width, src_height);
+    };
+    if src_width == 0 || src_height == 0 || max_width == 0 {
+        return (src_width, src_height);
+    }
+
+    let out_width = max_width.min(src_width);
+    // FFmpeg computes `av_rescale(out_width, src_height, src_width * 2) * 2`,
+    // i.e. a half-up rounded number of even steps.
+    let numerator = out_width as u64 * src_height as u64;
+    let denominator = src_width as u64 * 2;
+    let even_steps = (numerator + denominator / 2) / denominator;
+    let out_height = (even_steps * 2).max(2).min(u32::MAX as u64) as u32;
+
+    (out_width, out_height)
+}
+
+/// Reads the real pixel dimensions of a written image via FFprobe.
+///
+/// Returns `None` when probing fails or reports no usable video stream so
+/// callers can fall back to computed dimensions.
+pub async fn probed_image_dimensions(ffmpeg: &FFmpegRunner, path: &Path) -> Option<(u32, u32)> {
+    ffmpeg
+        .probe(path)
+        .await
+        .ok()
+        .and_then(|info| info.video)
+        .map(|video| (video.width, video.height))
+        .filter(|(width, height)| *width > 0 && *height > 0)
+}
+
+/// Maps a timeline time to the corresponding source-media time inside `clip`.
+///
+/// Accounts for the clip's timeline placement, source in-point and speed.
+pub fn clip_source_time_at(clip: &Clip, timeline_time_sec: f64) -> f64 {
+    let clip_relative_time = timeline_time_sec - clip.place.timeline_in_sec;
+    clip.range.source_in_sec + (clip_relative_time * clip.speed as f64)
 }
 
 /// Result of a single-frame export
@@ -4055,9 +4120,7 @@ impl ExportEngine {
 
         // Calculate the source time within the asset, accounting for
         // the clip's timeline position and source offset.
-        let clip_relative_time = settings.time_sec - clip.place.timeline_in_sec;
-        let speed = clip.speed as f64;
-        let source_time = clip.range.source_in_sec + (clip_relative_time * speed);
+        let source_time = clip_source_time_at(clip, settings.time_sec);
 
         // Resolve asset path
         let asset_path = Path::new(&asset.uri);
@@ -4086,6 +4149,13 @@ impl ExportEngine {
             "-frames:v".to_string(),
             "1".to_string(),
         ];
+
+        // Downscale-only filter: sources narrower than the limit stay native.
+        // The quotes protect the comma from the filtergraph separator.
+        if let Some(max_width) = settings.max_width {
+            args.push("-vf".to_string());
+            args.push(format!("scale='min({},iw)':-2", max_width));
+        }
 
         // Format-specific arguments
         match settings.format {
@@ -4134,17 +4204,34 @@ impl ExportEngine {
                 other => other,
             })?;
 
-        // Read output file metadata
-        let metadata = tokio::fs::metadata(&settings.output_path).await?;
+        // FFmpeg exits successfully but writes nothing when the seek lands past
+        // the end of the source media, so a missing file is reported as a
+        // seek-out-of-range error instead of a bare IO error.
+        let metadata = tokio::fs::metadata(&settings.output_path)
+            .await
+            .map_err(|_| {
+                ExportError::InvalidSettings(format!(
+                    "No frame was produced at time {:.3}s (source time {:.3}s in '{}'). \
+                     The requested position is likely past the end of the source media.",
+                    settings.time_sec, source_time, asset.uri
+                ))
+            })?;
         let file_size = metadata.len();
 
-        // The frame is extracted at the source asset's native resolution.
-        // Use asset video dimensions if available, otherwise fall back to sequence canvas.
-        let (width, height) = if let Some(ref video) = asset.video {
+        // Source dimensions come from the asset's video stream when known,
+        // otherwise the sequence canvas is the best available approximation.
+        let (source_width, source_height) = if let Some(ref video) = asset.video {
             (video.width, video.height)
         } else {
             (sequence.format.canvas.width, sequence.format.canvas.height)
         };
+        // Prefer the written image's real size: asset metadata can be stale or
+        // missing, and the scale filter resolves against the true source.
+        let (width, height) = probed_image_dimensions(&self.ffmpeg, &settings.output_path)
+            .await
+            .unwrap_or_else(|| {
+                scaled_frame_dimensions(source_width, source_height, settings.max_width)
+            });
 
         Ok(FrameExportResult {
             output_path: settings.output_path.clone(),
@@ -4356,7 +4443,11 @@ impl ExportEngine {
     ///
     /// Iterates video tracks from top to bottom (highest index first) and
     /// returns the first enabled clip that covers the requested time.
-    fn find_topmost_clip_at_time<'a>(
+    ///
+    /// Text clips and adjustment layers are skipped because they have no
+    /// file-backed source. `None` therefore means [`ExportEngine::export_frame`]
+    /// cannot serve the requested time and a composited render is required.
+    pub fn find_topmost_clip_at_time<'a>(
         &self,
         sequence: &'a Sequence,
         assets: &'a HashMap<String, Asset>,
@@ -10269,6 +10360,7 @@ mod tests {
             format: ImageFormat::Png,
             output_path: PathBuf::from("/tmp/frame.png"),
             quality: None,
+            max_width: None,
         };
         let result = settings.validate();
         assert!(result.is_err());
@@ -10284,6 +10376,7 @@ mod tests {
             format: ImageFormat::Jpeg,
             output_path: PathBuf::from("/tmp/frame.jpg"),
             quality: Some(0),
+            max_width: None,
         };
         assert!(settings.validate().is_err());
 
@@ -10303,6 +10396,7 @@ mod tests {
             format: ImageFormat::Png,
             output_path: std::env::temp_dir().join("frame.png"),
             quality: None,
+            max_width: None,
         };
         assert!(settings.validate().is_ok());
     }
@@ -10317,8 +10411,76 @@ mod tests {
             format: ImageFormat::Png,
             output_path: temp_dir.path().join("frames/stills/frame.png"),
             quality: None,
+            max_width: None,
         };
         assert!(settings.validate().is_ok());
+    }
+
+    /// Feature: Frame Export Settings
+    /// Scenario: should reject a zero maximum width
+    #[test]
+    fn frame_export_settings_should_reject_zero_max_width() {
+        let settings = FrameExportSettings {
+            time_sec: 1.0,
+            format: ImageFormat::Png,
+            output_path: std::env::temp_dir().join("frame.png"),
+            quality: None,
+            max_width: Some(0),
+        };
+        assert!(settings.validate().is_err());
+    }
+
+    /// Feature: Frame Scaling
+    /// Scenario: should keep native size when no maximum width is requested
+    #[test]
+    fn scaled_frame_dimensions_should_keep_native_size_without_limit() {
+        assert_eq!(scaled_frame_dimensions(1920, 1080, None), (1920, 1080));
+    }
+
+    /// Feature: Frame Scaling
+    /// Scenario: should never upscale narrower sources
+    #[test]
+    fn scaled_frame_dimensions_should_not_upscale() {
+        assert_eq!(scaled_frame_dimensions(640, 360, Some(1280)), (640, 360));
+    }
+
+    /// Feature: Frame Scaling
+    /// Scenario: should preserve aspect ratio with an even height
+    #[test]
+    fn scaled_frame_dimensions_should_preserve_aspect_with_even_height() {
+        assert_eq!(scaled_frame_dimensions(1920, 1080, Some(1280)), (1280, 720));
+        assert_eq!(scaled_frame_dimensions(3840, 2160, Some(1280)), (1280, 720));
+        // 1280 * 240 / 320 = 960 exactly.
+        assert_eq!(scaled_frame_dimensions(320, 240, Some(160)), (160, 120));
+        // 100 * 57 / 111 = 51.35 -> nearest even is 52.
+        assert_eq!(scaled_frame_dimensions(111, 57, Some(100)), (100, 52));
+    }
+
+    /// Feature: Frame Scaling
+    /// Scenario: should stay at a valid minimum height for extreme ratios
+    #[test]
+    fn scaled_frame_dimensions_should_clamp_height_to_two() {
+        assert_eq!(scaled_frame_dimensions(4000, 10, Some(2)), (2, 2));
+    }
+
+    /// Feature: Frame Scaling
+    /// Scenario: should tolerate unknown source dimensions
+    #[test]
+    fn scaled_frame_dimensions_should_tolerate_zero_source() {
+        assert_eq!(scaled_frame_dimensions(0, 0, Some(1280)), (0, 0));
+    }
+
+    /// Feature: Timeline To Source Mapping
+    /// Scenario: should account for placement, source in-point and speed
+    #[test]
+    fn clip_source_time_at_should_map_timeline_to_source() {
+        let mut clip = Clip::new("asset_1");
+        clip.place.timeline_in_sec = 10.0;
+        clip.range.source_in_sec = 2.0;
+        clip.speed = 2.0;
+
+        assert_eq!(clip_source_time_at(&clip, 10.0), 2.0);
+        assert_eq!(clip_source_time_at(&clip, 12.0), 6.0);
     }
 
     /// Feature: Frame Export Result

@@ -27,11 +27,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
+# Scratch directories for composited frame renders and contact-sheet cells
+tempfile = "3"
+
 # Error handling
 anyhow = "1"
-
-[dev-dependencies]
-tempfile = "3"
 
 [features]
 default = ["whisper"]
