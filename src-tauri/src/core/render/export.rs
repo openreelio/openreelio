@@ -27,7 +27,7 @@ use crate::core::{
         execute_ffmpeg_invocation, execute_ffmpeg_output, RenderPlan,
     },
     timeline::{
-        BlendMode, Clip, Sequence, SlowMotionInterpolation, TimelineClock, Track, TrackKind,
+        BlendMode, Canvas, Clip, Sequence, SlowMotionInterpolation, TimelineClock, Track, TrackKind,
     },
 };
 
@@ -241,6 +241,32 @@ fn sequence_has_exportable_audio(
 // Types
 // =============================================================================
 
+/// Accepted values for [`ExportSettings::encoder_speed`], ordered fastest to slowest.
+///
+/// These are the x264/x265 `-preset` names. Faster values encode quicker at the cost
+/// of compression efficiency, which is the trade-off proxy and preview renders want.
+pub const ENCODER_SPEED_VALUES: &[&str] = &[
+    "ultrafast",
+    "superfast",
+    "veryfast",
+    "faster",
+    "fast",
+    "medium",
+    "slow",
+    "slower",
+    "veryslow",
+    "placebo",
+];
+
+/// Returns true when `value` is a supported software encoder speed preset.
+///
+/// Matching is case-insensitive and ignores surrounding whitespace so CLI and IPC
+/// callers do not have to normalize input themselves.
+pub fn is_valid_encoder_speed(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    ENCODER_SPEED_VALUES.contains(&normalized.as_str())
+}
+
 /// Export preset type
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -448,6 +474,15 @@ pub struct ExportSettings {
     /// When None, falls back to software encoder for the selected video codec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_encoder_name: Option<String>,
+    /// Encoder speed/compression trade-off for software x264/x265 encoding.
+    ///
+    /// Maps directly to FFmpeg's `-preset` argument. Accepted values are listed in
+    /// [`ENCODER_SPEED_VALUES`] (`ultrafast` … `placebo`). When `None` no `-preset`
+    /// argument is emitted and FFmpeg's own default applies. Silently ignored for
+    /// hardware encoders and for codecs that do not accept `-preset` (VP9, ProRes),
+    /// which carry their own tuning parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_speed: Option<String>,
 }
 
 impl Default for ExportSettings {
@@ -473,6 +508,7 @@ impl Default for ExportSettings {
             tonemap_mode: None,
             hardware_accel: super::hardware::HardwareAccelMode::default(),
             resolved_encoder_name: None,
+            encoder_speed: None,
         }
     }
 }
@@ -487,6 +523,27 @@ impl ExportSettings {
             return name.clone();
         }
         super::hardware::software_encoder_name(&self.video_codec)
+    }
+
+    /// Build the `-preset` arguments for the resolved encoder, if any.
+    ///
+    /// Only software x264/x265 accept the `ultrafast … placebo` preset ladder.
+    /// Hardware encoders use their own preset namespace (handled by
+    /// [`resolve_quality_args`](super::hardware::resolve_quality_args)) and VP9/ProRes
+    /// have no equivalent, so this returns an empty vector for them rather than
+    /// emitting an argument FFmpeg would reject.
+    pub fn encoder_speed_args(&self, encoder_name: &str) -> Vec<String> {
+        let Some(speed) = self.encoder_speed.as_deref() else {
+            return Vec::new();
+        };
+        if !matches!(encoder_name, "libx264" | "libx265") {
+            return Vec::new();
+        }
+        let normalized = speed.trim().to_ascii_lowercase();
+        if !is_valid_encoder_speed(&normalized) {
+            return Vec::new();
+        }
+        vec!["-preset".to_string(), normalized]
     }
 
     /// Get the resolved audio encoder name for FFmpeg.
@@ -524,6 +581,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::Mp4Draft => Self {
                 preset: ExportPreset::Mp4Draft,
@@ -546,6 +604,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::Mp4High => Self {
                 preset: ExportPreset::Mp4High,
@@ -568,6 +627,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::Youtube4k => Self {
                 preset: ExportPreset::Youtube4k,
@@ -590,6 +650,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::YoutubeShorts => Self {
                 preset: ExportPreset::YoutubeShorts,
@@ -612,6 +673,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::Twitter => Self {
                 preset: ExportPreset::Twitter,
@@ -634,6 +696,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::Instagram => Self {
                 preset: ExportPreset::Instagram,
@@ -656,6 +719,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::WebmVp9 => Self {
                 preset: ExportPreset::WebmVp9,
@@ -678,6 +742,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::ProRes => Self {
                 preset: ExportPreset::ProRes,
@@ -700,6 +765,7 @@ impl ExportSettings {
                 tonemap_mode: None,
                 hardware_accel: super::hardware::HardwareAccelMode::default(),
                 resolved_encoder_name: None,
+                encoder_speed: None,
             },
             ExportPreset::Custom => Self {
                 preset: ExportPreset::Custom,
@@ -739,6 +805,7 @@ impl ExportSettings {
             tonemap_mode: None,
             hardware_accel: super::hardware::HardwareAccelMode::default(),
             resolved_encoder_name: None,
+            encoder_speed: None,
         })
     }
 
@@ -806,6 +873,61 @@ impl ExportSettings {
             tonemap_mode: None,
             hardware_accel: super::hardware::HardwareAccelMode::default(),
             resolved_encoder_name: None,
+            encoder_speed: None,
+        }
+    }
+
+    /// Create proxy render settings optimized for machine inspection and fast turnaround.
+    ///
+    /// Proxy renders exist so an agent (or a human) can look at what the timeline
+    /// currently produces without paying for a full-quality encode:
+    /// - a 480p-class frame that follows the sequence aspect ratio (see
+    ///   [`proxy_frame_dimensions`]) — enough detail for visual QC, cheap to decode
+    /// - CRF 30 with no target bitrate — quality-driven, small files
+    /// - 96 kbps AAC — intelligible speech, negligible cost
+    /// - `ultrafast` x264 preset — encode speed over compression efficiency
+    /// - Frame rate follows the sequence (`fps: None`)
+    ///
+    /// The canvas is a parameter because a fixed 854x480 frame pillarboxes every
+    /// sequence that is not 16:9 — a 1080x1920 vertical edit would arrive with
+    /// 270 px of usable picture inside a landscape frame.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_path` - Path where the proxy video will be saved
+    /// * `canvas` - The sequence canvas the proxy frame is fitted to
+    /// * `start_time` - Optional start time in seconds for a partial render
+    /// * `end_time` - Optional end time in seconds for a partial render
+    pub fn proxy(
+        output_path: PathBuf,
+        canvas: &Canvas,
+        start_time: Option<f64>,
+        end_time: Option<f64>,
+    ) -> Self {
+        let (width, height) = proxy_frame_dimensions(canvas.width, canvas.height);
+
+        Self {
+            preset: ExportPreset::Custom,
+            output_path,
+            video_codec: VideoCodec::H264,
+            audio_codec: AudioCodec::Aac,
+            width: Some(width),
+            height: Some(height),
+            video_bitrate: None,
+            audio_bitrate: Some("96k".to_string()),
+            fps: None,
+            crf: Some(30),
+            two_pass: false,
+            start_time,
+            end_time,
+            hdr_mode: HdrMode::Sdr,
+            max_cll: None,
+            max_fall: None,
+            bit_depth: None,
+            tonemap_mode: None,
+            hardware_accel: super::hardware::HardwareAccelMode::default(),
+            resolved_encoder_name: None,
+            encoder_speed: Some("ultrafast".to_string()),
         }
     }
 
@@ -1247,6 +1369,16 @@ fn validate_export_settings_options(settings: &ExportSettings) -> Vec<String> {
         errors.push(error);
     }
 
+    if let Some(ref speed) = settings.encoder_speed {
+        if !is_valid_encoder_speed(speed) {
+            errors.push(format!(
+                "Invalid encoder speed '{}'. Supported values: {}",
+                speed,
+                ENCODER_SPEED_VALUES.join(", ")
+            ));
+        }
+    }
+
     errors
 }
 
@@ -1404,6 +1536,13 @@ pub struct FrameExportSettings {
     pub output_path: PathBuf,
     /// Optional JPEG quality (1-31, lower = better; only used for JPEG)
     pub quality: Option<u8>,
+    /// Optional maximum output width in pixels.
+    ///
+    /// `None` exports at the source's native resolution. When set, the frame is
+    /// downscaled to at most this width with the aspect ratio preserved;
+    /// narrower sources are never upscaled.
+    #[serde(default)]
+    pub max_width: Option<u32>,
 }
 
 impl FrameExportSettings {
@@ -1428,8 +1567,130 @@ impl FrameExportSettings {
             }
         }
 
+        if let Some(max_width) = self.max_width {
+            if max_width == 0 {
+                return Err(ExportError::InvalidSettings(
+                    "Maximum width must be greater than zero".to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
+}
+
+/// Computes the output dimensions of FFmpeg's `scale='min(max_width,iw)':-2`.
+///
+/// The width is clamped to `max_width` (never upscaled) and the height keeps
+/// the source aspect ratio rounded to the nearest even number, mirroring how
+/// FFmpeg resolves a `-2` dimension. `None` leaves the source size untouched.
+pub fn scaled_frame_dimensions(
+    src_width: u32,
+    src_height: u32,
+    max_width: Option<u32>,
+) -> (u32, u32) {
+    let Some(max_width) = max_width else {
+        return (src_width, src_height);
+    };
+    if src_width == 0 || src_height == 0 || max_width == 0 {
+        return (src_width, src_height);
+    }
+
+    let out_width = max_width.min(src_width);
+    // FFmpeg computes `av_rescale(out_width, src_height, src_width * 2) * 2`,
+    // i.e. a half-up rounded number of even steps.
+    let numerator = out_width as u64 * src_height as u64;
+    let denominator = src_width as u64 * 2;
+    let even_steps = (numerator + denominator / 2) / denominator;
+    let out_height = (even_steps * 2).max(2).min(u32::MAX as u64) as u32;
+
+    (out_width, out_height)
+}
+
+/// Longest edge a 480p-class proxy frame may occupy, in pixels.
+///
+/// 854 is the conventional 16:9 partner of 480 (1920/1080 * 480, rounded up to
+/// an even number).
+const PROXY_MAX_LONG_EDGE: u32 = 854;
+
+/// Shortest edge a 480p-class proxy frame may occupy, in pixels.
+const PROXY_MAX_SHORT_EDGE: u32 = 480;
+
+/// Fits a sequence canvas into the 480p proxy budget, preserving its aspect.
+///
+/// The frame is scaled so its long edge is at most [`PROXY_MAX_LONG_EDGE`] and
+/// its short edge at most [`PROXY_MAX_SHORT_EDGE`], which keeps a proxy of any
+/// aspect ratio roughly as expensive to decode as the classic 854x480 one.
+/// Canvases already inside the budget are left alone — a proxy never upscales.
+///
+/// Both edges come back even, as H.264 with 4:2:0 chroma requires.
+///
+/// Worked examples: 1920x1080 → 854x480, 1080x1920 → 480x854, 1080x1080 →
+/// 480x480, 1920x800 → 854x356, 640x360 → 640x360 (unchanged).
+pub fn proxy_frame_dimensions(canvas_width: u32, canvas_height: u32) -> (u32, u32) {
+    if canvas_width == 0 || canvas_height == 0 {
+        return (PROXY_MAX_LONG_EDGE, PROXY_MAX_SHORT_EDGE);
+    }
+
+    // Fit the short edge first: that is the constraint 480p names. Extreme
+    // aspect ratios can still blow past the long-edge budget afterwards
+    // (2.39:1 at 480 tall is 1152 wide), so the result is re-fitted by the
+    // long edge when it does.
+    let (mut width, mut height) = fit_short_edge(canvas_width, canvas_height, PROXY_MAX_SHORT_EDGE);
+    if width.max(height) > PROXY_MAX_LONG_EDGE {
+        (width, height) = fit_long_edge(canvas_width, canvas_height, PROXY_MAX_LONG_EDGE);
+    }
+
+    (round_down_to_even(width), round_down_to_even(height))
+}
+
+/// Scales `(width, height)` so its shorter edge is at most `max_short_edge`.
+fn fit_short_edge(width: u32, height: u32, max_short_edge: u32) -> (u32, u32) {
+    if width >= height {
+        // `scaled_frame_dimensions` constrains the first axis, so the swap
+        // makes it constrain height instead of width.
+        let (height, width) = scaled_frame_dimensions(height, width, Some(max_short_edge));
+        (width, height)
+    } else {
+        scaled_frame_dimensions(width, height, Some(max_short_edge))
+    }
+}
+
+/// Scales `(width, height)` so its longer edge is at most `max_long_edge`.
+fn fit_long_edge(width: u32, height: u32, max_long_edge: u32) -> (u32, u32) {
+    if width >= height {
+        scaled_frame_dimensions(width, height, Some(max_long_edge))
+    } else {
+        let (height, width) = scaled_frame_dimensions(height, width, Some(max_long_edge));
+        (width, height)
+    }
+}
+
+/// Rounds a dimension down to the nearest even number, never below 2.
+fn round_down_to_even(value: u32) -> u32 {
+    (value & !1).max(2)
+}
+
+/// Reads the real pixel dimensions of a written image via FFprobe.
+///
+/// Returns `None` when probing fails or reports no usable video stream so
+/// callers can fall back to computed dimensions.
+pub async fn probed_image_dimensions(ffmpeg: &FFmpegRunner, path: &Path) -> Option<(u32, u32)> {
+    ffmpeg
+        .probe(path)
+        .await
+        .ok()
+        .and_then(|info| info.video)
+        .map(|video| (video.width, video.height))
+        .filter(|(width, height)| *width > 0 && *height > 0)
+}
+
+/// Maps a timeline time to the corresponding source-media time inside `clip`.
+///
+/// Accounts for the clip's timeline placement, source in-point and speed.
+pub fn clip_source_time_at(clip: &Clip, timeline_time_sec: f64) -> f64 {
+    let clip_relative_time = timeline_time_sec - clip.place.timeline_in_sec;
+    clip.range.source_in_sec + (clip_relative_time * clip.speed as f64)
 }
 
 /// Result of a single-frame export
@@ -1589,6 +1850,7 @@ impl AudioExportSettings {
             tonemap_mode: None,
             hardware_accel: super::hardware::HardwareAccelMode::Cpu,
             resolved_encoder_name: None,
+            encoder_speed: None,
         }
     }
 }
@@ -3663,6 +3925,9 @@ impl ExportEngine {
             }
         }
 
+        // Encoder speed/compression trade-off (software x264/x265 only)
+        args.extend(settings.encoder_speed_args(&video_codec));
+
         // HDR metadata
         args.extend(settings.hdr_args());
 
@@ -4034,11 +4299,16 @@ impl ExportEngine {
     ///
     /// * `sequence` - The sequence containing clips
     /// * `assets` - Map of asset ID to Asset
+    /// * `project_root` - Project directory, used to resolve project-relative
+    ///   asset paths via [`Asset::resolved_path`]. An asset imported relative to
+    ///   the project keeps a `uri` from wherever it was first seen, so a moved
+    ///   or copied project only finds its media through this.
     /// * `settings` - Frame export settings (time, format, output path)
     pub async fn export_frame(
         &self,
         sequence: &Sequence,
         assets: &HashMap<String, Asset>,
+        project_root: &Path,
         settings: &FrameExportSettings,
     ) -> Result<FrameExportResult, ExportError> {
         settings.validate()?;
@@ -4055,16 +4325,14 @@ impl ExportEngine {
 
         // Calculate the source time within the asset, accounting for
         // the clip's timeline position and source offset.
-        let clip_relative_time = settings.time_sec - clip.place.timeline_in_sec;
-        let speed = clip.speed as f64;
-        let source_time = clip.range.source_in_sec + (clip_relative_time * speed);
+        let source_time = clip_source_time_at(clip, settings.time_sec);
 
-        // Resolve asset path
-        let asset_path = Path::new(&asset.uri);
+        // Resolve asset path, preferring the project-relative location.
+        let asset_path = asset.resolved_path(project_root);
         if !asset_path.exists() {
             return Err(ExportError::InvalidSettings(format!(
                 "Asset file not found: {}",
-                asset.uri
+                asset_path.display()
             )));
         }
 
@@ -4086,6 +4354,13 @@ impl ExportEngine {
             "-frames:v".to_string(),
             "1".to_string(),
         ];
+
+        // Downscale-only filter: sources narrower than the limit stay native.
+        // The quotes protect the comma from the filtergraph separator.
+        if let Some(max_width) = settings.max_width {
+            args.push("-vf".to_string());
+            args.push(format!("scale='min({},iw)':-2", max_width));
+        }
 
         // Format-specific arguments
         match settings.format {
@@ -4134,17 +4409,39 @@ impl ExportEngine {
                 other => other,
             })?;
 
-        // Read output file metadata
-        let metadata = tokio::fs::metadata(&settings.output_path).await?;
+        // FFmpeg exits successfully but writes nothing when the seek lands past
+        // the end of the source media, so a missing file is reported as a
+        // seek-out-of-range error instead of a bare IO error. Every other IO
+        // failure (permissions, a removed output directory) keeps its own cause.
+        let metadata = match tokio::fs::metadata(&settings.output_path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ExportError::InvalidSettings(format!(
+                    "No frame was produced at time {:.3}s (source time {:.3}s in '{}'). \
+                     The requested position is likely past the end of the source media.",
+                    settings.time_sec,
+                    source_time,
+                    asset_path.display()
+                )));
+            }
+            Err(error) => return Err(ExportError::IoError(error)),
+        };
         let file_size = metadata.len();
 
-        // The frame is extracted at the source asset's native resolution.
-        // Use asset video dimensions if available, otherwise fall back to sequence canvas.
-        let (width, height) = if let Some(ref video) = asset.video {
+        // Source dimensions come from the asset's video stream when known,
+        // otherwise the sequence canvas is the best available approximation.
+        let (source_width, source_height) = if let Some(ref video) = asset.video {
             (video.width, video.height)
         } else {
             (sequence.format.canvas.width, sequence.format.canvas.height)
         };
+        // Prefer the written image's real size: asset metadata can be stale or
+        // missing, and the scale filter resolves against the true source.
+        let (width, height) = probed_image_dimensions(&self.ffmpeg, &settings.output_path)
+            .await
+            .unwrap_or_else(|| {
+                scaled_frame_dimensions(source_width, source_height, settings.max_width)
+            });
 
         Ok(FrameExportResult {
             output_path: settings.output_path.clone(),
@@ -4356,7 +4653,11 @@ impl ExportEngine {
     ///
     /// Iterates video tracks from top to bottom (highest index first) and
     /// returns the first enabled clip that covers the requested time.
-    fn find_topmost_clip_at_time<'a>(
+    ///
+    /// Text clips and adjustment layers are skipped because they have no
+    /// file-backed source. `None` therefore means [`ExportEngine::export_frame`]
+    /// cannot serve the requested time and a composited render is required.
+    pub fn find_topmost_clip_at_time<'a>(
         &self,
         sequence: &'a Sequence,
         assets: &'a HashMap<String, Asset>,
@@ -6747,6 +7048,317 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair[0] == "-crf" && pair[1] == "31"),
             "expected VP9 CRF args, got: {args:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Encoder speed / proxy render
+    // -------------------------------------------------------------------------
+
+    fn test_export_engine() -> ExportEngine {
+        use crate::core::ffmpeg::{FFmpegInfo, FFmpegRunner};
+
+        ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
+            ffmpeg_path: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
+            version: "test".to_string(),
+            is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
+        }))
+    }
+
+    fn preset_arg_value(args: &[String]) -> Option<&str> {
+        args.windows(2)
+            .find(|pair| pair[0] == "-preset")
+            .map(|pair| pair[1].as_str())
+    }
+
+    /// Feature: Encoder speed validation
+    /// Scenario: should accept the documented x264/x265 preset ladder
+    #[test]
+    fn is_valid_encoder_speed_should_accept_known_presets() {
+        for value in ENCODER_SPEED_VALUES {
+            assert!(
+                is_valid_encoder_speed(value),
+                "expected '{value}' to be accepted"
+            );
+        }
+        assert!(is_valid_encoder_speed("  UltraFast "));
+    }
+
+    /// Feature: Encoder speed validation
+    /// Scenario: should reject values FFmpeg would not understand
+    #[test]
+    fn is_valid_encoder_speed_should_reject_unknown_values() {
+        for value in ["", "turbo", "ultra fast", "p4", "0"] {
+            assert!(
+                !is_valid_encoder_speed(value),
+                "expected '{value}' to be rejected"
+            );
+        }
+    }
+
+    /// Feature: Encoder speed validation
+    /// Scenario: should surface a validation error for a bogus encoder speed
+    #[test]
+    fn validate_export_settings_options_should_reject_bogus_encoder_speed() {
+        let settings = ExportSettings {
+            encoder_speed: Some("turbo".to_string()),
+            ..ExportSettings::default()
+        };
+
+        let errors = validate_export_settings_options(&settings);
+
+        assert!(
+            errors.iter().any(|error| error.contains("turbo")),
+            "expected an encoder speed error, got: {errors:?}"
+        );
+    }
+
+    /// Feature: Encoder speed validation
+    /// Scenario: should accept a valid encoder speed without adding errors
+    #[test]
+    fn validate_export_settings_options_should_accept_valid_encoder_speed() {
+        let settings = ExportSettings {
+            encoder_speed: Some("ultrafast".to_string()),
+            ..ExportSettings::default()
+        };
+
+        let errors = validate_export_settings_options(&settings);
+
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
+
+    /// Feature: Proxy render preset
+    /// Scenario: should produce 480p, CRF 30, ultrafast settings that follow the sequence fps
+    #[test]
+    fn proxy_settings_should_use_fast_480p_configuration() {
+        let settings = ExportSettings::proxy(
+            PathBuf::from("proxy.mp4"),
+            &Canvas::new(1920, 1080),
+            None,
+            None,
+        );
+
+        assert_eq!(settings.width, Some(854));
+        assert_eq!(settings.height, Some(480));
+        assert_eq!(settings.crf, Some(30));
+        assert_eq!(settings.video_codec, VideoCodec::H264);
+        assert_eq!(settings.audio_codec, AudioCodec::Aac);
+        assert_eq!(settings.audio_bitrate.as_deref(), Some("96k"));
+        assert_eq!(settings.video_bitrate, None);
+        assert_eq!(settings.fps, None);
+        assert_eq!(settings.encoder_speed.as_deref(), Some("ultrafast"));
+        assert!(!settings.two_pass);
+    }
+
+    /// Feature: Proxy render preset
+    /// Scenario: should follow the sequence aspect instead of pillarboxing it
+    #[test]
+    fn proxy_settings_should_follow_a_vertical_canvas() {
+        let settings = ExportSettings::proxy(
+            PathBuf::from("proxy.mp4"),
+            &Canvas::new(1080, 1920),
+            None,
+            None,
+        );
+
+        assert_eq!(settings.width, Some(480));
+        assert_eq!(settings.height, Some(854));
+    }
+
+    /// Feature: Proxy frame fitting
+    /// Scenario: should fit any canvas inside the 480p budget without upscaling
+    #[test]
+    fn proxy_frame_dimensions_should_fit_the_480p_budget() {
+        // Landscape 16:9 keeps the classic 480p frame.
+        assert_eq!(proxy_frame_dimensions(1920, 1080), (854, 480));
+        // Vertical 9:16 is the same frame turned on its side, not a letterbox.
+        assert_eq!(proxy_frame_dimensions(1080, 1920), (480, 854));
+        // Square fits the short-edge budget on both axes.
+        assert_eq!(proxy_frame_dimensions(1080, 1080), (480, 480));
+        // 2.39:1 would be 1152 wide at 480 tall, so the long edge binds.
+        assert_eq!(proxy_frame_dimensions(1920, 800), (854, 356));
+    }
+
+    /// Feature: Proxy frame fitting
+    /// Scenario: should never upscale a canvas that already fits
+    #[test]
+    fn proxy_frame_dimensions_should_not_upscale_a_small_canvas() {
+        assert_eq!(proxy_frame_dimensions(640, 360), (640, 360));
+        assert_eq!(proxy_frame_dimensions(320, 240), (320, 240));
+    }
+
+    /// Feature: Proxy frame fitting
+    /// Scenario: should fall back to the 16:9 frame for an unusable canvas
+    #[test]
+    fn proxy_frame_dimensions_should_tolerate_a_zero_canvas() {
+        assert_eq!(proxy_frame_dimensions(0, 1080), (854, 480));
+        assert_eq!(proxy_frame_dimensions(1920, 0), (854, 480));
+    }
+
+    /// Feature: Proxy render preset
+    /// Scenario: should carry the requested partial render range
+    #[test]
+    fn proxy_settings_should_carry_the_requested_range() {
+        let settings = ExportSettings::proxy(
+            PathBuf::from("proxy.mp4"),
+            &Canvas::new(1920, 1080),
+            Some(1.0),
+            Some(3.5),
+        );
+
+        assert_eq!(settings.start_time, Some(1.0));
+        assert_eq!(settings.end_time, Some(3.5));
+    }
+
+    /// Feature: Proxy render preset
+    /// Scenario: should pass the ultrafast preset through to the FFmpeg arguments
+    #[test]
+    fn proxy_settings_should_emit_ultrafast_preset_args() {
+        let engine = test_export_engine();
+        let settings = ExportSettings::proxy(
+            PathBuf::from("proxy.mp4"),
+            &Canvas::new(1920, 1080),
+            None,
+            None,
+        );
+
+        let args = engine.build_simple_export_args(Path::new("/tmp/input.mp4"), &settings);
+
+        assert_eq!(
+            preset_arg_value(&args),
+            Some("ultrafast"),
+            "expected ultrafast preset args, got: {args:?}"
+        );
+    }
+
+    /// Feature: Encoder speed argument emission
+    /// Scenario: should keep existing output byte-identical when no encoder speed is set
+    #[test]
+    fn default_settings_should_not_emit_preset_args() {
+        let engine = test_export_engine();
+        let settings = ExportSettings::default();
+
+        let args = engine.build_simple_export_args(Path::new("/tmp/input.mp4"), &settings);
+
+        assert_eq!(preset_arg_value(&args), None, "unexpected args: {args:?}");
+    }
+
+    /// Feature: Encoder speed argument emission
+    /// Scenario: should ignore encoder speed for encoders that do not accept the x264 ladder
+    #[test]
+    fn encoder_speed_args_should_only_apply_to_software_x264_and_x265() {
+        let settings = ExportSettings {
+            encoder_speed: Some("ultrafast".to_string()),
+            ..ExportSettings::default()
+        };
+
+        assert_eq!(
+            settings.encoder_speed_args("libx264"),
+            vec!["-preset".to_string(), "ultrafast".to_string()]
+        );
+        assert_eq!(
+            settings.encoder_speed_args("libx265"),
+            vec!["-preset".to_string(), "ultrafast".to_string()]
+        );
+        assert!(settings.encoder_speed_args("h264_nvenc").is_empty());
+        assert!(settings.encoder_speed_args("h264_videotoolbox").is_empty());
+        assert!(settings.encoder_speed_args("libvpx-vp9").is_empty());
+        assert!(settings.encoder_speed_args("prores_ks").is_empty());
+    }
+
+    /// Feature: Encoder speed argument emission
+    /// Scenario: should drop an invalid encoder speed rather than hand FFmpeg a bad flag
+    #[test]
+    fn encoder_speed_args_should_drop_invalid_values() {
+        let settings = ExportSettings {
+            encoder_speed: Some("turbo".to_string()),
+            ..ExportSettings::default()
+        };
+
+        assert!(settings.encoder_speed_args("libx264").is_empty());
+    }
+
+    /// Feature: Encoder speed argument emission
+    /// Scenario: should reach the plan/filter-complex export path used by `render start`
+    #[test]
+    fn sequence_export_args_should_carry_the_proxy_encoder_speed() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let video_path = create_temp_media_file("proxy_encoder_speed.mp4");
+        let mut video_asset =
+            Asset::new_video("proxy_encoder_speed.mp4", &video_path, VideoInfo::default())
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "video_asset".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+
+        let proxy_args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &audio_info_map,
+            &ExportSettings::proxy(
+                PathBuf::from("proxy.mp4"),
+                &Canvas::new(1920, 1080),
+                None,
+                None,
+            ),
+        )
+        .expect("proxy settings should build export args");
+
+        assert_eq!(
+            preset_arg_value(&proxy_args),
+            Some("ultrafast"),
+            "expected ultrafast preset args, got: {proxy_args:?}"
+        );
+
+        let default_args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &audio_info_map,
+            &ExportSettings::default(),
+        )
+        .expect("default settings should build export args");
+
+        assert_eq!(
+            preset_arg_value(&default_args),
+            None,
+            "default settings must not emit -preset, got: {default_args:?}"
+        );
+    }
+
+    /// Feature: Encoder speed serialization
+    /// Scenario: should stay absent from JSON when unset so stored settings are unchanged
+    #[test]
+    fn encoder_speed_should_be_omitted_from_serialization_when_unset() {
+        let settings = ExportSettings::default();
+
+        let json = serde_json::to_string(&settings).unwrap();
+
+        assert!(
+            !json.contains("encoderSpeed"),
+            "expected encoderSpeed to be omitted, got: {json}"
         );
     }
 
@@ -10269,6 +10881,7 @@ mod tests {
             format: ImageFormat::Png,
             output_path: PathBuf::from("/tmp/frame.png"),
             quality: None,
+            max_width: None,
         };
         let result = settings.validate();
         assert!(result.is_err());
@@ -10284,6 +10897,7 @@ mod tests {
             format: ImageFormat::Jpeg,
             output_path: PathBuf::from("/tmp/frame.jpg"),
             quality: Some(0),
+            max_width: None,
         };
         assert!(settings.validate().is_err());
 
@@ -10303,6 +10917,7 @@ mod tests {
             format: ImageFormat::Png,
             output_path: std::env::temp_dir().join("frame.png"),
             quality: None,
+            max_width: None,
         };
         assert!(settings.validate().is_ok());
     }
@@ -10317,8 +10932,170 @@ mod tests {
             format: ImageFormat::Png,
             output_path: temp_dir.path().join("frames/stills/frame.png"),
             quality: None,
+            max_width: None,
         };
         assert!(settings.validate().is_ok());
+    }
+
+    /// Feature: Frame Export Settings
+    /// Scenario: should reject a zero maximum width
+    #[test]
+    fn frame_export_settings_should_reject_zero_max_width() {
+        let settings = FrameExportSettings {
+            time_sec: 1.0,
+            format: ImageFormat::Png,
+            output_path: std::env::temp_dir().join("frame.png"),
+            quality: None,
+            max_width: Some(0),
+        };
+        assert!(settings.validate().is_err());
+    }
+
+    /// Builds a one-clip sequence plus an asset whose `uri` no longer resolves
+    /// but whose `relative_path` still points at `relative` inside the project.
+    ///
+    /// This is the shape a project takes after it is moved or copied: the URI
+    /// records where the media was first seen, the relative path records where
+    /// it lives now.
+    fn relocated_project_fixture(
+        relative: &str,
+    ) -> (Sequence, std::collections::HashMap<String, Asset>) {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Relocated", SequenceFormat::youtube_1080());
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut asset = Asset::new_video(
+            "clip.mp4",
+            "/previous/machine/clip.mp4",
+            VideoInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_relative_path(relative);
+        asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("video_asset".to_string(), asset);
+
+        (sequence, assets)
+    }
+
+    /// Feature: Frame export on a relocated project
+    /// Scenario: should resolve media through the project root, not the stale URI
+    #[tokio::test]
+    async fn export_frame_should_resolve_media_relative_to_the_project() {
+        let project = tempfile::tempdir().expect("temp project");
+        let media_dir = project.path().join("media");
+        std::fs::create_dir_all(&media_dir).expect("create media dir");
+        std::fs::write(media_dir.join("clip.mp4"), b"").expect("write media");
+
+        let (sequence, assets) = relocated_project_fixture("media/clip.mp4");
+        let settings = FrameExportSettings {
+            time_sec: 1.0,
+            format: ImageFormat::Png,
+            output_path: project.path().join("frame.png"),
+            quality: None,
+            max_width: None,
+        };
+
+        let error = test_export_engine()
+            .export_frame(&sequence, &assets, project.path(), &settings)
+            .await
+            .expect_err("the fixture FFmpeg path does not exist, so the run cannot succeed");
+
+        // The run gets past asset resolution and fails only on the fake FFmpeg
+        // binary; the stale URI would have stopped it before that.
+        assert!(
+            !error.to_string().contains("Asset file not found"),
+            "media under the project root must resolve, got: {error}"
+        );
+    }
+
+    /// Feature: Frame export on a relocated project
+    /// Scenario: should name the resolved path when the media is genuinely missing
+    #[tokio::test]
+    async fn export_frame_should_report_the_resolved_path_when_media_is_missing() {
+        let project = tempfile::tempdir().expect("temp project");
+        let (sequence, assets) = relocated_project_fixture("media/clip.mp4");
+        let settings = FrameExportSettings {
+            time_sec: 1.0,
+            format: ImageFormat::Png,
+            output_path: project.path().join("frame.png"),
+            quality: None,
+            max_width: None,
+        };
+
+        let error = test_export_engine()
+            .export_frame(&sequence, &assets, project.path(), &settings)
+            .await
+            .expect_err("the media file was never created");
+
+        let message = error.to_string();
+        assert!(message.contains("Asset file not found"), "got: {message}");
+        assert!(
+            message.contains("clip.mp4") && !message.contains("previous"),
+            "the message must name the path that was actually looked up, got: {message}"
+        );
+    }
+
+    /// Feature: Frame Scaling
+    /// Scenario: should keep native size when no maximum width is requested
+    #[test]
+    fn scaled_frame_dimensions_should_keep_native_size_without_limit() {
+        assert_eq!(scaled_frame_dimensions(1920, 1080, None), (1920, 1080));
+    }
+
+    /// Feature: Frame Scaling
+    /// Scenario: should never upscale narrower sources
+    #[test]
+    fn scaled_frame_dimensions_should_not_upscale() {
+        assert_eq!(scaled_frame_dimensions(640, 360, Some(1280)), (640, 360));
+    }
+
+    /// Feature: Frame Scaling
+    /// Scenario: should preserve aspect ratio with an even height
+    #[test]
+    fn scaled_frame_dimensions_should_preserve_aspect_with_even_height() {
+        assert_eq!(scaled_frame_dimensions(1920, 1080, Some(1280)), (1280, 720));
+        assert_eq!(scaled_frame_dimensions(3840, 2160, Some(1280)), (1280, 720));
+        // 1280 * 240 / 320 = 960 exactly.
+        assert_eq!(scaled_frame_dimensions(320, 240, Some(160)), (160, 120));
+        // 100 * 57 / 111 = 51.35 -> nearest even is 52.
+        assert_eq!(scaled_frame_dimensions(111, 57, Some(100)), (100, 52));
+    }
+
+    /// Feature: Frame Scaling
+    /// Scenario: should stay at a valid minimum height for extreme ratios
+    #[test]
+    fn scaled_frame_dimensions_should_clamp_height_to_two() {
+        assert_eq!(scaled_frame_dimensions(4000, 10, Some(2)), (2, 2));
+    }
+
+    /// Feature: Frame Scaling
+    /// Scenario: should tolerate unknown source dimensions
+    #[test]
+    fn scaled_frame_dimensions_should_tolerate_zero_source() {
+        assert_eq!(scaled_frame_dimensions(0, 0, Some(1280)), (0, 0));
+    }
+
+    /// Feature: Timeline To Source Mapping
+    /// Scenario: should account for placement, source in-point and speed
+    #[test]
+    fn clip_source_time_at_should_map_timeline_to_source() {
+        let mut clip = Clip::new("asset_1");
+        clip.place.timeline_in_sec = 10.0;
+        clip.range.source_in_sec = 2.0;
+        clip.speed = 2.0;
+
+        assert_eq!(clip_source_time_at(&clip, 10.0), 2.0);
+        assert_eq!(clip_source_time_at(&clip, 12.0), 6.0);
     }
 
     /// Feature: Frame Export Result

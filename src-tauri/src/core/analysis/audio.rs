@@ -7,17 +7,15 @@
 //! spectral centroid, and silence region detection.
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use uuid::Uuid;
 use webrtc_vad::{SampleRate as VadSampleRate, Vad, VadMode};
 
 use super::ducking::invert_silence_to_speech;
 use super::types::{AudioProfile, SilenceRegion, SpeechRegion, SILENCE_FLOOR_DB};
 use crate::core::captions::audio::{extract_audio_for_transcription_async, load_audio_samples_i16};
-use crate::core::process::configure_tokio_command;
+use crate::core::ffmpeg::{capture_filter_stderr, FFmpegError, FilterMode};
 use crate::core::{CoreError, CoreResult};
 
 // =============================================================================
@@ -48,6 +46,12 @@ const MAX_BPM: f64 = 300.0;
 
 /// Number of tail lines to keep from FFmpeg stderr for error reporting.
 const STDERR_TAIL_SIZE: usize = 20;
+
+/// Watchdog timeout for a single FFmpeg analysis pass.
+///
+/// Matches the analysis job budget elsewhere in the pipeline; without it a
+/// stalled decoder would hang the calling job forever.
+const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// VAD frame size in milliseconds.
 const VAD_FRAME_MS: usize = 30;
@@ -153,8 +157,8 @@ impl AudioProfiler {
             "silencedetect=n={}:d={}",
             SILENCE_THRESHOLD_DB, SILENCE_MIN_DURATION
         );
-        let stderr = self.run_ffmpeg_filter(video_path, &filter).await?;
-        Ok(parse_silence_regions(&stderr))
+        let capture = self.run_ffmpeg_filter(video_path, &filter).await?;
+        Ok(parse_silence_regions(&capture.stderr))
     }
 
     /// Detects silence regions with custom threshold and minimum duration.
@@ -176,8 +180,8 @@ impl AudioProfiler {
         let threshold = format!("{}dB", threshold_db.clamp(-90.0, 0.0));
         let duration = format!("{:.3}", min_duration_sec.clamp(0.01, 30.0));
         let filter = format!("silencedetect=n={}:d={}", threshold, duration);
-        let stderr = self.run_ffmpeg_filter(video_path, &filter).await?;
-        Ok(parse_silence_regions(&stderr))
+        let capture = self.run_ffmpeg_filter(video_path, &filter).await?;
+        Ok(parse_silence_regions(&capture.stderr))
     }
 
     /// Detect speech regions using a lightweight WebRTC VAD pass.
@@ -226,9 +230,9 @@ impl AudioProfiler {
         video_path: &Path,
     ) -> CoreResult<(Vec<f64>, f64, Vec<f64>)> {
         let filter = "ebur128=metadata=1";
-        let stderr = self.run_ffmpeg_filter(video_path, filter).await?;
-        let (loudness_profile, peak_db) = parse_loudness_and_peak(&stderr);
-        let momentary_values = parse_momentary_loudness_values(&stderr);
+        let capture = self.run_ffmpeg_filter(video_path, filter).await?;
+        let (loudness_profile, peak_db) = parse_loudness_and_peak(&capture.stderr);
+        let momentary_values = parse_momentary_loudness_values(&capture.stderr);
         Ok((loudness_profile, peak_db, momentary_values))
     }
 
@@ -246,7 +250,7 @@ impl AudioProfiler {
             "aspectralstats=measure=centroid,ametadata=mode=print:key=lavfi.aspectralstats.1.centroid";
 
         match self.run_ffmpeg_filter(video_path, filter).await {
-            Ok(stderr) => Ok(parse_spectral_centroid(&stderr)),
+            Ok(capture) => Ok(parse_spectral_centroid(&capture.stderr)),
             Err(err) => {
                 let msg = err.to_string();
                 // Only swallow explicit missing-filter errors; other failures propagate.
@@ -326,75 +330,66 @@ impl AudioProfiler {
     // FFmpeg Helper
     // =========================================================================
 
-    /// Runs FFmpeg with the given audio filter and returns stderr as a string.
+    /// Runs FFmpeg with the given audio filter and returns the whole capture.
     ///
-    /// Handles process spawning errors and non-zero exit codes. Uses
-    /// [`configure_tokio_command`] for Windows compatibility.
-    async fn run_ffmpeg_filter(&self, video_path: &Path, filter: &str) -> CoreResult<String> {
-        let mut cmd = Command::new(&self.ffmpeg_path);
-        configure_tokio_command(&mut cmd);
-
-        cmd.arg("-hide_banner")
-            .arg("-nostdin")
-            .arg("-i")
-            .arg(video_path)
-            .arg("-af")
-            .arg(filter)
-            .arg("-vn")
-            .arg("-f")
-            .arg("null")
-            .arg("-")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| CoreError::Internal(format!("Failed to spawn FFmpeg: {}", e)))?;
-
-        let stderr_handle = child
-            .stderr
-            .take()
-            .ok_or_else(|| CoreError::Internal("Failed to capture FFmpeg stderr".to_string()))?;
-
-        let mut reader = BufReader::new(stderr_handle).lines();
-        let mut all_lines: Vec<String> = Vec::new();
-
-        // Stream stderr line by line
-        while let Some(line) = reader
-            .next_line()
-            .await
-            .map_err(|e| CoreError::Internal(format!("Failed reading FFmpeg stderr: {}", e)))?
-        {
-            all_lines.push(line);
-        }
-
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| CoreError::Internal(format!("Failed to wait for FFmpeg: {}", e)))?;
-
-        let full_stderr = all_lines.join("\n");
+    /// Delegates spawning, bounded stderr retention, and the watchdog timeout to
+    /// [`capture_filter_stderr`]; only the audio-specific interpretation of the
+    /// result (missing audio stream vs. genuine failure) lives here.
+    ///
+    /// The [`FilterCapture`] is returned rather than just its text so the
+    /// truncation flag is not silently dropped: per-frame filters such as
+    /// `aspectralstats` overflow the retention limit on very long inputs, and a
+    /// parser fed the surviving tail would average only the end of the file.
+    /// Truncation is logged here — the audio profile has no warnings channel to
+    /// carry it — so an unexpectedly flat measurement is at least traceable.
+    ///
+    /// [`FilterCapture`]: crate::core::ffmpeg::FilterCapture
+    async fn run_ffmpeg_filter(
+        &self,
+        video_path: &Path,
+        filter: &str,
+    ) -> CoreResult<crate::core::ffmpeg::FilterCapture> {
+        let capture = capture_filter_stderr(
+            &self.ffmpeg_path,
+            video_path,
+            FilterMode::Audio(filter),
+            ANALYSIS_TIMEOUT,
+        )
+        .await
+        .map_err(|error| match error {
+            FFmpegError::Timeout => CoreError::Internal(format!(
+                "Audio analysis timed out after {}s",
+                ANALYSIS_TIMEOUT.as_secs()
+            )),
+            other => CoreError::Internal(format!("Failed to run FFmpeg: {}", other)),
+        })?;
 
         // Check for no-audio-stream condition before checking exit status,
         // because FFmpeg may exit non-zero when there is no audio stream.
-        if has_no_audio_indicator(&full_stderr) {
+        if has_no_audio_indicator(&capture.stderr) {
             return Err(CoreError::Internal(
                 "No audio stream found in input".to_string(),
             ));
         }
 
-        if !status.success() {
-            let code = status.code().unwrap_or(-1);
-            let tail_start = all_lines.len().saturating_sub(STDERR_TAIL_SIZE);
-            let tail = all_lines[tail_start..].join("\n");
+        if !capture.success {
             return Err(CoreError::Internal(format!(
                 "Audio analysis failed (exit {}): {}",
-                code, tail
+                capture.exit_code.unwrap_or(-1),
+                capture.stderr_tail(STDERR_TAIL_SIZE)
             )));
         }
 
-        Ok(full_stderr)
+        if capture.truncated {
+            tracing::warn!(
+                filter = %filter,
+                input = %video_path.display(),
+                "FFmpeg filter output exceeded the stderr retention limit; \
+                 the parsed result covers only the end of the input"
+            );
+        }
+
+        Ok(capture)
     }
 }
 
@@ -533,7 +528,7 @@ fn derive_speech_regions_from_silence(
 /// [silencedetect @ ...] silence_start: 1.234
 /// [silencedetect @ ...] silence_end: 5.678 | silence_duration: 4.444
 /// ```
-fn parse_silence_regions(stderr: &str) -> Vec<SilenceRegion> {
+pub(crate) fn parse_silence_regions(stderr: &str) -> Vec<SilenceRegion> {
     let mut regions = Vec::new();
     let mut current_start: Option<f64> = None;
 

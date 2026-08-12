@@ -1,14 +1,15 @@
 //! Render and export commands.
 
+use crate::ffmpeg_env::ensure_ffmpeg;
 use crate::output;
+use crate::validate;
 use clap::Subcommand;
-use openreelio_core::ffmpeg::{
-    detect_bundled_at_path, detect_system_ffmpeg, set_resolved_paths, FFmpegRunner,
-};
+use openreelio_core::ffmpeg::FFmpegRunner;
 use openreelio_core::render::{
     build_render_graph, build_render_plan, validate_export_settings, AudioCodec, ExportEngine,
-    ExportPreset, ExportSettings, HdrMode, VideoCodec,
+    ExportPreset, ExportProgress, ExportSettings, HdrMode, VideoCodec,
 };
+use openreelio_core::timeline::Canvas;
 use std::path::PathBuf;
 
 /// Canonical list of render presets. Single source of truth for both
@@ -17,9 +18,18 @@ const RENDER_PRESETS: &[(&str, &str, &str)] = &[
     ("mp4_h264_1080p", "MP4 H.264 1080p", "mp4"),
     ("mp4_h264_4k", "MP4 H.264 4K", "mp4"),
     ("mp4_h265_1080p", "MP4 H.265 1080p", "mp4"),
+    ("mp4_draft", "MP4 H.264 720p Draft", "mp4"),
+    ("proxy_480p", "Proxy 480p (fast, agent inspection)", "mp4"),
     ("webm_vp9_1080p", "WebM VP9 1080p", "webm"),
     ("prores_422", "ProRes 422", "mov"),
 ];
+
+/// Preset identifier selected by the `--proxy` shorthand.
+const PROXY_PRESET_ID: &str = "proxy_480p";
+
+/// Progress channel depth. Bounded so a slow stderr consumer applies
+/// backpressure to the progress reader instead of growing without limit.
+const PROGRESS_CHANNEL_CAPACITY: usize = 32;
 
 #[derive(Subcommand)]
 pub enum RenderAction {
@@ -51,9 +61,25 @@ pub enum RenderAction {
         #[arg(long, default_value = "mp4_h264_1080p")]
         preset: String,
 
+        /// Render a fast 480p proxy for inspection (shorthand for --preset proxy_480p)
+        #[arg(long, conflicts_with = "preset")]
+        proxy: bool,
+
         /// Sequence ID (defaults to active)
         #[arg(long)]
         sequence: Option<String>,
+
+        /// Start of the rendered range in timeline seconds
+        #[arg(long)]
+        start: Option<f64>,
+
+        /// End of the rendered range in timeline seconds
+        #[arg(long)]
+        end: Option<f64>,
+
+        /// Stream NDJSON encode progress to stderr
+        #[arg(long)]
+        progress: bool,
     },
 }
 
@@ -82,76 +108,216 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
             path,
             output: output_path,
             preset,
+            proxy,
             sequence,
-        } => {
-            let project = super::load_project(&path)?;
-            let seq_id = super::resolve_sequence_id(&project, sequence)?;
-            let sequence = project
-                .state
-                .sequences
-                .get(&seq_id)
-                .ok_or_else(|| anyhow::anyhow!("Sequence '{}' not found", seq_id))?
-                .clone();
-            let assets = project.state.assets.clone();
-            let effects = project.state.effects.clone();
-            let settings = build_export_settings(&preset, output_path.clone())?;
-            let graph = build_render_graph(&project.state, &seq_id)
-                .map_err(|error| anyhow::anyhow!("Failed to build render graph: {}", error))?;
-
-            let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
-            if !validation.is_valid {
-                return Err(anyhow::anyhow!(
-                    "Render validation failed: {}",
-                    validation.errors.join("; ")
-                ));
-            }
-            let render_plan = build_render_plan(&graph, &assets, &effects, &settings);
-            if !render_plan.validation.is_valid {
-                return Err(anyhow::anyhow!(
-                    "Render plan validation failed: {}",
-                    render_plan.validation.errors.join("; ")
-                ));
-            }
-            let plan_hash = render_plan.plan_hash.clone();
-
-            let ffmpeg_info = detect_cli_ffmpeg()?;
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| anyhow::anyhow!("Failed to create Tokio runtime: {error}"))?;
-            let result = runtime.block_on(async move {
-                let engine = ExportEngine::new(FFmpegRunner::new(ffmpeg_info));
-                engine
-                    .export_sequence_with_effects_for_plan(
-                        &sequence,
-                        &assets,
-                        &effects,
-                        &settings,
-                        &render_plan,
-                        None,
-                        None,
-                    )
-                    .await
-            })?;
-
-            output::print_json_pretty(&serde_json::json!({
-                "status": "ok",
-                "sequenceId": seq_id,
-                "preset": preset,
-                "outputPath": result.output_path.display().to_string(),
-                "durationSec": result.duration_sec,
-                "fileSize": result.file_size,
-                "encodingTimeSec": result.encoding_time_sec,
-                "planHash": plan_hash,
-                "warnings": validation.warnings,
-            }))
-        }
+            start,
+            end,
+            progress,
+        } => start_render(StartArgs {
+            path,
+            output_path,
+            preset,
+            proxy,
+            sequence,
+            start,
+            end,
+            progress,
+        }),
     }
 }
 
-fn build_export_settings(preset: &str, output_path: PathBuf) -> anyhow::Result<ExportSettings> {
+/// Parsed `render start` inputs.
+///
+/// Kept as a struct so the `Commands` enum stays small (see the crate-level
+/// `large_enum_variant` allowance) and the handler signature stays readable.
+struct StartArgs {
+    path: PathBuf,
+    output_path: PathBuf,
+    preset: String,
+    proxy: bool,
+    sequence: Option<String>,
+    start: Option<f64>,
+    end: Option<f64>,
+    progress: bool,
+}
+
+fn start_render(args: StartArgs) -> anyhow::Result<()> {
+    let StartArgs {
+        path,
+        output_path,
+        preset,
+        proxy,
+        sequence,
+        start,
+        end,
+        progress,
+    } = args;
+
+    validate_render_range(start, end)?;
+
+    let preset_id = if proxy {
+        PROXY_PRESET_ID.to_string()
+    } else {
+        preset
+    };
+    let output_path = if proxy {
+        default_extension(output_path, "mp4")
+    } else {
+        output_path
+    };
+
+    let project = super::load_project(&path)?;
+    let seq_id = super::resolve_sequence_id(&project, sequence)?;
+    let sequence = project
+        .state
+        .sequences
+        .get(&seq_id)
+        .ok_or_else(|| anyhow::anyhow!("Sequence '{}' not found", seq_id))?
+        .clone();
+    let assets = project.state.assets.clone();
+    let effects = project.state.effects.clone();
+    let settings =
+        build_export_settings(&preset_id, output_path, &sequence.format.canvas, start, end)?;
+    let graph = build_render_graph(&project.state, &seq_id)
+        .map_err(|error| anyhow::anyhow!("Failed to build render graph: {}", error))?;
+
+    let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
+    if !validation.is_valid {
+        return Err(anyhow::anyhow!(
+            "Render validation failed: {}",
+            validation.errors.join("; ")
+        ));
+    }
+    let render_plan = build_render_plan(&graph, &assets, &effects, &settings);
+    if !render_plan.validation.is_valid {
+        return Err(anyhow::anyhow!(
+            "Render plan validation failed: {}",
+            render_plan.validation.errors.join("; ")
+        ));
+    }
+    let plan_hash = render_plan.plan_hash.clone();
+
+    let ffmpeg_info = ensure_ffmpeg()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| anyhow::anyhow!("Failed to create Tokio runtime: {error}"))?;
+    let result = runtime.block_on(async move {
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        // Ctrl-C must reach FFmpeg: without this the CLI would exit while the
+        // child keeps encoding into a half-written output file.
+        let signal_task = tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = cancel_tx.send(());
+            }
+        });
+
+        let (progress_tx, progress_task) = if progress {
+            let (tx, mut rx) =
+                tokio::sync::mpsc::channel::<ExportProgress>(PROGRESS_CHANNEL_CAPACITY);
+            let task = tokio::spawn(async move {
+                while let Some(update) = rx.recv().await {
+                    emit_progress_line(&update);
+                }
+            });
+            (Some(tx), Some(task))
+        } else {
+            (None, None)
+        };
+
+        let engine = ExportEngine::new(FFmpegRunner::new(ffmpeg_info));
+        let export = engine
+            .export_sequence_with_effects_for_plan(
+                &sequence,
+                &assets,
+                &effects,
+                &settings,
+                &render_plan,
+                progress_tx,
+                Some(cancel_rx),
+            )
+            .await;
+
+        signal_task.abort();
+        if let Some(task) = progress_task {
+            let _ = task.await;
+        }
+
+        export
+    });
+
+    let result = result.map_err(|error| match error {
+        openreelio_core::render::ExportError::Cancelled => {
+            anyhow::anyhow!("Render cancelled; the partial output file was removed")
+        }
+        other => anyhow::anyhow!(other),
+    })?;
+
+    output::print_json_pretty(&serde_json::json!({
+        "status": "ok",
+        "sequenceId": seq_id,
+        "preset": preset_id,
+        "outputPath": result.output_path.display().to_string(),
+        "durationSec": result.duration_sec,
+        "fileSize": result.file_size,
+        "encodingTimeSec": result.encoding_time_sec,
+        "planHash": plan_hash,
+        "warnings": validation.warnings,
+    }))
+}
+
+/// Write one NDJSON progress record to stderr.
+///
+/// stdout stays reserved for the single result object, so progress goes to
+/// stderr where a supervising agent can read it line by line.
+fn emit_progress_line(update: &ExportProgress) {
+    let line = serde_json::json!({
+        "type": "progress",
+        "percent": update.percent,
+        "frame": update.frame,
+        "totalFrames": update.total_frames,
+        "fps": update.fps,
+        "etaSeconds": update.eta_seconds,
+        "message": update.message,
+    });
+    eprintln!("{}", line);
+}
+
+/// Validates the optional `--start` / `--end` render range.
+fn validate_render_range(start: Option<f64>, end: Option<f64>) -> anyhow::Result<()> {
+    if let Some(start) = start {
+        validate::time_non_negative(start, "start")?;
+    }
+    if let Some(end) = end {
+        validate::time_non_negative(end, "end")?;
+    }
+    if let (Some(start), Some(end)) = (start, end) {
+        validate::time_range_ordered(start, end, "start", "end")?;
+    }
+    Ok(())
+}
+
+/// Appends `extension` when the path has none, leaving explicit extensions alone.
+fn default_extension(path: PathBuf, extension: &str) -> PathBuf {
+    if path.extension().is_some() {
+        return path;
+    }
+    path.with_extension(extension)
+}
+
+/// Builds export settings for a named preset.
+///
+/// `canvas` is the sequence canvas: the proxy preset fits its frame to it so a
+/// vertical or square edit is not pillarboxed into a 16:9 proxy.
+fn build_export_settings(
+    preset: &str,
+    output_path: PathBuf,
+    canvas: &Canvas,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
+) -> anyhow::Result<ExportSettings> {
     let normalized = preset.trim().to_lowercase();
-    let settings = match normalized.as_str() {
+    let mut settings = match normalized.as_str() {
         "mp4_h264_1080p" | "youtube_1080p" | "youtube1080p" => {
             ExportSettings::from_preset(ExportPreset::Youtube1080p, output_path)
         }
@@ -179,7 +345,12 @@ fn build_export_settings(preset: &str, output_path: PathBuf) -> anyhow::Result<E
             tonemap_mode: None,
             hardware_accel: Default::default(),
             resolved_encoder_name: None,
+            encoder_speed: None,
         },
+        "mp4_draft" | "mp4_h264_720p" | "draft" => {
+            ExportSettings::from_preset(ExportPreset::Mp4Draft, output_path)
+        }
+        "proxy_480p" | "proxy" => ExportSettings::proxy(output_path, canvas, start_time, end_time),
         "webm_vp9_1080p" | "webm_vp9" | "webm" => {
             ExportSettings::from_preset(ExportPreset::WebmVp9, output_path)
         }
@@ -197,33 +368,86 @@ fn build_export_settings(preset: &str, output_path: PathBuf) -> anyhow::Result<E
         }
     };
 
+    settings.start_time = start_time;
+    settings.end_time = end_time;
+
     Ok(settings)
 }
 
-fn detect_cli_ffmpeg() -> anyhow::Result<openreelio_core::ffmpeg::FFmpegInfo> {
-    let candidate_roots = [
-        std::env::current_dir()
-            .ok()
-            .map(|path| path.join("src-tauri")),
-        std::env::current_dir().ok(),
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(|parent| parent.to_path_buf())),
-    ];
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let info = candidate_roots
-        .into_iter()
-        .flatten()
-        .find_map(|root| detect_bundled_at_path(&root).ok())
-        .map(Ok)
-        .unwrap_or_else(|| {
-            detect_system_ffmpeg()
-                .map_err(|error| anyhow::anyhow!("FFmpeg initialization failed: {}", error))
-        })?;
+    #[test]
+    fn render_presets_should_expose_the_proxy_preset() {
+        assert!(RENDER_PRESETS
+            .iter()
+            .any(|(id, _, ext)| *id == PROXY_PRESET_ID && *ext == "mp4"));
+    }
 
-    // Publish the detected paths so core modules that spawn ffmpeg/ffprobe
-    // directly resolve the same binaries instead of relying on PATH.
-    set_resolved_paths(info.ffmpeg_path.clone(), info.ffprobe_path.clone());
+    #[test]
+    fn build_export_settings_should_apply_proxy_dimensions_and_speed() {
+        let settings = build_export_settings(
+            PROXY_PRESET_ID,
+            PathBuf::from("proxy.mp4"),
+            &Canvas::new(1920, 1080),
+            None,
+            None,
+        )
+        .unwrap();
 
-    Ok(info)
+        assert_eq!(settings.width, Some(854));
+        assert_eq!(settings.height, Some(480));
+        assert_eq!(settings.encoder_speed.as_deref(), Some("ultrafast"));
+    }
+
+    #[test]
+    fn build_export_settings_should_fit_the_proxy_to_a_vertical_canvas() {
+        let settings = build_export_settings(
+            PROXY_PRESET_ID,
+            PathBuf::from("proxy.mp4"),
+            &Canvas::new(1080, 1920),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(settings.width, Some(480));
+        assert_eq!(settings.height, Some(854));
+    }
+
+    #[test]
+    fn build_export_settings_should_carry_the_requested_range() {
+        let settings = build_export_settings(
+            "mp4_h264_1080p",
+            PathBuf::from("out.mp4"),
+            &Canvas::new(1920, 1080),
+            Some(1.5),
+            Some(4.0),
+        )
+        .unwrap();
+
+        assert_eq!(settings.start_time, Some(1.5));
+        assert_eq!(settings.end_time, Some(4.0));
+    }
+
+    #[test]
+    fn validate_render_range_should_reject_inverted_ranges() {
+        assert!(validate_render_range(Some(5.0), Some(1.0)).is_err());
+        assert!(validate_render_range(Some(-1.0), None).is_err());
+        assert!(validate_render_range(Some(0.0), Some(1.0)).is_ok());
+        assert!(validate_render_range(None, None).is_ok());
+    }
+
+    #[test]
+    fn default_extension_should_only_fill_missing_extensions() {
+        assert_eq!(
+            default_extension(PathBuf::from("out"), "mp4"),
+            PathBuf::from("out.mp4")
+        );
+        assert_eq!(
+            default_extension(PathBuf::from("out.mov"), "mp4"),
+            PathBuf::from("out.mov")
+        );
+    }
 }

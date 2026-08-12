@@ -19,6 +19,43 @@ fn is_nonempty_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Default MJPEG quality (1-31, lower is better) used for extracted frames.
+const DEFAULT_FRAME_JPEG_QUALITY: u8 = 2;
+
+/// Best MJPEG quality FFmpeg's `-q:v` accepts.
+const MIN_FRAME_JPEG_QUALITY: u8 = 1;
+
+/// Worst MJPEG quality FFmpeg's `-q:v` accepts.
+const MAX_FRAME_JPEG_QUALITY: u8 = 31;
+
+/// Builds a downscale-only `scale` filter that preserves the aspect ratio.
+///
+/// `min(max_width, iw)` keeps sources narrower than `max_width` untouched, and
+/// `-2` keeps the height on an even number as required by most encoders. The
+/// quotes protect the comma from FFmpeg's filtergraph separator.
+fn downscale_filter(max_width: u32) -> String {
+    format!("scale='min({},iw)':-2", max_width.max(1))
+}
+
+/// Options for [`FFmpegRunner::extract_frame_with_options`].
+#[derive(Clone, Debug, Default)]
+pub struct FrameExtractOptions {
+    /// Re-extract even when a non-empty output file already exists.
+    ///
+    /// The default (`false`) keeps the legacy cache behaviour used by
+    /// thumbnail and clip-analysis passes.
+    pub overwrite: bool,
+    /// Downscale the frame so its width never exceeds this value.
+    ///
+    /// Sources narrower than the limit are left at their native size.
+    pub max_width: Option<u32>,
+    /// MJPEG quality (1-31, lower is better). Ignored for PNG output.
+    ///
+    /// Values outside the range are clamped to it, so the option can never
+    /// produce a command line FFmpeg refuses.
+    pub quality: Option<u8>,
+}
+
 // =============================================================================
 // Waveform Data Types
 // =============================================================================
@@ -268,6 +305,11 @@ impl FFmpegRunner {
 
     /// Extract a single frame from a video file
     ///
+    /// An existing non-empty output file is treated as a cache hit and left
+    /// untouched. Callers that need a freshly decoded frame must use
+    /// [`FFmpegRunner::extract_frame_with_options`] with
+    /// [`FrameExtractOptions::overwrite`] set.
+    ///
     /// # Arguments
     /// * `input` - Path to the input video file
     /// * `time_sec` - Time position in seconds
@@ -278,6 +320,25 @@ impl FFmpegRunner {
         time_sec: f64,
         output: &Path,
     ) -> FFmpegResult<()> {
+        self.extract_frame_with_options(input, time_sec, output, &FrameExtractOptions::default())
+            .await
+    }
+
+    /// Extract a single frame from a video file with explicit caching, scaling
+    /// and quality control.
+    ///
+    /// # Arguments
+    /// * `input` - Path to the input video file
+    /// * `time_sec` - Time position in seconds
+    /// * `output` - Path to save the output image (JPEG or PNG)
+    /// * `options` - Overwrite/scale/quality behaviour
+    pub async fn extract_frame_with_options(
+        &self,
+        input: &Path,
+        time_sec: f64,
+        output: &Path,
+        options: &FrameExtractOptions,
+    ) -> FFmpegResult<()> {
         if !input.exists() {
             return Err(FFmpegError::InvalidInput(format!(
                 "Input file does not exist: {}",
@@ -285,8 +346,9 @@ impl FFmpegRunner {
             )));
         }
 
-        // If already extracted, treat as success.
-        if is_nonempty_file(output) {
+        // Without `overwrite`, an already extracted frame is treated as success
+        // so repeated thumbnail/analysis passes stay cheap.
+        if !options.overwrite && is_nonempty_file(output) {
             return Ok(());
         }
 
@@ -300,32 +362,62 @@ impl FFmpegRunner {
         // Build FFmpeg command
         // -ss before -i for fast seeking
         // -frames:v 1 to extract single frame
-        // -q:v 2 for good JPEG quality
+        let mut args = vec![
+            "-hide_banner".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-nostdin".to_string(),
+            "-ss".to_string(),
+            format!("{:.6}", time_sec),
+            "-i".to_string(),
+            input.to_string_lossy().to_string(),
+            "-frames:v".to_string(),
+            "1".to_string(),
+        ];
+
+        if let Some(max_width) = options.max_width {
+            args.push("-vf".to_string());
+            args.push(downscale_filter(max_width));
+        }
+
+        // PNG ignores `-q:v`; only the MJPEG path is quality controlled.
+        if output
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+        {
+            args.extend([
+                "-c:v".to_string(),
+                "png".to_string(),
+                "-pix_fmt".to_string(),
+                "rgba".to_string(),
+            ]);
+        } else {
+            args.push("-q:v".to_string());
+            // FFmpeg rejects a `-q:v` outside 1-31 and the failure would surface
+            // as an opaque stderr dump, so an out-of-range option is clamped
+            // rather than handed to the encoder.
+            args.push(
+                options
+                    .quality
+                    .unwrap_or(DEFAULT_FRAME_JPEG_QUALITY)
+                    .clamp(MIN_FRAME_JPEG_QUALITY, MAX_FRAME_JPEG_QUALITY)
+                    .to_string(),
+            );
+        }
+
+        args.push("-y".to_string()); // Overwrite output
+        args.push(output.to_string_lossy().to_string());
+
         let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
         configure_tokio_command(&mut cmd);
-        let output = cmd
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-ss",
-                &format!("{:.6}", time_sec),
-                "-i",
-                &input.to_string_lossy(),
-                "-frames:v",
-                "1",
-                "-q:v",
-                "2",
-                "-y", // Overwrite output
-                &output.to_string_lossy(),
-            ])
+        let result = cmd
+            .args(&args)
             .output()
             .await
             .map_err(FFmpegError::ProcessError)?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
             return Err(FFmpegError::ExecutionFailed(format!(
                 "Frame extraction failed: {}",
                 stderr
@@ -1042,6 +1134,332 @@ impl FFmpegRunner {
 
         Ok(waveform)
     }
+
+    /// Runs a `-filter_complex` analysis pass and returns the captured stderr.
+    ///
+    /// Analysis filters (`blackdetect`, `freezedetect`, `silencedetect`,
+    /// `ebur128`, `astats`) report their findings to stderr at FFmpeg's INFO
+    /// log level, so the invocation pins `-loglevel info` and discards the
+    /// decoded output with `-f null -`.
+    ///
+    /// `maps` lists the filtergraph output labels to map (for example
+    /// `["[v]", "[a]"]`); an empty slice leaves stream selection to FFmpeg.
+    /// The call is aborted with [`FFmpegError::Timeout`] once `timeout`
+    /// elapses, and stderr retention is bounded (see [`FilterStderrCapture`]),
+    /// so a pathological input can neither hang nor exhaust memory.
+    ///
+    /// The whole [`FilterCapture`] is returned rather than just its text so
+    /// callers can see whether retention dropped lines and whether INFO-level
+    /// output was observed at all — both facts are lost once the buffers are
+    /// joined into a single string.
+    pub async fn run_filter_capture_stderr(
+        &self,
+        input: &Path,
+        filter_complex: &str,
+        maps: &[&str],
+        timeout: std::time::Duration,
+    ) -> FFmpegResult<FilterCapture> {
+        let capture = capture_filter_stderr(
+            &self.info.ffmpeg_path,
+            input,
+            FilterMode::Complex {
+                graph: filter_complex,
+                maps,
+            },
+            timeout,
+        )
+        .await?;
+
+        if !capture.success {
+            return Err(FFmpegError::ExecutionFailed(format!(
+                "Filter analysis failed (exit {}). Stderr tail:\n{}",
+                capture.exit_code.unwrap_or(-1),
+                capture.stderr_tail(STDERR_ERROR_TAIL_LINES)
+            )));
+        }
+
+        Ok(capture)
+    }
+}
+
+// =============================================================================
+// Filter analysis passes
+// =============================================================================
+
+/// Number of stderr tail lines quoted in filter-analysis error messages.
+const STDERR_ERROR_TAIL_LINES: usize = 20;
+
+/// Maximum number of filter-output lines retained from a capture.
+///
+/// Per-frame filters (`ametadata=mode=print`) emit tens of thousands of lines
+/// on long inputs, so retention is capped: the oldest lines are dropped and the
+/// capture is flagged as truncated. The cap is deliberately generous — it exists
+/// to bound memory, not to trim ordinary output.
+///
+/// Sizing: `ametadata=mode=print` emits two lines per audio frame (a `frame:`
+/// header plus the metadata value) and a 48 kHz stream decodes at roughly 47
+/// frames per second, so the cap corresponds to about 88 minutes of audio
+/// (500 000 / 94 ≈ 5300 s). Worst-case memory is bounded by the same number:
+/// each retained line costs its text (~60 bytes for these filters) plus the
+/// `String` header and sequence number, i.e. under 100 bytes, so a full buffer
+/// stays below ~50 MB.
+///
+/// The cap is per capture, not per process. `AudioProfiler::analyze` runs its
+/// passes concurrently and two of them retain filter output in full, so a
+/// single long asset can hold two near-full buffers, and analysing assets in
+/// parallel multiplies that again.
+const MAX_RETAINED_FILTER_LINES: usize = 500_000;
+
+/// Maximum number of trailing lines retained regardless of content.
+///
+/// The `ebur128` summary block is emitted as indented continuation lines that
+/// carry no filter prefix, so the tail window is what keeps it intact.
+const MAX_RETAINED_TAIL_LINES: usize = 400;
+
+/// Line prefixes FFmpeg only prints at its INFO log level.
+///
+/// These are header lines, so they carry no filter marker and survive only
+/// inside the trailing window. Whether one was ever seen is therefore recorded
+/// while streaming rather than recovered from the joined text, which a long
+/// run would have evicted (see [`FilterCapture::saw_info_output`]).
+const INFO_LEVEL_LINE_PREFIXES: &[&str] = &["Input #", "Output #", "Stream mapping:", "Stream #"];
+
+/// Line prefixes/markers that identify output worth keeping in full.
+const FILTER_LINE_MARKERS: &[&str] = &[
+    "[Parsed_",
+    "[silencedetect",
+    "[blackdetect",
+    "[freezedetect",
+    "[Parsed_ebur128",
+    "lavfi.",
+    "silence_start",
+    "silence_end",
+    "black_start",
+    "black_end",
+    "freeze_start",
+    "freeze_end",
+];
+
+/// How a filtergraph is attached to an analysis invocation.
+#[derive(Debug, Clone, Copy)]
+pub enum FilterMode<'a> {
+    /// `-af <filter> -vn`: audio-only pass over the first audio stream.
+    ///
+    /// Kept distinct from [`FilterMode::Complex`] because FFmpeg reports a
+    /// missing audio stream differently for the two forms, and callers match
+    /// on that message to tell "no audio" apart from "analysis failed".
+    Audio(&'a str),
+    /// `-filter_complex <graph>` with the given output labels mapped.
+    Complex {
+        /// The filtergraph description.
+        graph: &'a str,
+        /// Output labels to map, e.g. `["[v]", "[a]"]`.
+        maps: &'a [&'a str],
+    },
+}
+
+/// Result of an analysis pass, including runs that exited non-zero.
+///
+/// Failure is reported as data rather than an error so callers can inspect the
+/// captured stderr first: a missing audio stream, for example, surfaces only in
+/// the log text while FFmpeg exits non-zero.
+#[derive(Debug, Clone)]
+pub struct FilterCapture {
+    /// Retained stderr text (bounded; see [`FilterStderrCapture`]).
+    pub stderr: String,
+    /// Whether FFmpeg exited successfully.
+    pub success: bool,
+    /// Process exit code, when one was reported.
+    pub exit_code: Option<i32>,
+    /// Whether stderr retention dropped lines.
+    pub truncated: bool,
+    /// Whether any INFO-level FFmpeg output was observed while streaming.
+    ///
+    /// Detection filters log nothing when they find nothing, so "no detections"
+    /// is only meaningful if INFO output reached the capture at all. The fact is
+    /// recorded as lines arrive because the header lines that prove it are
+    /// evicted from the retained text by any long-running pass.
+    pub saw_info_output: bool,
+}
+
+impl FilterCapture {
+    /// Returns the last `lines` lines of the captured stderr.
+    pub fn stderr_tail(&self, lines: usize) -> String {
+        let all: Vec<&str> = self.stderr.lines().collect();
+        let start = all.len().saturating_sub(lines);
+        all[start..].join("\n")
+    }
+}
+
+/// Runs an FFmpeg analysis pass and captures its stderr.
+///
+/// The output is discarded (`-f null -`); only the filter log matters. The
+/// invocation pins `-loglevel info` (filters log their findings at that level)
+/// and `-nostats` (the periodic encode progress line is noise here).
+///
+/// Returns [`FFmpegError::Timeout`] when `timeout` elapses; the child process
+/// is killed before returning so no orphan encoder is left behind.
+pub async fn capture_filter_stderr(
+    ffmpeg_path: &Path,
+    input: &Path,
+    mode: FilterMode<'_>,
+    timeout: std::time::Duration,
+) -> FFmpegResult<FilterCapture> {
+    if !input.exists() {
+        return Err(FFmpegError::InvalidInput(format!(
+            "Input file does not exist: {}",
+            input.display()
+        )));
+    }
+
+    let mut cmd = tokio::process::Command::new(ffmpeg_path);
+    configure_tokio_command(&mut cmd);
+    cmd.args(["-hide_banner", "-nostats", "-nostdin", "-loglevel", "info"]);
+    cmd.arg("-i").arg(input);
+
+    match mode {
+        FilterMode::Audio(filter) => {
+            cmd.arg("-af").arg(filter).arg("-vn");
+        }
+        FilterMode::Complex { graph, maps } => {
+            cmd.arg("-filter_complex").arg(graph);
+            for label in maps {
+                cmd.arg("-map").arg(label);
+            }
+        }
+    }
+
+    cmd.args(["-f", "null", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(FFmpegError::ProcessError)?;
+
+    let stderr = child.stderr.take();
+    let (capture_tx, capture_rx) = tokio::sync::oneshot::channel::<FilterStderrCapture>();
+    let reader_task = tokio::spawn(async move {
+        let mut capture = FilterStderrCapture::new();
+        if let Some(stderr) = stderr {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                capture.push(&line);
+            }
+        }
+        let _ = capture_tx.send(capture);
+    });
+
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(result) => result.map_err(FFmpegError::ProcessError)?,
+        Err(_) => {
+            // Kill first, then drain: the reader task only ends once the child
+            // closes its stderr pipe.
+            let _ = child.kill().await;
+            reader_task.abort();
+            return Err(FFmpegError::Timeout);
+        }
+    };
+
+    let capture = capture_rx.await.unwrap_or_default();
+    let _ = reader_task.await;
+
+    Ok(FilterCapture {
+        stderr: capture.joined(),
+        success: status.success(),
+        exit_code: status.code(),
+        truncated: capture.truncated,
+        saw_info_output: capture.saw_info_output,
+    })
+}
+
+/// Bounded, order-preserving stderr buffer for analysis passes.
+///
+/// Filter findings can be numerous (one line per detected range) while the
+/// surrounding FFmpeg chatter is irrelevant, so lines that look like filter
+/// output are retained up to a high cap and everything else survives only
+/// inside a short trailing window. Sequence numbers keep the merged result in
+/// emission order without duplicating lines held by both buffers.
+#[derive(Debug, Default)]
+struct FilterStderrCapture {
+    next_seq: usize,
+    filter_lines: std::collections::VecDeque<(usize, String)>,
+    tail_lines: std::collections::VecDeque<(usize, String)>,
+    truncated: bool,
+    saw_info_output: bool,
+}
+
+impl FilterStderrCapture {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn push(&mut self, line: &str) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+
+        // Recorded here rather than re-scanned later: the header lines that
+        // prove INFO output arrived are not filter output, so a long run
+        // evicts them from the trailing window before anyone can look.
+        if !self.saw_info_output && is_info_level_line(line) {
+            self.saw_info_output = true;
+        }
+
+        if is_filter_output_line(line) {
+            if self.filter_lines.len() == MAX_RETAINED_FILTER_LINES {
+                self.filter_lines.pop_front();
+                self.truncated = true;
+            }
+            self.filter_lines.push_back((seq, line.to_string()));
+        }
+
+        // Dropping an old non-filter line is the intended behaviour of the
+        // trailing window, so it does not count as truncation.
+        if self.tail_lines.len() == MAX_RETAINED_TAIL_LINES {
+            self.tail_lines.pop_front();
+        }
+        self.tail_lines.push_back((seq, line.to_string()));
+    }
+
+    /// Merges both buffers back into emission order, without duplicates.
+    fn joined(&self) -> String {
+        let mut merged: Vec<(usize, &str)> =
+            Vec::with_capacity(self.filter_lines.len() + self.tail_lines.len());
+        merged.extend(
+            self.filter_lines
+                .iter()
+                .map(|(seq, line)| (*seq, line.as_str())),
+        );
+        merged.extend(
+            self.tail_lines
+                .iter()
+                .map(|(seq, line)| (*seq, line.as_str())),
+        );
+        merged.sort_by_key(|(seq, _)| *seq);
+        merged.dedup_by_key(|(seq, _)| *seq);
+
+        merged
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Returns whether a stderr line is one FFmpeg only prints at INFO level.
+fn is_info_level_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    INFO_LEVEL_LINE_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
+/// Returns whether a stderr line carries filter output worth retaining in full.
+fn is_filter_output_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    FILTER_LINE_MARKERS
+        .iter()
+        .any(|marker| trimmed.starts_with(marker) || trimmed.contains(marker))
 }
 
 /// Parse peak levels from FFmpeg astats filter output
@@ -1367,6 +1785,144 @@ fn parse_audio_stream(stream: &serde_json::Value) -> FFmpegResult<AudioStreamInf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // Filter stderr capture Tests
+    // =========================================================================
+
+    #[test]
+    fn test_filter_capture_should_keep_lines_in_emission_order() {
+        let mut capture = FilterStderrCapture::new();
+        capture.push("[blackdetect @ 0x1] black_start:0 black_end:0.5");
+        capture.push("frame= 10 fps=0.0");
+        capture.push("[silencedetect @ 0x2] silence_start: 1.0");
+
+        let joined = capture.joined();
+        let lines: Vec<&str> = joined.lines().collect();
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("black_start"));
+        assert!(lines[1].contains("frame="));
+        assert!(lines[2].contains("silence_start"));
+        assert!(!capture.truncated);
+    }
+
+    #[test]
+    fn test_filter_capture_should_retain_filter_lines_beyond_the_tail_window() {
+        let mut capture = FilterStderrCapture::new();
+        capture.push("[blackdetect @ 0x1] black_start:0 black_end:0.5");
+        for index in 0..(MAX_RETAINED_TAIL_LINES * 2) {
+            capture.push(&format!("noise line {}", index));
+        }
+
+        let joined = capture.joined();
+
+        assert!(
+            joined.contains("black_start"),
+            "filter output must survive a flood of unrelated stderr"
+        );
+        assert!(
+            !joined.contains("noise line 0"),
+            "unrelated stderr must be bounded"
+        );
+        assert!(!capture.truncated);
+    }
+
+    #[test]
+    fn test_filter_capture_should_not_duplicate_lines_held_by_both_buffers() {
+        let mut capture = FilterStderrCapture::new();
+        capture.push("[silencedetect @ 0x2] silence_start: 1.0");
+        capture.push("[silencedetect @ 0x2] silence_end: 2.0 | silence_duration: 1.0");
+
+        let joined = capture.joined();
+
+        assert_eq!(joined.matches("silence_start").count(), 1);
+        assert_eq!(joined.matches("silence_end").count(), 1);
+    }
+
+    #[test]
+    fn test_filter_capture_should_flag_truncation_when_filter_output_overflows() {
+        let mut capture = FilterStderrCapture::new();
+        for index in 0..(MAX_RETAINED_FILTER_LINES + 5) {
+            capture.push(&format!("[blackdetect @ 0x1] black_start:{}", index));
+        }
+
+        assert!(capture.truncated);
+    }
+
+    #[test]
+    fn test_is_filter_output_line() {
+        assert!(is_filter_output_line("[Parsed_ebur128_0 @ 0x1] Summary:"));
+        assert!(is_filter_output_line(
+            "[freezedetect @ 0x1] lavfi.freezedetect.freeze_start: 2"
+        ));
+        assert!(!is_filter_output_line("  Integrated loudness:"));
+        assert!(!is_filter_output_line("frame= 120 fps=30"));
+    }
+
+    #[test]
+    fn test_is_info_level_line() {
+        assert!(is_info_level_line(
+            "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'render.mp4':"
+        ));
+        assert!(is_info_level_line("Stream mapping:"));
+        assert!(is_info_level_line("  Stream #0:0 -> #0:0 (h264 (native))"));
+        assert!(is_info_level_line("Output #0, null, to 'pipe:':"));
+        assert!(!is_info_level_line(
+            "[silencedetect @ 0x1] silence_start: 1.0"
+        ));
+        assert!(!is_info_level_line("frame= 120 fps=30"));
+    }
+
+    #[test]
+    fn test_filter_capture_should_record_info_output_while_streaming() {
+        let mut capture = FilterStderrCapture::new();
+        assert!(!capture.saw_info_output);
+
+        capture.push("[silencedetect @ 0x1] silence_start: 1.0");
+        assert!(!capture.saw_info_output);
+
+        capture.push("Stream mapping:");
+        assert!(capture.saw_info_output);
+    }
+
+    #[test]
+    fn test_filter_capture_should_keep_the_info_flag_after_the_header_is_evicted() {
+        let mut capture = FilterStderrCapture::new();
+        capture.push("Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'render.mp4':");
+        capture.push("Stream mapping:");
+
+        // A content-rich render emits far more filter output than the trailing
+        // window holds, so the header lines are long gone by the time anyone
+        // reads the joined text.
+        for index in 0..(MAX_RETAINED_TAIL_LINES * 2) {
+            capture.push(&format!("[blackdetect @ 0x1] black_start:{}", index));
+        }
+
+        let joined = capture.joined();
+        assert!(
+            !joined.contains("Stream mapping:"),
+            "the header is expected to be evicted; the flag is what must survive"
+        );
+        assert!(
+            capture.saw_info_output,
+            "INFO-level output must stay recorded once the header is evicted"
+        );
+    }
+
+    #[test]
+    fn test_filter_capture_stderr_tail() {
+        let capture = FilterCapture {
+            stderr: "a\nb\nc\nd".to_string(),
+            success: false,
+            exit_code: Some(1),
+            truncated: false,
+            saw_info_output: true,
+        };
+
+        assert_eq!(capture.stderr_tail(2), "c\nd");
+        assert_eq!(capture.stderr_tail(10), "a\nb\nc\nd");
+    }
 
     // =========================================================================
     // WaveformData Tests

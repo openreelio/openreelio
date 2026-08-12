@@ -152,6 +152,170 @@ fn create_sample_video_with_duration(path: &std::path::Path, duration_secs: u32)
     status.success()
 }
 
+/// Picks the best available H.264-ish encoder, or `None` when ffmpeg has none.
+fn preferred_video_encoder(ffmpeg_path: &std::path::Path) -> Option<&'static str> {
+    if ffmpeg_supports_encoder(ffmpeg_path, "libx264") {
+        Some("libx264")
+    } else if ffmpeg_supports_encoder(ffmpeg_path, "mpeg4") {
+        Some("mpeg4")
+    } else {
+        None
+    }
+}
+
+/// Generates a 4-second video with a hard black-to-white cut at 2s.
+///
+/// Shot detection needs an unambiguous scene change; a single flat colour
+/// source produces none.
+fn create_sample_video_with_scene_change(path: &std::path::Path) -> bool {
+    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+        return false;
+    };
+    let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
+        eprintln!("Skipping perception test: ffmpeg lacks a supported video encoder");
+        return false;
+    };
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=320x240:r=25:d=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=white:s=320x240:r=25:d=2",
+        "-filter_complex",
+        "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+        "-map",
+        "[v]",
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p"]);
+    }
+
+    let status = command
+        .arg(path)
+        .status()
+        .expect("Failed to generate scene-change sample with ffmpeg");
+    if !status.success() {
+        eprintln!("Skipping perception test: ffmpeg could not generate the scene-change sample");
+    }
+    status.success()
+}
+
+/// Generates a 4-second video whose audio is a tone with a silent 1s–3s gap.
+///
+/// Silence detection and audio profiling need a real audio stream; the plain
+/// colour fixture is video-only.
+fn create_sample_video_with_audio(path: &std::path::Path) -> bool {
+    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+        return false;
+    };
+    let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
+        eprintln!("Skipping perception test: ffmpeg lacks a supported video encoder");
+        return false;
+    };
+    if !ffmpeg_supports_encoder(&ffmpeg_path, "aac") {
+        eprintln!("Skipping perception test: ffmpeg lacks the aac encoder");
+        return false;
+    }
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=320x240:r=25:d=4",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=44100:duration=4",
+        "-af",
+        "volume=enable='between(t,1,3)':volume=0",
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p"]);
+    }
+    command.args(["-c:a", "aac", "-shortest"]);
+
+    let status = command
+        .arg(path)
+        .status()
+        .expect("Failed to generate audio sample with ffmpeg");
+    if !status.success() {
+        eprintln!("Skipping perception test: ffmpeg could not generate the audio sample");
+    }
+    status.success()
+}
+
+/// Generates a 4-second fixture with a hard black-to-white cut at 2s and an
+/// attenuated tone whose 1s–3s window is muted.
+///
+/// The agent loop needs one asset that both shot detection and silence
+/// detection can find something in. The tone is deliberately attenuated so the
+/// rendered proxy stays well under the true-peak ceiling `verify` enforces;
+/// a full-scale sine would be a clipped, not a healthy, render.
+fn create_sample_video_with_scene_change_and_audio(path: &std::path::Path) -> bool {
+    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+        return false;
+    };
+    let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
+        eprintln!("Skipping agent-loop test: ffmpeg lacks a supported video encoder");
+        return false;
+    };
+    if !ffmpeg_supports_encoder(&ffmpeg_path, "aac") {
+        eprintln!("Skipping agent-loop test: ffmpeg lacks the aac encoder");
+        return false;
+    }
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=320x240:r=25:d=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=white:s=320x240:r=25:d=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=44100:duration=4",
+        "-filter_complex",
+        "[0:v][1:v]concat=n=2:v=1:a=0[v];\
+         [2:a]volume=0.25,volume=enable='between(t,1,3)':volume=0[a]",
+        "-map",
+        "[v]",
+        "-map",
+        "[a]",
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p"]);
+    }
+    command.args(["-c:a", "aac", "-shortest"]);
+
+    let status = command
+        .arg(path)
+        .status()
+        .expect("Failed to generate agent-loop sample with ffmpeg");
+    if !status.success() {
+        eprintln!("Skipping agent-loop test: ffmpeg could not generate the agent-loop sample");
+    }
+    status.success()
+}
+
 fn system_ffprobe_path() -> Option<PathBuf> {
     openreelio_core::ffmpeg::detect_system_ffmpeg()
         .ok()
@@ -168,6 +332,30 @@ fn ffprobe_duration_secs(path: &std::path::Path) -> Option<f64> {
             "error",
             "-show_entries",
             "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// Probe the height (in pixels) of the first video stream via ffprobe.
+/// Returns `None` if ffprobe is unavailable or the output cannot be parsed.
+fn ffprobe_video_height(path: &std::path::Path) -> Option<u32> {
+    let ffprobe_path = system_ffprobe_path()?;
+    let output = Command::new(ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=height",
             "-of",
             "default=noprint_wrappers=1:nokey=1",
         ])
@@ -807,9 +995,17 @@ fn test_validation_caption_inverted_range() {
 fn test_render_presets() {
     let result = run_cli_ok(&["render", "presets"]);
     let presets = result["presets"].as_array().unwrap();
-    assert_eq!(presets.len(), 5);
+    assert_eq!(presets.len(), 7);
     // Verify first preset structure
     assert_eq!(presets[0]["id"], "mp4_h264_1080p");
+    let ids: Vec<&str> = presets
+        .iter()
+        .filter_map(|preset| preset["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"proxy_480p") && ids.contains(&"mp4_draft"),
+        "expected proxy and draft presets, got: {ids:?}"
+    );
 }
 
 #[test]
@@ -850,6 +1046,36 @@ fn test_render_start_invalid_preset() {
         stderr.contains("Unknown preset"),
         "Expected unknown preset error, got: {}",
         stderr
+    );
+}
+
+#[test]
+fn test_ffmpeg_info_reports_resolved_binaries() {
+    if system_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let result = run_cli_ok(&["ffmpeg", "info"]);
+
+    assert_eq!(result["status"], "ok");
+    assert!(
+        !result["ffmpegPath"].as_str().unwrap_or_default().is_empty(),
+        "Expected a resolved ffmpeg path, got: {}",
+        result
+    );
+    assert!(
+        !result["ffprobePath"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "Expected a resolved ffprobe path, got: {}",
+        result
+    );
+    let source = result["source"].as_str().unwrap_or_default();
+    assert!(
+        ["explicit", "env", "bundled", "managed", "dev", "system"].contains(&source),
+        "Unexpected ffmpeg source: {}",
+        source
     );
 }
 
@@ -911,6 +1137,341 @@ fn test_render_start_exports_video_when_ffmpeg_is_available() {
     assert!(
         output_path.metadata().unwrap().len() > 0,
         "Expected rendered output to be non-empty"
+    );
+}
+
+#[test]
+fn test_render_start_rejects_proxy_combined_with_preset() {
+    let dir = create_temp_project("render_proxy_conflict");
+    let path = project_path(&dir, "render_proxy_conflict");
+    let (_stdout, stderr) = run_cli_err(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        "proxy.mp4",
+        "--proxy",
+        "--preset",
+        "mp4_h264_1080p",
+    ]);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "Expected a clap conflict error, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_render_start_rejects_inverted_range() {
+    let dir = create_temp_project("render_range_err");
+    let path = project_path(&dir, "render_range_err");
+    let (_stdout, stderr) = run_cli_err(&[
+        "render", "start", "--path", &path, "--output", "out.mp4", "--start", "5", "--end", "1",
+    ]);
+    assert!(
+        stderr.contains("Invalid time range"),
+        "Expected a range validation error, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_render_start_proxy_renders_480p_range_with_progress() {
+    if system_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_proxy_test");
+    let path = project_path(&dir, "render_proxy_test");
+
+    let source_path = dir.path().join("proxy_source.mp4");
+    if !create_sample_video_with_duration(&source_path, 2) {
+        return;
+    }
+
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source_path.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    let output_path = dir.path().join("proxy-output.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--start",
+        "0",
+        "--end",
+        "1",
+        "--progress",
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "Proxy render failed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let result: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("Failed to parse proxy render output: {error}\n{stdout}"));
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["preset"], "proxy_480p");
+
+    assert!(output_path.exists(), "Expected proxy output to exist");
+    assert!(
+        output_path.metadata().unwrap().len() > 0,
+        "Expected proxy output to be non-empty"
+    );
+
+    // Progress must be NDJSON on stderr so stdout stays a single JSON object.
+    let progress_lines: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .filter(|value| value["type"] == "progress")
+        .collect();
+    assert!(
+        !progress_lines.is_empty(),
+        "Expected NDJSON progress on stderr, got: {stderr}"
+    );
+    assert!(
+        progress_lines
+            .iter()
+            .all(|line| line["percent"].is_number() && line["totalFrames"].is_number()),
+        "Expected progress lines to carry percent and totalFrames, got: {progress_lines:?}"
+    );
+
+    if let Some(height) = ffprobe_video_height(&output_path) {
+        assert_eq!(height, 480, "Expected a 480p proxy, got height {height}");
+    }
+
+    if let Some(duration) = ffprobe_duration_secs(&output_path) {
+        assert!(
+            (duration - 1.0).abs() < 0.35,
+            "Expected proxy output duration near 1s, got {duration}"
+        );
+    }
+}
+
+// =============================================================================
+// Frame Commands
+// =============================================================================
+
+/// Creates a project with `sample.mp4` imported and inserted on a video track.
+///
+/// Returns `None` when FFmpeg cannot produce the sample so callers can skip.
+fn create_project_with_timeline_clip(
+    name: &str,
+    duration_secs: u32,
+) -> Option<(tempfile::TempDir, String, String)> {
+    system_ffmpeg_path()?;
+
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+
+    let source_path = dir.path().join("frame_source.mp4");
+    if !create_sample_video_with_duration(&source_path, duration_secs) {
+        return None;
+    }
+
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source_path.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    Some((dir, path, asset_id))
+}
+
+#[test]
+fn test_frame_extract_writes_still_from_asset_source_time() {
+    let Some((dir, path, asset_id)) = create_project_with_timeline_clip("frame_asset_test", 4)
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("asset_frame.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--asset",
+        &asset_id,
+        "--source-time",
+        "1.0",
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["mode"], "asset");
+    assert_eq!(result["count"], 1);
+    assert_eq!(result["frames"][0]["assetId"], asset_id.as_str());
+    assert_eq!(result["frames"][0]["sourceTimeSec"], 1.0);
+    assert!(output_path.exists(), "Expected extracted frame to exist");
+    assert!(
+        output_path.metadata().unwrap().len() > 0,
+        "Expected extracted frame to be non-empty"
+    );
+}
+
+#[test]
+fn test_frame_extract_writes_still_from_timeline_time() {
+    let Some((dir, path, asset_id)) = create_project_with_timeline_clip("frame_timeline_test", 4)
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("timeline_frame.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "1.5",
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["mode"], "fast");
+    assert_eq!(result["count"], 1);
+    assert_eq!(result["frames"][0]["timeSec"], 1.5);
+    assert_eq!(result["frames"][0]["assetId"], asset_id.as_str());
+    assert!(result["frames"][0]["clipId"].is_string());
+    assert!(result["frames"][0]["width"].as_u64().unwrap() > 0);
+    assert!(output_path.exists(), "Expected extracted frame to exist");
+    assert!(
+        output_path.metadata().unwrap().len() > 0,
+        "Expected extracted frame to be non-empty"
+    );
+}
+
+#[test]
+fn test_frame_extract_writes_one_file_per_requested_time() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_batch_test", 4) else {
+        return;
+    };
+
+    let output_dir = dir.path().join("stills");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--times",
+        "0.5,1.5,2.5",
+        "--out",
+        output_dir.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["count"], 3);
+
+    let frames = result["frames"].as_array().unwrap();
+    assert_eq!(frames.len(), 3);
+    for frame in frames {
+        let frame_path = std::path::Path::new(frame["path"].as_str().unwrap());
+        assert!(
+            frame_path.exists(),
+            "Expected batch frame {} to exist",
+            frame_path.display()
+        );
+        assert!(
+            frame_path.metadata().unwrap().len() > 0,
+            "Expected batch frame {} to be non-empty",
+            frame_path.display()
+        );
+    }
+}
+
+#[test]
+fn test_frame_extract_builds_contact_sheet_for_grid() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_grid_test", 4) else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("sheet.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--between",
+        "0",
+        "4",
+        "--format",
+        "jpeg",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["sheet"]["cols"], 2);
+    assert_eq!(result["sheet"]["rows"], 2);
+
+    let cells = result["sheet"]["cells"].as_array().unwrap();
+    assert_eq!(cells.len(), 4);
+    let times: Vec<f64> = cells
+        .iter()
+        .map(|cell| cell["timelineSec"].as_f64().unwrap())
+        .collect();
+    assert!(
+        times.windows(2).all(|pair| pair[0] < pair[1]),
+        "Expected ascending cell times, got {:?}",
+        times
+    );
+    assert!(times.iter().all(|time| *time > 0.0 && *time < 4.0));
+
+    assert!(sheet_path.exists(), "Expected contact sheet to exist");
+    assert!(
+        sheet_path.metadata().unwrap().len() > 0,
+        "Expected contact sheet to be non-empty"
     );
 }
 
@@ -1625,4 +2186,938 @@ fn test_core_flow_create_import_edit_caption_render_end_to_end() {
             "Expected rendered output to have a positive duration, got {duration}"
         );
     }
+}
+
+// =============================================================================
+// Perception Commands
+// =============================================================================
+
+/// Creates a project and imports media produced by `build_media`.
+///
+/// Returns `None` when FFmpeg cannot produce the fixture so callers can skip.
+fn create_project_with_media(
+    name: &str,
+    file_name: &str,
+    build_media: impl Fn(&std::path::Path) -> bool,
+) -> Option<(tempfile::TempDir, String, String)> {
+    system_ffmpeg_path()?;
+
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+
+    let source_path = dir.path().join(file_name);
+    if !build_media(&source_path) {
+        return None;
+    }
+
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source_path.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    Some((dir, path, asset_id))
+}
+
+/// Path of the cached analysis bundle written by the perception verbs.
+fn bundle_path(project_path: &str, asset_id: &str) -> PathBuf {
+    PathBuf::from(project_path)
+        .join(".openreelio")
+        .join("analysis")
+        .join(asset_id)
+        .join("bundle.json")
+}
+
+#[test]
+fn test_analysis_shots_detects_and_persists_scene_change() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "shots_persist_test",
+        "scene_change.mp4",
+        create_sample_video_with_scene_change,
+    ) else {
+        return;
+    };
+
+    let result = run_cli_ok(&["analysis", "shots", "--path", &path, "--id", &asset_id]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["assetId"], asset_id.as_str());
+    assert!(
+        result["shotCount"].as_u64().unwrap() >= 1,
+        "Expected at least one detected shot, got {}",
+        result["shotCount"]
+    );
+    assert!(result["totalDurationSec"].as_f64().unwrap() > 0.0);
+
+    let persisted: Vec<&str> = result["persisted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(persisted.contains(&"bundle"), "persisted: {:?}", persisted);
+    assert!(
+        persisted.contains(&"annotations"),
+        "persisted: {:?}",
+        persisted
+    );
+    assert!(persisted.contains(&"indexDb"), "persisted: {:?}", persisted);
+
+    assert!(
+        bundle_path(&path, &asset_id).exists(),
+        "Expected the analysis bundle to be written"
+    );
+    assert!(
+        PathBuf::from(&path).join("index.db").exists(),
+        "Expected the shot index database to be written"
+    );
+
+    // The cached artifacts must be visible to the reporting verbs.
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(report["coverage"]["shots"], true);
+    assert_eq!(report["shots"]["count"], result["shotCount"]);
+}
+
+#[test]
+fn test_analysis_shots_writes_nothing_with_no_persist() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "shots_no_persist_test",
+        "scene_change.mp4",
+        create_sample_video_with_scene_change,
+    ) else {
+        return;
+    };
+
+    let result = run_cli_ok(&[
+        "analysis",
+        "shots",
+        "--path",
+        &path,
+        "--id",
+        &asset_id,
+        "--no-persist",
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert!(result["shotCount"].as_u64().unwrap() >= 1);
+    assert_eq!(result["persisted"].as_array().unwrap().len(), 0);
+    assert!(
+        !bundle_path(&path, &asset_id).exists(),
+        "Expected --no-persist to leave the analysis bundle untouched"
+    );
+
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(report["coverage"]["shots"], false);
+}
+
+#[test]
+fn test_analysis_shots_rejects_out_of_range_threshold() {
+    let dir = create_temp_project("shots_threshold_test");
+    let path = project_path(&dir, "shots_threshold_test");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "analysis",
+        "shots",
+        "--path",
+        &path,
+        "--id",
+        "asset_missing",
+        "--threshold",
+        "1.5",
+    ]);
+    assert!(
+        stderr.contains("threshold"),
+        "Expected a threshold validation error, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_analysis_silence_caches_regions_at_default_thresholds() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "silence_default_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    // Silence lives inside the audio profile, so the profile has to exist
+    // before there is anything to merge into.
+    run_cli_ok(&["analysis", "audio", "--path", &path, "--id", &asset_id]);
+
+    let result = run_cli_ok(&["analysis", "silence", "--path", &path, "--id", &asset_id]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["persisted"], true);
+    assert!(result.get("reason").is_none() || result["reason"].is_null());
+    assert!(
+        result["regionCount"].as_u64().unwrap() >= 1,
+        "Expected the muted 1s-3s window to be detected"
+    );
+    assert!(result["totalSilenceSec"].as_f64().unwrap() > 0.0);
+    assert!(
+        bundle_path(&path, &asset_id).exists(),
+        "Expected default-threshold silence to be cached"
+    );
+
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(report["coverage"]["audio"], true);
+}
+
+#[test]
+fn test_analysis_silence_is_output_only_without_an_audio_profile() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "silence_no_profile_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let result = run_cli_ok(&["analysis", "silence", "--path", &path, "--id", &asset_id]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["persisted"], false);
+    assert_eq!(
+        result["reason"],
+        "no audio profile in bundle; run `analysis audio` first"
+    );
+    assert!(
+        result["regionCount"].as_u64().unwrap() >= 1,
+        "detection still runs and reports its regions"
+    );
+    assert!(
+        !bundle_path(&path, &asset_id).exists(),
+        "a fabricated audio profile must never reach the bundle"
+    );
+}
+
+#[test]
+fn test_analysis_silence_is_output_only_for_non_default_threshold() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "silence_custom_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let result = run_cli_ok(&[
+        "analysis",
+        "silence",
+        "--path",
+        &path,
+        "--id",
+        &asset_id,
+        "--threshold-db",
+        "-30",
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["persisted"], false);
+    assert_eq!(result["reason"], "non-default threshold");
+    assert!(
+        !bundle_path(&path, &asset_id).exists(),
+        "Non-default silence parameters must not poison the shared cache"
+    );
+}
+
+#[test]
+fn test_analysis_audio_profiles_and_caches_the_bundle() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "audio_profile_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let result = run_cli_ok(&["analysis", "audio", "--path", &path, "--id", &asset_id]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["persisted"], true);
+    assert!(result["durationSec"].as_f64().unwrap() > 0.0);
+    assert!(result["silenceRegionCount"].as_u64().unwrap() >= 1);
+    assert!(result["peakDb"].is_number());
+    assert!(
+        bundle_path(&path, &asset_id).exists(),
+        "Expected the audio profile to be cached"
+    );
+
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(report["coverage"]["audio"], true);
+}
+
+#[test]
+fn test_analysis_run_streams_progress_and_caches_the_bundle() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "analysis_run_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let (stdout, stderr, success) = run_cli(&[
+        "analysis",
+        "run",
+        "--path",
+        &path,
+        "--id",
+        &asset_id,
+        "--progress",
+    ]);
+    assert!(
+        success,
+        "analysis run failed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let result: serde_json::Value =
+        serde_json::from_str(&stdout).expect("analysis run must print one JSON object to stdout");
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["options"]["localOnly"], true);
+    assert_eq!(result["options"]["transcript"], false);
+    assert_eq!(result["hasAudioProfile"], true);
+    assert!(result["shotCount"].as_u64().unwrap() >= 1);
+    assert!(result["segmentCount"].as_u64().unwrap() >= 1);
+    assert!(result["errors"].as_object().unwrap().is_empty());
+    assert!(bundle_path(&path, &asset_id).exists());
+
+    // Progress must be NDJSON on stderr so stdout stays a single JSON object.
+    let progress_lines: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .filter(|value| value["type"] == "progress")
+        .collect();
+    assert!(
+        !progress_lines.is_empty(),
+        "Expected NDJSON progress on stderr, got: {stderr}"
+    );
+    assert!(progress_lines
+        .iter()
+        .any(|line| line["job"] == "shots" && line["status"] == "started"));
+    assert!(progress_lines
+        .iter()
+        .any(|line| line["job"] == "bundle" && line["status"] == "saved"));
+
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(report["coverage"]["shots"], true);
+    assert_eq!(report["coverage"]["audio"], true);
+    assert_eq!(report["coverage"]["segments"], true);
+}
+
+#[test]
+fn test_analysis_run_preserves_results_from_earlier_partial_runs() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "analysis_run_merge_test",
+        "with_audio.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let audio = run_cli_ok(&["analysis", "audio", "--path", &path, "--id", &asset_id]);
+    assert_eq!(audio["status"], "ok");
+
+    // A shots-only run must not drop the audio profile the previous run cached.
+    let result = run_cli_ok(&[
+        "analysis", "run", "--path", &path, "--id", &asset_id, "--shots",
+    ]);
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["options"]["audio"], false);
+    assert_eq!(result["hasAudioProfile"], true);
+
+    let report = run_cli_ok(&["analysis", "report", "--path", &path, "--id", &asset_id]);
+    assert_eq!(report["coverage"]["shots"], true);
+    assert_eq!(report["coverage"]["audio"], true);
+}
+
+// =============================================================================
+// verify
+// =============================================================================
+
+/// Runs the CLI and returns (stdout, stderr, exit code).
+///
+/// `verify` distinguishes "found problems" (1) from "could not run" (2), so its
+/// tests need the code itself rather than a success flag.
+fn run_cli_exit(args: &[&str]) -> (String, String, i32) {
+    let output = Command::new(cli_bin())
+        .args(args)
+        .output()
+        .expect("Failed to execute CLI binary");
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+/// Creates a project holding one dummy asset placed on the first video track.
+///
+/// Deliberately FFmpeg-free: structural verification must work on a machine
+/// without a media toolchain.
+fn create_project_with_placed_dummy(name: &str) -> (tempfile::TempDir, String, String, String) {
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+
+    let dummy_file = dir.path().join("clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    (dir, path, asset_id, track_id)
+}
+
+/// Finds a check entry by its stable ID.
+fn find_check<'a>(report: &'a serde_json::Value, check_id: &str) -> &'a serde_json::Value {
+    report["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .find(|check| check["id"] == check_id)
+        .unwrap_or_else(|| panic!("check '{check_id}' missing from report: {report}"))
+}
+
+#[test]
+fn test_verify_structural_only_passes_on_a_healthy_project() {
+    let (_dir, path, _asset_id, _track_id) =
+        create_project_with_placed_dummy("verify_structural_ok");
+
+    let (stdout, stderr, code) = run_cli_exit(&["verify", "--path", &path, "--structural-only"]);
+    assert_eq!(
+        code, 0,
+        "expected a clean structural run.\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["passed"], true);
+    assert_eq!(report["summary"]["error"], 0);
+    assert_eq!(report["summary"]["critical"], 0);
+
+    // Structural runs must never reach for FFmpeg.
+    assert_eq!(report["target"]["measured"], false);
+    assert_eq!(report["measurements"]["measured"], false);
+
+    let stats = find_check(&report, "shot.length_stats");
+    assert_eq!(stats["status"], "passed");
+    assert_eq!(stats["metrics"]["count"], 1);
+    assert!(stats["metrics"]["medianSec"].as_f64().unwrap() > 0.0);
+
+    // A passing check still has to appear, or an agent cannot tell it ran.
+    let gap = find_check(&report, "timeline.gap");
+    assert_eq!(gap["status"], "passed");
+    assert_eq!(gap["violationCount"], 0);
+
+    // Rendered checks are skipped with a reason rather than silently passed.
+    let black = find_check(&report, "render.black_frames");
+    assert_eq!(black["status"], "skipped");
+    assert_eq!(black["passed"], false);
+    assert!(black["skipReason"]
+        .as_str()
+        .unwrap()
+        .contains("measurements"));
+}
+
+#[test]
+fn test_verify_reports_a_timeline_gap_as_an_error_and_exits_one() {
+    let (dir, path, asset_id, track_id) = create_project_with_placed_dummy("verify_gap_error");
+
+    // The dummy asset yields a 10s clip; placing the next one at 11s leaves a
+    // deliberate one-second hole in the picture.
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "11.0",
+    ]);
+
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--structural-only",
+        "--fail-on",
+        "error",
+    ]);
+    assert_eq!(
+        code, 1,
+        "a gap must breach the error threshold.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["passed"], false);
+    assert_eq!(report["summary"]["error"], 1);
+
+    let gap = find_check(&report, "timeline.gap");
+    assert_eq!(gap["status"], "failed");
+    assert_eq!(gap["severity"], "error");
+    assert_eq!(gap["violationCount"], 1);
+    assert!((gap["timeRanges"][0]["startSec"].as_f64().unwrap() - 10.0).abs() < 1e-6);
+    assert!((gap["timeRanges"][0]["endSec"].as_f64().unwrap() - 11.0).abs() < 1e-6);
+
+    // The suggested fix has to be executable, not merely descriptive.
+    let step = &gap["suggestedFix"]["steps"][0];
+    assert_eq!(step["commandType"], "CloseGap");
+    assert_eq!(step["payload"]["trackId"], track_id.as_str());
+
+    let plan_file = dir.path().join("fix-plan.json");
+    std::fs::write(
+        &plan_file,
+        serde_json::json!({
+            "id": "plan_verify_fix",
+            "steps": gap["suggestedFix"]["steps"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let applied = run_cli_ok(&[
+        "plan",
+        "execute",
+        "--path",
+        &path,
+        "--file",
+        plan_file.to_str().unwrap(),
+    ]);
+    assert_eq!(applied["status"], "ok");
+
+    let (stdout, _stderr, code) = run_cli_exit(&["verify", "--path", &path, "--structural-only"]);
+    assert_eq!(code, 0, "the suggested fix must close the gap: {stdout}");
+}
+
+#[test]
+fn test_verify_rejects_an_unknown_check_id_with_the_tool_failure_code() {
+    let (_dir, path, _asset_id, _track_id) = create_project_with_placed_dummy("verify_bad_check");
+
+    let (_stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--structural-only",
+        "--checks",
+        "not.a.real.check",
+    ]);
+
+    assert_eq!(code, 2, "bad arguments are a tool failure, not a finding");
+    assert!(
+        stderr.contains("Unknown check"),
+        "expected the error to list the known checks, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_verify_measures_a_rendered_file() {
+    let Some((dir, path, asset_id)) = create_project_with_media(
+        "verify_rendered_test",
+        "verify_source.mp4",
+        create_sample_video_with_audio,
+    ) else {
+        return;
+    };
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    let render_path = dir.path().join("verify-proxy.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--start",
+        "0",
+        "--end",
+        "2",
+        "--output",
+        render_path.to_str().unwrap(),
+    ]);
+    if !success {
+        eprintln!("Skipping verify render test: proxy render failed.\n{stdout}\n{stderr}");
+        return;
+    }
+
+    // The fixture is a bare test tone, so its absolute loudness says nothing
+    // about the edit; the measurement itself is still asserted below.
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        render_path.to_str().unwrap(),
+        "--skip",
+        "audio.loudness",
+    ]);
+    assert_eq!(
+        code, 0,
+        "rendered verification should run cleanly.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+
+    assert_eq!(report["target"]["measured"], true);
+    assert_eq!(report["measurements"]["measured"], true);
+    assert_eq!(report["measurements"]["videoMeasured"], true);
+    assert_eq!(report["measurements"]["audioMeasured"], true);
+    assert!(report["measurements"]["durationSec"].as_f64().unwrap() > 0.0);
+
+    // Loudness is measured even though the check itself was skipped.
+    assert!(
+        report["measurements"]["integratedLufs"].is_number(),
+        "expected an EBU R128 reading: {}",
+        report["measurements"]
+    );
+
+    let black = find_check(&report, "render.black_frames");
+    assert_ne!(
+        black["status"], "skipped",
+        "rendered checks must run once a file was measured: {black}"
+    );
+
+    let peak = find_check(&report, "audio.peak");
+    assert_ne!(
+        peak["status"], "skipped",
+        "peak check should have run: {peak}"
+    );
+
+    let loudness = find_check(&report, "audio.loudness");
+    assert_eq!(loudness["status"], "skipped");
+}
+
+#[test]
+fn test_verify_reports_a_missing_render_file_as_a_tool_failure() {
+    let (_dir, path, _asset_id, _track_id) =
+        create_project_with_placed_dummy("verify_missing_file");
+
+    let (_stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        "definitely-not-here.mp4",
+    ]);
+
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("does not exist"),
+        "expected a missing-file error, got: {stderr}"
+    );
+}
+
+// =============================================================================
+// Agent Perception Loop Regression Guard
+// =============================================================================
+
+/// Returns the first shot boundary strictly inside `(0, program_end)`.
+///
+/// A single-shot result has no interior cut, so callers get `None` and decide
+/// their own fallback rather than splitting at 0 or at the very end.
+fn first_interior_shot_boundary(shots: &serde_json::Value, program_end: f64) -> Option<f64> {
+    const EDGE_MARGIN_SEC: f64 = 0.1;
+
+    shots["shots"]
+        .as_array()?
+        .iter()
+        .filter_map(|shot| shot["startSec"].as_f64())
+        .find(|start| *start > EDGE_MARGIN_SEC && *start < program_end - EDGE_MARGIN_SEC)
+}
+
+/// Total program length of the active sequence, from the CLI's own clip listing.
+fn timeline_program_end_sec(project_path: &str) -> f64 {
+    let clips = run_cli_ok(&["timeline", "clips", "--path", project_path]);
+    clips["clips"]
+        .as_array()
+        .expect("clips array")
+        .iter()
+        .map(|clip| {
+            clip["timelineInSec"].as_f64().unwrap_or(0.0)
+                + clip["durationSec"].as_f64().unwrap_or(0.0)
+        })
+        .fold(0.0_f64, f64::max)
+}
+
+// This is THE single end-to-end guard for the headless perception
+// loop an external agent drives: perceive (shots + silence) -> edit informed by
+// what was perceived -> render a proxy -> look at the result (still + contact
+// sheet) -> verify the render. It drives the real CLI binary and asserts only
+// on CLI-observable JSON and on files the CLI claims to have written, so it
+// stays valid as the internals move.
+//
+// It deliberately does NOT cover: detector accuracy, codec quality, or the
+// per-verb argument surface. Those have their own focused tests above. This
+// guard exists only to catch a SILENT break of the whole agent loop. It skips
+// cleanly (returns, does not fail) when FFmpeg is absent.
+#[test]
+fn test_agent_perception_loop_end_to_end() {
+    // 1. Create the project and import a fixture that has both a hard cut and
+    //    a silent window.
+    let Some((dir, path, asset_id)) = create_project_with_media(
+        "agent_loop_e2e",
+        "agent_loop_source.mp4",
+        create_sample_video_with_scene_change_and_audio,
+    ) else {
+        eprintln!("Skipping agent-loop E2E test: ffmpeg fixture unavailable");
+        return;
+    };
+
+    // 2. Perceive: shot detection.
+    let shots = run_cli_ok(&["analysis", "shots", "--path", &path, "--id", &asset_id]);
+    assert_eq!(shots["status"], "ok");
+    assert!(
+        shots["shotCount"].as_u64().unwrap() >= 1,
+        "Expected at least one detected shot, got {}",
+        shots["shotCount"]
+    );
+    assert!(shots["totalDurationSec"].as_f64().unwrap() > 0.0);
+
+    // 3. Perceive: silence detection over the same asset.
+    let silence = run_cli_ok(&["analysis", "silence", "--path", &path, "--id", &asset_id]);
+    assert_eq!(silence["status"], "ok");
+    let regions = silence["regions"].as_array().unwrap();
+    assert!(
+        !regions.is_empty(),
+        "Expected the muted 1s-3s window to be reported, got {silence}"
+    );
+    assert!(
+        regions.iter().any(|region| {
+            region["startSec"].as_f64().unwrap() >= 0.5 && region["endSec"].as_f64().unwrap() <= 3.5
+        }),
+        "Expected a silent region inside the muted window, got {regions:?}"
+    );
+
+    // 4. Edit: place the asset, then cut it where perception said the shot
+    //    changes.
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips["count"], 1);
+    let clip_id = clips["clips"][0]["id"].as_str().unwrap().to_string();
+
+    // `asset import` does not probe duration, so the placed clip carries the
+    // default length. Perception is what tells the agent how long the media
+    // actually is; trim to it before cutting so the edit stays inside the media.
+    let media_end = shots["totalDurationSec"].as_f64().unwrap();
+    run_cli_ok(&[
+        "timeline",
+        "trim",
+        "--path",
+        &path,
+        "--clip",
+        &clip_id,
+        "--track",
+        &track_id,
+        "--source-in",
+        "0.0",
+        "--source-out",
+        &media_end.to_string(),
+    ]);
+
+    let program_end = timeline_program_end_sec(&path);
+    assert!(
+        (program_end - media_end).abs() < 1e-6,
+        "Expected the trim to shrink the program to the perceived media length, got {program_end}"
+    );
+
+    // The fixture cuts at 2s; fall back to it when the detector merged the two
+    // shots so the loop still exercises a real split.
+    let split_at = first_interior_shot_boundary(&shots, program_end).unwrap_or(2.0);
+    let split = run_cli_ok(&[
+        "timeline",
+        "split",
+        "--path",
+        &path,
+        "--clip",
+        &clip_id,
+        "--track",
+        &track_id,
+        "--at",
+        &split_at.to_string(),
+    ]);
+    assert_eq!(split["status"], "ok");
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(
+        clips["count"], 2,
+        "Expected the shot-informed split to yield two clips: {clips}"
+    );
+
+    // 5. Render a proxy of the edit, streaming progress to stderr.
+    let proxy_path = dir.path().join("agent_loop_proxy.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--progress",
+        "--output",
+        proxy_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "Proxy render failed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let render: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("Failed to parse proxy render output: {error}\n{stdout}"));
+    assert_eq!(render["status"], "ok");
+    assert_eq!(render["preset"], "proxy_480p");
+    assert!(proxy_path.exists(), "Expected the proxy render to exist");
+    assert!(
+        proxy_path.metadata().unwrap().len() > 0,
+        "Expected the proxy render to be non-empty"
+    );
+    assert!(
+        stderr
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+            .any(|value| value["type"] == "progress"),
+        "Expected NDJSON render progress on stderr, got: {stderr}"
+    );
+
+    // 6. Look: a single still from the second half of the edit.
+    let still_path = dir.path().join("agent_loop_still.png");
+    let mid_second_clip = (split_at + program_end) / 2.0;
+    let still = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        &mid_second_clip.to_string(),
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+    assert_eq!(still["status"], "ok");
+    assert_eq!(still["count"], 1);
+    assert!(still["frames"][0]["clipId"].is_string());
+    assert!(still_path.exists(), "Expected the extracted still to exist");
+    assert!(
+        still_path.metadata().unwrap().len() > 0,
+        "Expected the extracted still to be non-empty"
+    );
+
+    // 7. Look: a contact sheet spanning the whole program, so a VLM can map
+    //    cells back to timecodes.
+    let sheet_path = dir.path().join("agent_loop_sheet.jpg");
+    let sheet = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--between",
+        "0",
+        &program_end.to_string(),
+        "--format",
+        "jpeg",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+    assert_eq!(sheet["status"], "ok");
+    assert_eq!(sheet["sheet"]["cols"], 2);
+    assert_eq!(sheet["sheet"]["rows"], 2);
+    assert_eq!(sheet["sheet"]["cells"].as_array().unwrap().len(), 4);
+    assert!(sheet_path.exists(), "Expected the contact sheet to exist");
+    assert!(
+        sheet_path.metadata().unwrap().len() > 0,
+        "Expected the contact sheet to be non-empty"
+    );
+
+    // 8. Verify the rendered proxy. A healthy project must clear the critical
+    //    threshold, and both halves of the report have to be present.
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        proxy_path.to_str().unwrap(),
+        "--fail-on",
+        "critical",
+    ]);
+    assert_eq!(
+        code, 0,
+        "A healthy project must clear --fail-on critical.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("Failed to parse verify report: {error}\n{stdout}"));
+    assert_eq!(report["summary"]["critical"], 0);
+    assert_eq!(report["target"]["measured"], true);
+    assert_eq!(report["measurements"]["measured"], true);
+    assert!(report["measurements"]["durationSec"].as_f64().unwrap() > 0.0);
+
+    let checks = report["checks"].as_array().expect("checks array");
+    assert!(
+        checks
+            .iter()
+            .any(|check| check["category"] == "structural" && check["status"] != "skipped"),
+        "Expected at least one structural check to have run: {report}"
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|check| check["category"] == "rendered" && check["status"] != "skipped"),
+        "Expected at least one rendered check to have run once a file was measured: {report}"
+    );
+
+    // The split closed onto the following clip, so the edit must be gapless.
+    let gap = find_check(&report, "timeline.gap");
+    assert_eq!(gap["status"], "passed");
+    assert_eq!(gap["violationCount"], 0);
 }

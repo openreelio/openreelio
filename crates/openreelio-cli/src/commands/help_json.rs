@@ -76,6 +76,51 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 },
                 "example": "openreelio-cli asset remove --path ./project --id asset_001"
             },
+            "analysis.shots": {
+                "description": "Detect shot boundaries with FFmpeg scene detection and cache them in index.db, the analysis bundle, and the asset annotation",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Asset ID" },
+                    "threshold": { "type": "number", "required": false, "desc": "Scene change threshold 0.0-1.0; lower detects more cuts (default: 0.3)" },
+                    "min-shot-duration": { "type": "number", "required": false, "desc": "Minimum shot duration in seconds; shorter shots are merged (default: 0.5)" },
+                    "timeout-sec": { "type": "number", "required": false, "desc": "FFmpeg scene-detection timeout in seconds (default: 600)" },
+                    "no-persist": { "type": "boolean", "required": false, "desc": "Detect only: skip the index.db, bundle, and annotation writes" }
+                },
+                "example": "openreelio-cli analysis shots --path ./project --id asset_001 --threshold 0.3 --min-shot-duration 0.5"
+            },
+            "analysis.silence": {
+                "description": "Detect silence regions with FFmpeg; results are cached only at the shared -40dB / 0.5s contract, otherwise they are output-only",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Asset ID" },
+                    "threshold-db": { "type": "number", "required": false, "desc": "Silence threshold in dB (default: -40)" },
+                    "min-duration": { "type": "number", "required": false, "desc": "Minimum silence duration in seconds (default: 0.5)" }
+                },
+                "example": "openreelio-cli analysis silence --path ./project --id asset_001 --threshold-db -40 --min-duration 0.5"
+            },
+            "analysis.audio": {
+                "description": "Profile the audio track (silence regions, loudness curve, peak, BPM, speech regions) and cache it in the analysis bundle",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Asset ID" }
+                },
+                "example": "openreelio-cli analysis audio --path ./project --id asset_001"
+            },
+            "analysis.run": {
+                "description": "Run the local analysis pipeline (shots, audio, segments, optional transcript and visual) and cache the resulting bundle; exits non-zero only when every enabled sub-job fails",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Asset ID" },
+                    "shots": { "type": "boolean", "required": false, "desc": "Run shot detection" },
+                    "audio": { "type": "boolean", "required": false, "desc": "Run audio profiling" },
+                    "segments": { "type": "boolean", "required": false, "desc": "Run content segmentation (requires shots and audio)" },
+                    "transcript": { "type": "boolean", "required": false, "desc": "Run transcription (requires an installed Whisper model)" },
+                    "visual": { "type": "boolean", "required": false, "desc": "Run local visual frame analysis" },
+                    "all": { "type": "boolean", "required": false, "desc": "Run every local sub-job; transcription stays off unless --transcript is given" },
+                    "progress": { "type": "boolean", "required": false, "desc": "Stream NDJSON sub-job progress to stderr" }
+                },
+                "example": "openreelio-cli analysis run --path ./project --id asset_001 --all --progress"
+            },
             "analysis.report": {
                 "description": "Build a cached source analysis report for one asset as structured JSON plus embedded Markdown, including moments, chapters, and candidate highlights",
                 "params": {
@@ -567,9 +612,54 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "output": { "type": "string", "required": true, "desc": "Output file path" },
                     "preset": { "type": "string", "required": false, "desc": "Render preset name (default: mp4_h264_1080p). Use render.presets for the supported list." },
-                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                    "proxy": { "type": "boolean", "required": false, "desc": "Render a fast 480p proxy for inspection (shorthand for --preset proxy_480p); conflicts with --preset and defaults the output extension to .mp4" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" },
+                    "start": { "type": "number", "required": false, "desc": "Start of the rendered range in timeline seconds (default: 0)" },
+                    "end": { "type": "number", "required": false, "desc": "End of the rendered range in timeline seconds (default: sequence duration); must be greater than --start" },
+                    "progress": { "type": "boolean", "required": false, "desc": "Stream NDJSON encode progress to stderr as {\"type\":\"progress\",\"percent\":..,\"frame\":..,\"totalFrames\":..,\"fps\":..,\"etaSeconds\":..}" }
                 },
-                "example": "openreelio-cli render start --path ./project --output output.mp4"
+                "example": "openreelio-cli render start --path ./project --proxy --start 0 --end 5 --progress --output proxy.mp4"
+            },
+            "ffmpeg.info": {
+                "description": "Resolve the FFmpeg/FFprobe binaries this CLI will use and report their version and source (explicit, env, bundled, managed, dev, or system)",
+                "params": {},
+                "example": "openreelio-cli ffmpeg info"
+            },
+            "frame.extract": {
+                "description": "Extract still frames for visual inspection: one asset-time frame, one or many timeline-time frames, or a contact sheet grid. Timeline 'fast' mode captures the topmost file-backed clip only (no effects, text, or compositing) and falls back to 'composite' automatically when no such clip covers the requested time.",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "out": { "type": "string", "required": true, "desc": "Output image file; must be a directory when --times is used. The extension is normalized to match --format." },
+                    "asset": { "type": "string", "required": false, "desc": "Asset ID to extract from; requires --source-time and cannot be combined with timeline selectors" },
+                    "source-time": { "type": "number", "required": false, "desc": "Time in seconds inside the asset's own media; requires --asset" },
+                    "time": { "type": "number", "required": false, "desc": "Timeline time in seconds for a single still" },
+                    "times": { "type": "string", "required": false, "desc": "Comma-separated timeline times in seconds; --out must be a directory and files are named frame_<ms>.<ext>" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" },
+                    "mode": { "type": "string", "required": false, "desc": "Timeline extraction mode: fast (default, topmost clip only) or composite (full render of a minimal window; decodes from timeline zero so cost grows with the timestamp)" },
+                    "max-width": { "type": "number", "required": false, "desc": "Maximum output width in pixels, aspect ratio preserved and never upscaled (default: 1280 for timeline modes, native for --asset)" },
+                    "format": { "type": "string", "required": false, "desc": "Output image format: png (default) or jpeg. Grid cells are always JPEG; the sheet itself uses this format." },
+                    "grid": { "type": "string", "required": false, "desc": "Contact sheet layout as COLSxROWS (e.g. 3x2), at most 100 cells; requires --between" },
+                    "between": { "type": "string", "required": false, "desc": "Timeline range sampled by --grid, given as two values: START END" },
+                    "count": { "type": "number", "required": false, "desc": "Number of grid samples (default: columns * rows; must not exceed the grid capacity). Rows no sample reaches are dropped, so the reported rows can be fewer than --grid asked for." }
+                },
+                "example": "openreelio-cli frame extract --path ./project --time 12.5 --out frame.png"
+            },
+            "verify": {
+                "description": "Run deterministic quality control over a sequence and, with --file, over a rendered export. Emits one entry per check — including the ones that passed or were skipped — so an agent can tell 'checked and clean' from 'never checked'. Exit codes: 0 = ran without breaching --fail-on, 1 = threshold breached, 2 = tool failure (bad arguments, unreadable file, FFmpeg failure, or a check that errored).",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" },
+                    "file": { "type": "string", "required": false, "desc": "Rendered file to measure (black/freeze/silence detection, EBU R128 loudness, peaks). Without it only structural checks run and FFmpeg is never invoked. Measured times are file-relative and are compared against timeline times, so pass a full-sequence render rather than a partial one." },
+                    "structural-only": { "type": "boolean", "required": false, "desc": "Run structural checks only and never touch FFmpeg; conflicts with --file" },
+                    "checks": { "type": "string", "required": false, "desc": "Comma-separated check IDs to run exclusively (asset.license and sequence.duration are opt-in and only run when named here): timeline.gap, clip.orphan, clip.missing_asset, audio.silent_clip, caption.overlap, caption.reading_rate, caption.out_of_bounds, caption.safe_area, shot.length_stats, shot.cut_rhythm, clip.aspect_ratio, asset.license, sequence.duration, render.black_frames, audio.peak, audio.loudness" },
+                    "skip": { "type": "string", "required": false, "desc": "Comma-separated check IDs to disable" },
+                    "target-lufs": { "type": "number", "required": false, "desc": "Integrated loudness target in LUFS (default -14). Deviation over 1 LU warns, over 3 LU errors." },
+                    "max-true-peak": { "type": "number", "required": false, "desc": "Maximum acceptable true peak in dBTP (default -1). Sample peak is used when the encoder reports no true peak." },
+                    "fail-on": { "type": "string", "required": false, "desc": "Lowest severity that exits 1: info, warning, error (default), critical" },
+                    "timeout-sec": { "type": "number", "required": false, "desc": "Timeout for the rendered-file measurement pass in seconds (default: 600)" },
+                    "json-pretty": { "type": "boolean", "required": false, "desc": "Pretty-print the JSON output" }
+                },
+                "example": "openreelio-cli verify --path ./project --file proxy.mp4 --target-lufs -14 --fail-on error"
             },
             "mcp": {
                 "description": "Serve read-only OpenReelio MCP tools for external AI agents",
@@ -648,6 +738,13 @@ mod tests {
         assert!(commands["text.add"]["params"]["font-weight"].is_object());
         assert!(commands["text.update"]["params"]["duration"].is_object());
         assert!(commands["text.transform"]["params"]["scale-x"].is_object());
+        assert!(commands.contains_key("analysis.shots"));
+        assert!(commands.contains_key("analysis.silence"));
+        assert!(commands.contains_key("analysis.audio"));
+        assert!(commands.contains_key("analysis.run"));
+        assert!(commands["analysis.shots"]["params"]["no-persist"].is_object());
+        assert!(commands["analysis.silence"]["params"]["threshold-db"].is_object());
+        assert!(commands["analysis.run"]["params"]["progress"].is_object());
         assert!(commands.contains_key("analysis.report"));
         assert!(commands.contains_key("analysis.search"));
         assert!(commands.contains_key("analysis.search-library"));

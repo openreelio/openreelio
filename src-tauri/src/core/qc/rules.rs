@@ -7,9 +7,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::context::QCContext;
 use super::violation::{QCViolation, Severity, ViolationFix};
+use crate::core::captions::{CaptionPosition, CaptionStyle, CustomPosition, VerticalPosition};
 use crate::core::project::ProjectState;
-use crate::core::timeline::Sequence;
+use crate::core::timeline::{Clip, Sequence};
 use crate::core::CoreResult;
 
 /// Configuration for QC rules
@@ -57,11 +59,47 @@ impl RuleConfig {
     }
 }
 
+/// What a rule inspects.
+///
+/// Structural rules read the timeline alone; rendered rules need measurements
+/// taken from an exported file, so they are unavailable until one exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckCategory {
+    /// Derived from the project state (timeline, assets, captions)
+    Structural,
+    /// Derived from measurements of a rendered file
+    Rendered,
+}
+
+impl std::fmt::Display for CheckCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CheckCategory::Structural => write!(f, "structural"),
+            CheckCategory::Rendered => write!(f, "rendered"),
+        }
+    }
+}
+
 /// Trait for all QC rules
 #[async_trait]
 pub trait QCRule: Send + Sync {
     /// Returns the unique name of this rule
     fn name(&self) -> &str;
+
+    /// Returns the stable, dotted identifier reported to agents
+    ///
+    /// Rule names are Rust type names; check IDs are the vocabulary the CLI and
+    /// agent surfaces use (`timeline.gap`, `audio.loudness`, …). Defaults to
+    /// the rule name so custom rules stay usable without extra work.
+    fn check_id(&self) -> &str {
+        self.name()
+    }
+
+    /// Returns what this rule inspects
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Structural
+    }
 
     /// Returns a human-readable description
     fn description(&self) -> &str;
@@ -75,7 +113,16 @@ pub trait QCRule: Send + Sync {
         sequence: &Sequence,
         state: &ProjectState,
         config: &RuleConfig,
+        context: &QCContext,
     ) -> CoreResult<Vec<QCViolation>>;
+
+    /// Returns why this rule cannot run against `context`, or `None` when it can.
+    ///
+    /// The engine records such rules in the report's skipped rules, so a rule
+    /// that is missing its inputs is never mistaken for a rule that passed.
+    fn skip_reason(&self, _context: &QCContext) -> Option<String> {
+        None
+    }
 
     /// Attempts to auto-fix a violation (if supported)
     async fn auto_fix(&self, violation: &QCViolation) -> Option<ViolationFix> {
@@ -88,11 +135,27 @@ pub trait QCRule: Send + Sync {
     }
 }
 
+/// Collects clips on video tracks that overlap the given timeline range.
+fn video_clips_in_range(sequence: &Sequence, start_sec: f64, end_sec: f64) -> Vec<&Clip> {
+    sequence
+        .tracks
+        .iter()
+        .filter(|track| track.is_video())
+        .flat_map(|track| track.clips.iter())
+        .filter(|clip| clip.place.timeline_in_sec < end_sec && clip.timeline_end() > start_sec)
+        .collect()
+}
+
 // ============================================================================
 // BlackFrameRule - Detects black frames at start/end
 // ============================================================================
 
-/// Rule that detects black frames at the beginning or end of clips
+/// Rule that reports black ranges found in the rendered sequence
+///
+/// Black detection is a pixel-level measurement, so this rule reads the ranges
+/// produced by the render measurement pass instead of inspecting the timeline.
+/// Luma/pixel thresholds belong to that pass; this rule only applies the
+/// duration threshold that decides which ranges are worth reporting.
 #[derive(Debug, Default)]
 pub struct BlackFrameRule;
 
@@ -101,9 +164,6 @@ impl BlackFrameRule {
     pub fn new() -> Self {
         Self
     }
-
-    /// Threshold for considering a frame "black" (0.0 - 1.0)
-    const DEFAULT_THRESHOLD: f64 = 0.05;
 
     /// Minimum duration to flag (seconds)
     const DEFAULT_MIN_DURATION: f64 = 0.1;
@@ -115,12 +175,27 @@ impl QCRule for BlackFrameRule {
         "BlackFrameRule"
     }
 
+    fn check_id(&self) -> &str {
+        "render.black_frames"
+    }
+
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Rendered
+    }
+
     fn description(&self) -> &str {
-        "Detects black frames at the start or end of clips"
+        "Reports black ranges detected in the rendered sequence"
     }
 
     fn default_severity(&self) -> Severity {
         Severity::Warning
+    }
+
+    fn skip_reason(&self, context: &QCContext) -> Option<String> {
+        if context.measurements.is_none() {
+            return Some("no rendered measurements available".to_string());
+        }
+        None
     }
 
     async fn check(
@@ -128,57 +203,69 @@ impl QCRule for BlackFrameRule {
         sequence: &Sequence,
         _state: &ProjectState,
         config: &RuleConfig,
+        context: &QCContext,
     ) -> CoreResult<Vec<QCViolation>> {
-        let mut violations = Vec::new();
+        let Some(measurements) = context.measurements.as_ref() else {
+            // The engine reports this rule as skipped (see `skip_reason`); an
+            // empty result here only guards direct single-rule invocations.
+            return Ok(Vec::new());
+        };
 
-        let _threshold = config
-            .get_param::<f64>("threshold")
-            .unwrap_or(Self::DEFAULT_THRESHOLD);
         let min_duration = config
             .get_param::<f64>("min_duration")
             .unwrap_or(Self::DEFAULT_MIN_DURATION);
 
         let severity = config.severity_override.unwrap_or(self.default_severity());
+        let frame_tolerance = context.frame_duration_sec();
 
-        // Check each clip in video tracks
-        for track in &sequence.tracks {
-            if !track.is_video() {
+        let mut violations = Vec::new();
+
+        for &(start_sec, end_sec) in &measurements.black_ranges {
+            let black_duration = end_sec - start_sec;
+            if !black_duration.is_finite() || black_duration < min_duration {
                 continue;
             }
 
-            for clip in &track.clips {
-                // Check for black frames at start (simulated check)
-                // In real implementation, this would analyze frame data.
-                if clip.place.timeline_in_sec == 0.0 {
-                    // Placeholder: detect black frame at start
-                    let black_duration = 0.5; // Simulated detection
-                    if black_duration >= min_duration {
-                        let fix = ViolationFix::new(
-                            format!("Trim {:.1}s from start", black_duration),
-                            vec![serde_json::json!({
-                                "type": "TrimClip",
-                                "clipId": clip.id,
-                                "trimStart": black_duration
-                            })],
-                        )
-                        .with_confidence(0.9);
+            let overlapping = video_clips_in_range(sequence, start_sec, end_sec);
+            let entity_ids: Vec<String> = overlapping.iter().map(|clip| clip.id.clone()).collect();
 
-                        let violation = QCViolation::new(
-                            self.name(),
-                            severity,
-                            format!("Black frame detected at start ({:.1}s)", black_duration),
-                        )
-                        .with_location(
-                            clip.place.timeline_in_sec,
-                            clip.place.timeline_in_sec + black_duration,
-                        )
-                        .with_entities(vec![clip.id.clone()])
-                        .with_fix(fix);
+            let mut violation = QCViolation::new(
+                self.name(),
+                severity,
+                format!(
+                    "Black frames detected for {:.2}s at {:.2}s",
+                    black_duration, start_sec
+                ),
+            )
+            .with_location(start_sec, end_sec)
+            .with_entities(entity_ids)
+            .with_details(if overlapping.is_empty() {
+                "No video clip covers this range; the timeline may have a gap here.".to_string()
+            } else {
+                format!("{} video clip(s) cover this range.", overlapping.len())
+            });
 
-                        violations.push(violation);
-                    }
-                }
+            // Only a black range that begins at a clip boundary can be trimmed
+            // away without shifting everything that follows it.
+            if let Some(clip) = overlapping
+                .iter()
+                .find(|clip| (clip.place.timeline_in_sec - start_sec).abs() <= frame_tolerance)
+            {
+                violation = violation.with_fix(
+                    ViolationFix::new(
+                        format!("Trim {:.2}s from the start of the clip", black_duration),
+                        vec![serde_json::json!({
+                            "type": "TrimClip",
+                            "sequenceId": sequence.id,
+                            "clipId": clip.id,
+                            "trimStart": black_duration
+                        })],
+                    )
+                    .with_confidence(0.9),
+                );
             }
+
+            violations.push(violation);
         }
 
         Ok(violations)
@@ -194,6 +281,11 @@ impl QCRule for BlackFrameRule {
 // ============================================================================
 
 /// Rule that detects audio peaks that may cause clipping
+///
+/// Peak level is a property of the rendered program, so this rule reads the
+/// measured peak instead of guessing from timeline structure. True peak is
+/// preferred; sample peak is used only when the measurement pass could not
+/// compute a true peak (it under-reports inter-sample overs).
 #[derive(Debug, Default)]
 pub struct AudioPeakRule;
 
@@ -208,12 +300,36 @@ impl AudioPeakRule {
 
     /// Default warning threshold in dB
     const DEFAULT_WARN_DB: f64 = -3.0;
+
+    /// Master volume limits accepted by `SetMasterVolumeCommand`
+    const MASTER_MIN_VOLUME_DB: f64 = -60.0;
+    const MASTER_MAX_VOLUME_DB: f64 = 6.0;
+
+    /// Returns the measured peak in dB and the label describing its kind.
+    fn measured_peak(context: &QCContext) -> Option<(f64, &'static str)> {
+        let measurements = context.measurements.as_ref()?;
+
+        if let Some(true_peak) = measurements.true_peak_dbtp {
+            return Some((true_peak, "true peak"));
+        }
+        measurements
+            .sample_peak_db
+            .map(|sample_peak| (sample_peak, "sample peak"))
+    }
 }
 
 #[async_trait]
 impl QCRule for AudioPeakRule {
     fn name(&self) -> &str {
         "AudioPeakRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "audio.peak"
+    }
+
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Rendered
     }
 
     fn description(&self) -> &str {
@@ -224,13 +340,28 @@ impl QCRule for AudioPeakRule {
         Severity::Error
     }
 
+    fn skip_reason(&self, context: &QCContext) -> Option<String> {
+        if context.measurements.is_none() {
+            return Some("no rendered measurements available".to_string());
+        }
+        if Self::measured_peak(context).is_none() {
+            return Some("no audio peak measurement available".to_string());
+        }
+        None
+    }
+
     async fn check(
         &self,
         sequence: &Sequence,
         _state: &ProjectState,
         config: &RuleConfig,
+        context: &QCContext,
     ) -> CoreResult<Vec<QCViolation>> {
-        let mut violations = Vec::new();
+        let Some((measured_peak, peak_kind)) = Self::measured_peak(context) else {
+            // The engine reports this rule as skipped (see `skip_reason`); an
+            // empty result here only guards direct single-rule invocations.
+            return Ok(Vec::new());
+        };
 
         let peak_db = config
             .get_param::<f64>("peak_db")
@@ -239,60 +370,238 @@ impl QCRule for AudioPeakRule {
             .get_param::<f64>("warn_db")
             .unwrap_or(Self::DEFAULT_WARN_DB);
 
-        // Check audio tracks
-        for track in &sequence.tracks {
-            if !track.is_audio() {
-                continue;
-            }
+        // The measurement covers the whole rendered program, so violations are
+        // located across the full sequence rather than attributed to one clip.
+        let program_end = sequence.duration();
+        let mut violations = Vec::new();
 
-            for clip in &track.clips {
-                // Simulated peak detection (real implementation would analyze audio)
-                let detected_peak = -0.5; // Simulated peak
+        if measured_peak > peak_db {
+            let severity = config.severity_override.unwrap_or(Severity::Critical);
 
-                if detected_peak > peak_db {
-                    let severity = config.severity_override.unwrap_or(Severity::Critical);
+            // The measurement reflects the program as rendered, so the headroom
+            // is recovered by lowering the master output rather than one clip.
+            let target_volume_db = (sequence.master_volume_db as f64
+                + (peak_db - measured_peak - 0.5))
+                .clamp(Self::MASTER_MIN_VOLUME_DB, Self::MASTER_MAX_VOLUME_DB);
 
-                    let fix = ViolationFix::new(
-                        "Reduce audio gain to prevent clipping",
-                        vec![serde_json::json!({
-                            "type": "AdjustAudio",
-                            "clipId": clip.id,
-                            "gainDb": peak_db - detected_peak - 0.5
-                        })],
-                    )
-                    .with_confidence(0.85);
+            let fix = ViolationFix::new(
+                format!("Lower master volume to {:.1} dB", target_volume_db),
+                vec![serde_json::json!({
+                    "type": "SetMasterVolume",
+                    "sequenceId": sequence.id,
+                    "volumeDb": target_volume_db
+                })],
+            )
+            .with_confidence(0.85);
 
-                    let violation = QCViolation::new(
-                        self.name(),
-                        severity,
-                        format!("Audio clipping detected ({:.1} dB peak)", detected_peak),
-                    )
-                    .with_location(clip.place.timeline_in_sec, clip.timeline_end())
-                    .with_entities(vec![clip.id.clone()])
-                    .with_details(format!(
-                        "Peak exceeds threshold of {:.1} dB. May cause distortion.",
-                        peak_db
-                    ))
-                    .with_fix(fix);
+            violations.push(
+                QCViolation::new(
+                    self.name(),
+                    severity,
+                    format!(
+                        "Audio clipping detected ({:.1} dB {})",
+                        measured_peak, peak_kind
+                    ),
+                )
+                .with_location(0.0, program_end)
+                .with_details(format!(
+                    "Peak exceeds threshold of {:.1} dB. May cause distortion.",
+                    peak_db
+                ))
+                .with_fix(fix),
+            );
+        } else if measured_peak > warn_db {
+            let severity = config.severity_override.unwrap_or(Severity::Warning);
 
-                    violations.push(violation);
-                } else if detected_peak > warn_db {
-                    let severity = config.severity_override.unwrap_or(Severity::Warning);
-
-                    let violation = QCViolation::new(
-                        self.name(),
-                        severity,
-                        format!("High audio level detected ({:.1} dB peak)", detected_peak),
-                    )
-                    .with_location(clip.place.timeline_in_sec, clip.timeline_end())
-                    .with_entities(vec![clip.id.clone()]);
-
-                    violations.push(violation);
-                }
-            }
+            violations.push(
+                QCViolation::new(
+                    self.name(),
+                    severity,
+                    format!(
+                        "High audio level detected ({:.1} dB {})",
+                        measured_peak, peak_kind
+                    ),
+                )
+                .with_location(0.0, program_end)
+                .with_details(format!(
+                    "Peak is within {:.1} dB of the {:.1} dB ceiling.",
+                    peak_db - measured_peak,
+                    peak_db
+                )),
+            );
         }
 
         Ok(violations)
+    }
+
+    fn supports_auto_fix(&self) -> bool {
+        true
+    }
+}
+
+// ============================================================================
+// AudioLoudnessRule - Checks program loudness against a delivery target
+// ============================================================================
+
+/// Rule that compares measured integrated loudness against a delivery target
+///
+/// Platforms normalise playback to a fixed integrated loudness, so a program
+/// that lands far from the target is either turned down (wasting the mix) or
+/// turned up (revealing noise). Only the rendered program has a meaningful
+/// integrated loudness, so this rule reads the measurement pass.
+///
+/// Findings are warnings at any deviation: the target is a delivery convention
+/// rather than a property of correct output. True-peak and clipping checks stay
+/// errors because they describe damage to the signal itself.
+#[derive(Debug, Default)]
+pub struct AudioLoudnessRule;
+
+impl AudioLoudnessRule {
+    /// Creates a new AudioLoudnessRule
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Default delivery target in LUFS (streaming platform convention)
+    pub const DEFAULT_TARGET_LUFS: f64 = -14.0;
+
+    /// Deviation tolerated without comment, in LU
+    const DEFAULT_TOLERANCE_LU: f64 = 1.0;
+
+    /// Peak ceiling assumed when judging whether a boost is safe, in dB
+    const SAFE_PEAK_CEILING_DB: f64 = -1.0;
+
+    /// Master volume limits accepted by `SetMasterVolumeCommand`
+    const MASTER_MIN_VOLUME_DB: f64 = -60.0;
+    const MASTER_MAX_VOLUME_DB: f64 = 6.0;
+}
+
+#[async_trait]
+impl QCRule for AudioLoudnessRule {
+    fn name(&self) -> &str {
+        "AudioLoudnessRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "audio.loudness"
+    }
+
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Rendered
+    }
+
+    fn description(&self) -> &str {
+        "Compares measured integrated loudness against the delivery target"
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Warning
+    }
+
+    fn skip_reason(&self, context: &QCContext) -> Option<String> {
+        let Some(measurements) = context.measurements.as_ref() else {
+            return Some("no rendered measurements available".to_string());
+        };
+        if measurements.integrated_lufs.is_none() {
+            return Some("no integrated loudness measurement available".to_string());
+        }
+        None
+    }
+
+    async fn check(
+        &self,
+        sequence: &Sequence,
+        _state: &ProjectState,
+        config: &RuleConfig,
+        context: &QCContext,
+    ) -> CoreResult<Vec<QCViolation>> {
+        let Some(measurements) = context.measurements.as_ref() else {
+            // The engine reports this rule as skipped (see `skip_reason`).
+            return Ok(Vec::new());
+        };
+        let Some(integrated_lufs) = measurements.integrated_lufs else {
+            return Ok(Vec::new());
+        };
+
+        let target_lufs = config
+            .get_param::<f64>("target_lufs")
+            .unwrap_or(Self::DEFAULT_TARGET_LUFS);
+        let tolerance_lu = config
+            .get_param::<f64>("tolerance_lu")
+            .unwrap_or(Self::DEFAULT_TOLERANCE_LU)
+            .abs();
+
+        let deviation = integrated_lufs - target_lufs;
+        if !deviation.is_finite() || deviation.abs() <= tolerance_lu {
+            return Ok(Vec::new());
+        }
+
+        // Every deviation is a warning, however large. A loudness target is a
+        // platform convention, not a property of correct output — a master
+        // mixed for cinema is not broken because it misses a streaming target —
+        // so `error` stays reserved for the objectively broken (true-peak overs,
+        // clipping). A caller that treats a specific target as a hard
+        // requirement can raise the grade with `severity_override`.
+        let severity = config.severity_override.unwrap_or(self.default_severity());
+
+        let direction = if deviation > 0.0 { "above" } else { "below" };
+        let mut violation = QCViolation::new(
+            self.name(),
+            severity,
+            format!(
+                "Integrated loudness is {:.1} LUFS, {:.1} LU {} the {:.1} LUFS target",
+                integrated_lufs,
+                deviation.abs(),
+                direction,
+                target_lufs
+            ),
+        )
+        .with_location(0.0, sequence.duration())
+        .with_metric("integratedLufs", integrated_lufs)
+        .with_metric("targetLufs", target_lufs)
+        .with_metric("deviationLu", (deviation * 100.0).round() / 100.0);
+
+        if let Some(range) = measurements.loudness_range_lu {
+            violation = violation.with_metric("loudnessRangeLu", range);
+        }
+
+        // A boost is only safe while the measured peak keeps enough headroom;
+        // otherwise the correction has to happen in the mix, not the master.
+        let measured_peak = measurements.true_peak_dbtp.or(measurements.sample_peak_db);
+        let boost_would_clip = deviation < 0.0
+            && measured_peak.is_some_and(|peak| peak - deviation > Self::SAFE_PEAK_CEILING_DB);
+
+        if boost_would_clip {
+            violation = violation.with_details(format!(
+                "Raising the master by {:.1} dB would push the measured peak of {:.1} dB past \
+                 {:.1} dB; rebalance the mix or apply a limiter instead.",
+                -deviation,
+                measured_peak.unwrap_or_default(),
+                Self::SAFE_PEAK_CEILING_DB
+            ));
+        } else {
+            let target_volume_db = (sequence.master_volume_db as f64 - deviation)
+                .clamp(Self::MASTER_MIN_VOLUME_DB, Self::MASTER_MAX_VOLUME_DB);
+
+            violation = violation
+                .with_details(format!(
+                    "Loudness normalisation will change playback level by {:.1} LU.",
+                    -deviation
+                ))
+                .with_fix(
+                    ViolationFix::new(
+                        format!("Set master volume to {:.1} dB", target_volume_db),
+                        vec![serde_json::json!({
+                            "type": "SetMasterVolume",
+                            "sequenceId": sequence.id,
+                            "volumeDb": target_volume_db
+                        })],
+                    )
+                    .with_confidence(0.7),
+                );
+        }
+
+        Ok(vec![violation])
     }
 
     fn supports_auto_fix(&self) -> bool {
@@ -305,6 +614,11 @@ impl QCRule for AudioPeakRule {
 // ============================================================================
 
 /// Rule that ensures captions remain within the title-safe area
+///
+/// Works purely from timeline structure: caption clips carry their position and
+/// style as untyped JSON, which is deserialized defensively so a legacy or
+/// partially written blob degrades to the caption defaults instead of failing
+/// the whole check.
 #[derive(Debug, Default)]
 pub struct CaptionSafeAreaRule;
 
@@ -314,14 +628,93 @@ impl CaptionSafeAreaRule {
         Self
     }
 
-    /// Default safe area margin (percentage of screen)
+    /// Default title-safe margin (percentage of canvas)
     const DEFAULT_MARGIN_PERCENT: f64 = 10.0;
+
+    /// Action-safe margin (percentage of canvas)
+    ///
+    /// Text outside this band risks being cropped by overscan and covered by
+    /// platform UI overlays, so breaching it is reported at the rule severity
+    /// while breaching only the title-safe margin stays informational.
+    const ACTION_SAFE_MARGIN_PERCENT: f64 = 5.0;
+
+    /// Characters that fit across the full canvas width at the default font size
+    ///
+    /// Core has no text shaping, so rendered text width can only be
+    /// approximated; this average glyph advance keeps the estimate conservative
+    /// for Latin text and is intentionally coarse.
+    const CHARS_PER_CANVAS_WIDTH: f64 = 42.0;
+
+    /// Maximum estimated text-box width as a percentage of canvas width
+    const MAX_TEXT_BOX_WIDTH_PERCENT: f64 = 90.0;
+
+    /// Line height as a multiple of the font size (typographic default)
+    const LINE_HEIGHT_FACTOR: f64 = 1.2;
+
+    /// Reads the caption font size in pixels from the clip's style JSON.
+    fn font_size_px(style: Option<&serde_json::Value>) -> f64 {
+        let default_size = f64::from(CaptionStyle::default().font_size);
+
+        let Some(value) = style else {
+            return default_size;
+        };
+
+        if let Ok(parsed) = serde_json::from_value::<CaptionStyle>(value.clone()) {
+            return f64::from(parsed.font_size);
+        }
+
+        // Partial style blobs are common (only the edited fields are stored),
+        // so fall back to reading the single field this rule needs.
+        value
+            .get("fontSize")
+            .or_else(|| value.get("font_size"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|size| size.is_finite() && *size > 0.0)
+            .unwrap_or(default_size)
+    }
+
+    /// Returns the estimated text box size as (width, height) percentages.
+    fn estimate_text_box_percent(clip: &Clip, canvas_height: u32) -> (f64, f64) {
+        let char_count = clip
+            .label
+            .as_ref()
+            .map(|label| label.chars().count())
+            .unwrap_or(0) as f64;
+
+        let width_percent = (char_count / Self::CHARS_PER_CANVAS_WIDTH * 100.0)
+            .min(Self::MAX_TEXT_BOX_WIDTH_PERCENT);
+
+        let canvas_height = if canvas_height > 0 { canvas_height } else { 1 };
+        let height_percent = Self::font_size_px(clip.caption_style.as_ref())
+            * Self::LINE_HEIGHT_FACTOR
+            / f64::from(canvas_height)
+            * 100.0;
+
+        (width_percent, height_percent)
+    }
+
+    /// Centers a box of `size_percent` inside the safe band, without panicking
+    /// when the box is wider than the band itself.
+    fn clamp_center(center_percent: f64, size_percent: f64, margin_percent: f64) -> f64 {
+        let min = margin_percent + size_percent / 2.0;
+        let max = 100.0 - margin_percent - size_percent / 2.0;
+
+        if min > max {
+            50.0
+        } else {
+            center_percent.clamp(min, max)
+        }
+    }
 }
 
 #[async_trait]
 impl QCRule for CaptionSafeAreaRule {
     fn name(&self) -> &str {
         "CaptionSafeAreaRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "caption.safe_area"
     }
 
     fn description(&self) -> &str {
@@ -337,51 +730,135 @@ impl QCRule for CaptionSafeAreaRule {
         sequence: &Sequence,
         _state: &ProjectState,
         config: &RuleConfig,
+        context: &QCContext,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();
 
-        let margin_percent = config
+        let title_safe_margin = config
             .get_param::<f64>("margin_percent")
             .unwrap_or(Self::DEFAULT_MARGIN_PERCENT);
+        let action_safe_margin = Self::ACTION_SAFE_MARGIN_PERCENT;
 
         let severity = config.severity_override.unwrap_or(self.default_severity());
 
-        // Check caption tracks
         for track in &sequence.tracks {
             if !track.is_caption() {
                 continue;
             }
 
             for clip in &track.clips {
-                // Check caption position (simulated - real impl would check Caption data)
-                let caption_y_percent = 95.0; // Simulated: near bottom edge
+                // A missing or unreadable position renders with the caption
+                // default, so the check follows the same fallback.
+                let position = clip
+                    .caption_position
+                    .as_ref()
+                    .and_then(|value| serde_json::from_value::<CaptionPosition>(value.clone()).ok())
+                    .unwrap_or_default();
 
-                if caption_y_percent > (100.0 - margin_percent) {
-                    let fix = ViolationFix::new(
-                        format!("Move caption to {}% from bottom", margin_percent),
-                        vec![serde_json::json!({
-                            "type": "UpdateCaption",
-                            "clipId": clip.id,
-                            "position": {"y": 100.0 - margin_percent - 5.0}
-                        })],
-                    )
-                    .with_confidence(0.95);
+                let (violation_severity, message, details, suggested_position) = match &position {
+                    CaptionPosition::Preset {
+                        vertical,
+                        margin_percent,
+                    } => {
+                        // Center-anchored captions sit mid-canvas, where an edge
+                        // margin has no meaning.
+                        if *vertical == VerticalPosition::Center {
+                            continue;
+                        }
 
-                    let violation = QCViolation::new(
-                        self.name(),
-                        severity,
-                        "Caption positioned outside title-safe area",
-                    )
+                        if *margin_percent < action_safe_margin {
+                            (
+                                severity,
+                                "Caption positioned outside the action-safe area".to_string(),
+                                format!(
+                                    "Margin of {:.1}% is below the {:.1}% action-safe margin",
+                                    margin_percent, action_safe_margin
+                                ),
+                                CaptionPosition::Preset {
+                                    vertical: vertical.clone(),
+                                    margin_percent: title_safe_margin,
+                                },
+                            )
+                        } else if *margin_percent < title_safe_margin {
+                            (
+                                Severity::Info,
+                                "Caption positioned outside the title-safe area".to_string(),
+                                format!(
+                                    "Margin of {:.1}% is below the {:.1}% title-safe margin but within the action-safe area",
+                                    margin_percent, title_safe_margin
+                                ),
+                                CaptionPosition::Preset {
+                                    vertical: vertical.clone(),
+                                    margin_percent: title_safe_margin,
+                                },
+                            )
+                        } else {
+                            continue;
+                        }
+                    }
+                    CaptionPosition::Custom(custom) => {
+                        let (box_width, box_height) =
+                            Self::estimate_text_box_percent(clip, context.canvas_height);
+
+                        let left = custom.x_percent - box_width / 2.0;
+                        let right = custom.x_percent + box_width / 2.0;
+                        let top = custom.y_percent - box_height / 2.0;
+                        let bottom = custom.y_percent + box_height / 2.0;
+
+                        let upper_bound = 100.0 - action_safe_margin;
+                        if left >= action_safe_margin
+                            && right <= upper_bound
+                            && top >= action_safe_margin
+                            && bottom <= upper_bound
+                        {
+                            continue;
+                        }
+
+                        (
+                            severity,
+                            "Caption positioned outside the action-safe area".to_string(),
+                            format!(
+                                "Estimated text box spans x {:.1}%-{:.1}%, y {:.1}%-{:.1}%, outside the {:.1}%-{:.1}% safe band (box size is an approximation)",
+                                left, right, top, bottom, action_safe_margin, upper_bound
+                            ),
+                            CaptionPosition::Custom(CustomPosition {
+                                x_percent: Self::clamp_center(
+                                    custom.x_percent,
+                                    box_width,
+                                    action_safe_margin,
+                                ),
+                                y_percent: Self::clamp_center(
+                                    custom.y_percent,
+                                    box_height,
+                                    action_safe_margin,
+                                ),
+                            }),
+                        )
+                    }
+                };
+
+                let mut violation = QCViolation::new(self.name(), violation_severity, message)
                     .with_location(clip.place.timeline_in_sec, clip.timeline_end())
                     .with_entities(vec![clip.id.clone()])
-                    .with_details(format!(
-                        "Caption at {}% exceeds safe area margin of {}%",
-                        caption_y_percent, margin_percent
-                    ))
-                    .with_fix(fix);
+                    .with_details(details);
 
-                    violations.push(violation);
+                if let Ok(position_json) = serde_json::to_value(&suggested_position) {
+                    violation = violation.with_fix(
+                        ViolationFix::new(
+                            "Move the caption inside the safe area",
+                            vec![serde_json::json!({
+                                "type": "UpdateCaption",
+                                "sequenceId": sequence.id,
+                                "trackId": track.id,
+                                "clipId": clip.id,
+                                "position": position_json
+                            })],
+                        )
+                        .with_confidence(0.95),
+                    );
                 }
+
+                violations.push(violation);
             }
         }
 
@@ -420,6 +897,10 @@ impl QCRule for CutRhythmRule {
         "CutRhythmRule"
     }
 
+    fn check_id(&self) -> &str {
+        "shot.cut_rhythm"
+    }
+
     fn description(&self) -> &str {
         "Checks if video cuts maintain appropriate rhythm and pacing"
     }
@@ -433,6 +914,7 @@ impl QCRule for CutRhythmRule {
         sequence: &Sequence,
         _state: &ProjectState,
         config: &RuleConfig,
+        _context: &QCContext,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();
 
@@ -507,6 +989,10 @@ impl QCRule for LicenseRule {
         "LicenseRule"
     }
 
+    fn check_id(&self) -> &str {
+        "asset.license"
+    }
+
     fn description(&self) -> &str {
         "Verifies all assets have valid licensing for intended use"
     }
@@ -520,6 +1006,7 @@ impl QCRule for LicenseRule {
         sequence: &Sequence,
         state: &ProjectState,
         config: &RuleConfig,
+        _context: &QCContext,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();
 
@@ -621,6 +1108,10 @@ impl QCRule for AspectRatioRule {
         "AspectRatioRule"
     }
 
+    fn check_id(&self) -> &str {
+        "clip.aspect_ratio"
+    }
+
     fn description(&self) -> &str {
         "Verifies all video clips match the sequence aspect ratio"
     }
@@ -634,6 +1125,7 @@ impl QCRule for AspectRatioRule {
         sequence: &Sequence,
         state: &ProjectState,
         config: &RuleConfig,
+        _context: &QCContext,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();
 
@@ -724,6 +1216,10 @@ impl QCRule for DurationRule {
         "DurationRule"
     }
 
+    fn check_id(&self) -> &str {
+        "sequence.duration"
+    }
+
     fn description(&self) -> &str {
         "Checks if sequence duration meets platform requirements"
     }
@@ -737,6 +1233,7 @@ impl QCRule for DurationRule {
         sequence: &Sequence,
         _state: &ProjectState,
         config: &RuleConfig,
+        _context: &QCContext,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();
 
@@ -801,6 +1298,54 @@ impl QCRule for DurationRule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::qc::context::RenderMeasurements;
+    use crate::core::timeline::{SequenceFormat, Track};
+
+    // ========================================================================
+    // Test Fixtures
+    // ========================================================================
+
+    /// Builds a 1920x1080 sequence with a single video clip on one video track
+    fn sequence_with_video_clip(timeline_in_sec: f64, duration_sec: f64) -> Sequence {
+        let mut sequence = Sequence::new("QC Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("V1");
+        track.add_clip(Clip::with_range("asset_001", 0.0, duration_sec).place_at(timeline_in_sec));
+        sequence.add_track(track);
+        sequence
+    }
+
+    /// Builds a 1920x1080 sequence with a single caption clip
+    fn sequence_with_caption(
+        label: &str,
+        position: Option<serde_json::Value>,
+        style: Option<serde_json::Value>,
+    ) -> Sequence {
+        let mut sequence = Sequence::new("QC Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("C1");
+
+        let mut clip = Clip::with_range("caption_asset", 0.0, 2.0);
+        clip.label = Some(label.to_string());
+        clip.caption_position = position;
+        clip.caption_style = style;
+        track.add_clip(clip);
+
+        sequence.add_track(track);
+        sequence
+    }
+
+    fn measurements_with_black_ranges(ranges: Vec<(f64, f64)>) -> RenderMeasurements {
+        RenderMeasurements {
+            black_ranges: ranges,
+            ..Default::default()
+        }
+    }
+
+    fn measurements_with_true_peak(true_peak_dbtp: f64) -> RenderMeasurements {
+        RenderMeasurements {
+            true_peak_dbtp: Some(true_peak_dbtp),
+            ..Default::default()
+        }
+    }
 
     // ========================================================================
     // RuleConfig Tests
@@ -859,6 +1404,67 @@ mod tests {
         assert!(rule.supports_auto_fix());
     }
 
+    #[tokio::test]
+    async fn test_black_frame_rule_should_report_ranges_when_measurements_are_provided() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence)
+            // The 0.02s range is below the default 0.1s duration threshold
+            .with_measurements(measurements_with_black_ranges(vec![
+                (0.0, 0.6),
+                (2.0, 2.02),
+            ]));
+
+        let violations = BlackFrameRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        let location = violations[0].location.as_ref().expect("located violation");
+        assert_eq!(location.start_sec, 0.0);
+        assert_eq!(location.end_sec, 0.6);
+        assert_eq!(violations[0].affected_entities.len(), 1);
+        assert!(
+            violations[0].auto_fixable,
+            "a black range starting at the clip start is trimmable"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_black_frame_rule_should_respect_min_duration_config() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_black_ranges(vec![(0.0, 0.6)]));
+
+        let mut config = RuleConfig::default();
+        config.set_param("min_duration", 1.0);
+
+        let violations = BlackFrameRule::new()
+            .check(&sequence, &state, &config, &context)
+            .await
+            .expect("rule runs");
+
+        assert!(violations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_black_frame_rule_should_skip_when_measurements_are_missing() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence);
+
+        let rule = BlackFrameRule::new();
+        assert!(rule.skip_reason(&context).is_some());
+
+        let violations = rule
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+        assert!(violations.is_empty());
+    }
+
     // ========================================================================
     // AudioPeakRule Tests
     // ========================================================================
@@ -871,6 +1477,82 @@ mod tests {
         assert!(rule.supports_auto_fix());
     }
 
+    #[tokio::test]
+    async fn test_audio_peak_rule_should_report_clipping_from_measured_true_peak() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_true_peak(-0.2));
+
+        let violations = AudioPeakRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Critical);
+        assert!(violations[0].message.contains("true peak"));
+
+        let fix = violations[0].suggested_fix.as_ref().expect("fix suggested");
+        assert_eq!(fix.commands[0]["type"], "SetMasterVolume");
+    }
+
+    #[tokio::test]
+    async fn test_audio_peak_rule_should_warn_below_ceiling() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_true_peak(-2.0));
+
+        let violations = AudioPeakRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Warning);
+        assert!(!violations[0].auto_fixable);
+    }
+
+    #[tokio::test]
+    async fn test_audio_peak_rule_should_fall_back_to_sample_peak() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence).with_measurements(RenderMeasurements {
+            sample_peak_db: Some(-0.2),
+            ..Default::default()
+        });
+
+        let violations = AudioPeakRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("sample peak"));
+    }
+
+    #[tokio::test]
+    async fn test_audio_peak_rule_should_skip_when_peak_is_not_measured() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        let state = ProjectState::new("QC Test");
+        let rule = AudioPeakRule::new();
+
+        let no_measurements = QCContext::from_sequence(&sequence);
+        assert!(rule.skip_reason(&no_measurements).is_some());
+
+        // Measurements without any peak figure (for example a silent render)
+        let no_peak =
+            QCContext::from_sequence(&sequence).with_measurements(RenderMeasurements::default());
+        assert!(rule.skip_reason(&no_peak).is_some());
+
+        let violations = rule
+            .check(&sequence, &state, &RuleConfig::default(), &no_peak)
+            .await
+            .expect("rule runs");
+        assert!(violations.is_empty());
+    }
+
     // ========================================================================
     // CaptionSafeAreaRule Tests
     // ========================================================================
@@ -881,6 +1563,130 @@ mod tests {
         assert_eq!(rule.name(), "CaptionSafeAreaRule");
         assert_eq!(rule.default_severity(), Severity::Warning);
         assert!(rule.supports_auto_fix());
+    }
+
+    #[tokio::test]
+    async fn test_caption_safe_area_rule_should_flag_custom_position_near_bottom_edge() {
+        let sequence = sequence_with_caption(
+            "Caption near the bottom edge",
+            Some(serde_json::json!({
+                "type": "custom",
+                "xPercent": 50.0,
+                "yPercent": 98.0
+            })),
+            None,
+        );
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence);
+
+        let violations = CaptionSafeAreaRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Warning);
+        assert!(violations[0].auto_fixable);
+
+        let fix = violations[0].suggested_fix.as_ref().expect("fix suggested");
+        assert_eq!(fix.commands[0]["type"], "UpdateCaption");
+        assert_eq!(fix.commands[0]["position"]["type"], "custom");
+    }
+
+    #[tokio::test]
+    async fn test_caption_safe_area_rule_should_pass_preset_at_title_safe_margin() {
+        let sequence = sequence_with_caption(
+            "Caption inside the safe area",
+            Some(serde_json::json!({
+                "type": "preset",
+                "vertical": "bottom",
+                "marginPercent": 10.0
+            })),
+            None,
+        );
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence);
+
+        let violations = CaptionSafeAreaRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(violations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_caption_safe_area_rule_should_flag_preset_below_action_safe_margin() {
+        let sequence = sequence_with_caption(
+            "Caption at the very edge",
+            Some(serde_json::json!({
+                "type": "preset",
+                "vertical": "top",
+                "marginPercent": 1.0
+            })),
+            None,
+        );
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence);
+
+        let violations = CaptionSafeAreaRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Warning);
+        assert_eq!(
+            violations[0]
+                .suggested_fix
+                .as_ref()
+                .expect("fix suggested")
+                .commands[0]["position"]["marginPercent"],
+            10.0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_caption_safe_area_rule_should_ignore_center_preset() {
+        let sequence = sequence_with_caption(
+            "Centered caption",
+            Some(serde_json::json!({
+                "type": "preset",
+                "vertical": "center",
+                "marginPercent": 0.0
+            })),
+            None,
+        );
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence);
+
+        let violations = CaptionSafeAreaRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(violations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_caption_safe_area_rule_should_fall_back_to_default_position_when_unreadable() {
+        let sequence = sequence_with_caption(
+            "Caption without a stored position",
+            Some(serde_json::json!({ "type": "unknown-variant" })),
+            Some(serde_json::json!({ "fontSize": 64 })),
+        );
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence);
+
+        let violations = CaptionSafeAreaRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        // The caption default (bottom, 5% margin) clears the action-safe margin
+        // but sits inside the title-safe margin, so it is informational only.
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Info);
     }
 
     // ========================================================================

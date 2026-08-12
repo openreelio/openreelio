@@ -15,6 +15,7 @@
 //! openreelio-cli state dump --path ./my-project
 //! ```
 mod commands;
+mod ffmpeg_env;
 mod output;
 mod validate;
 

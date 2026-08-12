@@ -11,8 +11,11 @@ mod analysis;
 mod asset;
 mod caption;
 mod command;
+mod ffmpeg;
+mod frame;
 mod help_json;
 mod mcp;
+mod perception;
 mod plan;
 mod project;
 mod render;
@@ -20,6 +23,7 @@ mod state;
 mod text;
 mod timeline;
 mod transcription;
+mod verify;
 
 use clap::{Parser, Subcommand};
 
@@ -90,6 +94,18 @@ pub enum Commands {
         action: render::RenderAction,
     },
 
+    /// FFmpeg toolchain inspection
+    Ffmpeg {
+        #[command(subcommand)]
+        action: ffmpeg::FfmpegAction,
+    },
+
+    /// Still frame extraction for visual inspection
+    Frame {
+        #[command(subcommand)]
+        action: frame::FrameAction,
+    },
+
     /// Batch plan execution (atomic multi-step edits)
     Plan {
         #[command(subcommand)]
@@ -107,6 +123,9 @@ pub enum Commands {
         #[command(subcommand)]
         action: state::StateAction,
     },
+
+    /// Deterministic quality control for a sequence and its rendered output
+    Verify(verify::VerifyArgs),
 
     /// Model Context Protocol server for external AI agents
     Mcp(mcp::McpAction),
@@ -126,9 +145,12 @@ pub fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Transcription { action } => transcription::execute(action),
         Commands::Text { action } => text::execute(action),
         Commands::Render { action } => render::execute(action),
+        Commands::Ffmpeg { action } => ffmpeg::execute(action),
+        Commands::Frame { action } => frame::execute(action),
         Commands::Plan { action } => plan::execute(action),
         Commands::Command { action } => command::execute(action),
         Commands::State { action } => state::execute(action),
+        Commands::Verify(args) => verify::execute(args),
         Commands::Mcp(action) => mcp::execute(action),
         Commands::HelpJson => help_json::execute(),
     }

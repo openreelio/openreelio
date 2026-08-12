@@ -590,6 +590,56 @@ impl AnalysisBundle {
     pub fn is_complete(&self) -> bool {
         self.errors.is_empty()
     }
+
+    /// Restores result slots that this bundle does not populate from `previous`.
+    ///
+    /// A run that enables only some sub-jobs produces a bundle whose other
+    /// slots are `None`. Writing that bundle over an existing one would discard
+    /// results a previous run already paid for, so callers that re-save a
+    /// partial run merge the older results back in first.
+    ///
+    /// Only empty slots are filled: freshly produced results, metadata, errors,
+    /// and the analysis timestamp always win.
+    ///
+    /// A slot whose sub-job is recorded in [`Self::errors`] is never restored.
+    /// That job ran and failed in this bundle, so the older result is not
+    /// "missing", it is superseded — republishing it under a fresh
+    /// `analyzed_at` would present stale data as current, which is exactly
+    /// wrong when the failure came from media that changed underneath.
+    pub fn backfill_missing_from(&mut self, previous: &AnalysisBundle) {
+        if self.shots.is_none() && !self.job_failed("shots") {
+            self.shots = previous.shots.clone();
+        }
+        if self.transcript.is_none() && !self.job_failed("transcript") {
+            self.transcript = previous.transcript.clone();
+        }
+        if self.transcript_detail.is_none() && !self.job_failed("transcript") {
+            self.transcript_detail = previous.transcript_detail.clone();
+        }
+        if self.audio_profile.is_none() && !self.job_failed("audio") {
+            self.audio_profile = previous.audio_profile.clone();
+        }
+        if self.segments.is_none() && !self.job_failed("segments") {
+            self.segments = previous.segments.clone();
+        }
+        if self.frame_analysis.is_none() && !self.job_failed("visual") {
+            self.frame_analysis = previous.frame_analysis.clone();
+        }
+        if self.frame_observations.is_none() && !self.job_failed("visual") {
+            self.frame_observations = previous.frame_observations.clone();
+        }
+        if self.contact_sheet.is_none() && !self.job_failed("contact_sheet") {
+            self.contact_sheet = previous.contact_sheet.clone();
+        }
+    }
+
+    /// Returns whether this bundle recorded a failure for `analysis_type`.
+    ///
+    /// Keys match the ones the analysis pipeline passes to [`Self::add_error`]:
+    /// `shots`, `audio`, `transcript`, `segments`, `visual`, `contact_sheet`.
+    fn job_failed(&self, analysis_type: &str) -> bool {
+        self.errors.contains_key(analysis_type)
+    }
 }
 
 fn current_analysis_schema_version() -> u32 {
@@ -834,6 +884,74 @@ mod tests {
         assert!(!bundle.is_complete());
         assert_eq!(bundle.errors.len(), 1);
         assert!(bundle.errors.contains_key("transcript"));
+    }
+
+    #[test]
+    fn should_restore_missing_slots_when_backfilling_a_partial_bundle() {
+        let mut previous = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        previous.audio_profile = Some(AudioProfile::silent(60.0));
+        previous.shots = Some(vec![ShotResult::new(0.0, 60.0, 1.0)]);
+
+        let mut partial = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        partial.shots = Some(vec![
+            ShotResult::new(0.0, 30.0, 0.9),
+            ShotResult::new(30.0, 60.0, 0.9),
+        ]);
+
+        partial.backfill_missing_from(&previous);
+
+        // Fresh results win, untouched slots are restored.
+        assert_eq!(partial.shots.as_ref().unwrap().len(), 2);
+        assert!(partial.audio_profile.is_some());
+    }
+
+    #[test]
+    fn should_not_backfill_a_slot_whose_sub_job_failed_in_the_fresh_run() {
+        let mut previous = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        previous.audio_profile = Some(AudioProfile::silent(60.0));
+        previous.shots = Some(vec![ShotResult::new(0.0, 60.0, 1.0)]);
+
+        // The fresh run asked for both jobs; audio failed, shots was not run.
+        let mut fresh = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        fresh.add_error("audio", "Audio analysis failed (exit 1)".to_string());
+
+        fresh.backfill_missing_from(&previous);
+
+        assert!(
+            fresh.audio_profile.is_none(),
+            "a failed sub-job must not republish the previous result as current"
+        );
+        assert!(
+            fresh.shots.is_some(),
+            "slots that simply were not run are still restored"
+        );
+    }
+
+    #[test]
+    fn should_not_backfill_visual_slots_when_visual_analysis_failed() {
+        let mut previous = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        previous.frame_analysis = Some(vec![FrameAnalysis::local_fallback(0, 0.5)]);
+        previous.frame_observations = Some(Vec::new());
+
+        let mut fresh = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        fresh.add_error("visual", "Vision API timeout".to_string());
+
+        fresh.backfill_missing_from(&previous);
+
+        assert!(fresh.frame_analysis.is_none());
+        assert!(fresh.frame_observations.is_none());
+    }
+
+    #[test]
+    fn should_not_backfill_errors_or_metadata_from_a_previous_bundle() {
+        let mut previous = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        previous.add_error("audio", "FFmpeg missing".to_string());
+
+        let mut fresh = AnalysisBundle::new("asset_001", VideoMetadata::new(90.0));
+        fresh.backfill_missing_from(&previous);
+
+        assert!(fresh.errors.is_empty());
+        assert_eq!(fresh.metadata.duration_sec, 90.0);
     }
 
     #[test]

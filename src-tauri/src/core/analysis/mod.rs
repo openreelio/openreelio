@@ -70,6 +70,23 @@ const BUNDLE_FILENAME: &str = "bundle.json";
 /// Name of the generated contact-sheet image
 const CONTACT_SHEET_FILENAME: &str = "contact-sheet.jpg";
 
+/// Name of the advisory lock file guarding bundle read-modify-write cycles
+const BUNDLE_LOCK_FILENAME: &str = "bundle.json.lock";
+
+/// Advisory lock held for the duration of a bundle read-modify-write cycle.
+///
+/// The GUI job worker and the CLI are separate processes writing the same
+/// bundle, so the lock is on the file system rather than in memory. The lock is
+/// released when the guard drops.
+struct BundleLock(std::fs::File);
+
+impl Drop for BundleLock {
+    fn drop(&mut self) {
+        // Keep the handle alive for the lifetime of the guard. Locks are released on drop.
+        let _ = &self.0;
+    }
+}
+
 // =============================================================================
 // Analysis Job Runner
 // =============================================================================
@@ -150,6 +167,29 @@ impl AnalysisJobRunner {
     /// Returns the path to an asset's bundle JSON file
     fn bundle_path(&self, asset_id: &str) -> CoreResult<PathBuf> {
         Ok(self.asset_analysis_dir(asset_id)?.join(BUNDLE_FILENAME))
+    }
+
+    /// Takes the exclusive advisory lock guarding an asset's bundle.
+    ///
+    /// Held across a whole load-mutate-save cycle so two processes updating
+    /// different slots of the same bundle cannot overwrite each other.
+    fn lock_bundle_exclusive(&self, asset_id: &str) -> CoreResult<BundleLock> {
+        let lock_path = self
+            .asset_analysis_dir(asset_id)?
+            .join(BUNDLE_LOCK_FILENAME);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)?;
+        // Use UFCS to avoid accidentally picking up newer std methods and violating MSRV.
+        fs2::FileExt::lock_exclusive(&file)?;
+        Ok(BundleLock(file))
     }
 
     /// Runs the full analysis pipeline with the given options.
@@ -424,6 +464,68 @@ impl AnalysisJobRunner {
         );
 
         Ok(())
+    }
+
+    /// Applies `mutate` to the asset's cached bundle and writes it back.
+    ///
+    /// The bundle is loaded from disk first, so a caller that produces only one
+    /// kind of result (shot detection, an audio profile) updates its own slot
+    /// without discarding what earlier runs stored. When no bundle exists yet,
+    /// a fresh one is created from `fallback_metadata`.
+    ///
+    /// The load, the mutation and the write happen under an exclusive advisory
+    /// lock on the bundle: the GUI job worker and a CLI invocation can update
+    /// different slots of the same bundle at the same time, and without the lock
+    /// the later write would silently drop the earlier one.
+    ///
+    /// Returns the merged bundle that was persisted.
+    pub fn merge_bundle_update<F>(
+        &self,
+        asset_id: &str,
+        fallback_metadata: &VideoMetadata,
+        mutate: F,
+    ) -> CoreResult<AnalysisBundle>
+    where
+        F: FnOnce(&mut AnalysisBundle),
+    {
+        let _lock = self.lock_bundle_exclusive(asset_id)?;
+
+        let mut bundle = match self.load_bundle_optional(asset_id)? {
+            Some(bundle) => bundle,
+            None => AnalysisBundle::new(asset_id, fallback_metadata.clone()),
+        };
+
+        mutate(&mut bundle);
+        bundle.analyzed_at = chrono::Utc::now().to_rfc3339();
+
+        self.save_bundle(&bundle)?;
+        Ok(bundle)
+    }
+
+    /// Merges shot-detection results into the asset's cached bundle.
+    pub fn merge_bundle_shots(
+        &self,
+        asset_id: &str,
+        fallback_metadata: &VideoMetadata,
+        shots: Vec<ShotResult>,
+    ) -> CoreResult<AnalysisBundle> {
+        self.merge_bundle_update(asset_id, fallback_metadata, |bundle| {
+            bundle.shots = Some(shots);
+            bundle.errors.remove("shots");
+        })
+    }
+
+    /// Merges an audio profile into the asset's cached bundle.
+    pub fn merge_bundle_audio_profile(
+        &self,
+        asset_id: &str,
+        fallback_metadata: &VideoMetadata,
+        audio_profile: AudioProfile,
+    ) -> CoreResult<AnalysisBundle> {
+        self.merge_bundle_update(asset_id, fallback_metadata, |bundle| {
+            bundle.audio_profile = Some(audio_profile);
+            bundle.errors.remove("audio");
+        })
     }
 
     async fn generate_contact_sheet_if_possible(
@@ -784,6 +886,127 @@ mod tests {
         assert_eq!(loaded.shots.as_ref().unwrap().len(), 2);
         assert_eq!(loaded.audio_profile.as_ref().unwrap().bpm, Some(120.0));
         assert_eq!(loaded.contact_sheet.as_ref().unwrap().columns, 2);
+    }
+
+    #[test]
+    fn should_create_bundle_from_fallback_metadata_when_merging_into_nothing() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+        let metadata = VideoMetadata::new(12.0).with_audio(true);
+
+        let merged = runner
+            .merge_bundle_shots(
+                "asset_100",
+                &metadata,
+                vec![ShotResult::new(0.0, 12.0, 0.9)],
+            )
+            .unwrap();
+
+        assert_eq!(merged.metadata.duration_sec, 12.0);
+        assert_eq!(merged.shots.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            runner
+                .load_bundle("asset_100")
+                .unwrap()
+                .shots
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn should_not_lose_a_slot_when_two_threads_merge_the_same_bundle() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path().to_path_buf();
+        let metadata = VideoMetadata::new(30.0).with_audio(true);
+
+        let shots_dir = project_dir.clone();
+        let shots_metadata = metadata.clone();
+        let shots_writer = std::thread::spawn(move || {
+            let runner = AnalysisJobRunner::new(&shots_dir);
+            for _ in 0..20 {
+                runner
+                    .merge_bundle_shots(
+                        "asset_200",
+                        &shots_metadata,
+                        vec![ShotResult::new(0.0, 30.0, 0.9)],
+                    )
+                    .unwrap();
+            }
+        });
+
+        let audio_writer = std::thread::spawn(move || {
+            let runner = AnalysisJobRunner::new(&project_dir);
+            for _ in 0..20 {
+                runner
+                    .merge_bundle_audio_profile("asset_200", &metadata, AudioProfile::silent(30.0))
+                    .unwrap();
+            }
+        });
+
+        shots_writer.join().unwrap();
+        audio_writer.join().unwrap();
+
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+        let loaded = runner.load_bundle("asset_200").unwrap();
+        assert!(
+            loaded.shots.is_some(),
+            "the shots slot must survive concurrent audio merges"
+        );
+        assert!(
+            loaded.audio_profile.is_some(),
+            "the audio slot must survive concurrent shot merges"
+        );
+    }
+
+    #[test]
+    fn should_preserve_other_results_when_merging_shots_into_an_existing_bundle() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+
+        let mut existing = AnalysisBundle::new("asset_101", VideoMetadata::new(30.0));
+        existing.audio_profile = Some(AudioProfile::silent(30.0));
+        existing.segments = Some(Vec::new());
+        runner.save_bundle(&existing).unwrap();
+
+        runner
+            .merge_bundle_shots(
+                "asset_101",
+                &VideoMetadata::new(0.0),
+                vec![ShotResult::new(0.0, 30.0, 0.8)],
+            )
+            .unwrap();
+
+        let loaded = runner.load_bundle("asset_101").unwrap();
+        assert_eq!(loaded.shots.as_ref().unwrap().len(), 1);
+        assert!(loaded.audio_profile.is_some());
+        assert!(loaded.segments.is_some());
+        // The fallback metadata must not overwrite what the bundle already knows.
+        assert_eq!(loaded.metadata.duration_sec, 30.0);
+    }
+
+    #[test]
+    fn should_clear_the_matching_error_when_merging_a_successful_result() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+
+        let mut existing = AnalysisBundle::new("asset_102", VideoMetadata::new(30.0));
+        existing.add_error("audio", "FFmpeg missing".to_string());
+        existing.add_error("shots", "FFmpeg missing".to_string());
+        runner.save_bundle(&existing).unwrap();
+
+        runner
+            .merge_bundle_audio_profile(
+                "asset_102",
+                &VideoMetadata::new(30.0),
+                AudioProfile::silent(30.0),
+            )
+            .unwrap();
+
+        let loaded = runner.load_bundle("asset_102").unwrap();
+        assert!(!loaded.errors.contains_key("audio"));
+        assert!(loaded.errors.contains_key("shots"));
     }
 
     #[test]

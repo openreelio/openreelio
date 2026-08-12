@@ -1,5 +1,6 @@
 //! Asset management commands: import, list, info, remove.
 
+use crate::ffmpeg_env::ensure_ffmpeg_optional;
 use crate::output;
 use clap::Subcommand;
 use openreelio_core::commands::ImportAssetCommand;
@@ -59,6 +60,11 @@ pub enum AssetAction {
 pub fn execute(action: AssetAction) -> anyhow::Result<()> {
     match action {
         AssetAction::Import { path, file, name } => {
+            // Import probes media metadata with ffprobe when the container is
+            // ambiguous. Register the binaries first, but keep importing when
+            // FFmpeg is absent: metadata probing only enriches the asset.
+            ensure_ffmpeg_optional();
+
             let mut project = super::load_project(&path)?;
             let file_path = std::fs::canonicalize(&file)
                 .map_err(|e| anyhow::anyhow!("File '{}' not found: {}", file.display(), e))?;
