@@ -1,7 +1,12 @@
-//! Read-only MCP server surface for external AI agents.
+//! MCP server surface for external AI agents.
+//!
+//! The server is read-only by default. Mutating tools appear either when the
+//! host supplies a single-use approval token through the environment, or when
+//! the operator starts the server with `--allow-write` — a local-trust switch
+//! that trades per-call approval for an unattended edit loop.
 
 use crate::{
-    commands::{help_json, plan, transcription},
+    commands::{help_json, plan, transcription, verify},
     output,
 };
 use clap::Args;
@@ -13,6 +18,14 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// Timeout for the rendered-file measurement pass of `openreelio.verify`,
+/// matching the `verify --timeout-sec` default.
+const VERIFY_MEASURE_TIMEOUT_SEC: u64 = 600;
+
+/// Severity threshold `openreelio.verify` applies when the caller names none,
+/// matching the `verify --fail-on` default.
+const DEFAULT_VERIFY_FAIL_ON: &str = "error";
+
 #[derive(Args)]
 pub struct McpAction {
     /// Project directory path to expose through read-only tools
@@ -22,11 +35,19 @@ pub struct McpAction {
     /// Serve MCP JSON-RPC over stdio
     #[arg(long)]
     pub stdio: bool,
+
+    /// Enable mutating tools without a per-call approval token
+    ///
+    /// Intended for a locally trusted client editing a local project; every
+    /// mutation still goes through the command log and stays undoable.
+    #[arg(long)]
+    pub allow_write: bool,
 }
 
 #[derive(Clone, Debug, Default)]
 struct McpServerState {
     project: Option<PathBuf>,
+    allow_write: bool,
     client_name: Option<String>,
     client_version: Option<String>,
     approval_token: Option<String>,
@@ -43,6 +64,7 @@ pub fn execute(action: McpAction) -> anyhow::Result<()> {
     let (approval_expires_at_ms, approval_expiry_error) = read_approval_expiry_from_env();
     let state = McpServerState {
         project: action.project,
+        allow_write: action.allow_write,
         client_name: None,
         client_version: None,
         approval_token: std::env::var("OPENREELIO_MCP_APPROVAL_TOKEN").ok(),
@@ -56,6 +78,13 @@ pub fn execute(action: McpAction) -> anyhow::Result<()> {
     };
 
     if action.stdio {
+        if state.allow_write {
+            // The operator gave up per-call approval, so the only remaining
+            // safeguard is who they let talk to this process. Say so once.
+            eprintln!(
+                "warning: --allow-write enables OpenReelio MCP mutations without per-call approval; use it only with a locally trusted client"
+            );
+        }
         serve_stdio(state)
     } else {
         output::print_json_pretty(&serde_json::json!({
@@ -67,15 +96,33 @@ pub fn execute(action: McpAction) -> anyhow::Result<()> {
             "command": "openreelio-cli mcp --stdio --project <project-path>",
             "tools": build_tools(&state),
             "resources": build_resources(),
-            "policy": {
-                "mode": "read-only",
-                "mutations": "disabled"
-            }
+            "policy": build_discovery_policy(&state)
         }))
     }
 }
 
+/// Policy block of the non-stdio discovery payload.
+///
+/// This is what an operator reads before wiring the server into a client, so it
+/// has to name the write mode plainly rather than leave it to be inferred from
+/// the tool list.
+fn build_discovery_policy(state: &McpServerState) -> Value {
+    serde_json::json!({
+        "mode": if state.allow_write { "read-write-local" } else { "read-only" },
+        "mutations": if state.allow_write { "enabled" } else { "disabled" }
+    })
+}
+
 impl McpServerState {
+    /// Whether mutating tools are available at all.
+    ///
+    /// `--allow-write` and an approval token are alternatives, not layers: the
+    /// flag is an operator-level grant for the whole session, the token a
+    /// host-issued grant for a single call.
+    fn mutations_enabled(&self) -> bool {
+        self.allow_write || self.has_active_approval_token()
+    }
+
     fn has_active_approval_token(&self) -> bool {
         self.active_approval_token(None).is_ok()
     }
@@ -446,6 +493,44 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
             }),
         ),
         tool(
+            "openreelio.verify",
+            "OpenReelio verify",
+            "Run deterministic quality control over a sequence and, with 'file', over a rendered export. Every check that ran, was skipped, or errored is reported, so 'checked and clean' is distinguishable from 'never checked'. Violations carry an executable suggestedFix plan.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "sequenceId": {
+                        "type": "string",
+                        "description": "Sequence to verify. Defaults to the active sequence."
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Rendered file to measure for black/freeze/silence, EBU R128 loudness, and peaks. Without it only structural checks run and FFmpeg is never invoked. Measured times are file-relative and compared against timeline times, so pass a full-sequence render rather than a partial one."
+                    },
+                    "structuralOnly": {
+                        "type": "boolean",
+                        "description": "Run structural checks only and never touch FFmpeg. Cannot be combined with file."
+                    },
+                    "failOn": {
+                        "type": "string",
+                        "enum": ["info", "warning", "error", "critical"],
+                        "description": "Lowest severity that marks the run as failed. Defaults to error."
+                    },
+                    "checks": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Check IDs to run exclusively; asset.license and sequence.duration are opt-in and only run when named here."
+                    },
+                    "skip": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Check IDs to disable."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool(
             "openreelio.preview.describe",
             "OpenReelio preview state",
             "Read non-sensitive preview state.",
@@ -453,14 +538,14 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         ),
     ];
 
-    if state.has_active_approval_token() {
+    if state.mutations_enabled() {
         tools.push(tool(
             "openreelio.media.insert",
             "OpenReelio media insert",
             "Insert a media asset through the drag-and-drop parity path: validates visible track placement, preserves source ranges, and creates linked audio for video assets.",
             serde_json::json!({
                 "type": "object",
-                "required": ["approvalToken", "sequenceId", "trackId", "assetId", "timelineStart"],
+                "required": required_fields(state, &["sequenceId", "trackId", "assetId", "timelineStart"]),
                 "properties": {
                     "approvalToken": { "type": "string" },
                     "sequenceId": { "type": "string" },
@@ -487,7 +572,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
             "Apply a validated edit plan, including text/caption commands, through the OpenReelio command log path using an approval token.",
             serde_json::json!({
                 "type": "object",
-                "required": ["approvalToken", "plan"],
+                "required": required_fields(state, &["plan"]),
                 "properties": {
                     "approvalToken": { "type": "string" },
                     "plan": { "type": "object" }
@@ -498,6 +583,20 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
     }
 
     tools
+}
+
+/// Builds a mutating tool's `required` list.
+///
+/// `--allow-write` removes the per-call approval requirement, so the token must
+/// also disappear from the schema; leaving it required would make every call an
+/// argument error for a client that has no token to send.
+fn required_fields(state: &McpServerState, fields: &[&str]) -> Vec<String> {
+    let mut required = Vec::with_capacity(fields.len() + 1);
+    if !state.allow_write {
+        required.push("approvalToken".to_string());
+    }
+    required.extend(fields.iter().map(|field| (*field).to_string()));
+    required
 }
 
 fn tool(name: &str, title: &str, description: &str, input_schema: Value) -> Value {
@@ -574,6 +673,7 @@ fn call_tool(state: &McpServerState, name: &str, arguments: Value) -> Result<Val
         "openreelio.command.schema" => Ok(build_command_schema()),
         "openreelio.command.validate" => validate_command(arguments),
         "openreelio.plan.validate" => validate_plan(arguments),
+        "openreelio.verify" => run_verify_tool(state, arguments),
         "openreelio.media.insert" => apply_media_insert(state, arguments),
         "openreelio.plan.apply" => apply_plan(state, arguments),
         "openreelio.preview.describe" => Ok(build_preview_state()),
@@ -665,14 +765,21 @@ fn build_host_context(state: &McpServerState) -> Value {
             "planValidate": true,
             "transcriptionGenerate": true,
             "transcriptionStatus": true,
-            "mediaInsertWithApproval": state.has_active_approval_token(),
-            "planApplyWithApproval": state.has_active_approval_token(),
+            "verify": true,
+            "mediaInsertWithApproval": state.mutations_enabled(),
+            "planApplyWithApproval": state.mutations_enabled(),
             "previewFrameRead": false,
             "diagnosticsRead": true,
             "renderControl": false
         },
         "policy": {
-            "approvalMode": if state.has_active_approval_token() { "approve-mutations" } else { "read-only" },
+            "approvalMode": if state.allow_write {
+                "allow-write-local"
+            } else if state.has_active_approval_token() {
+                "approve-mutations"
+            } else {
+                "read-only"
+            },
             "rawMediaAccess": if state.project.is_some() { "transcription-generate" } else { "none" },
             "filesystemAccess": if state.project.is_some() { "project-readonly" } else { "none" }
         },
@@ -1153,6 +1260,37 @@ fn optional_string_argument(arguments: &Value, key: &str) -> Result<Option<Strin
         })
 }
 
+fn optional_string_array_argument(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<Vec<String>>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let items = value.as_array().ok_or_else(|| {
+        ToolError::InvalidArguments(format!("{key} must be an array of strings when provided"))
+    })?;
+
+    items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    ToolError::InvalidArguments(format!(
+                        "{key} must contain only non-empty strings"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<String>, ToolError>>()
+        .map(Some)
+}
+
 fn optional_bool_argument(arguments: &Value, key: &str) -> Result<Option<bool>, ToolError> {
     let Some(value) = arguments.get(key) else {
         return Ok(None);
@@ -1198,22 +1336,70 @@ fn optional_non_negative_number(arguments: &Value, key: &str) -> Result<Option<f
     Ok(Some(number))
 }
 
-fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
-    let expected_token = state.active_approval_token(None)?;
-    let actual_token = arguments
-        .get("approvalToken")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ToolError::PermissionDenied("approvalToken is required".to_string()))?;
-    if actual_token != expected_token {
-        return Err(ToolError::PermissionDenied(
-            "approvalToken is invalid".to_string(),
+/// Runs deterministic QC and returns the same document `openreelio-cli verify`
+/// prints.
+///
+/// Verify mutates nothing, so the tool is always registered. The rendered pass
+/// can run for minutes on a long export; the stdio loop handles one request at a
+/// time and imposes no deadline of its own, so the measurement timeout is the
+/// only bound and stays at the CLI default.
+fn run_verify_tool(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
+    let Some(project_path) = state.project.as_ref() else {
+        return Err(ToolError::InvalidArguments(
+            "openreelio.verify requires mcp --project <project-path>".to_string(),
+        ));
+    };
+
+    let file = optional_string_argument(&arguments, "file")?.map(PathBuf::from);
+    let structural_only = optional_bool_argument(&arguments, "structuralOnly")?.unwrap_or(false);
+    if file.is_some() && structural_only {
+        return Err(ToolError::InvalidArguments(
+            "file and structuralOnly cannot be combined".to_string(),
         ));
     }
 
-    if let Some(plan_id) = state.approval_plan_id.as_deref() {
-        return Err(ToolError::PermissionDenied(format!(
-            "approvalToken is scoped to plan '{plan_id}' and cannot be used for openreelio.media.insert"
-        )));
+    let args = verify::VerifyArgs {
+        path: project_path.clone(),
+        sequence: optional_string_argument(&arguments, "sequenceId")?,
+        file,
+        structural_only,
+        checks: optional_string_array_argument(&arguments, "checks")?,
+        skip: optional_string_array_argument(&arguments, "skip")?,
+        target_lufs: None,
+        max_true_peak: None,
+        fail_on: optional_string_argument(&arguments, "failOn")?
+            .unwrap_or_else(|| DEFAULT_VERIFY_FAIL_ON.to_string()),
+        timeout_sec: VERIFY_MEASURE_TIMEOUT_SEC,
+        json_pretty: false,
+    };
+
+    // The exit code is dropped on purpose: the report already carries `status`,
+    // `passed`, and the per-check outcomes an MCP client acts on, and a JSON-RPC
+    // result has nowhere honest to put a process code.
+    let (report, _exit_code) =
+        verify::run_verify(args).map_err(|error| ToolError::Execution(error.to_string()))?;
+    Ok(report)
+}
+
+fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
+    // `--allow-write` is the grant; there is no token to check, scope, or spend.
+    if !state.allow_write {
+        let expected_token = state.active_approval_token(None)?;
+        let actual_token = arguments
+            .get("approvalToken")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolError::PermissionDenied("approvalToken is required".to_string()))?;
+        if actual_token != expected_token {
+            return Err(ToolError::PermissionDenied(
+                "approvalToken is invalid".to_string(),
+            ));
+        }
+
+        if let Some(plan_id) = state.approval_plan_id.as_deref() {
+            return Err(ToolError::PermissionDenied(format!(
+                "approvalToken is scoped to plan '{plan_id}' and cannot be used for openreelio.media.insert"
+            )));
+        }
     }
 
     let sequence_id = required_string_argument(&arguments, "sequenceId")?;
@@ -1236,7 +1422,9 @@ fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value,
     })?;
     let mut project = super::load_project(project_path)
         .map_err(|error| ToolError::Execution(error.to_string()))?;
-    state.ensure_media_insert_token_scope(&project.state.meta.id)?;
+    if !state.allow_write {
+        state.ensure_media_insert_token_scope(&project.state.meta.id)?;
+    }
 
     // Validate the inputs against the canonical command schema, then run the
     // single canonical InsertMedia command. All linked-audio business logic now
@@ -1257,7 +1445,11 @@ fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value,
     )
     .map_err(ToolError::InvalidArguments)?;
 
-    state.consume_approval_token()?;
+    // Single-use consumption belongs to the token path only; spending it under
+    // `--allow-write` would let exactly one mutation through per session.
+    if !state.allow_write {
+        state.consume_approval_token()?;
+    }
 
     let command = InsertMediaCommand::new(&sequence_id, &track_id, &asset_id, timeline_start)
         .with_source_range(source_in, source_out)
@@ -1456,7 +1648,10 @@ fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
 }
 
 fn apply_plan(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
-    state.active_approval_token(None)?;
+    // `--allow-write` is the grant; there is no token to check, scope, or spend.
+    if !state.allow_write {
+        state.active_approval_token(None)?;
+    }
 
     let plan_value = arguments
         .get("plan")
@@ -1466,16 +1661,18 @@ fn apply_plan(state: &McpServerState, arguments: Value) -> Result<Value, ToolErr
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| ToolError::InvalidArguments("plan.id is required".to_string()))?;
-    let expected_token = state.active_approval_token(Some(plan_id))?;
-    let actual_token = arguments
-        .get("approvalToken")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ToolError::PermissionDenied("approvalToken is required".to_string()))?;
+    if !state.allow_write {
+        let expected_token = state.active_approval_token(Some(plan_id))?;
+        let actual_token = arguments
+            .get("approvalToken")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolError::PermissionDenied("approvalToken is required".to_string()))?;
 
-    if actual_token != expected_token {
-        return Err(ToolError::PermissionDenied(
-            "approvalToken is invalid".to_string(),
-        ));
+        if actual_token != expected_token {
+            return Err(ToolError::PermissionDenied(
+                "approvalToken is invalid".to_string(),
+            ));
+        }
     }
 
     let project_path = state.project.as_ref().ok_or_else(|| {
@@ -1494,7 +1691,11 @@ fn apply_plan(state: &McpServerState, arguments: Value) -> Result<Value, ToolErr
         }));
     }
 
-    state.consume_approval_token()?;
+    // Single-use consumption belongs to the token path only; spending it under
+    // `--allow-write` would let exactly one plan through per session.
+    if !state.allow_write {
+        state.consume_approval_token()?;
+    }
 
     let mut project = super::load_project(project_path)
         .map_err(|error| ToolError::Execution(error.to_string()))?;
@@ -2323,6 +2524,297 @@ mod tests {
             .as_str()
             .expect("error message")
             .contains("already been consumed"));
+    }
+
+    #[test]
+    fn should_advertise_mutating_tools_without_a_token_when_allow_write_is_set() {
+        let state = McpServerState {
+            allow_write: true,
+            ..Default::default()
+        };
+        let response = handle_jsonrpc_request(&state, request("tools/list", serde_json::json!({})));
+        let tools = response["result"]["tools"].as_array().expect("tools array");
+
+        let find = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("tool '{name}' must be advertised"))
+                .clone()
+        };
+
+        for name in ["openreelio.media.insert", "openreelio.plan.apply"] {
+            let required = find(name)["inputSchema"]["required"]
+                .as_array()
+                .expect("required array")
+                .clone();
+            assert!(
+                !required.iter().any(|field| field == "approvalToken"),
+                "{name} must not require approvalToken under --allow-write"
+            );
+        }
+
+        assert_eq!(
+            find("openreelio.media.insert")["inputSchema"]["required"],
+            serde_json::json!(["sequenceId", "trackId", "assetId", "timelineStart"])
+        );
+        assert_eq!(
+            find("openreelio.plan.apply")["inputSchema"]["required"],
+            serde_json::json!(["plan"])
+        );
+    }
+
+    #[test]
+    fn should_keep_the_approval_token_required_without_allow_write() {
+        let state = McpServerState {
+            approval_token: Some("token".to_string()),
+            ..Default::default()
+        };
+        let response = handle_jsonrpc_request(&state, request("tools/list", serde_json::json!({})));
+        let tools = response["result"]["tools"].as_array().expect("tools array");
+        let media_insert = tools
+            .iter()
+            .find(|tool| tool["name"] == "openreelio.media.insert")
+            .expect("media insert tool");
+
+        assert_eq!(
+            media_insert["inputSchema"]["required"],
+            serde_json::json!([
+                "approvalToken",
+                "sequenceId",
+                "trackId",
+                "assetId",
+                "timelineStart"
+            ])
+        );
+    }
+
+    #[test]
+    fn should_report_local_write_policy_when_allow_write_is_set() {
+        let state = McpServerState {
+            allow_write: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            build_discovery_policy(&state),
+            serde_json::json!({ "mode": "read-write-local", "mutations": "enabled" })
+        );
+        assert_eq!(
+            build_discovery_policy(&McpServerState::default()),
+            serde_json::json!({ "mode": "read-only", "mutations": "disabled" })
+        );
+
+        let context = build_host_context(&state);
+        assert_eq!(context["policy"]["approvalMode"], "allow-write-local");
+        assert_eq!(context["capabilities"]["planApplyWithApproval"], true);
+        assert_eq!(context["capabilities"]["mediaInsertWithApproval"], true);
+    }
+
+    #[test]
+    fn should_apply_two_plans_in_a_row_when_allow_write_is_set() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("allow_write_plan_project");
+        let project = openreelio_core::ActiveProject::create("Allow Write", project_path.clone())
+            .expect("project");
+        let sequence_id = project.state.active_sequence_id.clone().expect("sequence");
+        let initial_track_count = project
+            .state
+            .sequences
+            .get(&sequence_id)
+            .expect("sequence state")
+            .tracks
+            .len();
+        drop(project);
+
+        let state = McpServerState {
+            project: Some(project_path.clone()),
+            allow_write: true,
+            ..Default::default()
+        };
+
+        let apply = |track_name: &str| {
+            handle_jsonrpc_request(
+                &state,
+                request(
+                    "tools/call",
+                    serde_json::json!({
+                        "name": "openreelio.plan.apply",
+                        "arguments": {
+                            "plan": {
+                                "id": format!("allow-write-{track_name}"),
+                                "steps": [{
+                                    "id": "step-1",
+                                    "commandType": "AddTrack",
+                                    "payload": {
+                                        "sequenceId": sequence_id,
+                                        "name": track_name,
+                                        "kind": "video"
+                                    },
+                                    "dependsOn": []
+                                }]
+                            }
+                        }
+                    }),
+                ),
+            )
+        };
+
+        for track_name in ["First Track", "Second Track"] {
+            let response = apply(track_name);
+            let text = response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_else(|| panic!("apply '{track_name}' failed: {response}"));
+            let result: Value = serde_json::from_str(text).expect("apply result JSON");
+            assert_eq!(result["status"], "ok", "apply '{track_name}': {result}");
+        }
+
+        let reopened = openreelio_core::ActiveProject::open(project_path).expect("reopen");
+        let sequence = reopened
+            .state
+            .sequences
+            .get(&sequence_id)
+            .expect("sequence after apply");
+        assert_eq!(sequence.tracks.len(), initial_track_count + 2);
+    }
+
+    #[test]
+    fn should_insert_media_twice_when_allow_write_is_set() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("allow_write_media_project");
+        let media_path = temp_dir.path().join("clip.mp4");
+        std::fs::write(&media_path, b"fake video bytes").expect("media fixture");
+
+        let mut project =
+            openreelio_core::ActiveProject::create("Allow Write Media", project_path.clone())
+                .expect("project");
+        let sequence_id = project.state.active_sequence_id.clone().expect("sequence");
+        let track_id = project.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .find(|track| matches!(track.kind, TrackKind::Video | TrackKind::Overlay))
+            .expect("video track")
+            .id
+            .clone();
+        let import_command = ImportAssetCommand::new("clip.mp4", &media_path.to_string_lossy())
+            .with_duration(8.0)
+            .with_audio_info(AudioInfo::default());
+        let asset_id = import_command.asset_id().to_string();
+        project
+            .executor
+            .execute(Box::new(import_command), &mut project.state)
+            .expect("import video asset");
+        project.save().expect("save project");
+        drop(project);
+
+        let state = McpServerState {
+            project: Some(project_path.clone()),
+            allow_write: true,
+            ..Default::default()
+        };
+
+        let mut clip_ids = Vec::new();
+        for timeline_start in [0.0, 10.0] {
+            let result = apply_media_insert(
+                &state,
+                serde_json::json!({
+                    "sequenceId": sequence_id,
+                    "trackId": track_id,
+                    "assetId": asset_id,
+                    "timelineStart": timeline_start
+                }),
+            )
+            .unwrap_or_else(|error| panic!("media insert at {timeline_start} failed: {error}"));
+            clip_ids.push(result["clipId"].as_str().expect("clip id").to_string());
+        }
+
+        let reopened = openreelio_core::ActiveProject::open(project_path).expect("reopen");
+        let track = reopened.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .expect("video track after insert");
+        for clip_id in &clip_ids {
+            assert!(
+                track.clips.iter().any(|clip| &clip.id == clip_id),
+                "clip '{clip_id}' must survive the second insert"
+            );
+        }
+    }
+
+    #[test]
+    fn should_always_advertise_the_verify_tool() {
+        for state in [
+            McpServerState::default(),
+            McpServerState {
+                allow_write: true,
+                ..Default::default()
+            },
+        ] {
+            let response =
+                handle_jsonrpc_request(&state, request("tools/list", serde_json::json!({})));
+            let tools = response["result"]["tools"].as_array().expect("tools array");
+            assert!(
+                tools.iter().any(|tool| tool["name"] == "openreelio.verify"),
+                "verify is read-only-safe and must always be advertised"
+            );
+        }
+    }
+
+    #[test]
+    fn should_run_structural_checks_through_the_verify_tool() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("verify_tool_project");
+        let project = openreelio_core::ActiveProject::create("Verify Tool", project_path.clone())
+            .expect("project");
+        let sequence_id = project.state.active_sequence_id.clone().expect("sequence");
+        drop(project);
+
+        let state = McpServerState {
+            project: Some(project_path),
+            ..Default::default()
+        };
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.verify",
+                    "arguments": { "structuralOnly": true }
+                }),
+            ),
+        );
+
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("verify tool failed: {response}"));
+        let report: Value = serde_json::from_str(text).expect("verify report JSON");
+
+        assert_eq!(report["target"]["sequenceId"], sequence_id);
+        // Structural-only never invokes FFmpeg, so the tool works on a machine
+        // that has none installed.
+        assert_eq!(report["measurements"]["measured"], false);
+        assert!(!report["checks"]
+            .as_array()
+            .expect("checks array")
+            .is_empty());
+    }
+
+    #[test]
+    fn should_reject_verify_arguments_that_contradict_each_other() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let state = McpServerState {
+            project: Some(temp_dir.path().join("verify_conflict_project")),
+            ..Default::default()
+        };
+
+        let error = run_verify_tool(
+            &state,
+            serde_json::json!({ "file": "render.mp4", "structuralOnly": true }),
+        )
+        .expect_err("file and structuralOnly must conflict");
+
+        assert!(error.to_string().contains("structuralOnly"));
     }
 
     #[test]
