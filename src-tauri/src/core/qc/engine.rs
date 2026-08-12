@@ -9,6 +9,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use super::context::{QCContext, RenderMeasurements};
 use super::rules::{
     AspectRatioRule, AudioPeakRule, BlackFrameRule, CaptionSafeAreaRule, CutRhythmRule,
     DurationRule, LicenseRule, QCRule, RuleConfig,
@@ -112,6 +113,16 @@ impl QCEngineConfig {
     }
 }
 
+/// A rule that returned an error instead of a result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleFailure {
+    /// Name of the rule that failed
+    pub rule_name: String,
+    /// Error reported by the rule
+    pub message: String,
+}
+
 /// QC check report
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QCReport {
@@ -125,8 +136,14 @@ pub struct QCReport {
     pub violations: Vec<QCViolation>,
     /// Count by severity
     pub severity_counts: HashMap<String, usize>,
-    /// Rules that were skipped
+    /// Rules that were skipped, either by configuration or for missing inputs
     pub skipped_rules: Vec<String>,
+    /// Rules that failed to run
+    ///
+    /// A failed rule leaves part of the sequence unchecked, so the report can
+    /// never be reported as passing while this list is non-empty.
+    #[serde(default)]
+    pub errored_rules: Vec<RuleFailure>,
     /// Whether the check was stopped early
     pub stopped_early: bool,
     /// Overall pass/fail status
@@ -143,6 +160,7 @@ impl QCReport {
             violations: Vec::new(),
             severity_counts: HashMap::new(),
             skipped_rules: Vec::new(),
+            errored_rules: Vec::new(),
             stopped_early: false,
             passed: true,
         }
@@ -158,6 +176,15 @@ impl QCReport {
         }
 
         self.violations.push(violation);
+    }
+
+    /// Records a rule failure and marks the report as not passing
+    fn record_rule_failure(&mut self, rule_name: &str, message: String) {
+        self.errored_rules.push(RuleFailure {
+            rule_name: rule_name.to_string(),
+            message,
+        });
+        self.passed = false;
     }
 
     /// Gets violations of a specific severity
@@ -188,7 +215,7 @@ impl QCReport {
 
     /// Generates a summary string
     pub fn summary(&self) -> String {
-        format!(
+        let mut summary = format!(
             "QC Report: {} ({} violations - {} critical, {} error, {} warning, {} info)",
             if self.passed { "PASSED" } else { "FAILED" },
             self.total_violations(),
@@ -196,7 +223,13 @@ impl QCReport {
             self.count(Severity::Error),
             self.count(Severity::Warning),
             self.count(Severity::Info)
-        )
+        );
+
+        if !self.errored_rules.is_empty() {
+            summary.push_str(&format!(" [{} rules errored]", self.errored_rules.len()));
+        }
+
+        summary
     }
 }
 
@@ -272,7 +305,33 @@ impl QCEngine {
     }
 
     /// Runs all enabled QC rules on a sequence
+    ///
+    /// The context is derived from the sequence alone, so rules that require
+    /// rendered measurements are reported as skipped. Use
+    /// [`QCEngine::check_with_measurements`] to run those rules.
     pub async fn check(&self, sequence: &Sequence, state: &ProjectState) -> CoreResult<QCReport> {
+        let context = QCContext::from_sequence(sequence);
+        self.check_with_context(sequence, state, &context).await
+    }
+
+    /// Runs all enabled QC rules with measurements from a rendered sequence
+    pub async fn check_with_measurements(
+        &self,
+        sequence: &Sequence,
+        state: &ProjectState,
+        measurements: RenderMeasurements,
+    ) -> CoreResult<QCReport> {
+        let context = QCContext::from_sequence(sequence).with_measurements(measurements);
+        self.check_with_context(sequence, state, &context).await
+    }
+
+    /// Runs all enabled QC rules against an explicit context
+    pub async fn check_with_context(
+        &self,
+        sequence: &Sequence,
+        state: &ProjectState,
+        context: &QCContext,
+    ) -> CoreResult<QCReport> {
         let start_time = std::time::Instant::now();
         let config = self.config.read().await;
 
@@ -294,8 +353,15 @@ impl QCEngine {
                 continue;
             }
 
+            // A rule missing its required inputs is skipped, never silently passed
+            if let Some(reason) = rule.skip_reason(context) {
+                tracing::debug!("Rule '{}' skipped: {}", rule_name, reason);
+                report.skipped_rules.push(rule_name.to_string());
+                continue;
+            }
+
             // Run the rule
-            match rule.check(sequence, state, &rule_config).await {
+            match rule.check(sequence, state, &rule_config, context).await {
                 Ok(violations) => {
                     for violation in violations {
                         // Apply severity filter
@@ -313,8 +379,10 @@ impl QCEngine {
                     }
                 }
                 Err(e) => {
-                    // Log rule error but continue with other rules
+                    // Continue with other rules, but record the failure so the
+                    // report cannot claim a check that never ran as passing
                     tracing::warn!("Rule '{}' failed: {}", rule_name, e);
+                    report.record_rule_failure(rule_name, e.to_string());
                 }
             }
         }
@@ -323,12 +391,29 @@ impl QCEngine {
         Ok(report)
     }
 
-    /// Runs a specific rule on a sequence
+    /// Runs a specific rule on a sequence with a context derived from it
     pub async fn check_rule(
         &self,
         rule_name: &str,
         sequence: &Sequence,
         state: &ProjectState,
+    ) -> CoreResult<Vec<QCViolation>> {
+        let context = QCContext::from_sequence(sequence);
+        self.check_rule_with_context(rule_name, sequence, state, &context)
+            .await
+    }
+
+    /// Runs a specific rule on a sequence against an explicit context
+    ///
+    /// Rules that cannot run against the context return no violations; callers
+    /// that need to distinguish that from a clean result should consult
+    /// [`QCRule::skip_reason`] or run the full engine.
+    pub async fn check_rule_with_context(
+        &self,
+        rule_name: &str,
+        sequence: &Sequence,
+        state: &ProjectState,
+        context: &QCContext,
     ) -> CoreResult<Vec<QCViolation>> {
         let rule = self
             .get_rule(rule_name)
@@ -337,7 +422,7 @@ impl QCEngine {
         let config = self.config.read().await;
         let rule_config = config.get_rule_config(rule_name);
 
-        rule.check(sequence, state, &rule_config).await
+        rule.check(sequence, state, &rule_config, context).await
     }
 
     /// Gets suggested fixes for all auto-fixable violations
@@ -373,6 +458,69 @@ impl Default for QCEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::timeline::{Clip, SequenceFormat, Track};
+    use async_trait::async_trait;
+
+    // ========================================================================
+    // Test Fixtures
+    // ========================================================================
+
+    /// Rule that always fails, used to verify error reporting
+    struct FailingRule;
+
+    #[async_trait]
+    impl QCRule for FailingRule {
+        fn name(&self) -> &str {
+            "FailingRule"
+        }
+
+        fn description(&self) -> &str {
+            "Always returns an error"
+        }
+
+        fn default_severity(&self) -> Severity {
+            Severity::Error
+        }
+
+        async fn check(
+            &self,
+            _sequence: &Sequence,
+            _state: &ProjectState,
+            _config: &RuleConfig,
+            _context: &QCContext,
+        ) -> CoreResult<Vec<QCViolation>> {
+            Err(CoreError::Internal("rule exploded".to_string()))
+        }
+    }
+
+    /// Builds a sequence with one 30s video clip, long enough to satisfy the
+    /// duration rule so tests only observe the behavior under test.
+    fn test_sequence() -> Sequence {
+        let mut sequence = Sequence::new("QC Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("V1");
+        track.add_clip(Clip::with_range("asset_001", 0.0, 30.0));
+        sequence.add_track(track);
+        sequence
+    }
+
+    /// Builds an engine whose built-in rules are all disabled
+    async fn engine_with_only(rule: Arc<dyn QCRule>) -> QCEngine {
+        let mut engine = QCEngine::new();
+
+        let mut config = QCEngineConfig::default();
+        let builtin_names: Vec<String> = engine
+            .rule_names()
+            .into_iter()
+            .map(|name| name.to_string())
+            .collect();
+        for name in builtin_names {
+            config.disable_rule(&name);
+        }
+
+        engine.set_config(config).await;
+        engine.register_rule(rule);
+        engine
+    }
 
     // ========================================================================
     // QCSeverityFilter Tests
@@ -592,6 +740,69 @@ mod tests {
 
         let fixes = engine.get_fixes(&report);
         assert_eq!(fixes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_engine_check_should_record_errored_rules_and_not_pass() {
+        let engine = engine_with_only(Arc::new(FailingRule)).await;
+        let sequence = test_sequence();
+        let state = ProjectState::new("QC Test");
+
+        let report = engine.check(&sequence, &state).await.expect("check runs");
+
+        assert_eq!(report.errored_rules.len(), 1);
+        assert_eq!(report.errored_rules[0].rule_name, "FailingRule");
+        assert!(report.errored_rules[0].message.contains("rule exploded"));
+        assert!(report.violations.is_empty());
+        assert!(
+            !report.passed,
+            "a rule that never ran must not be reported as passing"
+        );
+        assert!(report.summary().contains("1 rules errored"));
+    }
+
+    #[tokio::test]
+    async fn test_engine_check_should_skip_measurement_rules_without_measurements() {
+        let engine = QCEngine::new();
+        let sequence = test_sequence();
+        let state = ProjectState::new("QC Test");
+
+        let report = engine.check(&sequence, &state).await.expect("check runs");
+
+        assert!(report.skipped_rules.contains(&"BlackFrameRule".to_string()));
+        assert!(report.skipped_rules.contains(&"AudioPeakRule".to_string()));
+        assert!(report.errored_rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_engine_check_with_measurements_should_run_measurement_rules() {
+        let engine = QCEngine::new();
+        let sequence = test_sequence();
+        let state = ProjectState::new("QC Test");
+
+        let report = engine
+            .check_with_measurements(
+                &sequence,
+                &state,
+                RenderMeasurements {
+                    black_ranges: vec![(0.0, 0.5)],
+                    true_peak_dbtp: Some(-0.2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("check runs");
+
+        assert!(!report.skipped_rules.contains(&"BlackFrameRule".to_string()));
+        assert!(!report.skipped_rules.contains(&"AudioPeakRule".to_string()));
+        assert!(report
+            .violations
+            .iter()
+            .any(|violation| violation.rule_name == "BlackFrameRule"));
+        assert!(report
+            .violations
+            .iter()
+            .any(|violation| violation.rule_name == "AudioPeakRule"));
     }
 
     #[test]
