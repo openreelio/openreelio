@@ -1,7 +1,40 @@
 # Agent Perception CLI — Design & Implementation Plan
 
 **Branch**: `feature/agent-headless-perception`
+**Status**: **COMPLETE** — T1–T7 all landed on the branch.
 **Goal**: Give the headless CLI the primitives an external coding agent (Claude Code / Codex) needs to *see* media and *verify* its own edits: frame extraction, proxy renders, perception generation (shots/silence/audio/full analysis), and a deterministic QC `verify` tool. This is the shared foundation for both the in-app agent quality roadmap and the agent-native external surface.
+
+## Status summary
+
+| Task | Status | Commit |
+|------|--------|--------|
+| T1 — Unified FFmpeg resolution | DONE | `9abe13c8` |
+| T2 — QC bring-up refactor | DONE | `3433d95b` |
+| T3 — Frame extraction | DONE | `6100a72c` |
+| T4 — Proxy render | DONE | `310b86c9` |
+| T5 — Headless perception | DONE | `1bf586ba` |
+| T6 — `verify` | DONE | `b6568eba` |
+| T7 — Integration & polish | DONE | (this commit) |
+
+### Accepted deviations from the plan
+
+These were decided during implementation and are deliberate; do not "fix" them back.
+
+- **`ebur128` uses `framelog=quiet`, not `framelog=summary`** (T6). The summary block is
+  emitted regardless, and `framelog=summary` still logs per-frame lines on some builds; `quiet`
+  keeps the single-pass stderr capture small and the parse deterministic.
+- **`caption.reading_rate` is warning-only** (T6). The plan reserved `error` for >25 CPS on
+  Latin script, but reading rate is taste-adjacent and script detection is heuristic, so every
+  finding stays a warning. `error` remains reserved for objectively broken output.
+- **`analysis silence`'s write gate is stricter than `can_reuse_cached_silence_regions`** (T5).
+  The plan reused the read gate for writes, but that gate accepts a *longer* `min-duration`
+  (a reader may filter a cached set down). A run detecting at that duration would populate the
+  cache with fewer regions than the contract promises, so writing requires both parameters to
+  equal the defaults exactly; anything else is output-only with `"persisted": false` and a
+  `reason` of `"non-default threshold"` or `"non-default min-duration"`.
+- **Proxy is an `ExportSettings` constructor, not an enum variant** (T4). `--proxy` is an alias
+  that selects the `proxy_480p` preset rather than a new render-mode variant, so the existing
+  preset plumbing and `plan_hash` behaviour are untouched.
 
 ## Design principles
 
@@ -13,7 +46,7 @@
 
 ## Task breakdown (sequential; one commit each unless noted)
 
-### T1 — Unified FFmpeg resolution (`fix(core)` + `feat(api)`)
+### T1 — Unified FFmpeg resolution (`fix(core)` + `feat(api)`) — DONE (`9abe13c8`)
 
 Problem: three divergent resolution paths; CLI never checks the managed install (PR #784), so in-app FFmpeg installs are invisible to every CLI verb; non-render CLI verbs never register paths at all and silently fall back to bare `ffmpeg`.
 
@@ -26,7 +59,7 @@ Problem: three divergent resolution paths; CLI never checks the managed install 
 - New verb `ffmpeg info` → `{status, ffmpegPath, ffprobePath, version, source}` for agent self-diagnosis.
 - Unit tests for resolution order; keep `dev_mode` visibility inside the module.
 
-### T2 — QC bring-up refactor (`refactor(core)`)
+### T2 — QC bring-up refactor (`refactor(core)`) — DONE (`3433d95b`)
 
 Per "Refactor Before Feature". `core/qc/` is dead code with three simulated rule bodies.
 
@@ -35,7 +68,7 @@ Per "Refactor Before Feature". `core/qc/` is dead code with three simulated rule
 - `QCEngine::check`: record `errored_rules` in `QCReport` instead of log-and-continue masquerading as pass.
 - No CLI exposure yet; module unit tests only.
 
-### T3 — Frame extraction (`feat(api)`)
+### T3 — Frame extraction (`feat(api)`) — DONE (`6100a72c`)
 
 `openreelio-cli frame extract --path P --out F [--asset ID --source-time T | --time T] [--sequence S] [--mode fast|composite] [--width N] [--format png|jpeg] [--grid CxR --between A B [--count N]]`
 
@@ -45,14 +78,14 @@ Per "Refactor Before Feature". `core/qc/` is dead code with three simulated rule
 - `--grid`: sample N evenly over `[a,b]` into `%d.jpg` sequence dir → `VisualAnalyzer::generate_contact_sheet`; JSON returns `cells:[{index,row,col,timelineSec}]` for VLM cell→timecode mapping.
 - Output: `{status, frames:[{index, timeSec, sourceTimeSec, clipId, assetId, path, width, height}], count}` (or `{sheet: {...}}` for grid).
 
-### T4 — Proxy render (`feat(render)`)
+### T4 — Proxy render (`feat(render)`) — DONE (`310b86c9`)
 
 - `ExportSettings`: add `encoder_speed: Option<String>` threaded into quality args (check `plan_hash` includes it deliberately).
 - New preset `proxy_480p` (854x480, CRF 30, H264/AAC 96k, `ultrafast`) + expose `mp4_draft` in CLI `RENDER_PRESETS`.
 - `render start --proxy` (alias for proxy_480p) + `--start/--end` args (ExportSettings already supports).
 - `--progress`: pass `mpsc::Sender<ExportProgress>`, stream NDJSON to stderr. Add tokio `sync`+`signal` features to CLI Cargo.toml; wire Ctrl-C to the existing oneshot cancel.
 
-### T5 — Headless perception (`feat(api)`)
+### T5 — Headless perception (`feat(api)`) — DONE (`1bf586ba`)
 
 - src-tauri visibility: promote `AnalysisJobRunner::save_bundle` + `asset_analysis_dir` to `pub`; or add public load-merge-save helpers (`merge_bundle_shots`, `merge_bundle_audio_profile`) — prefer merge helpers to prevent partial-bundle clobbering.
 - `analysis shots [--threshold 0.3] [--min-shot-duration 0.5] [--timeout-sec 600]` → `ShotDetector`; **triple-write**: (1) sqlite `index.db` `shots` table via `save_to_db` with the 3-attempt SQLITE_BUSY retry (GUI markers read only this), (2) merge into `bundle.json`, (3) `AnnotationStore.set_shots` (provider Ffmpeg, config recorded; use asset's stored hash, tolerate empty).
@@ -61,7 +94,7 @@ Per "Refactor Before Feature". `core/qc/` is dead code with three simulated rule
 - `analysis run [--shots|--audio|--segments|--transcript|--visual|--all]` → `analyze_full_with_metadata` with `local_only: true` forced; transcript off by default, fail fast with `transcription install` hint when the whisper model is missing; surface `bundle.errors`, non-zero exit only if every enabled sub-job failed. NDJSON progress on stderr.
 - All media paths via `asset.resolved_path(&project.path)`.
 
-### T6 — `verify` (`feat(core)` then `feat(api)`; may be two commits)
+### T6 — `verify` (`feat(core)` then `feat(api)`; may be two commits) — DONE (`b6568eba`)
 
 - `core/qc/measure.rs`: `FFmpegRunner::run_filter_capture_stderr(input, filter_complex, maps, timeout)` (public, `tokio::time::timeout`, `configure_tokio_command`, pinned `-loglevel info`); refactor `AudioProfiler::run_ffmpeg_filter` onto it (closes the no-timeout gap everywhere). Single-pass invocation:
   `-filter_complex "[0:v]blackdetect=d=0.1:pic_th=0.98:pix_th=0.10,freezedetect=n=-60dB:d=2[v];[0:a]ebur128=peak=true:framelog=summary,silencedetect=n=-50dB:d=1.5,astats=metadata=0:measure_perchannel=none:measure_overall=Peak_level+Flat_factor[a]" -map "[v]" -map "[a]" -f null -`
@@ -70,11 +103,23 @@ Per "Refactor Before Feature". `core/qc/` is dead code with three simulated rule
 - Cross-reference: rendered black ranges overlapping structural gaps ⇒ error; non-overlapping ⇒ info (title cards/fades are legitimate).
 - `crates/openreelio-cli/src/commands/verify.rs`: `verify --path P [--sequence S] [--file RENDER] [--structural-only] [--checks a,b] [--skip a,b] [--target-lufs -14] [--max-true-peak -1] [--fail-on error] [--timeout-sec 600]`. No `--file` ⇒ structural only. Exit codes: 0 ran+passed threshold, 1 threshold breached, 2 tool error. Output schema mirrors `build_diagnostics` top-level (`status/warnings/errors`) plus `checks[]`, `measurements{}`, per-check `timeRanges`, `suggestedFix` (EditScript) so violations stay agent-actionable. Keep taste-adjacent checks at warning/info; `error` reserved for objectively broken output.
 
-### T7 — Integration & polish
+### T7 — Integration & polish — DONE
 
 - Extend `integration.rs` e2e: perceive (shots+silence) → edit → proxy render → frame extract → verify (structural + rendered) in one flow; plus targeted tests per verb.
 - help-json entries for every new leaf; update `docs/COMMAND_REFERENCE.md` CLI tree in CLAUDE.md if needed.
 - Workspace-wide `cargo fmt --check`, `cargo clippy -D warnings` (gui lib AND cli AND core), full `cargo test`, `npm run type-check` (bindings untouched but verify).
+
+Outcome:
+
+- `test_agent_perception_loop_end_to_end` drives the whole loop through the real binary
+  (create → import → `analysis shots` → `analysis silence` → insert + shot-informed split →
+  `render start --proxy --progress` → `frame extract --time` → `frame extract --grid` →
+  `verify --file`), asserting only on CLI-observable JSON. Runs in ~3 s; skips without FFmpeg.
+- The loop needs a `timeline trim` step before the split: `asset import` does not probe media
+  duration, so the placed clip carries the default length and perception's `totalDurationSec`
+  is what tells the agent how long the media actually is.
+- `docs/COMMAND_REFERENCE.md` documents edit Commands and analysis IPC only — no CLI verb tree,
+  so it was left untouched. The CLI tree in `CLAUDE.md` carries the new verbs.
 
 ## Known risks (from investigation — do not rediscover)
 

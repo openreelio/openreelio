@@ -256,6 +256,66 @@ fn create_sample_video_with_audio(path: &std::path::Path) -> bool {
     status.success()
 }
 
+/// Generates a 4-second fixture with a hard black-to-white cut at 2s and an
+/// attenuated tone whose 1s–3s window is muted.
+///
+/// The agent loop needs one asset that both shot detection and silence
+/// detection can find something in. The tone is deliberately attenuated so the
+/// rendered proxy stays well under the true-peak ceiling `verify` enforces;
+/// a full-scale sine would be a clipped, not a healthy, render.
+fn create_sample_video_with_scene_change_and_audio(path: &std::path::Path) -> bool {
+    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+        return false;
+    };
+    let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
+        eprintln!("Skipping agent-loop test: ffmpeg lacks a supported video encoder");
+        return false;
+    };
+    if !ffmpeg_supports_encoder(&ffmpeg_path, "aac") {
+        eprintln!("Skipping agent-loop test: ffmpeg lacks the aac encoder");
+        return false;
+    }
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=320x240:r=25:d=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=white:s=320x240:r=25:d=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=44100:duration=4",
+        "-filter_complex",
+        "[0:v][1:v]concat=n=2:v=1:a=0[v];\
+         [2:a]volume=0.25,volume=enable='between(t,1,3)':volume=0[a]",
+        "-map",
+        "[v]",
+        "-map",
+        "[a]",
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p"]);
+    }
+    command.args(["-c:a", "aac", "-shortest"]);
+
+    let status = command
+        .arg(path)
+        .status()
+        .expect("Failed to generate agent-loop sample with ffmpeg");
+    if !status.success() {
+        eprintln!("Skipping agent-loop test: ffmpeg could not generate the agent-loop sample");
+    }
+    status.success()
+}
+
 fn system_ffprobe_path() -> Option<PathBuf> {
     openreelio_core::ffmpeg::detect_system_ffmpeg()
         .ok()
@@ -2753,4 +2813,279 @@ fn test_verify_reports_a_missing_render_file_as_a_tool_failure() {
         stderr.contains("does not exist"),
         "expected a missing-file error, got: {stderr}"
     );
+}
+
+// =============================================================================
+// Agent Perception Loop Regression Guard
+// =============================================================================
+
+/// Returns the first shot boundary strictly inside `(0, program_end)`.
+///
+/// A single-shot result has no interior cut, so callers get `None` and decide
+/// their own fallback rather than splitting at 0 or at the very end.
+fn first_interior_shot_boundary(shots: &serde_json::Value, program_end: f64) -> Option<f64> {
+    const EDGE_MARGIN_SEC: f64 = 0.1;
+
+    shots["shots"]
+        .as_array()?
+        .iter()
+        .filter_map(|shot| shot["startSec"].as_f64())
+        .find(|start| *start > EDGE_MARGIN_SEC && *start < program_end - EDGE_MARGIN_SEC)
+}
+
+/// Total program length of the active sequence, from the CLI's own clip listing.
+fn timeline_program_end_sec(project_path: &str) -> f64 {
+    let clips = run_cli_ok(&["timeline", "clips", "--path", project_path]);
+    clips["clips"]
+        .as_array()
+        .expect("clips array")
+        .iter()
+        .map(|clip| {
+            clip["timelineInSec"].as_f64().unwrap_or(0.0)
+                + clip["durationSec"].as_f64().unwrap_or(0.0)
+        })
+        .fold(0.0_f64, f64::max)
+}
+
+// ponytail: This is THE single end-to-end guard for the headless perception
+// loop an external agent drives: perceive (shots + silence) -> edit informed by
+// what was perceived -> render a proxy -> look at the result (still + contact
+// sheet) -> verify the render. It drives the real CLI binary and asserts only
+// on CLI-observable JSON and on files the CLI claims to have written, so it
+// stays valid as the internals move.
+//
+// It deliberately does NOT cover: detector accuracy, codec quality, or the
+// per-verb argument surface. Those have their own focused tests above. This
+// guard exists only to catch a SILENT break of the whole agent loop. It skips
+// cleanly (returns, does not fail) when FFmpeg is absent.
+#[test]
+fn test_agent_perception_loop_end_to_end() {
+    // 1. Create the project and import a fixture that has both a hard cut and
+    //    a silent window.
+    let Some((dir, path, asset_id)) = create_project_with_media(
+        "agent_loop_e2e",
+        "agent_loop_source.mp4",
+        create_sample_video_with_scene_change_and_audio,
+    ) else {
+        eprintln!("Skipping agent-loop E2E test: ffmpeg fixture unavailable");
+        return;
+    };
+
+    // 2. Perceive: shot detection.
+    let shots = run_cli_ok(&["analysis", "shots", "--path", &path, "--id", &asset_id]);
+    assert_eq!(shots["status"], "ok");
+    assert!(
+        shots["shotCount"].as_u64().unwrap() >= 1,
+        "Expected at least one detected shot, got {}",
+        shots["shotCount"]
+    );
+    assert!(shots["totalDurationSec"].as_f64().unwrap() > 0.0);
+
+    // 3. Perceive: silence detection over the same asset.
+    let silence = run_cli_ok(&["analysis", "silence", "--path", &path, "--id", &asset_id]);
+    assert_eq!(silence["status"], "ok");
+    let regions = silence["regions"].as_array().unwrap();
+    assert!(
+        !regions.is_empty(),
+        "Expected the muted 1s-3s window to be reported, got {silence}"
+    );
+    assert!(
+        regions.iter().any(|region| {
+            region["startSec"].as_f64().unwrap() >= 0.5 && region["endSec"].as_f64().unwrap() <= 3.5
+        }),
+        "Expected a silent region inside the muted window, got {regions:?}"
+    );
+
+    // 4. Edit: place the asset, then cut it where perception said the shot
+    //    changes.
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips["count"], 1);
+    let clip_id = clips["clips"][0]["id"].as_str().unwrap().to_string();
+
+    // `asset import` does not probe duration, so the placed clip carries the
+    // default length. Perception is what tells the agent how long the media
+    // actually is; trim to it before cutting so the edit stays inside the media.
+    let media_end = shots["totalDurationSec"].as_f64().unwrap();
+    run_cli_ok(&[
+        "timeline",
+        "trim",
+        "--path",
+        &path,
+        "--clip",
+        &clip_id,
+        "--track",
+        &track_id,
+        "--source-in",
+        "0.0",
+        "--source-out",
+        &media_end.to_string(),
+    ]);
+
+    let program_end = timeline_program_end_sec(&path);
+    assert!(
+        (program_end - media_end).abs() < 1e-6,
+        "Expected the trim to shrink the program to the perceived media length, got {program_end}"
+    );
+
+    // The fixture cuts at 2s; fall back to it when the detector merged the two
+    // shots so the loop still exercises a real split.
+    let split_at = first_interior_shot_boundary(&shots, program_end).unwrap_or(2.0);
+    let split = run_cli_ok(&[
+        "timeline",
+        "split",
+        "--path",
+        &path,
+        "--clip",
+        &clip_id,
+        "--track",
+        &track_id,
+        "--at",
+        &split_at.to_string(),
+    ]);
+    assert_eq!(split["status"], "ok");
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(
+        clips["count"], 2,
+        "Expected the shot-informed split to yield two clips: {clips}"
+    );
+
+    // 5. Render a proxy of the edit, streaming progress to stderr.
+    let proxy_path = dir.path().join("agent_loop_proxy.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--progress",
+        "--output",
+        proxy_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "Proxy render failed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let render: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("Failed to parse proxy render output: {error}\n{stdout}"));
+    assert_eq!(render["status"], "ok");
+    assert_eq!(render["preset"], "proxy_480p");
+    assert!(proxy_path.exists(), "Expected the proxy render to exist");
+    assert!(
+        proxy_path.metadata().unwrap().len() > 0,
+        "Expected the proxy render to be non-empty"
+    );
+    assert!(
+        stderr
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+            .any(|value| value["type"] == "progress"),
+        "Expected NDJSON render progress on stderr, got: {stderr}"
+    );
+
+    // 6. Look: a single still from the second half of the edit.
+    let still_path = dir.path().join("agent_loop_still.png");
+    let mid_second_clip = (split_at + program_end) / 2.0;
+    let still = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        &mid_second_clip.to_string(),
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+    assert_eq!(still["status"], "ok");
+    assert_eq!(still["count"], 1);
+    assert!(still["frames"][0]["clipId"].is_string());
+    assert!(still_path.exists(), "Expected the extracted still to exist");
+    assert!(
+        still_path.metadata().unwrap().len() > 0,
+        "Expected the extracted still to be non-empty"
+    );
+
+    // 7. Look: a contact sheet spanning the whole program, so a VLM can map
+    //    cells back to timecodes.
+    let sheet_path = dir.path().join("agent_loop_sheet.jpg");
+    let sheet = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--between",
+        "0",
+        &program_end.to_string(),
+        "--format",
+        "jpeg",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+    assert_eq!(sheet["status"], "ok");
+    assert_eq!(sheet["sheet"]["cols"], 2);
+    assert_eq!(sheet["sheet"]["rows"], 2);
+    assert_eq!(sheet["sheet"]["cells"].as_array().unwrap().len(), 4);
+    assert!(sheet_path.exists(), "Expected the contact sheet to exist");
+    assert!(
+        sheet_path.metadata().unwrap().len() > 0,
+        "Expected the contact sheet to be non-empty"
+    );
+
+    // 8. Verify the rendered proxy. A healthy project must clear the critical
+    //    threshold, and both halves of the report have to be present.
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        proxy_path.to_str().unwrap(),
+        "--fail-on",
+        "critical",
+    ]);
+    assert_eq!(
+        code, 0,
+        "A healthy project must clear --fail-on critical.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("Failed to parse verify report: {error}\n{stdout}"));
+    assert_eq!(report["summary"]["critical"], 0);
+    assert_eq!(report["target"]["measured"], true);
+    assert_eq!(report["measurements"]["measured"], true);
+    assert!(report["measurements"]["durationSec"].as_f64().unwrap() > 0.0);
+
+    let checks = report["checks"].as_array().expect("checks array");
+    assert!(
+        checks
+            .iter()
+            .any(|check| check["category"] == "structural" && check["status"] != "skipped"),
+        "Expected at least one structural check to have run: {report}"
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|check| check["category"] == "rendered" && check["status"] != "skipped"),
+        "Expected at least one rendered check to have run once a file was measured: {report}"
+    );
+
+    // The split closed onto the following clip, so the edit must be gapless.
+    let gap = find_check(&report, "timeline.gap");
+    assert_eq!(gap["status"], "passed");
+    assert_eq!(gap["violationCount"], 0);
 }
