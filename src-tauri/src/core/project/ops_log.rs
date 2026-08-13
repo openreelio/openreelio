@@ -12,7 +12,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::core::{CoreResult, OpId};
+use crate::core::{CoreError, CoreResult, OpId};
 
 // =============================================================================
 // Operation Types
@@ -184,17 +184,35 @@ pub struct ReadResult {
     pub errors: Vec<(usize, String)>,
 }
 
+/// Revision of `ops.jsonl` a guarded session believes is on disk.
+///
+/// Shared by every handle derived from one another via [`OpsLog::shared_handle`],
+/// so an append made through the executor's handle advances the same watermark
+/// the project's own handle checks.
+///
+/// The byte length is the discriminator: it is an `O(1)` stat, and because the
+/// log is append-only any foreign write necessarily changes it. The operation
+/// count is carried alongside purely so a rejection can report meaningful
+/// numbers without rescanning the file on the happy path.
+#[derive(Debug)]
+struct SessionWatermark {
+    /// Byte length `ops.jsonl` had after this session's last write or resync.
+    expected_len: AtomicU64,
+    /// Operation count corresponding to `expected_len`.
+    expected_op_count: AtomicU64,
+}
+
 /// Append-only operation log backed by a JSONL file
 pub struct OpsLog {
     /// Path to the ops.jsonl file
     path: PathBuf,
-    /// Number of operations appended through this handle and every handle
-    /// derived from it via [`OpsLog::shared_handle`].
+    /// Session watermark installed by [`OpsLog::begin_guarded_session`].
     ///
-    /// This is the basis of external-change detection: the number of operations
-    /// the current session expects to find on disk is the count observed when
-    /// the log was opened plus the number of appends this session performed.
-    local_append_count: Arc<AtomicU64>,
+    /// `None` means this handle writes unguarded, which is the correct default
+    /// for one-shot readers, replay helpers and tests. Only a handle that
+    /// represents a live editing session (see [`crate::ActiveProject`]) opts in,
+    /// because only such a session can be *stale* relative to the file.
+    watermark: Option<Arc<SessionWatermark>>,
 }
 
 struct OpsLogLock(File);
@@ -211,28 +229,197 @@ impl OpsLog {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
-            local_append_count: Arc::new(AtomicU64::new(0)),
+            watermark: None,
         }
     }
 
-    /// Creates a second handle to the same log that shares this handle's local
-    /// append counter.
+    /// Creates a second handle to the same log that shares this handle's
+    /// session watermark.
     ///
     /// Use this whenever a component (for example [`crate::core::commands::CommandExecutor`])
     /// needs its own handle to a log that another component also writes to, so
-    /// that every append performed by this session is attributed to the same
-    /// counter and never mistaken for an external edit.
+    /// that every append performed by this session advances the same watermark
+    /// and is never mistaken for an external edit.
     pub fn shared_handle(&self) -> Self {
         Self {
             path: self.path.clone(),
-            local_append_count: Arc::clone(&self.local_append_count),
+            watermark: self.watermark.as_ref().map(Arc::clone),
         }
     }
 
-    /// Returns the number of operations appended through this handle family
-    /// since it was created.
-    pub fn local_append_count(&self) -> u64 {
-        self.local_append_count.load(Ordering::SeqCst)
+    // =========================================================================
+    // External-change guard
+    //
+    // Every write to ops.jsonl in the product funnels through `append` /
+    // `append_batch`, so enforcing the guard here covers all callers by
+    // construction instead of relying on each of them to remember a check.
+    // =========================================================================
+
+    /// Starts guarding this handle family against writes made by other
+    /// processes, using the log's current on-disk revision as the baseline.
+    ///
+    /// From this point on, [`OpsLog::append`] and [`OpsLog::append_batch`] fail
+    /// with [`CoreError::ExternalChangeDetected`] when the file no longer
+    /// matches what this session wrote, instead of interleaving this session's
+    /// operations with the foreign ones.
+    ///
+    /// Handles that do not opt in keep appending unconditionally, which is what
+    /// short-lived writers such as `openreelio-cli` invocations need.
+    pub fn begin_guarded_session(&mut self) -> CoreResult<()> {
+        let _lock = self.lock_shared()?;
+        let len = self.on_disk_len()?;
+        let count = self.count_unlocked()? as u64;
+        self.watermark = Some(Arc::new(SessionWatermark {
+            expected_len: AtomicU64::new(len),
+            expected_op_count: AtomicU64::new(count),
+        }));
+        Ok(())
+    }
+
+    /// Reads every operation, archived ones included, and installs the session
+    /// watermark from the same critical section.
+    ///
+    /// Opening a project needs both halves to describe the same revision of the
+    /// log. Reading first and sampling the baseline afterwards (or the reverse)
+    /// leaves a window in which another process can append: the freshly opened
+    /// session would then start out already disagreeing with the file and report
+    /// an external change that it had in fact just replayed.
+    pub fn begin_guarded_session_reading_all(&mut self) -> CoreResult<ReadResult> {
+        // Exclusive rather than shared: no other process may append between the
+        // replay and the baseline sample.
+        let _lock = self.lock_exclusive()?;
+
+        let mut all_ops = Vec::new();
+        let mut all_errors = Vec::new();
+
+        let archive_result = self.read_archive()?;
+        all_ops.extend(archive_result.operations);
+        all_errors.extend(
+            archive_result
+                .errors
+                .into_iter()
+                .map(|(line, err)| (line, format!("[archive] {}", err))),
+        );
+
+        let current_result = self.read_all_unlocked()?;
+        let archive_lines = all_ops.len();
+        all_ops.extend(current_result.operations);
+        all_errors.extend(
+            current_result
+                .errors
+                .into_iter()
+                .map(|(line, err)| (line + archive_lines, err)),
+        );
+
+        let len = self.on_disk_len()?;
+        let count = self.count_unlocked()? as u64;
+        self.watermark = Some(Arc::new(SessionWatermark {
+            expected_len: AtomicU64::new(len),
+            expected_op_count: AtomicU64::new(count),
+        }));
+
+        Ok(ReadResult {
+            operations: all_ops,
+            errors: all_errors,
+        })
+    }
+
+    /// Whether this handle rejects appends made on top of foreign writes.
+    pub fn is_guarded(&self) -> bool {
+        self.watermark.is_some()
+    }
+
+    /// Number of operations a guarded session expects the log to contain.
+    ///
+    /// Returns `None` for unguarded handles, which hold no expectation at all.
+    pub fn expected_op_count(&self) -> Option<u64> {
+        self.watermark
+            .as_ref()
+            .map(|watermark| watermark.expected_op_count.load(Ordering::SeqCst))
+    }
+
+    /// Fails with [`CoreError::ExternalChangeDetected`] when the on-disk log no
+    /// longer matches what this session wrote.
+    ///
+    /// Callers that mutate in-memory state before appending should call this
+    /// first so a rejection leaves nothing half-applied. It is a no-op on
+    /// unguarded handles.
+    pub fn ensure_no_external_changes(&self) -> CoreResult<()> {
+        if self.watermark.is_none() {
+            return Ok(());
+        }
+        let _lock = self.lock_shared()?;
+        self.verify_watermark_locked()
+    }
+
+    /// Byte length of the log, treating a missing file as empty.
+    fn on_disk_len(&self) -> CoreResult<u64> {
+        match std::fs::metadata(&self.path) {
+            Ok(metadata) => Ok(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Compares the on-disk log against the watermark. Requires a held lock.
+    fn verify_watermark_locked(&self) -> CoreResult<()> {
+        let Some(watermark) = self.watermark.as_ref() else {
+            return Ok(());
+        };
+
+        let expected_len = watermark.expected_len.load(Ordering::SeqCst);
+        let actual_len = self.on_disk_len()?;
+        if actual_len == expected_len {
+            return Ok(());
+        }
+
+        // Only the rejection path pays for an exact count; the numbers exist to
+        // explain the conflict to the user, not to detect it.
+        let expected_op_count = watermark.expected_op_count.load(Ordering::SeqCst) as usize;
+        let on_disk_op_count = self.count_unlocked()?;
+        tracing::warn!(
+            expected_op_count,
+            on_disk_op_count,
+            expected_len,
+            actual_len,
+            ops_log = %self.path.display(),
+            "External change detected in project ops log"
+        );
+        Err(CoreError::ExternalChangeDetected {
+            expected_op_count,
+            on_disk_op_count,
+        })
+    }
+
+    /// Records that this session just wrote `appended_ops` operations.
+    /// Requires a held lock so the sampled length reflects our own write.
+    fn advance_watermark_locked(&self, appended_ops: u64) -> CoreResult<()> {
+        let Some(watermark) = self.watermark.as_ref() else {
+            return Ok(());
+        };
+        watermark
+            .expected_len
+            .store(self.on_disk_len()?, Ordering::SeqCst);
+        watermark
+            .expected_op_count
+            .fetch_add(appended_ops, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Re-samples the watermark after this session deliberately rewrote the log
+    /// (compaction), so its own rewrite is not mistaken for a foreign edit.
+    /// Requires a held lock.
+    fn resync_watermark_locked(&self) -> CoreResult<()> {
+        let Some(watermark) = self.watermark.as_ref() else {
+            return Ok(());
+        };
+        watermark
+            .expected_len
+            .store(self.on_disk_len()?, Ordering::SeqCst);
+        watermark
+            .expected_op_count
+            .store(self.count_unlocked()? as u64, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Returns the path to the ops.jsonl file
@@ -303,9 +490,15 @@ impl OpsLog {
     }
 
     /// Appends a single operation to the log
+    ///
+    /// On a guarded handle (see [`OpsLog::begin_guarded_session`]) this fails
+    /// with [`CoreError::ExternalChangeDetected`] when another process wrote to
+    /// the log first. The check runs inside the same exclusive lock as the
+    /// write, so no foreign append can slip in between the two.
     pub fn append(&self, op: &Operation) -> CoreResult<()> {
         tracing::debug!(op_id = %op.id, op_kind = ?op.kind, "Appending operation to ops log");
         let _lock = self.lock_exclusive()?;
+        self.verify_watermark_locked()?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -321,20 +514,23 @@ impl OpsLog {
         // of the log on power loss can make snapshots diverge from history.
         writer.get_ref().sync_all()?;
 
-        // Only count appends that reached disk; an inflated counter would hide a
-        // genuine external edit.
-        self.local_append_count.fetch_add(1, Ordering::SeqCst);
+        // Only count appends that reached disk; an inflated watermark would hide
+        // a genuine external edit.
+        self.advance_watermark_locked(1)?;
 
         Ok(())
     }
 
     /// Appends multiple operations to the log atomically
+    ///
+    /// Guarded handles reject foreign writes exactly as [`OpsLog::append`] does.
     pub fn append_batch(&self, ops: &[Operation]) -> CoreResult<()> {
         tracing::debug!(
             op_count = ops.len(),
             "Appending batch operations to ops log"
         );
         let _lock = self.lock_exclusive()?;
+        self.verify_watermark_locked()?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -350,8 +546,7 @@ impl OpsLog {
         // See `append` for durability rationale.
         writer.get_ref().sync_all()?;
 
-        self.local_append_count
-            .fetch_add(ops.len() as u64, Ordering::SeqCst);
+        self.advance_watermark_locked(ops.len() as u64)?;
 
         Ok(())
     }
@@ -441,6 +636,11 @@ impl OpsLog {
     /// Counts the total number of operations in the log
     pub fn count(&self) -> CoreResult<usize> {
         let _lock = self.lock_shared()?;
+        self.count_unlocked()
+    }
+
+    /// Counts operations without acquiring the lock. Requires a held lock.
+    fn count_unlocked(&self) -> CoreResult<usize> {
         if !self.exists() {
             return Ok(0);
         }
@@ -493,6 +693,9 @@ impl OpsLog {
 
         // Replace the original file
         std::fs::rename(&temp_path, &self.path)?;
+        // This session rewrote the log on purpose; re-baseline so its own
+        // rewrite is not reported as somebody else's edit.
+        self.resync_watermark_locked()?;
 
         Ok(error_count)
     }
@@ -562,6 +765,8 @@ impl OpsLog {
 
         // Atomic rename
         std::fs::rename(&temp_path, &self.path)?;
+        // See `compact`: compaction is a deliberate local rewrite.
+        self.resync_watermark_locked()?;
 
         Ok(archived_count)
     }
@@ -877,44 +1082,168 @@ this is not valid json
         assert_eq!(ops_log.count().unwrap(), 2);
     }
 
+    // =========================================================================
+    // External-change guard
+    //
+    // Feature: External edit safety
+    //   As an editor who drives OpenReelio from both the GUI and openreelio-cli
+    //   I want appends to stop at the log itself when another process wrote
+    //   So that no mutation path can bypass the check by forgetting to call it
+    // =========================================================================
+
+    /// Scenario: an unguarded handle is the default and never blocks.
     #[test]
-    fn test_ops_log_shared_handle_counts_appends_from_both_handles() {
+    fn should_append_unconditionally_on_an_unguarded_handle() {
+        // Given a plain handle, as short-lived headless writers and tests use
         let (ops_log, _temp_dir) = create_test_ops_log();
-        let executor_handle = ops_log.shared_handle();
+        assert!(!ops_log.is_guarded());
+        assert_eq!(ops_log.expected_op_count(), None);
 
-        assert_eq!(ops_log.local_append_count(), 0);
+        // When another writer appends underneath it
+        OpsLog::new(ops_log.path())
+            .append(&Operation::new(OpKind::AssetImport, serde_json::json!({})))
+            .unwrap();
 
+        // Then it still appends and reports no external change
+        ops_log.ensure_no_external_changes().unwrap();
+        ops_log
+            .append(&Operation::new(OpKind::ClipAdd, serde_json::json!({})))
+            .unwrap();
+        assert_eq!(ops_log.count().unwrap(), 2);
+    }
+
+    /// Scenario: a guarded handle refuses to write on top of a foreign append.
+    #[test]
+    fn should_reject_appends_on_a_guarded_handle_after_a_foreign_write() {
+        // Given a guarded session that has appended once
+        let (mut ops_log, _temp_dir) = create_test_ops_log();
+        ops_log.begin_guarded_session().unwrap();
         ops_log
             .append(&Operation::new(OpKind::AssetImport, serde_json::json!({})))
             .unwrap();
-        executor_handle
+        ops_log.ensure_no_external_changes().unwrap();
+        assert_eq!(ops_log.expected_op_count(), Some(1));
+
+        // When another process appends
+        OpsLog::new(ops_log.path())
             .append(&Operation::new(OpKind::ClipAdd, serde_json::json!({})))
             .unwrap();
-        executor_handle
-            .append_batch(&[
-                Operation::new(OpKind::ClipMove, serde_json::json!({})),
-                Operation::new(OpKind::ClipTrim, serde_json::json!({})),
-            ])
-            .unwrap();
 
-        // Both handles observe the same session-local total.
-        assert_eq!(ops_log.local_append_count(), 4);
-        assert_eq!(executor_handle.local_append_count(), 4);
-        assert_eq!(ops_log.count().unwrap(), 4);
+        // Then both the pre-flight check and the append itself refuse
+        assert!(matches!(
+            ops_log.ensure_no_external_changes(),
+            Err(CoreError::ExternalChangeDetected {
+                expected_op_count: 1,
+                on_disk_op_count: 2,
+            })
+        ));
+        assert!(matches!(
+            ops_log.append(&Operation::new(OpKind::ClipMove, serde_json::json!({}))),
+            Err(CoreError::ExternalChangeDetected { .. })
+        ));
+        assert!(matches!(
+            ops_log.append_batch(&[Operation::new(OpKind::ClipTrim, serde_json::json!({}))]),
+            Err(CoreError::ExternalChangeDetected { .. })
+        ));
+        // And the foreign operation is still the only thing that landed
+        assert_eq!(ops_log.count().unwrap(), 2);
     }
 
+    /// Scenario: the executor's derived handle shares one watermark.
     #[test]
-    fn test_ops_log_independent_handles_do_not_share_append_counts() {
-        let (ops_log, _temp_dir) = create_test_ops_log();
-        // A separate handle stands in for another process writing the same file.
-        let other_process = OpsLog::new(ops_log.path());
+    fn should_share_the_guard_with_handles_derived_from_the_same_session() {
+        // Given a guarded log and the handle the executor writes through
+        let (mut ops_log, _temp_dir) = create_test_ops_log();
+        ops_log.begin_guarded_session().unwrap();
+        let executor_handle = ops_log.shared_handle();
+        assert!(executor_handle.is_guarded());
 
-        other_process
+        // When each handle appends, neither sees the other as external
+        executor_handle
             .append(&Operation::new(OpKind::AssetImport, serde_json::json!({})))
             .unwrap();
+        ops_log
+            .append(&Operation::new(OpKind::ClipAdd, serde_json::json!({})))
+            .unwrap();
+        ops_log.ensure_no_external_changes().unwrap();
+        executor_handle.ensure_no_external_changes().unwrap();
 
-        assert_eq!(ops_log.local_append_count(), 0);
-        assert_eq!(ops_log.count().unwrap(), 1);
+        // Then a foreign append stops both of them
+        OpsLog::new(ops_log.path())
+            .append(&Operation::new(OpKind::ClipMove, serde_json::json!({})))
+            .unwrap();
+        assert!(matches!(
+            executor_handle.append(&Operation::new(OpKind::ClipTrim, serde_json::json!({}))),
+            Err(CoreError::ExternalChangeDetected { .. })
+        ));
+        assert!(matches!(
+            ops_log.ensure_no_external_changes(),
+            Err(CoreError::ExternalChangeDetected { .. })
+        ));
+    }
+
+    /// Scenario: opening a project baselines against the log it just replayed.
+    #[test]
+    fn should_baseline_the_guard_against_the_operations_it_replayed() {
+        // Given a log another process already populated, part of it archived so
+        // the replay has to read both files
+        let (ops_log, _temp_dir) = create_test_ops_log();
+        let ops: Vec<Operation> = (1..=5)
+            .map(|i| {
+                Operation::with_id(
+                    &format!("op_{:03}", i),
+                    OpKind::AssetImport,
+                    serde_json::json!({}),
+                )
+            })
+            .collect();
+        ops_log.append_batch(&ops).unwrap();
+        assert_eq!(ops_log.compact_after_snapshot("op_002").unwrap(), 2);
+
+        // When a session opens it
+        let mut session = OpsLog::new(ops_log.path());
+        let read = session.begin_guarded_session_reading_all().unwrap();
+
+        // Then the replay spans the archive, while the watermark tracks only the
+        // live log the session will append to
+        assert_eq!(read.operations.len(), 5);
+        assert!(read.errors.is_empty());
+        assert_eq!(session.expected_op_count(), Some(3));
+        session.ensure_no_external_changes().unwrap();
+        session
+            .append(&Operation::new(OpKind::ClipMove, serde_json::json!({})))
+            .unwrap();
+        assert_eq!(session.expected_op_count(), Some(4));
+    }
+
+    /// Scenario: this session's own compaction is not a foreign edit.
+    #[test]
+    fn should_rebaseline_the_guard_after_this_session_compacts() {
+        // Given a guarded session with several operations
+        let (mut ops_log, _temp_dir) = create_test_ops_log();
+        let ops: Vec<Operation> = (1..=6)
+            .map(|i| {
+                Operation::with_id(
+                    &format!("op_{:03}", i),
+                    OpKind::AssetImport,
+                    serde_json::json!({}),
+                )
+            })
+            .collect();
+        ops_log.append_batch(&ops).unwrap();
+        ops_log.begin_guarded_session().unwrap();
+
+        // When it compacts its own log, which rewrites the file
+        let archived = ops_log.compact_after_snapshot("op_003").unwrap();
+        assert_eq!(archived, 3);
+
+        // Then it keeps writing rather than accusing itself
+        ops_log.ensure_no_external_changes().unwrap();
+        assert_eq!(ops_log.expected_op_count(), Some(3));
+        ops_log
+            .append(&Operation::new(OpKind::ClipAdd, serde_json::json!({})))
+            .unwrap();
+        assert_eq!(ops_log.count().unwrap(), 4);
     }
 
     #[test]

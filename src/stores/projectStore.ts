@@ -1069,6 +1069,10 @@ export const useProjectStore = create<ProjectState>()(
 
             set((state) => {
               state.error = errorMessage;
+              // Agent tools and several hooks mutate through this path, so it
+              // needs the same reload affordance as executeCommand - otherwise a
+              // refused mutation surfaces as a bare error with no way forward.
+              noteExternalChangeIfDetected(state, error);
             });
             throw error;
           }

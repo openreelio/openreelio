@@ -11,6 +11,15 @@ use tauri::State;
 use crate::core::{assets::Asset, fs::validate_existing_project_dir, CoreError};
 use crate::{ActiveProject, AppState};
 
+/// How many times [`reload_project_from_disk`] re-reads the project when another
+/// process appends while the reload is in flight.
+///
+/// Reloading has to release the project lock to replay the log off the async
+/// runtime, so a busy external writer can land an operation in that window. A
+/// couple of retries absorb that; beyond it the honest answer is that something
+/// else owns the project right now.
+const RELOAD_MAX_ATTEMPTS: u32 = 3;
+
 // =============================================================================
 // Helper Functions
 // =============================================================================
@@ -740,48 +749,80 @@ pub async fn reload_project_from_disk(state: State<'_, AppState>) -> Result<Proj
             .clone()
     };
 
-    // Reopening replays the ops log; keep it off the async runtime threads.
-    let reloaded = tokio::task::spawn_blocking(move || ActiveProject::open(project_path))
-        .await
-        .map_err(|e| format!("Project reload task failed: {e}"))?
-        .map_err(|e| e.to_ipc_error())?;
+    for attempt in 1..=RELOAD_MAX_ATTEMPTS {
+        let path_for_open = project_path.clone();
+        // Reopening replays the ops log; keep it off the async runtime threads.
+        // `ActiveProject::open` takes its external-change baseline in the same
+        // critical section as the replay, so the reloaded session's watermark
+        // always describes exactly the revision it replayed.
+        let reloaded = tokio::task::spawn_blocking(move || ActiveProject::open(path_for_open))
+            .await
+            .map_err(|e| format!("Project reload task failed: {e}"))?
+            .map_err(|e| e.to_ipc_error())?;
 
-    let assets_for_scope: Vec<Asset> = reloaded.state.assets.values().cloned().collect();
-    let project_path_canon =
-        std::fs::canonicalize(&reloaded.path).unwrap_or_else(|_| reloaded.path.clone());
+        let assets_for_scope: Vec<Asset> = reloaded.state.assets.values().cloned().collect();
+        let project_path_canon =
+            std::fs::canonicalize(&reloaded.path).unwrap_or_else(|_| reloaded.path.clone());
 
-    let info = ProjectInfo {
-        id: reloaded.state.meta.id.clone(),
-        name: reloaded.state.meta.name.clone(),
-        path: project_path_canon.to_string_lossy().to_string(),
-        created_at: reloaded.state.meta.created_at.clone(),
-    };
+        let info = ProjectInfo {
+            id: reloaded.state.meta.id.clone(),
+            name: reloaded.state.meta.name.clone(),
+            path: project_path_canon.to_string_lossy().to_string(),
+            created_at: reloaded.state.meta.created_at.clone(),
+        };
 
-    {
-        let mut guard = state.project.lock().await;
-        // Guard against the project being closed or replaced while reopening.
-        let is_same_project = guard
-            .as_ref()
-            .is_some_and(|current| current.path == reloaded.path);
-        if !is_same_project {
-            return Err(
-                "The active project changed while reloading. Reopen the project instead."
-                    .to_string(),
-            );
+        {
+            let mut guard = state.project.lock().await;
+            // Guard against the project being closed or replaced while reopening.
+            let is_same_project = guard
+                .as_ref()
+                .is_some_and(|current| current.path == reloaded.path);
+            if !is_same_project {
+                return Err(
+                    "The active project changed while reloading. Reopen the project instead."
+                        .to_string(),
+                );
+            }
+
+            // The project lock was released while reopening, so another process
+            // may have appended in the meantime. Publishing such a session would
+            // hand the user a project that is stale the moment it appears and
+            // re-raises the banner on their next edit. Re-read instead, while
+            // still holding the lock that keeps this decision and the swap
+            // atomic against the rest of the app.
+            if reloaded.ensure_no_external_changes().is_err() {
+                if attempt == RELOAD_MAX_ATTEMPTS {
+                    return Err(format!(
+                        "The project kept changing on disk during reload \
+                         ({RELOAD_MAX_ATTEMPTS} attempts). Another process is still \
+                         writing to it; wait for it to finish and reload again."
+                    ));
+                }
+                tracing::warn!(
+                    attempt,
+                    project = %project_path_canon.display(),
+                    "Project changed on disk during reload; retrying"
+                );
+                continue;
+            }
+
+            *guard = Some(reloaded);
         }
-        *guard = Some(reloaded);
+
+        // Asset ids may have changed while this session was stale; re-derive the scope.
+        allow_project_asset_protocol(&state, &project_path_canon, &assets_for_scope);
+        reset_runtime_state_for_project_change(&state).await;
+
+        tracing::info!(
+            project = %project_path_canon.display(),
+            "Project reloaded from disk after external change"
+        );
+
+        return Ok(info);
     }
 
-    // Asset ids may have changed while this session was stale; re-derive the scope.
-    allow_project_asset_protocol(&state, &project_path_canon, &assets_for_scope);
-    reset_runtime_state_for_project_change(&state).await;
-
-    tracing::info!(
-        project = %project_path_canon.display(),
-        "Project reloaded from disk after external change"
-    );
-
-    Ok(info)
+    // The loop either returns or continues, so this is unreachable in practice.
+    Err("Project reload did not complete.".to_string())
 }
 
 /// Gets current project info

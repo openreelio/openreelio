@@ -146,6 +146,37 @@ describe('projectStore external change handling', () => {
     });
   });
 
+  describe('executeBackendMutation', () => {
+    it('should raise the external-change flag when the backend refuses the mutation', async () => {
+      // Agent tools and several hooks mutate through this path rather than
+      // executeCommand, so it needs the same reload affordance.
+      useProjectStore.setState({ isLoaded: true });
+
+      await expect(
+        useProjectStore.getState().executeBackendMutation('importAsset', () => {
+          throw new Error(
+            `${EXTERNAL_CHANGE_DETECTED_CODE}: the project operation log changed on disk ` +
+              'outside this session (expected 3 operations, found 5). Reload the project to continue.',
+          );
+        }),
+      ).rejects.toThrow(EXTERNAL_CHANGE_DETECTED_CODE);
+
+      expect(useProjectStore.getState().externalChange).toEqual({ source: 'command' });
+    });
+
+    it('should not raise the flag for ordinary mutation failures', async () => {
+      useProjectStore.setState({ isLoaded: true });
+
+      await expect(
+        useProjectStore.getState().executeBackendMutation('importAsset', () => {
+          throw new Error('Asset not found: asset_001');
+        }),
+      ).rejects.toThrow('Asset not found');
+
+      expect(useProjectStore.getState().externalChange).toBeNull();
+    });
+  });
+
   describe('reloadProjectFromDisk', () => {
     it('should rebuild from disk and clear the flag', async () => {
       const sequence = createMockSequence({ id: 'seq_reloaded' });

@@ -139,6 +139,15 @@ impl CommandExecutor {
         let command_json = command.to_json();
         let prev_op_id = state.last_op_id.clone();
 
+        // Refuse before touching `state`. The authoritative check lives in
+        // `OpsLog::append` (inside the write lock, so it cannot be raced), but
+        // by then the command has already mutated the in-memory state; failing
+        // there would leave this session's state ahead of its own log. On an
+        // unguarded log this is a no-op, so headless writers are unaffected.
+        if let Some(ops_log) = &self.ops_log {
+            ops_log.ensure_no_external_changes()?;
+        }
+
         tracing::debug!(
             command_type = %type_name,
             record_history,
