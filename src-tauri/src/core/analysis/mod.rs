@@ -108,6 +108,90 @@ fn expect_persisted(updated: Option<AnalysisBundle>) -> CoreResult<AnalysisBundl
 }
 
 // =============================================================================
+// Bundle Enrichment
+// =============================================================================
+
+/// Fields a slow, out-of-lock producer wants merged into a cached bundle.
+///
+/// A perception provider call takes seconds of network I/O, so it cannot run
+/// while the bundle lock is held, and the bundle copy it starts from is stale by
+/// the time it returns. Recording only the delta lets
+/// [`AnalysisJobRunner::publish_enrichment`] replay it onto the bundle as it is
+/// on disk *now*, inside the lock. Re-saving the producer's whole in-memory copy
+/// instead would revert every slot a concurrent writer — a CLI analysis run,
+/// another GUI job — filled while the producer was working.
+#[derive(Debug, Default)]
+pub struct BundleEnrichment {
+    /// Error keys this pass resolved, cleared before `recorded_errors` apply.
+    pub cleared_errors: Vec<&'static str>,
+    /// Errors this pass recorded.
+    pub recorded_errors: Vec<(&'static str, String)>,
+    /// Frame readings, indexed against [`Self::analyzed_shots`].
+    pub frame_analysis: Option<Vec<types::FrameAnalysis>>,
+    /// Semantic frame observations, indexed against [`Self::analyzed_shots`].
+    pub frame_observations: Option<Vec<types::FrameObservation>>,
+    /// The cut list the frame results were computed from.
+    pub analyzed_shots: Option<Vec<ShotResult>>,
+    /// Transcript segments plus the detail record derived from them.
+    pub transcript: Option<(Vec<TranscriptSegment>, types::TranscriptDetail)>,
+}
+
+impl BundleEnrichment {
+    /// Returns whether the producer came back with nothing to publish.
+    pub fn is_empty(&self) -> bool {
+        self.cleared_errors.is_empty()
+            && self.recorded_errors.is_empty()
+            && self.frame_analysis.is_none()
+            && self.frame_observations.is_none()
+            && self.transcript.is_none()
+    }
+
+    /// Applies the recorded delta to `bundle`, reporting whether it changed.
+    ///
+    /// Only the fields the producer filled are touched, so slots another writer
+    /// updated meanwhile survive. Frame results address shots by position and
+    /// are therefore published only while the bundle still carries the cut list
+    /// they were computed from.
+    fn apply(self, bundle: &mut AnalysisBundle) -> bool {
+        let mut changed = false;
+
+        for key in self.cleared_errors {
+            changed |= bundle.errors.remove(key).is_some();
+        }
+        for (key, message) in self.recorded_errors {
+            bundle.add_error(key, message);
+            changed = true;
+        }
+
+        if self.frame_analysis.is_some() || self.frame_observations.is_some() {
+            if bundle.has_shot_boundaries(self.analyzed_shots.as_deref()) {
+                if let Some(frames) = self.frame_analysis {
+                    bundle.frame_analysis = Some(frames);
+                    changed = true;
+                }
+                if let Some(observations) = self.frame_observations {
+                    bundle.frame_observations = Some(observations);
+                    changed = true;
+                }
+            } else {
+                tracing::warn!(
+                    "Discarding frame results for asset {}: shots changed while the provider ran",
+                    bundle.asset_id
+                );
+            }
+        }
+
+        if let Some((segments, detail)) = self.transcript {
+            bundle.transcript = Some(segments);
+            bundle.transcript_detail = Some(detail);
+            changed = true;
+        }
+
+        changed
+    }
+}
+
+// =============================================================================
 // Analysis Job Runner
 // =============================================================================
 
@@ -546,7 +630,15 @@ impl AnalysisJobRunner {
     /// failed or shot-orphaned slots).
     ///
     /// Returns the bundle that was persisted.
-    pub(crate) fn save_bundle(&self, bundle: &AnalysisBundle) -> CoreResult<AnalysisBundle> {
+    ///
+    /// Private on purpose: publishing a whole bundle is only sound for the
+    /// pipeline run that just produced it, because the merge can restore an
+    /// absent slot but cannot tell a caller's stale value from a fresh one. A
+    /// producer that works from a copy while other writers run — anything doing
+    /// network I/O — must publish its delta through
+    /// [`Self::publish_enrichment`] or [`Self::merge_bundle_update`] instead, so
+    /// the read its merge is based on happens under the bundle lock.
+    fn save_bundle(&self, bundle: &AnalysisBundle) -> CoreResult<AnalysisBundle> {
         let fresh = bundle.clone();
         let metadata = bundle.metadata.clone();
         let updated = self.locked_bundle_update(
@@ -607,6 +699,29 @@ impl AnalysisJobRunner {
         F: FnOnce(&mut AnalysisBundle) -> bool,
     {
         self.locked_bundle_update(asset_id, MissingBundle::Create(fallback_metadata), mutate)
+    }
+
+    /// Merges a provider enrichment into the asset's cached bundle.
+    ///
+    /// The read the merge is based on happens inside the bundle lock, so the
+    /// enrichment lands on the bundle as it is on disk when the producer
+    /// returns rather than on the copy the producer started from. Returns
+    /// `None` when the enrichment carries nothing, or nothing it carries
+    /// changes the cached bundle; nothing is written in that case, so the
+    /// `analyzed_at` stamp is left alone.
+    pub fn publish_enrichment(
+        &self,
+        asset_id: &str,
+        fallback_metadata: &VideoMetadata,
+        enrichment: BundleEnrichment,
+    ) -> CoreResult<Option<AnalysisBundle>> {
+        if enrichment.is_empty() {
+            return Ok(None);
+        }
+
+        self.try_merge_bundle_update(asset_id, fallback_metadata, |stored| {
+            enrichment.apply(stored)
+        })
     }
 
     /// Applies `mutate` to an already cached bundle, never creating one.
@@ -1313,6 +1428,95 @@ mod tests {
         let loaded = runner.load_bundle("asset_102").unwrap();
         assert!(!loaded.errors.contains_key("audio"));
         assert!(loaded.errors.contains_key("shots"));
+    }
+
+    #[test]
+    fn should_keep_a_concurrent_writers_slot_when_publishing_an_enrichment() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+        let metadata = VideoMetadata::new(30.0).with_audio(true);
+
+        // The bundle a perception provider starts its (slow) call from.
+        let mut published = AnalysisBundle::new("asset_300", metadata.clone());
+        published.shots = Some(vec![ShotResult::new(0.0, 30.0, 0.9)]);
+        published.audio_profile = Some(AudioProfile::silent(30.0));
+        runner.save_bundle(&published).unwrap();
+
+        // A second writer re-profiles the audio while the provider is working.
+        let mut reprofiled = AudioProfile::silent(30.0);
+        reprofiled.bpm = Some(128.0);
+        runner
+            .merge_bundle_audio_profile("asset_300", &metadata, reprofiled)
+            .unwrap();
+
+        let enrichment = BundleEnrichment {
+            transcript: Some((
+                vec![TranscriptSegment::new(0.0, 2.0, "hello", 0.9)],
+                build_transcript_detail_from_segments(
+                    &[TranscriptSegment::new(0.0, 2.0, "hello", 0.9)],
+                    "openai",
+                    "gpt-test",
+                ),
+            )),
+            ..Default::default()
+        };
+        let persisted = runner
+            .publish_enrichment("asset_300", &metadata, enrichment)
+            .unwrap()
+            .expect("an enrichment carrying a transcript must be written");
+
+        assert_eq!(
+            persisted.audio_profile.as_ref().unwrap().bpm,
+            Some(128.0),
+            "the concurrent writer's audio profile must survive the enrichment"
+        );
+        assert!(persisted.transcript_detail.is_some());
+        let reloaded = runner.load_bundle("asset_300").unwrap();
+        assert_eq!(reloaded.audio_profile.as_ref().unwrap().bpm, Some(128.0));
+        assert!(reloaded.transcript_detail.is_some());
+    }
+
+    #[test]
+    fn should_discard_enriched_frame_results_when_shots_changed_during_the_provider_call() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+        let metadata = VideoMetadata::new(30.0);
+
+        let analyzed_shots = vec![
+            ShotResult::new(0.0, 10.0, 0.9),
+            ShotResult::new(10.0, 30.0, 0.9),
+        ];
+        let mut published = AnalysisBundle::new("asset_301", metadata.clone());
+        published.shots = Some(analyzed_shots.clone());
+        runner.save_bundle(&published).unwrap();
+
+        // A re-detection lands while the provider is still reading the old cuts.
+        runner
+            .merge_bundle_shots(
+                "asset_301",
+                &metadata,
+                vec![
+                    ShotResult::new(0.0, 4.0, 0.9),
+                    ShotResult::new(4.0, 30.0, 0.9),
+                ],
+            )
+            .unwrap();
+
+        let enrichment = BundleEnrichment {
+            frame_analysis: Some(vec![FrameAnalysis::local_fallback(0, 0.5)]),
+            analyzed_shots: Some(analyzed_shots),
+            ..Default::default()
+        };
+        runner
+            .publish_enrichment("asset_301", &metadata, enrichment)
+            .unwrap();
+
+        let reloaded = runner.load_bundle("asset_301").unwrap();
+        assert_eq!(reloaded.shots.as_ref().unwrap()[0].end_sec, 4.0);
+        assert!(
+            reloaded.frame_analysis.is_none(),
+            "frame results indexed against superseded shots must not be published"
+        );
     }
 
     #[test]

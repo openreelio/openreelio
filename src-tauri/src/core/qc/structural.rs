@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use super::context::QCContext;
 use super::engine::QCReport;
 use super::rules::{QCRule, RuleConfig};
-use super::violation::{QCViolation, Severity, ViolationFix};
+use super::violation::{merged_span_duration_sec, QCViolation, Severity, ViolationFix};
 use crate::core::captions::{CaptionPosition, CaptionStyle, VerticalPosition};
 use crate::core::commands::find_gaps;
 use crate::core::project::ProjectState;
@@ -274,7 +274,10 @@ fn program_edge_gaps(sequence: &Sequence, min_gap_sec: f64) -> Vec<UncoveredGap>
         });
     }
 
-    let program_end_sec = sequence.duration();
+    // The program ends where the export stops writing, so a trailing clip the
+    // render drops leaves no uncovered picture behind it — there is simply no
+    // program there to be uncovered.
+    let program_end_sec = sequence.output_duration();
     if program_end_sec - latest.time_sec >= min_gap_sec {
         gaps.push(UncoveredGap {
             track_id: latest.track.id.clone(),
@@ -1376,12 +1379,16 @@ impl QCRule for ShotLengthStatsRule {
 // Cross-reference: rendered black ranges vs. structural gaps
 // =============================================================================
 
-/// Fraction of the program a single black range may cover before the "no gap
-/// overlaps this, so it is probably deliberate" reading stops being credible.
+/// Fraction of the program black may cover before the "no gap overlaps this,
+/// so it is probably deliberate" reading stops being credible.
 ///
 /// A fade or title card is short by construction. Black over half the running
 /// time is a dropped video chain, a wrong pixel format or an export that never
 /// received a picture — a broken render, whatever the timeline says.
+///
+/// Measured against the **total** black in the program, not against one range
+/// at a time: a render broken into a dozen dark stretches is exactly as unwatchable
+/// as one long one, and grading each range on its own let the sum pass.
 const BLACK_PROGRAM_FRACTION_ERROR: f64 = 0.5;
 
 /// Re-grades detected black ranges against the structural gaps of a sequence.
@@ -1392,9 +1399,10 @@ const BLACK_PROGRAM_FRACTION_ERROR: f64 = 0.5;
 /// happens here rather than inside either rule:
 ///
 /// * black overlapping an uncovered gap becomes [`Severity::Error`]
-/// * black covering at least [`BLACK_PROGRAM_FRACTION_ERROR`] of the program
-///   stays [`Severity::Error`] whether or not a gap explains it — a render that
-///   is dark end to end is broken output, and a timeline full of picture makes
+/// * black covering at least [`BLACK_PROGRAM_FRACTION_ERROR`] of the program in
+///   total stays [`Severity::Error`] whether or not a gap explains it, and
+///   whether it arrives as one stretch or twenty — a render that is dark for
+///   most of its length is broken output, and a timeline full of picture makes
 ///   that more damning, not less
 /// * black anywhere else drops to [`Severity::Info`] and is reported without a
 ///   verdict — nothing here can distinguish a deliberate fade from footage that
@@ -1426,7 +1434,27 @@ pub fn crossref_black_ranges_with_gaps(
     }
 
     let gaps = uncovered_video_gaps(sequence, min_gap_sec);
-    let program_duration_sec = sequence.duration();
+    // Black ranges are measured from the rendered file, so the fraction they
+    // cover is a fraction of what the render writes.
+    let program_duration_sec = sequence.output_duration();
+    let has_program = program_duration_sec.is_finite() && program_duration_sec > 0.0;
+
+    // How dark the program is overall, which is the question the error grade
+    // asks. A single range is only ever part of the answer: three separate
+    // stretches of a fifth of the running time each leave two thirds of the
+    // deliverable black while no one of them looks alarming.
+    let black_spans: Vec<(f64, f64)> = report
+        .violations
+        .iter()
+        .filter(|violation| violation.rule_name == black_rule_name)
+        .filter_map(|violation| violation.location.as_ref())
+        .map(|location| (location.start_sec, location.end_sec))
+        .collect();
+    let total_black_sec = merged_span_duration_sec(&black_spans);
+    let total_black_fraction = has_program.then(|| total_black_sec / program_duration_sec);
+    let program_is_mostly_black =
+        total_black_fraction.is_some_and(|fraction| fraction >= BLACK_PROGRAM_FRACTION_ERROR);
+
     let mut regraded = 0;
 
     for violation in report
@@ -1438,17 +1466,24 @@ pub fn crossref_black_ranges_with_gaps(
             continue;
         };
 
-        // Recorded on every black finding so the fraction an agent would have
-        // to derive by hand is already in the report.
-        let program_fraction = if program_duration_sec.is_finite() && program_duration_sec > 0.0 {
-            Some(location.duration() / program_duration_sec)
-        } else {
-            None
-        };
+        // Recorded on every black finding so the fractions an agent would have
+        // to derive by hand — this range's own share, and the program's total —
+        // are already in the report.
+        let program_fraction = has_program.then(|| location.duration() / program_duration_sec);
         if let Some(fraction) = program_fraction {
             violation.metrics.insert(
                 "programFraction".to_string(),
                 serde_json::json!((fraction * 1000.0).round() / 1000.0),
+            );
+        }
+        if let Some(fraction) = total_black_fraction {
+            violation.metrics.insert(
+                "programFractionTotal".to_string(),
+                serde_json::json!((fraction * 1000.0).round() / 1000.0),
+            );
+            violation.metrics.insert(
+                "totalBlackSec".to_string(),
+                serde_json::json!((total_black_sec * 1000.0).round() / 1000.0),
             );
         }
 
@@ -1475,19 +1510,21 @@ pub fn crossref_black_ranges_with_gaps(
                 .insert("overlapsGap".to_string(), serde_json::Value::Bool(false));
 
             // No gap explains this black. That is the benign reading only while
-            // the range is short; black over most of the program means the
-            // render is broken, and a timeline that is full of picture makes
-            // that worse rather than better.
-            let covers_program =
-                program_fraction.is_some_and(|fraction| fraction >= BLACK_PROGRAM_FRACTION_ERROR);
-
-            if covers_program {
+            // the program is mostly picture; black over most of the running
+            // time means the render is broken, and a timeline that is full of
+            // picture makes that worse rather than better. The total is what
+            // counts: how the darkness is split across ranges says nothing
+            // about how much of the deliverable is missing.
+            if program_is_mostly_black {
                 violation.severity = Severity::Error;
                 violation.details = Some(format!(
-                    "Black covers {:.0}% of the {:.2}s program while the timeline has picture \
-                     here, so the render itself is broken rather than the edit.",
-                    program_fraction.unwrap_or_default() * 100.0,
-                    program_duration_sec
+                    "Black covers {:.0}% of the {:.2}s program in total ({} range(s), {:.2}s) \
+                     while the timeline has picture here, so the render itself is broken rather \
+                     than the edit.",
+                    total_black_fraction.unwrap_or_default() * 100.0,
+                    program_duration_sec,
+                    black_spans.len(),
+                    total_black_sec
                 ));
             } else {
                 violation.severity = Severity::Info;
@@ -2307,6 +2344,10 @@ mod tests {
     // ========================================================================
 
     async fn report_with_black_range(sequence: &Sequence, range: (f64, f64)) -> QCReport {
+        report_with_black_ranges(sequence, vec![range]).await
+    }
+
+    async fn report_with_black_ranges(sequence: &Sequence, ranges: Vec<(f64, f64)>) -> QCReport {
         let mut engine = super::super::engine::QCEngine::new();
         let mut config = super::super::engine::QCEngineConfig::default();
         for name in engine
@@ -2328,7 +2369,7 @@ mod tests {
                 sequence,
                 &ProjectState::new("p"),
                 RenderMeasurements {
-                    black_ranges: vec![range],
+                    black_ranges: ranges,
                     ..Default::default()
                 },
             )
@@ -2433,6 +2474,65 @@ mod tests {
 
         assert_eq!(report.violations[0].severity, Severity::Error);
         assert_eq!(report.violations[0].metrics["programFraction"], 0.6);
+    }
+
+    /// Feature: Cross-referenced black detection
+    /// Scenario: should error when separate black ranges cover most of the program
+    ///
+    /// Regression: the "black covers half the program" rule was applied to one
+    /// range at a time, so a render broken into three dark fifths — sixty per
+    /// cent of the deliverable, none of it individually alarming — was
+    /// downgraded to info and passed.
+    #[tokio::test]
+    async fn test_crossref_should_error_when_black_ranges_add_up_to_most_of_the_program() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        // Continuous picture: the timeline explains none of the black below.
+        track.add_clip(video_clip("asset_1", 0.0, 10.0));
+        sequence.add_track(track);
+
+        let mut report =
+            report_with_black_ranges(&sequence, vec![(0.0, 2.0), (4.0, 6.0), (8.0, 10.0)]).await;
+        let regraded = crossref_black_ranges_with_gaps(&mut report, &sequence, 1.0 / 30.0);
+
+        assert_eq!(regraded, 3);
+        for violation in &report.violations {
+            assert_eq!(
+                violation.severity,
+                Severity::Error,
+                "60% of the program is black, however it is split up: {violation:?}"
+            );
+            assert_eq!(
+                violation.metrics["programFraction"], 0.2,
+                "no single range crosses the threshold on its own"
+            );
+            assert_eq!(violation.metrics["programFractionTotal"], 0.6);
+            assert_eq!(violation.metrics["totalBlackSec"], 6.0);
+        }
+        assert!(
+            !report.passed,
+            "verify must exit non-zero on a mostly black render"
+        );
+    }
+
+    /// Feature: Cross-referenced black detection
+    /// Scenario: should still treat several short fades as informational
+    #[tokio::test]
+    async fn test_crossref_should_leave_scattered_short_fades_informational() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        track.add_clip(video_clip("asset_1", 0.0, 20.0));
+        sequence.add_track(track);
+
+        // Three half-second fades: 7.5% of the program in total.
+        let mut report =
+            report_with_black_ranges(&sequence, vec![(0.0, 0.5), (9.0, 9.5), (19.5, 20.0)]).await;
+        crossref_black_ranges_with_gaps(&mut report, &sequence, 1.0 / 30.0);
+
+        for violation in &report.violations {
+            assert_eq!(violation.severity, Severity::Info, "{violation:?}");
+        }
+        assert!(report.passed);
     }
 
     /// Feature: Cross-referenced black detection

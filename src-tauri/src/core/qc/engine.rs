@@ -11,8 +11,9 @@ use tokio::sync::RwLock;
 
 use super::context::{QCContext, RenderMeasurements};
 use super::rules::{
-    AspectRatioRule, AudioLoudnessRule, AudioPeakRule, BlackFrameRule, CaptionSafeAreaRule,
-    CheckCategory, CutRhythmRule, DurationRule, LicenseRule, QCRule, RenderDurationRule,
+    AspectRatioRule, AudioClippingRule, AudioLoudnessRule, AudioPeakRule, BlackFrameRule,
+    CaptionSafeAreaRule, CheckCategory, CutRhythmRule, DurationRule, FrozenProgramRule,
+    LicenseRule, MissingVideoStreamRule, QCRule, RenderDurationRule, RenderResolutionRule,
     RuleConfig,
 };
 use super::structural::{
@@ -397,11 +398,17 @@ impl QCEngine {
         self.register_rule(Arc::new(DurationRule::new()));
 
         // Rendered rules: need measurements from an exported file.
-        // `RenderDurationRule` runs first because the others only describe the
-        // sequence while the measured file actually is the sequence.
+        // `RenderDurationRule` and `MissingVideoStreamRule` run first because
+        // the others grade detections inside the file while these two ask
+        // whether the file is the sequence at all and whether it carries a
+        // picture to grade.
         self.register_rule(Arc::new(RenderDurationRule::new()));
+        self.register_rule(Arc::new(MissingVideoStreamRule::new()));
+        self.register_rule(Arc::new(RenderResolutionRule::new()));
         self.register_rule(Arc::new(BlackFrameRule::new()));
+        self.register_rule(Arc::new(FrozenProgramRule::new()));
         self.register_rule(Arc::new(AudioPeakRule::new()));
+        self.register_rule(Arc::new(AudioClippingRule::new()));
         self.register_rule(Arc::new(AudioLoudnessRule::new()));
     }
 
@@ -843,6 +850,12 @@ mod tests {
 
         assert!(names.contains(&"BlackFrameRule"));
         assert!(names.contains(&"AudioPeakRule"));
+        // Every measured signal needs a rule reading it, or the measurement is
+        // taken and the finding never made.
+        assert!(names.contains(&"MissingVideoStreamRule"));
+        assert!(names.contains(&"RenderResolutionRule"));
+        assert!(names.contains(&"FrozenProgramRule"));
+        assert!(names.contains(&"AudioClippingRule"));
         assert!(names.contains(&"CaptionSafeAreaRule"));
         assert!(names.contains(&"CutRhythmRule"));
         assert!(names.contains(&"LicenseRule"));

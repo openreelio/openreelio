@@ -39,11 +39,36 @@ Exit `2` is never "the video is bad" — it means the verdict is unknown.
 `asset.license` and `sequence.duration`.
 
 **rendered** (require `--file`) — `render.duration_mismatch`,
-`render.black_frames`, `audio.peak`, `audio.loudness`.
+`render.missing_video`, `render.resolution_mismatch`, `render.black_frames`,
+`render.frozen`, `audio.peak`, `audio.clipping`, `audio.loudness`.
 
-`render.duration_mismatch` compares the measured file against the sequence
-duration and errors when the file is shorter: a stale or truncated render
-measures perfectly well and is still not the deliverable.
+`render.duration_mismatch` compares the measured file against the length a
+full-range render of the sequence writes — clips the export drops (disabled, or
+on a muted track) are not counted — and errors when the file is shorter: a stale
+or truncated render measures perfectly well and is still not the deliverable.
+The tolerance is 0.5s (or two frames, when that is longer) whatever the running
+time; `--duration-tolerance-sec` sets it explicitly and is honoured exactly.
+
+`render.missing_video` errors when a sequence that puts something on screen
+rendered a file with no video stream. The picture checks read detection lists,
+and empty lists cannot tell "clean picture" from "no picture", so
+`render.black_frames` and `render.frozen` report `skipped` on such a file
+instead of passing over it.
+
+`render.resolution_mismatch` compares the written frame against the canvas: a
+different shape errors (the composition was cropped or padded into a frame it
+was never composed for), the same shape at a different size is info (a proxy,
+or a delivery size), and a resampled frame rate warns.
+
+`render.frozen` reports how much of the program never moves. Held frames,
+stills and title cards are info; a program frozen for most of its length is an
+error. `render.black_frames` grades on the **total** black in the program the
+same way, so a render broken into several dark stretches cannot pass by keeping
+each one under half the running time.
+
+`audio.clipping` reports the flat-topped samples `astats` measures, at warning
+— a master limited on purpose measures the same way, and `audio.peak` keeps the
+objectively broken half.
 
 `asset.license` and `sequence.duration` run only when named in `--checks`.
 Narrow any run with `--checks a,b` or `--skip a,b`.
@@ -59,6 +84,7 @@ Narrow any run with `--checks a,b` or `--skip a,b`.
                 "passed": false, "severity": "warning", "violationCount": 1, "timeRanges": [],
                 "metrics": { }, "autoFixable": true, "suggestedFix": { } } ],
   "measurements": { "measured": true, "durationSec": 12.0,
+                    "videoStream": { "width": 1920, "height": 1080, "fps": 30.0 },
                     "blackRanges": [], "freezeRanges": [], "silenceRanges": [],
                     "integratedLufs": -21.8, "loudnessRangeLu": 0.0,
                     "truePeakDbtp": -13.4, "samplePeakDb": -13.4, "flatFactor": 0.0 },

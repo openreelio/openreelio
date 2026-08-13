@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::{future::Future, pin::Pin};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -66,10 +66,84 @@ const SMART_KEYFRAME_MIN_SAMPLES: usize = 4;
 /// Maximum number of sampled frames for representative selection.
 const SMART_KEYFRAME_MAX_SAMPLES: usize = 12;
 
+/// Name of the sidecar recording which shot each keyframe file was extracted for.
+const KEYFRAME_MANIFEST_FILENAME: &str = "manifest.json";
+
+/// Tolerance used when deciding whether a keyframe file still describes a shot.
+///
+/// Boundaries round-trip through JSON, so an exact comparison would re-extract a
+/// frame for a cut that never moved.
+const KEYFRAME_BOUNDARY_EPSILON_SEC: f64 = 0.001;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExtractedKeyframe {
     pub path: PathBuf,
     pub method: KeyframeSelectionMethod,
+}
+
+/// Records which shot each `<index>.jpg` in a keyframe directory was cut from.
+///
+/// Keyframe files are named by shot position because the contact sheet reads
+/// them back as a zero-based `%d.jpg` image sequence. Position alone is not
+/// identity: re-detecting shots with different boundaries reuses index 3 for a
+/// different span of the video, so an existing `3.jpg` may hold the previous
+/// shot 3's frame. The manifest pins each file to the boundaries it was
+/// extracted from, which is what lets extraction tell a still-valid file from a
+/// stale one instead of skipping both alike.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct KeyframeManifest {
+    /// One entry per keyframe file believed to be current, keyed by index.
+    entries: Vec<KeyframeManifestEntry>,
+}
+
+/// The shot boundaries a single keyframe file was extracted from.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct KeyframeManifestEntry {
+    /// Position of the shot, matching the `<index>.jpg` file name.
+    index: usize,
+    /// Shot start in source seconds.
+    start_sec: f64,
+    /// Shot end in source seconds.
+    end_sec: f64,
+}
+
+impl KeyframeManifest {
+    /// Reads the manifest for `dir`, treating a missing or unreadable one as empty.
+    ///
+    /// An unreadable manifest means nothing is known to be current, so every
+    /// keyframe is re-extracted. That is the safe direction: the alternative
+    /// would hand a caller a frame from some earlier cut list.
+    async fn load(dir: &Path) -> Self {
+        let path = dir.join(KEYFRAME_MANIFEST_FILENAME);
+        let Ok(content) = tokio::fs::read_to_string(&path).await else {
+            return Self::default();
+        };
+        serde_json::from_str(&content).unwrap_or_default()
+    }
+
+    /// Writes the manifest for `dir`.
+    fn save(&self, dir: &Path) -> CoreResult<()> {
+        crate::core::fs::atomic_write_json_pretty(&dir.join(KEYFRAME_MANIFEST_FILENAME), self)
+    }
+
+    /// Returns whether `index`'s file was extracted from `shot`.
+    fn records(&self, index: usize, shot: &ShotResult) -> bool {
+        self.entries.iter().any(|entry| {
+            entry.index == index
+                && (entry.start_sec - shot.start_sec).abs() <= KEYFRAME_BOUNDARY_EPSILON_SEC
+                && (entry.end_sec - shot.end_sec).abs() <= KEYFRAME_BOUNDARY_EPSILON_SEC
+        })
+    }
+
+    /// Records that `index`'s file now holds a frame from `shot`.
+    fn record(&mut self, index: usize, shot: &ShotResult) {
+        self.entries.retain(|entry| entry.index != index);
+        self.entries.push(KeyframeManifestEntry {
+            index,
+            start_sec: shot.start_sec,
+            end_sec: shot.end_sec,
+        });
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -124,8 +198,14 @@ impl VisualAnalyzer {
     /// `output_dir/<index>.jpg`. For sufficiently long shots, FFmpeg's
     /// `thumbnail` filter is applied over an interior window that avoids the
     /// cut edges. For short shots or failures, extraction falls back to the
-    /// temporal midpoint. Already-existing
-    /// (and non-empty) files are skipped to make the operation idempotent.
+    /// temporal midpoint.
+    ///
+    /// A file is reused only when [`KeyframeManifest`] records it against the
+    /// same shot boundaries, which keeps the operation idempotent for an
+    /// unchanged cut list while guaranteeing the invariant the callers rely on:
+    /// `<index>.jpg` always holds a frame from the shot now at that index. A
+    /// re-detection that moves the cuts re-extracts the affected files instead
+    /// of handing the new shot its predecessor's frame.
     ///
     /// Returns the ordered list of keyframe file paths and selection methods.
     pub async fn extract_keyframes(
@@ -142,16 +222,38 @@ impl VisualAnalyzer {
             ))
         })?;
 
+        let cached = KeyframeManifest::load(output_dir).await;
+        let reusable = shots
+            .iter()
+            .enumerate()
+            .map(|(index, shot)| {
+                cached.records(index, shot)
+                    && is_nonempty_file(&keyframe_path_for_index(output_dir, index))
+            })
+            .collect::<Vec<_>>();
+
+        // Narrow the manifest to the files that survive this run *before*
+        // overwriting any of them. If extraction then fails part way through,
+        // what is left on disk is a manifest that claims only untouched files,
+        // never one that vouches for a file already replaced.
+        let mut manifest = KeyframeManifest::default();
+        for (index, shot) in shots.iter().enumerate() {
+            if reusable[index] {
+                manifest.record(index, shot);
+            }
+        }
+        manifest.save(output_dir)?;
+
         let mut keyframes = Vec::with_capacity(shots.len());
 
         for (index, shot) in shots.iter().enumerate() {
-            let output_path = output_dir.join(format!("{}.jpg", index));
+            let output_path = keyframe_path_for_index(output_dir, index);
             let preferred_method = choose_keyframe_selection_method(shot);
 
-            // Skip extraction if the file already exists and is non-empty
-            if is_nonempty_file(&output_path) {
+            // Reuse only a frame this same shot produced.
+            if reusable[index] {
                 tracing::debug!(
-                    "Keyframe already exists, skipping: {}",
+                    "Keyframe already current for this shot, skipping: {}",
                     output_path.display()
                 );
                 keyframes.push(ExtractedKeyframe {
@@ -205,8 +307,15 @@ impl VisualAnalyzer {
                 }
             };
 
+            manifest.record(index, shot);
             keyframes.push(extracted);
         }
+
+        // Files past the end of the current cut list describe shots that no
+        // longer exist; dropping them keeps the directory in step with the
+        // manifest that now describes it.
+        remove_orphan_keyframes(output_dir, shots.len()).await;
+        manifest.save(output_dir)?;
 
         Ok(keyframes)
     }
@@ -359,8 +468,10 @@ impl VisualAnalyzer {
         let mut cmd = Command::new(&self.ffmpeg_path);
         configure_tokio_command(&mut cmd);
 
+        // -y: a re-detection overwrites the frame recorded for this index.
         cmd.arg("-hide_banner")
             .arg("-nostdin")
+            .arg("-y")
             .arg("-ss")
             .arg(format!("{:.3}", midpoint))
             .arg("-i")
@@ -405,8 +516,10 @@ impl VisualAnalyzer {
 
         let mut cmd = Command::new(&self.ffmpeg_path);
         configure_tokio_command(&mut cmd);
+        // -y: a re-detection overwrites the frame recorded for this index.
         cmd.arg("-hide_banner")
             .arg("-nostdin")
+            .arg("-y")
             .arg("-ss")
             .arg(format!("{:.3}", window.start_sec))
             .arg("-t")
@@ -697,6 +810,48 @@ fn is_nonempty_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns the keyframe file path for a shot position.
+///
+/// The contact sheet reads the directory back as a zero-based `%d.jpg` image
+/// sequence, so the name is the shot index and nothing else.
+fn keyframe_path_for_index(output_dir: &Path, index: usize) -> PathBuf {
+    output_dir.join(format!("{}.jpg", index))
+}
+
+/// Deletes keyframe files whose index is beyond the current shot count.
+///
+/// Best effort: a file that cannot be removed is only stale, never wrong, since
+/// the manifest no longer records it and no shot addresses that index.
+async fn remove_orphan_keyframes(output_dir: &Path, shot_count: usize) {
+    let Ok(mut entries) = tokio::fs::read_dir(output_dir).await else {
+        return;
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jpg") {
+            continue;
+        }
+        let Some(index) = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if index < shot_count {
+            continue;
+        }
+        if let Err(error) = tokio::fs::remove_file(&path).await {
+            tracing::debug!(
+                "Failed to remove orphaned keyframe {}: {}",
+                path.display(),
+                error
+            );
+        }
+    }
+}
+
 /// Returns the last `n` lines of a multi-line string.
 fn stderr_tail(stderr: &str, n: usize) -> String {
     let lines: Vec<&str> = stderr.lines().collect();
@@ -976,6 +1131,100 @@ mod tests {
             assert_eq!(frame.camera_angle, CameraAngle::Unknown);
             assert_eq!(frame.subject_position, SubjectPosition::Unknown);
             assert_eq!(frame.motion_direction, MotionDirection::Unknown);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Keyframe Freshness Tests
+    // -------------------------------------------------------------------------
+
+    /// An analyzer whose FFmpeg binary cannot be spawned.
+    ///
+    /// Any attempt to extract fails loudly, which is what makes "did this call
+    /// reuse the cached file or re-extract it?" observable without a real video.
+    fn analyzer_without_ffmpeg() -> VisualAnalyzer {
+        VisualAnalyzer::new(PathBuf::from("openreelio-missing-ffmpeg-binary"))
+    }
+
+    fn write_keyframe_file(dir: &Path, index: usize, content: &str) {
+        std::fs::write(keyframe_path_for_index(dir, index), content).unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_reuse_keyframes_and_drop_orphans_when_shots_are_unchanged() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+        let shots = [
+            ShotResult::new(0.0, 5.0, 0.9),
+            ShotResult::new(5.0, 10.0, 0.9),
+        ];
+
+        let mut manifest = KeyframeManifest::default();
+        for (index, shot) in shots.iter().enumerate() {
+            write_keyframe_file(dir, index, &format!("frame-{index}"));
+            manifest.record(index, shot);
+        }
+        // A file left behind by an earlier, longer cut list.
+        write_keyframe_file(dir, 2, "orphan");
+        manifest.save(dir).unwrap();
+
+        let keyframes = analyzer_without_ffmpeg()
+            .extract_keyframes(Path::new("unused.mp4"), &shots, dir)
+            .await
+            .expect("unchanged shots must reuse their keyframes without running FFmpeg");
+
+        assert_eq!(keyframes.len(), 2);
+        assert_eq!(keyframes[0].path, keyframe_path_for_index(dir, 0));
+        assert_eq!(
+            std::fs::read_to_string(keyframe_path_for_index(dir, 0)).unwrap(),
+            "frame-0"
+        );
+        assert!(!keyframe_path_for_index(dir, 2).exists());
+    }
+
+    #[tokio::test]
+    async fn should_not_hand_a_shot_a_keyframe_extracted_for_different_boundaries() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+        let detected = [
+            ShotResult::new(0.0, 5.0, 0.9),
+            ShotResult::new(5.0, 10.0, 0.9),
+        ];
+
+        let mut manifest = KeyframeManifest::default();
+        for (index, shot) in detected.iter().enumerate() {
+            write_keyframe_file(dir, index, &format!("frame-{index}"));
+            manifest.record(index, shot);
+        }
+        manifest.save(dir).unwrap();
+
+        // Re-detection moves the cuts: index 0 and 1 now describe other spans.
+        let redetected = [
+            ShotResult::new(0.0, 2.0, 0.9),
+            ShotResult::new(2.0, 10.0, 0.9),
+        ];
+
+        let result = analyzer_without_ffmpeg()
+            .extract_keyframes(Path::new("unused.mp4"), &redetected, dir)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "shifted boundaries must re-extract instead of reusing the previous shot's frame"
+        );
+
+        let persisted = KeyframeManifest::load(dir).await;
+        for (index, shot) in redetected.iter().enumerate() {
+            assert!(
+                !persisted.records(index, shot),
+                "a file never extracted for shot {index} must not be recorded as its keyframe"
+            );
+        }
+        for (index, shot) in detected.iter().enumerate() {
+            assert!(
+                !persisted.records(index, shot),
+                "the superseded cut list must no longer vouch for index {index}"
+            );
         }
     }
 

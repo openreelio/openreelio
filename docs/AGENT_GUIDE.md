@@ -297,25 +297,50 @@ openreelio-cli verify --path ./demo --file ./proxy.mp4 \
 Without `--file`, only structural checks run and FFmpeg is never invoked.
 `--structural-only` makes that explicit and conflicts with `--file`.
 
-Eighteen checks in two categories. **structural**: `sequence.empty`,
+Twenty-two checks in two categories. **structural**: `sequence.empty`,
 `timeline.gap`, `clip.orphan`, `clip.missing_asset`, `clip.aspect_ratio`,
 `audio.silent_clip`, `caption.overlap`, `caption.reading_rate`,
 `caption.out_of_bounds`, `caption.safe_area`, `shot.length_stats`,
 `shot.cut_rhythm`, plus the opt-in `asset.license` and `sequence.duration`.
-**rendered**: `render.duration_mismatch`, `render.black_frames`, `audio.peak`,
-`audio.loudness`. The two opt-ins run only when named in `--checks`; narrow any
-run with `--checks a,b` or `--skip a,b`.
+**rendered**: `render.duration_mismatch`, `render.missing_video`,
+`render.resolution_mismatch`, `render.black_frames`, `render.frozen`,
+`audio.peak`, `audio.clipping`, `audio.loudness`. The two opt-ins run only when
+named in `--checks`; narrow any run with `--checks a,b` or `--skip a,b`.
 
 `render.duration_mismatch` asks the question the other rendered checks assume
 an answer to: is the measured file this sequence at all? A stale or truncated
 render measures perfectly well and is still not the deliverable, so a file
-shorter than the timeline is an error.
+shorter than the render is an error. The comparison is against the length a
+full-range render writes, not the editing extent: a clip the export drops —
+disabled, or on a muted track — shortens the expected file with it, so a
+correct render of a timeline ending on one still passes. The tolerance is
+0.5s (or two frames, when that is longer) and does not scale with the running
+time; `--duration-tolerance-sec` sets it explicitly and is honoured exactly.
+
+`render.missing_video` asks the same kind of question about the picture. Every
+other picture check reads a detection list, and a file with no video stream
+produces empty lists — indistinguishable from a clean picture. A sequence that
+puts anything on screen and rendered without a video stream is an error, and
+`render.black_frames` / `render.frozen` report `skipped` rather than passing
+over a file they cannot see.
+
+`render.resolution_mismatch` compares the written frame against the canvas: a
+different shape is an error (the composition was cropped or barred), the same
+shape at a different size is info (a proxy or a delivery size), and a resampled
+frame rate is a warning. `render.frozen` reports how much of the program never
+moves — held frames and title cards are info, a program frozen for most of its
+length is an error. `render.black_frames` grades the same way on the **total**
+black in the program, so a render broken into several dark stretches cannot
+pass by keeping each one short. `audio.clipping` reports the flat-topped
+samples `astats` measures, at warning: a master limited on purpose reads the
+same way.
 
 The report always lists every check that ran, was skipped, or errored — so
 "checked and clean" is distinguishable from "never looked". Each entry carries
 `id`, `category`, `status`, `violationCount`, `timeRanges`, `metrics`,
 `autoFixable` and, when the rule knows the repair, `suggestedFix`.
-`measurements` holds the file-level numbers: `blackRanges`, `freezeRanges`,
+`measurements` holds the file-level numbers: `videoStream` (`width`, `height`,
+`fps`, or `null` when the file has no picture), `blackRanges`, `freezeRanges`,
 `silenceRanges`, `integratedLufs`, `loudnessRangeLu`, `truePeakDbtp`,
 `samplePeakDb`, `flatFactor`.
 

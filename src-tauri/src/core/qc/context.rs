@@ -15,6 +15,47 @@ use crate::core::timeline::Sequence;
 /// the context falls back to the project-wide default instead of propagating it.
 const FALLBACK_FPS: f64 = 30.0;
 
+/// Picture properties of the measured file's video stream.
+///
+/// Read from the container by the probe that opens the measurement pass, so
+/// these describe the file that was written rather than the settings it was
+/// asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredVideoStream {
+    /// Coded width in pixels
+    pub width: u32,
+    /// Coded height in pixels
+    pub height: u32,
+    /// Frame rate reported by the container, in frames per second
+    pub fps: f64,
+}
+
+impl MeasuredVideoStream {
+    /// Returns the display aspect ratio, or `None` for an unusable frame size.
+    pub fn aspect_ratio(&self) -> Option<f64> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+        Some(f64::from(self.width) / f64::from(self.height))
+    }
+}
+
+/// The stream table the probe found in the measured file.
+///
+/// Recorded because an empty detection list cannot express "there was nothing
+/// to detect": a render with no video stream at all reports no black frames
+/// and no freezes, which is indistinguishable from a clean picture unless the
+/// stream table is carried alongside.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredStreams {
+    /// Picture properties, or `None` when the file carries no video stream
+    pub video: Option<MeasuredVideoStream>,
+    /// Whether the file carries an audio stream
+    pub has_audio: bool,
+}
+
 /// Measurements captured from a rendered version of the sequence.
 ///
 /// Produced by the render measurement pass. Every field is optional or empty so
@@ -46,6 +87,31 @@ pub struct RenderMeasurements {
     /// truncated render measures perfectly well and is still not the
     /// deliverable.
     pub file_duration_sec: Option<f64>,
+    /// Streams the probe found in the measured file
+    ///
+    /// `None` means no stream table was recorded — measurements assembled by
+    /// hand, or by a pass older than this field — which is not the same as
+    /// "the file carries no streams". A rule that grades stream presence must
+    /// skip rather than judge while this is `None`.
+    #[serde(default)]
+    pub streams: Option<MeasuredStreams>,
+}
+
+impl RenderMeasurements {
+    /// Returns the measured video stream, when the probe recorded one.
+    pub fn video_stream(&self) -> Option<&MeasuredVideoStream> {
+        self.streams
+            .as_ref()
+            .and_then(|streams| streams.video.as_ref())
+    }
+
+    /// Returns whether the measured file carries a video stream.
+    ///
+    /// `None` means the stream table was never recorded, which no rule may
+    /// read as "there is no video".
+    pub fn has_video_stream(&self) -> Option<bool> {
+        self.streams.map(|streams| streams.video.is_some())
+    }
 }
 
 /// Context handed to every QC rule for a single check run.

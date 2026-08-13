@@ -47,6 +47,51 @@ impl TimeRange {
     }
 }
 
+/// Returns how much time a set of `(start, end)` spans covers in total.
+///
+/// Overlapping spans are merged first, so a signal reported twice — once per
+/// detector, or once per violation — cannot inflate the coverage past the
+/// program it is measured against. Degenerate and non-finite spans are ignored.
+///
+/// This is the shared basis for every "how much of the program is X" grade
+/// (black, frozen), which must be answered for the program as a whole rather
+/// than one span at a time.
+pub fn merged_span_duration_sec(spans: &[(f64, f64)]) -> f64 {
+    let mut usable: Vec<(f64, f64)> = spans
+        .iter()
+        .copied()
+        .filter(|(start, end)| start.is_finite() && end.is_finite() && end > start)
+        .collect();
+
+    usable.sort_by(|left, right| {
+        left.0
+            .partial_cmp(&right.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut total = 0.0;
+    let mut current: Option<(f64, f64)> = None;
+
+    for (start, end) in usable {
+        match current {
+            Some((open_start, open_end)) if start <= open_end => {
+                current = Some((open_start, open_end.max(end)));
+            }
+            Some((open_start, open_end)) => {
+                total += open_end - open_start;
+                current = Some((start, end));
+            }
+            None => current = Some((start, end)),
+        }
+    }
+
+    if let Some((open_start, open_end)) = current {
+        total += open_end - open_start;
+    }
+
+    total
+}
+
 /// Severity level of a QC violation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -210,6 +255,37 @@ impl QCViolation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ========================================================================
+    // Span coverage
+    // ========================================================================
+
+    #[test]
+    fn test_merged_span_duration_should_sum_disjoint_spans() {
+        let total = merged_span_duration_sec(&[(0.0, 2.0), (4.0, 6.0), (8.0, 10.0)]);
+
+        assert!((total - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_merged_span_duration_should_count_overlapping_spans_once() {
+        let total = merged_span_duration_sec(&[(0.0, 5.0), (3.0, 8.0), (7.5, 9.0)]);
+
+        assert!((total - 9.0).abs() < 1e-9, "got {total}");
+    }
+
+    #[test]
+    fn test_merged_span_duration_should_ignore_degenerate_spans() {
+        let total = merged_span_duration_sec(&[
+            (5.0, 5.0),
+            (6.0, 4.0),
+            (f64::NAN, 3.0),
+            (1.0, f64::INFINITY),
+            (0.0, 1.0),
+        ]);
+
+        assert!((total - 1.0).abs() < 1e-9, "got {total}");
+    }
 
     // ========================================================================
     // TimeRange Tests

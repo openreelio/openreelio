@@ -70,7 +70,11 @@ use crate::core::analysis::openai_perception::{
     analyze_keyframes_with_openai, transcribe_with_openai, OpenAiPerceptionConfig,
 };
 #[cfg(feature = "ai-providers")]
-use crate::core::analysis::OpenAiResponsesClipPerceptionProvider;
+use crate::core::analysis::{BundleEnrichment, OpenAiResponsesClipPerceptionProvider};
+#[cfg(feature = "ai-providers")]
+use crate::core::CoreResult;
+#[cfg(feature = "ai-providers")]
+use std::path::Path;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -362,6 +366,27 @@ async fn resolve_clip_perception_provider(
     )))
 }
 
+/// Merges an enhancement pass into the cached bundle under the bundle lock.
+///
+/// The provider calls run outside the lock, so the copy they started from is
+/// stale by the time they return; only the delta they produced is replayed onto
+/// the bundle as it is on disk. `bundle` adopts the persisted result.
+#[cfg(feature = "ai-providers")]
+fn publish_openai_enrichment(
+    project_path: &Path,
+    enrichment: BundleEnrichment,
+    bundle: &mut AnalysisBundle,
+) -> CoreResult<()> {
+    let runner = AnalysisJobRunner::new(project_path);
+    let metadata = bundle.metadata.clone();
+
+    if let Some(persisted) = runner.publish_enrichment(&bundle.asset_id, &metadata, enrichment)? {
+        *bundle = persisted;
+    }
+
+    Ok(())
+}
+
 #[cfg(feature = "ai-providers")]
 async fn maybe_enhance_bundle_with_openai(
     app: &tauri::AppHandle,
@@ -375,19 +400,19 @@ async fn maybe_enhance_bundle_with_openai(
         return Ok(());
     }
 
-    let mut changed = false;
+    let mut enrichment = BundleEnrichment::default();
     let config = match resolve_openai_perception_config(app, state).await {
         Ok(Some(config)) => {
-            changed |= bundle.errors.remove("perception_provider").is_some();
+            enrichment.cleared_errors.push("perception_provider");
             config
         }
         Ok(None) => return Ok(()),
         Err(error) => {
-            bundle.add_error("perception_provider", error);
-            *bundle = AnalysisJobRunner::new(&asset_context.project_path)
-                .save_bundle(bundle)
-                .map_err(|error| format!("Failed to save provider warning: {error}"))?;
-            return Ok(());
+            enrichment
+                .recorded_errors
+                .push(("perception_provider", error));
+            return publish_openai_enrichment(&asset_context.project_path, enrichment, bundle)
+                .map_err(|error| format!("Failed to save provider warning: {error}"));
         }
     };
 
@@ -402,19 +427,19 @@ async fn maybe_enhance_bundle_with_openai(
                     .await
                 {
                     Ok((frames, observations)) => {
-                        bundle.errors.remove("perception_provider");
-                        bundle.errors.remove("openai_vision");
+                        enrichment.cleared_errors.push("openai_vision");
                         if !frames.is_empty() {
-                            bundle.frame_analysis = Some(frames);
+                            enrichment.frame_analysis = Some(frames);
                         }
                         if !observations.is_empty() {
-                            bundle.frame_observations = Some(observations);
+                            enrichment.frame_observations = Some(observations);
                         }
-                        changed = true;
+                        enrichment.analyzed_shots = Some(shots.to_vec());
                     }
                     Err(error) => {
-                        bundle.add_error("openai_vision", error.to_string());
-                        changed = true;
+                        enrichment
+                            .recorded_errors
+                            .push(("openai_vision", error.to_string()));
                     }
                 }
             }
@@ -438,29 +463,20 @@ async fn maybe_enhance_bundle_with_openai(
         };
         match transcribe_with_openai(&config, &video_path, &analysis_dir, &ffmpeg_path).await {
             Ok((segments, detail)) => {
-                bundle.errors.remove("perception_provider");
-                bundle.errors.remove("openai_transcript");
-                bundle.transcript = Some(segments);
-                bundle.transcript_detail = Some(detail);
-                bundle.errors.remove("transcript");
-                changed = true;
+                enrichment.cleared_errors.push("openai_transcript");
+                enrichment.cleared_errors.push("transcript");
+                enrichment.transcript = Some((segments, detail));
             }
             Err(error) => {
-                bundle.add_error("openai_transcript", error.to_string());
-                changed = true;
+                enrichment
+                    .recorded_errors
+                    .push(("openai_transcript", error.to_string()));
             }
         }
     }
 
-    if changed {
-        // The save merges under the bundle lock, so adopt what was persisted:
-        // it may carry slots another writer added while the provider ran.
-        *bundle = AnalysisJobRunner::new(&asset_context.project_path)
-            .save_bundle(bundle)
-            .map_err(|error| format!("Failed to save OpenAI-enhanced analysis bundle: {error}"))?;
-    }
-
-    Ok(())
+    publish_openai_enrichment(&asset_context.project_path, enrichment, bundle)
+        .map_err(|error| format!("Failed to save OpenAI-enhanced analysis bundle: {error}"))
 }
 
 #[cfg(not(feature = "ai-providers"))]

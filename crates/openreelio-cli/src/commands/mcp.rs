@@ -12,9 +12,27 @@
 //! through [`confine_to_project`] — the server has no working directory a client
 //! could reason about, and an unconfined path handed to FFmpeg would turn a
 //! read-only server into a whole-disk existence oracle and an outbound-connection
-//! primitive. The one deliberate exception is the grant-gated plan surface:
-//! commands such as `ImportAsset` name media anywhere the operator's user can
-//! read, because pulling external footage into a project is what an editor does.
+//! primitive.
+//!
+//! Confinement is enforced at the FFmpeg boundary, not only at the argument
+//! boundary. A path that arrives as project state rather than as a tool argument
+//! — an asset URI — is confined too ([`confine_asset_media`]), because project
+//! state is data the server reads, not a grant: it can come from a foreign
+//! project the operator pointed the server at, or from an `UpdateAsset` an
+//! approved plan applied. The practical consequence is that media living outside
+//! the project directory is not transcribable through MCP; ingest it into the
+//! project workspace first.
+//!
+//! The one deliberate exception is the grant-gated plan surface: commands such as
+//! `ImportAsset` name media anywhere the operator's user can read, because pulling
+//! external footage into a project is what an editor does. That exception is
+//! bounded by the confinement above — an out-of-tree path a plan writes into
+//! project state still cannot be handed to FFmpeg by any tool on this server.
+//!
+//! None of this applies to the local CLI (`openreelio-cli transcription`,
+//! `render`, `analysis`). There the operator's own shell already reaches the whole
+//! filesystem, so confining the CLI would buy nothing and would break the normal
+//! workflow of editing a project that references footage on another drive.
 
 use crate::{
     commands::{help_json, plan, transcription, verify},
@@ -817,6 +835,7 @@ fn generate_transcription(state: &McpServerState, arguments: Value) -> Result<Va
             optional_string_argument(&arguments, "sequenceId")?,
         )
         .map_err(|error| ToolError::Execution(error.to_string()))?;
+        confine_sequence_media(&project, &sequence_id)?;
         serde_json::to_value(
             transcription::generate_sequence_transcription(
                 &project,
@@ -830,6 +849,7 @@ fn generate_transcription(state: &McpServerState, arguments: Value) -> Result<Va
         .map_err(|error| ToolError::Execution(error.to_string()))?
     } else {
         let asset_id = required_string_argument(&arguments, "assetId")?;
+        confine_asset_media(&project, &asset_id)?;
         serde_json::to_value(
             transcription::generate_asset_transcription(
                 &project, &asset_id, &language, &model, translate,
@@ -840,6 +860,69 @@ fn generate_transcription(state: &McpServerState, arguments: Value) -> Result<Va
     };
 
     Ok(output)
+}
+
+/// Confines one asset's media file to the served project directory.
+///
+/// The asset URI is project state rather than a tool argument, so it bypasses the
+/// confinement [`confine_to_project`] applies to client-supplied paths — yet it
+/// reaches FFmpeg exactly like one, through
+/// [`Asset::resolved_path`](openreelio_core::assets::Asset::resolved_path). A
+/// project whose state names media outside the served directory would otherwise
+/// turn a read-only tool into a whole-disk read, and a UNC URI would make the
+/// server open an outbound connection. Project state is not a grant: it can be
+/// a foreign project the operator pointed the server at, or one an approved
+/// `UpdateAsset`/`ImportAsset` rewrote.
+///
+/// The error names the asset, never the resolved path, so a rejection cannot be
+/// read as an existence oracle for whatever the URI pointed at.
+fn confine_asset_media(
+    project: &openreelio_core::ActiveProject,
+    asset_id: &str,
+) -> Result<(), ToolError> {
+    let Some(asset) = project.state.assets.get(asset_id) else {
+        // A missing asset is the transcription command's error to report, with
+        // its own wording; there is no path to confine here.
+        return Ok(());
+    };
+
+    // Import canonicalizes the URI, so on Windows it carries the `\\?\` verbatim
+    // prefix. Stripping it here is what tells an ordinary drive path apart from a
+    // real UNC share, which keeps its prefix and is rejected below.
+    let media_path = strip_verbatim_prefix(&asset.resolved_path(&project.path));
+    match confine_to_project(&project.path, "asset media", &media_path.to_string_lossy()) {
+        Ok(_) => Ok(()),
+        // A project directory that cannot be resolved is an environment failure,
+        // not a policy decision, and keeps its own wording.
+        Err(error @ ToolError::Execution(_)) => Err(error),
+        Err(_) => Err(ToolError::PermissionDenied(format!(
+            "Asset '{asset_id}' resolves to media outside the served project directory; the MCP server only reads media inside the project it was started on"
+        ))),
+    }
+}
+
+/// Confines every asset a sequence mixdown will read.
+///
+/// The mixdown builds a render graph over the whole sequence, so confinement is
+/// checked for every asset the sequence references rather than for the audible
+/// subset alone: which layers survive muting and trimming is the render graph's
+/// decision, and a scope violation anywhere in the sequence is worth refusing
+/// before FFmpeg is spawned at all.
+fn confine_sequence_media(
+    project: &openreelio_core::ActiveProject,
+    sequence_id: &str,
+) -> Result<(), ToolError> {
+    let Some(sequence) = project.state.sequences.get(sequence_id) else {
+        // Reported by the transcription command in its own words.
+        return Ok(());
+    };
+
+    for track in &sequence.tracks {
+        for clip in &track.clips {
+            confine_asset_media(project, &clip.asset_id)?;
+        }
+    }
+    Ok(())
 }
 
 fn build_host_context(state: &McpServerState) -> Value {
@@ -1619,6 +1702,7 @@ fn run_verify_tool(state: &McpServerState, arguments: Value) -> Result<Value, To
         skip: optional_string_array_argument(&arguments, "skip")?,
         target_lufs: None,
         max_true_peak: None,
+        duration_tolerance_sec: None,
         fail_on: optional_string_argument(&arguments, "failOn")?
             .unwrap_or_else(|| DEFAULT_VERIFY_FAIL_ON.to_string()),
         timeout_sec: VERIFY_MEASURE_TIMEOUT_SEC,
@@ -3197,6 +3281,269 @@ mod tests {
         assert_eq!(
             existing_error.to_string().replace("exists", "missing"),
             missing_error.to_string()
+        );
+    }
+
+    /// Builds a project holding one asset backed by `media_path`, with the asset
+    /// placed on the active sequence. Returns the project path, sequence ID, and
+    /// asset ID.
+    ///
+    /// The media fixture is written after the project exists so a fixture that
+    /// lives inside the project directory does not race project creation.
+    fn project_with_media_asset(
+        temp_dir: &tempfile::TempDir,
+        name: &str,
+        media_path: &Path,
+    ) -> (PathBuf, String, String) {
+        let project_path = temp_dir.path().join(name);
+        let mut project =
+            openreelio_core::ActiveProject::create("Media Scope", project_path.clone())
+                .expect("project");
+        if let Some(parent) = media_path.parent() {
+            std::fs::create_dir_all(parent).expect("media parent");
+        }
+        std::fs::write(media_path, b"fake video bytes").expect("media fixture");
+        let sequence_id = project.state.active_sequence_id.clone().expect("sequence");
+        let track_id = project.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .find(|track| matches!(track.kind, TrackKind::Video | TrackKind::Overlay))
+            .expect("video track")
+            .id
+            .clone();
+
+        let import_command = ImportAssetCommand::new("clip.mp4", &media_path.to_string_lossy())
+            .with_duration(8.0)
+            .with_audio_info(AudioInfo::default());
+        let asset_id = import_command.asset_id().to_string();
+        project
+            .executor
+            .execute(Box::new(import_command), &mut project.state)
+            .expect("import asset");
+        project
+            .executor
+            .execute(
+                Box::new(InsertMediaCommand::new(
+                    &sequence_id,
+                    &track_id,
+                    &asset_id,
+                    0.0,
+                )),
+                &mut project.state,
+            )
+            .expect("insert media");
+        project.save().expect("save project");
+        drop(project);
+
+        (project_path, sequence_id, asset_id)
+    }
+
+    #[test]
+    fn should_refuse_to_transcribe_an_asset_whose_media_lives_outside_the_project() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let outside_media = temp_dir.path().join("outside.mp4");
+        let (project_path, sequence_id, asset_id) =
+            project_with_media_asset(&temp_dir, "outside_media_project", &outside_media);
+
+        let state = McpServerState {
+            project: Some(project_path),
+            ..Default::default()
+        };
+
+        // Both transcription modes reach FFmpeg with this asset's path, so both
+        // have to refuse before FFmpeg is spawned — the refusal must not depend
+        // on whether Whisper happens to be compiled in on this build.
+        for arguments in [
+            serde_json::json!({ "assetId": asset_id }),
+            serde_json::json!({ "sequenceAudio": true, "sequenceId": sequence_id }),
+        ] {
+            let error = generate_transcription(&state, arguments.clone())
+                .expect_err(&format!("{arguments} must be refused"));
+            assert!(
+                matches!(error, ToolError::PermissionDenied(_)),
+                "{arguments} must be denied by policy, got {error:?}"
+            );
+            assert!(
+                !error.to_string().contains("outside.mp4"),
+                "the refusal must not echo the out-of-scope path: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_allow_transcription_scope_for_media_inside_the_project() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let inside_media = temp_dir
+            .path()
+            .join("inside_media_project")
+            .join("media")
+            .join("clip.mp4");
+        let (project_path, sequence_id, asset_id) =
+            project_with_media_asset(&temp_dir, "inside_media_project", &inside_media);
+
+        let project = super::super::load_project(&project_path).expect("load project");
+        confine_asset_media(&project, &asset_id).expect("in-project media must be accepted");
+        confine_sequence_media(&project, &sequence_id)
+            .expect("a sequence of in-project media must be accepted");
+    }
+
+    #[test]
+    fn should_refuse_transcription_for_asset_uris_that_leave_the_project_lexically() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let inside_media = temp_dir.path().join("hostile_uri_project").join("clip.mp4");
+        let (project_path, _sequence_id, asset_id) =
+            project_with_media_asset(&temp_dir, "hostile_uri_project", &inside_media);
+
+        // The command layer refuses these, so they can only arrive on a project
+        // written by something else. Confinement is what makes that harmless.
+        for hostile_uri in [
+            "http://attacker.example/probe.mp4",
+            "\\\\attacker.example\\share\\probe.mp4",
+            "//attacker.example/share/probe.mp4",
+        ] {
+            let mut project = super::super::load_project(&project_path).expect("load project");
+            project.state.assets.get_mut(&asset_id).expect("asset").uri = hostile_uri.to_string();
+
+            let error = confine_asset_media(&project, &asset_id)
+                .expect_err(&format!("'{hostile_uri}' must be refused"));
+            assert!(
+                matches!(error, ToolError::PermissionDenied(_)),
+                "'{hostile_uri}' must be denied by policy, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_refuse_transcription_for_relative_paths_that_traverse_out_of_the_project() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let inside_media = temp_dir
+            .path()
+            .join("traversal_uri_project")
+            .join("clip.mp4");
+        let outside_media = temp_dir.path().join("outside.mp4");
+        std::fs::write(&outside_media, b"fake video bytes").expect("outside fixture");
+        let (project_path, _sequence_id, asset_id) =
+            project_with_media_asset(&temp_dir, "traversal_uri_project", &inside_media);
+
+        // `Asset::resolved_path` joins `relative_path` onto the project root with
+        // no traversal check of its own.
+        let mut project = super::super::load_project(&project_path).expect("load project");
+        let asset = project.state.assets.get_mut(&asset_id).expect("asset");
+        asset.relative_path = Some("../outside.mp4".to_string());
+
+        let error =
+            confine_asset_media(&project, &asset_id).expect_err("traversal must be refused");
+        assert!(
+            matches!(error, ToolError::PermissionDenied(_)),
+            "traversal must be denied by policy, got {error:?}"
+        );
+    }
+
+    /// Class guard for RC-E: every MCP surface that turns a client-influenced
+    /// value into a filesystem path reaching FFmpeg, and where that path is
+    /// confined.
+    ///
+    /// This test is a checklist with teeth: adding an FFmpeg-backed tool without
+    /// confining its media path should make it fail. It asserts the two shapes
+    /// that exist today — a path-typed tool argument, and a path that arrives as
+    /// project state — and pins the tool inventory the boundary was reasoned
+    /// about, so a new tool cannot be added silently.
+    #[test]
+    fn should_confine_every_mcp_path_that_reaches_ffmpeg() {
+        // 1. The tool inventory. Any name added here must be classified below.
+        let state = McpServerState {
+            project: Some(PathBuf::from("unused")),
+            allow_write: true,
+            ..Default::default()
+        };
+        let advertised: Vec<String> = build_tools(&state)
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect();
+
+        // Tools that spawn FFmpeg. Each is covered by a confinement test above.
+        let ffmpeg_backed = ["openreelio.verify", "openreelio.transcription.generate"];
+        // Everything else reads or writes project state only; none of them opens
+        // a media file, so none of them can be used as a read primitive.
+        let state_only = [
+            "openreelio.host.context",
+            "openreelio.project.info",
+            "openreelio.selection.read",
+            "openreelio.diagnostics.read",
+            "openreelio.timeline.snapshot",
+            "openreelio.assets.list",
+            "openreelio.transcription.status",
+            "openreelio.annotation.read",
+            "openreelio.command.schema",
+            "openreelio.command.validate",
+            "openreelio.plan.validate",
+            "openreelio.media.insert",
+            "openreelio.plan.apply",
+            "openreelio.preview.describe",
+        ];
+
+        for name in &advertised {
+            assert!(
+                ffmpeg_backed.contains(&name.as_str()) || state_only.contains(&name.as_str()),
+                "'{name}' is a new MCP tool: classify it here and confine its \
+                 media path if it reaches FFmpeg"
+            );
+        }
+        for name in ffmpeg_backed.iter().chain(state_only.iter()) {
+            assert!(
+                advertised.contains(&name.to_string()),
+                "'{name}' disappeared from the MCP surface; update this guard"
+            );
+        }
+
+        // 2. `openreelio.verify` — a path-typed tool argument, confined by
+        //    `confine_to_project` at mcp.rs `run_verify_tool`.
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "class_guard_project");
+        let verify_state = McpServerState {
+            project: Some(project_path.clone()),
+            ..Default::default()
+        };
+        let error = run_verify_tool(
+            &verify_state,
+            serde_json::json!({ "file": "../outside.mp4" }),
+        )
+        .expect_err("verify must confine its file argument");
+        assert!(matches!(error, ToolError::PermissionDenied(_)));
+
+        // 3. `openreelio.transcription.generate` — a path that arrives as project
+        //    state, confined by `confine_asset_media` before FFmpeg is spawned.
+        let outside_media = temp_dir.path().join("class_guard_outside.mp4");
+        let (media_project, _, asset_id) =
+            project_with_media_asset(&temp_dir, "class_guard_media", &outside_media);
+        let media_state = McpServerState {
+            project: Some(media_project),
+            ..Default::default()
+        };
+        let error =
+            generate_transcription(&media_state, serde_json::json!({ "assetId": asset_id }))
+                .expect_err("transcription must confine its media path");
+        assert!(matches!(error, ToolError::PermissionDenied(_)));
+
+        // 4. Documented exception: plan payload paths are NOT confined to the
+        //    project, because importing external footage is the point of the
+        //    grant-gated plan surface. They are validated at the command layer
+        //    instead (`ImportAssetCommand`/`UpdateAssetCommand` reject URLs,
+        //    relative paths, traversal, and non-files), and the confinement in
+        //    (3) is what keeps an out-of-tree path they store from reaching
+        //    FFmpeg through this server.
+        let outside_import = temp_dir.path().join("plan_import.mp4");
+        std::fs::write(&outside_import, b"fake video bytes").expect("import fixture");
+        let import_result = CommandPayload::parse(
+            "ImportAsset".to_string(),
+            serde_json::json!({
+                "name": "plan_import.mp4",
+                "uri": outside_import.to_string_lossy()
+            }),
+        );
+        assert!(
+            import_result.is_ok(),
+            "external footage must stay importable through a plan"
         );
     }
 

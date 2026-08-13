@@ -66,11 +66,13 @@ fn track_included_in_export(track: &Track) -> bool {
     }
 }
 
+/// Tracks whose clips are collected into the FFmpeg argument builders.
+///
+/// Delegates to [`Track::contributes_to_output`] so this filter and
+/// [`Sequence::output_duration`] — the length the builders pad the output to —
+/// always describe the same set of clips.
 fn track_included_in_media_collection(track: &Track) -> bool {
-    match track.kind {
-        TrackKind::Video | TrackKind::Audio => !track.muted,
-        TrackKind::Overlay | TrackKind::Caption => track.visible && !track.muted,
-    }
+    track.contributes_to_output()
 }
 
 pub(super) fn asset_has_playable_audio(
@@ -1941,22 +1943,14 @@ pub(super) fn append_output_time_range_args(
     }
 }
 
-fn sequence_timeline_duration(sequence: &Sequence) -> f64 {
-    sequence
-        .tracks
-        .iter()
-        .flat_map(|track| track.clips.iter())
-        .filter(|clip| clip.enabled)
-        .map(|clip| clip.place.timeline_out_sec())
-        .fold(0.0_f64, f64::max)
-}
-
 fn normalize_output_time_range(
     sequence: &Sequence,
     start_time: Option<f64>,
     end_time: Option<f64>,
 ) -> Result<(Option<f64>, Option<f64>), ExportError> {
-    let full_duration = sequence_timeline_duration(sequence);
+    // Ranges are clamped to the length the export writes, so a range the caller
+    // is allowed to ask for always lands inside the resulting file.
+    let full_duration = sequence.output_duration();
 
     if full_duration <= 0.0 {
         return Err(ExportError::InvalidSettings(
@@ -1994,12 +1988,17 @@ fn normalize_output_time_range(
     Ok((normalized_start, normalized_end))
 }
 
+/// Length of the file a render of `sequence` over this range writes.
+///
+/// Derived from [`Sequence::output_duration`] so the reported duration, the
+/// progress total and the file itself all agree; a clip the export drops
+/// (disabled, or on a muted track) shortens all three together.
 fn effective_export_duration(
     sequence: &Sequence,
     start_time: Option<f64>,
     end_time: Option<f64>,
 ) -> f64 {
-    let full_duration = sequence_timeline_duration(sequence);
+    let full_duration = sequence.output_duration();
 
     let normalized_start = start_time.unwrap_or(0.0).max(0.0).min(full_duration);
 
@@ -8011,6 +8010,150 @@ mod tests {
         );
     }
 
+    /// Builds an audio-only export of a 4s voiceover at 0s plus `tail_track`,
+    /// returning the joined arguments so the padding target can be read off.
+    fn audio_only_args_with_tail(tail_track: Track, tail_asset: Option<Asset>) -> String {
+        use crate::core::assets::AudioInfo;
+        use crate::core::ffmpeg::{FFmpegInfo, FFmpegRunner};
+        use crate::core::timeline::{Clip, SequenceFormat};
+
+        let mut sequence = Sequence::new("Audio Tail", SequenceFormat::youtube_1080());
+        let mut audio_track = Track::new_audio("Audio 1");
+        audio_track.add_clip(
+            Clip::new("voiceover")
+                .with_source_range(0.0, 4.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(audio_track);
+        sequence.add_track(tail_track);
+
+        let voiceover_path = create_temp_media_file("audio_tail_case.wav");
+        let mut voiceover =
+            Asset::new_audio("audio_tail_case.wav", &voiceover_path, AudioInfo::default())
+                .with_duration(4.0)
+                .with_file_size(1_000_000);
+        voiceover.id = "voiceover".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert("voiceover".to_string(), AssetAudioInfo { has_audio: true });
+        if let Some(asset) = tail_asset {
+            audio_info_map.insert(asset.id.clone(), AssetAudioInfo { has_audio: true });
+            assets.insert(asset.id.clone(), asset);
+        }
+        assets.insert(voiceover.id.clone(), voiceover);
+
+        let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
+            ffmpeg_path: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
+            version: "test".to_string(),
+            is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
+        }));
+        let settings = AudioExportSettings {
+            format: AudioExportFormat::Wav,
+            output_path: PathBuf::from("/tmp/audio-tail-case.wav"),
+            bitrate: None,
+            sample_rate: None,
+            start_time: None,
+            end_time: None,
+        }
+        .to_export_settings();
+
+        engine
+            .build_audio_only_filter_args_with_audio_info(
+                &sequence,
+                &assets,
+                &std::collections::HashMap::new(),
+                &audio_info_map,
+                &settings,
+            )
+            .expect("audio-only export args should build")
+            .join(" ")
+    }
+
+    /// Feature: audio-only export padding
+    /// Scenario: should not pad silence out to a clip the export drops
+    ///
+    /// Padding to the editing extent produced files far longer than the
+    /// program: a disabled tail clip, or one on a muted track, is not in the
+    /// output and cannot lengthen it.
+    #[test]
+    fn test_audio_only_filter_builder_does_not_pad_past_dropped_clips() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::Clip;
+
+        let mut disabled_tail = Track::new_video("Video 1");
+        let mut disabled = Clip::new("silent_video")
+            .with_source_range(0.0, 6.0)
+            .place_at(4.0);
+        disabled.enabled = false;
+        disabled_tail.add_clip(disabled);
+
+        let mut muted_track_tail = Track::new_audio("Audio 2");
+        muted_track_tail.muted = true;
+        muted_track_tail.add_clip(
+            Clip::new("muted_track_asset")
+                .with_source_range(0.0, 6.0)
+                .place_at(4.0),
+        );
+
+        let silent_video_path = create_temp_media_file("audio_tail_dropped.mp4");
+        let mut silent_video = Asset::new_video(
+            "audio_tail_dropped.mp4",
+            &silent_video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(6.0)
+        .with_file_size(5_000_000);
+        silent_video.id = "silent_video".to_string();
+        silent_video.audio = None;
+
+        for (label, tail, asset) in [
+            ("disabled clip", disabled_tail, Some(silent_video)),
+            ("clip on a muted track", muted_track_tail, None),
+        ] {
+            let args_str = audio_only_args_with_tail(tail, asset);
+            assert!(
+                args_str.contains("apad=whole_dur=4"),
+                "a trailing {label} is not in the output, so the pad target stays at the \
+                 last clip the export keeps. Got: {args_str}"
+            );
+        }
+    }
+
+    /// Feature: audio-only export padding
+    /// Scenario: should pad silence out to an enabled but muted tail clip
+    ///
+    /// Muting a clip silences it; it still occupies its span, and a range
+    /// render inside that span has to receive packets.
+    #[test]
+    fn test_audio_only_filter_builder_pads_past_a_muted_tail_clip() {
+        use crate::core::assets::AudioInfo;
+        use crate::core::timeline::Clip;
+
+        let mut tail_track = Track::new_audio("Audio 2");
+        let mut muted_clip = Clip::new("muted_clip_asset")
+            .with_source_range(0.0, 6.0)
+            .place_at(4.0);
+        muted_clip.audio.muted = true;
+        tail_track.add_clip(muted_clip);
+
+        let muted_path = create_temp_media_file("audio_tail_muted.wav");
+        let mut muted_asset =
+            Asset::new_audio("audio_tail_muted.wav", &muted_path, AudioInfo::default())
+                .with_duration(6.0)
+                .with_file_size(1_000_000);
+        muted_asset.id = "muted_clip_asset".to_string();
+
+        let args_str = audio_only_args_with_tail(tail_track, Some(muted_asset));
+
+        assert!(
+            args_str.contains("apad=whole_dur=10"),
+            "a muted clip contributes silence for its span, got: {args_str}"
+        );
+    }
+
     /// Feature: audio-only export padding
     /// Scenario: both master-audio branches, and targets that cannot be padded
     #[test]
@@ -8697,6 +8840,170 @@ mod tests {
         assert!(
             filter_complex.contains("color=c=black:s=1920x1080:r=30:d=7"),
             "Expected black video extension from the last visual clip to the audio timeline end. Got: {filter_complex}"
+        );
+    }
+
+    /// Builds a 1920x1080 sequence with a 5s file-backed clip on `Video 1` and
+    /// whatever `tail_track` adds after it, plus the asset that clip needs.
+    ///
+    /// The tail decides the output length; the assertions below read it off the
+    /// black tail gap the filter graph pads with.
+    fn sequence_with_video_body_and_tail(
+        tail_track: Track,
+    ) -> (Sequence, std::collections::HashMap<String, Asset>) {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat};
+
+        let mut sequence = Sequence::new("Tail", SequenceFormat::youtube_1080());
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+        sequence.add_track(tail_track);
+
+        let video_path = create_temp_media_file("tail_body.mp4");
+        let mut video_asset = Asset::new_video("tail_body.mp4", &video_path, VideoInfo::default())
+            .with_duration(5.0)
+            .with_file_size(5_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert(video_asset.id.clone(), video_asset);
+
+        (sequence, assets)
+    }
+
+    fn filter_complex_of(args: &[String]) -> &str {
+        args.windows(2)
+            .find_map(|window| (window[0] == "-filter_complex").then_some(window[1].as_str()))
+            .expect("filter_complex argument")
+    }
+
+    /// Feature: Render output length
+    /// Scenario: a tail clip that emits no stream still holds the render open
+    ///
+    /// An adjustment layer grades the picture below it and contributes no
+    /// stream of its own. Before the canonical output duration, the render
+    /// stopped at the last file-backed clip and silently dropped the tail.
+    #[test]
+    fn test_build_filter_covers_a_trailing_adjustment_layer() {
+        use crate::core::timeline::Clip;
+
+        let mut tail_track = Track::new_video("Video 2");
+        let mut adjustment = Clip::new("adjustment")
+            .with_source_range(0.0, 7.0)
+            .place_at(5.0);
+        adjustment.is_adjustment_layer = true;
+        tail_track.add_clip(adjustment);
+
+        let (sequence, assets) = sequence_with_video_body_and_tail(tail_track);
+        assert_eq!(sequence.output_duration(), 12.0);
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings::default(),
+        )
+        .expect("trailing adjustment layer should build");
+
+        let filter_complex = filter_complex_of(&args);
+        assert!(
+            filter_complex.contains("color=c=black:s=1920x1080:r=30:d=7"),
+            "the render must reach the adjustment layer's out point. Got: {filter_complex}"
+        );
+    }
+
+    /// Feature: Render output length
+    /// Scenario: a clip on a hidden video track still holds the render open
+    #[test]
+    fn test_build_filter_covers_a_trailing_clip_on_a_hidden_track() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::Clip;
+
+        let mut tail_track = Track::new_video("Video 2");
+        tail_track.visible = false;
+        tail_track.add_clip(
+            Clip::new("hidden_asset")
+                .with_source_range(0.0, 7.0)
+                .place_at(5.0),
+        );
+
+        let (sequence, mut assets) = sequence_with_video_body_and_tail(tail_track);
+
+        let hidden_path = create_temp_media_file("tail_hidden.mp4");
+        let mut hidden_asset =
+            Asset::new_video("tail_hidden.mp4", &hidden_path, VideoInfo::default())
+                .with_duration(7.0)
+                .with_file_size(5_000_000);
+        hidden_asset.id = "hidden_asset".to_string();
+        hidden_asset.audio = None;
+        assets.insert(hidden_asset.id.clone(), hidden_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "hidden_asset".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &audio_info_map,
+            &ExportSettings::default(),
+        )
+        .expect("trailing hidden clip should build");
+
+        let filter_complex = filter_complex_of(&args);
+        assert!(
+            filter_complex.contains("color=c=black:s=1920x1080:r=30:d=7"),
+            "a hidden track contributes no picture but still occupies the timeline. \
+             Got: {filter_complex}"
+        );
+    }
+
+    /// Feature: Render output length
+    /// Scenario: a disabled tail clip is not in the output and must not extend it
+    ///
+    /// This is the render half of the duration agreement: padding black out to
+    /// a clip the export drops would make the file longer than the program.
+    #[test]
+    fn test_build_filter_stops_at_the_last_enabled_clip() {
+        use crate::core::timeline::Clip;
+
+        let mut tail_track = Track::new_video("Video 2");
+        let mut disabled = Clip::new("disabled_asset")
+            .with_source_range(0.0, 7.0)
+            .place_at(5.0);
+        disabled.enabled = false;
+        tail_track.add_clip(disabled);
+
+        let (sequence, assets) = sequence_with_video_body_and_tail(tail_track);
+        assert_eq!(
+            sequence.duration(),
+            12.0,
+            "the editing extent still shows it"
+        );
+        assert_eq!(sequence.output_duration(), 5.0);
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings::default(),
+        )
+        .expect("disabled tail clip should build");
+
+        let filter_complex = filter_complex_of(&args);
+        assert!(
+            !filter_complex.contains("color=c=black"),
+            "a disabled clip must not pad the render with black. Got: {filter_complex}"
         );
     }
 

@@ -316,12 +316,61 @@ impl Sequence {
         self.markers.iter().find(|m| m.id == marker_id)
     }
 
-    /// Calculates the total duration of the sequence
+    /// Calculates the total editing extent of the sequence
+    ///
+    /// Counts **every** clip on **every** track, including disabled clips and
+    /// clips on muted or hidden tracks, because the editor still shows them and
+    /// still lets the playhead reach them.
+    ///
+    /// This is deliberately *not* the length of a render: an export drops
+    /// disabled clips and muted tracks. Use [`Sequence::output_duration`] for
+    /// anything that has to agree with a rendered file.
     pub fn duration(&self) -> TimeSec {
         self.tracks
             .iter()
             .flat_map(|t| t.clips.iter())
             .map(|c| c.place.timeline_out_sec())
+            .fold(0.0, f64::max)
+    }
+
+    /// Returns the wall-clock length the export writes for this sequence.
+    ///
+    /// This is the single source of truth for "how long is the output", shared
+    /// by the FFmpeg argument builders (which pad black video and silent audio
+    /// out to it) and by the render QC rule (which compares a measured file
+    /// against it). Whatever this returns **must** equal the duration of the
+    /// file a full-range export produces, for every clip-type/enabled/muted
+    /// combination; a divergence is a bug in one of the two, not a tolerance to
+    /// widen.
+    ///
+    /// A clip contributes its timeline span when, and only when:
+    /// - its track contributes to the output — see
+    ///   [`Track::contributes_to_output`]: video and audio tracks unless muted,
+    ///   overlay and caption tracks while visible and unmuted; and
+    /// - the clip itself is enabled.
+    ///
+    /// Contribution is about *occupying time*, not about emitting a stream, so
+    /// the span counts even when the clip renders nothing of its own:
+    /// - a **disabled** clip is excluded — the export never lays it down, so it
+    ///   cannot extend the output;
+    /// - an **enabled but muted** audio clip contributes silence for its span;
+    /// - a clip on a **hidden** video track contributes its span (as black
+    ///   picture) and its audio;
+    /// - **adjustment-layer**, **text** and **caption** clips contribute their
+    ///   span even though they only draw onto — or grade — the picture below
+    ///   them, and a tail one keeps the render alive to its out point;
+    /// - a clip whose source carries **no audio** still contributes its span.
+    ///
+    /// Non-finite and non-positive out points are ignored. An empty sequence,
+    /// or one whose clips are all disabled or on muted tracks, returns `0.0`.
+    pub fn output_duration(&self) -> TimeSec {
+        self.tracks
+            .iter()
+            .filter(|track| track.contributes_to_output())
+            .flat_map(|track| track.clips.iter())
+            .filter(|clip| clip.enabled)
+            .map(|clip| clip.place.timeline_out_sec())
+            .filter(|end| end.is_finite() && *end > 0.0)
             .fold(0.0, f64::max)
     }
 
@@ -545,6 +594,22 @@ impl Track {
     /// Returns true if this is a caption track
     pub fn is_caption(&self) -> bool {
         matches!(self.kind, TrackKind::Caption)
+    }
+
+    /// Returns true when the export pipeline lays this track onto the output.
+    ///
+    /// Muting a video or audio track drops it from the render entirely, while a
+    /// hidden video track still contributes its audio. Overlay and caption
+    /// tracks only draw while they are visible, so hiding one removes it.
+    ///
+    /// This is the single definition of track inclusion used by the export
+    /// argument builders and by [`Sequence::output_duration`]; the export path's
+    /// own media-collection filter delegates here so the two cannot drift.
+    pub fn contributes_to_output(&self) -> bool {
+        match self.kind {
+            TrackKind::Video | TrackKind::Audio => !self.muted,
+            TrackKind::Overlay | TrackKind::Caption => self.visible && !self.muted,
+        }
     }
 }
 
@@ -1555,6 +1620,199 @@ mod tests {
         seq.add_track(track);
 
         assert_eq!(seq.duration(), 15.0);
+    }
+
+    // =========================================================================
+    // Sequence::output_duration - the length the export writes
+    // =========================================================================
+
+    /// Builds a two-second clip at `timeline_in` on a fresh track of `kind`.
+    fn tail_clip(asset_id: &str, timeline_in: TimeSec) -> Clip {
+        Clip::new(asset_id)
+            .with_source_range(0.0, 2.0)
+            .place_at(timeline_in)
+    }
+
+    /// A sequence with a 10s video clip and one trailing clip at 10s-12s.
+    ///
+    /// The tail is what every case below varies: whatever it is, the export
+    /// either lays it down (output runs to 12s) or drops it (output stops at
+    /// 10s), and `output_duration` has to say which.
+    fn sequence_with_tail(tail_track: Track) -> Sequence {
+        let mut sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("asset_body")
+                .with_source_range(0.0, 10.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+        sequence.add_track(tail_track);
+        sequence
+    }
+
+    /// Feature: Canonical output duration
+    /// Scenario: should count an enabled tail clip of every kind that occupies time
+    #[test]
+    fn test_output_duration_should_count_every_enabled_clip_that_occupies_time() {
+        // A plain file-backed clip on a second video track.
+        let mut media_tail = Track::new_video("Video 2");
+        media_tail.add_clip(tail_clip("asset_tail", 10.0));
+
+        // A text clip: draws onto the picture below it, emits no stream.
+        let mut text_tail = Track::new_video("Video 2");
+        text_tail.add_clip(tail_clip("__text__title", 10.0));
+
+        // A caption clip on a caption track: same, via a different filter.
+        let mut caption_tail = Track::new_caption("Captions");
+        caption_tail.add_clip(tail_clip("__caption__line", 10.0));
+
+        // An adjustment layer: grades the picture below it, emits no stream.
+        let mut adjustment_tail = Track::new_video("Video 2");
+        let mut adjustment_clip = tail_clip("asset_tail", 10.0);
+        adjustment_clip.is_adjustment_layer = true;
+        adjustment_tail.add_clip(adjustment_clip);
+
+        // An audio clip whose own audio is muted: occupies its span as silence.
+        let mut muted_clip_tail = Track::new_audio("Audio 1");
+        let mut muted_clip = tail_clip("asset_tail", 10.0);
+        muted_clip.audio.muted = true;
+        muted_clip_tail.add_clip(muted_clip);
+
+        // A clip on a hidden video track: no picture, still occupies its span.
+        let mut hidden_track_tail = Track::new_video("Video 2");
+        hidden_track_tail.visible = false;
+        hidden_track_tail.add_clip(tail_clip("asset_tail", 10.0));
+
+        for (label, tail) in [
+            ("media", media_tail),
+            ("text", text_tail),
+            ("caption", caption_tail),
+            ("adjustment layer", adjustment_tail),
+            ("muted audio clip", muted_clip_tail),
+            ("clip on a hidden track", hidden_track_tail),
+        ] {
+            let sequence = sequence_with_tail(tail);
+            assert_eq!(
+                sequence.output_duration(),
+                12.0,
+                "a trailing {label} occupies the timeline, so the export runs to its out point"
+            );
+        }
+    }
+
+    /// Feature: Canonical output duration
+    /// Scenario: should ignore a tail clip the export never lays down
+    #[test]
+    fn test_output_duration_should_ignore_clips_the_export_drops() {
+        // A disabled clip: excluded from the export entirely.
+        let mut disabled_tail = Track::new_video("Video 2");
+        let mut disabled_clip = tail_clip("asset_tail", 10.0);
+        disabled_clip.enabled = false;
+        disabled_tail.add_clip(disabled_clip);
+
+        // A muted video track: dropped whole, picture and sound.
+        let mut muted_video_tail = Track::new_video("Video 2");
+        muted_video_tail.muted = true;
+        muted_video_tail.add_clip(tail_clip("asset_tail", 10.0));
+
+        // A muted audio track: dropped whole.
+        let mut muted_audio_tail = Track::new_audio("Audio 1");
+        muted_audio_tail.muted = true;
+        muted_audio_tail.add_clip(tail_clip("asset_tail", 10.0));
+
+        // A hidden caption track: captions only draw while visible.
+        let mut hidden_caption_tail = Track::new_caption("Captions");
+        hidden_caption_tail.visible = false;
+        hidden_caption_tail.add_clip(tail_clip("__caption__line", 10.0));
+
+        for (label, tail) in [
+            ("disabled clip", disabled_tail),
+            ("clip on a muted video track", muted_video_tail),
+            ("clip on a muted audio track", muted_audio_tail),
+            ("caption on a hidden track", hidden_caption_tail),
+        ] {
+            let sequence = sequence_with_tail(tail);
+            assert_eq!(
+                sequence.output_duration(),
+                10.0,
+                "a trailing {label} is not in the render, so it cannot extend the file"
+            );
+        }
+    }
+
+    /// Feature: Canonical output duration
+    /// Scenario: should diverge from the editing extent exactly where the export does
+    #[test]
+    fn test_output_duration_is_not_the_editing_extent() {
+        let mut disabled_tail = Track::new_video("Video 2");
+        let mut disabled_clip = tail_clip("asset_tail", 10.0);
+        disabled_clip.enabled = false;
+        disabled_tail.add_clip(disabled_clip);
+        let sequence = sequence_with_tail(disabled_tail);
+
+        // The editor still shows the disabled clip and the playhead still
+        // reaches it, so the editing extent runs to 12s while nothing the
+        // export writes does.
+        assert_eq!(sequence.duration(), 12.0);
+        assert_eq!(sequence.output_duration(), 10.0);
+    }
+
+    /// Feature: Canonical output duration
+    /// Scenario: should report nothing to render rather than a bogus length
+    #[test]
+    fn test_output_duration_should_be_zero_when_nothing_renders() {
+        let empty = Sequence::new("Empty", SequenceFormat::youtube_1080());
+        assert_eq!(empty.output_duration(), 0.0);
+
+        let mut all_disabled = Sequence::new("Disabled", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        let mut clip = tail_clip("asset_1", 0.0);
+        clip.enabled = false;
+        track.add_clip(clip);
+        all_disabled.add_track(track);
+        assert_eq!(all_disabled.output_duration(), 0.0);
+    }
+
+    /// Feature: Canonical output duration
+    /// Scenario: should survive a clip with an unusable out point
+    #[test]
+    fn test_output_duration_should_ignore_non_finite_out_points() {
+        let mut sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(tail_clip("asset_1", 0.0));
+
+        let mut broken = tail_clip("asset_2", 0.0);
+        broken.place.duration_sec = f64::NAN;
+        track.add_clip(broken);
+        sequence.add_track(track);
+
+        assert_eq!(sequence.output_duration(), 2.0);
+    }
+
+    /// Feature: Track output contribution
+    /// Scenario: should keep a hidden video track's audio but drop a muted one
+    #[test]
+    fn test_track_contributes_to_output_by_kind() {
+        let mut video = Track::new_video("Video 1");
+        assert!(video.contributes_to_output());
+        video.visible = false;
+        assert!(
+            video.contributes_to_output(),
+            "hiding a video track silences its picture, not its audio"
+        );
+        video.muted = true;
+        assert!(!video.contributes_to_output());
+
+        let mut audio = Track::new_audio("Audio 1");
+        assert!(audio.contributes_to_output());
+        audio.muted = true;
+        assert!(!audio.contributes_to_output());
+
+        let mut caption = Track::new_caption("Captions");
+        assert!(caption.contributes_to_output());
+        caption.visible = false;
+        assert!(!caption.contributes_to_output());
     }
 
     #[test]
