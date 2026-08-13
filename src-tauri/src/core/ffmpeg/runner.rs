@@ -1293,6 +1293,15 @@ const MAX_RETAINED_FILTER_LINES: usize = 500_000;
 /// carry no filter prefix, so the tail window is what keeps it intact.
 const MAX_RETAINED_TAIL_LINES: usize = 400;
 
+/// Maximum number of bytes retained from a single logical stderr line.
+///
+/// The line cap only bounds how many lines are kept, so without a byte cap a
+/// stream that never emits `\n` — a corrupt pipe, or a stream-metadata tag
+/// copied verbatim into the log — would grow one line until the process runs
+/// out of memory. FFmpeg's own lines are well under a kilobyte, so 8 KiB keeps
+/// every real line whole and truncates only pathological input.
+const MAX_STDERR_LINE_BYTES: usize = 8 * 1024;
+
 /// Line prefixes FFmpeg only prints at its INFO log level.
 ///
 /// These are header lines, so they carry no filter marker and survive only
@@ -1503,6 +1512,11 @@ where
 /// make `lines()` yield an error. Stopping there would discard every filter
 /// line after it and, worse, leave the child's stderr pipe unread — a large
 /// log would then fill the pipe and block FFmpeg from ever exiting.
+///
+/// Each logical line is bounded at [`MAX_STDERR_LINE_BYTES`]: the buffered
+/// reader is consumed a chunk at a time so the surplus of an overlong line is
+/// discarded as it arrives instead of being accumulated by `read_until`. The
+/// line still reaches the capture, truncated and counted as truncation.
 async fn drain_filter_stderr<R>(stderr: R) -> FilterStderrCapture
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -1511,24 +1525,57 @@ where
 
     let mut capture = FilterStderrCapture::new();
     let mut reader = BufReader::new(stderr);
-    let mut buffer = Vec::new();
+    let mut line = Vec::new();
+    let mut line_truncated = false;
 
     loop {
-        buffer.clear();
-        match reader.read_until(b'\n', &mut buffer).await {
-            // End of stream: the child closed stderr.
-            Ok(0) => break,
-            Ok(_) => {
-                let line = String::from_utf8_lossy(&buffer);
-                capture.push(line.trim_end_matches('\n').trim_end_matches('\r'));
-            }
-            // A genuine I/O error means the pipe is gone; there is nothing left
-            // to drain, so retaining what arrived is the best outcome.
-            Err(_) => break,
+        let (consumed, line_complete, dropped_bytes) = {
+            let chunk = match reader.fill_buf().await {
+                // End of stream: the child closed stderr.
+                Ok([]) => break,
+                Ok(chunk) => chunk,
+                // A genuine I/O error means the pipe is gone; there is nothing
+                // left to drain, so retaining what arrived is the best outcome.
+                Err(_) => break,
+            };
+
+            let (payload_len, consumed, line_complete) =
+                match chunk.iter().position(|&byte| byte == b'\n') {
+                    Some(index) => (index, index + 1, true),
+                    None => (chunk.len(), chunk.len(), false),
+                };
+
+            let room = MAX_STDERR_LINE_BYTES.saturating_sub(line.len());
+            let retained = payload_len.min(room);
+            line.extend_from_slice(&chunk[..retained]);
+            (consumed, line_complete, payload_len - retained)
+        };
+
+        reader.consume(consumed);
+        line_truncated |= dropped_bytes > 0;
+
+        if line_complete {
+            push_stderr_line(&mut capture, &line, line_truncated);
+            line.clear();
+            line_truncated = false;
         }
     }
 
+    // A stream that ends without a trailing newline still carries a line.
+    if !line.is_empty() {
+        push_stderr_line(&mut capture, &line, line_truncated);
+    }
+
     capture
+}
+
+/// Decodes one logical stderr line into the capture.
+fn push_stderr_line(capture: &mut FilterStderrCapture, line: &[u8], truncated: bool) {
+    let decoded = String::from_utf8_lossy(line);
+    capture.push(decoded.trim_end_matches('\r'));
+    if truncated {
+        capture.truncated = true;
+    }
 }
 
 /// Bounded, order-preserving stderr buffer for analysis passes.
@@ -1992,6 +2039,33 @@ mod tests {
         let capture = drain_filter_stderr(std::io::Cursor::new(stream)).await;
 
         assert_eq!(capture.joined(), "[silencedetect @ 0x1] silence_start: 1.0");
+    }
+
+    #[tokio::test]
+    async fn should_bound_a_stderr_line_that_carries_no_newline() {
+        // A stream that never emits `\n` would otherwise be accumulated whole,
+        // so the per-line cap is what keeps a corrupt pipe from exhausting
+        // memory. The line after it must still be read as its own line.
+        let mut stream: Vec<u8> = vec![b'a'; MAX_STDERR_LINE_BYTES * 4];
+        stream.extend_from_slice(b"\n[silencedetect @ 0x1] silence_start: 1.0\n");
+
+        let capture = drain_filter_stderr(std::io::Cursor::new(stream)).await;
+        let joined = capture.joined();
+        let overlong = joined.lines().next().expect("the oversized line");
+
+        assert_eq!(overlong.len(), MAX_STDERR_LINE_BYTES);
+        assert!(capture.truncated);
+        assert!(joined.contains("silence_start: 1.0"), "{joined:.120}");
+    }
+
+    #[tokio::test]
+    async fn should_keep_a_final_stderr_line_without_a_trailing_newline() {
+        let stream = b"[blackdetect @ 0x2] black_start:3".to_vec();
+
+        let capture = drain_filter_stderr(std::io::Cursor::new(stream)).await;
+
+        assert_eq!(capture.joined(), "[blackdetect @ 0x2] black_start:3");
+        assert!(!capture.truncated);
     }
 
     #[tokio::test]

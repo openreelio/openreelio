@@ -3200,6 +3200,37 @@ mod tests {
         );
     }
 
+    /// Restores an environment variable to its pre-test value when dropped.
+    ///
+    /// The variable is process-wide, so a test that cleared it unconditionally
+    /// would discard a value the test process was started with, and a failed
+    /// assertion would leave the override in place for whatever runs next.
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn set_value(&self, value: &str) {
+            std::env::set_var(self.key, value);
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn should_treat_an_empty_approval_token_environment_value_as_no_grant() {
         // Both cases live in one test because they mutate the same process-wide
@@ -3210,9 +3241,8 @@ mod tests {
             allow_write: false,
         };
 
-        std::env::set_var("OPENREELIO_MCP_APPROVAL_TOKEN", "   ");
+        let approval_token_env = EnvVarGuard::set("OPENREELIO_MCP_APPROVAL_TOKEN", "   ");
         let state = build_server_state(&action);
-        std::env::remove_var("OPENREELIO_MCP_APPROVAL_TOKEN");
 
         assert!(state.approval_token.is_none());
         assert!(!state.has_active_approval_token());
@@ -3227,9 +3257,8 @@ mod tests {
             "an empty token must not unlock the mutating tools"
         );
 
-        std::env::set_var("OPENREELIO_MCP_APPROVAL_TOKEN", "real-token");
+        approval_token_env.set_value("real-token");
         let granted = build_server_state(&action);
-        std::env::remove_var("OPENREELIO_MCP_APPROVAL_TOKEN");
         assert_eq!(granted.approval_token.as_deref(), Some("real-token"));
         assert!(granted.has_active_approval_token());
     }

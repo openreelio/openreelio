@@ -7917,6 +7917,136 @@ mod tests {
         assert!(!args_str.contains("/missing/broken_visual.mp4"));
     }
 
+    /// Feature: audio-only export padding
+    /// Scenario: the timeline outlives the last clip that carries audio
+    #[test]
+    fn test_audio_only_filter_builder_pads_to_the_sequence_end() {
+        use crate::core::assets::{AudioInfo, VideoInfo};
+        use crate::core::ffmpeg::{FFmpegInfo, FFmpegRunner};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Audio Tail", SequenceFormat::youtube_1080());
+
+        let mut audio_track = Track::new_audio("Audio 1");
+        audio_track.add_clip(
+            Clip::new("voiceover")
+                .with_source_range(0.0, 4.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(audio_track);
+
+        // Silent picture holds the timeline open to 10s. An export range inside
+        // it is valid, so the master audio has to reach that far.
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("silent_video")
+                .with_source_range(0.0, 6.0)
+                .place_at(4.0),
+        );
+        sequence.add_track(video_track);
+
+        let voiceover_path = create_temp_media_file("audio_tail_voiceover.wav");
+        let mut voiceover = Asset::new_audio(
+            "audio_tail_voiceover.wav",
+            &voiceover_path,
+            AudioInfo::default(),
+        )
+        .with_duration(4.0)
+        .with_file_size(1_000_000);
+        voiceover.id = "voiceover".to_string();
+
+        let silent_video_path = create_temp_media_file("audio_tail_silent.mp4");
+        let mut silent_video = Asset::new_video(
+            "audio_tail_silent.mp4",
+            &silent_video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(6.0)
+        .with_file_size(5_000_000);
+        silent_video.id = "silent_video".to_string();
+        silent_video.audio = None;
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert(voiceover.id.clone(), voiceover);
+        assets.insert(silent_video.id.clone(), silent_video);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert("voiceover".to_string(), AssetAudioInfo { has_audio: true });
+        audio_info_map.insert(
+            "silent_video".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+
+        let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
+            ffmpeg_path: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
+            version: "test".to_string(),
+            is_bundled: false,
+            source: crate::core::ffmpeg::FFmpegSource::System,
+        }));
+        let settings = AudioExportSettings {
+            format: AudioExportFormat::Wav,
+            output_path: PathBuf::from("/tmp/audio-tail.wav"),
+            bitrate: None,
+            sample_rate: None,
+            start_time: None,
+            end_time: None,
+        }
+        .to_export_settings();
+
+        let args = engine
+            .build_audio_only_filter_args_with_audio_info(
+                &sequence,
+                &assets,
+                &std::collections::HashMap::new(),
+                &audio_info_map,
+                &settings,
+            )
+            .expect("audio-only export args should build");
+
+        let args_str = args.join(" ");
+        assert!(
+            args_str.contains("apad=whole_dur=10"),
+            "audio must be padded to the sequence end, got: {args_str}"
+        );
+    }
+
+    /// Feature: audio-only export padding
+    /// Scenario: both master-audio branches, and targets that cannot be padded
+    #[test]
+    fn test_master_audio_output_pads_every_branch_and_rejects_invalid_targets() {
+        let mut single = String::from("[0:a]anull[a0]");
+        let label = append_master_audio_output(&mut single, &["[a0]".to_string()], 0.0, 12.5)
+            .expect("a single stream produces a master output");
+        assert_eq!(label, "[outa_base]");
+        assert!(single.contains("apad=whole_dur=12.5"), "{single}");
+
+        let mut mixed = String::from("[0:a]anull[a0]");
+        append_master_audio_output(
+            &mut mixed,
+            &["[a0]".to_string(), "[a1]".to_string()],
+            0.0,
+            12.5,
+        )
+        .expect("a mix produces a master output");
+        assert!(mixed.contains("amix=inputs=2"), "{mixed}");
+        assert!(mixed.contains("apad=whole_dur=12.5"), "{mixed}");
+
+        // A target that is zero, negative, or not a number is not a duration
+        // FFmpeg can pad to, so no padding is emitted at all.
+        for target in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut graph = String::from("[0:a]anull[a0]");
+            append_master_audio_output(&mut graph, &["[a0]".to_string()], 0.0, target)
+                .expect("a single stream produces a master output");
+            assert!(!graph.contains("apad"), "target {target}: {graph}");
+        }
+
+        assert!(
+            append_master_audio_output(&mut String::new(), &[], 0.0, 5.0).is_none(),
+            "no audio streams means no master audio output"
+        );
+    }
+
     #[test]
     fn test_build_filter_keeps_audio_from_hidden_video_tracks() {
         use crate::core::assets::VideoInfo;

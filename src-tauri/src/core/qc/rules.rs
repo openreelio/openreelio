@@ -199,8 +199,19 @@ impl BlackFrameRule {
         state: &ProjectState,
         black_duration_sec: f64,
     ) -> Option<ViolationFix> {
+        // A measured black range is matched to any clip it overlaps, so it can
+        // outlast the clip it starts on. Black that runs past the clip's own
+        // out point is not leading black on this clip: slipping by the whole
+        // range would discard picture the edit asked for, so only the part
+        // inside the clip counts, and a clip that is black end to end has no
+        // leading black to slip past at all.
+        let clip_duration_sec = clip.duration();
+        if !clip_duration_sec.is_finite() || black_duration_sec >= clip_duration_sec {
+            return None;
+        }
+
         // Timeline seconds map to source seconds through the clip's speed.
-        let source_shift = black_duration_sec * safe_clip_speed(clip);
+        let source_shift = black_duration_sec.min(clip_duration_sec) * safe_clip_speed(clip);
         if !source_shift.is_finite() || source_shift <= 0.0 {
             return None;
         }
@@ -1746,6 +1757,56 @@ mod tests {
             .expect("rule runs");
 
         assert_eq!(violations.len(), 1);
+        assert!(violations[0].suggested_fix.is_none());
+    }
+
+    /// Feature: Black frame fixes
+    /// Scenario: should stay silent when the black outlasts the clip it starts on
+    #[tokio::test]
+    async fn test_black_frame_rule_should_not_suggest_a_slip_when_black_outlives_the_clip() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        // 120s of source, so the asset-end guard would happily accept a 10s
+        // slip: only the clip's own length can reject it.
+        let state = state_with_video_asset("asset_001", Some(120.0));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_black_ranges(vec![(0.0, 10.0)]));
+
+        let violations = BlackFrameRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert!(
+            violations[0].suggested_fix.is_none(),
+            "black covering the whole clip leaves no picture to slip to"
+        );
+    }
+
+    /// Feature: Black frame fixes
+    /// Scenario: should slip below the clip's duration but not at it
+    #[tokio::test]
+    async fn test_black_frame_rule_should_bound_the_slip_by_the_clip_duration() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        let state = state_with_video_asset("asset_001", Some(120.0));
+
+        let inside = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_black_ranges(vec![(0.0, 4.9)]));
+        let violations = BlackFrameRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &inside)
+            .await
+            .expect("rule runs");
+        let command = &violations[0].suggested_fix.as_ref().expect("fix").commands[0];
+        assert!((command["newSourceIn"].as_f64().expect("newSourceIn") - 4.9).abs() < 1e-9);
+
+        // Exactly the clip's duration: the whole clip is black, so there is no
+        // frame left to slip to.
+        let at_boundary = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_black_ranges(vec![(0.0, 5.0)]));
+        let violations = BlackFrameRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &at_boundary)
+            .await
+            .expect("rule runs");
         assert!(violations[0].suggested_fix.is_none());
     }
 

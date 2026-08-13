@@ -56,6 +56,7 @@ import {
   copyFileSync,
   createReadStream,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -348,6 +349,20 @@ function extractVerifiedArchive(target, archivePath, stagingRoot) {
   const binaryPath = join(destination, target.binaryName);
   if (!existsSync(binaryPath)) {
     fail(`verified archive ${archivePath} does not contain ${target.binaryName}`);
+  }
+
+  // `existsSync` follows links and `copyFileSync` copies what the link points
+  // at, so an archive carrying `openreelio-cli -> /etc/passwd` would publish
+  // bytes the checksum never covered. Only a regular file can be packaged.
+  const payload = lstatSync(binaryPath);
+  if (payload.isSymbolicLink()) {
+    fail(
+      `verified archive ${archivePath} contains ${target.binaryName} as a symbolic link; ` +
+        'only a regular file can be packaged',
+    );
+  }
+  if (!payload.isFile()) {
+    fail(`verified archive ${archivePath} does not contain ${target.binaryName} as a regular file`);
   }
 
   return binaryPath;

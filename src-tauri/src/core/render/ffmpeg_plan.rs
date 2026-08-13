@@ -512,6 +512,16 @@ pub(super) fn build_audio_only_ffmpeg_args(
         filter_complex.pop();
     }
 
+    // Clips that carry no audio — muted, frozen, text, or a silent source —
+    // were skipped above but still occupy the timeline, and an export range
+    // inside their span is valid against the sequence. Padding only to the last
+    // audio clip would leave that range with no packets at all, so the
+    // sequence's own end is the floor for the padding target.
+    let sequence_end_sec = ctx.sequence.duration();
+    if sequence_end_sec.is_finite() {
+        timeline_end_sec = timeline_end_sec.max(sequence_end_sec);
+    }
+
     let final_audio_label = append_master_audio_output(
         &mut filter_complex,
         &audio_streams,

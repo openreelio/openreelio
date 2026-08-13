@@ -1,6 +1,6 @@
 # Audit Remediation Plan — 2026-08 Agent-Native Delta
 
-**Source**: no-trust adversarial audit (48 agents, 8 lenses) of everything since `7f256808` — PRs #785 (perception/verify), #786 (distribution), the release/npm pipeline, and the unmerged `feature/external-edit-safety` (PR #788). 38 confirmed findings: 3 CRITICAL, 14 HIGH, 18 MEDIUM, 2 LOW.
+**Source**: no-trust adversarial audit (48 agents, 8 lenses) of everything since `7f256808` — PRs #785 (perception/verify), #786 (distribution), the release/npm pipeline, and the unmerged `feature/external-edit-safety` (PR #788). 38 confirmed findings (`C0`–`C2` plus `#3`–`#37`): 3 CRITICAL, 14 HIGH, 19 MEDIUM, 2 LOW. This PR closes the 33 that live in shipped code; RC-C lands on PR #788.
 
 ## Engineering principle for this remediation
 

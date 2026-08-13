@@ -137,9 +137,13 @@ jobs:
           if [ "$PRERELEASE" != "$VERSION" ]; then
             # First prerelease identifier: 0.2.0-rc.1 -> rc, 0.2.0-beta -> beta.
             CHANNEL="$(printf '%s' "${PRERELEASE%%.*}" | tr '[:upper:]' '[:lower:]')"
-            # npm refuses a dist-tag that parses as a semver range, so a numeric
-            # identifier (0.2.0-1) falls back to the generic prerelease channel.
-            if printf '%s' "$CHANNEL" | grep -Eq '^[a-z][0-9a-z-]*$'; then
+            # Two channels can never be derived from a prerelease identifier:
+            # `latest` is exactly the tag this branch exists to protect, and npm
+            # refuses any dist-tag it can read as a semver range (0.2.0-1 -> "1",
+            # 0.2.0-v2 -> "v2", 0.2.0-x.1 -> "x"). Both fall back to the generic
+            # prerelease channel.
+            if printf '%s' "$CHANNEL" | grep -Eq '^[a-z][0-9a-z-]*$' &&
+              ! printf '%s' "$CHANNEL" | grep -Eq '^(latest|x|v[0-9].*)$'; then
               DIST_TAG="$CHANNEL"
             else
               DIST_TAG=next
