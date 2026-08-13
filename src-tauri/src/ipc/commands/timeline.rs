@@ -155,6 +155,13 @@ pub async fn execute_command(
         .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
+    // Refuse to append on top of edits made by another process (openreelio-cli,
+    // a second window, an agent). The frontend maps this error to a reload
+    // prompt; merging is never attempted automatically.
+    project
+        .ensure_no_external_changes()
+        .map_err(|e| e.to_ipc_error())?;
+
     // Strict validation via CommandPayload::parse
     let typed_command = CommandPayload::parse(command_type, payload)?;
 

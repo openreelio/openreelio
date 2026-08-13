@@ -6,6 +6,15 @@ use thiserror::Error;
 
 use super::{AssetId, ClipId, EffectId, OpId, SequenceId, TimeSec, TrackId};
 
+/// Stable machine-readable marker embedded in [`CoreError::ExternalChangeDetected`]
+/// messages.
+///
+/// IPC flattens `CoreError` to a string, so the frontend matches on this token to
+/// tell "another process edited this project" apart from ordinary command
+/// failures. Keep it in sync with `EXTERNAL_CHANGE_DETECTED_CODE` in
+/// `src/utils/externalChange.ts`.
+pub const EXTERNAL_CHANGE_DETECTED_CODE: &str = "ExternalChangeDetected";
+
 /// Core engine error types
 #[derive(Error, Debug)]
 pub enum CoreError {
@@ -23,6 +32,19 @@ pub enum CoreError {
 
     #[error("Failed to save project: {0}")]
     ProjectSaveFailed(String),
+
+    #[error(
+        "{}: the project operation log changed on disk outside this session \
+         (expected {expected_op_count} operations, found {on_disk_op_count}). \
+         Reload the project to continue.",
+        EXTERNAL_CHANGE_DETECTED_CODE
+    )]
+    ExternalChangeDetected {
+        /// Number of operations this session expects the log to contain.
+        expected_op_count: usize,
+        /// Number of operations currently present in the on-disk log.
+        on_disk_op_count: usize,
+    },
 
     // =========================================================================
     // Asset Errors

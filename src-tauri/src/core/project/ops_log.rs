@@ -6,6 +6,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -186,6 +188,13 @@ pub struct ReadResult {
 pub struct OpsLog {
     /// Path to the ops.jsonl file
     path: PathBuf,
+    /// Number of operations appended through this handle and every handle
+    /// derived from it via [`OpsLog::shared_handle`].
+    ///
+    /// This is the basis of external-change detection: the number of operations
+    /// the current session expects to find on disk is the count observed when
+    /// the log was opened plus the number of appends this session performed.
+    local_append_count: Arc<AtomicU64>,
 }
 
 struct OpsLogLock(File);
@@ -202,7 +211,28 @@ impl OpsLog {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
+            local_append_count: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Creates a second handle to the same log that shares this handle's local
+    /// append counter.
+    ///
+    /// Use this whenever a component (for example [`crate::core::commands::CommandExecutor`])
+    /// needs its own handle to a log that another component also writes to, so
+    /// that every append performed by this session is attributed to the same
+    /// counter and never mistaken for an external edit.
+    pub fn shared_handle(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            local_append_count: Arc::clone(&self.local_append_count),
+        }
+    }
+
+    /// Returns the number of operations appended through this handle family
+    /// since it was created.
+    pub fn local_append_count(&self) -> u64 {
+        self.local_append_count.load(Ordering::SeqCst)
     }
 
     /// Returns the path to the ops.jsonl file
@@ -291,6 +321,10 @@ impl OpsLog {
         // of the log on power loss can make snapshots diverge from history.
         writer.get_ref().sync_all()?;
 
+        // Only count appends that reached disk; an inflated counter would hide a
+        // genuine external edit.
+        self.local_append_count.fetch_add(1, Ordering::SeqCst);
+
         Ok(())
     }
 
@@ -315,6 +349,9 @@ impl OpsLog {
 
         // See `append` for durability rationale.
         writer.get_ref().sync_all()?;
+
+        self.local_append_count
+            .fetch_add(ops.len() as u64, Ordering::SeqCst);
 
         Ok(())
     }
@@ -838,6 +875,46 @@ this is not valid json
         let op2 = Operation::new(OpKind::ClipAdd, serde_json::json!({}));
         ops_log.append(&op2).unwrap();
         assert_eq!(ops_log.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_ops_log_shared_handle_counts_appends_from_both_handles() {
+        let (ops_log, _temp_dir) = create_test_ops_log();
+        let executor_handle = ops_log.shared_handle();
+
+        assert_eq!(ops_log.local_append_count(), 0);
+
+        ops_log
+            .append(&Operation::new(OpKind::AssetImport, serde_json::json!({})))
+            .unwrap();
+        executor_handle
+            .append(&Operation::new(OpKind::ClipAdd, serde_json::json!({})))
+            .unwrap();
+        executor_handle
+            .append_batch(&[
+                Operation::new(OpKind::ClipMove, serde_json::json!({})),
+                Operation::new(OpKind::ClipTrim, serde_json::json!({})),
+            ])
+            .unwrap();
+
+        // Both handles observe the same session-local total.
+        assert_eq!(ops_log.local_append_count(), 4);
+        assert_eq!(executor_handle.local_append_count(), 4);
+        assert_eq!(ops_log.count().unwrap(), 4);
+    }
+
+    #[test]
+    fn test_ops_log_independent_handles_do_not_share_append_counts() {
+        let (ops_log, _temp_dir) = create_test_ops_log();
+        // A separate handle stands in for another process writing the same file.
+        let other_process = OpsLog::new(ops_log.path());
+
+        other_process
+            .append(&Operation::new(OpKind::AssetImport, serde_json::json!({})))
+            .unwrap();
+
+        assert_eq!(ops_log.local_append_count(), 0);
+        assert_eq!(ops_log.count().unwrap(), 1);
     }
 
     #[test]

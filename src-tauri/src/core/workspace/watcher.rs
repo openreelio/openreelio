@@ -22,6 +22,37 @@ pub enum WorkspaceEvent {
     FileRemoved(String),
     /// A file was modified in the workspace
     FileModified(String),
+    /// A persistent project state file (`ops.jsonl` / `snapshot.json`) changed.
+    ///
+    /// These files are excluded from workspace indexing, but a change to them
+    /// may mean another process edited the project, so they are reported
+    /// separately instead of being filtered out.
+    ProjectStateChanged(String),
+}
+
+/// Project state files, relative to the project root, that must be reported even
+/// though the workspace ignore rules exclude their directory.
+///
+/// Both the current hidden layout and the legacy root layout are covered, so a
+/// project written by an older build is still watched.
+const PROJECT_STATE_RELATIVE_PATHS: &[&str] = &[
+    ".openreelio/state/ops.jsonl",
+    ".openreelio/state/snapshot.json",
+    "ops.jsonl",
+    "snapshot.json",
+];
+
+/// Returns `true` when the given project-root-relative path is a persistent
+/// project state file.
+///
+/// The comparison is case-insensitive and separator-agnostic so it behaves the
+/// same on Windows and POSIX hosts.
+pub fn is_project_state_path(relative_path: &std::path::Path) -> bool {
+    let normalized = relative_path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    PROJECT_STATE_RELATIVE_PATHS.contains(&normalized.as_str())
 }
 
 /// Maximum number of filesystem events buffered between the watcher thread and
@@ -84,6 +115,33 @@ impl WorkspaceWatcher {
                                 Err(_) => continue,
                             };
 
+                            let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+
+                            // Project state files must bypass both the ignore
+                            // rules (they live under `.openreelio/`) and the
+                            // media-extension gate, otherwise external edits by
+                            // openreelio-cli would never reach the app.
+                            if is_project_state_path(rel_path) {
+                                match event_tx
+                                    .try_send(WorkspaceEvent::ProjectStateChanged(rel_str))
+                                {
+                                    Ok(()) => {}
+                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                        tracing::warn!(
+                                            capacity = WORKSPACE_EVENT_CHANNEL_CAPACITY,
+                                            "Workspace event channel full; dropping project state event"
+                                        );
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        tracing::debug!(
+                                            "Workspace event channel closed, stopping watcher"
+                                        );
+                                        return;
+                                    }
+                                }
+                                continue;
+                            }
+
                             // Check ignore rules
                             if ignore_rules.is_ignored(rel_path) {
                                 continue;
@@ -95,8 +153,6 @@ impl WorkspaceWatcher {
                             if !is_media_extension(ext) {
                                 continue;
                             }
-
-                            let rel_str = rel_path.to_string_lossy().replace('\\', "/");
 
                             let ws_event = match event.kind {
                                 DebouncedEventKind::Any => {
@@ -194,6 +250,52 @@ mod tests {
         assert!(!is_media_extension("txt"));
         assert!(!is_media_extension("rs"));
         assert!(!is_media_extension("json"));
+    }
+
+    #[test]
+    fn test_is_project_state_path_matches_hidden_and_legacy_layouts() {
+        use std::path::Path;
+
+        assert!(is_project_state_path(Path::new(
+            ".openreelio/state/ops.jsonl"
+        )));
+        assert!(is_project_state_path(Path::new(
+            ".openreelio\\state\\snapshot.json"
+        )));
+        assert!(is_project_state_path(Path::new("ops.jsonl")));
+        assert!(is_project_state_path(Path::new("snapshot.json")));
+
+        assert!(!is_project_state_path(Path::new(
+            ".openreelio/state/history.json"
+        )));
+        assert!(!is_project_state_path(Path::new("footage/clip.mp4")));
+        assert!(!is_project_state_path(Path::new("nested/ops.jsonl")));
+    }
+
+    #[tokio::test]
+    async fn test_watcher_reports_project_state_changes_despite_ignore_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join(".openreelio").join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let rules = Arc::new(IgnoreRules::defaults());
+        let (tx, mut rx) = mpsc::channel(WORKSPACE_EVENT_CHANNEL_CAPACITY);
+        let _watcher = WorkspaceWatcher::start(dir.path().to_path_buf(), rules, tx).unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Simulate an external process appending to the ops log.
+        std::fs::write(state_dir.join("ops.jsonl"), b"{}\n").unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        let event = rx.try_recv().expect("expected a project state event");
+        match event {
+            WorkspaceEvent::ProjectStateChanged(path) => {
+                assert_eq!(path, ".openreelio/state/ops.jsonl");
+            }
+            other => panic!("Unexpected event: {:?}", other),
+        }
     }
 
     #[test]

@@ -69,6 +69,12 @@ pub struct ActiveProject {
     pub ops_log: OpsLog,
     /// Persistent history metadata used by headless clients.
     pub history: ProjectHistory,
+    /// Number of operations the on-disk ops log contained when this session last
+    /// synchronized with it, excluding operations appended afterwards by this
+    /// session.
+    ops_baseline_count: u64,
+    /// Value of `ops_log.local_append_count()` at the last synchronization.
+    ops_baseline_appends: u64,
 }
 
 pub struct PreparedProjectSave {
@@ -402,11 +408,15 @@ impl ActiveProject {
         // Start with empty state - default sequence will be added via Command
         let mut state = ProjectState::new_empty(name);
 
-        // Create OpsLog instances - one for ActiveProject, one for executor
-        // Both point to the same file but operate independently
-        // This is safe because OpsLog performs atomic appends
+        // Create OpsLog instances - one for ActiveProject, one for executor.
+        // Both point to the same file but operate independently; this is safe
+        // because OpsLog performs atomic appends. The executor handle is derived
+        // with `shared_handle` so appends made through it count towards the same
+        // session-local append counter used for external-change detection.
         let ops_log = OpsLog::new(&ops_path);
-        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let ops_baseline_count = ops_log.count()?;
+        let ops_baseline_appends = ops_log.local_append_count();
+        let mut executor = CommandExecutor::with_ops_log(ops_log.shared_handle());
 
         // Create default sequence via Command to ensure ops log recording
         // This maintains Event Sourcing principle: all changes go through commands
@@ -444,6 +454,8 @@ impl ActiveProject {
             executor,
             ops_log,
             history,
+            ops_baseline_count: ops_baseline_count as u64,
+            ops_baseline_appends,
         })
     }
 
@@ -507,6 +519,8 @@ impl ActiveProject {
         };
 
         let ops_log = OpsLog::new(&ops_path);
+        let ops_baseline_count = ops_log.count()?;
+        let ops_baseline_appends = ops_log.local_append_count();
         let read_result = ops_log.read_all_with_archive()?;
         let mut history = if history_path.exists() {
             match ProjectHistory::load(&history_path) {
@@ -558,8 +572,9 @@ impl ActiveProject {
             ProjectState::from_ops_log(&ops_log, meta)?
         };
 
-        // Create executor with its own OpsLog instance (both point to same file)
-        let executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        // Create executor with its own OpsLog handle (both point to same file and
+        // share the session-local append counter).
+        let executor = CommandExecutor::with_ops_log(ops_log.shared_handle());
 
         Ok(Self {
             path,
@@ -571,7 +586,53 @@ impl ActiveProject {
             executor,
             ops_log,
             history,
+            ops_baseline_count: ops_baseline_count as u64,
+            ops_baseline_appends,
         })
+    }
+
+    /// Number of operations this session expects the on-disk ops log to contain.
+    ///
+    /// This is the count observed at the last synchronization plus every append
+    /// this session has performed since then.
+    pub fn expected_op_count(&self) -> u64 {
+        self.ops_baseline_count
+            + self
+                .ops_log
+                .local_append_count()
+                .saturating_sub(self.ops_baseline_appends)
+    }
+
+    /// Reads the number of operations currently present in the on-disk ops log.
+    pub fn on_disk_op_count(&self) -> crate::core::CoreResult<u64> {
+        Ok(self.ops_log.count()? as u64)
+    }
+
+    /// Fails with [`crate::core::CoreError::ExternalChangeDetected`] when the
+    /// on-disk operation log no longer matches what this session wrote.
+    ///
+    /// A mismatch means another process (`openreelio-cli`, a second app window,
+    /// an agent) appended to or rewrote `ops.jsonl`. Continuing would interleave
+    /// this session's stale state with the external edits, so callers must
+    /// surface the error and let the user reload instead of merging.
+    pub fn ensure_no_external_changes(&self) -> crate::core::CoreResult<()> {
+        let on_disk = self.on_disk_op_count()?;
+        let expected = self.expected_op_count();
+
+        if on_disk != expected {
+            tracing::warn!(
+                expected_op_count = expected,
+                on_disk_op_count = on_disk,
+                ops_log = %self.ops_log.path().display(),
+                "External change detected in project ops log"
+            );
+            return Err(crate::core::CoreError::ExternalChangeDetected {
+                expected_op_count: expected as usize,
+                on_disk_op_count: on_disk as usize,
+            });
+        }
+
+        Ok(())
     }
 
     /// Saves the project state
@@ -590,6 +651,9 @@ impl ActiveProject {
     }
 
     pub fn prepare_save(&mut self) -> crate::core::CoreResult<PreparedProjectSave> {
+        // Saving on top of external edits would snapshot this session's stale
+        // state under the external head op id, silently discarding them.
+        self.ensure_no_external_changes()?;
         self.sync_history_with_ops_log()?;
         self.state.last_op_id = self.history.current_head().map(str::to_string);
         self.state.op_count = self.history.applied_op_ids.len();
@@ -821,6 +885,9 @@ impl ActiveProject {
         &mut self,
         target_index: i32,
     ) -> crate::core::CoreResult<i32> {
+        // Same hazard as undo/redo: history indices computed here would address
+        // operations written by another process.
+        self.ensure_no_external_changes()?;
         self.sync_history_with_ops_log()?;
 
         let visible_undo_len = self
@@ -854,7 +921,12 @@ impl ActiveProject {
     }
 
     /// Performs a persisted undo that survives process restarts.
+    ///
+    /// Fails with [`crate::core::CoreError::ExternalChangeDetected`] when another
+    /// process appended operations, because the newest applied operation would
+    /// then belong to that process rather than to this session.
     pub fn undo_persisted(&mut self) -> crate::core::CoreResult<OpId> {
+        self.ensure_no_external_changes()?;
         self.sync_history_with_ops_log()?;
         let mut candidate_history = self.history.clone();
         let op_id = candidate_history.undo()?;
@@ -863,7 +935,11 @@ impl ActiveProject {
     }
 
     /// Performs a persisted redo that survives process restarts.
+    ///
+    /// Fails with [`crate::core::CoreError::ExternalChangeDetected`] when another
+    /// process appended operations. See [`ActiveProject::undo_persisted`].
     pub fn redo_persisted(&mut self) -> crate::core::CoreResult<OpId> {
+        self.ensure_no_external_changes()?;
         self.sync_history_with_ops_log()?;
         let mut candidate_history = self.history.clone();
         let op_id = candidate_history.redo()?;
@@ -1326,6 +1402,7 @@ mod tauri_app {
                 $crate::ipc::open_or_init_project,
                 $crate::ipc::close_project,
                 $crate::ipc::save_project,
+                $crate::ipc::reload_project_from_disk,
                 $crate::ipc::get_project_info,
                 $crate::ipc::get_project_state,
                 $crate::ipc::get_sequence_text_clip_data,
@@ -1855,6 +1932,7 @@ mod tauri_app {
             ipc::open_or_init_project,
             ipc::close_project,
             ipc::save_project,
+            ipc::reload_project_from_disk,
             ipc::get_project_info,
             ipc::get_project_state,
             ipc::get_sequence_text_clip_data,
@@ -2901,5 +2979,344 @@ mod tests {
         assert_eq!(state.in_point, Some(1.0));
         assert_eq!(state.out_point, Some(6.0));
         assert_eq!(state.playhead_sec, 4.25);
+    }
+
+    // =========================================================================
+    // External Edit Safety
+    //
+    // Feature: External edit safety
+    //   As an editor who drives OpenReelio from both the GUI and openreelio-cli
+    //   I want the app to notice when another process edited the same project
+    //   So that my CLI edits are never silently overwritten
+    // =========================================================================
+
+    /// Executes a command the way the CLI does: parse the JSON payload, build
+    /// the command, then run it through the project's executor.
+    fn execute_cli_command(
+        project: &mut ActiveProject,
+        command_type: &str,
+        payload: serde_json::Value,
+    ) -> crate::core::commands::CommandResult {
+        let parsed = crate::ipc::CommandPayload::parse(command_type.to_string(), payload)
+            .unwrap_or_else(|error| panic!("failed to parse {command_type} payload: {error}"));
+        let command = parsed.build_command(&project.path);
+        project
+            .executor
+            .execute(command, &mut project.state)
+            .unwrap_or_else(|error| panic!("failed to execute {command_type}: {error}"))
+    }
+
+    fn base_track_id(project: &ActiveProject, kind: crate::core::timeline::TrackKind) -> String {
+        let sequence_id = project
+            .state
+            .active_sequence_id
+            .clone()
+            .expect("project should have an active sequence");
+        project.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .find(|track| track.kind == kind)
+            .unwrap_or_else(|| panic!("sequence should have a {kind:?} track"))
+            .id
+            .clone()
+    }
+
+    fn count_clips(project: &ActiveProject, track_id: &str) -> usize {
+        project
+            .state
+            .sequences
+            .values()
+            .flat_map(|sequence| sequence.tracks.iter())
+            .find(|track| track.id == track_id)
+            .map(|track| track.clips.len())
+            .unwrap_or(0)
+    }
+
+    /// A project built exactly the way `openreelio-cli` builds one.
+    struct CliBuiltProject {
+        project: ActiveProject,
+        sequence_id: String,
+        video_track_id: String,
+        caption_track_id: String,
+    }
+
+    fn build_project_like_cli(project_path: PathBuf) -> CliBuiltProject {
+        std::fs::create_dir_all(&project_path).unwrap();
+        let media_path = project_path.join("footage.mp4");
+        std::fs::write(&media_path, b"fake media bytes").unwrap();
+
+        let mut project = ActiveProject::create("CLI Project", project_path).unwrap();
+        let sequence_id = project.state.active_sequence_id.clone().unwrap();
+        let video_track_id = base_track_id(&project, crate::core::timeline::TrackKind::Video);
+
+        let import = execute_cli_command(
+            &mut project,
+            "importAsset",
+            serde_json::json!({
+                "name": "footage.mp4",
+                "uri": media_path.to_string_lossy(),
+            }),
+        );
+        let asset_id = import.created_ids[0].clone();
+
+        execute_cli_command(
+            &mut project,
+            "insertClip",
+            serde_json::json!({
+                "sequenceId": sequence_id,
+                "trackId": video_track_id,
+                "assetId": asset_id,
+                "timelineStart": 0.0,
+                "sourceIn": 0.0,
+                "sourceOut": 12.0,
+            }),
+        );
+
+        let clip_id = project.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .find(|track| track.id == video_track_id)
+            .unwrap()
+            .clips[0]
+            .id
+            .clone();
+
+        execute_cli_command(
+            &mut project,
+            "splitClip",
+            serde_json::json!({
+                "sequenceId": sequence_id,
+                "trackId": video_track_id,
+                "clipId": clip_id,
+                "splitTime": 5.0,
+            }),
+        );
+
+        execute_cli_command(
+            &mut project,
+            "trimClip",
+            serde_json::json!({
+                "sequenceId": sequence_id,
+                "trackId": video_track_id,
+                "clipId": clip_id,
+                "newSourceOut": 4.0,
+            }),
+        );
+
+        execute_cli_command(
+            &mut project,
+            "addEffect",
+            serde_json::json!({
+                "sequenceId": sequence_id,
+                "trackId": video_track_id,
+                "clipId": clip_id,
+                "effectType": "brightness",
+            }),
+        );
+
+        let caption_track = execute_cli_command(
+            &mut project,
+            "createTrack",
+            serde_json::json!({
+                "sequenceId": sequence_id,
+                "kind": "caption",
+                "name": "Captions 1",
+            }),
+        );
+        let caption_track_id = caption_track.created_ids[0].clone();
+
+        execute_cli_command(
+            &mut project,
+            "createCaption",
+            serde_json::json!({
+                "sequenceId": sequence_id,
+                "trackId": caption_track_id,
+                "text": "Hello from the CLI",
+                "startSec": 1.0,
+                "endSec": 3.0,
+            }),
+        );
+
+        CliBuiltProject {
+            project,
+            sequence_id,
+            video_track_id,
+            caption_track_id,
+        }
+    }
+
+    /// Scenario: a project built purely through CLI-style commands opens in the GUI.
+    #[test]
+    fn should_open_a_cli_built_project_with_identical_state() {
+        // Given a project created and edited only through CommandPayload/executor
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("cli_built");
+        let CliBuiltProject {
+            mut project,
+            sequence_id,
+            video_track_id,
+            caption_track_id,
+        } = build_project_like_cli(project_path.clone());
+
+        let expected_video_clips = count_clips(&project, &video_track_id);
+        let expected_caption_clips = count_clips(&project, &caption_track_id);
+        let expected_assets = project.state.assets.len();
+        let expected_effects = project.state.effects.len();
+        assert_eq!(expected_video_clips, 2, "split should produce two clips");
+        assert_eq!(expected_caption_clips, 1);
+        assert_eq!(expected_assets, 1);
+        assert_eq!(expected_effects, 1);
+
+        // And the CLI saved it the way `openreelio-cli` does
+        project.save().unwrap();
+        drop(project);
+
+        // When the GUI opens the same directory
+        let reopened = ActiveProject::open(project_path).unwrap();
+
+        // Then the replayed state matches, with no operations lost
+        assert_eq!(reopened.state.meta.name, "CLI Project");
+        assert!(reopened.state.sequences.contains_key(&sequence_id));
+        assert_eq!(
+            count_clips(&reopened, &video_track_id),
+            expected_video_clips
+        );
+        assert_eq!(
+            count_clips(&reopened, &caption_track_id),
+            expected_caption_clips
+        );
+        assert_eq!(reopened.state.assets.len(), expected_assets);
+        assert_eq!(reopened.state.effects.len(), expected_effects);
+        assert!(!reopened.state.is_dirty);
+    }
+
+    /// Scenario: the CLI never got to save; only the append-only log survives.
+    #[test]
+    fn should_open_a_cli_built_project_from_the_ops_log_without_a_save() {
+        // Given a CLI session that appended operations but never saved
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("cli_unsaved");
+        let built = build_project_like_cli(project_path.clone());
+        let expected_video_clips = count_clips(&built.project, &built.video_track_id);
+        let expected_caption_clips = count_clips(&built.project, &built.caption_track_id);
+        let video_track_id = built.video_track_id.clone();
+        let caption_track_id = built.caption_track_id.clone();
+        drop(built);
+
+        // When the GUI opens the same directory
+        let reopened = ActiveProject::open(project_path).unwrap();
+
+        // Then the state is rebuilt from the ops log alone
+        assert_eq!(
+            count_clips(&reopened, &video_track_id),
+            expected_video_clips
+        );
+        assert_eq!(
+            count_clips(&reopened, &caption_track_id),
+            expected_caption_clips
+        );
+        assert_eq!(reopened.state.effects.len(), 1);
+    }
+
+    /// Scenario: a second process appends while this session holds the project.
+    #[test]
+    fn should_detect_external_ops_and_refuse_mutations_until_reload() {
+        // Given a GUI session with one edit of its own
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("shared_project");
+        std::fs::create_dir_all(&project_path).unwrap();
+        let mut gui = ActiveProject::create("Shared Project", project_path.clone()).unwrap();
+        let sequence_id = gui.state.active_sequence_id.clone().unwrap();
+        let gui_track = execute_cli_command(
+            &mut gui,
+            "createTrack",
+            serde_json::json!({
+                "sequenceId": sequence_id,
+                "kind": "video",
+                "name": "GUI Track",
+            }),
+        );
+        let gui_track_id = gui_track.created_ids[0].clone();
+        gui.ensure_no_external_changes()
+            .expect("this session's own appends are not external changes");
+
+        // When another process (openreelio-cli) opens the same project and edits it
+        let mut cli = ActiveProject::open(project_path.clone()).unwrap();
+        let cli_track = execute_cli_command(
+            &mut cli,
+            "createTrack",
+            serde_json::json!({
+                "sequenceId": sequence_id,
+                "kind": "audio",
+                "name": "CLI Track",
+            }),
+        );
+        let cli_track_id = cli_track.created_ids[0].clone();
+        cli.save().unwrap();
+        drop(cli);
+
+        // Then every mutating entry point in the stale session refuses to run
+        assert!(
+            matches!(
+                gui.ensure_no_external_changes(),
+                Err(crate::core::CoreError::ExternalChangeDetected { .. })
+            ),
+            "the guard used by execute_command must report the external change"
+        );
+        assert!(matches!(
+            gui.prepare_save(),
+            Err(crate::core::CoreError::ExternalChangeDetected { .. })
+        ));
+        assert!(matches!(
+            gui.undo_persisted(),
+            Err(crate::core::CoreError::ExternalChangeDetected { .. })
+        ));
+        assert!(matches!(
+            gui.redo_persisted(),
+            Err(crate::core::CoreError::ExternalChangeDetected { .. })
+        ));
+
+        // And the error message carries the marker the frontend matches on
+        let message = gui.ensure_no_external_changes().unwrap_err().to_ipc_error();
+        assert!(
+            message.contains(crate::core::EXTERNAL_CHANGE_DETECTED_CODE),
+            "unexpected message: {message}"
+        );
+
+        // And reloading from disk recovers with both sessions' edits visible
+        let reloaded = ActiveProject::open(project_path).unwrap();
+        let track_ids: Vec<&str> = reloaded.state.sequences[&sequence_id]
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect();
+        assert!(track_ids.contains(&gui_track_id.as_str()));
+        assert!(track_ids.contains(&cli_track_id.as_str()));
+        reloaded
+            .ensure_no_external_changes()
+            .expect("a freshly reloaded session is in sync with disk");
+    }
+
+    /// Scenario: the app's own workspace-watcher appends must not look external.
+    #[test]
+    fn should_not_report_direct_ops_log_appends_by_this_session_as_external() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("watcher_project");
+        let mut project = ActiveProject::create("Watcher Project", project_path).unwrap();
+
+        // The workspace watcher writes through `project.ops_log` rather than the
+        // executor; that path must also be attributed to this session.
+        let operation = crate::core::project::Operation::new(
+            crate::core::project::OpKind::AssetUpdate,
+            serde_json::json!({ "assetId": "asset_001" }),
+        );
+        project.ops_log.append(&operation).unwrap();
+
+        project
+            .ensure_no_external_changes()
+            .expect("direct ops log appends by this session are not external");
+        project
+            .prepare_save()
+            .expect("save should still be allowed");
     }
 }
