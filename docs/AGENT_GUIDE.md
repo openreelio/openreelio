@@ -201,8 +201,12 @@ openreelio-cli analysis report  --path ./demo --id <ASSET_ID>
 
 - **`analysis shots`** returns `totalDurationSec`, `shotCount` and
   `shots[{index,startSec,endSec,durationSec,confidence}]`. `persisted` is an
-  array naming the stores written: `["indexDb","bundle","annotations"]`. Cut on
-  shot boundaries instead of round numbers.
+  array naming the stores written: `["indexDb","bundle","annotations"]`, and
+  `warnings` explains every store that was not. `status` follows the same
+  vocabulary as `analysis run`: `ok` (every requested store accepted the write,
+  or `--no-persist` was passed), `partial` (some did, exit still `0`), or
+  `failed` (none did — detection succeeded but the verb did not, so it exits
+  `1`). Cut on shot boundaries instead of round numbers.
 - **`analysis silence`** returns `regions[{startSec,endSec,durationSec}]`,
   `totalSilenceSec` and a boolean `persisted`. **Persistence contract:** results
   reach the shared analysis cache only at the default thresholds (`-40` dB,
@@ -238,14 +242,28 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
   example) and reports `fellBackToComposite: true`.
 - `--mode composite` renders a minimal window through the full stack, so
   effects and overlays appear. Range renders decode from zero, so it costs more.
+  It works anywhere inside the timeline, including over a gap — a gap has no
+  picture, so a black frame is the correct answer, not an error.
 - `--max-width` caps the output (default 1280 px, aspect preserved, never
-  upscaled); `--format png|jpeg`.
+  upscaled).
+- `--format png|jpeg` is optional: the format follows the `--out` extension, so
+  `--out sheet.jpg` writes JPEG at exactly that path. Use `--format` for
+  extensionless paths and `--times` directories (which default to PNG). A
+  `--format` that contradicts a `.png`/`.jpg` extension is rejected rather than
+  silently writing to a different file.
 - `--grid COLSxROWS --between START END [--count N]` writes one contact sheet
   and returns `sheet.cells[{index,row,col,timelineSec}]`, which maps every cell
   a vision model comments on back to a timecode. Grids are capped at 100 cells.
 
+Every timeline time must fall inside the sequence. Asking for one at or past
+the end is rejected with the sequence's actual duration in the message, so widen
+the edit or narrow `--between` rather than guessing.
+
 Single and batch extraction return
 `frames[{index,timeSec,sourceTimeSec,clipId,assetId,path,width,height}]`.
+`sourceTimeSec`, `clipId` and `assetId` name the clip the pixels came from, so
+they are absent on a composited frame — there is no single source clip behind a
+title card or a gap. Treat them as optional.
 
 ### Draft renders
 
@@ -254,9 +272,14 @@ openreelio-cli render start --path ./demo --proxy --output proxy.mp4 \
   --start 0 --end 30 --progress
 ```
 
-`--proxy` is an alias for the `proxy_480p` preset: 854x480, CRF 30, H.264 +
-AAC, `ultrafast`. Combine it with `--start` / `--end` to render only the range
-under review. `--output` is required. `--progress` streams
+`--proxy` is an alias for the `proxy_480p` preset: 480p-class frame, CRF 30,
+H.264 + AAC, `ultrafast`. The frame is **fitted to the sequence canvas**, not
+fixed at 854x480: the short edge is capped at 480 px and the long edge at
+854 px, aspect preserved, both edges even, and a canvas already inside that
+budget is left alone. So 1920x1080 → 854x480, 1080x1920 → 480x854,
+1080x1080 → 480x480, 1920x800 → 854x356, and 640x360 stays 640x360 — a
+vertical edit is never pillarboxed into a landscape frame. Combine it with
+`--start` / `--end` to render only the range under review. `--output` is required. `--progress` streams
 `{"type":"progress","percent","frame","totalFrames","fps","etaSeconds","message"}`
 to stderr. The result carries `outputPath`, `durationSec`, `fileSize`,
 `encodingTimeSec`, `planHash` and `warnings`. `render presets` lists the
@@ -379,6 +402,9 @@ and `openreelio.plan.apply` and drops the per-call approval token those tools
 otherwise require; the policy block then reports `"mode": "allow-write-local"`
 and `"filesystemAccess": "project-write"`. Every mutation still goes through the
 command log and stays undoable, but use it only with a locally trusted client.
+The three policy modes are `read-only` (the default, `"filesystemAccess":
+"project-readonly"`), `approve-mutations` (an approval token is active), and
+`allow-write-local`; without `--project` the access is `"none"`.
 Without the flag, a host can still authorize a single call by supplying
 `OPENREELIO_MCP_APPROVAL_TOKEN` — an empty value is not a grant, and a token
 scoped with `OPENREELIO_MCP_APPROVAL_PROJECT_ID` or

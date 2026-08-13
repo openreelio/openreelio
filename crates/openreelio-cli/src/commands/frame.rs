@@ -86,9 +86,9 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub max_width: Option<u32>,
 
-    /// Output image format
-    #[arg(long, default_value = "png")]
-    pub format: String,
+    /// Output image format: png or jpeg (defaults to the --out extension, else png)
+    #[arg(long)]
+    pub format: Option<String>,
 
     /// Contact sheet grid as COLSxROWS (requires --between)
     #[arg(long, requires = "between")]
@@ -248,7 +248,7 @@ fn resolve_selection(args: &ExtractArgs) -> anyhow::Result<Selection> {
 
 fn extract(args: ExtractArgs) -> anyhow::Result<()> {
     let selection = resolve_selection(&args)?;
-    let format = parse_image_format(&args.format)?;
+    let format = resolve_image_format(args.format.as_deref(), &args.out)?;
     let mode = TimelineMode::parse(&args.mode)?;
     if let Some(max_width) = args.max_width {
         if max_width == 0 {
@@ -375,6 +375,7 @@ async fn run_timeline_mode(
     batch: bool,
 ) -> anyhow::Result<serde_json::Value> {
     let (sequence_id, sequence) = resolve_sequence(project, args.sequence.clone())?;
+    ensure_times_inside_sequence(sequence, times)?;
     let context = TimelineFrameContext {
         engine: ExportEngine::new(runner.clone()),
         runner,
@@ -426,6 +427,7 @@ async fn run_grid_mode(
     times: &[f64],
 ) -> anyhow::Result<serde_json::Value> {
     let (sequence_id, sequence) = resolve_sequence(project, args.sequence.clone())?;
+    ensure_times_inside_sequence(sequence, times)?;
     let context = TimelineFrameContext {
         engine: ExportEngine::new(runner.clone()),
         runner,
@@ -676,6 +678,44 @@ struct GridCell {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
+/// Last timeline position the sequence has any content at.
+fn sequence_duration_sec(sequence: &Sequence) -> f64 {
+    sequence
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .filter(|clip| clip.enabled)
+        .map(|clip| clip.place.timeline_out_sec())
+        .filter(|end| end.is_finite())
+        .fold(0.0_f64, f64::max)
+}
+
+/// Rejects requested times the sequence has no content at.
+///
+/// Without this the request reaches the renderer and comes back as an internal
+/// "output range is empty" message that says nothing about what the caller
+/// asked for. The common trigger is a `--between` window wider than the edit.
+fn ensure_times_inside_sequence(sequence: &Sequence, times: &[f64]) -> anyhow::Result<()> {
+    let duration_sec = sequence_duration_sec(sequence);
+    if duration_sec <= 0.0 {
+        return Err(anyhow::anyhow!(
+            "Sequence '{}' is empty, so there is no frame to extract",
+            sequence.name
+        ));
+    }
+
+    if let Some(out_of_range) = times.iter().find(|time| **time >= duration_sec) {
+        return Err(anyhow::anyhow!(
+            "Requested time {:.3}s is at or past the end of sequence '{}' ({:.3}s). Ask for a time inside the sequence, or narrow --between to the edited range.",
+            out_of_range,
+            sequence.name,
+            duration_sec
+        ));
+    }
+
+    Ok(())
+}
+
 /// Resolves the target sequence, defaulting to the project's active sequence.
 fn resolve_sequence(
     project: &ActiveProject,
@@ -700,6 +740,54 @@ fn parse_image_format(raw: &str) -> anyhow::Result<ImageFormat> {
             other
         )),
     }
+}
+
+/// Reads the image format the `--out` path already names, if any.
+///
+/// Returns `None` for directories and for extensions that name no supported
+/// image format, so the caller can fall back to the default.
+fn image_format_from_path(out: &Path) -> Option<ImageFormat> {
+    if out.is_dir() {
+        return None;
+    }
+    let extension = out.extension()?.to_str()?.to_lowercase();
+    match extension.as_str() {
+        "png" => Some(ImageFormat::Png),
+        "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
+        _ => None,
+    }
+}
+
+/// Decides the output image format.
+///
+/// The `--out` extension wins by default so `--out sheet.jpg` writes a JPEG at
+/// exactly that path. `--format` stays available as an explicit override for
+/// extensionless or directory outputs, but a `--format` that contradicts a
+/// recognised extension is rejected rather than silently redirecting the write
+/// to a different file.
+fn resolve_image_format(explicit: Option<&str>, out: &Path) -> anyhow::Result<ImageFormat> {
+    let from_path = image_format_from_path(out);
+
+    let Some(raw) = explicit else {
+        return Ok(from_path.unwrap_or(ImageFormat::Png));
+    };
+
+    let requested = parse_image_format(raw)?;
+    if let Some(path_format) = from_path {
+        if path_format != requested {
+            return Err(anyhow::anyhow!(
+                "Conflicting output format: --format {} does not match the '.{}' extension of --out '{}'. Drop --format to follow the extension, or point --out at a .{} file.",
+                raw.trim(),
+                out.extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or_default(),
+                out.display(),
+                requested.extension()
+            ));
+        }
+    }
+
+    Ok(requested)
 }
 
 /// Parses a `COLSxROWS` grid specification.
@@ -818,7 +906,7 @@ mod tests {
             sequence: None,
             mode: "fast".to_string(),
             max_width: None,
-            format: "jpeg".to_string(),
+            format: None,
             grid: Some(grid.to_string()),
             between: Some(vec![0.0, 4.0]),
             count,
@@ -923,5 +1011,84 @@ mod tests {
         assert_eq!(parse_image_format("png").unwrap(), ImageFormat::Png);
         assert_eq!(parse_image_format("JPG").unwrap(), ImageFormat::Jpeg);
         assert!(parse_image_format("gif").is_err());
+    }
+
+    #[test]
+    fn resolve_image_format_should_follow_the_out_extension_when_format_is_omitted() {
+        assert_eq!(
+            resolve_image_format(None, Path::new("sheet.jpg")).unwrap(),
+            ImageFormat::Jpeg
+        );
+        assert_eq!(
+            resolve_image_format(None, Path::new("a/b/sheet.JPEG")).unwrap(),
+            ImageFormat::Jpeg
+        );
+        assert_eq!(
+            resolve_image_format(None, Path::new("frame.png")).unwrap(),
+            ImageFormat::Png
+        );
+    }
+
+    #[test]
+    fn resolve_image_format_should_default_to_png_without_a_recognised_extension() {
+        assert_eq!(
+            resolve_image_format(None, Path::new("./stills/")).unwrap(),
+            ImageFormat::Png
+        );
+        assert_eq!(
+            resolve_image_format(None, Path::new("frame")).unwrap(),
+            ImageFormat::Png
+        );
+        assert_eq!(
+            resolve_image_format(None, Path::new("frame.bin")).unwrap(),
+            ImageFormat::Png
+        );
+    }
+
+    #[test]
+    fn resolve_image_format_should_apply_explicit_format_when_the_path_names_none() {
+        assert_eq!(
+            resolve_image_format(Some("jpeg"), Path::new("./stills/")).unwrap(),
+            ImageFormat::Jpeg
+        );
+        assert_eq!(
+            resolve_image_format(Some("jpeg"), Path::new("frame")).unwrap(),
+            ImageFormat::Jpeg
+        );
+    }
+
+    #[test]
+    fn resolve_image_format_should_reject_a_format_that_contradicts_the_out_extension() {
+        let error = resolve_image_format(Some("jpeg"), Path::new("frame.png"))
+            .expect_err("Conflicting format and extension must be rejected");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("--format") && message.contains("frame.png"),
+            "Error should name both sides of the conflict, got: {message}"
+        );
+        assert!(resolve_image_format(Some("png"), Path::new("sheet.jpg")).is_err());
+    }
+
+    #[test]
+    fn resolve_image_format_should_accept_a_format_that_agrees_with_the_out_extension() {
+        assert_eq!(
+            resolve_image_format(Some("jpg"), Path::new("sheet.jpeg")).unwrap(),
+            ImageFormat::Jpeg
+        );
+        assert_eq!(
+            resolve_image_format(Some("png"), Path::new("frame.PNG")).unwrap(),
+            ImageFormat::Png
+        );
+    }
+
+    #[test]
+    fn resolve_single_output_path_should_keep_a_jpg_path_when_format_follows_the_extension() {
+        let format = resolve_image_format(None, Path::new("sheet.jpg")).unwrap();
+
+        assert_eq!(
+            resolve_single_output_path(Path::new("sheet.jpg"), 0.0, format).unwrap(),
+            PathBuf::from("sheet.jpg")
+        );
     }
 }

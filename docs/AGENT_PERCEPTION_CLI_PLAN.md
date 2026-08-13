@@ -79,7 +79,7 @@ Per "Refactor Before Feature". `core/qc/` is dead code with three simulated rule
 
 ### T3 — Frame extraction (`feat(api)`) — DONE (`6100a72c`)
 
-`openreelio-cli frame extract --path P --out F [--asset ID --source-time T | --time T] [--sequence S] [--mode fast|composite] [--width N] [--format png|jpeg] [--grid CxR --between A B [--count N]]`
+`openreelio-cli frame extract --path P --out F [--asset ID --source-time T | --time T] [--sequence S] [--mode fast|composite] [--max-width N] [--format png|jpeg] [--grid CxR --between A B [--count N]]`
 
 - Asset source-time: `FFmpegRunner::extract_frame` + scale filter. Fix its stale-output short-circuit (force overwrite).
 - Timeline-time `--mode fast` (default): `ExportEngine::export_frame`; extend `FrameExportSettings` with `width`/`height` (default max-width 1280 for VLM-friendly size). Document limitation: topmost video clip only, no effects/text/compositing; when `find_topmost_clip_at_time` returns None (e.g. title card), auto-fall back to composite mode.
@@ -90,7 +90,7 @@ Per "Refactor Before Feature". `core/qc/` is dead code with three simulated rule
 ### T4 — Proxy render (`feat(render)`) — DONE (`310b86c9`)
 
 - `ExportSettings`: add `encoder_speed: Option<String>` threaded into quality args (check `plan_hash` includes it deliberately).
-- New preset `proxy_480p` (854x480, CRF 30, H264/AAC 96k, `ultrafast`) + expose `mp4_draft` in CLI `RENDER_PRESETS`.
+- New preset `proxy_480p` (480p-class frame fitted to the sequence canvas — short edge ≤480, long edge ≤854, so 854x480 for 16:9 and 480x854 for vertical — CRF 30, H264/AAC 96k, `ultrafast`) + expose `mp4_draft` in CLI `RENDER_PRESETS`.
 - `render start --proxy` (alias for proxy_480p) + `--start/--end` args (ExportSettings already supports).
 - `--progress`: pass `mpsc::Sender<ExportProgress>`, stream NDJSON to stderr. Add tokio `sync`+`signal` features to CLI Cargo.toml; wire Ctrl-C to the existing oneshot cancel.
 
@@ -110,7 +110,7 @@ Per "Refactor Before Feature". `core/qc/` is dead code with three simulated rule
   New parsers (pure fns + fixture tests): blackdetect ranges, freezedetect ranges, ebur128 Summary (`I:`, `LRA:`, True peak — degrade to sample peak if absent), astats peak/flat. Reuse `parse_silence_regions`. If `has_no_audio_indicator` → audio checks `skipped`, never `failed`. Assert ≥1 filter line seen, else check = `skipped` (guards against a future `-loglevel` regression silently passing everything).
 - `core/qc/structural.rs` checks: `timeline.gap` (error; `find_gaps`, autofix `CloseGapCommand`), `clip.orphan` (<2/fps, warning), `clip.missing_asset` (critical), `audio.silent_clip` (warning), `caption.overlap` (error), `caption.reading_rate` (CPS from `clip.label` — **script-aware: default off/adjusted for CJK**; warn >20, error >25 Latin only), `caption.out_of_bounds` (error), `caption.safe_area` (structural from position JSON, warning), `shot.length_stats` (info, always emits metrics).
 - Cross-reference: rendered black ranges overlapping structural gaps ⇒ error; non-overlapping ⇒ info (title cards/fades are legitimate).
-- `crates/openreelio-cli/src/commands/verify.rs`: `verify --path P [--sequence S] [--file RENDER] [--structural-only] [--checks a,b] [--skip a,b] [--target-lufs -14] [--max-true-peak -1] [--fail-on error] [--timeout-sec 600]`. No `--file` ⇒ structural only. Exit codes: 0 ran+passed threshold, 1 threshold breached, 2 tool error. Output schema mirrors `build_diagnostics` top-level (`status/warnings/errors`) plus `checks[]`, `measurements{}`, per-check `timeRanges`, `suggestedFix` (EditScript) so violations stay agent-actionable. Keep taste-adjacent checks at warning/info; `error` reserved for objectively broken output.
+- `crates/openreelio-cli/src/commands/verify.rs`: `verify --path P [--sequence S] [--file RENDER] [--structural-only] [--checks a,b] [--skip a,b] [--target-lufs=-14] [--max-true-peak=-1] [--fail-on error] [--timeout-sec 600]` (the two negative-valued options require the `=` form; the space form is parsed as a flag). No `--file` ⇒ structural only. Exit codes: 0 ran+passed threshold, 1 threshold breached, 2 tool error. Output schema mirrors `build_diagnostics` top-level (`status/warnings/errors`) plus `checks[]`, `measurements{}`, per-check `timeRanges`, `suggestedFix` (EditScript) so violations stay agent-actionable. Keep taste-adjacent checks at warning/info; `error` reserved for objectively broken output.
 
 ### T7 — Integration & polish — DONE
 

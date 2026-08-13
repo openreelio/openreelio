@@ -7,11 +7,14 @@
 //!
 //! ## Usage
 //!
+//! IDs are ULIDs the CLI returns; read them from `createdIds`, `asset list`,
+//! `timeline tracks` or `timeline clips` rather than inventing them.
+//!
 //! ```bash
 //! openreelio-cli project create --name "My Project" --path ./my-project
 //! openreelio-cli asset import --path ./my-project --file video.mp4
-//! openreelio-cli timeline insert --path ./my-project --asset asset_001 --track track_v1 --at 0.0
-//! openreelio-cli timeline split --path ./my-project --clip clip_001 --at 5.0
+//! openreelio-cli timeline insert --path ./my-project --asset <ASSET_ID> --track <TRACK_ID> --at 0.0
+//! openreelio-cli timeline split --path ./my-project --clip <CLIP_ID> --track <TRACK_ID> --at 5.0
 //! openreelio-cli state dump --path ./my-project
 //! ```
 mod commands;

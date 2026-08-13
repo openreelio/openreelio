@@ -232,9 +232,12 @@ pub fn shots(args: ShotsArgs) -> anyhow::Result<()> {
         }
     }
 
+    let persist_requested = !args.no_persist;
+    let persistence_failed = persist_requested && persisted.is_empty();
+
     let total_duration_sec = detected.last().map(|shot| shot.end_sec).unwrap_or(0.0);
     let mut payload = json!({
-        "status": "ok",
+        "status": shots_status(persist_requested, persisted.len(), warnings.len()),
         "assetId": args.id,
         "shotCount": detected.len(),
         "totalDurationSec": total_duration_sec,
@@ -255,7 +258,41 @@ pub fn shots(args: ShotsArgs) -> anyhow::Result<()> {
         payload["warnings"] = json!(warnings);
     }
 
-    output::print_json_pretty(&payload)
+    output::print_json_pretty(&payload)?;
+
+    // Detection succeeding is not the same as the verb succeeding: an agent that
+    // asked for persisted shots and got none must see a non-zero exit, matching
+    // the documented "exit 0 on success, 1 on failure" contract.
+    if persistence_failed {
+        return Err(anyhow::anyhow!(
+            "Shot detection succeeded but every persistence target failed: {}",
+            warnings.join("; ")
+        ));
+    }
+
+    Ok(())
+}
+
+/// Status string for `analysis shots`, using the same vocabulary as
+/// `analysis run`.
+///
+/// Detection is only half the job: when persistence was requested and no store
+/// accepted the write, the verb reports `failed` instead of claiming success.
+/// `partial` means the shots reached some stores but not all, which is a usable
+/// result and therefore still exits zero.
+fn shots_status(
+    persist_requested: bool,
+    persisted_count: usize,
+    failed_count: usize,
+) -> &'static str {
+    if !persist_requested || failed_count == 0 {
+        return "ok";
+    }
+    if persisted_count == 0 {
+        "failed"
+    } else {
+        "partial"
+    }
 }
 
 /// Detects silence regions, caching them only when the parameters match the
@@ -958,5 +995,28 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].confidence, DEFAULT_SHOT_CONFIDENCE);
         assert_eq!(results[0].end_sec, 2.0);
+    }
+
+    #[test]
+    fn shots_status_should_report_ok_when_every_target_accepted_the_write() {
+        assert_eq!(shots_status(true, 3, 0), "ok");
+    }
+
+    #[test]
+    fn shots_status_should_report_ok_when_persistence_was_not_requested() {
+        // `--no-persist` writes nowhere by design, so an empty `persisted` list
+        // is the expected outcome rather than a failure.
+        assert_eq!(shots_status(false, 0, 0), "ok");
+    }
+
+    #[test]
+    fn shots_status_should_report_partial_when_only_some_targets_accepted_the_write() {
+        assert_eq!(shots_status(true, 2, 1), "partial");
+        assert_eq!(shots_status(true, 1, 2), "partial");
+    }
+
+    #[test]
+    fn shots_status_should_report_failed_when_every_target_rejected_the_write() {
+        assert_eq!(shots_status(true, 0, 3), "failed");
     }
 }

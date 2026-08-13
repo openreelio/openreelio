@@ -2796,6 +2796,7 @@ pub(super) fn append_master_audio_output(
     filter_complex: &mut String,
     audio_streams: &[String],
     master_volume_db: f32,
+    timeline_end_sec: f64,
 ) -> Option<String> {
     if audio_streams.is_empty() {
         return None;
@@ -2804,14 +2805,28 @@ pub(super) fn append_master_audio_output(
     const BASE_AUDIO_LABEL: &str = "[outa_base]";
     const FINAL_AUDIO_LABEL: &str = "[outa]";
 
+    // Audio that runs out before the picture does leaves the muxer with a
+    // stream shorter than the video, and an export range that starts after the
+    // last audio clip receives no packets at all — which fails the whole
+    // output. Silence fills the tail so every renderable range carries audio.
+    let tail_padding = if timeline_end_sec.is_finite() && timeline_end_sec > 0.0 {
+        format!(",apad=whole_dur={}", format_speed_number(timeline_end_sec))
+    } else {
+        String::new()
+    };
+
     filter_complex.push(';');
     if audio_streams.len() == 1 {
-        filter_complex.push_str(&format!("{}anull{}", audio_streams[0], BASE_AUDIO_LABEL));
+        filter_complex.push_str(&format!(
+            "{}anull{}{}",
+            audio_streams[0], tail_padding, BASE_AUDIO_LABEL
+        ));
     } else {
         filter_complex.push_str(&audio_streams.join(""));
         filter_complex.push_str(&format!(
-            "amix=inputs={}:duration=longest:dropout_transition=0:normalize=0{}",
+            "amix=inputs={}:duration=longest:dropout_transition=0:normalize=0{}{}",
             audio_streams.len(),
+            tail_padding,
             BASE_AUDIO_LABEL
         ));
     }
@@ -9456,16 +9471,11 @@ mod tests {
         let args = result.unwrap();
         let args_str = args.join(" ");
 
-        // Text clips should be composited over the regular video instead of becoming
-        // a separate black video segment in the concat timeline.
+        // Text clips are composited over the concatenated picture rather than
+        // decoded as their own media input.
         assert!(
             args_str.contains(&regular_path),
             "Should include file input for regular clip. Got: {}",
-            args_str
-        );
-        assert!(
-            !args_str.contains("color=c="),
-            "Text overlay should not add a color-source segment when regular video exists. Got: {}",
             args_str
         );
         assert!(
@@ -9475,6 +9485,15 @@ mod tests {
         );
         let input_count = args.iter().filter(|arg| arg.as_str() == "-i").count();
         assert_eq!(input_count, 1, "Text overlay should not add a media input");
+
+        // The text clip runs from 5s to 10s but the only file-backed clip ends
+        // at 5s, so the timeline needs five seconds of black underneath it.
+        // Without that tail the render stops at 5s and the title disappears.
+        assert!(
+            args_str.contains("color=c=black:s=1920x1080:r=30:d=5"),
+            "Text past the last file-backed clip needs a black tail. Got: {}",
+            args_str
+        );
     }
 
     #[test]

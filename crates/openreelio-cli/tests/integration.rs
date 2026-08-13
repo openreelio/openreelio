@@ -1530,6 +1530,358 @@ fn test_frame_extract_writes_one_file_per_requested_time() {
     }
 }
 
+/// Builds a sequence whose only file-backed clip ends well before the
+/// timeline does, followed by a gap and then a title card.
+///
+/// This is the layout that used to make `frame extract` hard-error: the render
+/// stopped at the last file-backed clip, so nothing existed to sample at the
+/// gap or the title card.
+///
+/// Returns `(dir, project_path, gap_time, title_time)`.
+fn create_project_with_trailing_title_card(
+    name: &str,
+) -> Option<(tempfile::TempDir, String, f64, f64)> {
+    let (dir, path, _asset_id) = create_project_with_timeline_clip(name, 4)?;
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let clip_id = clips["clips"][0]["id"].as_str().unwrap().to_string();
+
+    // Keep the clip inside the fixture's real media length so the render has
+    // decodable frames for the whole file-backed span.
+    run_cli_ok(&[
+        "timeline",
+        "trim",
+        "--path",
+        &path,
+        "--clip",
+        &clip_id,
+        "--track",
+        &track_id,
+        "--source-in",
+        "0",
+        "--source-out",
+        "3",
+    ]);
+
+    // Timeline becomes: clip 0-3, gap 3-6, title card 6-8.
+    run_cli_ok(&[
+        "text",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "The End",
+        "--start",
+        "6",
+        "--duration",
+        "2",
+        "--preset",
+        "title",
+    ]);
+
+    Some((dir, path, 4.5, 7.0))
+}
+
+#[test]
+fn test_frame_extract_renders_a_title_card_that_outlives_the_last_file_backed_clip() {
+    let Some((dir, path, _gap_time, title_time)) =
+        create_project_with_trailing_title_card("frame_title_card_test")
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("title_frame.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        &title_time.to_string(),
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        result["frames"][0]["fellBackToComposite"], true,
+        "No file-backed clip covers a title card, so fast mode must fall back"
+    );
+    assert!(output_path.exists(), "Expected a frame at the title card");
+    assert!(output_path.metadata().unwrap().len() > 0);
+}
+
+#[test]
+fn test_frame_extract_renders_a_gap_after_the_last_file_backed_clip() {
+    let Some((dir, path, gap_time, _title_time)) =
+        create_project_with_trailing_title_card("frame_trailing_gap_test")
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("gap_frame.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        &gap_time.to_string(),
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    // A gap has no picture of its own; a black frame is the correct answer.
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["frames"][0]["fellBackToComposite"], true);
+    assert!(output_path.exists(), "Expected a frame over the gap");
+    assert!(output_path.metadata().unwrap().len() > 0);
+}
+
+#[test]
+fn test_frame_extract_composite_mode_renders_a_title_card_directly() {
+    let Some((dir, path, _gap_time, title_time)) =
+        create_project_with_trailing_title_card("frame_composite_title_test")
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("composite_title.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        &title_time.to_string(),
+        "--mode",
+        "composite",
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["mode"], "composite");
+    assert!(output_path.exists(), "Expected a composited title frame");
+    assert!(output_path.metadata().unwrap().len() > 0);
+}
+
+#[test]
+fn test_render_covers_a_title_card_that_outlives_the_last_file_backed_clip() {
+    let Some((dir, path, _gap_time, _title_time)) =
+        create_project_with_trailing_title_card("render_title_card_test")
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("full.mp4");
+    let result = run_cli_ok(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    // The timeline runs to 8s even though the last file-backed clip ends at 3s.
+    assert_eq!(result["durationSec"], 8.0);
+    assert!(output_path.exists(), "Expected a rendered file");
+    assert!(output_path.metadata().unwrap().len() > 0);
+}
+
+#[test]
+fn test_frame_extract_names_the_sequence_end_when_asked_past_it() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_past_end_test", 4) else {
+        return;
+    };
+
+    let output_path = dir.path().join("past_end.png");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "600",
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("past the end"),
+        "Expected an out-of-range message naming the sequence end, got: {stderr}"
+    );
+    assert!(!output_path.exists());
+}
+
+#[test]
+fn test_frame_extract_rejects_a_grid_range_wider_than_the_sequence() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_grid_past_end_test", 4)
+    else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("wide_sheet.jpg");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "3x2",
+        "--between",
+        "0",
+        "600",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("--between"),
+        "Expected the error to point at the range flag, got: {stderr}"
+    );
+    assert!(!sheet_path.exists());
+}
+
+/// Reads the first bytes of a file so tests can tell PNG from JPEG.
+fn file_signature(path: &std::path::Path) -> Vec<u8> {
+    let bytes = std::fs::read(path).expect("Failed to read output image");
+    bytes.into_iter().take(3).collect()
+}
+
+const JPEG_SIGNATURE: [u8; 3] = [0xFF, 0xD8, 0xFF];
+const PNG_SIGNATURE: [u8; 3] = [0x89, 0x50, 0x4E];
+
+#[test]
+fn test_frame_extract_writes_jpeg_when_the_out_path_names_one() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_jpg_infer_test", 4) else {
+        return;
+    };
+
+    let output_path = dir.path().join("still.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "1.0",
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    // The requested path is the written path: no silent rewrite to .png.
+    assert_eq!(
+        result["frames"][0]["path"].as_str().unwrap(),
+        output_path.to_string_lossy()
+    );
+    assert!(output_path.exists(), "Expected the .jpg path to be written");
+    assert_eq!(
+        file_signature(&output_path),
+        JPEG_SIGNATURE,
+        "Expected JPEG data behind a .jpg extension"
+    );
+}
+
+#[test]
+fn test_frame_extract_defaults_to_png_without_a_recognised_extension() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_png_default_test", 4)
+    else {
+        return;
+    };
+
+    let requested = dir.path().join("still");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "1.0",
+        "--out",
+        requested.to_str().unwrap(),
+    ]);
+
+    let written = std::path::PathBuf::from(result["frames"][0]["path"].as_str().unwrap());
+    assert_eq!(written.extension().unwrap(), "png");
+    assert_eq!(file_signature(&written), PNG_SIGNATURE);
+}
+
+#[test]
+fn test_frame_extract_rejects_a_format_that_contradicts_the_out_extension() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_format_conflict_test", 4)
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("still.png");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "1.0",
+        "--out",
+        output_path.to_str().unwrap(),
+        "--format",
+        "jpeg",
+    ]);
+
+    assert!(
+        stderr.contains("--format"),
+        "Expected the error to name the conflicting flag, got: {stderr}"
+    );
+    assert!(
+        !output_path.exists(),
+        "A rejected request must not write anything"
+    );
+}
+
+#[test]
+fn test_frame_extract_builds_a_jpeg_contact_sheet_at_the_requested_path() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_sheet_jpg_test", 4) else {
+        return;
+    };
+
+    // This is the documented contact-sheet form: a .jpg path and no --format.
+    let sheet_path = dir.path().join("sheet.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--between",
+        "0",
+        "4",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        result["sheet"]["path"].as_str().unwrap(),
+        sheet_path.to_string_lossy()
+    );
+    assert!(sheet_path.exists(), "Expected the sheet at the .jpg path");
+    assert_eq!(file_signature(&sheet_path), JPEG_SIGNATURE);
+}
+
 #[test]
 fn test_frame_extract_builds_contact_sheet_for_grid() {
     let Some((dir, path, _)) = create_project_with_timeline_clip("frame_grid_test", 4) else {

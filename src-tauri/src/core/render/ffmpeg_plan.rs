@@ -277,29 +277,37 @@ pub(super) fn build_sequence_ffmpeg_args(
         input_index += 1;
     }
 
-    if video_segments.is_empty()
-        && (!caption_filters.is_empty()
-            || !overlay_text_filters.is_empty()
-            || use_ass_text_overlays)
-    {
+    // Text and caption clips draw onto the composited picture instead of
+    // contributing their own video segment, so the timeline has to be long
+    // enough to carry them. Without this the render stops at the last
+    // file-backed clip and every title card or gap after it disappears.
+    let has_generated_text_visuals =
+        !caption_filters.is_empty() || !overlay_text_filters.is_empty() || use_ass_text_overlays;
+    if has_generated_text_visuals {
         let generated_visual_end_sec = generated_text_visual_end_sec(&all_clips);
         if generated_visual_end_sec > TIMELINE_EPSILON_SEC {
-            let blank_label = "vtextbase0";
-            append_black_video_gap(
-                &mut filter_complex,
-                blank_label,
-                generated_visual_end_sec,
-                output_width,
-                output_height,
-                output_fps,
-                output_pixel_format,
-            );
-            video_segments.push(VideoTimelineSegment {
-                stream_label: format!("[{}]", blank_label),
-                start_sec: 0.0,
-                end_sec: generated_visual_end_sec,
-                transition_filter: None,
-            });
+            if video_segments.is_empty() {
+                // Text-only sequence: nothing else can supply a base canvas.
+                let blank_label = "vtextbase0";
+                append_black_video_gap(
+                    &mut filter_complex,
+                    blank_label,
+                    generated_visual_end_sec,
+                    output_width,
+                    output_height,
+                    output_fps,
+                    output_pixel_format,
+                );
+                video_segments.push(VideoTimelineSegment {
+                    stream_label: format!("[{}]", blank_label),
+                    start_sec: 0.0,
+                    end_sec: generated_visual_end_sec,
+                    transition_filter: None,
+                });
+            }
+            // `append_timeline_video_output` pads the tail with black up to
+            // `timeline_end_sec`, which is what puts a canvas under text that
+            // outlives the last file-backed clip.
             timeline_end_sec = timeline_end_sec.max(generated_visual_end_sec);
         }
     }
@@ -362,6 +370,7 @@ pub(super) fn build_sequence_ffmpeg_args(
         &mut filter_complex,
         &audio_streams,
         ctx.sequence.master_volume_db,
+        timeline_end_sec,
     );
 
     args.push("-filter_complex".to_string());
@@ -423,6 +432,7 @@ pub(super) fn build_audio_only_ffmpeg_args(
     let mut input_index = 0;
     let mut filter_complex = String::new();
     let mut audio_streams = Vec::new();
+    let mut timeline_end_sec = 0.0_f64;
     let audio_companion_keys =
         collect_audio_companion_keys(ctx.sequence, ctx.assets, ctx.audio_info);
     let all_clips = collect_enabled_clips_sorted(ctx.sequence);
@@ -494,6 +504,7 @@ pub(super) fn build_audio_only_ffmpeg_args(
         );
 
         audio_streams.push(format!("[{}]", mixed_audio_label));
+        timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
         input_index += 1;
     }
 
@@ -505,6 +516,7 @@ pub(super) fn build_audio_only_ffmpeg_args(
         &mut filter_complex,
         &audio_streams,
         ctx.sequence.master_volume_db,
+        timeline_end_sec,
     )
     .ok_or_else(|| ExportError::InvalidSettings("No audio tracks found in sequence".to_string()))?;
 
