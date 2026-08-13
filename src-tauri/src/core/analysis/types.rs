@@ -652,7 +652,10 @@ impl AnalysisBundle {
     /// Keyframe thumbnails travel the other way. A caller that detects
     /// boundaries without extracting keyframes (`analysis shots`) supplies
     /// shots with no `keyframe_path`, so the path already recorded for an
-    /// identical boundary is carried forward rather than nulled out.
+    /// identical boundary is carried forward rather than nulled out. That is
+    /// sound because the file a path names still holds the frame cut from those
+    /// boundaries: keyframe extraction re-cuts any file whose shot moved rather
+    /// than leaving one shot's frame under another's index.
     pub fn replace_shots(&mut self, shots: Vec<ShotResult>) {
         let mut shots = shots;
         let Some(previous) = self.shots.take() else {
@@ -681,6 +684,19 @@ impl AnalysisBundle {
         }
 
         self.shots = Some(shots);
+    }
+
+    /// Returns whether this bundle's cut list is still `shots`.
+    ///
+    /// Frame analysis, frame observations and the contact sheet address shots by
+    /// position, so a result computed against one cut list only describes this
+    /// bundle while it stores that same list. A producer that worked from a copy
+    /// of the bundle — a provider call that runs outside the bundle lock, for
+    /// instance — must check this before publishing position-indexed results
+    /// back, or a re-detection that landed in the meantime would attach one
+    /// shot's reading to another.
+    pub fn has_shot_boundaries(&self, shots: Option<&[ShotResult]>) -> bool {
+        shot_boundaries_match(self.shots.as_deref(), shots)
     }
 
     /// Returns whether this bundle recorded a failure for `analysis_type`.
