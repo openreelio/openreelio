@@ -3,14 +3,18 @@
 //! Implements append-only event sourcing log for project operations.
 //! The ops.jsonl file is the single source of truth for all project state.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fs::{File, OpenOptions};
+use std::hash::Hasher;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::core::{CoreResult, OpId};
+use crate::core::{CoreError, CoreResult, OpId};
 
 // =============================================================================
 // Operation Types
@@ -182,10 +186,138 @@ pub struct ReadResult {
     pub errors: Vec<(usize, String)>,
 }
 
+/// Revision of the project's persistent state a guarded session believes is on
+/// disk.
+///
+/// Shared by every handle derived from one another via [`OpsLog::shared_handle`],
+/// so an append made through the executor's handle advances the same watermark
+/// the project's own handle checks.
+///
+/// Two files carry the revision, because two files can be rewritten
+/// independently:
+///
+/// - `ops.jsonl` — append-only, so its byte length is a sufficient
+///   discriminator: an `O(1)` stat that any foreign write necessarily changes.
+///   The operation count is carried alongside purely so a rejection can report
+///   meaningful numbers without rescanning the file on the happy path.
+/// - `history.json` — rewritten in place by undo, redo and history jumps, which
+///   append nothing. A process that only undoes leaves `ops.jsonl` byte-identical,
+///   so the log watermark alone cannot see it; the manifest is therefore tracked
+///   by content fingerprint (see [`FileFingerprint`]).
+///
+/// `snapshot.json` is deliberately *not* tracked: it is a regenerable cache
+/// derived from the log and the manifest, so a foreign rewrite of it cannot
+/// silently revert anybody's edits — the next open rebuilds it.
+#[derive(Debug)]
+struct SessionWatermark {
+    /// Byte length `ops.jsonl` had after this session's last write or resync.
+    expected_len: AtomicU64,
+    /// Operation count corresponding to `expected_len`.
+    expected_op_count: AtomicU64,
+    /// Baseline for the history manifest, once the session tracks one.
+    ///
+    /// Behind a mutex rather than an atomic because the baseline is a path plus
+    /// a fingerprint that must be replaced as one value, and because the
+    /// watermark is shared through an [`Arc`] by handles that only hold `&self`.
+    history: Mutex<Option<HistoryBaseline>>,
+}
+
+impl SessionWatermark {
+    fn new(expected_len: u64, expected_op_count: u64) -> Self {
+        Self {
+            expected_len: AtomicU64::new(expected_len),
+            expected_op_count: AtomicU64::new(expected_op_count),
+            history: Mutex::new(None),
+        }
+    }
+
+    /// Locks the history baseline, recovering from a poisoned mutex.
+    ///
+    /// Every writer replaces the whole value, so a panic elsewhere cannot leave
+    /// a half-updated baseline behind; refusing to edit because an unrelated
+    /// thread panicked would be worse than continuing.
+    fn history(&self) -> MutexGuard<'_, Option<HistoryBaseline>> {
+        self.history
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Revision of the history manifest (`history.json`) a session believes is on
+/// disk.
+#[derive(Debug)]
+struct HistoryBaseline {
+    /// Manifest this session writes and verifies.
+    path: PathBuf,
+    /// Fingerprint of the manifest, or `None` when it does not exist yet.
+    fingerprint: Option<FileFingerprint>,
+}
+
+/// Content identity of a small state file.
+///
+/// The manifest is a list of operation ids, so reading it whole costs far less
+/// than the `fsync` an append already pays. Length alone would not do: an undo
+/// followed by an unrelated redo can produce a same-length manifest that
+/// describes a different history, and mtime alone is at the mercy of filesystem
+/// timestamp granularity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileFingerprint {
+    len: u64,
+    digest: u64,
+}
+
+impl FileFingerprint {
+    /// Fingerprints `path`, reporting `None` when the file does not exist.
+    ///
+    /// Callers write the manifest atomically (temp file plus rename), so a
+    /// concurrent reader observes either the whole old file or the whole new
+    /// one and never a torn fingerprint.
+    fn of_file(path: &Path) -> CoreResult<Option<Self>> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(Self::of_bytes(&bytes))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn of_bytes(bytes: &[u8]) -> Self {
+        // Only ever compared against fingerprints taken by the same process, so
+        // a fast non-cryptographic hash is enough.
+        let mut hasher = DefaultHasher::new();
+        hasher.write(bytes);
+        Self {
+            len: bytes.len() as u64,
+            digest: hasher.finish(),
+        }
+    }
+}
+
+/// Everything [`OpsLog::begin_guarded_session_reading_all`] read while taking
+/// the session's baseline.
+#[derive(Debug)]
+pub struct GuardedSessionOpen {
+    /// Every operation in the log, archived ones included.
+    pub operations: ReadResult,
+    /// Raw bytes of the history manifest, or `None` when it does not exist.
+    ///
+    /// Returned rather than re-read by the caller so the manifest the session
+    /// parses is exactly the one its baseline describes.
+    pub history_manifest: Option<Vec<u8>>,
+}
+
 /// Append-only operation log backed by a JSONL file
 pub struct OpsLog {
     /// Path to the ops.jsonl file
     path: PathBuf,
+    /// Session watermark installed by [`OpsLog::begin_guarded_session`].
+    ///
+    /// `None` means this handle writes unguarded, which is the correct default
+    /// for one-shot readers, replay helpers and tests. Only a handle that
+    /// represents a live editing session opts in, because only such a session
+    /// can be *stale* relative to the file. Every [`crate::ActiveProject`] is
+    /// one, whether it belongs to a GUI window or to an `openreelio-cli`
+    /// invocation.
+    watermark: Option<Arc<SessionWatermark>>,
 }
 
 struct OpsLogLock(File);
@@ -202,7 +334,286 @@ impl OpsLog {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
+            watermark: None,
         }
+    }
+
+    /// Creates a second handle to the same log that shares this handle's
+    /// session watermark.
+    ///
+    /// Use this whenever a component (for example [`crate::core::commands::CommandExecutor`])
+    /// needs its own handle to a log that another component also writes to, so
+    /// that every append performed by this session advances the same watermark
+    /// and is never mistaken for an external edit.
+    pub fn shared_handle(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            watermark: self.watermark.as_ref().map(Arc::clone),
+        }
+    }
+
+    // =========================================================================
+    // External-change guard
+    //
+    // Every write to ops.jsonl in the product funnels through `append` /
+    // `append_batch`, and every write to history.json through
+    // `write_history_manifest`, so enforcing the guard at those three functions
+    // covers all callers by construction instead of relying on each of them to
+    // remember a check.
+    // =========================================================================
+
+    /// Starts guarding this handle family against writes made by other
+    /// processes, using the log's current on-disk revision as the baseline.
+    ///
+    /// From this point on, [`OpsLog::append`], [`OpsLog::append_batch`] and
+    /// [`OpsLog::write_history_manifest`] fail with
+    /// [`CoreError::ExternalChangeDetected`] when the files no longer match what
+    /// this session wrote, instead of interleaving this session's work with the
+    /// foreign one.
+    ///
+    /// The history manifest joins the baseline on the session's first
+    /// [`OpsLog::write_history_manifest`]; use
+    /// [`OpsLog::begin_guarded_session_reading_all`] to baseline both files at
+    /// once when opening an existing project.
+    ///
+    /// Every live editing session opts in — the GUI and each `openreelio-cli`
+    /// invocation alike (see [`crate::ActiveProject`]). Handles that do not opt
+    /// in keep appending unconditionally, which is what one-shot readers, replay
+    /// helpers and tests need.
+    pub fn begin_guarded_session(&mut self) -> CoreResult<()> {
+        let _lock = self.lock_shared()?;
+        let len = self.on_disk_len()?;
+        let count = self.count_unlocked()? as u64;
+        self.watermark = Some(Arc::new(SessionWatermark::new(len, count)));
+        Ok(())
+    }
+
+    /// Reads every operation, archived ones included, plus the history manifest,
+    /// and installs the session watermark from the same critical section.
+    ///
+    /// Opening a project needs all of them to describe the same revision of the
+    /// project. Reading first and sampling the baseline afterwards (or the
+    /// reverse) leaves a window in which another process can write: the freshly
+    /// opened session would then start out already disagreeing with the files
+    /// and report an external change that it had in fact just replayed.
+    pub fn begin_guarded_session_reading_all(
+        &mut self,
+        history_path: &Path,
+    ) -> CoreResult<GuardedSessionOpen> {
+        // Exclusive rather than shared: no other process may append between the
+        // replay and the baseline sample.
+        let _lock = self.lock_exclusive()?;
+
+        let mut all_ops = Vec::new();
+        let mut all_errors = Vec::new();
+
+        let archive_result = self.read_archive()?;
+        all_ops.extend(archive_result.operations);
+        all_errors.extend(
+            archive_result
+                .errors
+                .into_iter()
+                .map(|(line, err)| (line, format!("[archive] {}", err))),
+        );
+
+        let current_result = self.read_all_unlocked()?;
+        let archive_lines = all_ops.len();
+        all_ops.extend(current_result.operations);
+        all_errors.extend(
+            current_result
+                .errors
+                .into_iter()
+                .map(|(line, err)| (line + archive_lines, err)),
+        );
+
+        let history_manifest = match std::fs::read(history_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+
+        let len = self.on_disk_len()?;
+        let count = self.count_unlocked()? as u64;
+        let watermark = SessionWatermark::new(len, count);
+        // Fingerprint the bytes just read, not the file again: the caller
+        // rebuilds its history from exactly these bytes.
+        *watermark.history() = Some(HistoryBaseline {
+            path: history_path.to_path_buf(),
+            fingerprint: history_manifest.as_deref().map(FileFingerprint::of_bytes),
+        });
+        self.watermark = Some(Arc::new(watermark));
+
+        Ok(GuardedSessionOpen {
+            operations: ReadResult {
+                operations: all_ops,
+                errors: all_errors,
+            },
+            history_manifest,
+        })
+    }
+
+    /// Rewrites the project's history manifest through the session guard.
+    ///
+    /// Undo, redo and history jumps change which operations are applied without
+    /// appending anything, so they are invisible to the append-only log
+    /// watermark. Routing those rewrites through here gives them the same two
+    /// properties the append path has:
+    ///
+    /// 1. the write is refused with [`CoreError::ExternalChangeDetected`] or
+    ///    [`CoreError::ExternalHistoryChangeDetected`] when another process got
+    ///    there first, verified inside the same exclusive lock as the write; and
+    /// 2. the session's baseline advances to what it just wrote, so its own
+    ///    rewrite is never mistaken for somebody else's.
+    ///
+    /// `history_path` is expected to stay the same for the life of a session.
+    /// On an unguarded handle this is a plain write.
+    pub fn write_history_manifest<F>(&self, history_path: &Path, write: F) -> CoreResult<()>
+    where
+        F: FnOnce(&Path) -> CoreResult<()>,
+    {
+        let _lock = self.lock_exclusive()?;
+        self.verify_watermark_locked()?;
+        write(history_path)?;
+        self.rebaseline_history_locked(history_path)
+    }
+
+    /// Whether this handle rejects appends made on top of foreign writes.
+    pub fn is_guarded(&self) -> bool {
+        self.watermark.is_some()
+    }
+
+    /// Number of operations a guarded session expects the log to contain.
+    ///
+    /// Returns `None` for unguarded handles, which hold no expectation at all.
+    pub fn expected_op_count(&self) -> Option<u64> {
+        self.watermark
+            .as_ref()
+            .map(|watermark| watermark.expected_op_count.load(Ordering::SeqCst))
+    }
+
+    /// Fails when the on-disk log or history manifest no longer matches what
+    /// this session wrote.
+    ///
+    /// Reports [`CoreError::ExternalChangeDetected`] for a foreign append and
+    /// [`CoreError::ExternalHistoryChangeDetected`] for a foreign undo, redo or
+    /// history jump.
+    ///
+    /// Callers that mutate in-memory state before appending should call this
+    /// first so a rejection leaves nothing half-applied. It is a no-op on
+    /// unguarded handles.
+    pub fn ensure_no_external_changes(&self) -> CoreResult<()> {
+        if self.watermark.is_none() {
+            return Ok(());
+        }
+        let _lock = self.lock_shared()?;
+        self.verify_watermark_locked()
+    }
+
+    /// Byte length of the log, treating a missing file as empty.
+    fn on_disk_len(&self) -> CoreResult<u64> {
+        match std::fs::metadata(&self.path) {
+            Ok(metadata) => Ok(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Compares the on-disk log and history manifest against the watermark.
+    /// Requires a held lock.
+    fn verify_watermark_locked(&self) -> CoreResult<()> {
+        let Some(watermark) = self.watermark.as_ref() else {
+            return Ok(());
+        };
+
+        let expected_len = watermark.expected_len.load(Ordering::SeqCst);
+        let actual_len = self.on_disk_len()?;
+        if actual_len != expected_len {
+            // Only the rejection path pays for an exact count; the numbers exist
+            // to explain the conflict to the user, not to detect it.
+            let expected_op_count = watermark.expected_op_count.load(Ordering::SeqCst) as usize;
+            let on_disk_op_count = self.count_unlocked()?;
+            tracing::warn!(
+                expected_op_count,
+                on_disk_op_count,
+                expected_len,
+                actual_len,
+                ops_log = %self.path.display(),
+                "External change detected in project ops log"
+            );
+            return Err(CoreError::ExternalChangeDetected {
+                expected_op_count,
+                on_disk_op_count,
+            });
+        }
+
+        self.verify_history_baseline_locked(watermark)
+    }
+
+    /// Compares the on-disk history manifest against the baseline. Requires a
+    /// held lock.
+    fn verify_history_baseline_locked(&self, watermark: &SessionWatermark) -> CoreResult<()> {
+        let history = watermark.history();
+        let Some(baseline) = history.as_ref() else {
+            return Ok(());
+        };
+
+        let actual = FileFingerprint::of_file(&baseline.path)?;
+        if actual == baseline.fingerprint {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            history_manifest = %baseline.path.display(),
+            expected = ?baseline.fingerprint,
+            actual = ?actual,
+            "External change detected in project history manifest"
+        );
+        Err(CoreError::ExternalHistoryChangeDetected)
+    }
+
+    /// Records the history manifest this session just wrote. Requires a held
+    /// lock so the sampled fingerprint reflects our own write.
+    fn rebaseline_history_locked(&self, history_path: &Path) -> CoreResult<()> {
+        let Some(watermark) = self.watermark.as_ref() else {
+            return Ok(());
+        };
+        let fingerprint = FileFingerprint::of_file(history_path)?;
+        *watermark.history() = Some(HistoryBaseline {
+            path: history_path.to_path_buf(),
+            fingerprint,
+        });
+        Ok(())
+    }
+
+    /// Records that this session just wrote `appended_ops` operations.
+    /// Requires a held lock so the sampled length reflects our own write.
+    fn advance_watermark_locked(&self, appended_ops: u64) -> CoreResult<()> {
+        let Some(watermark) = self.watermark.as_ref() else {
+            return Ok(());
+        };
+        watermark
+            .expected_len
+            .store(self.on_disk_len()?, Ordering::SeqCst);
+        watermark
+            .expected_op_count
+            .fetch_add(appended_ops, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Re-samples the watermark after this session deliberately rewrote the log
+    /// (compaction), so its own rewrite is not mistaken for a foreign edit.
+    /// Requires a held lock.
+    fn resync_watermark_locked(&self) -> CoreResult<()> {
+        let Some(watermark) = self.watermark.as_ref() else {
+            return Ok(());
+        };
+        watermark
+            .expected_len
+            .store(self.on_disk_len()?, Ordering::SeqCst);
+        watermark
+            .expected_op_count
+            .store(self.count_unlocked()? as u64, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Returns the path to the ops.jsonl file
@@ -273,9 +684,16 @@ impl OpsLog {
     }
 
     /// Appends a single operation to the log
+    ///
+    /// On a guarded handle (see [`OpsLog::begin_guarded_session`]) this fails
+    /// with [`CoreError::ExternalChangeDetected`] when another process wrote to
+    /// the log first, or [`CoreError::ExternalHistoryChangeDetected`] when one
+    /// rewrote the history manifest. The check runs inside the same exclusive
+    /// lock as the write, so no foreign write can slip in between the two.
     pub fn append(&self, op: &Operation) -> CoreResult<()> {
         tracing::debug!(op_id = %op.id, op_kind = ?op.kind, "Appending operation to ops log");
         let _lock = self.lock_exclusive()?;
+        self.verify_watermark_locked()?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -291,16 +709,23 @@ impl OpsLog {
         // of the log on power loss can make snapshots diverge from history.
         writer.get_ref().sync_all()?;
 
+        // Only count appends that reached disk; an inflated watermark would hide
+        // a genuine external edit.
+        self.advance_watermark_locked(1)?;
+
         Ok(())
     }
 
     /// Appends multiple operations to the log atomically
+    ///
+    /// Guarded handles reject foreign writes exactly as [`OpsLog::append`] does.
     pub fn append_batch(&self, ops: &[Operation]) -> CoreResult<()> {
         tracing::debug!(
             op_count = ops.len(),
             "Appending batch operations to ops log"
         );
         let _lock = self.lock_exclusive()?;
+        self.verify_watermark_locked()?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -315,6 +740,8 @@ impl OpsLog {
 
         // See `append` for durability rationale.
         writer.get_ref().sync_all()?;
+
+        self.advance_watermark_locked(ops.len() as u64)?;
 
         Ok(())
     }
@@ -404,6 +831,11 @@ impl OpsLog {
     /// Counts the total number of operations in the log
     pub fn count(&self) -> CoreResult<usize> {
         let _lock = self.lock_shared()?;
+        self.count_unlocked()
+    }
+
+    /// Counts operations without acquiring the lock. Requires a held lock.
+    fn count_unlocked(&self) -> CoreResult<usize> {
         if !self.exists() {
             return Ok(0);
         }
@@ -456,6 +888,9 @@ impl OpsLog {
 
         // Replace the original file
         std::fs::rename(&temp_path, &self.path)?;
+        // This session rewrote the log on purpose; re-baseline so its own
+        // rewrite is not reported as somebody else's edit.
+        self.resync_watermark_locked()?;
 
         Ok(error_count)
     }
@@ -525,6 +960,8 @@ impl OpsLog {
 
         // Atomic rename
         std::fs::rename(&temp_path, &self.path)?;
+        // See `compact`: compaction is a deliberate local rewrite.
+        self.resync_watermark_locked()?;
 
         Ok(archived_count)
     }
@@ -838,6 +1275,313 @@ this is not valid json
         let op2 = Operation::new(OpKind::ClipAdd, serde_json::json!({}));
         ops_log.append(&op2).unwrap();
         assert_eq!(ops_log.count().unwrap(), 2);
+    }
+
+    // =========================================================================
+    // External-change guard
+    //
+    // Feature: External edit safety
+    //   As an editor who drives OpenReelio from both the GUI and openreelio-cli
+    //   I want appends to stop at the log itself when another process wrote
+    //   So that no mutation path can bypass the check by forgetting to call it
+    // =========================================================================
+
+    /// Path of the history manifest that lives beside a test log.
+    fn history_path(ops_log: &OpsLog) -> PathBuf {
+        ops_log.path().with_file_name("history.json")
+    }
+
+    /// Writes a manifest the way `ProjectHistory::save` does, as far as the
+    /// guard is concerned: whole-file replacement of small JSON.
+    fn write_manifest(path: &Path, applied: &[&str]) -> CoreResult<()> {
+        std::fs::write(
+            path,
+            serde_json::json!({ "appliedOpIds": applied }).to_string(),
+        )?;
+        Ok(())
+    }
+
+    /// Scenario: an unguarded handle is the default and never blocks.
+    #[test]
+    fn should_append_unconditionally_on_an_unguarded_handle() {
+        // Given a plain handle, as short-lived headless writers and tests use
+        let (ops_log, _temp_dir) = create_test_ops_log();
+        assert!(!ops_log.is_guarded());
+        assert_eq!(ops_log.expected_op_count(), None);
+
+        // When another writer appends underneath it
+        OpsLog::new(ops_log.path())
+            .append(&Operation::new(OpKind::AssetImport, serde_json::json!({})))
+            .unwrap();
+
+        // Then it still appends and reports no external change
+        ops_log.ensure_no_external_changes().unwrap();
+        ops_log
+            .append(&Operation::new(OpKind::ClipAdd, serde_json::json!({})))
+            .unwrap();
+        assert_eq!(ops_log.count().unwrap(), 2);
+    }
+
+    /// Scenario: a guarded handle refuses to write on top of a foreign append.
+    #[test]
+    fn should_reject_appends_on_a_guarded_handle_after_a_foreign_write() {
+        // Given a guarded session that has appended once
+        let (mut ops_log, _temp_dir) = create_test_ops_log();
+        ops_log.begin_guarded_session().unwrap();
+        ops_log
+            .append(&Operation::new(OpKind::AssetImport, serde_json::json!({})))
+            .unwrap();
+        ops_log.ensure_no_external_changes().unwrap();
+        assert_eq!(ops_log.expected_op_count(), Some(1));
+
+        // When another process appends
+        OpsLog::new(ops_log.path())
+            .append(&Operation::new(OpKind::ClipAdd, serde_json::json!({})))
+            .unwrap();
+
+        // Then both the pre-flight check and the append itself refuse
+        assert!(matches!(
+            ops_log.ensure_no_external_changes(),
+            Err(CoreError::ExternalChangeDetected {
+                expected_op_count: 1,
+                on_disk_op_count: 2,
+            })
+        ));
+        assert!(matches!(
+            ops_log.append(&Operation::new(OpKind::ClipMove, serde_json::json!({}))),
+            Err(CoreError::ExternalChangeDetected { .. })
+        ));
+        assert!(matches!(
+            ops_log.append_batch(&[Operation::new(OpKind::ClipTrim, serde_json::json!({}))]),
+            Err(CoreError::ExternalChangeDetected { .. })
+        ));
+        // And the foreign operation is still the only thing that landed
+        assert_eq!(ops_log.count().unwrap(), 2);
+    }
+
+    /// Scenario: the executor's derived handle shares one watermark.
+    #[test]
+    fn should_share_the_guard_with_handles_derived_from_the_same_session() {
+        // Given a guarded log and the handle the executor writes through
+        let (mut ops_log, _temp_dir) = create_test_ops_log();
+        ops_log.begin_guarded_session().unwrap();
+        let executor_handle = ops_log.shared_handle();
+        assert!(executor_handle.is_guarded());
+
+        // When each handle appends, neither sees the other as external
+        executor_handle
+            .append(&Operation::new(OpKind::AssetImport, serde_json::json!({})))
+            .unwrap();
+        ops_log
+            .append(&Operation::new(OpKind::ClipAdd, serde_json::json!({})))
+            .unwrap();
+        ops_log.ensure_no_external_changes().unwrap();
+        executor_handle.ensure_no_external_changes().unwrap();
+
+        // Then a foreign append stops both of them
+        OpsLog::new(ops_log.path())
+            .append(&Operation::new(OpKind::ClipMove, serde_json::json!({})))
+            .unwrap();
+        assert!(matches!(
+            executor_handle.append(&Operation::new(OpKind::ClipTrim, serde_json::json!({}))),
+            Err(CoreError::ExternalChangeDetected { .. })
+        ));
+        assert!(matches!(
+            ops_log.ensure_no_external_changes(),
+            Err(CoreError::ExternalChangeDetected { .. })
+        ));
+    }
+
+    /// Scenario: opening a project baselines against the log it just replayed.
+    #[test]
+    fn should_baseline_the_guard_against_the_operations_it_replayed() {
+        // Given a log another process already populated, part of it archived so
+        // the replay has to read both files
+        let (ops_log, _temp_dir) = create_test_ops_log();
+        let ops: Vec<Operation> = (1..=5)
+            .map(|i| {
+                Operation::with_id(
+                    &format!("op_{:03}", i),
+                    OpKind::AssetImport,
+                    serde_json::json!({}),
+                )
+            })
+            .collect();
+        ops_log.append_batch(&ops).unwrap();
+        assert_eq!(ops_log.compact_after_snapshot("op_002").unwrap(), 2);
+
+        // When a session opens it
+        let mut session = OpsLog::new(ops_log.path());
+        let read = session
+            .begin_guarded_session_reading_all(&history_path(&ops_log))
+            .unwrap()
+            .operations;
+
+        // Then the replay spans the archive, while the watermark tracks only the
+        // live log the session will append to
+        assert_eq!(read.operations.len(), 5);
+        assert!(read.errors.is_empty());
+        assert_eq!(session.expected_op_count(), Some(3));
+        session.ensure_no_external_changes().unwrap();
+        session
+            .append(&Operation::new(OpKind::ClipMove, serde_json::json!({})))
+            .unwrap();
+        assert_eq!(session.expected_op_count(), Some(4));
+    }
+
+    /// Scenario: this session's own compaction is not a foreign edit.
+    #[test]
+    fn should_rebaseline_the_guard_after_this_session_compacts() {
+        // Given a guarded session with several operations
+        let (mut ops_log, _temp_dir) = create_test_ops_log();
+        let ops: Vec<Operation> = (1..=6)
+            .map(|i| {
+                Operation::with_id(
+                    &format!("op_{:03}", i),
+                    OpKind::AssetImport,
+                    serde_json::json!({}),
+                )
+            })
+            .collect();
+        ops_log.append_batch(&ops).unwrap();
+        ops_log.begin_guarded_session().unwrap();
+
+        // When it compacts its own log, which rewrites the file
+        let archived = ops_log.compact_after_snapshot("op_003").unwrap();
+        assert_eq!(archived, 3);
+
+        // Then it keeps writing rather than accusing itself
+        ops_log.ensure_no_external_changes().unwrap();
+        assert_eq!(ops_log.expected_op_count(), Some(3));
+        ops_log
+            .append(&Operation::new(OpKind::ClipAdd, serde_json::json!({})))
+            .unwrap();
+        assert_eq!(ops_log.count().unwrap(), 4);
+    }
+
+    /// Scenario: another process moves through history without appending.
+    ///
+    /// This is the case the append-only log watermark structurally cannot see:
+    /// an undo rewrites the manifest and leaves `ops.jsonl` byte-identical.
+    #[test]
+    fn should_reject_writes_after_a_foreign_history_rewrite() {
+        // Given a guarded session baselined against a log and a manifest
+        let (mut ops_log, _temp_dir) = create_test_ops_log();
+        let manifest = history_path(&ops_log);
+        write_manifest(&manifest, &["op_001"]).unwrap();
+        let read = ops_log
+            .begin_guarded_session_reading_all(&manifest)
+            .unwrap();
+        assert_eq!(
+            read.history_manifest.as_deref(),
+            Some(std::fs::read(&manifest).unwrap().as_slice()),
+            "the session parses exactly the manifest its baseline describes"
+        );
+        ops_log
+            .append(&Operation::new(OpKind::ClipAdd, serde_json::json!({})))
+            .unwrap();
+        let log_len_before = std::fs::metadata(ops_log.path()).unwrap().len();
+
+        // When another process undoes, rewriting only the manifest
+        write_manifest(&manifest, &[]).unwrap();
+        assert_eq!(
+            std::fs::metadata(ops_log.path()).unwrap().len(),
+            log_len_before,
+            "an undo appends nothing, so the log watermark cannot see it"
+        );
+
+        // Then every guarded write refuses, naming the manifest as the reason
+        assert!(matches!(
+            ops_log.ensure_no_external_changes(),
+            Err(CoreError::ExternalHistoryChangeDetected)
+        ));
+        assert!(matches!(
+            ops_log.append(&Operation::new(OpKind::ClipMove, serde_json::json!({}))),
+            Err(CoreError::ExternalHistoryChangeDetected)
+        ));
+        assert!(matches!(
+            ops_log.append_batch(&[Operation::new(OpKind::ClipTrim, serde_json::json!({}))]),
+            Err(CoreError::ExternalHistoryChangeDetected)
+        ));
+        assert!(matches!(
+            ops_log.write_history_manifest(&manifest, |path| write_manifest(path, &["op_001"])),
+            Err(CoreError::ExternalHistoryChangeDetected)
+        ));
+        // And nothing this session wanted to write landed
+        assert_eq!(
+            std::fs::metadata(ops_log.path()).unwrap().len(),
+            log_len_before
+        );
+        assert_eq!(
+            std::fs::read_to_string(&manifest).unwrap(),
+            serde_json::json!({ "appliedOpIds": [] }).to_string()
+        );
+    }
+
+    /// Scenario: this session's own history writes are not foreign edits.
+    #[test]
+    fn should_rebaseline_the_history_manifest_this_session_wrote() {
+        // Given a guarded session whose manifest does not exist yet
+        let (mut ops_log, _temp_dir) = create_test_ops_log();
+        let manifest = history_path(&ops_log);
+        let read = ops_log
+            .begin_guarded_session_reading_all(&manifest)
+            .unwrap();
+        assert!(read.history_manifest.is_none());
+
+        // When it writes the manifest through the guard, repeatedly
+        for applied in [&["op_001"][..], &["op_001", "op_002"][..], &[][..]] {
+            ops_log
+                .write_history_manifest(&manifest, |path| write_manifest(path, applied))
+                .unwrap();
+            ops_log.ensure_no_external_changes().unwrap();
+        }
+
+        // Then it keeps editing rather than accusing itself
+        ops_log
+            .append(&Operation::new(OpKind::ClipAdd, serde_json::json!({})))
+            .unwrap();
+        assert_eq!(ops_log.count().unwrap(), 1);
+    }
+
+    /// Scenario: the guard covers the manifest write in both directions.
+    #[test]
+    fn should_refuse_a_history_write_after_a_foreign_append() {
+        // Given a guarded session with a manifest baseline
+        let (mut ops_log, _temp_dir) = create_test_ops_log();
+        let manifest = history_path(&ops_log);
+        ops_log
+            .begin_guarded_session_reading_all(&manifest)
+            .unwrap();
+
+        // When another process appends to the log
+        OpsLog::new(ops_log.path())
+            .append(&Operation::new(OpKind::AssetImport, serde_json::json!({})))
+            .unwrap();
+
+        // Then this session may not persist a history move on top of it
+        assert!(matches!(
+            ops_log.write_history_manifest(&manifest, |path| write_manifest(path, &["op_001"])),
+            Err(CoreError::ExternalChangeDetected { .. })
+        ));
+        assert!(!manifest.exists(), "the refused write must not have run");
+    }
+
+    /// Scenario: an unguarded handle writes the manifest unconditionally.
+    #[test]
+    fn should_write_the_history_manifest_unconditionally_on_an_unguarded_handle() {
+        let (ops_log, _temp_dir) = create_test_ops_log();
+        let manifest = history_path(&ops_log);
+        write_manifest(&manifest, &["op_001"]).unwrap();
+
+        ops_log
+            .write_history_manifest(&manifest, |path| write_manifest(path, &["op_002"]))
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&manifest).unwrap(),
+            serde_json::json!({ "appliedOpIds": ["op_002"] }).to_string()
+        );
     }
 
     #[test]

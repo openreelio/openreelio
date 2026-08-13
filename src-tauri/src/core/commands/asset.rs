@@ -42,6 +42,15 @@ fn validate_asset_relative_path(relative_path: &str, label: &str) -> Result<(), 
     if trimmed.contains("://") {
         return Err(format!("{label} must be a relative path, not a URL"));
     }
+    // Reject backslashes on every platform: on Windows a backslash is a path
+    // separator (so `\\host\share` is a UNC path), but on Unix it is an ordinary
+    // filename character, so `Path::components` would not flag a UNC-style value
+    // as a Prefix. Requiring forward slashes keeps this check platform-agnostic.
+    if trimmed.contains('\\') {
+        return Err(format!(
+            "{label} must use forward slashes and must not be a UNC path"
+        ));
+    }
 
     let candidate = std::path::Path::new(trimmed);
     if candidate.is_absolute() {

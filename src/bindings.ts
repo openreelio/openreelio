@@ -121,6 +121,28 @@ async saveProject() : Promise<Result<null, string>> {
 }
 },
 /**
+ * Rebuilds the active project from its on-disk state, discarding the in-memory
+ * session.
+ * 
+ * This is the recovery path for an external edit: `openreelio-cli`, a second
+ * window or an agent appended to `ops.jsonl`, so this session's state is stale
+ * and every mutation is refused by
+ * [`ActiveProject::ensure_no_external_changes`]. Reopening rebuilds state from
+ * the log rather than merging, which keeps the event-sourced log authoritative
+ * and resets the external-change watermark.
+ * 
+ * Unsaved in-memory changes are lost by design; the caller is expected to warn
+ * first. The workspace watcher, asset-protocol scope and project path are
+ * preserved because the project root does not change.
+ */
+async reloadProjectFromDisk() : Promise<Result<ProjectInfo, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reload_project_from_disk") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Gets current project info
  */
 async getProjectInfo() : Promise<Result<ProjectInfo | null, string>> {

@@ -18,6 +18,7 @@ import {
   useAppLifecycle,
 } from './hooks';
 import { UpdateBanner } from './components/features/update';
+import { ExternalChangeBanner } from './components/features/project';
 import { AppFrame } from './components/layout';
 import { createLogger, initializeLogger } from './services/logger';
 import {
@@ -244,7 +245,13 @@ function App(): JSX.Element {
   return (
     <>
       <AppFrame
-        banner={<UpdateBanner checkOnMount={settingsLoaded && general.checkUpdatesOnStartup} />}
+        banner={
+          <>
+            <UpdateBanner checkOnMount={settingsLoaded && general.checkUpdatesOnStartup} />
+            {/* Only meaningful with a project open, so this branch alone mounts it. */}
+            <ExternalChangeBanner />
+          </>
+        }
       >
         <ErrorBoundary
           onError={handleEditorError}

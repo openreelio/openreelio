@@ -36,6 +36,12 @@ import {
   _resetDeduplicatorForTesting as resetDeduplicator,
 } from '@/utils/requestDeduplicator';
 import { refreshProjectState, applyProjectState } from '@/utils/stateRefreshHelper';
+import {
+  PROJECT_EXTERNAL_CHANGE_EVENT,
+  isExternalChangeError,
+  parseExternalChangeEvent,
+  type ExternalChangeNotice,
+} from '@/utils/externalChange';
 import { useWorkspaceStore, setupWorkspaceEventListeners } from '@/stores/workspaceStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useCommandPaletteStore } from '@/stores/commandPaletteStore';
@@ -50,6 +56,27 @@ const logger = createLogger('ProjectStore');
 function shouldAutoScanWorkspaceOnOpen(): boolean {
   const workspaceSettings = useSettingsStore.getState().settings.workspace;
   return workspaceSettings?.autoScanOnOpen ?? true;
+}
+
+/**
+ * Raises the external-change flag when a backend rejection came from the
+ * external-edit guard.
+ *
+ * An external edit is not a command failure: the user needs a reload prompt, not
+ * a generic error. Callers still rethrow so they stop treating the mutation as
+ * applied. Structurally typed so it accepts an Immer draft.
+ *
+ * @param draft - The store draft being mutated inside `set()`.
+ * @param error - The rejection value from the backend.
+ */
+function noteExternalChangeIfDetected(
+  draft: { isLoaded: boolean; externalChange: ExternalChangeNotice | null },
+  error: unknown,
+): void {
+  if (!draft.isLoaded || draft.externalChange !== null || !isExternalChangeError(error)) {
+    return;
+  }
+  draft.externalChange = { source: 'command' };
 }
 
 // =============================================================================
@@ -119,6 +146,15 @@ interface ProjectState {
   error: string | null;
   /** State version for conflict detection (increments on each state update) */
   stateVersion: number;
+  /**
+   * Set when another process (openreelio-cli, an agent, a second window) changed
+   * this project on disk — an appended operation, or an undo/redo/jump that
+   * rewrote its history. While set, backend mutations are refused and the user
+   * is offered a reload.
+   */
+  externalChange: ExternalChangeNotice | null;
+  /** True while {@link ProjectState.reloadProjectFromDisk} is in flight. */
+  isReloadingFromDisk: boolean;
 
   // Actions
   loadProject: (path: string) => Promise<void>;
@@ -126,6 +162,14 @@ interface ProjectState {
   openOrInitProject: (path: string) => Promise<void>;
   saveProject: () => Promise<void>;
   closeProject: () => Promise<void>;
+
+  // External change handling
+  /** Flags that another process changed the project on disk. */
+  markExternalChange: (notice: ExternalChangeNotice) => void;
+  /** Clears the external-change flag without reloading. */
+  dismissExternalChange: () => void;
+  /** Rebuilds the project from disk, adopting the external edits. */
+  reloadProjectFromDisk: () => Promise<void>;
 
   // Asset actions
   importAsset: (uri?: string) => Promise<string>;
@@ -189,6 +233,8 @@ export const useProjectStore = create<ProjectState>()(
     proxyJobIdsByAssetId: {},
     error: null,
     stateVersion: 0,
+    externalChange: null,
+    isReloadingFromDisk: false,
 
     // Load existing project
     loadProject: async (path: string) => {
@@ -211,6 +257,7 @@ export const useProjectStore = create<ProjectState>()(
           state.selectedAssetId = null;
           state.proxyJobIdsByAssetId = {};
           state.sequenceNavigationStack = [];
+          state.externalChange = null;
 
           // Populate assets
           state.assets = projectState.assets;
@@ -291,6 +338,7 @@ export const useProjectStore = create<ProjectState>()(
           state.proxyJobIdsByAssetId = {};
           state.isDirty = false;
           state.sequenceNavigationStack = [];
+          state.externalChange = null;
 
           // Populate assets (empty for new project)
           state.assets = projectState.assets;
@@ -347,6 +395,7 @@ export const useProjectStore = create<ProjectState>()(
           state.selectedAssetId = null;
           state.proxyJobIdsByAssetId = {};
           state.sequenceNavigationStack = [];
+          state.externalChange = null;
 
           // Populate assets
           state.assets = projectState.assets;
@@ -416,6 +465,7 @@ export const useProjectStore = create<ProjectState>()(
       } catch (error) {
         set((state) => {
           state.error = error instanceof Error ? error.message : String(error);
+          noteExternalChangeIfDetected(state, error);
         });
         throw error;
       }
@@ -449,6 +499,8 @@ export const useProjectStore = create<ProjectState>()(
         state.proxyJobIdsByAssetId = {};
         state.isDirty = false;
         state.error = null;
+        state.externalChange = null;
+        state.isReloadingFromDisk = false;
         // Increment (not reset) so in-flight ops from the old project
         // see a version mismatch and abort instead of applying stale state.
         state.stateVersion += 1;
@@ -465,6 +517,69 @@ export const useProjectStore = create<ProjectState>()(
       }
 
       logger.info('Project closed and state reset');
+    },
+
+    // Flag an external edit to the project's operation log.
+    markExternalChange: (notice: ExternalChangeNotice) => {
+      set((state) => {
+        if (!state.isLoaded) {
+          return;
+        }
+        state.externalChange = notice;
+      });
+    },
+
+    // Dismiss the external-change notice without reloading.
+    dismissExternalChange: () => {
+      set((state) => {
+        state.externalChange = null;
+      });
+    },
+
+    /**
+     * Rebuilds the project from its on-disk operation log.
+     *
+     * This is a rebuild, not a merge: the backend replays the log and this store
+     * adopts the result. In-memory edits that were never written to the log are
+     * discarded by design.
+     */
+    reloadProjectFromDisk: async () => {
+      // Drop queued commands: they were built against the stale state and the
+      // backend would refuse them anyway.
+      commandQueue.clear();
+
+      set((state) => {
+        state.isReloadingFromDisk = true;
+        state.error = null;
+      });
+
+      try {
+        const projectInfo = await invoke<ProjectMeta>('reload_project_from_disk');
+        const projectState = await refreshProjectState();
+
+        set((state) => {
+          state.meta = projectInfo;
+          state.isLoaded = true;
+          state.isReloadingFromDisk = false;
+          state.externalChange = null;
+          state.isDirty = false;
+          state.error = null;
+          state.selectedAssetId = null;
+          state.proxyJobIdsByAssetId = {};
+          state.stateVersion += 1;
+          applyProjectState(state, projectState);
+        });
+
+        logger.info('Project reloaded from disk after external change');
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.error('Failed to reload project from disk', { error: errorMessage });
+        set((state) => {
+          state.isReloadingFromDisk = false;
+          state.error = errorMessage;
+        });
+        throw error;
+      }
     },
 
     // Import asset
@@ -883,6 +998,7 @@ export const useProjectStore = create<ProjectState>()(
 
             set((state) => {
               state.error = errorMessage;
+              noteExternalChangeIfDetected(state, error);
             });
             throw error;
           }
@@ -954,6 +1070,10 @@ export const useProjectStore = create<ProjectState>()(
 
             set((state) => {
               state.error = errorMessage;
+              // Agent tools and several hooks mutate through this path, so it
+              // needs the same reload affordance as executeCommand - otherwise a
+              // refused mutation surfaces as a bare error with no way forward.
+              noteExternalChangeIfDetected(state, error);
             });
             throw error;
           }
@@ -1057,6 +1177,7 @@ export const useProjectStore = create<ProjectState>()(
 
           set((state) => {
             state.error = errorMessage;
+            noteExternalChangeIfDetected(state, error);
           });
           throw error;
         }
@@ -1110,6 +1231,7 @@ export const useProjectStore = create<ProjectState>()(
 
           set((state) => {
             state.error = errorMessage;
+            noteExternalChangeIfDetected(state, error);
           });
           throw error;
         }
@@ -1166,6 +1288,7 @@ export const useProjectStore = create<ProjectState>()(
 
           set((state) => {
             state.error = errorMessage;
+            noteExternalChangeIfDetected(state, error);
           });
           throw error;
         }
@@ -1313,6 +1436,32 @@ export async function setupProxyEventListeners(): Promise<void> {
       newUnlisteners.push(unlistenFailed);
     } catch (error) {
       logger.error('Failed to setup proxy-failed listener', { error });
+    }
+
+    // Listen for external edits to the project's operation log.
+    // Registered here rather than per-project because the watcher outlives any
+    // single project load and the payload is project-agnostic.
+    try {
+      const unlistenExternalChange = await listen<unknown>(
+        PROJECT_EXTERNAL_CHANGE_EVENT,
+        (event) => {
+          const payload = parseExternalChangeEvent(event.payload);
+          if (!payload) {
+            logger.warn('Ignoring invalid project:external-change payload');
+            return;
+          }
+          logger.warn('External project change detected', {
+            opCount: payload.opCount,
+            relativePath: payload.relativePath,
+          });
+          useProjectStore
+            .getState()
+            .markExternalChange({ source: 'watcher', opCount: payload.opCount });
+        },
+      );
+      newUnlisteners.push(unlistenExternalChange);
+    } catch (error) {
+      logger.error('Failed to setup project external-change listener', { error });
     }
 
     // Only assign after all setup attempts complete

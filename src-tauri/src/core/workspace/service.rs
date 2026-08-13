@@ -345,6 +345,10 @@ impl WorkspaceService {
                     }
                 }
             }
+            WorkspaceEvent::ProjectStateChanged(_) => {
+                // Project state files are not workspace media; external-change
+                // handling lives in the workspace event loop.
+            }
         }
         Ok(())
     }
@@ -375,6 +379,9 @@ impl WorkspaceService {
             }
             WorkspaceEvent::FileRemoved(rel_path) => {
                 self.index.remove(rel_path)?;
+            }
+            WorkspaceEvent::ProjectStateChanged(_) => {
+                // Project state files are never indexed as workspace media.
             }
         }
         Ok(())

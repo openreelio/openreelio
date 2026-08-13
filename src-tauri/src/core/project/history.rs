@@ -69,9 +69,19 @@ impl ProjectHistory {
             return Ok(Self::default());
         }
 
-        let file = std::fs::File::open(path)?;
-        let history = serde_json::from_reader(file)?;
-        Ok(history)
+        let bytes = std::fs::read(path)?;
+        Self::from_json_slice(&bytes)
+    }
+
+    /// Parses a history manifest from raw JSON bytes.
+    ///
+    /// Opening a project reads the manifest inside the same critical section as
+    /// its external-change baseline (see
+    /// [`crate::core::project::OpsLog::begin_guarded_session_reading_all`]) and
+    /// parses the bytes it got, so the history the session runs on is exactly
+    /// the revision its guard is watching.
+    pub fn from_json_slice(bytes: &[u8]) -> CoreResult<Self> {
+        Ok(serde_json::from_slice(bytes)?)
     }
 
     /// Persists history to disk atomically.

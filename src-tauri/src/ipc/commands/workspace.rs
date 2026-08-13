@@ -32,6 +32,12 @@ use crate::core::CoreError;
 use crate::{ActiveProject, AppState};
 use tauri::{Emitter, Manager};
 
+/// Tauri event emitted when the active project's state files were changed by
+/// another process.
+///
+/// Payload: `{ "opCount": number, "expectedOpCount": number, "relativePath": string }`.
+pub const PROJECT_EXTERNAL_CHANGE_EVENT: &str = "project:external-change";
+
 // =============================================================================
 // Response Types
 // =============================================================================
@@ -135,6 +141,53 @@ pub struct WorkspaceDocumentWriteResultDto {
 const MAX_DOCUMENT_BYTES: usize = 512 * 1024;
 const DEFAULT_DOCUMENT_LIST_LIMIT: usize = 500;
 const MAX_DOCUMENT_LIST_LIMIT: usize = 2_000;
+
+/// Builds the `project:external-change` payload for a project state file change,
+/// or `None` when the change was written by this process.
+///
+/// Suppression asks the session guard whether the project on disk still matches
+/// what this session wrote, which is the same question every mutation asks. The
+/// app's own writes (edit commands, workspace auto-registration, undo/redo,
+/// save) advance the guard's baseline, so they never surface as external
+/// changes, while a foreign undo — which appends nothing and leaves the
+/// operation counts equal — still does.
+async fn external_change_payload(
+    app_handle: &tauri::AppHandle,
+    relative_path: &str,
+) -> Option<serde_json::Value> {
+    let app_state = app_handle.state::<crate::AppState>();
+    let guard = app_state.project.lock().await;
+    let project = guard.as_ref()?;
+
+    if project.ensure_no_external_changes().is_ok() {
+        return None;
+    }
+
+    let expected = project.expected_op_count();
+    let on_disk = match project.on_disk_op_count() {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "Workspace watcher: failed to read on-disk op count"
+            );
+            return None;
+        }
+    };
+
+    tracing::info!(
+        expected_op_count = expected,
+        on_disk_op_count = on_disk,
+        path = %relative_path,
+        "Detected external project state change"
+    );
+
+    Some(serde_json::json!({
+        "opCount": on_disk,
+        "expectedOpCount": expected,
+        "relativePath": relative_path,
+    }))
+}
 
 fn record_workspace_operation(
     project: &mut ActiveProject,
@@ -331,6 +384,22 @@ async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Res
 
         let mut rx = event_rx;
         while let Some(event) = rx.recv().await {
+            // 0. Project state files bypass indexing entirely: they only tell us
+            //    whether another process edited the project.
+            if let WorkspaceEvent::ProjectStateChanged(rel_path) = &event {
+                if let Some(payload) = external_change_payload(&app_handle, rel_path.as_str()).await
+                {
+                    if let Err(e) = app_handle.emit(PROJECT_EXTERNAL_CHANGE_EVENT, payload) {
+                        tracing::warn!(
+                            event = PROJECT_EXTERNAL_CHANGE_EVENT,
+                            error = %e,
+                            "Workspace watcher: failed to emit external change event"
+                        );
+                    }
+                }
+                continue;
+            }
+
             // 1. Update the on-disk workspace index
             if let Err(e) = service.handle_event(&event) {
                 tracing::warn!(error = %e, "Workspace watcher: failed to update index");
@@ -429,6 +498,8 @@ async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Res
                                 }
                             }
                         }
+                        // Handled before indexing; the loop never reaches here.
+                        WorkspaceEvent::ProjectStateChanged(_) => {}
                     }
                 }
             } // project lock released here
@@ -438,6 +509,8 @@ async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Res
                 WorkspaceEvent::FileAdded(p) => ("workspace:file-added", p.clone()),
                 WorkspaceEvent::FileRemoved(p) => ("workspace:file-removed", p.clone()),
                 WorkspaceEvent::FileModified(p) => ("workspace:file-modified", p.clone()),
+                // Handled above; the loop never reaches this point for them.
+                WorkspaceEvent::ProjectStateChanged(_) => continue,
             };
 
             let kind = kind_string_for_path(&rel_path);
