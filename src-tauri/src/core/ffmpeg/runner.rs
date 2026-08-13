@@ -28,6 +28,25 @@ const MIN_FRAME_JPEG_QUALITY: u8 = 1;
 /// Worst MJPEG quality FFmpeg's `-q:v` accepts.
 const MAX_FRAME_JPEG_QUALITY: u8 = 31;
 
+/// Watchdog timeout for a single `ffprobe` metadata probe.
+///
+/// A probe reads container headers only, so seconds are the expected cost; the
+/// generous budget exists purely so a pathological or unreachable (network
+/// share, stalled device) input cannot wedge the caller forever. Probes run on
+/// the single-threaded MCP stdio loop, where a hung child blocks every
+/// subsequent request.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Maximum `ffprobe` stdout retained, in bytes.
+///
+/// The payload is a JSON description of the container. Even a file with
+/// thousands of streams and chapters stays far below this, so the cap only
+/// bites on crafted inputs that would otherwise buffer without limit.
+const MAX_PROBE_STDOUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Maximum `ffprobe` stderr retained, in bytes. Only used for error messages.
+const MAX_PROBE_STDERR_BYTES: usize = 64 * 1024;
+
 /// Builds a downscale-only `scale` filter that preserves the aspect ratio.
 ///
 /// `min(max_width, iw)` keeps sources narrower than `max_width` untouched, and
@@ -35,6 +54,45 @@ const MAX_FRAME_JPEG_QUALITY: u8 = 31;
 /// quotes protect the comma from FFmpeg's filtergraph separator.
 fn downscale_filter(max_width: u32) -> String {
     format!("scale='min({},iw)':-2", max_width.max(1))
+}
+
+/// Builds the encoder arguments for a single extracted frame.
+///
+/// PNG ignores `-q:v`, so only the MJPEG path is quality controlled.
+///
+/// The PNG branch pins `rgba` to match `ImageFormat::pixel_format` in the
+/// render export engine: the CLI reaches frame extraction through both this
+/// runner (`frame extract --asset`) and the export engine (`frame extract
+/// --time`), and the two must not produce PNGs with different channel counts
+/// for the same request. No consumer decodes these pixels in Rust — extracted
+/// PNGs are measured with ffprobe, rendered through the Tauri asset protocol,
+/// or base64-encoded for a vision model, all of which accept RGBA — and the
+/// one histogram path that assumes three channels asks ffmpeg for `rgb24`
+/// explicitly, so alpha is flattened before it ever sees a buffer. The cost is
+/// an always-opaque alpha plane (a larger file); correctness is unaffected.
+fn frame_encode_args(output: &Path, quality: Option<u8>) -> Vec<String> {
+    if output
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+    {
+        return vec![
+            "-c:v".to_string(),
+            "png".to_string(),
+            "-pix_fmt".to_string(),
+            "rgba".to_string(),
+        ];
+    }
+
+    // FFmpeg rejects a `-q:v` outside 1-31 and the failure would surface as an
+    // opaque stderr dump, so an out-of-range option is clamped rather than
+    // handed to the encoder.
+    vec![
+        "-q:v".to_string(),
+        quality
+            .unwrap_or(DEFAULT_FRAME_JPEG_QUALITY)
+            .clamp(MIN_FRAME_JPEG_QUALITY, MAX_FRAME_JPEG_QUALITY)
+            .to_string(),
+    ]
 }
 
 /// Options for [`FFmpegRunner::extract_frame_with_options`].
@@ -380,30 +438,7 @@ impl FFmpegRunner {
             args.push(downscale_filter(max_width));
         }
 
-        // PNG ignores `-q:v`; only the MJPEG path is quality controlled.
-        if output
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
-        {
-            args.extend([
-                "-c:v".to_string(),
-                "png".to_string(),
-                "-pix_fmt".to_string(),
-                "rgba".to_string(),
-            ]);
-        } else {
-            args.push("-q:v".to_string());
-            // FFmpeg rejects a `-q:v` outside 1-31 and the failure would surface
-            // as an opaque stderr dump, so an out-of-range option is clamped
-            // rather than handed to the encoder.
-            args.push(
-                options
-                    .quality
-                    .unwrap_or(DEFAULT_FRAME_JPEG_QUALITY)
-                    .clamp(MIN_FRAME_JPEG_QUALITY, MAX_FRAME_JPEG_QUALITY)
-                    .to_string(),
-            );
-        }
+        args.extend(frame_encode_args(output, options.quality));
 
         args.push("-y".to_string()); // Overwrite output
         args.push(output.to_string_lossy().to_string());
@@ -878,6 +913,14 @@ impl FFmpegRunner {
     }
 
     /// Probe media file to get information
+    ///
+    /// The probe is watchdogged by [`PROBE_TIMEOUT`] and its output is capped
+    /// ([`MAX_PROBE_STDOUT_BYTES`]), because the input file is untrusted: this
+    /// runs on the single-threaded MCP stdio loop, where a child that never
+    /// exits or never stops writing would stall every later request.
+    ///
+    /// Returns [`FFmpegError::Timeout`] when the budget elapses; the child is
+    /// killed first so no orphan ffprobe is left behind.
     pub async fn probe(&self, input: &Path) -> FFmpegResult<MediaInfo> {
         if !input.exists() {
             return Err(FFmpegError::InvalidInput(format!(
@@ -889,29 +932,63 @@ impl FFmpegRunner {
         // Run ffprobe with JSON output
         let mut cmd = tokio::process::Command::new(&self.info.ffprobe_path);
         configure_tokio_command(&mut cmd);
-        let output = cmd
-            .args([
-                "-v",
-                "error",
-                "-print_format",
-                "json",
-                "-show_format",
-                "-show_streams",
-                &input.to_string_lossy(),
-            ])
-            .output()
-            .await
-            .map_err(FFmpegError::ProcessError)?;
+        cmd.args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            &input.to_string_lossy(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut child = cmd.spawn().map_err(FFmpegError::ProcessError)?;
+        let mut child_stdout = child.stdout.take();
+        let mut child_stderr = child.stderr.take();
+
+        // The pipes are drained concurrently with the wait so a chatty child
+        // never blocks on a full pipe while we wait for it to exit.
+        let outcome = {
+            let collect = async {
+                let (stdout, stderr) = tokio::join!(
+                    drain_capped(child_stdout.as_mut(), MAX_PROBE_STDOUT_BYTES),
+                    drain_capped(child_stderr.as_mut(), MAX_PROBE_STDERR_BYTES),
+                );
+                let status = child.wait().await;
+                (status, stdout, stderr)
+            };
+            tokio::time::timeout(PROBE_TIMEOUT, collect).await
+        };
+
+        let (status, stdout, stderr) = match outcome {
+            Ok(collected) => collected,
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(FFmpegError::Timeout);
+            }
+        };
+
+        let status = status.map_err(FFmpegError::ProcessError)?;
+
+        if !status.success() {
             return Err(FFmpegError::ProbeError(format!(
                 "FFprobe failed: {}",
-                stderr
+                String::from_utf8_lossy(&stderr.bytes)
             )));
         }
 
-        let json_str = String::from_utf8_lossy(&output.stdout);
+        if stdout.truncated {
+            return Err(FFmpegError::ProbeError(format!(
+                "FFprobe output exceeded the {} byte limit for {}",
+                MAX_PROBE_STDOUT_BYTES,
+                input.display()
+            )));
+        }
+
+        let json_str = String::from_utf8_lossy(&stdout.bytes);
         parse_probe_output(&json_str)
     }
 
@@ -1339,14 +1416,10 @@ pub async fn capture_filter_stderr(
     let stderr = child.stderr.take();
     let (capture_tx, capture_rx) = tokio::sync::oneshot::channel::<FilterStderrCapture>();
     let reader_task = tokio::spawn(async move {
-        let mut capture = FilterStderrCapture::new();
-        if let Some(stderr) = stderr {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                capture.push(&line);
-            }
-        }
+        let capture = match stderr {
+            Some(stderr) => drain_filter_stderr(stderr).await,
+            None => FilterStderrCapture::new(),
+        };
         let _ = capture_tx.send(capture);
     });
 
@@ -1371,6 +1444,91 @@ pub async fn capture_filter_stderr(
         truncated: capture.truncated,
         saw_info_output: capture.saw_info_output,
     })
+}
+
+/// Bytes read from a child pipe, capped at a caller-supplied limit.
+#[derive(Debug, Default)]
+struct CappedOutput {
+    /// The retained prefix of the stream.
+    bytes: Vec<u8>,
+    /// Whether the stream carried more bytes than the cap allowed.
+    truncated: bool,
+}
+
+/// Reads a child pipe to end-of-file, retaining at most `max_bytes`.
+///
+/// Reading continues past the cap and the surplus is discarded rather than
+/// leaving the pipe unread: an unread pipe fills up and blocks the child, which
+/// would turn an oversized output into a hang instead of an error.
+async fn drain_capped<R>(reader: Option<R>, max_bytes: usize) -> CappedOutput
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let mut output = CappedOutput::default();
+    let Some(mut reader) = reader else {
+        return output;
+    };
+
+    let mut chunk = [0_u8; 8192];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(read) => {
+                let remaining = max_bytes.saturating_sub(output.bytes.len());
+                if remaining == 0 {
+                    output.truncated = true;
+                    continue;
+                }
+                if read > remaining {
+                    output.truncated = true;
+                }
+                output
+                    .bytes
+                    .extend_from_slice(&chunk[..read.min(remaining)]);
+            }
+            Err(_) => break,
+        }
+    }
+
+    output
+}
+
+/// Reads an FFmpeg stderr stream to end-of-file into a bounded capture.
+///
+/// Raw bytes are split on `\n` and lossily decoded rather than read through
+/// [`tokio::io::AsyncBufReadExt::lines`]: FFmpeg copies stream metadata (title
+/// tags, filenames) into its log verbatim, so a single non-UTF-8 byte would
+/// make `lines()` yield an error. Stopping there would discard every filter
+/// line after it and, worse, leave the child's stderr pipe unread — a large
+/// log would then fill the pipe and block FFmpeg from ever exiting.
+async fn drain_filter_stderr<R>(stderr: R) -> FilterStderrCapture
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut capture = FilterStderrCapture::new();
+    let mut reader = BufReader::new(stderr);
+    let mut buffer = Vec::new();
+
+    loop {
+        buffer.clear();
+        match reader.read_until(b'\n', &mut buffer).await {
+            // End of stream: the child closed stderr.
+            Ok(0) => break,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buffer);
+                capture.push(line.trim_end_matches('\n').trim_end_matches('\r'));
+            }
+            // A genuine I/O error means the pipe is gone; there is nothing left
+            // to drain, so retaining what arrived is the best outcome.
+            Err(_) => break,
+        }
+    }
+
+    capture
 }
 
 /// Bounded, order-preserving stderr buffer for analysis passes.
@@ -1785,6 +1943,70 @@ fn parse_audio_stream(stream: &serde_json::Value) -> FFmpegResult<AudioStreamInf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // Frame encoder argument Tests
+    // =========================================================================
+
+    #[test]
+    fn should_encode_png_frames_without_a_jpeg_quality_flag() {
+        let args = frame_encode_args(Path::new("frame.PNG"), Some(2));
+
+        assert_eq!(args, vec!["-c:v", "png", "-pix_fmt", "rgba"]);
+    }
+
+    #[test]
+    fn should_clamp_out_of_range_jpeg_quality() {
+        let args = frame_encode_args(Path::new("frame.jpg"), Some(200));
+
+        assert_eq!(args, vec!["-q:v", &MAX_FRAME_JPEG_QUALITY.to_string()]);
+    }
+
+    // =========================================================================
+    // Child pipe draining Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn should_keep_draining_stderr_after_an_invalid_utf8_line() {
+        // A stream metadata tag copied verbatim into the log used to abort the
+        // reader, discarding every filter line that followed it.
+        let mut stream: Vec<u8> = Vec::new();
+        stream.extend_from_slice(b"[silencedetect @ 0x1] silence_start: 1.0\n");
+        stream.extend_from_slice(b"title: \xff\xfe invalid\n");
+        stream.extend_from_slice(b"[silencedetect @ 0x1] silence_end: 2.5\n");
+        stream.extend_from_slice(b"[blackdetect @ 0x2] black_start:3\n");
+
+        let capture = drain_filter_stderr(std::io::Cursor::new(stream)).await;
+        let joined = capture.joined();
+
+        assert!(joined.contains("silence_start: 1.0"), "{joined}");
+        assert!(joined.contains("silence_end: 2.5"), "{joined}");
+        assert!(joined.contains("black_start:3"), "{joined}");
+        assert!(!capture.truncated);
+    }
+
+    #[tokio::test]
+    async fn should_strip_line_endings_while_draining_stderr() {
+        let stream = b"[silencedetect @ 0x1] silence_start: 1.0\r\n".to_vec();
+
+        let capture = drain_filter_stderr(std::io::Cursor::new(stream)).await;
+
+        assert_eq!(capture.joined(), "[silencedetect @ 0x1] silence_start: 1.0");
+    }
+
+    #[tokio::test]
+    async fn should_cap_child_output_and_flag_truncation() {
+        let payload = vec![b'a'; 10_000];
+
+        let capped = drain_capped(Some(std::io::Cursor::new(payload.clone())), 1_000).await;
+
+        assert_eq!(capped.bytes.len(), 1_000);
+        assert!(capped.truncated);
+
+        let complete = drain_capped(Some(std::io::Cursor::new(payload)), 100_000).await;
+        assert_eq!(complete.bytes.len(), 10_000);
+        assert!(!complete.truncated);
+    }
 
     // =========================================================================
     // Filter stderr capture Tests

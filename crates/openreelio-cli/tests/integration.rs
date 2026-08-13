@@ -91,6 +91,108 @@ fn system_ffmpeg_path() -> Option<PathBuf> {
         .map(|info| info.ffmpeg_path)
 }
 
+/// Run a CLI command from `cwd` with extra environment variables applied.
+///
+/// The FFmpeg path overrides are always cleared so a developer's shell cannot
+/// change what the resolver picks during the test.
+fn run_cli_from(
+    cwd: &std::path::Path,
+    env: &[(&str, &str)],
+    args: &[&str],
+) -> (String, String, bool) {
+    let mut command = Command::new(cli_bin());
+    command
+        .current_dir(cwd)
+        .env_remove("OPENREELIO_FFMPEG_PATH")
+        .env_remove("OPENREELIO_FFPROBE_PATH")
+        .env_remove("OPENREELIO_DEV")
+        .args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+
+    let output = command.output().expect("Failed to execute CLI binary");
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.success(),
+    )
+}
+
+/// Hard-link (or copy, across volumes) a binary to a new location.
+fn link_or_copy(source: &std::path::Path, target: &std::path::Path) -> bool {
+    std::fs::hard_link(source, target).is_ok() || std::fs::copy(source, target).is_ok()
+}
+
+/// Plant a working ffmpeg/ffprobe pair under `<dir>/binaries`.
+///
+/// Returns the planted ffmpeg path, or `None` when no installation is
+/// available to clone. The plant must be genuinely runnable: a resolver that
+/// consults the directory would otherwise reject it for the wrong reason and
+/// the test would prove nothing.
+fn plant_bundled_ffmpeg(dir: &std::path::Path) -> Option<PathBuf> {
+    // Any resolvable installation will do as the clone source (bundled, dev,
+    // managed, or system), so the test still runs where FFmpeg is not on PATH.
+    let info = openreelio_core::ffmpeg::resolve_ffmpeg(&Default::default()).ok()?;
+    let (ffmpeg_name, ffprobe_name) = openreelio_core::ffmpeg::get_bundled_binary_names();
+
+    let binaries = dir.join("binaries");
+    std::fs::create_dir_all(&binaries).ok()?;
+
+    let planted_ffmpeg = binaries.join(ffmpeg_name);
+    if !link_or_copy(&info.ffmpeg_path, &planted_ffmpeg)
+        || !link_or_copy(&info.ffprobe_path, &binaries.join(ffprobe_name))
+    {
+        return None;
+    }
+
+    Some(planted_ffmpeg)
+}
+
+/// Resolve the ffmpeg path reported by `ffmpeg info`, canonicalized.
+fn resolved_ffmpeg_from(cwd: &std::path::Path, env: &[(&str, &str)]) -> Option<PathBuf> {
+    let (stdout, stderr, success) = run_cli_from(cwd, env, &["ffmpeg", "info"]);
+    if !success {
+        eprintln!("ffmpeg info failed.\nstdout: {stdout}\nstderr: {stderr}");
+        return None;
+    }
+
+    let value: serde_json::Value = serde_json::from_str(&stdout).ok()?;
+    let path = PathBuf::from(value["ffmpegPath"].as_str()?);
+    std::fs::canonicalize(path).ok()
+}
+
+/// The CLI runs as an MCP server with an agent's project directory as its
+/// working directory, so that directory is untrusted input. A repository that
+/// happens to carry `binaries/ffmpeg` must never be executed.
+#[test]
+fn should_not_execute_ffmpeg_planted_in_the_working_directory() {
+    let dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let Some(planted) = plant_bundled_ffmpeg(dir.path()) else {
+        eprintln!("Skipping CWD hijack test: no FFmpeg installation available to plant");
+        return;
+    };
+    let planted = std::fs::canonicalize(&planted).expect("Failed to canonicalize planted ffmpeg");
+
+    let Some(default_resolved) = resolved_ffmpeg_from(dir.path(), &[]) else {
+        eprintln!("Skipping CWD hijack test: no FFmpeg resolved in the default configuration");
+        return;
+    };
+    assert_ne!(
+        default_resolved, planted,
+        "the working directory must not be a bundled-binary root by default"
+    );
+
+    // The opt-in run proves the plant would have been selected, so the
+    // assertion above is not passing for an unrelated reason.
+    let dev_resolved = resolved_ffmpeg_from(dir.path(), &[("OPENREELIO_DEV", "1")])
+        .expect("ffmpeg info should resolve with the developer opt-in");
+    assert_eq!(
+        dev_resolved, planted,
+        "OPENREELIO_DEV must restore working-directory discovery for developers"
+    );
+}
+
 fn ffmpeg_supports_encoder(ffmpeg_path: &std::path::Path, encoder: &str) -> bool {
     let Ok(output) = Command::new(ffmpeg_path)
         .args(["-hide_banner", "-encoders"])

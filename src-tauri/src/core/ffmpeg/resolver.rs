@@ -87,6 +87,16 @@ impl Candidate {
         }
     }
 
+    /// Whether this candidate names binaries the user asked for by hand.
+    ///
+    /// Overrides are the user's explicit answer to "use this FFmpeg"; silently
+    /// falling through to an auto-detected installation would run a different
+    /// binary than the one requested. Auto-detection candidates carry no such
+    /// intent and keep falling through.
+    fn is_user_override(&self) -> bool {
+        matches!(self, Candidate::Explicit { .. } | Candidate::Env { .. })
+    }
+
     fn resolve(&self) -> FFmpegResult<FFmpegInfo> {
         match self {
             Candidate::Explicit { ffmpeg, ffprobe } => {
@@ -196,14 +206,33 @@ fn build_candidates(
 /// dev-mode binaries → system PATH. Every candidate is validated by probing
 /// `-version` on both binaries; the first valid one wins.
 ///
+/// A user override (explicit paths or the `OPENREELIO_FFMPEG_PATH` /
+/// `OPENREELIO_FFPROBE_PATH` variables) that fails validation is a hard
+/// [`FFmpegError::InvalidOverride`] naming the rejected path: the user asked
+/// for that binary specifically, so quietly running an auto-detected one
+/// instead would hide the misconfiguration. Auto-detected candidates keep
+/// falling through to the next source.
+///
 /// This spawns blocking process probes, so async callers must run it inside
 /// `spawn_blocking`.
 pub fn resolve_ffmpeg(opts: &FFmpegResolveOptions) -> FFmpegResult<FFmpegInfo> {
-    let candidates = build_candidates(
+    resolve_with_env(
         opts,
         read_env_override(FFMPEG_PATH_ENV),
         read_env_override(FFPROBE_PATH_ENV),
-    );
+    )
+}
+
+/// [`resolve_ffmpeg`] with the environment overrides injected.
+///
+/// Split out so the override handling is testable without mutating
+/// process-global environment state shared by every test in the binary.
+fn resolve_with_env(
+    opts: &FFmpegResolveOptions,
+    env_ffmpeg: Option<PathBuf>,
+    env_ffprobe: Option<PathBuf>,
+) -> FFmpegResult<FFmpegInfo> {
+    let candidates = build_candidates(opts, env_ffmpeg, env_ffprobe);
 
     let mut tried = Vec::with_capacity(candidates.len());
     for candidate in candidates {
@@ -215,6 +244,12 @@ pub fn resolve_ffmpeg(opts: &FFmpegResolveOptions) -> FFmpegResult<FFmpegInfo> {
                     info.ffmpeg_path
                 );
                 return Ok(info);
+            }
+            Err(error) if candidate.is_user_override() => {
+                return Err(FFmpegError::InvalidOverride {
+                    origin: candidate.label(),
+                    details: error.to_string(),
+                });
             }
             Err(error) => {
                 tracing::debug!("FFmpeg candidate {} rejected: {}", candidate.label(), error);
@@ -402,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_ffmpeg_falls_through_invalid_explicit_paths() {
+    fn should_fail_hard_when_an_explicit_override_is_unusable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let bogus = temp_dir.path().join("not-ffmpeg");
         let opts = FFmpegResolveOptions {
@@ -411,13 +446,66 @@ mod tests {
             ..Default::default()
         };
 
-        // Whether a real installation exists depends on the machine, so only
-        // assert that the invalid explicit candidate is never accepted.
-        match resolve_ffmpeg(&opts) {
-            Ok(info) => assert_ne!(info.ffmpeg_path, bogus),
+        let error = resolve_with_env(&opts, None, None)
+            .expect_err("an unusable explicit override must not fall through");
+
+        assert!(
+            matches!(error, FFmpegError::InvalidOverride { .. }),
+            "unexpected error: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&bogus.display().to_string()),
+            "the error must name the rejected path: {message}"
+        );
+    }
+
+    #[test]
+    fn should_fail_hard_when_an_environment_override_is_unusable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let bogus = temp_dir.path().join("not-ffmpeg");
+        let opts = FFmpegResolveOptions {
+            use_env: true,
+            ..Default::default()
+        };
+
+        let error = resolve_with_env(&opts, Some(bogus.clone()), None)
+            .expect_err("an unusable environment override must not fall through");
+
+        assert!(
+            matches!(error, FFmpegError::InvalidOverride { .. }),
+            "unexpected error: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(FFMPEG_PATH_ENV),
+            "the error must name the environment variable: {message}"
+        );
+        assert!(
+            message.contains(&bogus.display().to_string()),
+            "the error must name the rejected path: {message}"
+        );
+    }
+
+    #[test]
+    fn should_keep_falling_through_when_an_auto_detected_source_is_unusable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let opts = FFmpegResolveOptions {
+            resource_roots: vec![temp_dir.path().to_path_buf()],
+            use_env: false,
+            ..Default::default()
+        };
+
+        // Whether a real installation exists depends on the machine, so assert
+        // only that an empty resource root never aborts the search.
+        match resolve_with_env(&opts, None, None) {
+            Ok(info) => assert!(!info.ffmpeg_path.starts_with(temp_dir.path())),
             Err(error) => {
+                assert!(
+                    matches!(error, FFmpegError::NotFoundInSources(_)),
+                    "auto-detection must not raise an override error: {error}"
+                );
                 let message = error.to_string();
-                assert!(message.contains("explicit("), "unexpected error: {message}");
                 assert!(message.contains("system"), "unexpected error: {message}");
             }
         }

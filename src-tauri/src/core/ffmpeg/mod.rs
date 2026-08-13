@@ -65,6 +65,14 @@ pub enum FFmpegError {
     #[error("FFprobe error: {0}")]
     ProbeError(String),
 
+    #[error("Configured FFmpeg binaries are unusable [{origin}]: {details}")]
+    InvalidOverride {
+        /// Where the override came from, e.g. `explicit(/opt/bin/ffmpeg)`.
+        origin: String,
+        /// The validation failure that rejected the configured binaries.
+        details: String,
+    },
+
     #[error("Process error: {0}")]
     ProcessError(#[from] std::io::Error),
 
