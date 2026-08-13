@@ -42,26 +42,49 @@ where they came from.
 
 ## Quickstart
 
+Every ID is a ULID the CLI hands back — there are no guessable `asset_001`
+names. Read them out of the JSON each command prints, or capture them as you go.
+Every command below is copy-pasteable; `pick` reads a field out of the JSON on
+stdin using the Node you already have from npm:
+
 ```bash
+pick() { node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8'))$1"; }
+
 # 1. Create a project and import media
 openreelio-cli project create --name "Demo" --path ./demo
 openreelio-cli asset import --path ./demo --file ./footage.mp4
+# -> {"status":"ok","createdIds":["01KZW64VJ4JPBS5B9YZEA335J8"],...}
+
+ASSET=$(openreelio-cli asset list --path ./demo | pick '.assets[0].id')
+TRACK=$(openreelio-cli timeline tracks --path ./demo \
+  | pick '.tracks.find(t => t.kind === "Video").id')
 
 # 2. Look before you cut: shots, silence, loudness
-openreelio-cli analysis run --path ./demo --id <ASSET_ID> --progress
+openreelio-cli analysis run --path ./demo --id "$ASSET" --progress
 
 # 3. Edit through commands (append-only, undoable)
-openreelio-cli timeline insert --path ./demo --asset asset_001 --track track_v1 --at 0.0
-openreelio-cli timeline split  --path ./demo --clip clip_001 --at 5.0
-openreelio-cli timeline undo   --path ./demo
+openreelio-cli timeline insert --path ./demo --asset "$ASSET" --track "$TRACK" --at 0.0
+CLIP=$(openreelio-cli timeline clips --path ./demo | pick '.clips[0].id')
+openreelio-cli timeline split --path ./demo --clip "$CLIP" --track "$TRACK" --at 5.0
+openreelio-cli timeline undo  --path ./demo
 
 # 4. See the result, not just the JSON
-openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out ./frames/sheet.jpg
-openreelio-cli render start --path ./demo --proxy --output ./out/proxy.mp4 --start 0 --end 30 --progress
+#    Contact-sheet times must land inside the sequence, so read its end first.
+END=$(openreelio-cli timeline clips --path ./demo \
+  | pick '.clips.reduce((m, c) => Math.max(m, c.timelineInSec + c.durationSec), 0)')
+openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 "$END" --out ./frames/sheet.jpg
+openreelio-cli render start --path ./demo --proxy --output ./out/proxy.mp4 --progress
 
 # 5. Prove it is deliverable
 openreelio-cli verify --path ./demo --file ./out/proxy.mp4
 ```
+
+Clip-scoped verbs (`split`, `trim`, `move`, `speed`, `remove`) all need
+`--track` as well as `--clip`; `timeline clips` prints both.
+
+`verify --file` expects a render of the whole sequence, which is why step 4
+renders without `--start`/`--end`. Add them when you only want to eyeball a
+range you just changed.
 
 `verify` exits `0` when checks pass, `1` when a `--fail-on` threshold is
 breached, and `2` when it could not run. Violations carry a `suggestedFix`

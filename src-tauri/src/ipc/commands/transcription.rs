@@ -990,25 +990,11 @@ pub async fn detect_shots(
         };
 
         if let Ok(db) = index_db {
-            // Retry a few times to mitigate transient SQLITE_BUSY (concurrent writers).
-            let mut last_err: Option<String> = None;
-            for attempt in 0..3 {
-                match detector.save_to_db(&db, &shots) {
-                    Ok(()) => {
-                        last_err = None;
-                        break;
-                    }
-                    Err(e) => {
-                        last_err = Some(e.to_string());
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            50 * (attempt + 1) as u64,
-                        ))
-                        .await;
-                    }
-                }
-            }
-            if let Some(e) = last_err {
-                tracing::warn!("Failed to save shots to database after retries: {}", e);
+            // A concurrent writer (a CLI analysis run) is waited out by the
+            // connection's busy timeout, which `IndexDb` sets before the schema
+            // DDL runs, so no retry is needed here.
+            if let Err(e) = detector.save_to_db(&db, &shots) {
+                tracing::warn!("Failed to save shots to database: {}", e);
             }
         }
     }

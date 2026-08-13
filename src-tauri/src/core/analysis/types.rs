@@ -622,6 +622,14 @@ impl AnalysisBundle {
         if self.segments.is_none() && !self.job_failed("segments") {
             self.segments = previous.segments.clone();
         }
+
+        // Everything below addresses shots by position, so it may only be
+        // restored once the shot list itself is settled: an older reading of
+        // shot 3 describes this bundle's shot 3 only when both bundles cut the
+        // source the same way.
+        if !shot_boundaries_match(self.shots.as_deref(), previous.shots.as_deref()) {
+            return;
+        }
         if self.frame_analysis.is_none() && !self.job_failed("visual") {
             self.frame_analysis = previous.frame_analysis.clone();
         }
@@ -633,12 +641,85 @@ impl AnalysisBundle {
         }
     }
 
+    /// Replaces the shot list, dropping results the new cuts orphan.
+    ///
+    /// [`Self::frame_analysis`], [`Self::frame_observations`] and
+    /// [`Self::contact_sheet`] address shots by position, so a different cut
+    /// list invalidates them: keeping them would let `analysis report` attach
+    /// one shot's visual reading to a different shot. They are dropped whenever
+    /// the boundaries change and kept when a re-detection reproduces them.
+    ///
+    /// Keyframe thumbnails travel the other way. A caller that detects
+    /// boundaries without extracting keyframes (`analysis shots`) supplies
+    /// shots with no `keyframe_path`, so the path already recorded for an
+    /// identical boundary is carried forward rather than nulled out.
+    pub fn replace_shots(&mut self, shots: Vec<ShotResult>) {
+        let mut shots = shots;
+        let Some(previous) = self.shots.take() else {
+            self.shots = Some(shots);
+            return;
+        };
+
+        for shot in shots.iter_mut() {
+            if shot.keyframe_path.is_some() {
+                continue;
+            }
+            let Some(matching) = previous
+                .iter()
+                .find(|candidate| same_shot_boundary(candidate, shot))
+            else {
+                continue;
+            };
+            shot.keyframe_path = matching.keyframe_path.clone();
+            shot.keyframe_selection_method = matching.keyframe_selection_method.clone();
+        }
+
+        if !shot_boundaries_match(Some(&shots), Some(&previous)) {
+            self.frame_analysis = None;
+            self.frame_observations = None;
+            self.contact_sheet = None;
+        }
+
+        self.shots = Some(shots);
+    }
+
     /// Returns whether this bundle recorded a failure for `analysis_type`.
     ///
     /// Keys match the ones the analysis pipeline passes to [`Self::add_error`]:
     /// `shots`, `audio`, `transcript`, `segments`, `visual`, `contact_sheet`.
     fn job_failed(&self, analysis_type: &str) -> bool {
         self.errors.contains_key(analysis_type)
+    }
+}
+
+/// Tolerance used when deciding whether two shot lists describe the same cuts.
+///
+/// Boundaries come from FFmpeg timestamps that round-trip through JSON, so an
+/// exact float comparison would report a change that never happened.
+const SHOT_BOUNDARY_EPSILON_SEC: f64 = 0.001;
+
+/// Returns whether two shots cover the same span of the source.
+fn same_shot_boundary(left: &ShotResult, right: &ShotResult) -> bool {
+    (left.start_sec - right.start_sec).abs() <= SHOT_BOUNDARY_EPSILON_SEC
+        && (left.end_sec - right.end_sec).abs() <= SHOT_BOUNDARY_EPSILON_SEC
+}
+
+/// Returns whether two shot lists describe the same cuts.
+///
+/// Only boundaries are compared: results indexed by shot position stay valid
+/// when a re-detection reproduces the same cut list, even if confidence scores
+/// or keyframe paths differ. Two absent lists match — neither indexes anything.
+fn shot_boundaries_match(left: Option<&[ShotResult]>, right: Option<&[ShotResult]>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| same_shot_boundary(left, right))
+        }
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -940,6 +1021,128 @@ mod tests {
 
         assert!(fresh.frame_analysis.is_none());
         assert!(fresh.frame_observations.is_none());
+    }
+
+    #[test]
+    fn should_not_backfill_shot_indexed_slots_when_the_cut_list_changed() {
+        let mut previous = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        previous.shots = Some(vec![ShotResult::new(0.0, 60.0, 1.0)]);
+        previous.frame_analysis = Some(vec![FrameAnalysis::local_fallback(0, 0.5)]);
+        previous.frame_observations = Some(Vec::new());
+        previous.contact_sheet = Some(ContactSheetArtifact {
+            path: "sheet.jpg".to_string(),
+            frame_count: 1,
+            columns: 1,
+            rows: 1,
+        });
+
+        let mut fresh = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        fresh.shots = Some(vec![
+            ShotResult::new(0.0, 30.0, 0.9),
+            ShotResult::new(30.0, 60.0, 0.9),
+        ]);
+
+        fresh.backfill_missing_from(&previous);
+
+        assert!(
+            fresh.frame_analysis.is_none(),
+            "frame analysis indexes shots by position and must not survive new cuts"
+        );
+        assert!(fresh.frame_observations.is_none());
+        assert!(
+            fresh.contact_sheet.is_none(),
+            "the contact sheet renders the previous keyframes and is stale after new cuts"
+        );
+    }
+
+    #[test]
+    fn should_backfill_shot_indexed_slots_when_the_cut_list_is_reproduced() {
+        let mut previous = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        previous.shots = Some(vec![ShotResult::new(0.0, 60.0, 1.0)]);
+        previous.frame_analysis = Some(vec![FrameAnalysis::local_fallback(0, 0.5)]);
+
+        let mut fresh = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        // Same cuts, different confidence: the readings still describe shot 0.
+        fresh.shots = Some(vec![ShotResult::new(0.0, 60.0, 0.75)]);
+
+        fresh.backfill_missing_from(&previous);
+
+        assert!(fresh.frame_analysis.is_some());
+    }
+
+    #[test]
+    fn should_drop_shot_indexed_slots_when_replacing_shots_with_different_cuts() {
+        let mut bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        bundle.shots = Some(vec![ShotResult::new(0.0, 60.0, 1.0)]);
+        bundle.frame_analysis = Some(vec![FrameAnalysis::local_fallback(0, 0.5)]);
+        bundle.frame_observations = Some(Vec::new());
+        bundle.contact_sheet = Some(ContactSheetArtifact {
+            path: "sheet.jpg".to_string(),
+            frame_count: 1,
+            columns: 1,
+            rows: 1,
+        });
+
+        bundle.replace_shots(vec![
+            ShotResult::new(0.0, 20.0, 0.9),
+            ShotResult::new(20.0, 60.0, 0.9),
+        ]);
+
+        assert_eq!(bundle.shots.as_ref().unwrap().len(), 2);
+        assert!(bundle.frame_analysis.is_none());
+        assert!(bundle.frame_observations.is_none());
+        assert!(bundle.contact_sheet.is_none());
+    }
+
+    #[test]
+    fn should_carry_keyframes_forward_when_replacing_shots_with_the_same_cuts() {
+        let mut bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        bundle.shots = Some(vec![ShotResult::new(0.0, 60.0, 1.0)
+            .with_keyframe("keyframes/shot_000.jpg")
+            .with_keyframe_selection_method(
+                crate::core::annotations::models::KeyframeSelectionMethod::Thumbnail,
+            )]);
+        bundle.contact_sheet = Some(ContactSheetArtifact {
+            path: "sheet.jpg".to_string(),
+            frame_count: 1,
+            columns: 1,
+            rows: 1,
+        });
+
+        // `analysis shots` re-detects boundaries without extracting keyframes.
+        bundle.replace_shots(vec![ShotResult::new(0.0, 60.0, 0.9)]);
+
+        let shots = bundle.shots.as_ref().unwrap();
+        assert_eq!(
+            shots[0].keyframe_path.as_deref(),
+            Some("keyframes/shot_000.jpg"),
+            "a keyframe-less re-detection must not erase existing thumbnails"
+        );
+        assert_eq!(
+            shots[0].keyframe_selection_method,
+            Some(crate::core::annotations::models::KeyframeSelectionMethod::Thumbnail)
+        );
+        assert!(
+            bundle.contact_sheet.is_some(),
+            "unchanged cuts keep the sheet that renders them"
+        );
+    }
+
+    #[test]
+    fn should_prefer_freshly_extracted_keyframes_over_the_cached_ones() {
+        let mut bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(60.0));
+        bundle.shots = Some(vec![
+            ShotResult::new(0.0, 60.0, 1.0).with_keyframe("old.jpg")
+        ]);
+
+        bundle.replace_shots(vec![
+            ShotResult::new(0.0, 60.0, 0.9).with_keyframe("new.jpg")
+        ]);
+
+        assert_eq!(
+            bundle.shots.as_ref().unwrap()[0].keyframe_path.as_deref(),
+            Some("new.jpg")
+        );
     }
 
     #[test]

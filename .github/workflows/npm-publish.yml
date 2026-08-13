@@ -17,6 +17,17 @@ name: npm Publish
 # token. A `release: published` trigger would therefore never fire.
 #
 # ---------------------------------------------------------------------------
+# Dist-tags
+# ---------------------------------------------------------------------------
+# Every publish passes an explicit `--tag`, derived from the release tag:
+#   v0.2.0        -> latest   (what `npm install openreelio-cli` resolves to)
+#   v0.2.0-rc.1   -> rc       (the first prerelease identifier, lowercased)
+#   v0.2.0-beta.3 -> beta
+#   v0.2.0-1      -> next     (numeric identifiers are not valid dist-tags)
+# Without it npm would move `latest` on every publish, so shipping a prerelease
+# would hand prerelease binaries to everyone installing the package.
+#
+# ---------------------------------------------------------------------------
 # Setup required before this workflow can publish (neither is done yet)
 # ---------------------------------------------------------------------------
 # 1. Enable the workflow.
@@ -117,9 +128,33 @@ jobs:
           fi
 
           VERSION="${RELEASE_TAG#v}"
+
+          # npm moves the `latest` dist-tag on every publish that does not pass
+          # --tag, so a prerelease would become what `npm install openreelio-cli`
+          # resolves to. Route prereleases to their own channel instead.
+          DIST_TAG=latest
+          PRERELEASE="${VERSION#*-}"
+          if [ "$PRERELEASE" != "$VERSION" ]; then
+            # First prerelease identifier: 0.2.0-rc.1 -> rc, 0.2.0-beta -> beta.
+            CHANNEL="$(printf '%s' "${PRERELEASE%%.*}" | tr '[:upper:]' '[:lower:]')"
+            # Two channels can never be derived from a prerelease identifier:
+            # `latest` is exactly the tag this branch exists to protect, and npm
+            # refuses any dist-tag it can read as a semver range (0.2.0-1 -> "1",
+            # 0.2.0-v2 -> "v2", 0.2.0-x.1 -> "x"). Both fall back to the generic
+            # prerelease channel.
+            if printf '%s' "$CHANNEL" | grep -Eq '^[a-z][0-9a-z-]*$' &&
+              ! printf '%s' "$CHANNEL" | grep -Eq '^(latest|x|v[0-9].*)$'; then
+              DIST_TAG="$CHANNEL"
+            else
+              DIST_TAG=next
+            fi
+          fi
+
           echo "tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=${DIST_TAG}" >> "$GITHUB_OUTPUT"
           echo "Publishing version ${VERSION} from ${RELEASE_TAG} (dry_run=${DRY_RUN})."
+          echo "npm dist-tag: ${DIST_TAG}"
 
       - name: Checkout release tag
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -185,36 +220,24 @@ jobs:
 
           ls -la dist/cli-archives
 
-      - name: Extract CLI binaries
-        env:
-          VERSION: ${{ steps.release.outputs.version }}
+          # Four release targets, each contributing an archive and a .sha256
+          # sidecar. Asset listings are paginated, so a truncated one would drop
+          # a target quietly; refuse to publish a partial matrix.
+          EXPECTED_ASSET_COUNT=8
+          DOWNLOADED_ASSET_COUNT="$(find dist/cli-archives -type f -name 'openreelio-cli-*' | wc -l)"
+          if [ "${DOWNLOADED_ASSET_COUNT}" -ne "${EXPECTED_ASSET_COUNT}" ]; then
+            echo "Expected ${EXPECTED_ASSET_COUNT} CLI assets, downloaded ${DOWNLOADED_ASSET_COUNT}." >&2
+            exit 1
+          fi
+
+      - name: Verify CLI archive checksums
         run: |
           set -euo pipefail
 
-          # Checksums are verified again by the generator (--archives); this
-          # early pass fails fast before anything is unpacked.
+          # Checksums are verified again by the generator (--archives), which
+          # then unpacks the very archives it verified; this early pass just
+          # fails the run before any packaging work starts.
           (cd dist/cli-archives && sha256sum --check --strict ./*.sha256)
-
-          extract() {
-            TRIPLE="$1"
-            EXTENSION="$2"
-            ARCHIVE="dist/cli-archives/openreelio-cli-${VERSION}-${TRIPLE}.${EXTENSION}"
-            DESTINATION="dist/cli-assets/${TRIPLE}"
-
-            mkdir -p "$DESTINATION"
-            if [ "$EXTENSION" = "zip" ]; then
-              unzip -o "$ARCHIVE" -d "$DESTINATION"
-            else
-              tar -xzf "$ARCHIVE" -C "$DESTINATION"
-            fi
-          }
-
-          extract x86_64-pc-windows-msvc zip
-          extract x86_64-apple-darwin tar.gz
-          extract aarch64-apple-darwin tar.gz
-          extract x86_64-unknown-linux-gnu tar.gz
-
-          find dist/cli-assets -type f -name 'openreelio-cli*' -print
 
       - name: Assemble npm packages
         env:
@@ -222,9 +245,10 @@ jobs:
         run: |
           set -euo pipefail
 
+          # No --input: the generator packages each binary out of the archive it
+          # just checksummed, so the published bytes are the verified bytes.
           node scripts/build-npm-platform-packages.mjs \
             --version "${VERSION}" \
-            --input dist/cli-assets \
             --archives dist/cli-archives \
             --out dist/npm-packages \
             --shim-out dist/npm-packages/openreelio-cli
@@ -255,33 +279,37 @@ jobs:
           # Empty when trusted publishing is configured; npm then falls back to
           # OIDC. Harmless to leave set once trusted publishing is live.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DIST_TAG: ${{ steps.release.outputs.dist_tag }}
         run: |
           set -euo pipefail
 
           # Platform packages first: the shim pins them as optionalDependencies,
           # and npm resolves those at install time.
           for PACKAGE_DIR in dist/npm-packages/cli-*; do
-            echo "Publishing ${PACKAGE_DIR}"
-            npm publish --access public "${PACKAGE_DIR}"
+            echo "Publishing ${PACKAGE_DIR} under dist-tag ${DIST_TAG}"
+            npm publish --access public --tag "${DIST_TAG}" "${PACKAGE_DIR}"
           done
 
       - name: Publish shim package
         if: env.DRY_RUN != 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DIST_TAG: ${{ steps.release.outputs.dist_tag }}
         run: |
           set -euo pipefail
-          npm publish --access public dist/npm-packages/openreelio-cli
+          npm publish --access public --tag "${DIST_TAG}" dist/npm-packages/openreelio-cli
 
       - name: Summary
         env:
           VERSION: ${{ steps.release.outputs.version }}
+          DIST_TAG: ${{ steps.release.outputs.dist_tag }}
         run: |
           {
             echo "## npm distribution"
             echo
             echo "- tag: \`${RELEASE_TAG}\`"
             echo "- version: \`${VERSION}\`"
+            echo "- dist-tag: \`${DIST_TAG}\`"
             if [ "${DRY_RUN}" = "true" ]; then
               echo "- mode: dry run (packed only, nothing published)"
             else

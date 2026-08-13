@@ -18,8 +18,11 @@ openreelio-cli analysis report  --path ./demo --id <ASSET_ID>
 
 **`analysis shots`** returns `totalDurationSec`, `shotCount`, and
 `shots[{index,startSec,endSec,durationSec,confidence}]`. `persisted` is an array
-naming the stores written, e.g. `["indexDb","bundle","annotations"]`. Cut on shot
-boundaries, not round numbers.
+naming the stores written, e.g. `["indexDb","bundle","annotations"]`, and
+`warnings` explains every store that was not. `status` is `ok` (all requested
+stores written, or `--no-persist`), `partial` (some written — still exit `0`),
+or `failed` (none written — detection worked but the verb did not, exit `1`).
+Cut on shot boundaries, not round numbers.
 
 > `asset import` does not probe media duration, so a clip placed by
 > `timeline insert` gets the 10-second default length. `totalDurationSec` from
@@ -69,13 +72,24 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
   auto-falls back to composite when there is no such clip (a title card, say) and
   reports `fellBackToComposite: true`.
 - `--mode composite` renders a minimal window through the full stack, so effects
-  and overlays appear. Range renders decode from zero, so it costs more.
+  and overlays appear. Range renders decode from zero, so it costs more. It works
+  anywhere inside the timeline, including over a gap — a gap has no picture, so a
+  black frame is the answer, not an error.
 - `--max-width` caps output size (default 1280 px, aspect preserved, never
-  upscaled). `--format png|jpeg`.
+  upscaled).
+- `--format png|jpeg` is optional: the format follows the `--out` extension, so
+  `--out sheet.jpg` writes JPEG at exactly that path. Reach for `--format` on
+  extensionless paths and `--times` directories, which default to PNG. A
+  `--format` contradicting a `.png`/`.jpg` extension is rejected instead of
+  quietly writing somewhere else.
 
 **Contact sheets.** `--grid COLSxROWS --between START END [--count N]` writes one
 sheet and returns `sheet.cells[{index,row,col,timelineSec}]`, mapping every cell
 a vision model comments on back to a timecode. Capped at 100 cells.
+
+Every timeline time has to be inside the sequence. One at or past the end is
+rejected with the sequence's real duration in the message — the `0 30` above
+assumes a sequence at least 30 s long, so check `timeline info` first.
 
 Single and batch extraction return
 `frames[{index,timeSec,sourceTimeSec,clipId,assetId,path,width,height}]`.

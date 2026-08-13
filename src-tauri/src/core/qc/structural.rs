@@ -52,11 +52,13 @@ pub struct UncoveredGap {
     pub gap_start_sec: f64,
     /// End of the enclosing track gap.
     pub gap_end_sec: f64,
-    /// Whether rippling the following clips left would remove this hole.
+    /// Whether rippling this one track's later clips left would remove the hole.
     ///
-    /// A hole between clips closes when everything after it moves left, but a
-    /// hole past the last video clip has nothing to pull in, so it carries no
-    /// [`CloseGap`](crate::core::commands::CloseGapCommand) fix.
+    /// True only for a hole between two clips on the same track, which is the
+    /// edit [`CloseGap`](crate::core::commands::CloseGapCommand) performs. The
+    /// head and tail of the program are both false: a tail hole has nothing to
+    /// pull in, and a head hole would ripple a single track to zero while every
+    /// other track stayed put. Neither carries a fix.
     pub closable: bool,
 }
 
@@ -238,6 +240,9 @@ fn video_coverage_edges(sequence: &Sequence) -> Option<(CoverageEdge<'_>, Covera
 
 /// Reports black before the first and after the last video clip.
 ///
+/// Neither span carries a fix: both would need a decision about the other
+/// tracks that no single command expresses (see the notes at each push).
+///
 /// Both spans are uncovered by construction — they sit outside the union of
 /// every video track's coverage — so no subtraction is needed. The trailing
 /// span is measured against [`Sequence::duration`], which follows the longest
@@ -258,8 +263,14 @@ fn program_edge_gaps(sequence: &Sequence, min_gap_sec: f64) -> Vec<UncoveredGap>
             end_sec: earliest.time_sec,
             gap_start_sec: 0.0,
             gap_end_sec: earliest.time_sec,
-            // Rippling the clips left starts the picture at zero.
-            closable: true,
+            // `CloseGap` ripples one track. Applied to the head of the program
+            // it would pull that single track's clips to zero and leave every
+            // other track — audio, captions, overlays — where it was, trading
+            // leading black for a program that is out of sync end to end.
+            // Deciding between rippling everything, extending the first shot
+            // and shortening the other tracks is a call this rule cannot make,
+            // so it reports the black and offers no fix.
+            closable: false,
         });
     }
 
@@ -279,6 +290,79 @@ fn program_edge_gaps(sequence: &Sequence, min_gap_sec: f64) -> Vec<UncoveredGap>
     }
 
     gaps
+}
+
+// =============================================================================
+// EmptySequenceRule
+// =============================================================================
+
+/// Rule that reports a sequence with nothing on any track
+///
+/// Every other check reads the clips: with none to read they all pass, and the
+/// report says the project is clean when in truth nothing was ever edited. An
+/// agent acting on that report concludes its work is verified. This rule is the
+/// floor under the whole run — the one finding that says there was nothing to
+/// look at.
+///
+/// Graded as a warning, not an error: an empty sequence is a legitimate
+/// starting point, and `error` stays reserved for output that is objectively
+/// broken. What matters is that it can never be silent.
+#[derive(Debug, Default)]
+pub struct EmptySequenceRule;
+
+impl EmptySequenceRule {
+    /// Creates a new EmptySequenceRule
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl QCRule for EmptySequenceRule {
+    fn name(&self) -> &str {
+        "EmptySequenceRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "sequence.empty"
+    }
+
+    fn description(&self) -> &str {
+        "Reports a sequence that holds no clips on any track"
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Warning
+    }
+
+    async fn check(
+        &self,
+        sequence: &Sequence,
+        _state: &ProjectState,
+        config: &RuleConfig,
+        _context: &QCContext,
+    ) -> CoreResult<Vec<QCViolation>> {
+        let clip_count: usize = sequence.tracks.iter().map(|track| track.clips.len()).sum();
+        if clip_count > 0 {
+            return Ok(Vec::new());
+        }
+
+        let severity = config.severity_override.unwrap_or(self.default_severity());
+
+        Ok(vec![QCViolation::new(
+            self.name(),
+            severity,
+            "Sequence contains no clips on any track",
+        )
+        .with_details(
+            "Every other check reads the clips, so an empty sequence passes them all without \
+             anything having been inspected. Import media and place it on the timeline before \
+             treating this report as a verdict."
+                .to_string(),
+        )
+        .with_metric("trackCount", sequence.tracks.len())
+        .with_metric("clipCount", clip_count)])
+    }
 }
 
 // =============================================================================
@@ -1292,6 +1376,14 @@ impl QCRule for ShotLengthStatsRule {
 // Cross-reference: rendered black ranges vs. structural gaps
 // =============================================================================
 
+/// Fraction of the program a single black range may cover before the "no gap
+/// overlaps this, so it is probably deliberate" reading stops being credible.
+///
+/// A fade or title card is short by construction. Black over half the running
+/// time is a dropped video chain, a wrong pixel format or an export that never
+/// received a picture — a broken render, whatever the timeline says.
+const BLACK_PROGRAM_FRACTION_ERROR: f64 = 0.5;
+
 /// Re-grades detected black ranges against the structural gaps of a sequence.
 ///
 /// Black pixels alone say nothing about intent: a fade-out or title card is
@@ -1300,6 +1392,10 @@ impl QCRule for ShotLengthStatsRule {
 /// happens here rather than inside either rule:
 ///
 /// * black overlapping an uncovered gap becomes [`Severity::Error`]
+/// * black covering at least [`BLACK_PROGRAM_FRACTION_ERROR`] of the program
+///   stays [`Severity::Error`] whether or not a gap explains it — a render that
+///   is dark end to end is broken output, and a timeline full of picture makes
+///   that more damning, not less
 /// * black anywhere else drops to [`Severity::Info`] and is reported without a
 ///   verdict — nothing here can distinguish a deliberate fade from footage that
 ///   simply went dark, so the details state the fact and leave the call open
@@ -1330,6 +1426,7 @@ pub fn crossref_black_ranges_with_gaps(
     }
 
     let gaps = uncovered_video_gaps(sequence, min_gap_sec);
+    let program_duration_sec = sequence.duration();
     let mut regraded = 0;
 
     for violation in report
@@ -1341,35 +1438,64 @@ pub fn crossref_black_ranges_with_gaps(
             continue;
         };
 
+        // Recorded on every black finding so the fraction an agent would have
+        // to derive by hand is already in the report.
+        let program_fraction = if program_duration_sec.is_finite() && program_duration_sec > 0.0 {
+            Some(location.duration() / program_duration_sec)
+        } else {
+            None
+        };
+        if let Some(fraction) = program_fraction {
+            violation.metrics.insert(
+                "programFraction".to_string(),
+                serde_json::json!((fraction * 1000.0).round() / 1000.0),
+            );
+        }
+
         let overlapping = gaps
             .iter()
             .find(|gap| location.start_sec < gap.end_sec && location.end_sec > gap.start_sec);
 
-        match overlapping {
-            Some(gap) => {
+        if let Some(gap) = overlapping {
+            violation.severity = Severity::Error;
+            violation.details = Some(format!(
+                "Black covers a {:.2}s gap at {:.2}s on track '{}', so the program is \
+                 missing picture here.",
+                gap.duration_sec(),
+                gap.start_sec,
+                gap.track_name
+            ));
+            violation
+                .metrics
+                .insert("overlapsGap".to_string(), serde_json::Value::Bool(true));
+            violation.affected_entities.push(gap.track_id.clone());
+        } else {
+            violation
+                .metrics
+                .insert("overlapsGap".to_string(), serde_json::Value::Bool(false));
+
+            // No gap explains this black. That is the benign reading only while
+            // the range is short; black over most of the program means the
+            // render is broken, and a timeline that is full of picture makes
+            // that worse rather than better.
+            let covers_program =
+                program_fraction.is_some_and(|fraction| fraction >= BLACK_PROGRAM_FRACTION_ERROR);
+
+            if covers_program {
                 violation.severity = Severity::Error;
                 violation.details = Some(format!(
-                    "Black covers a {:.2}s gap at {:.2}s on track '{}', so the program is \
-                     missing picture here.",
-                    gap.duration_sec(),
-                    gap.start_sec,
-                    gap.track_name
+                    "Black covers {:.0}% of the {:.2}s program while the timeline has picture \
+                     here, so the render itself is broken rather than the edit.",
+                    program_fraction.unwrap_or_default() * 100.0,
+                    program_duration_sec
                 ));
-                violation
-                    .metrics
-                    .insert("overlapsGap".to_string(), serde_json::Value::Bool(true));
-                violation.affected_entities.push(gap.track_id.clone());
-            }
-            None => {
+            } else {
                 violation.severity = Severity::Info;
                 violation.details = Some(
                     "No timeline gap overlaps this range; if this black is not an intentional \
                      fade or title card, inspect the timeline."
                         .to_string(),
                 );
-                violation
-                    .metrics
-                    .insert("overlapsGap".to_string(), serde_json::Value::Bool(false));
             }
         }
 
@@ -1589,13 +1715,106 @@ mod tests {
         assert!((location.start_sec - 0.0).abs() < 1e-9);
         assert!((location.end_sec - 2.0).abs() < 1e-9);
         assert!(
-            violations[0].auto_fixable,
-            "rippling the clips left removes a head gap"
+            !violations[0].auto_fixable,
+            "CloseGap ripples one track, so closing a head gap would desync every other track"
         );
-        assert_eq!(
-            violations[0].suggested_fix.as_ref().expect("fix").commands[0]["gapStart"],
-            0.0
+        assert!(violations[0].suggested_fix.is_none());
+    }
+
+    /// Feature: Uncovered video gaps
+    /// Scenario: should not offer a per-track ripple that desyncs the program
+    #[tokio::test]
+    async fn test_gap_rule_should_not_offer_a_close_gap_fix_for_a_head_gap() {
+        let mut sequence = sequence_30fps();
+        let mut video = Track::new_video("V1");
+        video.add_clip(video_clip("asset_1", 2.0, 5.0));
+        sequence.add_track(video);
+
+        // Audio that starts at zero is exactly what a head-gap CloseGap would
+        // desync: the picture would move to zero and the sound would not.
+        let mut audio = Track::new_audio("A1");
+        audio.add_clip(video_clip("asset_1", 0.0, 7.0));
+        sequence.add_track(audio);
+
+        let head_gap = uncovered_video_gaps(&sequence, 1.0 / 30.0)
+            .into_iter()
+            .find(|gap| gap.start_sec == 0.0)
+            .expect("head gap reported");
+
+        assert!(
+            !head_gap.closable,
+            "a head gap has no single-track ripple that keeps the program in sync"
         );
+
+        let context = context_for(&sequence);
+        let violations = TimelineGapRule::new()
+            .check(
+                &sequence,
+                &ProjectState::new("p"),
+                &RuleConfig::default(),
+                &context,
+            )
+            .await
+            .expect("rule runs");
+
+        assert!(violations
+            .iter()
+            .all(|violation| violation.suggested_fix.is_none()));
+    }
+
+    // ========================================================================
+    // EmptySequenceRule
+    // ========================================================================
+
+    /// Feature: Empty sequence detection
+    /// Scenario: should warn when no track holds a clip
+    #[tokio::test]
+    async fn test_empty_sequence_rule_should_warn_when_nothing_was_edited() {
+        let mut sequence = sequence_30fps();
+        sequence.add_track(Track::new_video("V1"));
+        sequence.add_track(Track::new_audio("A1"));
+
+        let context = context_for(&sequence);
+        let violations = EmptySequenceRule::new()
+            .check(
+                &sequence,
+                &ProjectState::new("p"),
+                &RuleConfig::default(),
+                &context,
+            )
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Warning);
+        assert_eq!(violations[0].metrics["clipCount"], 0);
+        assert!(
+            violations[0].suggested_fix.is_none(),
+            "what belongs on an empty timeline is not a QC decision"
+        );
+    }
+
+    /// Feature: Empty sequence detection
+    /// Scenario: should stay silent once any track holds a clip
+    #[tokio::test]
+    async fn test_empty_sequence_rule_should_stay_silent_when_a_clip_exists() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        track.add_clip(video_clip("asset_1", 0.0, 2.0));
+        sequence.add_track(track);
+
+        let context = context_for(&sequence);
+        let violations = EmptySequenceRule::new()
+            .check(
+                &sequence,
+                &ProjectState::new("p"),
+                &RuleConfig::default(),
+                &context,
+            )
+            .await
+            .expect("rule runs");
+
+        assert!(violations.is_empty());
     }
 
     /// Feature: Uncovered video gaps
@@ -2170,5 +2389,65 @@ mod tests {
         );
         assert_eq!(report.violations[0].metrics["overlapsGap"], true);
         assert!(!report.passed);
+    }
+
+    /// Feature: Cross-referenced black detection
+    /// Scenario: should keep an end-to-end black render graded as an error
+    #[tokio::test]
+    async fn test_crossref_should_keep_black_over_the_whole_program_as_an_error() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        // Continuous picture across the whole program: nothing in the timeline
+        // explains the black, which is exactly what makes the render broken.
+        track.add_clip(video_clip("asset_1", 0.0, 10.0));
+        sequence.add_track(track);
+
+        let mut report = report_with_black_range(&sequence, (0.0, 10.0)).await;
+        let regraded = crossref_black_ranges_with_gaps(&mut report, &sequence, 1.0 / 30.0);
+
+        assert_eq!(regraded, 1);
+        assert_eq!(
+            report.violations[0].severity,
+            Severity::Error,
+            "a render that is black end to end must never be downgraded to info"
+        );
+        assert_eq!(report.violations[0].metrics["overlapsGap"], false);
+        assert_eq!(report.violations[0].metrics["programFraction"], 1.0);
+        assert!(
+            !report.passed,
+            "verify must exit non-zero on a fully black render"
+        );
+    }
+
+    /// Feature: Cross-referenced black detection
+    /// Scenario: should keep grading black over most of the program as an error
+    #[tokio::test]
+    async fn test_crossref_should_keep_black_over_most_of_the_program_as_an_error() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        track.add_clip(video_clip("asset_1", 0.0, 10.0));
+        sequence.add_track(track);
+
+        let mut report = report_with_black_range(&sequence, (1.0, 7.0)).await;
+        crossref_black_ranges_with_gaps(&mut report, &sequence, 1.0 / 30.0);
+
+        assert_eq!(report.violations[0].severity, Severity::Error);
+        assert_eq!(report.violations[0].metrics["programFraction"], 0.6);
+    }
+
+    /// Feature: Cross-referenced black detection
+    /// Scenario: should still treat a short unexplained fade as informational
+    #[tokio::test]
+    async fn test_crossref_should_leave_a_short_fade_informational() {
+        let mut sequence = sequence_30fps();
+        let mut track = Track::new_video("V1");
+        track.add_clip(video_clip("asset_1", 0.0, 10.0));
+        sequence.add_track(track);
+
+        let mut report = report_with_black_range(&sequence, (9.0, 10.0)).await;
+        crossref_black_ranges_with_gaps(&mut report, &sequence, 1.0 / 30.0);
+
+        assert_eq!(report.violations[0].severity, Severity::Info);
+        assert!(report.passed);
     }
 }

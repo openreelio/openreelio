@@ -37,15 +37,6 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Attempts made when writing shots into `index.db`.
-///
-/// A GUI instance may hold the same SQLite file, so a transient `SQLITE_BUSY`
-/// must not be reported as a failed detection.
-const INDEX_DB_WRITE_ATTEMPTS: u32 = 3;
-
-/// Base backoff between `index.db` write attempts.
-const INDEX_DB_RETRY_BACKOFF: Duration = Duration::from_millis(50);
-
 /// Tolerance used when comparing requested silence parameters with the cached
 /// contract. Mirrors the tolerance `cleanup::can_reuse_cached_silence_regions`
 /// applies on the read side.
@@ -204,7 +195,7 @@ pub fn shots(args: ShotsArgs) -> anyhow::Result<()> {
     let mut warnings: Vec<String> = Vec::new();
 
     if !args.no_persist {
-        match runtime.block_on(save_shots_to_index_db(&project.path, &detector, &detected)) {
+        match save_shots_to_index_db(&project.path, &detector, &detected) {
             Ok(()) => persisted.push("indexDb"),
             Err(error) => warnings.push(format!("index.db write skipped: {}", error)),
         }
@@ -241,9 +232,12 @@ pub fn shots(args: ShotsArgs) -> anyhow::Result<()> {
         }
     }
 
+    let persist_requested = !args.no_persist;
+    let persistence_failed = persist_requested && persisted.is_empty();
+
     let total_duration_sec = detected.last().map(|shot| shot.end_sec).unwrap_or(0.0);
     let mut payload = json!({
-        "status": "ok",
+        "status": shots_status(persist_requested, persisted.len(), warnings.len()),
         "assetId": args.id,
         "shotCount": detected.len(),
         "totalDurationSec": total_duration_sec,
@@ -264,7 +258,41 @@ pub fn shots(args: ShotsArgs) -> anyhow::Result<()> {
         payload["warnings"] = json!(warnings);
     }
 
-    output::print_json_pretty(&payload)
+    output::print_json_pretty(&payload)?;
+
+    // Detection succeeding is not the same as the verb succeeding: an agent that
+    // asked for persisted shots and got none must see a non-zero exit, matching
+    // the documented "exit 0 on success, 1 on failure" contract.
+    if persistence_failed {
+        return Err(anyhow::anyhow!(
+            "Shot detection succeeded but every persistence target failed: {}",
+            warnings.join("; ")
+        ));
+    }
+
+    Ok(())
+}
+
+/// Status string for `analysis shots`, using the same vocabulary as
+/// `analysis run`.
+///
+/// Detection is only half the job: when persistence was requested and no store
+/// accepted the write, the verb reports `failed` instead of claiming success.
+/// `partial` means the shots reached some stores but not all, which is a usable
+/// result and therefore still exits zero.
+fn shots_status(
+    persist_requested: bool,
+    persisted_count: usize,
+    failed_count: usize,
+) -> &'static str {
+    if !persist_requested || failed_count == 0 {
+        return "ok";
+    }
+    if persisted_count == 0 {
+        "failed"
+    } else {
+        "partial"
+    }
 }
 
 /// Detects silence regions, caching them only when the parameters match the
@@ -298,31 +326,19 @@ pub fn silence(args: SilenceArgs) -> anyhow::Result<()> {
 
     let mut rejection = silence_cache_rejection(args.threshold_db, args.min_duration);
     if rejection.is_none() {
-        let runner = AnalysisJobRunner::new(&project.path);
-        // Silence regions live inside the audio profile, and the rest of that
-        // profile is measured, not defaulted. Without an existing profile there
-        // is nothing to merge into, and inventing one would publish invented
-        // measurements to `analysis report` and the GUI cleanup panel.
-        let has_audio_profile = runner
-            .load_bundle_optional(&args.id)
-            .map_err(|error| {
-                anyhow::anyhow!("Failed to read the cached analysis bundle: {}", error)
-            })?
-            .and_then(|bundle| bundle.audio_profile)
-            .is_some();
-
-        if has_audio_profile {
-            let metadata =
-                runtime.block_on(resolve_video_metadata(asset, &media_path, &ffmpeg_info))?;
-            let cached_regions = regions.clone();
-            runner
-                .merge_bundle_update(&args.id, &metadata, move |bundle| {
-                    apply_silence_regions(bundle, cached_regions)
-                })
-                .map_err(|error| {
-                    anyhow::anyhow!("Failed to update the analysis bundle: {}", error)
-                })?;
-        } else {
+        let metadata =
+            runtime.block_on(resolve_video_metadata(asset, &media_path, &ffmpeg_info))?;
+        let cached_regions = regions.clone();
+        // The "is there a profile to merge into?" question is answered inside
+        // the bundle lock, by the same closure that writes: a profile that
+        // disappears between the check and the write would otherwise be
+        // reported as a successful cache update that stored nothing.
+        let persisted = AnalysisJobRunner::new(&project.path)
+            .try_merge_bundle_update(&args.id, &metadata, move |bundle| {
+                apply_silence_regions(bundle, cached_regions)
+            })
+            .map_err(|error| anyhow::anyhow!("Failed to update the analysis bundle: {}", error))?;
+        if persisted.is_none() {
             rejection = Some(NO_AUDIO_PROFILE_REASON);
         }
     }
@@ -427,19 +443,14 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     let metadata = runtime.block_on(resolve_video_metadata(asset, &media_path, &ffmpeg_info))?;
 
     let runner = AnalysisJobRunner::new(&project.path);
-    // Captured before the run: `analyze_full_with_metadata` writes the bundle
-    // itself, so results the enabled sub-jobs do not produce are merged back
-    // afterwards instead of being dropped.
-    let previous = runner
-        .load_bundle_optional(&args.id)
-        .map_err(|error| anyhow::anyhow!("Failed to read the cached analysis bundle: {}", error))?;
-
     let emit_progress = args.progress;
+    // The runner persists under the bundle lock and merges what this run did not
+    // reproduce back in, so the returned bundle is the asset's full analysis.
     let bundle = runtime
         .block_on(runner.analyze_full_with_metadata(
             &args.id,
             &media_path.to_string_lossy(),
-            metadata.clone(),
+            metadata,
             &options,
             |job, status, detail| {
                 if emit_progress {
@@ -448,15 +459,6 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
             },
         ))
         .map_err(|error| anyhow::anyhow!("Analysis run failed: {}", error))?;
-
-    let bundle = match previous {
-        Some(previous) => runner
-            .merge_bundle_update(&args.id, &metadata, |merged| {
-                merged.backfill_missing_from(&previous)
-            })
-            .map_err(|error| anyhow::anyhow!("Failed to merge the analysis bundle: {}", error))?,
-        None => bundle,
-    };
 
     let enabled = enabled_job_names(&options);
     let failed = enabled
@@ -602,11 +604,13 @@ fn to_shot_results(shots: &[Shot]) -> Vec<ShotResult> {
         .collect()
 }
 
-/// Writes shots into the project's `index.db`, retrying transient lock errors.
+/// Writes shots into the project's `index.db`.
 ///
-/// A running GUI instance can hold the same database, so a busy database is
-/// retried rather than reported as a detection failure.
-async fn save_shots_to_index_db(
+/// A running GUI instance can hold the same database. Waiting for it is
+/// [`IndexDb`]'s job: every connection it hands out carries a busy timeout, so
+/// the open, the schema DDL and the write all block on a contended lock instead
+/// of failing. A retry here would only have covered the write.
+fn save_shots_to_index_db(
     project_dir: &Path,
     detector: &ShotDetector,
     shots: &[Shot],
@@ -623,21 +627,9 @@ async fn save_shots_to_index_db(
     }
     .map_err(|error| anyhow::anyhow!("{}", error))?;
 
-    let mut last_error = None;
-    for attempt in 0..INDEX_DB_WRITE_ATTEMPTS {
-        match detector.save_to_db(&db, shots) {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                last_error = Some(error);
-                tokio::time::sleep(INDEX_DB_RETRY_BACKOFF * (attempt + 1)).await;
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "{}",
-        last_error.expect("a failed attempt always records an error")
-    ))
+    detector
+        .save_to_db(&db, shots)
+        .map_err(|error| anyhow::anyhow!("{}", error))
 }
 
 /// Stores shot results in the per-asset annotation file.
@@ -676,18 +668,20 @@ fn save_shot_annotation(
 
 /// Writes freshly detected silence into an existing audio profile.
 ///
-/// Does nothing when the bundle carries no profile: every other field of an
+/// Returns `false` when the bundle carries no profile, which abandons the write:
+/// every other field of an
 /// [`AudioProfile`](openreelio_core::analysis::AudioProfile) is a measurement,
-/// and a placeholder would be indistinguishable from one. Callers check for the
-/// profile first and report `persisted: false` instead (see
-/// [`NO_AUDIO_PROFILE_REASON`]).
+/// and a placeholder would be indistinguishable from one. The caller reports
+/// `persisted: false` instead (see [`NO_AUDIO_PROFILE_REASON`]).
 fn apply_silence_regions(
     bundle: &mut AnalysisBundle,
     regions: Vec<openreelio_core::analysis::SilenceRegion>,
-) {
-    if let Some(profile) = bundle.audio_profile.as_mut() {
-        profile.silence_regions = regions;
-    }
+) -> bool {
+    let Some(profile) = bundle.audio_profile.as_mut() else {
+        return false;
+    };
+    profile.silence_regions = regions;
+    true
 }
 
 /// Returns why freshly detected silence must not enter the shared cache.
@@ -945,11 +939,15 @@ mod tests {
     fn apply_silence_regions_should_not_fabricate_a_profile_when_none_exists() {
         let mut bundle = AnalysisBundle::new("asset_001", VideoMetadata::new(10.0));
 
-        apply_silence_regions(
+        let applied = apply_silence_regions(
             &mut bundle,
             vec![openreelio_core::analysis::SilenceRegion::new(1.0, 3.0)],
         );
 
+        assert!(
+            !applied,
+            "declining the write is what makes the command report persisted: false"
+        );
         assert!(
             bundle.audio_profile.is_none(),
             "a placeholder peak level and centroid would read as measurements"
@@ -968,11 +966,12 @@ mod tests {
             speech_regions: Vec::new(),
         });
 
-        apply_silence_regions(
+        let applied = apply_silence_regions(
             &mut bundle,
             vec![openreelio_core::analysis::SilenceRegion::new(0.0, 1.0)],
         );
 
+        assert!(applied);
         let profile = bundle.audio_profile.expect("profile must be preserved");
         assert_eq!(profile.bpm, Some(120.0));
         assert_eq!(profile.peak_db, -3.0);
@@ -996,5 +995,28 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].confidence, DEFAULT_SHOT_CONFIDENCE);
         assert_eq!(results[0].end_sec, 2.0);
+    }
+
+    #[test]
+    fn shots_status_should_report_ok_when_every_target_accepted_the_write() {
+        assert_eq!(shots_status(true, 3, 0), "ok");
+    }
+
+    #[test]
+    fn shots_status_should_report_ok_when_persistence_was_not_requested() {
+        // `--no-persist` writes nowhere by design, so an empty `persisted` list
+        // is the expected outcome rather than a failure.
+        assert_eq!(shots_status(false, 0, 0), "ok");
+    }
+
+    #[test]
+    fn shots_status_should_report_partial_when_only_some_targets_accepted_the_write() {
+        assert_eq!(shots_status(true, 2, 1), "partial");
+        assert_eq!(shots_status(true, 1, 2), "partial");
+    }
+
+    #[test]
+    fn shots_status_should_report_failed_when_every_target_rejected_the_write() {
+        assert_eq!(shots_status(true, 0, 3), "failed");
     }
 }

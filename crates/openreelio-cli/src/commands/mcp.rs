@@ -4,6 +4,17 @@
 //! host supplies a single-use approval token through the environment, or when
 //! the operator starts the server with `--allow-write` — a local-trust switch
 //! that trades per-call approval for an unattended edit loop.
+//!
+//! # Scope
+//!
+//! The server exposes exactly one project directory, and that directory is its
+//! whole filesystem scope. Every path-typed tool argument resolves inside it
+//! through [`confine_to_project`] — the server has no working directory a client
+//! could reason about, and an unconfined path handed to FFmpeg would turn a
+//! read-only server into a whole-disk existence oracle and an outbound-connection
+//! primitive. The one deliberate exception is the grant-gated plan surface:
+//! commands such as `ImportAsset` name media anywhere the operator's user can
+//! read, because pulling external footage into a project is what an editor does.
 
 use crate::{
     commands::{help_json, plan, transcription, verify},
@@ -15,7 +26,7 @@ use openreelio_core::ipc::CommandPayload;
 use openreelio_core::timeline::TrackKind;
 use serde_json::Value;
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Timeout for the rendered-file measurement pass of `openreelio.verify`,
@@ -61,21 +72,7 @@ struct McpServerState {
 }
 
 pub fn execute(action: McpAction) -> anyhow::Result<()> {
-    let (approval_expires_at_ms, approval_expiry_error) = read_approval_expiry_from_env();
-    let state = McpServerState {
-        project: action.project,
-        allow_write: action.allow_write,
-        client_name: None,
-        client_version: None,
-        approval_token: std::env::var("OPENREELIO_MCP_APPROVAL_TOKEN").ok(),
-        approval_expires_at_ms,
-        approval_expiry_error,
-        approval_plan_id: read_trimmed_env("OPENREELIO_MCP_APPROVAL_PLAN_ID"),
-        approval_project_id: read_trimmed_env("OPENREELIO_MCP_APPROVAL_PROJECT_ID"),
-        approval_runtime_id: read_trimmed_env("OPENREELIO_MCP_APPROVAL_RUNTIME_ID"),
-        approval_session_id: read_trimmed_env("OPENREELIO_MCP_APPROVAL_SESSION_ID"),
-        approval_consumed: Arc::new(Mutex::new(false)),
-    };
+    let state = build_server_state(&action);
 
     if action.stdio {
         if state.allow_write {
@@ -96,8 +93,32 @@ pub fn execute(action: McpAction) -> anyhow::Result<()> {
             "command": build_discovery_command(&state),
             "tools": build_tools(&state),
             "resources": build_resources(),
-            "policy": build_discovery_policy(&state)
+            "policy": build_policy(&state)
         }))
+    }
+}
+
+/// Builds the server state from the operator's flags and the host environment.
+///
+/// Every approval variable is read through the same empty-filter: an exported
+/// but empty value is an unset value, never a grant. Reading the token any other
+/// way would let `OPENREELIO_MCP_APPROVAL_TOKEN=""` pair with a request carrying
+/// `"approvalToken": ""` and pass the equality check with no approval behind it.
+fn build_server_state(action: &McpAction) -> McpServerState {
+    let (approval_expires_at_ms, approval_expiry_error) = read_approval_expiry_from_env();
+    McpServerState {
+        project: action.project.clone(),
+        allow_write: action.allow_write,
+        client_name: None,
+        client_version: None,
+        approval_token: read_trimmed_env("OPENREELIO_MCP_APPROVAL_TOKEN"),
+        approval_expires_at_ms,
+        approval_expiry_error,
+        approval_plan_id: read_trimmed_env("OPENREELIO_MCP_APPROVAL_PLAN_ID"),
+        approval_project_id: read_trimmed_env("OPENREELIO_MCP_APPROVAL_PROJECT_ID"),
+        approval_runtime_id: read_trimmed_env("OPENREELIO_MCP_APPROVAL_RUNTIME_ID"),
+        approval_session_id: read_trimmed_env("OPENREELIO_MCP_APPROVAL_SESSION_ID"),
+        approval_consumed: Arc::new(Mutex::new(false)),
     }
 }
 
@@ -113,23 +134,50 @@ fn build_discovery_command(state: &McpServerState) -> &'static str {
     }
 }
 
-/// Policy block of the non-stdio discovery payload.
+/// The server's policy block: the single description of what this server may do.
 ///
-/// This is what an operator reads before wiring the server into a client, so it
-/// has to name the write mode plainly rather than leave it to be inferred from
-/// the tool list. The mode names match `policy.approvalMode` in the stdio host
-/// context, and `mutations` tracks the same predicate that gates the tool list.
-fn build_discovery_policy(state: &McpServerState) -> Value {
+/// Discovery and the stdio host context report the *same* object, because two
+/// descriptions of one server are two chances to be wrong: before this was
+/// shared, discovery called an `--allow-write` server `read-write-local` while
+/// the host context called it `allow-write-local`, and both claimed
+/// `project-readonly` filesystem access while the server was writing the
+/// project. `approvalMode` is kept as an alias of `mode` for clients that read
+/// the host context's original key name.
+fn build_policy(state: &McpServerState) -> Value {
+    let mode = policy_mode(state);
     serde_json::json!({
-        "mode": if state.allow_write {
-            "read-write-local"
-        } else if state.has_active_approval_token() {
-            "approve-mutations"
-        } else {
-            "read-only"
-        },
-        "mutations": if state.mutations_enabled() { "enabled" } else { "disabled" }
+        "mode": mode,
+        "approvalMode": mode,
+        "mutations": if state.mutations_enabled() { "enabled" } else { "disabled" },
+        "rawMediaAccess": if state.project.is_some() { "transcription-generate" } else { "none" },
+        "filesystemAccess": filesystem_access(state)
     })
+}
+
+/// Names the grant the server is running under.
+fn policy_mode(state: &McpServerState) -> &'static str {
+    if state.allow_write {
+        "allow-write-local"
+    } else if state.has_active_approval_token() {
+        "approve-mutations"
+    } else {
+        "read-only"
+    }
+}
+
+/// Names what the server may do to the project directory.
+///
+/// Mutating tools write the project through the command log, so a server that
+/// advertises them must not report read-only access. Reads never reach outside
+/// the project directory in any mode (see [`confine_to_project`]).
+fn filesystem_access(state: &McpServerState) -> &'static str {
+    if state.project.is_none() {
+        "none"
+    } else if state.mutations_enabled() {
+        "project-write"
+    } else {
+        "project-readonly"
+    }
 }
 
 impl McpServerState {
@@ -147,9 +195,16 @@ impl McpServerState {
     }
 
     fn active_approval_token(&self, plan_id: Option<&str>) -> Result<&str, ToolError> {
-        let Some(token) = self.approval_token.as_deref() else {
+        // An empty token is not a grant. Filtering it here — not only where the
+        // environment is read — keeps a directly constructed state honest too.
+        let Some(token) = self
+            .approval_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        else {
             return Err(ToolError::PermissionDenied(
-                "openreelio.plan.apply requires an approval token".to_string(),
+                "This tool requires an approval token".to_string(),
             ));
         };
 
@@ -201,13 +256,38 @@ impl McpServerState {
         Ok(())
     }
 
-    fn ensure_media_insert_token_scope(&self, project_id: &str) -> Result<(), ToolError> {
-        if let Some(plan_id) = self.approval_plan_id.as_deref() {
-            return Err(ToolError::PermissionDenied(format!(
-                "approvalToken is scoped to plan '{plan_id}' and cannot be used for openreelio.media.insert"
-            )));
+    /// Checks the caller-supplied token against the host-issued grant.
+    ///
+    /// Both mutating tools authorize through this one path so an argument that
+    /// is missing, empty, or simply wrong is rejected identically wherever it
+    /// arrives; `plan_id` additionally holds the token to its plan scope.
+    fn verify_approval_token(
+        &self,
+        arguments: &Value,
+        plan_id: Option<&str>,
+    ) -> Result<(), ToolError> {
+        let expected_token = self.active_approval_token(plan_id)?;
+        let actual_token = arguments
+            .get("approvalToken")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| ToolError::PermissionDenied("approvalToken is required".to_string()))?;
+
+        if actual_token != expected_token {
+            return Err(ToolError::PermissionDenied(
+                "approvalToken is invalid".to_string(),
+            ));
         }
 
+        Ok(())
+    }
+
+    /// Holds the token to the project the host scoped it to.
+    ///
+    /// Every mutating tool applies this: a grant issued for one project must not
+    /// be spendable against whichever project this server happens to serve.
+    fn ensure_token_project_scope(&self, project_id: &str) -> Result<(), ToolError> {
         if let Some(expected_project_id) = self.approval_project_id.as_deref() {
             if expected_project_id != project_id {
                 return Err(ToolError::PermissionDenied(format!(
@@ -217,6 +297,16 @@ impl McpServerState {
         }
 
         Ok(())
+    }
+
+    fn ensure_media_insert_token_scope(&self, project_id: &str) -> Result<(), ToolError> {
+        if let Some(plan_id) = self.approval_plan_id.as_deref() {
+            return Err(ToolError::PermissionDenied(format!(
+                "approvalToken is scoped to plan '{plan_id}' and cannot be used for openreelio.media.insert"
+            )));
+        }
+
+        self.ensure_token_project_scope(project_id)
     }
 }
 
@@ -514,7 +604,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.verify",
             "OpenReelio verify",
-            "Run deterministic quality control over a sequence and, with 'file', over a rendered export. Every check that ran, was skipped, or errored is reported, so 'checked and clean' is distinguishable from 'never checked'. Violations carry an executable suggestedFix plan.",
+            "Run deterministic quality control over a sequence and, with 'file', over a rendered export. Every check that ran, was skipped, or errored is reported, so 'checked and clean' is distinguishable from 'never checked'. Per-check status is passed (ran, found nothing), warned (ran, warning/info findings only), failed (ran, error or critical findings), skipped, or errored; checks[].passed is true only for 'passed', while the top-level status/passed follow severity. Violations carry an executable suggestedFix plan.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -524,7 +614,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
                     },
                     "file": {
                         "type": "string",
-                        "description": "Rendered file to measure for black/freeze/silence, EBU R128 loudness, and peaks. Without it only structural checks run and FFmpeg is never invoked. Measured times are file-relative and compared against timeline times, so pass a full-sequence render rather than a partial one."
+                        "description": "Rendered file to measure for black/freeze/silence, EBU R128 loudness, and peaks. Must be inside the project directory; a relative path resolves against the project root and anything outside it is rejected, so render into the project before verifying. Without it only structural checks run and FFmpeg is never invoked. Measured times are file-relative and compared against timeline times, so pass a full-sequence render rather than a partial one."
                     },
                     "structuralOnly": {
                         "type": "boolean",
@@ -791,17 +881,7 @@ fn build_host_context(state: &McpServerState) -> Value {
             "diagnosticsRead": true,
             "renderControl": false
         },
-        "policy": {
-            "approvalMode": if state.allow_write {
-                "allow-write-local"
-            } else if state.has_active_approval_token() {
-                "approve-mutations"
-            } else {
-                "read-only"
-            },
-            "rawMediaAccess": if state.project.is_some() { "transcription-generate" } else { "none" },
-            "filesystemAccess": if state.project.is_some() { "project-readonly" } else { "none" }
-        },
+        "policy": build_policy(state),
         "approvalGrant": approval_grant
     })
 }
@@ -1123,12 +1203,17 @@ fn validate_annotation_asset_id(asset_id: &str) -> Result<&str, ToolError> {
     Ok(trimmed)
 }
 
+/// Locates one asset's cached annotation inside the project directory.
+///
+/// The asset ID is already restricted to characters that cannot form a path, so
+/// the confinement pass is defence in depth: it keeps this lookup on the same
+/// enforced scope as every other path the server touches.
 fn annotation_path(project_dir: &Path, asset_id: &str) -> Result<PathBuf, ToolError> {
     let asset_id = validate_annotation_asset_id(asset_id)?;
-    Ok(project_dir
-        .join(".openreelio")
+    let relative = Path::new(".openreelio")
         .join("annotations")
-        .join(format!("{asset_id}.json")))
+        .join(format!("{asset_id}.json"));
+    confine_to_project(project_dir, "assetId", &relative.to_string_lossy())
 }
 
 fn load_annotation_for_asset(
@@ -1355,6 +1440,148 @@ fn optional_non_negative_number(arguments: &Value, key: &str) -> Result<Option<f
     Ok(Some(number))
 }
 
+// ── Filesystem scope ────────────────────────────────────────────────────────
+
+/// Resolves a client-supplied path argument inside the served project directory.
+///
+/// The project directory is the server's entire filesystem scope, so a relative
+/// path is joined onto the project root — an MCP server is spawned by its host
+/// and has no working directory a client could reason about — and anything that
+/// would land outside is rejected: an absolute path elsewhere on disk, a `..`
+/// escape, a UNC/device path, a URL, or a symlink pointing out of the project.
+///
+/// Rejection is lexical *before* it is filesystem-based, which is the point of
+/// the helper. These paths are handed to FFmpeg, so a path that reached the
+/// filesystem first would answer "does this file exist?" for the whole disk and,
+/// for a UNC path, make the server open an outbound network connection — both
+/// from a server advertising itself as read-only.
+///
+/// Returns the resolved absolute path.
+fn confine_to_project(
+    project_root: &Path,
+    key: &str,
+    requested: &str,
+) -> Result<PathBuf, ToolError> {
+    let trimmed = requested.trim();
+    if trimmed.is_empty() {
+        return Err(ToolError::InvalidArguments(format!(
+            "{key} must not be empty"
+        )));
+    }
+
+    if trimmed.contains("://") {
+        return Err(ToolError::PermissionDenied(format!(
+            "{key} must be a filesystem path inside the project directory, not a URL"
+        )));
+    }
+
+    // Matched on the raw string: a platform whose path parser does not recognise
+    // `\\server\share` as a network path would otherwise treat it as a file name
+    // and only fail later, for the wrong reason.
+    if trimmed.starts_with("\\\\") || trimmed.starts_with("//") {
+        return Err(ToolError::PermissionDenied(format!(
+            "{key} must be a filesystem path inside the project directory; UNC, device, and network paths are rejected"
+        )));
+    }
+
+    let requested_path = Path::new(trimmed);
+    let escapes_scope = requested_path
+        .components()
+        .any(|component| match component {
+            Component::ParentDir => true,
+            Component::Prefix(prefix) => !matches!(prefix.kind(), std::path::Prefix::Disk(_)),
+            _ => false,
+        });
+    if escapes_scope {
+        return Err(path_escape_error(key, trimmed));
+    }
+
+    // The project root comes from the operator, not the client, so resolving it
+    // is safe and gives every later comparison one form to work against.
+    let canonical_root = std::fs::canonicalize(project_root).map_err(|error| {
+        ToolError::Execution(format!(
+            "Project directory '{}' could not be resolved: {error}",
+            project_root.display()
+        ))
+    })?;
+    let scope_root = strip_verbatim_prefix(&canonical_root);
+
+    let candidate = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        scope_root.join(requested_path)
+    };
+    if !path_is_within(&scope_root, &candidate) {
+        return Err(path_escape_error(key, trimmed));
+    }
+
+    // Only now is touching the filesystem safe: the path is already known to be
+    // inside the project, so resolving it cannot probe anything outside it.
+    let mut nearest_existing = candidate.as_path();
+    while !nearest_existing.exists() {
+        nearest_existing = nearest_existing
+            .parent()
+            .ok_or_else(|| path_escape_error(key, trimmed))?;
+    }
+    let canonical_existing = std::fs::canonicalize(nearest_existing)
+        .map_err(|error| ToolError::Execution(format!("{key} could not be resolved: {error}")))?;
+    if !path_is_within(&scope_root, &strip_verbatim_prefix(&canonical_existing)) {
+        return Err(path_escape_error(key, trimmed));
+    }
+
+    Ok(candidate)
+}
+
+/// One rejection message for every way out of the project directory.
+///
+/// Absolute, traversing, and symlinked paths fail identically so the wording
+/// cannot be used to distinguish "outside the project" from "does not exist".
+fn path_escape_error(key: &str, requested: &str) -> ToolError {
+    ToolError::PermissionDenied(format!(
+        "{key} must resolve inside the project directory; '{requested}' escapes it"
+    ))
+}
+
+/// Removes the `\\?\` verbatim prefix `canonicalize` adds on Windows.
+///
+/// A client never sends that prefix, so comparisons and joins use the plain
+/// form. Verbatim UNC roots keep theirs: stripping it would change which share
+/// the path names.
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// True when `path` is `base` itself or lives underneath it.
+fn path_is_within(base: &Path, path: &Path) -> bool {
+    let mut path_components = path.components();
+    for base_component in base.components() {
+        let Some(path_component) = path_components.next() else {
+            return false;
+        };
+        if !path_components_match(base_component, path_component) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Windows path comparison is case-insensitive, so components are folded there.
+#[cfg(windows)]
+fn path_components_match(base: Component<'_>, candidate: Component<'_>) -> bool {
+    base.as_os_str().to_string_lossy().to_ascii_lowercase()
+        == candidate.as_os_str().to_string_lossy().to_ascii_lowercase()
+}
+
+/// Every other platform compares components verbatim.
+#[cfg(not(windows))]
+fn path_components_match(base: Component<'_>, candidate: Component<'_>) -> bool {
+    base == candidate
+}
+
 /// Runs deterministic QC and returns the same document `openreelio-cli verify`
 /// prints.
 ///
@@ -1369,13 +1596,19 @@ fn run_verify_tool(state: &McpServerState, arguments: Value) -> Result<Value, To
         ));
     };
 
-    let file = optional_string_argument(&arguments, "file")?.map(PathBuf::from);
+    let requested_file = optional_string_argument(&arguments, "file")?;
     let structural_only = optional_bool_argument(&arguments, "structuralOnly")?.unwrap_or(false);
-    if file.is_some() && structural_only {
+    if requested_file.is_some() && structural_only {
         return Err(ToolError::InvalidArguments(
             "file and structuralOnly cannot be combined".to_string(),
         ));
     }
+
+    // The rendered file is measured with FFmpeg, so it has to stay inside the
+    // project the server was started on, in every mode.
+    let file = requested_file
+        .map(|requested| confine_to_project(project_path, "file", &requested))
+        .transpose()?;
 
     let args = verify::VerifyArgs {
         path: project_path.clone(),
@@ -1403,16 +1636,7 @@ fn run_verify_tool(state: &McpServerState, arguments: Value) -> Result<Value, To
 fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
     // `--allow-write` is the grant; there is no token to check, scope, or spend.
     if !state.allow_write {
-        let expected_token = state.active_approval_token(None)?;
-        let actual_token = arguments
-            .get("approvalToken")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::PermissionDenied("approvalToken is required".to_string()))?;
-        if actual_token != expected_token {
-            return Err(ToolError::PermissionDenied(
-                "approvalToken is invalid".to_string(),
-            ));
-        }
+        state.verify_approval_token(&arguments, None)?;
 
         if let Some(plan_id) = state.approval_plan_id.as_deref() {
             return Err(ToolError::PermissionDenied(format!(
@@ -1681,17 +1905,7 @@ fn apply_plan(state: &McpServerState, arguments: Value) -> Result<Value, ToolErr
         .and_then(Value::as_str)
         .ok_or_else(|| ToolError::InvalidArguments("plan.id is required".to_string()))?;
     if !state.allow_write {
-        let expected_token = state.active_approval_token(Some(plan_id))?;
-        let actual_token = arguments
-            .get("approvalToken")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::PermissionDenied("approvalToken is required".to_string()))?;
-
-        if actual_token != expected_token {
-            return Err(ToolError::PermissionDenied(
-                "approvalToken is invalid".to_string(),
-            ));
-        }
+        state.verify_approval_token(&arguments, Some(plan_id))?;
     }
 
     let project_path = state.project.as_ref().ok_or_else(|| {
@@ -1710,14 +1924,21 @@ fn apply_plan(state: &McpServerState, arguments: Value) -> Result<Value, ToolErr
         }));
     }
 
+    // The project has to be open before the token can be held to its project
+    // scope, and the scope has to hold before the token is spent: a grant issued
+    // for another project buys nothing here.
+    let mut project = super::load_project(project_path)
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
+    if !state.allow_write {
+        state.ensure_token_project_scope(&project.state.meta.id)?;
+    }
+
     // Single-use consumption belongs to the token path only; spending it under
     // `--allow-write` would let exactly one plan through per session.
     if !state.allow_write {
         state.consume_approval_token()?;
     }
 
-    let mut project = super::load_project(project_path)
-        .map_err(|error| ToolError::Execution(error.to_string()))?;
     let result = plan::apply_edit_plan(&mut project, &edit_plan)
         .map_err(|error| ToolError::Execution(error.to_string()))?;
 
@@ -2610,32 +2831,64 @@ mod tests {
 
     #[test]
     fn should_report_local_write_policy_when_allow_write_is_set() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let state = McpServerState {
+            project: Some(temp_dir.path().to_path_buf()),
             allow_write: true,
             ..Default::default()
         };
 
         assert_eq!(
-            build_discovery_policy(&state),
-            serde_json::json!({ "mode": "read-write-local", "mutations": "enabled" })
+            build_policy(&state),
+            serde_json::json!({
+                "mode": "allow-write-local",
+                "approvalMode": "allow-write-local",
+                "mutations": "enabled",
+                "rawMediaAccess": "transcription-generate",
+                "filesystemAccess": "project-write"
+            })
         );
         assert_eq!(
             build_discovery_command(&state),
             "openreelio-cli mcp --stdio --project <project-path> --allow-write"
         );
         assert_eq!(
-            build_discovery_policy(&McpServerState::default()),
-            serde_json::json!({ "mode": "read-only", "mutations": "disabled" })
+            build_policy(&McpServerState::default()),
+            serde_json::json!({
+                "mode": "read-only",
+                "approvalMode": "read-only",
+                "mutations": "disabled",
+                "rawMediaAccess": "none",
+                "filesystemAccess": "none"
+            })
         );
         assert_eq!(
             build_discovery_command(&McpServerState::default()),
             "openreelio-cli mcp --stdio --project <project-path>"
         );
 
+        // Discovery and the host context describe the same server, so they must
+        // not disagree about the mode or about filesystem access.
         let context = build_host_context(&state);
+        assert_eq!(context["policy"], build_policy(&state));
         assert_eq!(context["policy"]["approvalMode"], "allow-write-local");
+        assert_eq!(context["policy"]["filesystemAccess"], "project-write");
         assert_eq!(context["capabilities"]["planApplyWithApproval"], true);
         assert_eq!(context["capabilities"]["mediaInsertWithApproval"], true);
+    }
+
+    #[test]
+    fn should_report_read_only_filesystem_access_without_a_write_grant() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let state = McpServerState {
+            project: Some(temp_dir.path().to_path_buf()),
+            ..Default::default()
+        };
+
+        let context = build_host_context(&state);
+        assert_eq!(context["policy"]["filesystemAccess"], "project-readonly");
+        assert_eq!(context["policy"]["mode"], "read-only");
+        assert_eq!(context["policy"]["mutations"], "disabled");
     }
 
     #[test]
@@ -2647,10 +2900,8 @@ mod tests {
 
         // The tool list already exposes the mutating tools here, so the policy
         // block must not claim the server is read-only.
-        assert_eq!(
-            build_discovery_policy(&state),
-            serde_json::json!({ "mode": "approve-mutations", "mutations": "enabled" })
-        );
+        assert_eq!(build_policy(&state)["mode"], "approve-mutations");
+        assert_eq!(build_policy(&state)["mutations"], "enabled");
         assert_eq!(
             build_discovery_command(&state),
             "openreelio-cli mcp --stdio --project <project-path>"
@@ -2867,6 +3118,332 @@ mod tests {
         .expect_err("file and structuralOnly must conflict");
 
         assert!(error.to_string().contains("structuralOnly"));
+    }
+
+    /// Creates a project with one rendered-looking file inside it.
+    fn project_with_file(temp_dir: &tempfile::TempDir, name: &str) -> (PathBuf, PathBuf) {
+        let project_path = temp_dir.path().join(name);
+        openreelio_core::ActiveProject::create("Confinement", project_path.clone())
+            .expect("project");
+        let file_path = project_path.join("render.mp4");
+        std::fs::write(&file_path, b"not a real render").expect("write render");
+        (project_path, file_path)
+    }
+
+    #[test]
+    fn should_accept_a_verify_file_inside_the_project_directory() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, file_path) = project_with_file(&temp_dir, "confined_project");
+
+        let relative = confine_to_project(&project_path, "file", "render.mp4")
+            .expect("a path inside the project must be accepted");
+        let absolute = confine_to_project(&project_path, "file", &file_path.to_string_lossy())
+            .expect("an absolute path inside the project must be accepted");
+
+        for resolved in [relative, absolute] {
+            assert_eq!(
+                std::fs::canonicalize(&resolved).expect("canonicalize resolved"),
+                std::fs::canonicalize(&file_path).expect("canonicalize expected")
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_verify_file_paths_that_escape_the_project_directory() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "escape_project");
+        let outside = temp_dir.path().join("outside.mp4");
+        std::fs::write(&outside, b"outside the project").expect("write outside file");
+
+        let state = McpServerState {
+            project: Some(project_path),
+            ..Default::default()
+        };
+
+        for hostile in [
+            outside.to_string_lossy().to_string(),
+            "../outside.mp4".to_string(),
+            "sub/../../outside.mp4".to_string(),
+            "\\\\attacker\\share\\probe.mp4".to_string(),
+            "//attacker/share/probe.mp4".to_string(),
+            "http://attacker.example/probe.mp4".to_string(),
+        ] {
+            let error = run_verify_tool(&state, serde_json::json!({ "file": hostile.clone() }))
+                .expect_err(&format!("'{hostile}' must be rejected"));
+            assert!(
+                matches!(error, ToolError::PermissionDenied(_)),
+                "'{hostile}' must be denied by policy, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_not_report_whether_an_out_of_scope_path_exists() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "oracle_project");
+        let existing_outside = temp_dir.path().join("exists.mp4");
+        std::fs::write(&existing_outside, b"outside the project").expect("write outside file");
+        let missing_outside = temp_dir.path().join("missing.mp4");
+
+        // An existence oracle is exactly what confinement removes, so both
+        // answers have to look the same to the client.
+        let existing_error =
+            confine_to_project(&project_path, "file", &existing_outside.to_string_lossy())
+                .expect_err("an existing file outside the project must be rejected");
+        let missing_error =
+            confine_to_project(&project_path, "file", &missing_outside.to_string_lossy())
+                .expect_err("a missing file outside the project must be rejected");
+
+        assert_eq!(
+            existing_error.to_string().replace("exists", "missing"),
+            missing_error.to_string()
+        );
+    }
+
+    /// Restores an environment variable to its pre-test value when dropped.
+    ///
+    /// The variable is process-wide, so a test that cleared it unconditionally
+    /// would discard a value the test process was started with, and a failed
+    /// assertion would leave the override in place for whatever runs next.
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn set_value(&self, value: &str) {
+            std::env::set_var(self.key, value);
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn should_treat_an_empty_approval_token_environment_value_as_no_grant() {
+        // Both cases live in one test because they mutate the same process-wide
+        // environment variable.
+        let action = McpAction {
+            project: None,
+            stdio: false,
+            allow_write: false,
+        };
+
+        let approval_token_env = EnvVarGuard::set("OPENREELIO_MCP_APPROVAL_TOKEN", "   ");
+        let state = build_server_state(&action);
+
+        assert!(state.approval_token.is_none());
+        assert!(!state.has_active_approval_token());
+        assert!(!state.mutations_enabled());
+        assert_eq!(policy_mode(&state), "read-only");
+
+        let tools = build_tools(&state);
+        assert!(
+            !tools
+                .iter()
+                .any(|tool| tool["name"] == "openreelio.plan.apply"),
+            "an empty token must not unlock the mutating tools"
+        );
+
+        approval_token_env.set_value("real-token");
+        let granted = build_server_state(&action);
+        assert_eq!(granted.approval_token.as_deref(), Some("real-token"));
+        assert!(granted.has_active_approval_token());
+    }
+
+    #[test]
+    fn should_reject_an_empty_approval_token_argument() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("empty_token_project");
+        let project = openreelio_core::ActiveProject::create("Empty Token", project_path.clone())
+            .expect("project");
+        let sequence_id = project.state.active_sequence_id.clone().expect("sequence");
+        let initial_op_count = project.state.op_count;
+        drop(project);
+
+        let plan = serde_json::json!({
+            "id": "empty-token-plan",
+            "steps": [{
+                "id": "step-1",
+                "commandType": "AddTrack",
+                "payload": {
+                    "sequenceId": sequence_id,
+                    "name": "Should Not Exist",
+                    "kind": "video"
+                },
+                "dependsOn": []
+            }]
+        });
+
+        // A configured token with an empty request token, and an empty token on
+        // both sides — neither is an approval.
+        for approval_token in [Some("real-token".to_string()), Some(String::new())] {
+            let state = McpServerState {
+                project: Some(project_path.clone()),
+                approval_token,
+                ..Default::default()
+            };
+
+            let response = handle_jsonrpc_request(
+                &state,
+                request(
+                    "tools/call",
+                    serde_json::json!({
+                        "name": "openreelio.plan.apply",
+                        "arguments": {
+                            "approvalToken": "",
+                            "plan": plan.clone()
+                        }
+                    }),
+                ),
+            );
+
+            assert_eq!(response["error"]["code"], -32001, "{response}");
+        }
+
+        let reopened = openreelio_core::ActiveProject::open(project_path).expect("reopen");
+        assert_eq!(reopened.state.op_count, initial_op_count);
+    }
+
+    #[test]
+    fn should_reject_plan_apply_when_approval_token_project_scope_differs() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("plan_project_scope_project");
+        let project = openreelio_core::ActiveProject::create("Plan Scope", project_path.clone())
+            .expect("project");
+        let sequence_id = project.state.active_sequence_id.clone().expect("sequence");
+        let initial_op_count = project.state.op_count;
+        drop(project);
+
+        let state = McpServerState {
+            project: Some(project_path.clone()),
+            approval_token: Some("scoped-token".to_string()),
+            approval_project_id: Some("some-other-project".to_string()),
+            ..Default::default()
+        };
+
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.plan.apply",
+                    "arguments": {
+                        "approvalToken": "scoped-token",
+                        "plan": {
+                            "id": "cross-project-plan",
+                            "steps": [{
+                                "id": "step-1",
+                                "commandType": "AddTrack",
+                                "payload": {
+                                    "sequenceId": sequence_id,
+                                    "name": "Cross Project Track",
+                                    "kind": "video"
+                                },
+                                "dependsOn": []
+                            }]
+                        }
+                    }
+                }),
+            ),
+        );
+
+        assert_eq!(response["error"]["code"], -32001, "{response}");
+        assert!(response["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("scoped to project"));
+
+        let reopened = openreelio_core::ActiveProject::open(project_path).expect("reopen");
+        assert_eq!(reopened.state.op_count, initial_op_count);
+        assert!(
+            !*state.approval_consumed.lock().expect("consumed state"),
+            "a token rejected on scope must not be spent"
+        );
+    }
+
+    #[test]
+    fn should_deny_every_mutation_and_confine_every_path_in_the_default_server() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "class_guard_project");
+        let outside = temp_dir.path().join("outside.mp4");
+        std::fs::write(&outside, b"outside the project").expect("write outside file");
+
+        // No --allow-write and no token: the shipped default.
+        let state = McpServerState {
+            project: Some(project_path),
+            ..Default::default()
+        };
+
+        let advertised: Vec<String> = build_tools(&state)
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+
+        for mutating_tool in ["openreelio.media.insert", "openreelio.plan.apply"] {
+            assert!(
+                !advertised.contains(&mutating_tool.to_string()),
+                "{mutating_tool} must not be advertised without a grant"
+            );
+
+            let response = handle_jsonrpc_request(
+                &state,
+                request(
+                    "tools/call",
+                    serde_json::json!({
+                        "name": mutating_tool,
+                        "arguments": { "approvalToken": "", "plan": { "id": "p" } }
+                    }),
+                ),
+            );
+            assert_eq!(
+                response["error"]["code"], -32001,
+                "{mutating_tool} must be denied: {response}"
+            );
+        }
+
+        // Every path-typed argument on the read-only surface stays in scope.
+        for hostile in [
+            outside.to_string_lossy().to_string(),
+            "../outside.mp4".to_string(),
+            "\\\\attacker\\share\\probe.mp4".to_string(),
+        ] {
+            let response = handle_jsonrpc_request(
+                &state,
+                request(
+                    "tools/call",
+                    serde_json::json!({
+                        "name": "openreelio.verify",
+                        "arguments": { "file": hostile }
+                    }),
+                ),
+            );
+            assert_eq!(response["error"]["code"], -32001, "{response}");
+        }
+
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.annotation.read",
+                    "arguments": { "assetId": "../../secret" }
+                }),
+            ),
+        );
+        assert_eq!(response["error"]["code"], -32602, "{response}");
     }
 
     #[test]

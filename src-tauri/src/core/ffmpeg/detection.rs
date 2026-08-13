@@ -9,6 +9,32 @@ use std::process::Command;
 use super::{FFmpegError, FFmpegResult};
 use crate::core::process::configure_std_command;
 
+/// Environment variable opting into working-directory-relative binary discovery.
+///
+/// Set to `1` or `true` by developers who run the binaries straight out of a
+/// checkout (`cargo run`, `npm run tauri dev`) from a directory that is not the
+/// crate manifest directory. See [`dev_mode_enabled`] for why it is opt-in.
+pub const DEV_MODE_ENV: &str = "OPENREELIO_DEV";
+
+/// Returns whether working-directory-relative FFmpeg discovery is enabled.
+///
+/// SECURITY: a directory that is searched for `binaries/ffmpeg` is a
+/// code-execution root — whatever is found there is spawned. The CLI is
+/// routinely launched as an MCP server with an *agent's project directory* as
+/// its working directory (see `distribution/skills/.mcp.json`), so the working
+/// directory holds untrusted, attacker-plantable content. It therefore only
+/// becomes a discovery root when a developer explicitly opts in through
+/// [`DEV_MODE_ENV`]; the trusted roots (executable directory, Cargo manifest
+/// directory, managed install directory, system PATH) always participate.
+pub fn dev_mode_enabled() -> bool {
+    std::env::var(DEV_MODE_ENV)
+        .map(|value| {
+            let value = value.trim();
+            value.eq_ignore_ascii_case("1") || value.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
+}
+
 /// Where a detected FFmpeg installation came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FFmpegSource {
@@ -183,15 +209,46 @@ pub(crate) fn detect_dev_mode_binaries() -> FFmpegResult<FFmpegInfo> {
 
 /// Get possible paths where dev mode binaries might be located
 fn get_dev_mode_paths() -> Vec<PathBuf> {
+    // The working directory is only a discovery root under an explicit
+    // developer opt-in; see [`dev_mode_enabled`] for the threat model.
+    let dev_cwd = if dev_mode_enabled() {
+        std::env::current_dir().ok()
+    } else {
+        None
+    };
+
+    build_dev_mode_paths(
+        std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from),
+        std::env::current_exe().ok(),
+        dev_cwd,
+    )
+}
+
+/// Build the dev-mode search paths from already-resolved inputs.
+///
+/// Split from [`get_dev_mode_paths`] so the trust boundary (which inputs may
+/// contribute roots) is testable without mutating process-global state.
+fn build_dev_mode_paths(
+    manifest_dir: Option<PathBuf>,
+    exe_path: Option<PathBuf>,
+    dev_cwd: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    // Try CARGO_MANIFEST_DIR (available during cargo build/run)
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        paths.push(PathBuf::from(&manifest_dir).join("binaries"));
+    // CARGO_MANIFEST_DIR is set by cargo when it runs a binary or test, so it
+    // only ever points inside a developer's own checkout.
+    if let Some(manifest_dir) = manifest_dir {
+        paths.push(manifest_dir.join("binaries"));
+        // Workspace members (crates/openreelio-cli) have no `binaries/` of
+        // their own: the downloaded dev binaries live in `src-tauri/binaries`
+        // at the workspace root.
+        for ancestor in manifest_dir.ancestors() {
+            paths.push(ancestor.join("src-tauri").join("binaries"));
+        }
     }
 
     // Try relative to current executable (for dev mode)
-    if let Ok(exe_path) = std::env::current_exe() {
+    if let Some(exe_path) = exe_path {
         // In dev mode, exe is typically at src-tauri/target/debug/openreelio
         // So binaries would be at src-tauri/binaries (3 levels up, then binaries)
         if let Some(parent) = exe_path.parent() {
@@ -204,8 +261,8 @@ fn get_dev_mode_paths() -> Vec<PathBuf> {
         }
     }
 
-    // Try current working directory (might be project root)
-    if let Ok(cwd) = std::env::current_dir() {
+    // Working directory (might be project root) — opt-in only.
+    if let Some(cwd) = dev_cwd {
         paths.push(cwd.join("src-tauri").join("binaries"));
         paths.push(cwd.join("binaries"));
     }
@@ -657,6 +714,54 @@ mod tests {
         assert!(
             !paths.is_empty(),
             "get_dev_mode_paths should return at least one path"
+        );
+    }
+
+    #[test]
+    fn should_exclude_working_directory_roots_when_dev_mode_is_off() {
+        let cwd = PathBuf::from("/agent/untrusted-project");
+
+        let paths = build_dev_mode_paths(
+            Some(PathBuf::from("/home/dev/openreelio/src-tauri")),
+            Some(PathBuf::from("/opt/openreelio/openreelio.exe")),
+            None,
+        );
+
+        assert!(
+            !paths.iter().any(|path| path.starts_with(&cwd)),
+            "the working directory must never be searched by default: {paths:?}"
+        );
+        assert!(
+            paths.contains(&PathBuf::from("/home/dev/openreelio/src-tauri").join("binaries")),
+            "the Cargo manifest directory must still be searched: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn should_include_working_directory_roots_when_dev_mode_is_on() {
+        let cwd = PathBuf::from("/home/dev/openreelio");
+
+        let paths = build_dev_mode_paths(None, None, Some(cwd.clone()));
+
+        assert_eq!(
+            paths,
+            vec![cwd.join("src-tauri").join("binaries"), cwd.join("binaries"),]
+        );
+    }
+
+    #[test]
+    fn should_search_workspace_src_tauri_binaries_from_a_member_manifest_dir() {
+        let manifest_dir = PathBuf::from("/home/dev/openreelio/crates/openreelio-cli");
+
+        let paths = build_dev_mode_paths(Some(manifest_dir), None, None);
+
+        assert!(
+            paths.contains(
+                &PathBuf::from("/home/dev/openreelio")
+                    .join("src-tauri")
+                    .join("binaries")
+            ),
+            "a workspace member must still find the shared dev binaries: {paths:?}"
         );
     }
 

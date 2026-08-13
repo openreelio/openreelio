@@ -10,6 +10,10 @@ pub mod rules;
 pub mod structural;
 pub mod violation;
 
+/// Proves every fix a rule can suggest is a command the edit layer accepts.
+#[cfg(test)]
+mod fix_roundtrip_tests;
+
 // Re-export main types
 pub use context::{QCContext, RenderMeasurements};
 pub use engine::{
@@ -20,11 +24,12 @@ pub use measure::{
 };
 pub use rules::{
     AspectRatioRule, AudioLoudnessRule, AudioPeakRule, BlackFrameRule, CaptionSafeAreaRule,
-    CheckCategory, CutRhythmRule, DurationRule, LicenseRule, QCRule, RuleConfig,
+    CheckCategory, CutRhythmRule, DurationRule, LicenseRule, QCRule, RenderDurationRule,
+    RuleConfig,
 };
 pub use structural::{
     crossref_black_ranges_with_gaps, CaptionOutOfBoundsRule, CaptionOverlapRule,
-    CaptionReadingRateRule, ClipOrphanRule, MissingAssetRule, ShotLengthStatsRule, SilentClipRule,
-    TimelineGapRule,
+    CaptionReadingRateRule, ClipOrphanRule, EmptySequenceRule, MissingAssetRule,
+    ShotLengthStatsRule, SilentClipRule, TimelineGapRule,
 };
 pub use violation::{QCViolation, Severity, TimeRange, ViolationFix};

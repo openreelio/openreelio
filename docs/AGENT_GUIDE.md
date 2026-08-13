@@ -201,8 +201,12 @@ openreelio-cli analysis report  --path ./demo --id <ASSET_ID>
 
 - **`analysis shots`** returns `totalDurationSec`, `shotCount` and
   `shots[{index,startSec,endSec,durationSec,confidence}]`. `persisted` is an
-  array naming the stores written: `["indexDb","bundle","annotations"]`. Cut on
-  shot boundaries instead of round numbers.
+  array naming the stores written: `["indexDb","bundle","annotations"]`, and
+  `warnings` explains every store that was not. `status` follows the same
+  vocabulary as `analysis run`: `ok` (every requested store accepted the write,
+  or `--no-persist` was passed), `partial` (some did, exit still `0`), or
+  `failed` (none did — detection succeeded but the verb did not, so it exits
+  `1`). Cut on shot boundaries instead of round numbers.
 - **`analysis silence`** returns `regions[{startSec,endSec,durationSec}]`,
   `totalSilenceSec` and a boolean `persisted`. **Persistence contract:** results
   reach the shared analysis cache only at the default thresholds (`-40` dB,
@@ -238,14 +242,28 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
   example) and reports `fellBackToComposite: true`.
 - `--mode composite` renders a minimal window through the full stack, so
   effects and overlays appear. Range renders decode from zero, so it costs more.
+  It works anywhere inside the timeline, including over a gap — a gap has no
+  picture, so a black frame is the correct answer, not an error.
 - `--max-width` caps the output (default 1280 px, aspect preserved, never
-  upscaled); `--format png|jpeg`.
+  upscaled).
+- `--format png|jpeg` is optional: the format follows the `--out` extension, so
+  `--out sheet.jpg` writes JPEG at exactly that path. Use `--format` for
+  extensionless paths and `--times` directories (which default to PNG). A
+  `--format` that contradicts a `.png`/`.jpg` extension is rejected rather than
+  silently writing to a different file.
 - `--grid COLSxROWS --between START END [--count N]` writes one contact sheet
   and returns `sheet.cells[{index,row,col,timelineSec}]`, which maps every cell
   a vision model comments on back to a timecode. Grids are capped at 100 cells.
 
+Every timeline time must fall inside the sequence. Asking for one at or past
+the end is rejected with the sequence's actual duration in the message, so widen
+the edit or narrow `--between` rather than guessing.
+
 Single and batch extraction return
 `frames[{index,timeSec,sourceTimeSec,clipId,assetId,path,width,height}]`.
+`sourceTimeSec`, `clipId` and `assetId` name the clip the pixels came from, so
+they are absent on a composited frame — there is no single source clip behind a
+title card or a gap. Treat them as optional.
 
 ### Draft renders
 
@@ -254,9 +272,14 @@ openreelio-cli render start --path ./demo --proxy --output proxy.mp4 \
   --start 0 --end 30 --progress
 ```
 
-`--proxy` is an alias for the `proxy_480p` preset: 854x480, CRF 30, H.264 +
-AAC, `ultrafast`. Combine it with `--start` / `--end` to render only the range
-under review. `--output` is required. `--progress` streams
+`--proxy` is an alias for the `proxy_480p` preset: 480p-class frame, CRF 30,
+H.264 + AAC, `ultrafast`. The frame is **fitted to the sequence canvas**, not
+fixed at 854x480: the short edge is capped at 480 px and the long edge at
+854 px, aspect preserved, both edges even, and a canvas already inside that
+budget is left alone. So 1920x1080 → 854x480, 1080x1920 → 480x854,
+1080x1080 → 480x480, 1920x800 → 854x356, and 640x360 stays 640x360 — a
+vertical edit is never pillarboxed into a landscape frame. Combine it with
+`--start` / `--end` to render only the range under review. `--output` is required. `--progress` streams
 `{"type":"progress","percent","frame","totalFrames","fps","etaSeconds","message"}`
 to stderr. The result carries `outputPath`, `durationSec`, `fileSize`,
 `encodingTimeSec`, `planHash` and `warnings`. `render presets` lists the
@@ -274,21 +297,33 @@ openreelio-cli verify --path ./demo --file ./proxy.mp4 \
 Without `--file`, only structural checks run and FFmpeg is never invoked.
 `--structural-only` makes that explicit and conflicts with `--file`.
 
-Sixteen checks in two categories. **structural**: `timeline.gap`,
-`clip.orphan`, `clip.missing_asset`, `clip.aspect_ratio`, `audio.silent_clip`,
-`caption.overlap`, `caption.reading_rate`, `caption.out_of_bounds`,
-`caption.safe_area`, `shot.length_stats`, `shot.cut_rhythm`, plus the opt-in
-`asset.license` and `sequence.duration`. **rendered**: `render.black_frames`,
-`audio.peak`, `audio.loudness`. The two opt-ins run only when named in
-`--checks`; narrow any run with `--checks a,b` or `--skip a,b`.
+Eighteen checks in two categories. **structural**: `sequence.empty`,
+`timeline.gap`, `clip.orphan`, `clip.missing_asset`, `clip.aspect_ratio`,
+`audio.silent_clip`, `caption.overlap`, `caption.reading_rate`,
+`caption.out_of_bounds`, `caption.safe_area`, `shot.length_stats`,
+`shot.cut_rhythm`, plus the opt-in `asset.license` and `sequence.duration`.
+**rendered**: `render.duration_mismatch`, `render.black_frames`, `audio.peak`,
+`audio.loudness`. The two opt-ins run only when named in `--checks`; narrow any
+run with `--checks a,b` or `--skip a,b`.
+
+`render.duration_mismatch` asks the question the other rendered checks assume
+an answer to: is the measured file this sequence at all? A stale or truncated
+render measures perfectly well and is still not the deliverable, so a file
+shorter than the timeline is an error.
 
 The report always lists every check that ran, was skipped, or errored — so
 "checked and clean" is distinguishable from "never looked". Each entry carries
-`id`, `category`, `status` (`passed`/`failed`/`skipped`/`errored`),
-`violationCount`, `timeRanges`, `metrics`, `autoFixable` and, when the rule
-knows the repair, `suggestedFix`. `measurements` holds the file-level numbers:
-`blackRanges`, `freezeRanges`, `silenceRanges`, `integratedLufs`,
-`loudnessRangeLu`, `truePeakDbtp`, `samplePeakDb`, `flatFactor`.
+`id`, `category`, `status`, `violationCount`, `timeRanges`, `metrics`,
+`autoFixable` and, when the rule knows the repair, `suggestedFix`.
+`measurements` holds the file-level numbers: `blackRanges`, `freezeRanges`,
+`silenceRanges`, `integratedLufs`, `loudnessRangeLu`, `truePeakDbtp`,
+`samplePeakDb`, `flatFactor`.
+
+Per-check `status` is `passed` (ran, found nothing), `warned` (ran, found only
+warning/info issues), `failed` (ran, found error or critical), `skipped` or
+`errored`; `checks[].passed` is true only for `passed`. The top-level
+`status`/`passed` are the verdict and follow severity alone, so a report can be
+`"passed": true` with `warned` checks inside it.
 
 `--fail-on info|warning|error|critical` (default `error`) sets which severity
 turns exit `0` into exit `1`. Taste-adjacent findings stay at warning/info;
@@ -364,15 +399,28 @@ openreelio-cli mcp --stdio --project ./demo --allow-write
 
 **`--allow-write` is a local-trust switch.** It adds `openreelio.media.insert`
 and `openreelio.plan.apply` and drops the per-call approval token those tools
-otherwise require; the policy block then reports `"mode": "read-write-local"`.
-Every mutation still goes through the command log and stays undoable, but use it
-only with a locally trusted client. Without the flag, a host can still authorize
-a single call by supplying `OPENREELIO_MCP_APPROVAL_TOKEN`.
+otherwise require; the policy block then reports `"mode": "allow-write-local"`
+and `"filesystemAccess": "project-write"`. Every mutation still goes through the
+command log and stays undoable, but use it only with a locally trusted client.
+The three policy modes are `read-only` (the default, `"filesystemAccess":
+"project-readonly"`), `approve-mutations` (an approval token is active), and
+`allow-write-local`; without `--project` the access is `"none"`.
+Without the flag, a host can still authorize a single call by supplying
+`OPENREELIO_MCP_APPROVAL_TOKEN` — an empty value is not a grant, and a token
+scoped with `OPENREELIO_MCP_APPROVAL_PROJECT_ID` or
+`OPENREELIO_MCP_APPROVAL_PLAN_ID` is rejected outside that scope. Discovery and
+`host.context` report the same policy object, so the two can never disagree.
+
+**The project directory is the whole filesystem scope.** Every path a client
+sends resolves inside it: a relative path is joined onto the project root, and
+absolute paths outside it, `..` escapes, UNC/network paths, and URLs are
+rejected before they reach the filesystem or FFmpeg.
 
 **`openreelio.verify`** is read-only-safe and always advertised. It accepts
 `{sequenceId?, file?, structuralOnly?, checks?[], skip?[], failOn?}` and returns
 the same report document the CLI prints — so an MCP client gets the fix loop
-without shelling out.
+without shelling out. `file` must be inside the project directory, so render
+into the project before verifying.
 
 ## 9. Environment variables
 

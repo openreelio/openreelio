@@ -91,6 +91,108 @@ fn system_ffmpeg_path() -> Option<PathBuf> {
         .map(|info| info.ffmpeg_path)
 }
 
+/// Run a CLI command from `cwd` with extra environment variables applied.
+///
+/// The FFmpeg path overrides are always cleared so a developer's shell cannot
+/// change what the resolver picks during the test.
+fn run_cli_from(
+    cwd: &std::path::Path,
+    env: &[(&str, &str)],
+    args: &[&str],
+) -> (String, String, bool) {
+    let mut command = Command::new(cli_bin());
+    command
+        .current_dir(cwd)
+        .env_remove("OPENREELIO_FFMPEG_PATH")
+        .env_remove("OPENREELIO_FFPROBE_PATH")
+        .env_remove("OPENREELIO_DEV")
+        .args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+
+    let output = command.output().expect("Failed to execute CLI binary");
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.success(),
+    )
+}
+
+/// Hard-link (or copy, across volumes) a binary to a new location.
+fn link_or_copy(source: &std::path::Path, target: &std::path::Path) -> bool {
+    std::fs::hard_link(source, target).is_ok() || std::fs::copy(source, target).is_ok()
+}
+
+/// Plant a working ffmpeg/ffprobe pair under `<dir>/binaries`.
+///
+/// Returns the planted ffmpeg path, or `None` when no installation is
+/// available to clone. The plant must be genuinely runnable: a resolver that
+/// consults the directory would otherwise reject it for the wrong reason and
+/// the test would prove nothing.
+fn plant_bundled_ffmpeg(dir: &std::path::Path) -> Option<PathBuf> {
+    // Any resolvable installation will do as the clone source (bundled, dev,
+    // managed, or system), so the test still runs where FFmpeg is not on PATH.
+    let info = openreelio_core::ffmpeg::resolve_ffmpeg(&Default::default()).ok()?;
+    let (ffmpeg_name, ffprobe_name) = openreelio_core::ffmpeg::get_bundled_binary_names();
+
+    let binaries = dir.join("binaries");
+    std::fs::create_dir_all(&binaries).ok()?;
+
+    let planted_ffmpeg = binaries.join(ffmpeg_name);
+    if !link_or_copy(&info.ffmpeg_path, &planted_ffmpeg)
+        || !link_or_copy(&info.ffprobe_path, &binaries.join(ffprobe_name))
+    {
+        return None;
+    }
+
+    Some(planted_ffmpeg)
+}
+
+/// Resolve the ffmpeg path reported by `ffmpeg info`, canonicalized.
+fn resolved_ffmpeg_from(cwd: &std::path::Path, env: &[(&str, &str)]) -> Option<PathBuf> {
+    let (stdout, stderr, success) = run_cli_from(cwd, env, &["ffmpeg", "info"]);
+    if !success {
+        eprintln!("ffmpeg info failed.\nstdout: {stdout}\nstderr: {stderr}");
+        return None;
+    }
+
+    let value: serde_json::Value = serde_json::from_str(&stdout).ok()?;
+    let path = PathBuf::from(value["ffmpegPath"].as_str()?);
+    std::fs::canonicalize(path).ok()
+}
+
+/// The CLI runs as an MCP server with an agent's project directory as its
+/// working directory, so that directory is untrusted input. A repository that
+/// happens to carry `binaries/ffmpeg` must never be executed.
+#[test]
+fn should_not_execute_ffmpeg_planted_in_the_working_directory() {
+    let dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let Some(planted) = plant_bundled_ffmpeg(dir.path()) else {
+        eprintln!("Skipping CWD hijack test: no FFmpeg installation available to plant");
+        return;
+    };
+    let planted = std::fs::canonicalize(&planted).expect("Failed to canonicalize planted ffmpeg");
+
+    let Some(default_resolved) = resolved_ffmpeg_from(dir.path(), &[]) else {
+        eprintln!("Skipping CWD hijack test: no FFmpeg resolved in the default configuration");
+        return;
+    };
+    assert_ne!(
+        default_resolved, planted,
+        "the working directory must not be a bundled-binary root by default"
+    );
+
+    // The opt-in run proves the plant would have been selected, so the
+    // assertion above is not passing for an unrelated reason.
+    let dev_resolved = resolved_ffmpeg_from(dir.path(), &[("OPENREELIO_DEV", "1")])
+        .expect("ffmpeg info should resolve with the developer opt-in");
+    assert_eq!(
+        dev_resolved, planted,
+        "OPENREELIO_DEV must restore working-directory discovery for developers"
+    );
+}
+
 fn ffmpeg_supports_encoder(ffmpeg_path: &std::path::Path, encoder: &str) -> bool {
     let Ok(output) = Command::new(ffmpeg_path)
         .args(["-hide_banner", "-encoders"])
@@ -1428,6 +1530,358 @@ fn test_frame_extract_writes_one_file_per_requested_time() {
     }
 }
 
+/// Builds a sequence whose only file-backed clip ends well before the
+/// timeline does, followed by a gap and then a title card.
+///
+/// This is the layout that used to make `frame extract` hard-error: the render
+/// stopped at the last file-backed clip, so nothing existed to sample at the
+/// gap or the title card.
+///
+/// Returns `(dir, project_path, gap_time, title_time)`.
+fn create_project_with_trailing_title_card(
+    name: &str,
+) -> Option<(tempfile::TempDir, String, f64, f64)> {
+    let (dir, path, _asset_id) = create_project_with_timeline_clip(name, 4)?;
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let clip_id = clips["clips"][0]["id"].as_str().unwrap().to_string();
+
+    // Keep the clip inside the fixture's real media length so the render has
+    // decodable frames for the whole file-backed span.
+    run_cli_ok(&[
+        "timeline",
+        "trim",
+        "--path",
+        &path,
+        "--clip",
+        &clip_id,
+        "--track",
+        &track_id,
+        "--source-in",
+        "0",
+        "--source-out",
+        "3",
+    ]);
+
+    // Timeline becomes: clip 0-3, gap 3-6, title card 6-8.
+    run_cli_ok(&[
+        "text",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "The End",
+        "--start",
+        "6",
+        "--duration",
+        "2",
+        "--preset",
+        "title",
+    ]);
+
+    Some((dir, path, 4.5, 7.0))
+}
+
+#[test]
+fn test_frame_extract_renders_a_title_card_that_outlives_the_last_file_backed_clip() {
+    let Some((dir, path, _gap_time, title_time)) =
+        create_project_with_trailing_title_card("frame_title_card_test")
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("title_frame.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        &title_time.to_string(),
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        result["frames"][0]["fellBackToComposite"], true,
+        "No file-backed clip covers a title card, so fast mode must fall back"
+    );
+    assert!(output_path.exists(), "Expected a frame at the title card");
+    assert!(output_path.metadata().unwrap().len() > 0);
+}
+
+#[test]
+fn test_frame_extract_renders_a_gap_after_the_last_file_backed_clip() {
+    let Some((dir, path, gap_time, _title_time)) =
+        create_project_with_trailing_title_card("frame_trailing_gap_test")
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("gap_frame.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        &gap_time.to_string(),
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    // A gap has no picture of its own; a black frame is the correct answer.
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["frames"][0]["fellBackToComposite"], true);
+    assert!(output_path.exists(), "Expected a frame over the gap");
+    assert!(output_path.metadata().unwrap().len() > 0);
+}
+
+#[test]
+fn test_frame_extract_composite_mode_renders_a_title_card_directly() {
+    let Some((dir, path, _gap_time, title_time)) =
+        create_project_with_trailing_title_card("frame_composite_title_test")
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("composite_title.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        &title_time.to_string(),
+        "--mode",
+        "composite",
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["mode"], "composite");
+    assert!(output_path.exists(), "Expected a composited title frame");
+    assert!(output_path.metadata().unwrap().len() > 0);
+}
+
+#[test]
+fn test_render_covers_a_title_card_that_outlives_the_last_file_backed_clip() {
+    let Some((dir, path, _gap_time, _title_time)) =
+        create_project_with_trailing_title_card("render_title_card_test")
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("full.mp4");
+    let result = run_cli_ok(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    // The timeline runs to 8s even though the last file-backed clip ends at 3s.
+    assert_eq!(result["durationSec"], 8.0);
+    assert!(output_path.exists(), "Expected a rendered file");
+    assert!(output_path.metadata().unwrap().len() > 0);
+}
+
+#[test]
+fn test_frame_extract_names_the_sequence_end_when_asked_past_it() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_past_end_test", 4) else {
+        return;
+    };
+
+    let output_path = dir.path().join("past_end.png");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "600",
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("past the end"),
+        "Expected an out-of-range message naming the sequence end, got: {stderr}"
+    );
+    assert!(!output_path.exists());
+}
+
+#[test]
+fn test_frame_extract_rejects_a_grid_range_wider_than_the_sequence() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_grid_past_end_test", 4)
+    else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("wide_sheet.jpg");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "3x2",
+        "--between",
+        "0",
+        "600",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("--between"),
+        "Expected the error to point at the range flag, got: {stderr}"
+    );
+    assert!(!sheet_path.exists());
+}
+
+/// Reads the first bytes of a file so tests can tell PNG from JPEG.
+fn file_signature(path: &std::path::Path) -> Vec<u8> {
+    let bytes = std::fs::read(path).expect("Failed to read output image");
+    bytes.into_iter().take(3).collect()
+}
+
+const JPEG_SIGNATURE: [u8; 3] = [0xFF, 0xD8, 0xFF];
+const PNG_SIGNATURE: [u8; 3] = [0x89, 0x50, 0x4E];
+
+#[test]
+fn test_frame_extract_writes_jpeg_when_the_out_path_names_one() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_jpg_infer_test", 4) else {
+        return;
+    };
+
+    let output_path = dir.path().join("still.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "1.0",
+        "--out",
+        output_path.to_str().unwrap(),
+    ]);
+
+    // The requested path is the written path: no silent rewrite to .png.
+    assert_eq!(
+        result["frames"][0]["path"].as_str().unwrap(),
+        output_path.to_string_lossy()
+    );
+    assert!(output_path.exists(), "Expected the .jpg path to be written");
+    assert_eq!(
+        file_signature(&output_path),
+        JPEG_SIGNATURE,
+        "Expected JPEG data behind a .jpg extension"
+    );
+}
+
+#[test]
+fn test_frame_extract_defaults_to_png_without_a_recognised_extension() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_png_default_test", 4)
+    else {
+        return;
+    };
+
+    let requested = dir.path().join("still");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "1.0",
+        "--out",
+        requested.to_str().unwrap(),
+    ]);
+
+    let written = std::path::PathBuf::from(result["frames"][0]["path"].as_str().unwrap());
+    assert_eq!(written.extension().unwrap(), "png");
+    assert_eq!(file_signature(&written), PNG_SIGNATURE);
+}
+
+#[test]
+fn test_frame_extract_rejects_a_format_that_contradicts_the_out_extension() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_format_conflict_test", 4)
+    else {
+        return;
+    };
+
+    let output_path = dir.path().join("still.png");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "1.0",
+        "--out",
+        output_path.to_str().unwrap(),
+        "--format",
+        "jpeg",
+    ]);
+
+    assert!(
+        stderr.contains("--format"),
+        "Expected the error to name the conflicting flag, got: {stderr}"
+    );
+    assert!(
+        !output_path.exists(),
+        "A rejected request must not write anything"
+    );
+}
+
+#[test]
+fn test_frame_extract_builds_a_jpeg_contact_sheet_at_the_requested_path() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_sheet_jpg_test", 4) else {
+        return;
+    };
+
+    // This is the documented contact-sheet form: a .jpg path and no --format.
+    let sheet_path = dir.path().join("sheet.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--between",
+        "0",
+        "4",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        result["sheet"]["path"].as_str().unwrap(),
+        sheet_path.to_string_lossy()
+    );
+    assert!(sheet_path.exists(), "Expected the sheet at the .jpg path");
+    assert_eq!(file_signature(&sheet_path), JPEG_SIGNATURE);
+}
+
 #[test]
 fn test_frame_extract_builds_contact_sheet_for_grid() {
     let Some((dir, path, _)) = create_project_with_timeline_clip("frame_grid_test", 4) else {
@@ -2536,6 +2990,48 @@ fn test_analysis_run_preserves_results_from_earlier_partial_runs() {
     assert_eq!(report["coverage"]["audio"], true);
 }
 
+#[test]
+fn test_analysis_shots_keeps_keyframes_a_previous_run_extracted() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "analysis_shots_keyframe_test",
+        "scene_change.mp4",
+        create_sample_video_with_scene_change,
+    ) else {
+        return;
+    };
+
+    // A full run detects shots and extracts a keyframe per shot.
+    run_cli_ok(&[
+        "analysis", "run", "--path", &path, "--id", &asset_id, "--shots",
+    ]);
+
+    let cached: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(bundle_path(&path, &asset_id)).unwrap())
+            .unwrap();
+    let cached_shots = cached["shots"].as_array().unwrap().clone();
+    assert!(
+        cached_shots
+            .iter()
+            .any(|shot| shot["keyframePath"].is_string()),
+        "the full run must extract keyframes for this test to mean anything: {cached}"
+    );
+
+    // `analysis shots` re-detects boundaries and deliberately extracts nothing.
+    run_cli_ok(&["analysis", "shots", "--path", &path, "--id", &asset_id]);
+
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(bundle_path(&path, &asset_id)).unwrap())
+            .unwrap();
+    let after_shots = after["shots"].as_array().unwrap();
+    assert_eq!(after_shots.len(), cached_shots.len());
+    for (before, after) in cached_shots.iter().zip(after_shots) {
+        assert_eq!(
+            before["keyframePath"], after["keyframePath"],
+            "re-detecting the same cuts must not blank the keyframe thumbnails"
+        );
+    }
+}
+
 // =============================================================================
 // verify
 // =============================================================================
@@ -2627,15 +3123,24 @@ fn test_verify_structural_only_passes_on_a_healthy_project() {
     assert_eq!(report["target"]["measured"], false);
     assert_eq!(report["measurements"]["measured"], false);
 
+    // The stats check always reports its metrics as an informational finding,
+    // which is a finding all the same: "warned", never "passed".
     let stats = find_check(&report, "shot.length_stats");
-    assert_eq!(stats["status"], "passed");
+    assert_eq!(stats["status"], "warned");
+    assert_eq!(stats["passed"], false);
+    assert_eq!(stats["severity"], "info");
     assert_eq!(stats["metrics"]["count"], 1);
     assert!(stats["metrics"]["medianSec"].as_f64().unwrap() > 0.0);
 
     // A passing check still has to appear, or an agent cannot tell it ran.
     let gap = find_check(&report, "timeline.gap");
     assert_eq!(gap["status"], "passed");
+    assert_eq!(gap["passed"], true);
     assert_eq!(gap["violationCount"], 0);
+
+    // A project with clips must not trip the empty-sequence floor.
+    let empty = find_check(&report, "sequence.empty");
+    assert_eq!(empty["status"], "passed");
 
     // Rendered checks are skipped with a reason rather than silently passed.
     let black = find_check(&report, "render.black_frames");
@@ -2645,6 +3150,53 @@ fn test_verify_structural_only_passes_on_a_healthy_project() {
         .as_str()
         .unwrap()
         .contains("measurements"));
+
+    // Nothing may be measured against a file that was never supplied.
+    let duration = find_check(&report, "render.duration_mismatch");
+    assert_eq!(duration["status"], "skipped");
+    assert_eq!(duration["passed"], false);
+}
+
+/// Feature: Verify
+/// Scenario: should not report a project it never looked at as clean
+#[test]
+fn test_verify_warns_that_an_empty_sequence_was_never_edited() {
+    let dir = create_temp_project("verify_empty_sequence");
+    let path = project_path(&dir, "verify_empty_sequence");
+
+    let (stdout, stderr, code) = run_cli_exit(&["verify", "--path", &path, "--structural-only"]);
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+
+    let empty = find_check(&report, "sequence.empty");
+    assert_eq!(
+        empty["status"], "warned",
+        "an empty timeline must never verify silently.\nstderr: {stderr}"
+    );
+    assert_eq!(empty["passed"], false);
+    assert_eq!(empty["severity"], "warning");
+    assert_eq!(empty["violationCount"], 1);
+    assert_eq!(empty["metrics"]["clipCount"], 0);
+    assert!(
+        empty["suggestedFix"].is_null(),
+        "what belongs on an empty timeline is not a QC decision"
+    );
+
+    // A warning is a finding to read, not a failing verdict: the default
+    // threshold is `error`, so the run still exits zero.
+    assert_eq!(report["status"], "warning");
+    assert_eq!(code, 0);
+
+    // Raising the threshold turns the same finding into a failure.
+    let (_stdout, _stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--structural-only",
+        "--fail-on",
+        "warning",
+    ]);
+    assert_eq!(code, 1, "--fail-on warning must catch an empty sequence");
 }
 
 #[test]
@@ -2779,6 +3331,10 @@ fn test_verify_measures_a_rendered_file() {
         return;
     }
 
+    // A two-second slice of a longer sequence is not the deliverable, and
+    // `render.duration_mismatch` says so. That is asserted on its own below;
+    // here it is skipped so the measurement assertions stand alone.
+    //
     // The fixture is a bare test tone, so its absolute loudness says nothing
     // about the edit; the measurement itself is still asserted below.
     let (stdout, stderr, code) = run_cli_exit(&[
@@ -2788,7 +3344,7 @@ fn test_verify_measures_a_rendered_file() {
         "--file",
         render_path.to_str().unwrap(),
         "--skip",
-        "audio.loudness",
+        "audio.loudness,render.duration_mismatch",
     ]);
     assert_eq!(
         code, 0,
@@ -2825,6 +3381,41 @@ fn test_verify_measures_a_rendered_file() {
 
     let loudness = find_check(&report, "audio.loudness");
     assert_eq!(loudness["status"], "skipped");
+
+    // Feature: Verify against a rendered file
+    // Scenario: should refuse to grade a file that is not the sequence
+    //
+    // The same render, now with the duration check left on. Two seconds of a
+    // ten-second timeline measures perfectly well and is still the wrong file;
+    // without this check every measurement above would describe a program
+    // nobody asked for.
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        render_path.to_str().unwrap(),
+        "--skip",
+        "audio.loudness",
+    ]);
+    assert_eq!(
+        code, 1,
+        "a truncated render must not be graded as the deliverable.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+
+    let duration = find_check(&report, "render.duration_mismatch");
+    assert_eq!(duration["status"], "failed");
+    assert_eq!(duration["severity"], "error");
+    assert!(duration["metrics"]["deltaSec"].as_f64().unwrap() < 0.0);
+    assert!(
+        duration["metrics"]["fileDurationSec"].as_f64().unwrap()
+            < duration["metrics"]["sequenceDurationSec"].as_f64().unwrap()
+    );
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["passed"], false);
 }
 
 #[test]

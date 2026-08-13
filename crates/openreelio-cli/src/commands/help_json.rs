@@ -77,7 +77,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli asset remove --path ./project --id asset_001"
             },
             "analysis.shots": {
-                "description": "Detect shot boundaries with FFmpeg scene detection and cache them in index.db, the analysis bundle, and the asset annotation",
+                "description": "Detect shot boundaries with FFmpeg scene detection and cache them in index.db, the analysis bundle, and the asset annotation. 'persisted' names the stores written and 'warnings' explains the rest; status is ok, partial, or failed, and the command exits 1 when persistence was requested and every store rejected the write",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Asset ID" },
@@ -89,7 +89,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli analysis shots --path ./project --id asset_001 --threshold 0.3 --min-shot-duration 0.5"
             },
             "analysis.silence": {
-                "description": "Detect silence regions with FFmpeg; results are cached only at the shared -40dB / 0.5s contract, otherwise they are output-only",
+                "description": "Detect silence regions with FFmpeg; results are cached only at the shared -40dB / 0.5s contract and only when an audio profile already exists, otherwise they are output-only with a 'reason'",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "id": { "type": "string", "required": true, "desc": "Asset ID" },
@@ -237,11 +237,11 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "clip": { "type": "string", "required": true, "desc": "Clip ID" },
                     "track": { "type": "string", "required": true, "desc": "Track ID" },
-                    "in": { "type": "number", "required": false, "desc": "New source in point (seconds)" },
-                    "out": { "type": "number", "required": false, "desc": "New source out point (seconds)" },
+                    "source-in": { "type": "number", "required": false, "desc": "New source in point (seconds)" },
+                    "source-out": { "type": "number", "required": false, "desc": "New source out point (seconds)" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
-                "example": "openreelio-cli timeline trim --path ./project --clip clip_001 --track track_v1 --in 2.0 --out 8.0"
+                "example": "openreelio-cli timeline trim --path ./project --clip clip_001 --track track_v1 --source-in 2.0 --source-out 8.0"
             },
             "timeline.split": {
                 "description": "Split a clip at a specific timeline position",
@@ -626,10 +626,10 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli ffmpeg info"
             },
             "frame.extract": {
-                "description": "Extract still frames for visual inspection: one asset-time frame, one or many timeline-time frames, or a contact sheet grid. Timeline 'fast' mode captures the topmost file-backed clip only (no effects, text, or compositing) and falls back to 'composite' automatically when no such clip covers the requested time.",
+                "description": "Extract still frames for visual inspection: one asset-time frame, one or many timeline-time frames, or a contact sheet grid. Timeline 'fast' mode captures the topmost file-backed clip only (no effects, text, or compositing) and falls back to 'composite' automatically when no such clip covers the requested time, including over a gap, where a black frame is the correct result. Timeline times must fall inside the sequence; one at or past the end is rejected with the sequence duration in the message.",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
-                    "out": { "type": "string", "required": true, "desc": "Output image file; must be a directory when --times is used. The extension is normalized to match --format." },
+                    "out": { "type": "string", "required": true, "desc": "Output image file; must be a directory when --times is used. A .png/.jpg extension selects the format and is written as given." },
                     "asset": { "type": "string", "required": false, "desc": "Asset ID to extract from; requires --source-time and cannot be combined with timeline selectors" },
                     "source-time": { "type": "number", "required": false, "desc": "Time in seconds inside the asset's own media; requires --asset" },
                     "time": { "type": "number", "required": false, "desc": "Timeline time in seconds for a single still" },
@@ -637,7 +637,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" },
                     "mode": { "type": "string", "required": false, "desc": "Timeline extraction mode: fast (default, topmost clip only) or composite (full render of a minimal window; decodes from timeline zero so cost grows with the timestamp)" },
                     "max-width": { "type": "number", "required": false, "desc": "Maximum output width in pixels, aspect ratio preserved and never upscaled (default: 1280 for timeline modes, native for --asset)" },
-                    "format": { "type": "string", "required": false, "desc": "Output image format: png (default) or jpeg. Grid cells are always JPEG; the sheet itself uses this format." },
+                    "format": { "type": "string", "required": false, "desc": "Output image format: png or jpeg. Defaults to the --out extension, falling back to png for directories and extensionless paths; a value that contradicts a .png/.jpg extension is rejected. Grid cells are always JPEG; the sheet itself uses this format." },
                     "grid": { "type": "string", "required": false, "desc": "Contact sheet layout as COLSxROWS (e.g. 3x2), at most 100 cells; requires --between" },
                     "between": { "type": "string", "required": false, "desc": "Timeline range sampled by --grid, given as two values: START END" },
                     "count": { "type": "number", "required": false, "desc": "Number of grid samples (default: columns * rows; must not exceed the grid capacity). Rows no sample reaches are dropped, so the reported rows can be fewer than --grid asked for." }
@@ -645,21 +645,21 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli frame extract --path ./project --time 12.5 --out frame.png"
             },
             "verify": {
-                "description": "Run deterministic quality control over a sequence and, with --file, over a rendered export. Emits one entry per check — including the ones that passed or were skipped — so an agent can tell 'checked and clean' from 'never checked'. Exit codes: 0 = ran without breaching --fail-on, 1 = threshold breached, 2 = tool failure (bad arguments, unreadable file, FFmpeg failure, or a check that errored).",
+                "description": "Run deterministic quality control over a sequence and, with --file, over a rendered export. Emits one entry per check — including the ones that passed or were skipped — so an agent can tell 'checked and clean' from 'never checked'. Each check reports status passed (ran, found nothing), warned (ran, warning/info findings only), failed (ran, error or critical findings), skipped, or errored; checks[].passed is true only for 'passed', while the top-level status/passed follow severity and stay true when findings are warnings or info. Exit codes: 0 = ran without breaching --fail-on, 1 = threshold breached, 2 = tool failure (bad arguments, unreadable file, FFmpeg failure, or a check that errored).",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" },
                     "file": { "type": "string", "required": false, "desc": "Rendered file to measure (black/freeze/silence detection, EBU R128 loudness, peaks). Without it only structural checks run and FFmpeg is never invoked. Measured times are file-relative and are compared against timeline times, so pass a full-sequence render rather than a partial one." },
                     "structural-only": { "type": "boolean", "required": false, "desc": "Run structural checks only and never touch FFmpeg; conflicts with --file" },
-                    "checks": { "type": "string", "required": false, "desc": "Comma-separated check IDs to run exclusively (asset.license and sequence.duration are opt-in and only run when named here): timeline.gap, clip.orphan, clip.missing_asset, audio.silent_clip, caption.overlap, caption.reading_rate, caption.out_of_bounds, caption.safe_area, shot.length_stats, shot.cut_rhythm, clip.aspect_ratio, asset.license, sequence.duration, render.black_frames, audio.peak, audio.loudness" },
+                    "checks": { "type": "string", "required": false, "desc": "Comma-separated check IDs to run exclusively (asset.license and sequence.duration are opt-in and only run when named here): sequence.empty, timeline.gap, clip.orphan, clip.missing_asset, audio.silent_clip, caption.overlap, caption.reading_rate, caption.out_of_bounds, caption.safe_area, shot.length_stats, shot.cut_rhythm, clip.aspect_ratio, asset.license, sequence.duration, render.duration_mismatch, render.black_frames, audio.peak, audio.loudness" },
                     "skip": { "type": "string", "required": false, "desc": "Comma-separated check IDs to disable" },
-                    "target-lufs": { "type": "number", "required": false, "desc": "Integrated loudness target in LUFS (default -14). Deviation over 1 LU warns, over 3 LU errors." },
-                    "max-true-peak": { "type": "number", "required": false, "desc": "Maximum acceptable true peak in dBTP (default -1). Sample peak is used when the encoder reports no true peak." },
+                    "target-lufs": { "type": "number", "required": false, "desc": "Integrated loudness target in LUFS (default -14). Negative values need the '=' form: --target-lufs=-14. Deviation over 1 LU warns, over 3 LU errors." },
+                    "max-true-peak": { "type": "number", "required": false, "desc": "Maximum acceptable true peak in dBTP (default -1). Negative values need the '=' form: --max-true-peak=-1. Sample peak is used when the encoder reports no true peak." },
                     "fail-on": { "type": "string", "required": false, "desc": "Lowest severity that exits 1: info, warning, error (default), critical" },
                     "timeout-sec": { "type": "number", "required": false, "desc": "Timeout for the rendered-file measurement pass in seconds (default: 600)" },
                     "json-pretty": { "type": "boolean", "required": false, "desc": "Pretty-print the JSON output" }
                 },
-                "example": "openreelio-cli verify --path ./project --file proxy.mp4 --target-lufs -14 --fail-on error"
+                "example": "openreelio-cli verify --path ./project --file proxy.mp4 --target-lufs=-14 --fail-on error"
             },
             "mcp": {
                 "description": "Serve OpenReelio MCP tools for external AI agents. Read-only by default; mutating tools appear with a host-issued approval token or with --allow-write.",

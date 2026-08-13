@@ -27,8 +27,14 @@ openreelio-cli render start --path ./demo --output out.mp4 \
 `--output` is required. `--preset` and `--proxy` conflict.
 
 **`--proxy` is the inspection render.** It is an alias for the `proxy_480p`
-preset: 854x480, CRF 30, H.264 + AAC, `ultrafast`. Use it whenever you are
-checking your own work rather than delivering.
+preset: 480p-class frame, CRF 30, H.264 + AAC, `ultrafast`. Use it whenever you
+are checking your own work rather than delivering.
+
+The frame is fitted to the sequence canvas, not fixed at 854x480: the short edge
+is capped at 480 px and the long edge at 854 px, aspect preserved, both edges
+even, and a canvas already inside the budget is left alone. 1920x1080 → 854x480,
+1080x1920 → 480x854, 1080x1080 → 480x480, 1920x800 → 854x356, 640x360 stays
+640x360. A vertical edit is therefore never pillarboxed into a landscape frame.
 
 **`--start` / `--end`** limit the rendered range to timeline seconds. Combine
 with `--proxy` to review just the section you changed. Note that a partial render

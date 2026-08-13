@@ -39,6 +39,13 @@ pub struct RenderMeasurements {
     pub sample_peak_db: Option<f64>,
     /// Flatness factor reported by the audio statistics pass
     pub flat_factor: Option<f64>,
+    /// Duration of the measured file in seconds, as reported by the probe
+    ///
+    /// Carried alongside the pixel and loudness figures so a rule can ask
+    /// whether the file that was measured is the sequence at all: a stale or
+    /// truncated render measures perfectly well and is still not the
+    /// deliverable.
+    pub file_duration_sec: Option<f64>,
 }
 
 /// Context handed to every QC rule for a single check run.
