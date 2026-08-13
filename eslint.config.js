@@ -56,6 +56,7 @@ export default tseslint.config(
       'tailwind.config.js',
       'postcss.config.js',
       'scripts/**/*.{js,mjs}',
+      'npm/**/*.mjs',
     ],
     languageOptions: {
       globals: {

@@ -1,0 +1,289 @@
+name: npm Publish
+
+# Publishes the agent-facing CLI to npm as `openreelio-cli` plus four
+# `@openreelio/cli-*` platform packages built from the release assets.
+#
+# ---------------------------------------------------------------------------
+# Why this is a separate workflow (and not a job inside release.yml)
+# ---------------------------------------------------------------------------
+# The platform packages embed the standalone CLI archives that release.yml
+# attaches to a *draft* release. Their public download URLs only resolve after
+# the `publish-release` job flips the draft, so npm work has to happen strictly
+# afterwards.
+#
+# The trigger is `workflow_run`, not `release: published`, on purpose: GitHub
+# does not start new workflow runs from events raised with the built-in
+# GITHUB_TOKEN, and `publish-release` publishes the draft with exactly that
+# token. A `release: published` trigger would therefore never fire.
+#
+# ---------------------------------------------------------------------------
+# Setup required before this workflow can publish (neither is done yet)
+# ---------------------------------------------------------------------------
+# 1. Enable the workflow.
+#    Create repository variable `NPM_PUBLISH_ENABLED` = `true`
+#    (Settings -> Secrets and variables -> Actions -> Variables).
+#    Until then the automatic path is inert, so merging this file cannot
+#    publish anything by accident. Manual runs still require `dry_run: false`
+#    *and* the variable.
+#
+# 2. Authenticate to npm. Either:
+#    a. Trusted Publishing (preferred, no long-lived secret).
+#       On npmjs.com, for `openreelio-cli` and each `@openreelio/cli-*`
+#       package: Settings -> Trusted publisher -> GitHub Actions, with
+#       repository `openreelio/openreelio` and workflow `npm-publish.yml`.
+#       Requires Node.js >= 22.14.0 and npm >= 11.5.1 on the runner (both
+#       enforced below) and `id-token: write` (granted below). Provenance is
+#       attached automatically.
+#       Note: a trusted publisher must be configured per package, and a
+#       package must exist before it can be configured -- so the very first
+#       release of each of the five packages has to use path (b).
+#    b. Automation token fallback. Create a secret `NPM_TOKEN` holding an npm
+#       automation token. It is used only when present, so it can be deleted
+#       once trusted publishing is live.
+
+on:
+  workflow_run:
+    workflows: ['Release']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish from (e.g. v0.1.10)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Pack and validate only; do not publish'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    # Automatic path: only for a successful, tag-triggered Release run, and only
+    # when the maintainer has opted in via the repository variable.
+    # Manual path: always allowed to reach the job; the guard step below still
+    # blocks a real publish without the variable.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v') &&
+       vars.NPM_PUBLISH_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required by npm Trusted Publishing (OIDC) and by provenance.
+      id-token: write
+
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      NPM_PUBLISH_ENABLED: ${{ vars.NPM_PUBLISH_ENABLED }}
+
+    steps:
+      - name: Resolve and guard release version
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RELEASE_TAG}" ]; then
+            echo "Could not determine the release tag." >&2
+            exit 1
+          fi
+
+          # Strict semver, so the tag cannot carry shell metacharacters that a
+          # later step would have to defend against.
+          if ! printf '%s' "${RELEASE_TAG}" |
+            grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "Refusing to publish from a non-release ref: ${RELEASE_TAG}" >&2
+            echo "Expected a tag of the form vMAJOR.MINOR.PATCH[-PRERELEASE]." >&2
+            exit 1
+          fi
+
+          if [ "${DRY_RUN}" != "true" ] && [ "${NPM_PUBLISH_ENABLED}" != "true" ]; then
+            echo "npm publishing is disabled." >&2
+            echo "Set repository variable NPM_PUBLISH_ENABLED=true to enable it," >&2
+            echo "or re-run this workflow with dry_run: true." >&2
+            exit 1
+          fi
+
+          VERSION="${RELEASE_TAG#v}"
+          echo "tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Publishing version ${VERSION} from ${RELEASE_TAG} (dry_run=${DRY_RUN})."
+
+      - name: Checkout release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          # The npm packaging sources are taken from the tag being published, so
+          # the published shim always matches the released CLI.
+          ref: ${{ steps.release.outputs.tag }}
+          persist-credentials: false
+
+      - name: Verify npm sources exist at this tag
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f npm/openreelio-cli/package.json ]; then
+            echo "npm/openreelio-cli/package.json is missing at ${RELEASE_TAG}." >&2
+            echo "Only tags that contain the npm distribution sources can be published." >&2
+            exit 1
+          fi
+
+          SHIM_VERSION="$(node -p "require('./npm/openreelio-cli/package.json').version")"
+          if [ "$SHIM_VERSION" != "$VERSION" ]; then
+            echo "Shim version ($SHIM_VERSION) does not match tag ($VERSION)." >&2
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          # Trusted Publishing needs Node.js >= 22.14.0; without this the action
+          # may pick an older 22.x already cached on the runner.
+          check-latest: true
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify Node.js and upgrade npm for Trusted Publishing
+        # Trusted Publishing (OIDC) requires Node.js >= 22.14.0 and npm >= 11.5.1;
+        # Node 22 ships npm 10.
+        run: |
+          set -euo pipefail
+
+          if [ "$(node -p 'const v = process.versions.node.split(".").map(Number); v[0] > 22 || (v[0] === 22 && v[1] >= 14)')" != "true" ]; then
+            echo "npm Trusted Publishing requires Node.js >= 22.14.0; got $(node --version)." >&2
+            exit 1
+          fi
+
+          npm install -g npm@^11.5.1
+          npm --version
+
+      - name: Download release CLI assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist/cli-archives
+          gh release download "${RELEASE_TAG}" \
+            --repo "${{ github.repository }}" \
+            --dir dist/cli-archives \
+            --pattern 'openreelio-cli-*' \
+            --clobber
+
+          ls -la dist/cli-archives
+
+      - name: Extract CLI binaries
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Checksums are verified again by the generator (--archives); this
+          # early pass fails fast before anything is unpacked.
+          (cd dist/cli-archives && sha256sum --check --strict ./*.sha256)
+
+          extract() {
+            TRIPLE="$1"
+            EXTENSION="$2"
+            ARCHIVE="dist/cli-archives/openreelio-cli-${VERSION}-${TRIPLE}.${EXTENSION}"
+            DESTINATION="dist/cli-assets/${TRIPLE}"
+
+            mkdir -p "$DESTINATION"
+            if [ "$EXTENSION" = "zip" ]; then
+              unzip -o "$ARCHIVE" -d "$DESTINATION"
+            else
+              tar -xzf "$ARCHIVE" -C "$DESTINATION"
+            fi
+          }
+
+          extract x86_64-pc-windows-msvc zip
+          extract x86_64-apple-darwin tar.gz
+          extract aarch64-apple-darwin tar.gz
+          extract x86_64-unknown-linux-gnu tar.gz
+
+          find dist/cli-assets -type f -name 'openreelio-cli*' -print
+
+      - name: Assemble npm packages
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          node scripts/build-npm-platform-packages.mjs \
+            --version "${VERSION}" \
+            --input dist/cli-assets \
+            --archives dist/cli-archives \
+            --out dist/npm-packages \
+            --shim-out dist/npm-packages/openreelio-cli
+
+      - name: Pack packages (always runs)
+        run: |
+          set -euo pipefail
+
+          for PACKAGE_DIR in dist/npm-packages/cli-* dist/npm-packages/openreelio-cli; do
+            echo "::group::npm pack ${PACKAGE_DIR}"
+            npm pack --pack-destination dist/npm-tarballs "${PACKAGE_DIR}"
+            echo "::endgroup::"
+          done
+
+          ls -la dist/npm-tarballs
+
+      - name: Upload packed tarballs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: npm-tarballs-${{ steps.release.outputs.version }}
+          path: dist/npm-tarballs/*.tgz
+          if-no-files-found: error
+
+      - name: Publish platform packages
+        if: env.DRY_RUN != 'true'
+        env:
+          # Empty when trusted publishing is configured; npm then falls back to
+          # OIDC. Harmless to leave set once trusted publishing is live.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Platform packages first: the shim pins them as optionalDependencies,
+          # and npm resolves those at install time.
+          for PACKAGE_DIR in dist/npm-packages/cli-*; do
+            echo "Publishing ${PACKAGE_DIR}"
+            npm publish --access public "${PACKAGE_DIR}"
+          done
+
+      - name: Publish shim package
+        if: env.DRY_RUN != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm publish --access public dist/npm-packages/openreelio-cli
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          {
+            echo "## npm distribution"
+            echo
+            echo "- tag: \`${RELEASE_TAG}\`"
+            echo "- version: \`${VERSION}\`"
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "- mode: dry run (packed only, nothing published)"
+            else
+              echo "- mode: published"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

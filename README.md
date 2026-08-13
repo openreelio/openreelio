@@ -137,6 +137,15 @@ npm run tauri build
 - [Data Models](docs/DATA_MODELS.md)
 - [Plugin Development](docs/PLUGIN_SPEC.md)
 
+## Using OpenReelio as a Tool (AI Agents)
+
+OpenReelio ships a headless CLI and MCP server so coding agents (Claude Code, Codex, Cursor) can edit, analyze, render, and verify video autonomously. Start with the [Agent Guide](docs/AGENT_GUIDE.md), or bootstrap directly:
+
+```bash
+npx openreelio-cli help-json                        # machine-readable command surface
+npx openreelio-cli mcp --project <dir> --stdio      # MCP server (read-only by default)
+```
+
 ## Project Structure
 
 ```

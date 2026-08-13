@@ -1,0 +1,35 @@
+# OpenReelio
+
+> OpenReelio is an open-source, AI agent-driven video editing IDE with a headless
+> CLI and MCP server (`openreelio-cli`). It gives an agent a real non-linear
+> editor: import media, cut/trim/split a timeline, add captions and text overlays,
+> detect shots and silence, extract frames to inspect the result, render, and run
+> deterministic quality control. Projects are event-sourced — every edit is a
+> command appended to an append-only op log, and the project state is a replayable
+> snapshot of that log — so edits stay inspectable, undoable and reproducible
+> rather than baked into a one-shot output file.
+
+Every CLI command prints a single JSON object on stdout; progress and diagnostics
+go to stderr. Long-running verbs stream NDJSON progress under `--progress`. The
+CLI is self-describing: `openreelio-cli help-json` emits the full command schema,
+and `openreelio-cli <verb> --help` is authoritative for any single verb.
+
+Install with `npm install -g openreelio-cli` (or run `npx openreelio-cli --help`).
+FFmpeg and FFprobe are resolved at runtime; `openreelio-cli ffmpeg info` reports
+which binaries were picked and from where.
+
+## Docs
+
+- [Agent Guide](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/AGENT_GUIDE.md): The canonical agent-facing reference — install, the JSON/exit-code contract, project lifecycle, editing verbs, the perception loop (analysis, frame extraction, proxy renders), the verify QC loop, and the MCP server.
+- [Agent Perception CLI Plan](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/AGENT_PERCEPTION_CLI_PLAN.md): Design rationale for the perception and verify surfaces, including accepted deviations such as the `analysis silence` cache-persistence contract and the proxy render preset.
+- [Architecture](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/ARCHITECTURE.md): System architecture — event sourcing, worker separation, the Rust core, and the Tauri/React frontend.
+- [Command Reference](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/COMMAND_REFERENCE.md): The backend edit commands that `command execute` and `plan execute` accept.
+
+## Optional
+
+- [README](https://raw.githubusercontent.com/openreelio/openreelio/main/README.md): Project overview, features, and desktop app installation.
+- [API Spec](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/API_SPEC.md): IPC and API specifications for the desktop app boundary.
+- [Data Models](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/DATA_MODELS.md): Project, sequence, track, clip, asset and analysis schemas.
+- [Plugin Spec](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/PLUGIN_SPEC.md): The WASM-based plugin sandbox.
+- [Roadmap](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/ROADMAP.md): Development roadmap from v0.1.0 to v1.0.0.
+- [Contributing](https://raw.githubusercontent.com/openreelio/openreelio/main/CONTRIBUTING.md): How to contribute code, and the project conventions.

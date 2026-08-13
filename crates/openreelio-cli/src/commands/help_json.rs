@@ -662,10 +662,11 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli verify --path ./project --file proxy.mp4 --target-lufs -14 --fail-on error"
             },
             "mcp": {
-                "description": "Serve read-only OpenReelio MCP tools for external AI agents",
+                "description": "Serve OpenReelio MCP tools for external AI agents. Read-only by default; mutating tools appear with a host-issued approval token or with --allow-write.",
                 "params": {
-                    "project": { "type": "string", "required": false, "desc": "Project directory path to expose through read-only tools" },
-                    "stdio": { "type": "boolean", "required": false, "desc": "Serve MCP JSON-RPC over stdio" }
+                    "project": { "type": "string", "required": false, "desc": "Project directory path to expose through the MCP tools" },
+                    "stdio": { "type": "boolean", "required": false, "desc": "Serve MCP JSON-RPC over stdio" },
+                    "allow-write": { "type": "boolean", "required": false, "desc": "Enable the mutating tools (media.insert, plan.apply) without a per-call approval token. For a locally trusted client only; every mutation still goes through the command log and stays undoable." }
                 },
                 "example": "openreelio-cli mcp --stdio --project ./project"
             },

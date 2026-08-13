@@ -115,11 +115,32 @@ pub fn execute(args: VerifyArgs) -> anyhow::Result<()> {
     }
 }
 
-/// Runs the verification and returns the process exit code.
+/// Runs the verification, prints the report, and returns the process exit code.
 ///
 /// Returning `Err` means the tool failed before it could produce a report; a
 /// report that merely found problems returns `Ok` with a non-zero code.
 fn run(args: VerifyArgs) -> anyhow::Result<i32> {
+    let json_pretty = args.json_pretty;
+    let (output_value, exit_code) = run_verify(args)?;
+
+    if json_pretty {
+        output::print_json_pretty(&output_value)?;
+    } else {
+        output::print_json(&output_value)?;
+    }
+
+    Ok(exit_code)
+}
+
+/// Runs the verification and returns the report document plus the exit code.
+///
+/// This is the print-free seam for in-process callers, which hand the returned
+/// document straight to their own client. The document is exactly what the CLI
+/// prints, so the two surfaces can never drift.
+///
+/// Returning `Err` means the tool failed before it could produce a report; a
+/// report that merely found problems returns `Ok` with a non-zero code.
+pub(crate) fn run_verify(args: VerifyArgs) -> anyhow::Result<(Value, i32)> {
     let fail_on = parse_severity(&args.fail_on)?;
     if args.timeout_sec == 0 {
         return Err(anyhow::anyhow!(
@@ -225,25 +246,20 @@ fn run(args: VerifyArgs) -> anyhow::Result<i32> {
         errors,
     );
 
-    if args.json_pretty {
-        output::print_json_pretty(&output_value)?;
-    } else {
-        output::print_json(&output_value)?;
-    }
-
     let breached = report
         .violations
         .iter()
         .any(|violation| violation.severity.meets_threshold(fail_on));
 
-    if breached {
-        return Ok(EXIT_THRESHOLD_BREACHED);
-    }
-    if measurement_failed || !report.errored_rules.is_empty() {
-        return Ok(EXIT_TOOL_FAILURE);
-    }
+    let exit_code = if breached {
+        EXIT_THRESHOLD_BREACHED
+    } else if measurement_failed || !report.errored_rules.is_empty() {
+        EXIT_TOOL_FAILURE
+    } else {
+        0
+    };
 
-    Ok(0)
+    Ok((output_value, exit_code))
 }
 
 // ── Configuration ───────────────────────────────────────────────────────

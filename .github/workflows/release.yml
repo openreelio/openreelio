@@ -398,6 +398,94 @@ jobs:
           echo "Bundled runtime tools:"
           ls -la src-tauri/binaries/
 
+      - name: Package standalone OpenReelio CLI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          REPOSITORY: ${{ github.repository }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE_DIR="cli-package"
+
+          rm -rf "$STAGE_DIR"
+          mkdir -p "$STAGE_DIR"
+
+          # Asset names intentionally end with .zip/.tar.gz/.sha256 so they can
+          # never be picked up by the latest.json updater classifier, which only
+          # matches *.exe (setup/nsis), *.msi, *.app.tar.gz and *.appimage.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            CLI_NAME="openreelio-cli.exe"
+            ASSET_NAME="openreelio-cli-${VERSION}-${TARGET}.zip"
+            ASSET_CONTENT_TYPE="application/zip"
+          else
+            CLI_NAME="openreelio-cli"
+            ASSET_NAME="openreelio-cli-${VERSION}-${TARGET}.tar.gz"
+            ASSET_CONTENT_TYPE="application/gzip"
+          fi
+
+          CLI_PATH="target/${TARGET}/release/${CLI_NAME}"
+          if [ ! -f "$CLI_PATH" ]; then
+            echo "Missing built CLI binary: $CLI_PATH" >&2
+            exit 1
+          fi
+
+          cp "$CLI_PATH" "${STAGE_DIR}/${CLI_NAME}"
+          cp LICENSE "${STAGE_DIR}/LICENSE"
+
+          rm -f "$ASSET_NAME" "${ASSET_NAME}.sha256"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -NoProfile -NonInteractive -Command \
+              "Compress-Archive -Path '${STAGE_DIR}/*' -DestinationPath '${ASSET_NAME}' -Force"
+          else
+            # COPYFILE_DISABLE keeps macOS bsdtar from adding ._ metadata entries.
+            COPYFILE_DISABLE=1 tar -czf "$ASSET_NAME" -C "$STAGE_DIR" "$CLI_NAME" LICENSE
+          fi
+
+          # macOS runners ship shasum instead of coreutils sha256sum.
+          if command -v sha256sum > /dev/null 2>&1; then
+            sha256sum "$ASSET_NAME" > "${ASSET_NAME}.sha256"
+          else
+            shasum -a 256 "$ASSET_NAME" > "${ASSET_NAME}.sha256"
+          fi
+
+          echo "Standalone CLI assets:"
+          ls -la "$ASSET_NAME" "${ASSET_NAME}.sha256"
+          cat "${ASSET_NAME}.sha256"
+
+          UPLOAD_URL="$(
+            gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}" --jq '.upload_url' |
+              sed 's/{.*//'
+          )"
+
+          upload_asset() {
+            ASSET_FILE="$1"
+            CONTENT_TYPE="$2"
+
+            EXISTING_ASSET_ID="$(
+              gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}/assets" \
+                --jq ".[] | select(.name == \"${ASSET_FILE}\") | .id" |
+                head -n 1
+            )"
+
+            if [ -n "$EXISTING_ASSET_ID" ]; then
+              gh api --method DELETE "repos/${REPOSITORY}/releases/assets/${EXISTING_ASSET_ID}"
+            fi
+
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --header "Content-Type: ${CONTENT_TYPE}" \
+              --data-binary "@${ASSET_FILE}" \
+              "${UPLOAD_URL}?name=${ASSET_FILE}"
+          }
+
+          upload_asset "$ASSET_NAME" "$ASSET_CONTENT_TYPE"
+          upload_asset "${ASSET_NAME}.sha256" "text/plain"
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -505,6 +593,14 @@ jobs:
           for (const asset of assets) {
             const name = asset.name.toLowerCase();
             if (name.endsWith('.sig')) {
+              continue;
+            }
+
+            // Standalone CLI archives (openreelio-cli-<version>-<target>.zip|.tar.gz
+            // and their .sha256 sidecars) are distribution assets, never updater
+            // artifacts. Their names already miss every classifier suffix below;
+            // this guard keeps that true if the naming scheme ever changes.
+            if (name.startsWith('openreelio-cli-')) {
               continue;
             }
 
