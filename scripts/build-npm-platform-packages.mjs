@@ -8,16 +8,20 @@
  * release assets, so the platform packages are generated at publish time rather
  * than committed. This script is that generator.
  *
- * It never downloads anything: give it a directory of already-unpacked release
- * binaries (the publish workflow extracts the release archives into it), and
- * optionally the directory holding the archives plus their `.sha256` sidecars
- * so the payload can be verified before it is republished to npm.
+ * It never downloads anything. The release path passes `--archives`: every
+ * selected archive is checked against its `.sha256` sidecar and then unpacked
+ * into a private staging directory, and the binary that gets packaged is taken
+ * from that unpacked copy. That is what makes the checksum mean something --
+ * the bytes that ship are the bytes that were verified. `--input`/`--binary`
+ * stay available for local runs against already-unpacked binaries, but those
+ * bytes are not verified.
  *
  * Usage:
  *   node scripts/build-npm-platform-packages.mjs [options]
  *
  * Options:
- *   --input <dir>          Directory of unpacked release binaries.
+ *   --input <dir>          Directory of unpacked release binaries. Ignored when
+ *                          --archives is given.
  *                          Default: dist/cli-assets
  *                          Looked up per target, first match wins:
  *                            <input>/<target-triple>/openreelio-cli[.exe]
@@ -26,9 +30,11 @@
  *                            <input>/openreelio-cli-<platform>[.exe]
  *   --binary <plat>=<path> Explicit binary for one platform (repeatable).
  *                          Overrides --input resolution for that platform.
+ *                          Cannot be combined with --archives.
  *   --archives <dir>       Directory holding the release archives and their
- *                          .sha256 sidecars. When given, each selected target's
- *                          archive is verified before its package is written.
+ *                          .sha256 sidecars. Each selected target's archive is
+ *                          verified, unpacked, and packaged from the unpacked
+ *                          copy; --input and --binary are not consulted.
  *   --out <dir>            Output directory.
  *                          Default: npm/platform-packages/generated (git-ignored)
  *   --shim-out <dir>       Also write a version-stamped copy of the shim package
@@ -43,6 +49,7 @@
  *   1 - bad arguments, missing binary, or checksum mismatch
  */
 
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -284,6 +291,69 @@ async function verifyArchive(target, archivesDir, version) {
 }
 
 /**
+ * Unpacks a verified archive into a private staging directory.
+ *
+ * Packaging from this copy, rather than from a separately supplied directory,
+ * is what ties the checksum to the payload: a binary that was never inside the
+ * verified archive cannot reach the published package.
+ *
+ * @param {typeof TARGETS[number]} target Release target.
+ * @param {string} archivePath Archive whose checksum already matched.
+ * @param {string} stagingRoot Directory to unpack into.
+ * @returns {string} Absolute path to the unpacked binary.
+ */
+function extractVerifiedArchive(target, archivePath, stagingRoot) {
+  const destination = join(stagingRoot, target.triple);
+  rmSync(destination, { recursive: true, force: true });
+  mkdirSync(destination, { recursive: true });
+
+  // The archive is copied in and unpacked from inside the staging directory:
+  // some tar builds read an absolute Windows path ("D:\...") as a remote host
+  // spec, and a bare file name in the working directory cannot be misread.
+  const localName = `archive.${target.archiveExtension}`;
+  copyFileSync(archivePath, join(destination, localName));
+
+  // GNU tar (Linux) cannot read zip and unzip is not installed everywhere, so
+  // zip extraction tries unzip first and falls back to bsdtar (Windows, macOS).
+  const attempts =
+    target.archiveExtension === 'zip'
+      ? [
+          ['unzip', ['-o', '-q', localName]],
+          ['tar', ['-xf', localName]],
+        ]
+      : [['tar', ['-xzf', localName]]];
+
+  const failures = [];
+  let unpacked = false;
+
+  for (const [command, args] of attempts) {
+    const result = spawnSync(command, args, { cwd: destination, encoding: 'utf-8' });
+    if (!result.error && result.status === 0) {
+      unpacked = true;
+      break;
+    }
+    failures.push(
+      `${command}: ${
+        result.error ? result.error.message : `exit ${result.status} ${(result.stderr ?? '').trim()}`
+      }`,
+    );
+  }
+
+  if (!unpacked) {
+    fail(`could not unpack ${archivePath}\n  ${failures.join('\n  ')}`);
+  }
+
+  rmSync(join(destination, localName), { force: true });
+
+  const binaryPath = join(destination, target.binaryName);
+  if (!existsSync(binaryPath)) {
+    fail(`verified archive ${archivePath} does not contain ${target.binaryName}`);
+  }
+
+  return binaryPath;
+}
+
+/**
  * Locates the unpacked binary for a target.
  *
  * @param {typeof TARGETS[number]} target Release target.
@@ -480,25 +550,42 @@ async function main() {
     options.out ?? join('npm', 'platform-packages', 'generated'),
   );
   const archivesDir = options.archives ? resolve(PROJECT_ROOT, options.archives) : undefined;
+  const stagingRoot = join(outDir, '.staging');
+
+  if (archivesDir && options.binaries.size > 0) {
+    fail('--binary cannot be combined with --archives: the verified archive is the only source');
+  }
 
   mkdirSync(outDir, { recursive: true });
 
   console.log(`Assembling ${selected.length} platform package(s) at version ${version}`);
+  if (!archivesDir) {
+    console.log('  note: no --archives given; the packaged binaries are not checksum-verified.');
+  } else if (options.input) {
+    console.log('  note: --input is ignored; binaries come from the verified archives.');
+  }
 
   for (const target of selected) {
+    let binaryPath;
     if (archivesDir) {
       const archiveName = await verifyArchive(target, archivesDir, version);
-      console.log(`  verified ${archiveName}`);
+      binaryPath = extractVerifiedArchive(target, join(archivesDir, archiveName), stagingRoot);
+      console.log(`  verified ${archiveName} -> ${target.binaryName}`);
+    } else {
+      binaryPath = resolveBinary(
+        target,
+        options.binaries.get(target.platform),
+        inputDir,
+        version,
+      );
     }
 
-    const binaryPath = resolveBinary(
-      target,
-      options.binaries.get(target.platform),
-      inputDir,
-      version,
-    );
     const packageDir = writePlatformPackage(target, binaryPath, version, outDir);
     console.log(`  ${SCOPE}/cli-${target.platform} -> ${packageDir}`);
+  }
+
+  if (archivesDir) {
+    rmSync(stagingRoot, { recursive: true, force: true });
   }
 
   if (options.shimOut) {

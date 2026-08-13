@@ -18,9 +18,11 @@ import {
   readTauriVersion,
   updateCargoVersion,
   updateTauriVersion,
+  updateJsonVersion,
   checkVersionSync,
   syncVersions,
   validateSemver,
+  getDefaultConfig,
   type VersionTarget,
 } from './sync-version';
 
@@ -31,6 +33,7 @@ const TEST_CARGO_TOML = join(TEST_DIR, 'Cargo.toml');
 const TEST_TAURI_CONF = join(TEST_DIR, 'tauri.conf.json');
 const TEST_CRATE_CARGO_TOML = join(TEST_DIR, 'crate-Cargo.toml');
 const TEST_MISSING_PACKAGE_JSON = join(TEST_DIR, 'missing', 'package.json');
+const TEST_PLUGIN_JSON = join(TEST_DIR, 'plugin.json');
 
 /** Targets mirroring the production descriptor list, minus the optional entry */
 const requiredTargets: VersionTarget[] = [
@@ -78,6 +81,12 @@ name = "demo-crate"
 version = "1.0.0"
 edition = "2021"
 `
+    );
+
+    // Create test plugin.json (generic JSON manifest with a root version)
+    writeFileSync(
+      TEST_PLUGIN_JSON,
+      JSON.stringify({ name: 'openreelio', version: '1.0.0' }, null, 2) + '\n'
     );
 
     // Create test tauri.conf.json
@@ -214,6 +223,66 @@ edition = "2021"
       expect(() => updateTauriVersion(TEST_TAURI_CONF, 'invalid')).toThrow(
         'Invalid semver'
       );
+    });
+  });
+
+  describe('json-version targets', () => {
+    /** Target for a plain JSON manifest such as the Claude Code plugin file */
+    const pluginTarget: VersionTarget = {
+      file: 'plugin.json',
+      path: TEST_PLUGIN_JSON,
+      kind: 'json-version',
+    };
+
+    it('should report a JSON manifest as mismatched when its version lags behind', () => {
+      const result = checkVersionSync({
+        packageJson: TEST_PACKAGE_JSON, // version: 1.2.3
+        targets: [pluginTarget],
+      });
+
+      expect(result.synced).toBe(false);
+      expect(result.mismatches).toEqual([
+        {
+          file: 'plugin.json',
+          path: TEST_PLUGIN_JSON,
+          kind: 'json-version',
+          currentVersion: '1.0.0',
+          expectedVersion: '1.2.3',
+        },
+      ]);
+    });
+
+    it('should sync a JSON manifest while preserving its other fields', () => {
+      const result = syncVersions({
+        packageJson: TEST_PACKAGE_JSON, // version: 1.2.3
+        targets: [pluginTarget],
+      });
+
+      expect(result.updatedFiles).toEqual(['plugin.json']);
+      const updated = JSON.parse(readFileSync(TEST_PLUGIN_JSON, 'utf-8'));
+      expect(updated.version).toBe('1.2.3');
+      expect(updated.name).toBe('openreelio');
+    });
+
+    it('should reject an invalid semver for a JSON manifest', () => {
+      expect(() => updateJsonVersion(TEST_PLUGIN_JSON, 'invalid')).toThrow(
+        'Invalid semver'
+      );
+    });
+  });
+
+  describe('repository configuration', () => {
+    it('should keep every registered manifest in sync with package.json', () => {
+      const result = checkVersionSync(getDefaultConfig());
+
+      expect(result.mismatches).toEqual([]);
+      expect(result.synced).toBe(true);
+    });
+
+    it('should track the distributed plugin manifest', () => {
+      const files = getDefaultConfig().targets.map((target) => target.file);
+
+      expect(files).toContain('distribution/skills/.claude-plugin/plugin.json');
     });
   });
 

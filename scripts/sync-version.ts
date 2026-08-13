@@ -5,8 +5,9 @@
  *
  * Single Source of Truth: package.json
  * Sync Targets: every entry in the target descriptor list (see getDefaultConfig),
- * currently the Tauri app manifests plus the openreelio-core / openreelio-cli
- * crates and the published npm shim package.
+ * currently the Tauri app manifests, the openreelio-core / openreelio-cli
+ * crates, the published npm shim package and the distributed Claude Code
+ * plugin manifest.
  *
  * Usage:
  *   npx tsx scripts/sync-version.ts --check   # Verify versions are synced (CI mode)
@@ -91,7 +92,7 @@ const LOCKSTEP_DEPENDENCY_SCOPE = '@openreelio/';
 /**
  * Updates the version field of a JSON manifest, preserving 2-space indentation
  */
-function updateJsonVersion(filePath: string, newVersion: string): void {
+export function updateJsonVersion(filePath: string, newVersion: string): void {
   if (!validateSemver(newVersion)) {
     throw new Error(`Invalid semver: ${newVersion}`);
   }
@@ -196,13 +197,23 @@ export function updatePackageVersion(filePath: string, newVersion: string): void
   writeFileSync(filePath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
 }
 
-/** Manifest formats the sync script knows how to read and write */
-export type VersionFileKind = 'package-json' | 'cargo-toml' | 'tauri-conf';
+/**
+ * Manifest formats the sync script knows how to read and write.
+ *
+ * `json-version` is the generic case: any JSON manifest carrying a top-level
+ * `version` field and no lockstep dependency pins.
+ */
+export type VersionFileKind =
+  | 'package-json'
+  | 'cargo-toml'
+  | 'tauri-conf'
+  | 'json-version';
 
 const VERSION_READERS: Record<VersionFileKind, (filePath: string) => string> = {
   'package-json': readPackageVersion,
   'cargo-toml': readCargoVersion,
   'tauri-conf': readTauriVersion,
+  'json-version': readPackageVersion,
 };
 
 const VERSION_WRITERS: Record<
@@ -212,6 +223,7 @@ const VERSION_WRITERS: Record<
   'package-json': updatePackageVersion,
   'cargo-toml': updateCargoVersion,
   'tauri-conf': updateTauriVersion,
+  'json-version': updateJsonVersion,
 };
 
 /** A single file that must carry the same version as package.json */
@@ -348,7 +360,7 @@ export function syncVersions(config: VersionSyncConfig): SyncResult {
 /**
  * Gets the default sync configuration relative to project root
  */
-function getDefaultConfig(): VersionSyncConfig {
+export function getDefaultConfig(): VersionSyncConfig {
   const projectRoot = resolve(__dirname, '..');
   return {
     packageJson: resolve(projectRoot, 'package.json'),
@@ -380,6 +392,19 @@ function getDefaultConfig(): VersionSyncConfig {
         path: resolve(projectRoot, 'npm', 'openreelio-cli', 'package.json'),
         kind: 'package-json',
         optional: true,
+      },
+      {
+        // The Claude Code plugin manifest is published from the same tag, so a
+        // stale version here advertises the wrong CLI to every agent host.
+        file: 'distribution/skills/.claude-plugin/plugin.json',
+        path: resolve(
+          projectRoot,
+          'distribution',
+          'skills',
+          '.claude-plugin',
+          'plugin.json'
+        ),
+        kind: 'json-version',
       },
     ],
   };

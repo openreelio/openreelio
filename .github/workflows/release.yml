@@ -255,8 +255,10 @@ jobs:
           fi
 
           RELEASE_ID="$(jq -r '.id' release.json)"
+          # --paginate: a release carries more assets than one page holds, and a
+          # truncated listing would silently miss the asset being replaced.
           EXISTING_COMMIT_HISTORY_ASSET_ID="$(
-            gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}/assets" |
+            gh api --paginate "repos/${REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" |
               jq -r --arg name "$COMMIT_HISTORY_ASSET" '.[] | select(.name == $name) | .id' |
               head -n 1
           )"
@@ -463,8 +465,10 @@ jobs:
             ASSET_FILE="$1"
             CONTENT_TYPE="$2"
 
+            # --paginate: the listing is capped at one page, so without it a
+            # re-run would fail to spot (and delete) an existing asset.
             EXISTING_ASSET_ID="$(
-              gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}/assets" \
+              gh api --paginate "repos/${REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
                 --jq ".[] | select(.name == \"${ASSET_FILE}\") | .id" |
                 head -n 1
             )"
@@ -551,8 +555,25 @@ jobs:
             return response.json();
           }
 
+          // The release object embeds only the first page of assets. A full
+          // release carries more than that, and a truncated list would drop the
+          // installers or their .sig files, so page through the assets endpoint.
+          async function fetchAllAssets(releaseId) {
+            const perPage = 100;
+            const collected = [];
+            for (let page = 1; ; page += 1) {
+              const batch = await githubJson(
+                `/repos/${owner}/${repo}/releases/${releaseId}/assets?per_page=${perPage}&page=${page}`,
+              );
+              collected.push(...batch);
+              if (batch.length < perPage) {
+                return collected;
+              }
+            }
+          }
+
           const release = await githubJson(`/repos/${owner}/${repo}/releases/${process.env.RELEASE_ID}`);
-          const assets = release.assets;
+          const assets = await fetchAllAssets(process.env.RELEASE_ID);
           const releaseTag = process.env.RELEASE_TAG;
           const version = releaseTag.replace(/^v/, '');
           const notes = release.body || '';
@@ -651,8 +672,10 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          # --paginate: latest.json is uploaded after every installer, so it sits
+          # well past the first page of a full release.
           EXISTING_LATEST_ASSET_ID="$(
-            gh api "repos/${REPOSITORY}/releases/${RELEASE_ID}/assets" |
+            gh api --paginate "repos/${REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" |
               jq -r '.[] | select(.name == "latest.json") | .id' |
               head -n 1
           )"
