@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::context::QCContext;
-use super::violation::{QCViolation, Severity, ViolationFix};
+use super::violation::{merged_span_duration_sec, QCViolation, Severity, ViolationFix};
 use crate::core::captions::{CaptionPosition, CaptionStyle, CustomPosition, VerticalPosition};
 use crate::core::project::ProjectState;
 use crate::core::timeline::{Clip, Sequence, Track};
@@ -267,8 +267,14 @@ impl QCRule for BlackFrameRule {
     }
 
     fn skip_reason(&self, context: &QCContext) -> Option<String> {
-        if context.measurements.is_none() {
+        let Some(measurements) = context.measurements.as_ref() else {
             return Some("no rendered measurements available".to_string());
+        };
+        // A file with no picture reports no black frames, which is not the same
+        // as a picture that is never black. `render.missing_video` owns that
+        // finding; this check has nothing to look at.
+        if measurements.has_video_stream() == Some(false) {
+            return Some("the measured file has no video stream".to_string());
         }
         None
     }
@@ -717,14 +723,36 @@ impl RenderDurationRule {
     ///
     /// Container timestamps, a trailing partial GOP and audio priming all move
     /// the reported duration by fractions of a second without anything being
-    /// wrong.
+    /// wrong. This is an absolute limit on purpose: the sources of drift do not
+    /// grow with the running time, so scaling the tolerance to the length of
+    /// the program only buys a long render the right to lose whole minutes of
+    /// picture and still pass.
     const DEFAULT_TOLERANCE_SEC: f64 = 0.5;
 
-    /// Divergence tolerated as a fraction of the sequence duration
+    /// Frames of drift tolerated on sequences slow enough that 0.5s is tighter
+    /// than a couple of frames.
     ///
-    /// Long programs accumulate more container drift than short ones, so the
-    /// effective tolerance is whichever of the two limits is larger.
-    const DEFAULT_TOLERANCE_FRACTION: f64 = 0.02;
+    /// At 30 fps this is 0.067s and the absolute default dominates; at 2 fps a
+    /// single frame is half a second and a correct render would otherwise trip
+    /// the rule.
+    const DEFAULT_TOLERANCE_FRAMES: f64 = 2.0;
+
+    /// Returns the divergence tolerated for this run, in seconds.
+    ///
+    /// An explicitly configured `tolerance_sec` is honoured exactly — a caller
+    /// asking for frame accuracy gets frame accuracy, and no floor quietly
+    /// widens it back out. Without one, the default is the larger of the
+    /// absolute limit and a couple of frames.
+    fn tolerance_sec(config: &RuleConfig, context: &QCContext) -> f64 {
+        if let Some(configured) = config.get_param::<f64>("tolerance_sec") {
+            if configured.is_finite() {
+                return configured.abs();
+            }
+        }
+
+        let frame_allowance = Self::DEFAULT_TOLERANCE_FRAMES * context.frame_duration_sec();
+        Self::DEFAULT_TOLERANCE_SEC.max(frame_allowance)
+    }
 }
 
 #[async_trait]
@@ -784,11 +812,7 @@ impl QCRule for RenderDurationRule {
             return Ok(Vec::new());
         }
 
-        let tolerance_sec = config
-            .get_param::<f64>("tolerance_sec")
-            .unwrap_or(Self::DEFAULT_TOLERANCE_SEC)
-            .abs()
-            .max(sequence_duration * Self::DEFAULT_TOLERANCE_FRACTION);
+        let tolerance_sec = Self::tolerance_sec(config, context);
 
         let delta = file_duration - sequence_duration;
         if !delta.is_finite() || delta.abs() <= tolerance_sec {
@@ -834,6 +858,595 @@ impl QCRule for RenderDurationRule {
                 "toleranceSec",
                 (tolerance_sec * 1000.0).round() / 1000.0,
             )])
+    }
+}
+
+// ============================================================================
+// MissingVideoStreamRule - Checks the render carries the picture at all
+// ============================================================================
+
+/// Returns whether the export is expected to write a picture for this sequence.
+///
+/// Everything on a contributing video, overlay or caption track draws into the
+/// frame — including title cards and adjustment layers, which have no media of
+/// their own — so a single enabled clip on one of them is what makes a
+/// video-less render wrong.
+fn sequence_expects_picture(sequence: &Sequence) -> bool {
+    sequence
+        .tracks
+        .iter()
+        .filter(|track| track.contributes_to_output() && !track.is_audio())
+        .flat_map(|track| track.clips.iter())
+        .any(|clip| clip.enabled)
+}
+
+/// Counts the clips that put something on screen.
+fn picture_clip_count(sequence: &Sequence) -> usize {
+    sequence
+        .tracks
+        .iter()
+        .filter(|track| track.contributes_to_output() && !track.is_audio())
+        .flat_map(|track| track.clips.iter())
+        .filter(|clip| clip.enabled)
+        .count()
+}
+
+/// Rule that catches a render which never wrote the picture
+///
+/// Every other rendered rule reads a detection list, and an empty list is
+/// ambiguous: a file with no video stream reports no black frames and no
+/// freezes, exactly like a file whose picture is fine. Those rules are skipped
+/// once the stream table says there is nothing to look at, and this rule states
+/// the finding they can no longer make — a sequence full of picture that
+/// rendered to an audio-only file is broken output, however cleanly the audio
+/// measures.
+#[derive(Debug, Default)]
+pub struct MissingVideoStreamRule;
+
+impl MissingVideoStreamRule {
+    /// Creates a new MissingVideoStreamRule
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl QCRule for MissingVideoStreamRule {
+    fn name(&self) -> &str {
+        "MissingVideoStreamRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "render.missing_video"
+    }
+
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Rendered
+    }
+
+    fn description(&self) -> &str {
+        "Checks that a sequence with picture rendered a video stream"
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Error
+    }
+
+    fn skip_reason(&self, context: &QCContext) -> Option<String> {
+        let Some(measurements) = context.measurements.as_ref() else {
+            return Some("no rendered measurements available".to_string());
+        };
+        if measurements.streams.is_none() {
+            return Some("the measured file's stream table was not recorded".to_string());
+        }
+        None
+    }
+
+    async fn check(
+        &self,
+        sequence: &Sequence,
+        _state: &ProjectState,
+        config: &RuleConfig,
+        context: &QCContext,
+    ) -> CoreResult<Vec<QCViolation>> {
+        let Some(measurements) = context.measurements.as_ref() else {
+            // The engine reports this rule as skipped (see `skip_reason`).
+            return Ok(Vec::new());
+        };
+        let Some(has_video) = measurements.has_video_stream() else {
+            return Ok(Vec::new());
+        };
+
+        // A sequence that asks for no picture is correctly rendered without
+        // one; only the contradiction is a finding.
+        if has_video || !sequence_expects_picture(sequence) {
+            return Ok(Vec::new());
+        }
+
+        let severity = config.severity_override.unwrap_or(self.default_severity());
+        let clip_count = picture_clip_count(sequence);
+        let has_audio = measurements
+            .streams
+            .map(|streams| streams.has_audio)
+            .unwrap_or(false);
+
+        Ok(vec![QCViolation::new(
+            self.name(),
+            severity,
+            format!(
+                "Rendered file has no video stream, but the sequence puts {} clip(s) on screen",
+                clip_count
+            ),
+        )
+        .with_location(0.0, sequence.output_duration())
+        .with_details(
+            "The file carries no picture at all, so every picture check has nothing to grade and \
+             the deliverable is not the sequence. Re-render the sequence and verify again."
+                .to_string(),
+        )
+        .with_metric("pictureClipCount", clip_count)
+        .with_metric("hasVideoStream", false)
+        .with_metric("hasAudioStream", has_audio)])
+    }
+}
+
+// ============================================================================
+// RenderResolutionRule - Checks the rendered frame against the canvas
+// ============================================================================
+
+/// Rule that compares the rendered frame against the sequence canvas
+///
+/// The measurement pass probes the written frame size and rate; without a rule
+/// reading them, a 9:16 edit delivered as a 16:9 file measures perfectly and
+/// passes. The grades follow what the difference costs:
+///
+/// * a different frame **shape** is [`Severity::Error`] — the picture was
+///   cropped or padded into a frame the edit was never composed for
+/// * the same shape at a different **size** is [`Severity::Info`] — a proxy or
+///   a delivery size, reported so the choice is visible, never failed
+/// * a different **frame rate** is [`Severity::Warning`] — the motion cadence
+///   was resampled on the way out, which is a delivery defect rather than a
+///   broken picture
+#[derive(Debug, Default)]
+pub struct RenderResolutionRule;
+
+impl RenderResolutionRule {
+    /// Creates a new RenderResolutionRule
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Aspect divergence tolerated, as a fraction of the canvas aspect
+    ///
+    /// Wide enough to absorb the rounding in a 480p proxy of a 16:9 canvas
+    /// (854/480 against 1920/1080), far too narrow to absorb 4:3 against 16:9.
+    const DEFAULT_ASPECT_TOLERANCE: f64 = 0.02;
+
+    /// Frame-rate divergence tolerated, as a fraction of the sequence rate
+    ///
+    /// Absorbs the NTSC pairs a container reports interchangeably (29.97
+    /// against 30, 23.976 against 24) while still catching 25 against 30.
+    const DEFAULT_FPS_TOLERANCE: f64 = 0.02;
+}
+
+#[async_trait]
+impl QCRule for RenderResolutionRule {
+    fn name(&self) -> &str {
+        "RenderResolutionRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "render.resolution_mismatch"
+    }
+
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Rendered
+    }
+
+    fn description(&self) -> &str {
+        "Compares the rendered frame size, shape and rate against the sequence"
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Error
+    }
+
+    fn skip_reason(&self, context: &QCContext) -> Option<String> {
+        let Some(measurements) = context.measurements.as_ref() else {
+            return Some("no rendered measurements available".to_string());
+        };
+        if measurements.streams.is_none() {
+            return Some("the measured file's stream table was not recorded".to_string());
+        }
+        if measurements.video_stream().is_none() {
+            return Some("the measured file has no video stream".to_string());
+        }
+        None
+    }
+
+    async fn check(
+        &self,
+        sequence: &Sequence,
+        _state: &ProjectState,
+        config: &RuleConfig,
+        context: &QCContext,
+    ) -> CoreResult<Vec<QCViolation>> {
+        let Some(video) = context
+            .measurements
+            .as_ref()
+            .and_then(|measurements| measurements.video_stream())
+        else {
+            // The engine reports this rule as skipped (see `skip_reason`).
+            return Ok(Vec::new());
+        };
+
+        let aspect_tolerance = config
+            .get_param::<f64>("aspect_tolerance")
+            .unwrap_or(Self::DEFAULT_ASPECT_TOLERANCE)
+            .abs();
+        let fps_tolerance = config
+            .get_param::<f64>("fps_tolerance")
+            .unwrap_or(Self::DEFAULT_FPS_TOLERANCE)
+            .abs();
+
+        let program_end = sequence.output_duration();
+        let canvas_width = context.canvas_width;
+        let canvas_height = context.canvas_height;
+        let canvas_aspect = (canvas_width > 0 && canvas_height > 0)
+            .then(|| f64::from(canvas_width) / f64::from(canvas_height));
+
+        let mut violations = Vec::new();
+
+        if let (Some(canvas_aspect), Some(file_aspect)) = (canvas_aspect, video.aspect_ratio()) {
+            let divergence = (file_aspect - canvas_aspect).abs() / canvas_aspect;
+
+            if divergence > aspect_tolerance {
+                let severity = config.severity_override.unwrap_or(self.default_severity());
+
+                violations.push(
+                    QCViolation::new(
+                        self.name(),
+                        severity,
+                        format!(
+                            "Rendered frame is {}x{} ({:.2}:1), not the shape of the {}x{} canvas \
+                             ({:.2}:1)",
+                            video.width,
+                            video.height,
+                            file_aspect,
+                            canvas_width,
+                            canvas_height,
+                            canvas_aspect
+                        ),
+                    )
+                    .with_location(0.0, program_end)
+                    .with_details(
+                        "A frame in the wrong shape either crops the composition or pads it with \
+                         bars, so the file is not the edit that was composed. Re-render with the \
+                         sequence canvas, or change the canvas if the delivery shape is the one \
+                         that is wanted."
+                            .to_string(),
+                    )
+                    .with_metric("fileWidth", video.width)
+                    .with_metric("fileHeight", video.height)
+                    .with_metric("canvasWidth", canvas_width)
+                    .with_metric("canvasHeight", canvas_height)
+                    .with_metric("fileAspect", (file_aspect * 1000.0).round() / 1000.0)
+                    .with_metric("canvasAspect", (canvas_aspect * 1000.0).round() / 1000.0),
+                );
+            } else if video.width != canvas_width || video.height != canvas_height {
+                let severity = config.severity_override.unwrap_or(Severity::Info);
+
+                violations.push(
+                    QCViolation::new(
+                        self.name(),
+                        severity,
+                        format!(
+                            "Rendered at {}x{} for a {}x{} canvas",
+                            video.width, video.height, canvas_width, canvas_height
+                        ),
+                    )
+                    .with_location(0.0, program_end)
+                    .with_details(
+                        "The frame shape matches, so this is a scaled render — a proxy, or a \
+                         delivery size. Re-render at the canvas size if the full-resolution \
+                         master was the deliverable."
+                            .to_string(),
+                    )
+                    .with_metric("fileWidth", video.width)
+                    .with_metric("fileHeight", video.height)
+                    .with_metric("canvasWidth", canvas_width)
+                    .with_metric("canvasHeight", canvas_height),
+                );
+            }
+        }
+
+        if video.fps.is_finite() && video.fps > 0.0 {
+            let divergence = (video.fps - context.fps).abs() / context.fps;
+
+            if divergence > fps_tolerance {
+                let severity = config.severity_override.unwrap_or(Severity::Warning);
+
+                violations.push(
+                    QCViolation::new(
+                        self.name(),
+                        severity,
+                        format!(
+                            "Rendered at {:.3} fps for a {:.3} fps sequence",
+                            video.fps, context.fps
+                        ),
+                    )
+                    .with_location(0.0, program_end)
+                    .with_details(
+                        "Frame timing was resampled on the way out, so the cadence of motion in \
+                         the file is not the one the timeline was cut to."
+                            .to_string(),
+                    )
+                    .with_metric("fileFps", (video.fps * 1000.0).round() / 1000.0)
+                    .with_metric("sequenceFps", (context.fps * 1000.0).round() / 1000.0),
+                );
+            }
+        }
+
+        Ok(violations)
+    }
+}
+
+// ============================================================================
+// FrozenProgramRule - Checks the rendered picture actually moves
+// ============================================================================
+
+/// Rule that reports how much of the rendered program never moves
+///
+/// The measurement pass detects frozen stretches; without a rule reading them,
+/// a render that stalled on one frame — a dropped video chain, an encoder that
+/// repeated the first picture, a still written where the edit has motion —
+/// measures clean and passes.
+///
+/// Grading follows the same shape as the black rule: coverage of the program as
+/// a whole decides, not the length of any one stretch. Held frames, title cards
+/// and stills are all legitimately frozen, so a minority of frozen time is
+/// reported as [`Severity::Info`] without a verdict; a program that is frozen
+/// for most of its running time is [`Severity::Error`].
+///
+/// Freeze ranges are timed against the measured file while the program length
+/// comes from the timeline, so this is only meaningful for a render that covers
+/// the whole sequence from zero.
+#[derive(Debug, Default)]
+pub struct FrozenProgramRule;
+
+impl FrozenProgramRule {
+    /// Creates a new FrozenProgramRule
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Fraction of the program that may be frozen before the render is broken
+    const DEFAULT_FRACTION_ERROR: f64 = 0.5;
+}
+
+#[async_trait]
+impl QCRule for FrozenProgramRule {
+    fn name(&self) -> &str {
+        "FrozenProgramRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "render.frozen"
+    }
+
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Rendered
+    }
+
+    fn description(&self) -> &str {
+        "Reports how much of the rendered program shows a frozen picture"
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Error
+    }
+
+    fn skip_reason(&self, context: &QCContext) -> Option<String> {
+        let Some(measurements) = context.measurements.as_ref() else {
+            return Some("no rendered measurements available".to_string());
+        };
+        if measurements.has_video_stream() == Some(false) {
+            return Some("the measured file has no video stream".to_string());
+        }
+        None
+    }
+
+    async fn check(
+        &self,
+        sequence: &Sequence,
+        _state: &ProjectState,
+        config: &RuleConfig,
+        context: &QCContext,
+    ) -> CoreResult<Vec<QCViolation>> {
+        let Some(measurements) = context.measurements.as_ref() else {
+            // The engine reports this rule as skipped (see `skip_reason`).
+            return Ok(Vec::new());
+        };
+        if measurements.freeze_ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let program_duration = sequence.output_duration();
+        if !program_duration.is_finite() || program_duration <= 0.0 {
+            // An empty sequence has no program to freeze; `sequence.empty` owns
+            // that finding.
+            return Ok(Vec::new());
+        }
+
+        let error_fraction = config
+            .get_param::<f64>("frozen_fraction")
+            .unwrap_or(Self::DEFAULT_FRACTION_ERROR)
+            .abs();
+
+        // Overlapping detections must not add up past the program they are
+        // measured against, and a file longer than the timeline cannot freeze
+        // more of the program than the program has.
+        let frozen_sec =
+            merged_span_duration_sec(&measurements.freeze_ranges).min(program_duration);
+        let fraction = frozen_sec / program_duration;
+        let longest_sec = measurements
+            .freeze_ranges
+            .iter()
+            .map(|(start, end)| end - start)
+            .filter(|duration| duration.is_finite())
+            .fold(0.0_f64, f64::max);
+
+        let is_broken = fraction >= error_fraction;
+        let severity = config.severity_override.unwrap_or(if is_broken {
+            Severity::Error
+        } else {
+            Severity::Info
+        });
+
+        let details = if is_broken {
+            "The picture does not move for most of the running time, so the render stalled on a \
+             frame rather than writing the edit. Re-render the sequence and verify again."
+                .to_string()
+        } else {
+            "Held frames, stills and title cards are frozen by construction; inspect the timeline \
+             if none of those belong here."
+                .to_string()
+        };
+
+        Ok(vec![QCViolation::new(
+            self.name(),
+            severity,
+            format!(
+                "Frozen picture covers {:.0}% of the program ({:.2}s across {} range(s))",
+                fraction * 100.0,
+                frozen_sec,
+                measurements.freeze_ranges.len()
+            ),
+        )
+        .with_location(0.0, program_duration)
+        .with_details(details)
+        .with_metric("frozenSec", (frozen_sec * 1000.0).round() / 1000.0)
+        .with_metric("programFraction", (fraction * 1000.0).round() / 1000.0)
+        .with_metric("rangeCount", measurements.freeze_ranges.len())
+        .with_metric(
+            "longestFrozenSec",
+            (longest_sec * 1000.0).round() / 1000.0,
+        )])
+    }
+}
+
+// ============================================================================
+// AudioClippingRule - Checks the mix for flat-topped samples
+// ============================================================================
+
+/// Rule that reports the flatness the audio statistics pass measured
+///
+/// `astats` counts runs of samples pinned at the signal's extreme level, which
+/// is what a clipped or hard-limited master looks like from the outside. The
+/// peak rule reads how loud the program got; nothing else read whether the
+/// waveform survived getting there, so a render clipped flat measured clean and
+/// passed.
+///
+/// Findings stay at [`Severity::Warning`]: a deliberately limited master is
+/// flat by design, and only a listener can tell that apart from damage.
+/// `audio.peak` keeps the objectively broken half — a signal over the ceiling.
+#[derive(Debug, Default)]
+pub struct AudioClippingRule;
+
+impl AudioClippingRule {
+    /// Creates a new AudioClippingRule
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Flatness above which the runs stop looking like ordinary programme peaks
+    ///
+    /// `astats` reports flatness in dB over the ratio of flat runs to samples
+    /// at the extremes, so a healthy mix sits at or near zero.
+    const DEFAULT_FLAT_FACTOR: f64 = 10.0;
+}
+
+#[async_trait]
+impl QCRule for AudioClippingRule {
+    fn name(&self) -> &str {
+        "AudioClippingRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "audio.clipping"
+    }
+
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Rendered
+    }
+
+    fn description(&self) -> &str {
+        "Reports flat-topped samples that indicate a clipped or limited master"
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Warning
+    }
+
+    fn skip_reason(&self, context: &QCContext) -> Option<String> {
+        let Some(measurements) = context.measurements.as_ref() else {
+            return Some("no rendered measurements available".to_string());
+        };
+        if measurements.flat_factor.is_none() {
+            return Some("no audio flatness measurement available".to_string());
+        }
+        None
+    }
+
+    async fn check(
+        &self,
+        sequence: &Sequence,
+        _state: &ProjectState,
+        config: &RuleConfig,
+        context: &QCContext,
+    ) -> CoreResult<Vec<QCViolation>> {
+        let Some(measurements) = context.measurements.as_ref() else {
+            // The engine reports this rule as skipped (see `skip_reason`).
+            return Ok(Vec::new());
+        };
+        let Some(flat_factor) = measurements.flat_factor else {
+            return Ok(Vec::new());
+        };
+
+        let threshold = config
+            .get_param::<f64>("flat_factor")
+            .unwrap_or(Self::DEFAULT_FLAT_FACTOR);
+
+        if !flat_factor.is_finite() || flat_factor <= threshold {
+            return Ok(Vec::new());
+        }
+
+        let severity = config.severity_override.unwrap_or(self.default_severity());
+        let measured_peak = measurements.true_peak_dbtp.or(measurements.sample_peak_db);
+
+        let mut violation = QCViolation::new(
+            self.name(),
+            severity,
+            format!(
+                "Audio flatness factor is {:.1}, above the {:.1} threshold",
+                flat_factor, threshold
+            ),
+        )
+        .with_location(0.0, sequence.output_duration())
+        .with_details(
+            "Runs of samples sit pinned at the signal's extreme level, which is how clipping and \
+             hard limiting look from outside. Check the mix before delivery; a master limited on \
+             purpose reads the same way."
+                .to_string(),
+        )
+        .with_metric("flatFactor", (flat_factor * 1000.0).round() / 1000.0)
+        .with_metric("thresholdFlatFactor", threshold);
+
+        if let Some(peak) = measured_peak {
+            violation = violation.with_metric("measuredPeakDb", (peak * 100.0).round() / 100.0);
+        }
+
+        Ok(vec![violation])
     }
 }
 
@@ -1525,7 +2138,7 @@ impl QCRule for DurationRule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::qc::context::RenderMeasurements;
+    use crate::core::qc::context::{MeasuredStreams, MeasuredVideoStream, RenderMeasurements};
     use crate::core::timeline::{SequenceFormat, Track};
 
     // ========================================================================
@@ -2224,9 +2837,10 @@ mod tests {
     async fn test_render_duration_rule_should_tolerate_small_divergence() {
         let sequence = sequence_with_video_clip(0.0, 60.0);
         let state = state_with_video_asset("asset_001", Some(60.0));
-        // 0.9s is under the 2% (1.2s) tolerance a 60s program allows.
+        // 0.3s is the scale container timestamps and audio priming move a
+        // correct render by, and is under the 0.5s default.
         let context =
-            QCContext::from_sequence(&sequence).with_measurements(measurements_of_length(60.9));
+            QCContext::from_sequence(&sequence).with_measurements(measurements_of_length(60.3));
 
         let violations = RenderDurationRule::new()
             .check(&sequence, &state, &RuleConfig::default(), &context)
@@ -2234,6 +2848,535 @@ mod tests {
             .expect("rule runs");
 
         assert!(violations.is_empty());
+    }
+
+    /// Feature: Render/sequence duration match
+    /// Scenario: should catch a long render that lost seconds of program
+    ///
+    /// Regression: the tolerance was floored at 2% of the sequence, so the
+    /// longer the program the more of it a render could silently drop. A
+    /// fifty-minute export was allowed to lose a full minute and still pass.
+    #[tokio::test]
+    async fn test_render_duration_rule_should_catch_a_long_render_missing_five_seconds() {
+        const LONG_SEQUENCE_SEC: f64 = 3_000.0;
+
+        let sequence = sequence_with_video_clip(0.0, LONG_SEQUENCE_SEC);
+        let state = state_with_video_asset("asset_001", Some(LONG_SEQUENCE_SEC));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_of_length(LONG_SEQUENCE_SEC - 5.0));
+
+        let violations = RenderDurationRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(
+            violations.len(),
+            1,
+            "five seconds of missing program stays missing however long the program is"
+        );
+        assert_eq!(violations[0].severity, Severity::Error);
+        assert_eq!(violations[0].metrics["deltaSec"], -5.0);
+        assert_eq!(
+            violations[0].metrics["toleranceSec"], 0.5,
+            "the tolerance must not scale with the length of the sequence"
+        );
+    }
+
+    /// Feature: Render/sequence duration match
+    /// Scenario: should honour an explicitly configured tolerance exactly
+    #[tokio::test]
+    async fn test_render_duration_rule_should_honour_an_explicit_tolerance() {
+        let sequence = sequence_with_video_clip(0.0, 3_000.0);
+        let state = state_with_video_asset("asset_001", Some(3_000.0));
+
+        let mut config = RuleConfig::default();
+        config.set_param("tolerance_sec", 0.05);
+
+        // Half a second used to sit inside both the absolute default and the
+        // 2% floor; a caller asking for frame accuracy gets frame accuracy.
+        let tight =
+            QCContext::from_sequence(&sequence).with_measurements(measurements_of_length(2_999.5));
+        let violations = RenderDurationRule::new()
+            .check(&sequence, &state, &config, &tight)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].metrics["toleranceSec"], 0.05);
+
+        // The same configuration still passes a render inside the window it
+        // asked for.
+        let within =
+            QCContext::from_sequence(&sequence).with_measurements(measurements_of_length(3_000.01));
+        let violations = RenderDurationRule::new()
+            .check(&sequence, &state, &config, &within)
+            .await
+            .expect("rule runs");
+
+        assert!(violations.is_empty());
+    }
+
+    /// Feature: Render/sequence duration match
+    /// Scenario: should widen the default to a couple of frames on a slow sequence
+    #[tokio::test]
+    async fn test_render_duration_rule_should_allow_two_frames_on_a_slow_sequence() {
+        let mut sequence = sequence_with_video_clip(0.0, 60.0);
+        // Two frames at 2 fps is a full second, longer than the absolute floor.
+        sequence.format.fps.num = 2;
+        sequence.format.fps.den = 1;
+
+        let state = state_with_video_asset("asset_001", Some(60.0));
+        let context =
+            QCContext::from_sequence(&sequence).with_measurements(measurements_of_length(60.8));
+
+        let violations = RenderDurationRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(
+            violations.is_empty(),
+            "a render inside two frames of the sequence is the deliverable: {violations:?}"
+        );
+    }
+
+    // ========================================================================
+    // MissingVideoStreamRule Tests
+    // ========================================================================
+
+    /// Measurements from a file carrying the given streams.
+    fn measurements_with_streams(
+        video: Option<MeasuredVideoStream>,
+        has_audio: bool,
+        file_duration_sec: f64,
+    ) -> RenderMeasurements {
+        RenderMeasurements {
+            file_duration_sec: Some(file_duration_sec),
+            streams: Some(MeasuredStreams { video, has_audio }),
+            ..Default::default()
+        }
+    }
+
+    fn stream_1080p() -> MeasuredVideoStream {
+        MeasuredVideoStream {
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+        }
+    }
+
+    #[test]
+    fn test_missing_video_stream_rule_properties() {
+        let rule = MissingVideoStreamRule::new();
+        assert_eq!(rule.check_id(), "render.missing_video");
+        assert_eq!(rule.category(), CheckCategory::Rendered);
+        assert_eq!(rule.default_severity(), Severity::Error);
+    }
+
+    /// Feature: Rendered stream presence
+    /// Scenario: should error when a sequence full of picture rendered no video
+    ///
+    /// Regression: every picture check reads a detection list, and a file with
+    /// no video stream produces empty lists — indistinguishable from a clean
+    /// picture, so an audio-only render of a video sequence passed.
+    #[tokio::test]
+    async fn test_missing_video_stream_rule_should_error_on_an_audio_only_render() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_streams(None, true, 30.0));
+
+        let violations = MissingVideoStreamRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Error);
+        assert_eq!(violations[0].metrics["pictureClipCount"], 1);
+        assert_eq!(violations[0].metrics["hasVideoStream"], false);
+        assert!(violations[0].suggested_fix.is_none());
+    }
+
+    /// Feature: Rendered stream presence
+    /// Scenario: should pass a render that carries the picture
+    #[tokio::test]
+    async fn test_missing_video_stream_rule_should_pass_when_video_was_written() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_streams(Some(stream_1080p()), true, 30.0));
+
+        let violations = MissingVideoStreamRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(violations.is_empty());
+    }
+
+    /// Feature: Rendered stream presence
+    /// Scenario: should say nothing about a sequence that asks for no picture
+    #[tokio::test]
+    async fn test_missing_video_stream_rule_should_ignore_an_audio_only_sequence() {
+        let mut sequence = Sequence::new("Audio only", SequenceFormat::youtube_1080());
+        let mut track = Track::new_audio("A1");
+        track.add_clip(Clip::with_range("asset_001", 0.0, 30.0));
+        sequence.add_track(track);
+
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_streams(None, true, 30.0));
+
+        let violations = MissingVideoStreamRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(violations.is_empty());
+    }
+
+    /// Feature: Rendered stream presence
+    /// Scenario: should be skipped rather than passed without a stream table
+    #[test]
+    fn test_missing_video_stream_rule_should_skip_without_a_stream_table() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let rule = MissingVideoStreamRule::new();
+
+        assert!(rule
+            .skip_reason(&QCContext::from_sequence(&sequence))
+            .is_some());
+        assert!(rule
+            .skip_reason(
+                &QCContext::from_sequence(&sequence)
+                    .with_measurements(RenderMeasurements::default())
+            )
+            .is_some());
+    }
+
+    /// Feature: Rendered stream presence
+    /// Scenario: should stop the black check from passing over a picture-less file
+    #[test]
+    fn test_black_frame_rule_should_skip_when_the_file_has_no_video_stream() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_streams(None, true, 30.0));
+
+        let reason = BlackFrameRule::new()
+            .skip_reason(&context)
+            .expect("a file with no picture leaves the black check nothing to grade");
+        assert!(reason.contains("no video stream"), "got: {reason}");
+    }
+
+    // ========================================================================
+    // RenderResolutionRule Tests
+    // ========================================================================
+
+    #[test]
+    fn test_render_resolution_rule_properties() {
+        let rule = RenderResolutionRule::new();
+        assert_eq!(rule.check_id(), "render.resolution_mismatch");
+        assert_eq!(rule.category(), CheckCategory::Rendered);
+        assert_eq!(rule.default_severity(), Severity::Error);
+    }
+
+    /// Feature: Rendered frame format
+    /// Scenario: should error when the render is a different shape than the canvas
+    #[tokio::test]
+    async fn test_render_resolution_rule_should_error_on_a_landscape_render_of_a_vertical_edit() {
+        let mut sequence = sequence_with_video_clip(0.0, 30.0);
+        sequence.format.canvas.width = 1080;
+        sequence.format.canvas.height = 1920;
+
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_streams(Some(stream_1080p()), true, 30.0));
+
+        let violations = RenderResolutionRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].severity,
+            Severity::Error,
+            "a vertical edit delivered landscape is cropped or barred, not the edit"
+        );
+        assert_eq!(violations[0].metrics["fileWidth"], 1920);
+        assert_eq!(violations[0].metrics["canvasWidth"], 1080);
+    }
+
+    /// Feature: Rendered frame format
+    /// Scenario: should report a proxy-sized render without failing it
+    #[tokio::test]
+    async fn test_render_resolution_rule_should_report_a_scaled_render_as_informational() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let proxy = MeasuredVideoStream {
+            width: 854,
+            height: 480,
+            fps: 30.0,
+        };
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_streams(Some(proxy), true, 30.0));
+
+        let violations = RenderResolutionRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].severity,
+            Severity::Info,
+            "a 480p proxy of a 16:9 canvas is a deliberate size, not a broken frame"
+        );
+    }
+
+    /// Feature: Rendered frame format
+    /// Scenario: should pass a render written at the canvas size
+    #[tokio::test]
+    async fn test_render_resolution_rule_should_pass_a_canvas_sized_render() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_streams(Some(stream_1080p()), true, 30.0));
+
+        let violations = RenderResolutionRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(violations.is_empty(), "got: {violations:?}");
+    }
+
+    /// Feature: Rendered frame format
+    /// Scenario: should warn when the frame rate was resampled on the way out
+    #[tokio::test]
+    async fn test_render_resolution_rule_should_warn_on_a_resampled_frame_rate() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let slow = MeasuredVideoStream {
+            width: 1920,
+            height: 1080,
+            fps: 25.0,
+        };
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_streams(Some(slow), true, 30.0));
+
+        let violations = RenderResolutionRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Warning);
+        assert_eq!(violations[0].metrics["fileFps"], 25.0);
+    }
+
+    /// Feature: Rendered frame format
+    /// Scenario: should not mistake NTSC rounding for a resampled rate
+    #[tokio::test]
+    async fn test_render_resolution_rule_should_tolerate_ntsc_frame_rates() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let ntsc = MeasuredVideoStream {
+            width: 1920,
+            height: 1080,
+            fps: 29.97,
+        };
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_streams(Some(ntsc), true, 30.0));
+
+        let violations = RenderResolutionRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(violations.is_empty(), "got: {violations:?}");
+    }
+
+    // ========================================================================
+    // FrozenProgramRule Tests
+    // ========================================================================
+
+    #[test]
+    fn test_frozen_program_rule_properties() {
+        let rule = FrozenProgramRule::new();
+        assert_eq!(rule.check_id(), "render.frozen");
+        assert_eq!(rule.category(), CheckCategory::Rendered);
+        assert_eq!(rule.default_severity(), Severity::Error);
+    }
+
+    fn measurements_with_freeze_ranges(ranges: Vec<(f64, f64)>) -> RenderMeasurements {
+        RenderMeasurements {
+            freeze_ranges: ranges,
+            streams: Some(MeasuredStreams {
+                video: Some(stream_1080p()),
+                has_audio: true,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Feature: Frozen program detection
+    /// Scenario: should error when the picture never moves
+    ///
+    /// Regression: freezes were measured and no rule read them, so a render
+    /// that stalled on a single frame passed every check.
+    #[tokio::test]
+    async fn test_frozen_program_rule_should_error_when_the_program_never_moves() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_freeze_ranges(vec![(0.0, 30.0)]));
+
+        let violations = FrozenProgramRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Error);
+        assert_eq!(violations[0].metrics["programFraction"], 1.0);
+        assert_eq!(violations[0].metrics["frozenSec"], 30.0);
+    }
+
+    /// Feature: Frozen program detection
+    /// Scenario: should error when separate frozen stretches cover the program
+    #[tokio::test]
+    async fn test_frozen_program_rule_should_add_up_separate_frozen_stretches() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        // Three stretches of a fifth of the program each: none alarming alone.
+        let context = QCContext::from_sequence(&sequence).with_measurements(
+            measurements_with_freeze_ranges(vec![(0.0, 6.0), (10.0, 16.0), (20.0, 26.0)]),
+        );
+
+        let violations = FrozenProgramRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Error);
+        assert_eq!(violations[0].metrics["programFraction"], 0.6);
+    }
+
+    /// Feature: Frozen program detection
+    /// Scenario: should leave a held frame informational
+    #[tokio::test]
+    async fn test_frozen_program_rule_should_leave_a_held_frame_informational() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_freeze_ranges(vec![(4.0, 7.0)]));
+
+        let violations = FrozenProgramRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].severity,
+            Severity::Info,
+            "a three-second hold is a title card, not a broken render"
+        );
+    }
+
+    /// Feature: Frozen program detection
+    /// Scenario: should stay quiet on a moving picture
+    #[tokio::test]
+    async fn test_frozen_program_rule_should_pass_a_moving_picture() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_freeze_ranges(Vec::new()));
+
+        let violations = FrozenProgramRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(violations.is_empty());
+    }
+
+    // ========================================================================
+    // AudioClippingRule Tests
+    // ========================================================================
+
+    #[test]
+    fn test_audio_clipping_rule_properties() {
+        let rule = AudioClippingRule::new();
+        assert_eq!(rule.check_id(), "audio.clipping");
+        assert_eq!(rule.category(), CheckCategory::Rendered);
+        assert_eq!(rule.default_severity(), Severity::Warning);
+    }
+
+    /// Feature: Audio flatness
+    /// Scenario: should warn when the master is flat-topped
+    ///
+    /// Regression: `astats` flatness was measured and no rule read it, so a
+    /// render clipped flat measured clean.
+    #[tokio::test]
+    async fn test_audio_clipping_rule_should_warn_on_flat_topped_samples() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let context = QCContext::from_sequence(&sequence).with_measurements(RenderMeasurements {
+            flat_factor: Some(24.0),
+            true_peak_dbtp: Some(-0.1),
+            ..Default::default()
+        });
+
+        let violations = AudioClippingRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Warning);
+        assert_eq!(violations[0].metrics["flatFactor"], 24.0);
+        assert_eq!(violations[0].metrics["measuredPeakDb"], -0.1);
+    }
+
+    /// Feature: Audio flatness
+    /// Scenario: should stay quiet on an unclipped mix
+    #[tokio::test]
+    async fn test_audio_clipping_rule_should_pass_an_unclipped_mix() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let state = state_with_video_asset("asset_001", Some(30.0));
+        let context = QCContext::from_sequence(&sequence).with_measurements(RenderMeasurements {
+            flat_factor: Some(0.0),
+            ..Default::default()
+        });
+
+        let violations = AudioClippingRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(violations.is_empty());
+    }
+
+    /// Feature: Audio flatness
+    /// Scenario: should be skipped rather than passed without a measurement
+    #[test]
+    fn test_audio_clipping_rule_should_skip_without_a_flatness_measurement() {
+        let sequence = sequence_with_video_clip(0.0, 30.0);
+        let rule = AudioClippingRule::new();
+
+        assert!(rule
+            .skip_reason(&QCContext::from_sequence(&sequence))
+            .is_some());
+        assert!(rule
+            .skip_reason(
+                &QCContext::from_sequence(&sequence)
+                    .with_measurements(RenderMeasurements::default())
+            )
+            .is_some());
     }
 
     /// Feature: Render/sequence duration match

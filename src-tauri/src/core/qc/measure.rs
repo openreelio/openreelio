@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::context::RenderMeasurements;
+use super::context::{MeasuredStreams, MeasuredVideoStream, RenderMeasurements};
 use crate::core::analysis::audio::parse_silence_regions;
 use crate::core::ffmpeg::FFmpegRunner;
 use crate::core::{CoreError, CoreResult};
@@ -188,6 +188,17 @@ pub async fn measure_rendered_file_detailed(
     // than claiming a zero-length file.
     let mut measurements = RenderMeasurements {
         file_duration_sec: (duration_sec.is_finite() && duration_sec > 0.0).then_some(duration_sec),
+        // Recorded even when a chain could not run: "this file has no picture"
+        // is a finding in its own right, and only the stream table can tell it
+        // apart from "the picture was fine".
+        streams: Some(MeasuredStreams {
+            video: media.video.as_ref().map(|video| MeasuredVideoStream {
+                width: video.width,
+                height: video.height,
+                fps: video.fps,
+            }),
+            has_audio,
+        }),
         ..Default::default()
     };
 

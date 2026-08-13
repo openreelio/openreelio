@@ -61,6 +61,9 @@ const LOUDNESS_CHECK_ID: &str = "audio.loudness";
 /// Check ID of the peak rule, wired to `--max-true-peak`.
 const PEAK_CHECK_ID: &str = "audio.peak";
 
+/// Check ID of the render-length rule, wired to `--duration-tolerance-sec`.
+const DURATION_CHECK_ID: &str = "render.duration_mismatch";
+
 /// Arguments for `verify`.
 #[derive(Args)]
 pub struct VerifyArgs {
@@ -95,6 +98,11 @@ pub struct VerifyArgs {
     /// Maximum acceptable true peak in dBTP
     #[arg(long)]
     pub max_true_peak: Option<f64>,
+
+    /// Divergence tolerated between the rendered file and the sequence, in
+    /// seconds; honoured exactly, so a tighter value really is tighter
+    #[arg(long)]
+    pub duration_tolerance_sec: Option<f64>,
 
     /// Lowest severity that fails the run: info, warning, error, critical
     #[arg(long, default_value = "error")]
@@ -362,6 +370,21 @@ fn build_engine_config(engine: &QCEngine, args: &VerifyArgs) -> anyhow::Result<Q
             ));
         }
         set_param(engine, &mut config, PEAK_CHECK_ID, "peak_db", max_true_peak);
+    }
+
+    if let Some(tolerance_sec) = args.duration_tolerance_sec {
+        if !tolerance_sec.is_finite() || tolerance_sec < 0.0 {
+            return Err(anyhow::anyhow!(
+                "Invalid value for --duration-tolerance-sec: must be a finite, non-negative number"
+            ));
+        }
+        set_param(
+            engine,
+            &mut config,
+            DURATION_CHECK_ID,
+            "tolerance_sec",
+            tolerance_sec,
+        );
     }
 
     Ok(config)
@@ -716,6 +739,13 @@ fn build_measurements(measurement: Option<&MeasurementReport>, file: Option<&Pat
         "durationSec": report.duration_sec,
         "videoMeasured": report.video_measured,
         "audioMeasured": report.audio_measured,
+        // The stream table itself, so "no picture in the file" is readable
+        // rather than inferred from an empty detection list.
+        "videoStream": measurements.video_stream().map(|video| serde_json::json!({
+            "width": video.width,
+            "height": video.height,
+            "fps": video.fps,
+        })),
         "blackRanges": spans_json(&measurements.black_ranges),
         "freezeRanges": spans_json(&measurements.freeze_ranges),
         "silenceRanges": spans_json(&measurements.silence_ranges),
@@ -834,6 +864,7 @@ mod tests {
             skip: None,
             target_lufs: None,
             max_true_peak: None,
+            duration_tolerance_sec: None,
             fail_on: "error".to_string(),
             timeout_sec: 600,
             json_pretty: false,
@@ -864,6 +895,7 @@ mod tests {
             skip: None,
             target_lufs: None,
             max_true_peak: None,
+            duration_tolerance_sec: None,
             fail_on: "error".to_string(),
             timeout_sec: 600,
             json_pretty: false,
@@ -888,6 +920,7 @@ mod tests {
             skip: Some(vec!["timeline.gap".to_string()]),
             target_lufs: None,
             max_true_peak: None,
+            duration_tolerance_sec: None,
             fail_on: "error".to_string(),
             timeout_sec: 600,
             json_pretty: false,
@@ -910,6 +943,7 @@ mod tests {
             skip: None,
             target_lufs: Some(-16.0),
             max_true_peak: Some(-2.0),
+            duration_tolerance_sec: None,
             fail_on: "error".to_string(),
             timeout_sec: 600,
             json_pretty: false,
@@ -936,6 +970,43 @@ mod tests {
                 .get_param::<f64>("peak_db"),
             Some(-2.0)
         );
+    }
+
+    /// Feature: Render-length tolerance
+    /// Scenario: should hand an explicit tolerance to the rule unchanged
+    #[test]
+    fn test_duration_tolerance_should_reach_the_rule_configuration() {
+        let engine = QCEngine::new();
+        let mut args = VerifyArgs {
+            path: PathBuf::from("."),
+            sequence: None,
+            file: None,
+            structural_only: false,
+            checks: None,
+            skip: None,
+            target_lufs: None,
+            max_true_peak: None,
+            duration_tolerance_sec: Some(0.04),
+            fail_on: "error".to_string(),
+            timeout_sec: 600,
+            json_pretty: false,
+        };
+
+        let config = build_engine_config(&engine, &args).expect("config builds");
+        let rule = engine
+            .get_rule_by_check_id(DURATION_CHECK_ID)
+            .expect("render-length rule registered");
+
+        assert_eq!(
+            config
+                .get_rule_config(rule.name())
+                .get_param::<f64>("tolerance_sec"),
+            Some(0.04),
+            "a tolerance the caller asked for must not be widened on the way in"
+        );
+
+        args.duration_tolerance_sec = Some(-1.0);
+        assert!(build_engine_config(&engine, &args).is_err());
     }
 
     /// Feature: Check status reporting
@@ -1058,6 +1129,7 @@ mod tests {
             skip: None,
             target_lufs: None,
             max_true_peak: None,
+            duration_tolerance_sec: None,
             fail_on: "error".to_string(),
             timeout_sec: 600,
             json_pretty: false,

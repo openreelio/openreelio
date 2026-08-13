@@ -3673,6 +3673,305 @@ fn test_render_and_verify_agree_when_the_timeline_ends_on_a_muted_track() {
     );
 }
 
+// =============================================================================
+// verify: objectively broken renders
+// =============================================================================
+//
+// Every fixture below is a deliverable that measures perfectly and is still
+// wrong: no picture at all, the wrong frame shape, a picture that never moves,
+// a program that is mostly black. Our own export pipeline cannot produce them,
+// so they are synthesised with FFmpeg and handed to the real `verify` binary.
+// Each one used to come back `"status": "ok", "passed": true`, exit 0.
+//
+// The project side stays FFmpeg-free: the dummy asset yields a 10s clip, so
+// every fixture is 10s and the render-length check has nothing to say.
+
+/// Length of every broken-render fixture, matching the dummy clip on the
+/// timeline so `render.duration_mismatch` stays out of the way.
+const BROKEN_RENDER_SECONDS: u32 = 10;
+
+/// Writes a media file with FFmpeg, returning `false` when it cannot be made.
+///
+/// Returning rather than failing keeps these guards skippable on a machine
+/// without a media toolchain, exactly like the render tests above.
+fn synthesize_media(path: &std::path::Path, args: &[&str], encode_video: bool) -> bool {
+    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+        eprintln!("Skipping broken-render test: ffmpeg unavailable");
+        return false;
+    };
+
+    let mut command = Command::new(&ffmpeg_path);
+    command.arg("-y").args(args);
+
+    if encode_video {
+        let Some(encoder) = preferred_video_encoder(&ffmpeg_path) else {
+            eprintln!("Skipping broken-render test: ffmpeg lacks a supported video encoder");
+            return false;
+        };
+        command.args(["-c:v", encoder]);
+        if encoder == "libx264" {
+            command.args(["-pix_fmt", "yuv420p"]);
+        }
+    }
+
+    let status = command
+        .arg(path)
+        .status()
+        .expect("Failed to run ffmpeg for a broken-render fixture");
+    if !status.success() {
+        eprintln!("Skipping broken-render test: ffmpeg could not write {path:?}");
+    }
+    status.success()
+}
+
+/// A render that dropped the video stream: an attenuated tone and nothing else.
+fn create_audio_only_render(path: &std::path::Path) -> bool {
+    synthesize_media(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=440:sample_rate=44100:duration={BROKEN_RENDER_SECONDS}"),
+            "-af",
+            "volume=0.25",
+        ],
+        false,
+    )
+}
+
+/// A render in the wrong frame shape: a vertical picture for a 16:9 canvas.
+fn create_vertical_render(path: &std::path::Path) -> bool {
+    synthesize_media(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size=480x854:rate=30:duration={BROKEN_RENDER_SECONDS}"),
+        ],
+        true,
+    )
+}
+
+/// A render that stalled: one grey frame held for the whole program.
+///
+/// Grey rather than black so the finding under test is the frozen picture and
+/// not the black one.
+fn create_frozen_render(path: &std::path::Path) -> bool {
+    synthesize_media(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("color=c=gray:s=320x180:r=30:d={BROKEN_RENDER_SECONDS}"),
+        ],
+        true,
+    )
+}
+
+/// A render that is black for three separate fifths of its length.
+///
+/// Sixty per cent of the program is missing picture while no single stretch
+/// covers half of it — the shape that used to be graded as three harmless
+/// fades.
+fn create_intermittently_black_render(path: &std::path::Path) -> bool {
+    const BLACK: &str = "color=c=black:s=320x180:r=30:d=2";
+    const WHITE: &str = "color=c=white:s=320x180:r=30:d=2";
+
+    synthesize_media(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            BLACK,
+            "-f",
+            "lavfi",
+            "-i",
+            WHITE,
+            "-f",
+            "lavfi",
+            "-i",
+            BLACK,
+            "-f",
+            "lavfi",
+            "-i",
+            WHITE,
+            "-f",
+            "lavfi",
+            "-i",
+            BLACK,
+            "-filter_complex",
+            "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0[v]",
+            "-map",
+            "[v]",
+        ],
+        true,
+    )
+}
+
+/// Runs `verify --file` over a broken render and returns the parsed report.
+fn verify_broken_render(path: &str, render: &std::path::Path) -> (serde_json::Value, i32) {
+    let (stdout, stderr, code) =
+        run_cli_exit(&["verify", "--path", path, "--file", render.to_str().unwrap()]);
+    assert_ne!(
+        code, 2,
+        "verify itself must run.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+    (report, code)
+}
+
+/// Feature: Verify against a rendered file
+/// Scenario: should fail a render that carries no picture at all
+#[test]
+fn test_verify_fails_a_render_with_no_video_stream() {
+    let (dir, path, _asset_id, _track_id) =
+        create_project_with_placed_dummy("verify_missing_video");
+
+    let render_path = dir.path().join("audio-only.wav");
+    if !create_audio_only_render(&render_path) {
+        return;
+    }
+
+    let (report, code) = verify_broken_render(&path, &render_path);
+    assert_eq!(
+        code, 1,
+        "a video sequence rendered without video is not the deliverable: {report}"
+    );
+    assert_eq!(report["passed"], false);
+
+    let missing = find_check(&report, "render.missing_video");
+    assert_eq!(missing["status"], "failed");
+    assert_eq!(missing["severity"], "error");
+    assert_eq!(missing["metrics"]["pictureClipCount"], 1);
+    assert_eq!(missing["metrics"]["hasAudioStream"], true);
+
+    // The picture checks must say they had nothing to look at rather than
+    // report the picture they never saw as clean.
+    for picture_check in ["render.black_frames", "render.frozen"] {
+        let check = find_check(&report, picture_check);
+        assert_eq!(
+            check["status"], "skipped",
+            "{picture_check} must not pass over a file with no picture: {check}"
+        );
+        assert_eq!(check["passed"], false);
+    }
+
+    assert!(
+        report["measurements"]["videoStream"].is_null(),
+        "the stream table must show the missing picture: {}",
+        report["measurements"]
+    );
+}
+
+/// Feature: Verify against a rendered file
+/// Scenario: should fail a render delivered in the wrong frame shape
+#[test]
+fn test_verify_fails_a_render_in_the_wrong_aspect_ratio() {
+    let (dir, path, _asset_id, _track_id) = create_project_with_placed_dummy("verify_wrong_aspect");
+
+    let render_path = dir.path().join("vertical.mp4");
+    if !create_vertical_render(&render_path) {
+        return;
+    }
+
+    let (report, code) = verify_broken_render(&path, &render_path);
+    assert_eq!(
+        code, 1,
+        "a vertical render of a 16:9 sequence is cropped or barred, not the edit: {report}"
+    );
+
+    let resolution = find_check(&report, "render.resolution_mismatch");
+    assert_eq!(resolution["status"], "failed");
+    assert_eq!(resolution["severity"], "error");
+
+    let shape = &resolution["violations"][0];
+    assert_eq!(shape["severity"], "error");
+    assert_eq!(shape["metrics"]["fileWidth"], 480);
+    assert_eq!(shape["metrics"]["fileHeight"], 854);
+    assert_eq!(shape["metrics"]["canvasWidth"], 1920);
+
+    assert_eq!(report["measurements"]["videoStream"]["width"], 480);
+}
+
+/// Feature: Verify against a rendered file
+/// Scenario: should fail a render whose picture never moves
+#[test]
+fn test_verify_fails_a_frozen_render() {
+    let (dir, path, _asset_id, _track_id) = create_project_with_placed_dummy("verify_frozen");
+
+    let render_path = dir.path().join("frozen.mp4");
+    if !create_frozen_render(&render_path) {
+        return;
+    }
+
+    let (report, code) = verify_broken_render(&path, &render_path);
+    assert_eq!(
+        code, 1,
+        "a program that never moves is a stalled render: {report}"
+    );
+
+    let frozen = find_check(&report, "render.frozen");
+    assert_eq!(frozen["status"], "failed");
+    assert_eq!(frozen["severity"], "error");
+
+    let finding = &frozen["violations"][0];
+    assert!(
+        finding["metrics"]["programFraction"].as_f64().unwrap() >= 0.5,
+        "expected most of the program to be frozen: {finding}"
+    );
+}
+
+/// Feature: Verify against a rendered file
+/// Scenario: should fail a render that is black in several separate stretches
+///
+/// Regression: the "black covers half the program" rule was applied to one
+/// range at a time, so three dark fifths — sixty per cent of the deliverable —
+/// were graded as three harmless fades and the run exited zero.
+#[test]
+fn test_verify_fails_a_render_black_across_several_ranges() {
+    let (dir, path, _asset_id, _track_id) =
+        create_project_with_placed_dummy("verify_scattered_black");
+
+    let render_path = dir.path().join("intermittent-black.mp4");
+    if !create_intermittently_black_render(&render_path) {
+        return;
+    }
+
+    let (report, code) = verify_broken_render(&path, &render_path);
+    assert_eq!(
+        code, 1,
+        "sixty per cent of the program is black, however it is split up: {report}"
+    );
+
+    let black = find_check(&report, "render.black_frames");
+    assert_eq!(black["status"], "failed");
+    assert_eq!(black["severity"], "error");
+
+    let findings = black["violations"].as_array().expect("black findings");
+    assert!(
+        findings.len() >= 2,
+        "the fixture must produce several separate black ranges, got: {black}"
+    );
+
+    for finding in findings {
+        assert!(
+            finding["metrics"]["programFraction"].as_f64().unwrap() < 0.5,
+            "no single range may cross the threshold on its own, or this proves nothing: {finding}"
+        );
+        assert!(
+            finding["metrics"]["programFractionTotal"].as_f64().unwrap() >= 0.5,
+            "the total is what makes the render broken: {finding}"
+        );
+        assert_eq!(finding["severity"], "error");
+    }
+}
+
 #[test]
 fn test_verify_reports_a_missing_render_file_as_a_tool_failure() {
     let (_dir, path, _asset_id, _track_id) =

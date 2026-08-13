@@ -1702,6 +1702,7 @@ fn run_verify_tool(state: &McpServerState, arguments: Value) -> Result<Value, To
         skip: optional_string_array_argument(&arguments, "skip")?,
         target_lufs: None,
         max_true_peak: None,
+        duration_tolerance_sec: None,
         fail_on: optional_string_argument(&arguments, "failOn")?
             .unwrap_or_else(|| DEFAULT_VERIFY_FAIL_ON.to_string()),
         timeout_sec: VERIFY_MEASURE_TIMEOUT_SEC,

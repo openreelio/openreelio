@@ -15,7 +15,7 @@ pub mod violation;
 mod fix_roundtrip_tests;
 
 // Re-export main types
-pub use context::{QCContext, RenderMeasurements};
+pub use context::{MeasuredStreams, MeasuredVideoStream, QCContext, RenderMeasurements};
 pub use engine::{
     QCEngine, QCEngineConfig, QCReport, QCSeverityFilter, RuleFailure, RuleOutcome, RuleStatus,
 };
@@ -23,8 +23,9 @@ pub use measure::{
     measure_rendered_file, measure_rendered_file_detailed, MeasureOptions, MeasurementReport,
 };
 pub use rules::{
-    AspectRatioRule, AudioLoudnessRule, AudioPeakRule, BlackFrameRule, CaptionSafeAreaRule,
-    CheckCategory, CutRhythmRule, DurationRule, LicenseRule, QCRule, RenderDurationRule,
+    AspectRatioRule, AudioClippingRule, AudioLoudnessRule, AudioPeakRule, BlackFrameRule,
+    CaptionSafeAreaRule, CheckCategory, CutRhythmRule, DurationRule, FrozenProgramRule,
+    LicenseRule, MissingVideoStreamRule, QCRule, RenderDurationRule, RenderResolutionRule,
     RuleConfig,
 };
 pub use structural::{
@@ -32,4 +33,4 @@ pub use structural::{
     CaptionReadingRateRule, ClipOrphanRule, EmptySequenceRule, MissingAssetRule,
     ShotLengthStatsRule, SilentClipRule, TimelineGapRule,
 };
-pub use violation::{QCViolation, Severity, TimeRange, ViolationFix};
+pub use violation::{merged_span_duration_sec, QCViolation, Severity, TimeRange, ViolationFix};
