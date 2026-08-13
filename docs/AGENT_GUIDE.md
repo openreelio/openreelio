@@ -309,7 +309,10 @@ run with `--checks a,b` or `--skip a,b`.
 `render.duration_mismatch` asks the question the other rendered checks assume
 an answer to: is the measured file this sequence at all? A stale or truncated
 render measures perfectly well and is still not the deliverable, so a file
-shorter than the timeline is an error.
+shorter than the render is an error. The comparison is against the length a
+full-range render writes, not the editing extent: a clip the export drops —
+disabled, or on a muted track — shortens the expected file with it, so a
+correct render of a timeline ending on one still passes.
 
 The report always lists every check that ran, was skipped, or errored — so
 "checked and clean" is distinguishable from "never looked". Each entry carries

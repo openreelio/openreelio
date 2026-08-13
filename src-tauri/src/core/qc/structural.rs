@@ -274,7 +274,10 @@ fn program_edge_gaps(sequence: &Sequence, min_gap_sec: f64) -> Vec<UncoveredGap>
         });
     }
 
-    let program_end_sec = sequence.duration();
+    // The program ends where the export stops writing, so a trailing clip the
+    // render drops leaves no uncovered picture behind it — there is simply no
+    // program there to be uncovered.
+    let program_end_sec = sequence.output_duration();
     if program_end_sec - latest.time_sec >= min_gap_sec {
         gaps.push(UncoveredGap {
             track_id: latest.track.id.clone(),
@@ -1426,7 +1429,9 @@ pub fn crossref_black_ranges_with_gaps(
     }
 
     let gaps = uncovered_video_gaps(sequence, min_gap_sec);
-    let program_duration_sec = sequence.duration();
+    // Black ranges are measured from the rendered file, so the fraction they
+    // cover is a fraction of what the render writes.
+    let program_duration_sec = sequence.output_duration();
     let mut regraded = 0;
 
     for violation in report

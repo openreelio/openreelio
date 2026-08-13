@@ -444,8 +444,9 @@ impl QCRule for AudioPeakRule {
             .unwrap_or(Self::DEFAULT_WARN_DB);
 
         // The measurement covers the whole rendered program, so violations are
-        // located across the full sequence rather than attributed to one clip.
-        let program_end = sequence.duration();
+        // located across the render's own length rather than attributed to one
+        // clip.
+        let program_end = sequence.output_duration();
         let mut violations = Vec::new();
 
         if measured_peak > peak_db {
@@ -629,7 +630,9 @@ impl QCRule for AudioLoudnessRule {
                 target_lufs
             ),
         )
-        .with_location(0.0, sequence.duration())
+        // Loudness is integrated over the rendered file, so the finding spans
+        // the length that file has.
+        .with_location(0.0, sequence.output_duration())
         .with_metric("integratedLufs", integrated_lufs)
         .with_metric("targetLufs", target_lufs)
         .with_metric("deviationLu", (deviation * 100.0).round() / 100.0);
@@ -694,9 +697,13 @@ impl QCRule for AudioLoudnessRule {
 /// died partway and left a truncated file, measures perfectly well and passes
 /// every check while describing a program nobody edited.
 ///
-/// The comparison is against [`Sequence::duration`], so it also anchors the
-/// other rendered checks: their timestamps are only comparable to the timeline
-/// while the file covers the whole sequence from zero.
+/// The comparison is against [`Sequence::output_duration`] — the length the
+/// export pipeline actually writes — and not against [`Sequence::duration`],
+/// which counts disabled clips and muted tracks the render drops. Comparing
+/// against the editing extent would fail correct renders of any sequence that
+/// ends on a disabled clip. The rule also anchors the other rendered checks:
+/// their timestamps are only comparable to the timeline while the file covers
+/// the whole output from zero.
 #[derive(Debug, Default)]
 pub struct RenderDurationRule;
 
@@ -768,7 +775,9 @@ impl QCRule for RenderDurationRule {
             return Ok(Vec::new());
         };
 
-        let sequence_duration = sequence.duration();
+        // The render's own output length, so a correct render can never trip
+        // this rule. See `Sequence::output_duration`.
+        let sequence_duration = sequence.output_duration();
         if !sequence_duration.is_finite() || sequence_duration <= 0.0 {
             // An empty sequence has no duration to match; `sequence.empty`
             // owns that finding.
@@ -2225,6 +2234,70 @@ mod tests {
             .expect("rule runs");
 
         assert!(violations.is_empty());
+    }
+
+    /// Feature: Render/sequence duration match
+    /// Scenario: should pass a correct render of a sequence with a disabled tail
+    ///
+    /// Regression: the rule compared the file against the editing extent, which
+    /// counts clips the export drops. A correct render of a timeline ending on
+    /// a disabled clip is shorter than that extent, so verify reported a
+    /// `render.duration_mismatch` ERROR on a file that was exactly right.
+    #[tokio::test]
+    async fn test_render_duration_rule_should_pass_when_a_disabled_tail_clip_shortens_the_render() {
+        let mut sequence = sequence_with_video_clip(0.0, 60.0);
+        let mut tail_track = Track::new_video("V2");
+        let mut disabled_tail = Clip::with_range("asset_002", 0.0, 30.0).place_at(60.0);
+        disabled_tail.enabled = false;
+        tail_track.add_clip(disabled_tail);
+        sequence.add_track(tail_track);
+
+        // The editor still reaches 90s; the export stops at 60s and so does the
+        // file it writes.
+        assert_eq!(sequence.duration(), 90.0);
+        assert_eq!(sequence.output_duration(), 60.0);
+
+        let state = state_with_video_asset("asset_001", Some(60.0));
+        let context =
+            QCContext::from_sequence(&sequence).with_measurements(measurements_of_length(60.0));
+
+        let violations = RenderDurationRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(
+            violations.is_empty(),
+            "a render matching the export's own output length is the deliverable: {violations:?}"
+        );
+    }
+
+    /// Feature: Render/sequence duration match
+    /// Scenario: should still catch a truncated render of that same sequence
+    #[tokio::test]
+    async fn test_render_duration_rule_should_still_catch_truncation_past_a_disabled_tail() {
+        let mut sequence = sequence_with_video_clip(0.0, 60.0);
+        let mut tail_track = Track::new_video("V2");
+        let mut disabled_tail = Clip::with_range("asset_002", 0.0, 30.0).place_at(60.0);
+        disabled_tail.enabled = false;
+        tail_track.add_clip(disabled_tail);
+        sequence.add_track(tail_track);
+
+        let state = state_with_video_asset("asset_001", Some(60.0));
+        let context =
+            QCContext::from_sequence(&sequence).with_measurements(measurements_of_length(12.0));
+
+        let violations = RenderDurationRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Error);
+        assert_eq!(
+            violations[0].metrics["sequenceDurationSec"], 60.0,
+            "the rule grades against the length the export writes"
+        );
     }
 
     /// Feature: Render/sequence duration match

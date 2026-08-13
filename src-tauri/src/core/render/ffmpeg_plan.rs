@@ -62,7 +62,13 @@ pub(super) fn build_sequence_ffmpeg_args(
     let mut filter_complex = String::new();
     let mut video_segments = Vec::new();
     let mut audio_streams = Vec::new();
-    let mut timeline_end_sec = 0.0_f64;
+    // Single source of truth for the output length: the video tail is padded
+    // with black up to it and the audio tail with silence, so the file this
+    // command writes is exactly `Sequence::output_duration()` long. Deriving it
+    // from the clips this builder happens to emit a stream for would truncate
+    // the render at every tail clip that renders nothing of its own — an
+    // adjustment layer, a title over black, a clip on a hidden track.
+    let timeline_end_sec = ctx.sequence.output_duration();
     let audio_companion_keys =
         collect_audio_companion_keys(ctx.sequence, ctx.assets, ctx.audio_info);
 
@@ -132,9 +138,10 @@ pub(super) fn build_sequence_ffmpeg_args(
 
         let contributes_visual_output = matches!(track.kind, TrackKind::Video) && track.visible;
         if !contributes_visual_output && !clip_has_audio {
+            // No stream to emit. The clip still occupies the timeline, and
+            // `timeline_end_sec` already accounts for it.
             continue;
         }
-        timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
 
         args.push("-i".to_string());
         args.push(validated_path.to_string_lossy().to_string());
@@ -278,37 +285,31 @@ pub(super) fn build_sequence_ffmpeg_args(
     }
 
     // Text and caption clips draw onto the composited picture instead of
-    // contributing their own video segment, so the timeline has to be long
-    // enough to carry them. Without this the render stops at the last
-    // file-backed clip and every title card or gap after it disappears.
+    // contributing their own video segment. A sequence made only of them has no
+    // picture at all to draw on, so it needs a base canvas; every other case is
+    // covered by the black tail `append_timeline_video_output` pads out to
+    // `timeline_end_sec`.
     let has_generated_text_visuals =
         !caption_filters.is_empty() || !overlay_text_filters.is_empty() || use_ass_text_overlays;
-    if has_generated_text_visuals {
+    if has_generated_text_visuals && video_segments.is_empty() {
         let generated_visual_end_sec = generated_text_visual_end_sec(&all_clips);
         if generated_visual_end_sec > TIMELINE_EPSILON_SEC {
-            if video_segments.is_empty() {
-                // Text-only sequence: nothing else can supply a base canvas.
-                let blank_label = "vtextbase0";
-                append_black_video_gap(
-                    &mut filter_complex,
-                    blank_label,
-                    generated_visual_end_sec,
-                    output_width,
-                    output_height,
-                    output_fps,
-                    output_pixel_format,
-                );
-                video_segments.push(VideoTimelineSegment {
-                    stream_label: format!("[{}]", blank_label),
-                    start_sec: 0.0,
-                    end_sec: generated_visual_end_sec,
-                    transition_filter: None,
-                });
-            }
-            // `append_timeline_video_output` pads the tail with black up to
-            // `timeline_end_sec`, which is what puts a canvas under text that
-            // outlives the last file-backed clip.
-            timeline_end_sec = timeline_end_sec.max(generated_visual_end_sec);
+            let blank_label = "vtextbase0";
+            append_black_video_gap(
+                &mut filter_complex,
+                blank_label,
+                generated_visual_end_sec,
+                output_width,
+                output_height,
+                output_fps,
+                output_pixel_format,
+            );
+            video_segments.push(VideoTimelineSegment {
+                stream_label: format!("[{}]", blank_label),
+                start_sec: 0.0,
+                end_sec: generated_visual_end_sec,
+                transition_filter: None,
+            });
         }
     }
 
@@ -432,7 +433,12 @@ pub(super) fn build_audio_only_ffmpeg_args(
     let mut input_index = 0;
     let mut filter_complex = String::new();
     let mut audio_streams = Vec::new();
-    let mut timeline_end_sec = 0.0_f64;
+    // Same single source of truth as the video path: silence is padded out to
+    // it, so the file is exactly `Sequence::output_duration()` long. Clips that
+    // carry no audio — muted, frozen, text, or a silent source — are skipped
+    // below but still occupy the timeline, and an export range inside their
+    // span has to receive packets.
+    let timeline_end_sec = ctx.sequence.output_duration();
     let audio_companion_keys =
         collect_audio_companion_keys(ctx.sequence, ctx.assets, ctx.audio_info);
     let all_clips = collect_enabled_clips_sorted(ctx.sequence);
@@ -504,22 +510,11 @@ pub(super) fn build_audio_only_ffmpeg_args(
         );
 
         audio_streams.push(format!("[{}]", mixed_audio_label));
-        timeline_end_sec = timeline_end_sec.max(clip.place.timeline_out_sec());
         input_index += 1;
     }
 
     if filter_complex.ends_with(';') {
         filter_complex.pop();
-    }
-
-    // Clips that carry no audio — muted, frozen, text, or a silent source —
-    // were skipped above but still occupy the timeline, and an export range
-    // inside their span is valid against the sequence. Padding only to the last
-    // audio clip would leave that range with no packets at all, so the
-    // sequence's own end is the floor for the padding target.
-    let sequence_end_sec = ctx.sequence.duration();
-    if sequence_end_sec.is_finite() {
-        timeline_end_sec = timeline_end_sec.max(sequence_end_sec);
     }
 
     let final_audio_label = append_master_audio_output(

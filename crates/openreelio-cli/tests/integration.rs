@@ -358,6 +358,32 @@ fn create_sample_video_with_audio(path: &std::path::Path) -> bool {
     status.success()
 }
 
+/// Generates a 4-second audio-only WAV fixture, for tests that need a clip an
+/// audio track will accept.
+fn create_sample_audio(path: &std::path::Path) -> bool {
+    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+        return false;
+    };
+
+    let status = Command::new(ffmpeg_path)
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:duration=4",
+            "-af",
+            "volume=0.25",
+        ])
+        .arg(path)
+        .status()
+        .expect("Failed to generate audio fixture with ffmpeg");
+    if !status.success() {
+        eprintln!("Skipping test: ffmpeg could not generate the audio fixture");
+    }
+    status.success()
+}
+
 /// Generates a 4-second fixture with a hard black-to-white cut at 2s and an
 /// attenuated tone whose 1s–3s window is muted.
 ///
@@ -3416,6 +3442,235 @@ fn test_verify_measures_a_rendered_file() {
     );
     assert_eq!(report["status"], "failed");
     assert_eq!(report["passed"], false);
+}
+
+/// Builds a project with a single 3s file-backed clip at 0s on the first video
+/// track, ready for a tail clip to be added after it.
+///
+/// Returns `(dir, project_path, sequence_id, video_track_id, asset_id)`.
+fn create_project_with_three_second_body(
+    name: &str,
+) -> Option<(tempfile::TempDir, String, String, String, String)> {
+    let (dir, path, asset_id) =
+        create_project_with_media(name, "duration_source.mp4", create_sample_video_with_audio)?;
+
+    let track_id = run_cli_ok(&["timeline", "tracks", "--path", &path])["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+
+    let clip_id = run_cli_ok(&["timeline", "clips", "--path", &path])["clips"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Keep the clip inside the fixture's real media length so the render has
+    // decodable frames for the whole file-backed span.
+    run_cli_ok(&[
+        "timeline",
+        "trim",
+        "--path",
+        &path,
+        "--clip",
+        &clip_id,
+        "--track",
+        &track_id,
+        "--source-in",
+        "0",
+        "--source-out",
+        "3",
+    ]);
+
+    let sequence_id = run_cli_ok(&["project", "info", "--path", &path])["activeSequenceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    Some((dir, path, sequence_id, track_id, asset_id))
+}
+
+/// Reads the `render.duration_mismatch` check out of a `verify --file` run.
+fn verify_duration_check(path: &str, render_path: &std::path::Path) -> serde_json::Value {
+    // The fixture is a bare test tone, so its absolute loudness says nothing
+    // about the edit and that check is skipped; the duration check is the whole
+    // point of the run.
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        path,
+        "--file",
+        render_path.to_str().unwrap(),
+        "--skip",
+        "audio.loudness",
+    ]);
+    assert_ne!(
+        code, 2,
+        "verify itself must run.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+    find_check(&report, "render.duration_mismatch").clone()
+}
+
+fn render_proxy_to(path: &str, output: &std::path::Path) -> serde_json::Value {
+    run_cli_ok(&[
+        "render",
+        "start",
+        "--path",
+        path,
+        "--proxy",
+        "--output",
+        output.to_str().unwrap(),
+    ])
+}
+
+// Feature: Render and verify agree on the output length
+//
+// The length the export writes and the length verify grades against are the
+// same function (`Sequence::output_duration`), so a correct render can never
+// be reported as a duration mismatch. These two tests cover the two ways the
+// two sides used to disagree: a tail clip that emits no stream of its own (the
+// render stopped short of it) and a tail clip the export drops (verify counted
+// it anyway).
+
+/// Scenario: the timeline ends on an adjustment layer, which emits no stream
+#[test]
+fn test_render_and_verify_agree_when_the_timeline_ends_on_an_adjustment_layer() {
+    let Some((dir, path, sequence_id, track_id, _asset_id)) =
+        create_project_with_three_second_body("render_verify_adjustment_tail")
+    else {
+        return;
+    };
+
+    // Timeline becomes: clip 0-3, adjustment layer 3-6.
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "CreateAdjustmentLayer",
+        "--payload",
+        &format!(
+            r#"{{"sequenceId":"{sequence_id}","trackId":"{track_id}","position":3.0,"duration":3.0,"name":"Grade"}}"#
+        ),
+    ]);
+
+    let render_path = dir.path().join("adjustment-tail.mp4");
+    let result = render_proxy_to(&path, &render_path);
+
+    // The last file-backed clip ends at 3s; the adjustment layer holds the
+    // output open to 6s.
+    assert_eq!(result["durationSec"], 6.0);
+    if let Some(measured) = ffprobe_duration_secs(&render_path) {
+        assert!(
+            (measured - 6.0).abs() < 0.5,
+            "the render must reach the adjustment layer's out point, measured {measured}s"
+        );
+    }
+
+    let duration = verify_duration_check(&path, &render_path);
+    assert_eq!(
+        duration["status"], "passed",
+        "a render covering the whole timeline is the deliverable: {duration}"
+    );
+}
+
+/// Scenario: the timeline ends on a muted track, which the export drops
+#[test]
+fn test_render_and_verify_agree_when_the_timeline_ends_on_a_muted_track() {
+    let Some((dir, path, sequence_id, _track_id, _asset_id)) =
+        create_project_with_three_second_body("render_verify_muted_tail")
+    else {
+        return;
+    };
+
+    let audio_source = dir.path().join("tail_tone.wav");
+    if !create_sample_audio(&audio_source) {
+        return;
+    }
+    let audio_asset_id = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        audio_source.to_str().unwrap(),
+    ])["createdIds"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let added = run_cli_ok(&[
+        "timeline",
+        "add-track",
+        "--path",
+        &path,
+        "--kind",
+        "audio",
+        "--name",
+        "Audio 2",
+    ]);
+    let audio_track_id = added["createdIds"][0].as_str().unwrap().to_string();
+
+    run_cli_ok(&[
+        "timeline",
+        "insert",
+        "--path",
+        &path,
+        "--asset",
+        &audio_asset_id,
+        "--track",
+        &audio_track_id,
+        "--at",
+        "3.0",
+    ]);
+
+    // Muting the track takes it out of the render. The clip stays on the
+    // timeline, so the editing extent still runs past 3s while nothing the
+    // export writes does.
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "ToggleTrackMute",
+        "--payload",
+        &format!(r#"{{"sequenceId":"{sequence_id}","trackId":"{audio_track_id}","muted":true}}"#),
+    ]);
+
+    assert!(
+        timeline_program_end_sec(&path) > 3.5,
+        "the muted clip must still be on the timeline for this to mean anything"
+    );
+
+    let render_path = dir.path().join("muted-tail.mp4");
+    let result = render_proxy_to(&path, &render_path);
+
+    assert_eq!(result["durationSec"], 3.0);
+    if let Some(measured) = ffprobe_duration_secs(&render_path) {
+        assert!(
+            (measured - 3.0).abs() < 0.5,
+            "a muted track is not in the output, measured {measured}s"
+        );
+    }
+
+    let duration = verify_duration_check(&path, &render_path);
+    assert_eq!(
+        duration["status"], "passed",
+        "the render stops where the export does, so nothing is missing: {duration}"
+    );
 }
 
 #[test]

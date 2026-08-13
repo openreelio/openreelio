@@ -41,9 +41,10 @@ Exit `2` is never "the video is bad" — it means the verdict is unknown.
 **rendered** (require `--file`) — `render.duration_mismatch`,
 `render.black_frames`, `audio.peak`, `audio.loudness`.
 
-`render.duration_mismatch` compares the measured file against the sequence
-duration and errors when the file is shorter: a stale or truncated render
-measures perfectly well and is still not the deliverable.
+`render.duration_mismatch` compares the measured file against the length a
+full-range render of the sequence writes — clips the export drops (disabled, or
+on a muted track) are not counted — and errors when the file is shorter: a stale
+or truncated render measures perfectly well and is still not the deliverable.
 
 `asset.license` and `sequence.duration` run only when named in `--checks`.
 Narrow any run with `--checks a,b` or `--skip a,b`.
