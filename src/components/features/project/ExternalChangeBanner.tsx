@@ -2,9 +2,10 @@
  * External Change Banner
  *
  * Shown when another process — `openreelio-cli`, an agent, or a second app
- * window — edited the open project's operation log. The backend refuses further
- * edits until this session reloads, so the banner is the recovery affordance
- * rather than a passive notice.
+ * window — changed the open project on disk, either by appending to its
+ * operation log or by moving through its history (undo/redo/jump). The backend
+ * refuses further edits until this session reloads, so the banner is the
+ * recovery affordance rather than a passive notice.
  */
 
 import { useCallback } from 'react';

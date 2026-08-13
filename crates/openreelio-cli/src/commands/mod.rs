@@ -162,6 +162,17 @@ use openreelio_core::ActiveProject;
 use std::path::PathBuf;
 
 /// Load an existing project from the given path.
+///
+/// Opening installs the external-edit guard: the session records the revision of
+/// `ops.jsonl` and `history.json` it replayed, and refuses to write on top of
+/// another process's changes. The CLI is not exempt from it, and does not need
+/// to be — an invocation opens, mutates, saves and exits, so a command that runs
+/// after another writer baselines against the current tail and appends onto it.
+///
+/// A command that runs *while* another process is editing the same project is
+/// refused with `ExternalChangeDetected` instead of interleaving; re-run it and
+/// the fresh open picks up the other writer's work. Serialize concurrent
+/// automation on a project rather than racing it.
 pub(crate) fn load_project(path: &PathBuf) -> anyhow::Result<ActiveProject> {
     let canonical = std::fs::canonicalize(path)
         .map_err(|e| anyhow::anyhow!("Project path '{}' not found: {}", path.display(), e))?;

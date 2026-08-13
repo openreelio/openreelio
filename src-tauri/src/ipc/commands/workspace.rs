@@ -145,9 +145,12 @@ const MAX_DOCUMENT_LIST_LIMIT: usize = 2_000;
 /// Builds the `project:external-change` payload for a project state file change,
 /// or `None` when the change was written by this process.
 ///
-/// Suppression compares the on-disk operation count with the count this session
-/// expects, so the app's own appends (edit commands, workspace auto-registration)
-/// never surface as external changes.
+/// Suppression asks the session guard whether the project on disk still matches
+/// what this session wrote, which is the same question every mutation asks. The
+/// app's own writes (edit commands, workspace auto-registration, undo/redo,
+/// save) advance the guard's baseline, so they never surface as external
+/// changes, while a foreign undo — which appends nothing and leaves the
+/// operation counts equal — still does.
 async fn external_change_payload(
     app_handle: &tauri::AppHandle,
     relative_path: &str,
@@ -155,6 +158,10 @@ async fn external_change_payload(
     let app_state = app_handle.state::<crate::AppState>();
     let guard = app_state.project.lock().await;
     let project = guard.as_ref()?;
+
+    if project.ensure_no_external_changes().is_ok() {
+        return None;
+    }
 
     let expected = project.expected_op_count();
     let on_disk = match project.on_disk_op_count() {
@@ -167,10 +174,6 @@ async fn external_change_payload(
             return None;
         }
     };
-
-    if on_disk == expected {
-        return None;
-    }
 
     tracing::info!(
         expected_op_count = expected,

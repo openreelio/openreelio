@@ -143,7 +143,8 @@ impl CommandExecutor {
         // `OpsLog::append` (inside the write lock, so it cannot be raced), but
         // by then the command has already mutated the in-memory state; failing
         // there would leave this session's state ahead of its own log. On an
-        // unguarded log this is a no-op, so headless writers are unaffected.
+        // unguarded log — a one-shot reader, a replay helper, a test — this is a
+        // no-op; every real session, GUI or headless, is guarded.
         if let Some(ops_log) = &self.ops_log {
             ops_log.ensure_no_external_changes()?;
         }

@@ -22,7 +22,8 @@ pub enum WorkspaceEvent {
     FileRemoved(String),
     /// A file was modified in the workspace
     FileModified(String),
-    /// A persistent project state file (`ops.jsonl` / `snapshot.json`) changed.
+    /// A persistent project state file (`ops.jsonl` / `snapshot.json` /
+    /// `history.json`) changed.
     ///
     /// These files are excluded from workspace indexing, but a change to them
     /// may mean another process edited the project, so they are reported
@@ -33,11 +34,17 @@ pub enum WorkspaceEvent {
 /// Project state files, relative to the project root, that must be reported even
 /// though the workspace ignore rules exclude their directory.
 ///
+/// `history.json` is watched alongside the log because undo, redo and history
+/// jumps rewrite only the manifest: another process can change which operations
+/// are applied while `ops.jsonl` stays byte-identical.
+///
 /// Both the current hidden layout and the legacy root layout are covered, so a
-/// project written by an older build is still watched.
+/// project written by an older build is still watched. The legacy layout predates
+/// the history manifest, so it has no `history.json` entry.
 const PROJECT_STATE_RELATIVE_PATHS: &[&str] = &[
     ".openreelio/state/ops.jsonl",
     ".openreelio/state/snapshot.json",
+    ".openreelio/state/history.json",
     "ops.jsonl",
     "snapshot.json",
 ];
@@ -264,10 +271,11 @@ mod tests {
         )));
         assert!(is_project_state_path(Path::new("ops.jsonl")));
         assert!(is_project_state_path(Path::new("snapshot.json")));
-
-        assert!(!is_project_state_path(Path::new(
+        // An external undo rewrites only the manifest, so it has to be watched.
+        assert!(is_project_state_path(Path::new(
             ".openreelio/state/history.json"
         )));
+
         assert!(!is_project_state_path(Path::new("footage/clip.mp4")));
         assert!(!is_project_state_path(Path::new("nested/ops.jsonl")));
     }

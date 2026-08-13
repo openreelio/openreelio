@@ -69,8 +69,14 @@ pub struct ActiveProject {
     ///
     /// The handle is guarded (see [`OpsLog::begin_guarded_session`]), so it —
     /// and the executor handle derived from it — reject appends made on top of
-    /// another process's edits. That is where external-edit safety is enforced;
-    /// no caller has to remember a check.
+    /// another process's edits, and reject history rewrites the same way. That
+    /// is where external-edit safety is enforced; no caller has to remember a
+    /// check.
+    ///
+    /// Every session is guarded, GUI and `openreelio-cli` alike. A CLI
+    /// invocation opens, edits and exits, so it only ever collides with a
+    /// process editing the same project *at the same time* — which is exactly
+    /// the case that must not silently interleave.
     pub ops_log: OpsLog,
     /// Persistent history metadata used by headless clients.
     pub history: ProjectHistory,
@@ -83,6 +89,13 @@ pub struct PreparedProjectSave {
     pub state_snapshot: ProjectState,
     pub history_snapshot: ProjectHistory,
     pub saved_last_op_id: Option<String>,
+    /// Guarded log handle of the session that prepared this save.
+    ///
+    /// [`ActiveProject::write_prepared_save`] runs without the project lock, so
+    /// the save carries the guard with it: the history manifest is written
+    /// inside the guard's lock, and the write advances this session's history
+    /// baseline instead of leaving it describing the pre-save file.
+    pub session_log: OpsLog,
 }
 
 impl ActiveProject {
@@ -442,7 +455,9 @@ impl ActiveProject {
             discarded_op_ids: Vec::new(),
             protected_prefix_len: 1,
         };
-        history.save(&history_path)?;
+        // Through the guard, so the session's history baseline starts out
+        // describing the manifest it just wrote.
+        ops_log.write_history_manifest(&history_path, |path| history.save(path))?;
 
         Ok(Self {
             path,
@@ -517,13 +532,16 @@ impl ActiveProject {
         };
 
         let mut ops_log = OpsLog::new(&ops_path);
-        // Replay the log and take the external-change baseline in one critical
-        // section. Sampling the baseline separately would leave a window in
-        // which another process appends, so the session would start life already
-        // disagreeing with the file it had just replayed.
-        let read_result = ops_log.begin_guarded_session_reading_all()?;
-        let mut history = if history_path.exists() {
-            match ProjectHistory::load(&history_path) {
+        // Replay the log, read the history manifest and take the external-change
+        // baseline in one critical section. Sampling the baseline separately
+        // would leave a window in which another process writes, so the session
+        // would start life already disagreeing with the files it had just
+        // replayed.
+        let opened = ops_log.begin_guarded_session_reading_all(&history_path)?;
+        let read_result = opened.operations;
+        let has_history_manifest = opened.history_manifest.is_some();
+        let mut history = match opened.history_manifest.as_deref() {
+            Some(bytes) => match ProjectHistory::from_json_slice(bytes) {
                 Ok(history) => history,
                 Err(error) => {
                     tracing::warn!(
@@ -533,9 +551,8 @@ impl ActiveProject {
                     );
                     ProjectHistory::from_operations(&read_result.operations, meta.clone())
                 }
-            }
-        } else {
-            ProjectHistory::from_operations(&read_result.operations, meta.clone())
+            },
+            None => ProjectHistory::from_operations(&read_result.operations, meta.clone()),
         };
         if history.base_meta.is_none() {
             history.base_meta = Some(meta.clone());
@@ -544,7 +561,7 @@ impl ActiveProject {
         let history_meta = history.base_meta.clone().unwrap_or_else(|| meta.clone());
 
         // Load state from history when available. Fall back to snapshot + replay or full ops replay.
-        let state = if !history.applied_op_ids.is_empty() || history_path.exists() {
+        let state = if !history.applied_op_ids.is_empty() || has_history_manifest {
             let by_id: std::collections::HashMap<&str, crate::core::project::Operation> =
                 read_result
                     .operations
@@ -603,13 +620,17 @@ impl ActiveProject {
         Ok(self.ops_log.count()? as u64)
     }
 
-    /// Fails with [`crate::core::CoreError::ExternalChangeDetected`] when the
-    /// on-disk operation log no longer matches what this session wrote.
+    /// Fails when the on-disk operation log or history manifest no longer
+    /// matches what this session wrote.
     ///
     /// A mismatch means another process (`openreelio-cli`, a second app window,
-    /// an agent) appended to or rewrote `ops.jsonl`. Continuing would interleave
-    /// this session's stale state with the external edits, so callers must
-    /// surface the error and let the user reload instead of merging.
+    /// an agent) appended to `ops.jsonl`
+    /// ([`crate::core::CoreError::ExternalChangeDetected`]) or undid, redid or
+    /// jumped through history, rewriting `history.json` without appending
+    /// anything ([`crate::core::CoreError::ExternalHistoryChangeDetected`]).
+    /// Continuing would interleave this session's stale state with the external
+    /// edits — or silently revert them — so callers must surface the error and
+    /// let the user reload instead of merging.
     ///
     /// This is a pre-flight convenience for callers that do bookkeeping before
     /// writing; enforcement itself lives in [`OpsLog::append`], so paths that
@@ -650,6 +671,7 @@ impl ActiveProject {
             state_snapshot,
             history_snapshot: self.history.clone(),
             saved_last_op_id: self.state.last_op_id.clone(),
+            session_log: self.ops_log.shared_handle(),
         })
     }
 
@@ -666,7 +688,15 @@ impl ActiveProject {
             &prepared.meta_path,
             &prepared.state_snapshot.meta,
         )?;
-        prepared.history_snapshot.save(&prepared.history_path)?;
+        // The manifest is guarded state, unlike the snapshot and metadata which
+        // are regenerable caches: write it through the session's guard so a
+        // concurrent process's undo cannot be overwritten, and so this session's
+        // own write re-baselines it.
+        prepared
+            .session_log
+            .write_history_manifest(&prepared.history_path, |path| {
+                prepared.history_snapshot.save(path)
+            })?;
         Ok(())
     }
 
@@ -746,7 +776,10 @@ impl ActiveProject {
         Self::sync_history_with_operations(&mut candidate_history, &read_result.operations);
         let candidate_state =
             self.build_state_from_operations(&mut candidate_history, &read_result.operations)?;
-        candidate_history.save(&self.history_path)?;
+        // Undo/redo/jump rewrite the manifest without appending, so the guarded
+        // write is the only thing standing between two processes' histories.
+        self.ops_log
+            .write_history_manifest(&self.history_path, |path| candidate_history.save(path))?;
 
         self.history = candidate_history;
         self.state = candidate_state;
@@ -772,7 +805,8 @@ impl ActiveProject {
 
         let candidate_state =
             self.build_state_from_operations(&mut candidate_history, &read_result.operations)?;
-        candidate_history.save(&self.history_path)?;
+        self.ops_log
+            .write_history_manifest(&self.history_path, |path| candidate_history.save(path))?;
 
         self.history = candidate_history;
         self.state = candidate_state;
@@ -869,7 +903,8 @@ impl ActiveProject {
         target_index: i32,
     ) -> crate::core::CoreResult<i32> {
         // Same hazard as undo/redo: history indices computed here would address
-        // operations written by another process.
+        // operations written by another process, or a history position another
+        // process has already moved away from.
         self.ensure_no_external_changes()?;
         self.sync_history_with_ops_log()?;
 
@@ -907,7 +942,10 @@ impl ActiveProject {
     ///
     /// Fails with [`crate::core::CoreError::ExternalChangeDetected`] when another
     /// process appended operations, because the newest applied operation would
-    /// then belong to that process rather than to this session.
+    /// then belong to that process rather than to this session, and with
+    /// [`crate::core::CoreError::ExternalHistoryChangeDetected`] when another
+    /// process moved through history itself, because undoing from this session's
+    /// stale position would silently revert that move.
     pub fn undo_persisted(&mut self) -> crate::core::CoreResult<OpId> {
         self.ensure_no_external_changes()?;
         self.sync_history_with_ops_log()?;
@@ -919,8 +957,8 @@ impl ActiveProject {
 
     /// Performs a persisted redo that survives process restarts.
     ///
-    /// Fails with [`crate::core::CoreError::ExternalChangeDetected`] when another
-    /// process appended operations. See [`ActiveProject::undo_persisted`].
+    /// Rejects external appends and external history moves exactly as
+    /// [`ActiveProject::undo_persisted`] does.
     pub fn redo_persisted(&mut self) -> crate::core::CoreResult<OpId> {
         self.ensure_no_external_changes()?;
         self.sync_history_with_ops_log()?;
@@ -3280,6 +3318,93 @@ mod tests {
             .expect("a freshly reloaded session is in sync with disk");
     }
 
+    /// Scenario: a second process undoes, which appends nothing.
+    ///
+    /// `ops.jsonl` is append-only, so undo/redo/jump record their move in
+    /// `history.json` instead. A session that watched only the log's byte length
+    /// would see nothing here and keep editing on top of a history position the
+    /// other process had already left, silently reverting it.
+    #[test]
+    fn should_detect_an_external_history_move_that_appends_nothing() {
+        // Given a session that edited and saved
+        let temp_dir = TempDir::new().unwrap();
+        let (mut gui, fixture) = create_shared_project(temp_dir.path().join("shared_project"));
+        let gui_track = execute_cli_command(
+            &mut gui,
+            "createTrack",
+            serde_json::json!({
+                "sequenceId": fixture.sequence_id,
+                "kind": "video",
+                "name": "GUI Track",
+            }),
+        );
+        let gui_track_id = gui_track.created_ids[0].clone();
+        gui.save().unwrap();
+        let ops_log_len_before = std::fs::metadata(gui.ops_log.path()).unwrap().len();
+
+        // When another process undoes it
+        let mut other_process = ActiveProject::open(fixture.project_path.clone()).unwrap();
+        let undone_op_id = other_process.undo_persisted().unwrap();
+        drop(other_process);
+
+        // Then the log is byte-identical and the operation counts still agree,
+        // so only a history baseline can tell the difference
+        assert_eq!(
+            std::fs::metadata(gui.ops_log.path()).unwrap().len(),
+            ops_log_len_before
+        );
+        assert_eq!(gui.on_disk_op_count().unwrap(), gui.expected_op_count());
+
+        // And every mutating entry point refuses
+        assert!(matches!(
+            gui.ensure_no_external_changes(),
+            Err(crate::core::CoreError::ExternalHistoryChangeDetected)
+        ));
+        assert!(matches!(
+            try_execute_command(
+                &mut gui,
+                "createSequence",
+                serde_json::json!({ "name": "Sequence 2", "format": "1080p" }),
+            ),
+            Err(crate::core::CoreError::ExternalHistoryChangeDetected)
+        ));
+        assert!(matches!(
+            gui.prepare_save(),
+            Err(crate::core::CoreError::ExternalHistoryChangeDetected)
+        ));
+        assert!(matches!(
+            gui.undo_persisted(),
+            Err(crate::core::CoreError::ExternalHistoryChangeDetected)
+        ));
+        assert!(matches!(
+            gui.redo_persisted(),
+            Err(crate::core::CoreError::ExternalHistoryChangeDetected)
+        ));
+        assert!(matches!(
+            gui.jump_to_history_index_persisted(-1),
+            Err(crate::core::CoreError::ExternalHistoryChangeDetected)
+        ));
+
+        // And the error carries the marker the frontend matches on
+        let message = gui.ensure_no_external_changes().unwrap_err().to_ipc_error();
+        assert!(
+            message.contains(crate::core::EXTERNAL_CHANGE_DETECTED_CODE),
+            "unexpected message: {message}"
+        );
+
+        // And reloading adopts the other process's undo instead of reverting it
+        drop(gui);
+        let reloaded = ActiveProject::open(fixture.project_path).unwrap();
+        assert!(!reloaded.history.applied_op_ids.contains(&undone_op_id));
+        assert!(!reloaded.state.sequences[&fixture.sequence_id]
+            .tracks
+            .iter()
+            .any(|track| track.id == gui_track_id));
+        reloaded
+            .ensure_no_external_changes()
+            .expect("a freshly reloaded session is in sync with disk");
+    }
+
     /// Scenario: the app's own workspace-watcher appends must not look external.
     #[test]
     fn should_not_report_direct_ops_log_appends_by_this_session_as_external() {
@@ -3511,6 +3636,77 @@ mod tests {
         }
     }
 
+    /// Undoes from a second process holding the same directory, which rewrites
+    /// `history.json` without appending to the log. Returns the undone op id.
+    fn undo_externally(fixture: &SharedProjectFixture) -> String {
+        let mut other_process = ActiveProject::open(fixture.project_path.clone()).unwrap();
+        other_process.undo_persisted().unwrap()
+    }
+
+    /// Scenario: every mutation surface is refused after an external *history*
+    /// move too, not just after an external append.
+    #[test]
+    fn should_refuse_every_mutation_surface_after_an_external_history_move() {
+        for path in mutation_paths() {
+            // Given a session that has edited and saved, so there is something
+            // for another process to undo
+            let temp_dir = TempDir::new().unwrap();
+            let (mut project, fixture) =
+                create_shared_project(temp_dir.path().join("shared_project"));
+            try_execute_command(
+                &mut project,
+                "createTrack",
+                serde_json::json!({
+                    "sequenceId": fixture.sequence_id,
+                    "kind": "video",
+                    "name": "Undo Me",
+                }),
+            )
+            .unwrap();
+            project.save().unwrap();
+
+            // And another process has undone it behind this session's back
+            undo_externally(&fixture);
+
+            let ops_before = project.on_disk_op_count().unwrap();
+            let assets_before = project.state.assets.len();
+            let sequences_before = project.state.sequences.len();
+            let name_before = project.state.meta.name.clone();
+
+            // When the surface mutates without checking for external edits first
+            let outcome = (path.run)(&mut project, &fixture);
+
+            // Then it is refused, even though the operation counts still agree
+            assert!(
+                matches!(
+                    outcome,
+                    Err(crate::core::CoreError::ExternalHistoryChangeDetected)
+                ),
+                "{} must be refused after an external history move, got {outcome:?}",
+                path.surface
+            );
+            assert_eq!(
+                project.on_disk_op_count().unwrap(),
+                ops_before,
+                "{} must not append on top of an external history move",
+                path.surface
+            );
+            assert_eq!(
+                project.state.assets.len(),
+                assets_before,
+                "{}",
+                path.surface
+            );
+            assert_eq!(
+                project.state.sequences.len(),
+                sequences_before,
+                "{}",
+                path.surface
+            );
+            assert_eq!(project.state.meta.name, name_before, "{}", path.surface);
+        }
+    }
+
     /// Scenario: reloading re-baselines the session so editing resumes.
     #[test]
     fn should_resume_every_mutation_surface_after_reloading_from_disk() {
@@ -3544,10 +3740,21 @@ mod tests {
         }
     }
 
-    /// Scenario: a headless writer is the *external* party and must never be
-    /// blocked by the guard, because every invocation opens the project afresh.
+    // -------------------------------------------------------------------------
+    // Headless writers
+    //
+    // `openreelio-cli` is not exempt from the guard: every invocation goes
+    // through `ActiveProject::open`, which installs it. What makes headless
+    // editing keep working is the shape of an invocation — open, mutate, save,
+    // exit — so a *sequential* writer always baselines against the current tail
+    // and appends onto it. Only a writer that overlaps in time with another one
+    // is refused, which is the case that would otherwise write a snapshot built
+    // from a state that never saw the other process's operations.
+    // -------------------------------------------------------------------------
+
+    /// Scenario: headless invocations run one after another, as they normally do.
     #[test]
-    fn should_let_a_fresh_headless_session_append_after_another_process_wrote() {
+    fn should_let_each_sequential_headless_session_append_after_the_previous_one() {
         // Given a project a long-lived GUI session already edited
         let temp_dir = TempDir::new().unwrap();
         let (mut gui, fixture) = create_shared_project(temp_dir.path().join("headless_project"));
@@ -3592,5 +3799,80 @@ mod tests {
                 "missing headless edit {index} in {track_names:?}"
             );
         }
+
+        // And the guard applied to them as much as to anyone: the session that
+        // stayed open through all three is the one that now has to reload
+        assert!(matches!(
+            gui.ensure_no_external_changes(),
+            Err(crate::core::CoreError::ExternalChangeDetected { .. })
+        ));
+    }
+
+    /// Scenario: two writers hold the same project at the same time.
+    #[test]
+    fn should_reject_a_concurrent_headless_writer_until_it_reopens() {
+        // Given two sessions that opened the project before either of them wrote
+        let temp_dir = TempDir::new().unwrap();
+        let (mut first, fixture) =
+            create_shared_project(temp_dir.path().join("concurrent_project"));
+        let mut second = ActiveProject::open(fixture.project_path.clone()).unwrap();
+
+        // When the first one edits and saves
+        try_execute_command(
+            &mut first,
+            "createTrack",
+            serde_json::json!({
+                "sequenceId": fixture.sequence_id,
+                "kind": "video",
+                "name": "First Writer",
+            }),
+        )
+        .unwrap();
+        first.save().unwrap();
+
+        // Then the second one is refused rather than interleaved. Letting it
+        // through would append onto a log it has not replayed and then save a
+        // snapshot built from a state that never saw the first writer's
+        // operation.
+        let ops_before = second.on_disk_op_count().unwrap();
+        assert!(matches!(
+            try_execute_command(
+                &mut second,
+                "createTrack",
+                serde_json::json!({
+                    "sequenceId": fixture.sequence_id,
+                    "kind": "audio",
+                    "name": "Second Writer",
+                }),
+            ),
+            Err(crate::core::CoreError::ExternalChangeDetected { .. })
+        ));
+        assert_eq!(second.on_disk_op_count().unwrap(), ops_before);
+
+        // And reopening — which is what a headless invocation does anyway — puts
+        // it back in sync, so the retry lands on top of the first writer's edit
+        drop(second);
+        let mut reopened = ActiveProject::open(fixture.project_path.clone()).unwrap();
+        try_execute_command(
+            &mut reopened,
+            "createTrack",
+            serde_json::json!({
+                "sequenceId": fixture.sequence_id,
+                "kind": "audio",
+                "name": "Second Writer",
+            }),
+        )
+        .unwrap();
+        reopened.save().unwrap();
+        drop(reopened);
+
+        let reloaded = ActiveProject::open(fixture.project_path).unwrap();
+        let track_names: Vec<&str> = reloaded.state.sequences[&fixture.sequence_id]
+            .tracks
+            .iter()
+            .map(|track| track.name.as_str())
+            .collect();
+        assert!(track_names.contains(&"First Writer"));
+        assert!(track_names.contains(&"Second Writer"));
     }
 }

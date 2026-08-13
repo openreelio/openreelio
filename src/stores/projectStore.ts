@@ -147,9 +147,10 @@ interface ProjectState {
   /** State version for conflict detection (increments on each state update) */
   stateVersion: number;
   /**
-   * Set when another process (openreelio-cli, an agent, a second window) edited
-   * this project's operation log. While set, backend mutations are refused and
-   * the user is offered a reload.
+   * Set when another process (openreelio-cli, an agent, a second window) changed
+   * this project on disk — an appended operation, or an undo/redo/jump that
+   * rewrote its history. While set, backend mutations are refused and the user
+   * is offered a reload.
    */
   externalChange: ExternalChangeNotice | null;
   /** True while {@link ProjectState.reloadProjectFromDisk} is in flight. */

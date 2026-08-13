@@ -46,6 +46,20 @@ pub enum CoreError {
         on_disk_op_count: usize,
     },
 
+    /// Another process rewrote the history manifest without appending to the log.
+    ///
+    /// Undo, redo and history jumps change which operations are applied without
+    /// recording a new operation, so the operation counts still agree and only
+    /// the manifest itself gives the change away. Continuing would re-apply this
+    /// session's view of history and silently revert the other process's undo.
+    #[error(
+        "{}: the project history changed on disk outside this session \
+         (another process undid, redid or jumped through history). \
+         Reload the project to continue.",
+        EXTERNAL_CHANGE_DETECTED_CODE
+    )]
+    ExternalHistoryChangeDetected,
+
     // =========================================================================
     // Asset Errors
     // =========================================================================
