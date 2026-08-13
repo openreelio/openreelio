@@ -384,7 +384,7 @@ async fn maybe_enhance_bundle_with_openai(
         Ok(None) => return Ok(()),
         Err(error) => {
             bundle.add_error("perception_provider", error);
-            AnalysisJobRunner::new(&asset_context.project_path)
+            *bundle = AnalysisJobRunner::new(&asset_context.project_path)
                 .save_bundle(bundle)
                 .map_err(|error| format!("Failed to save provider warning: {error}"))?;
             return Ok(());
@@ -453,7 +453,9 @@ async fn maybe_enhance_bundle_with_openai(
     }
 
     if changed {
-        AnalysisJobRunner::new(&asset_context.project_path)
+        // The save merges under the bundle lock, so adopt what was persisted:
+        // it may carry slots another writer added while the provider ran.
+        *bundle = AnalysisJobRunner::new(&asset_context.project_path)
             .save_bundle(bundle)
             .map_err(|error| format!("Failed to save OpenAI-enhanced analysis bundle: {error}"))?;
     }
@@ -900,24 +902,31 @@ pub async fn import_diarization_json(
     let diarization_segments = parse_imported_diarization_json(&json)
         .map_err(|_| "Failed to parse diarization JSON: invalid format".to_string())?;
 
-    let runner = AnalysisJobRunner::new(&project_path);
-    let mut bundle = runner
-        .load_bundle_optional(&asset_id)
-        .map_err(|e| format!("Failed to load analysis bundle: {}", e))?
-        .ok_or_else(|| "No cached analysis bundle exists for this asset".to_string())?;
-
-    let transcript = bundle
-        .transcript
-        .as_ref()
-        .ok_or_else(|| "The cached analysis bundle does not contain a transcript".to_string())?;
-    let speech_regions = bundle
-        .audio_profile
-        .as_ref()
-        .map(|profile| profile.speech_regions.as_slice())
-        .unwrap_or(&[]);
-
-    let updated_transcript =
-        apply_imported_diarization(transcript, &diarization_segments, speech_regions);
+    // The transcript this annotates is read inside the bundle lock, so the
+    // speaker assignment lands on the transcript it was computed against even
+    // when the analysis pipeline rewrites the bundle concurrently.
+    let persisted = AnalysisJobRunner::new(&project_path)
+        .update_cached_bundle(&asset_id, |cached| {
+            let Some(transcript) = cached.transcript.as_ref() else {
+                return false;
+            };
+            cached.transcript = Some(apply_imported_diarization(
+                transcript,
+                &diarization_segments,
+                cached
+                    .audio_profile
+                    .as_ref()
+                    .map(|profile| profile.speech_regions.as_slice())
+                    .unwrap_or(&[]),
+            ));
+            true
+        })
+        .map_err(|e| format!("Failed to save updated analysis bundle: {}", e))?;
+    let updated_transcript = persisted
+        .and_then(|bundle| bundle.transcript)
+        .ok_or_else(|| {
+            "No cached analysis bundle with a transcript exists for this asset".to_string()
+        })?;
     let speaker_count = updated_transcript
         .iter()
         .filter_map(|segment| segment.speaker_id.as_deref())
@@ -928,11 +937,6 @@ pub async fn import_diarization_json(
         .filter_map(|segment| segment.speaker_turn_id.as_deref())
         .collect::<std::collections::BTreeSet<_>>()
         .len();
-
-    bundle.transcript = Some(updated_transcript.clone());
-    runner
-        .save_bundle(&bundle)
-        .map_err(|e| format!("Failed to save updated analysis bundle: {}", e))?;
 
     Ok(DiarizationImportSummary {
         asset_id,

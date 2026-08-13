@@ -87,6 +87,26 @@ impl Drop for BundleLock {
     }
 }
 
+/// What a locked bundle update does when the asset has no cached bundle yet.
+enum MissingBundle<'a> {
+    /// Start from a fresh bundle built with this metadata.
+    Create(&'a VideoMetadata),
+    /// Leave the cache untouched and report that nothing was written.
+    Skip,
+}
+
+/// Converts the result of an unconditional locked update back into a bundle.
+///
+/// [`AnalysisJobRunner::locked_bundle_update`] reports `None` only when the
+/// mutation declined to persist, which an unconditional caller never does.
+fn expect_persisted(updated: Option<AnalysisBundle>) -> CoreResult<AnalysisBundle> {
+    updated.ok_or_else(|| {
+        CoreError::Internal(
+            "Analysis bundle update reported no write for an unconditional mutation".to_string(),
+        )
+    })
+}
+
 // =============================================================================
 // Analysis Job Runner
 // =============================================================================
@@ -211,6 +231,10 @@ impl AnalysisJobRunner {
     }
 
     /// Runs the full analysis pipeline with caller-provided metadata and progress updates.
+    ///
+    /// The returned bundle is the one that was persisted: results this run did
+    /// not reproduce are merged back from the cache under the bundle lock, so it
+    /// reflects the asset's complete analysis rather than just this run's slots.
     pub async fn analyze_full_with_metadata<F>(
         &self,
         asset_id: &str,
@@ -415,8 +439,10 @@ impl AnalysisJobRunner {
             }
         }
 
-        // Save bundle to disk
-        self.save_bundle(&bundle)?;
+        // Save bundle to disk. The write merges with whatever is cached, so a
+        // run with only some sub-jobs enabled keeps the results it did not
+        // reproduce instead of erasing them.
+        let bundle = self.save_bundle(&bundle)?;
         emit_progress(
             "bundle",
             "saved",
@@ -448,11 +474,15 @@ impl AnalysisJobRunner {
         Ok(Some(bundle))
     }
 
-    /// Saves an analysis bundle to disk using atomic write.
+    /// Writes a bundle to disk with an atomic replace.
     ///
-    /// Uses `atomic_write_json_pretty` from `crate::core::fs` which handles
+    /// Uses `atomic_write_json_pretty` from `crate::core::fs`, which handles
     /// Windows rename-over-existing semantics correctly.
-    pub(crate) fn save_bundle(&self, bundle: &AnalysisBundle) -> CoreResult<()> {
+    ///
+    /// Private on purpose: the caller must already hold the bundle lock, which
+    /// only [`Self::locked_bundle_update`] takes. Every write of `bundle.json`
+    /// goes through that one path so a new writer cannot forget the lock.
+    fn write_bundle(&self, bundle: &AnalysisBundle) -> CoreResult<()> {
         let path = self.bundle_path(&bundle.asset_id)?;
 
         crate::core::fs::atomic_write_json_pretty(&path, bundle)?;
@@ -466,17 +496,77 @@ impl AnalysisJobRunner {
         Ok(())
     }
 
+    /// Loads, mutates and writes the asset's bundle under the bundle lock.
+    ///
+    /// This is the only read-modify-write cycle over `bundle.json`. The GUI job
+    /// worker and a CLI invocation are separate processes updating different
+    /// slots of the same file, so holding the advisory lock across the whole
+    /// cycle is what keeps the later write from silently dropping the earlier
+    /// one.
+    ///
+    /// `mutate` returns `false` to abandon the update, leaving the cached bundle
+    /// — including its `analyzed_at` stamp — exactly as it was. `missing` decides
+    /// what happens when the asset has no cached bundle yet.
+    fn locked_bundle_update<F>(
+        &self,
+        asset_id: &str,
+        missing: MissingBundle<'_>,
+        mutate: F,
+    ) -> CoreResult<Option<AnalysisBundle>>
+    where
+        F: FnOnce(&mut AnalysisBundle) -> bool,
+    {
+        let _lock = self.lock_bundle_exclusive(asset_id)?;
+
+        let mut bundle = match self.load_bundle_optional(asset_id)? {
+            Some(bundle) => bundle,
+            None => match missing {
+                MissingBundle::Create(metadata) => AnalysisBundle::new(asset_id, metadata.clone()),
+                MissingBundle::Skip => return Ok(None),
+            },
+        };
+
+        if !mutate(&mut bundle) {
+            return Ok(None);
+        }
+
+        bundle.analyzed_at = chrono::Utc::now().to_rfc3339();
+
+        self.write_bundle(&bundle)?;
+        Ok(Some(bundle))
+    }
+
+    /// Publishes a caller-produced bundle, keeping cached results it does not carry.
+    ///
+    /// A pipeline run only fills the slots its enabled sub-jobs produced, and a
+    /// concurrent writer may have filled others in the meantime. The write takes
+    /// the bundle lock and merges rather than overwrites: fresh results win, and
+    /// slots this bundle leaves empty keep what the cache already held (subject
+    /// to [`AnalysisBundle::backfill_missing_from`], which refuses to restore
+    /// failed or shot-orphaned slots).
+    ///
+    /// Returns the bundle that was persisted.
+    pub(crate) fn save_bundle(&self, bundle: &AnalysisBundle) -> CoreResult<AnalysisBundle> {
+        let fresh = bundle.clone();
+        let metadata = bundle.metadata.clone();
+        let updated = self.locked_bundle_update(
+            &bundle.asset_id,
+            MissingBundle::Create(&metadata),
+            move |stored| {
+                let previous = std::mem::replace(stored, fresh);
+                stored.backfill_missing_from(&previous);
+                true
+            },
+        )?;
+        expect_persisted(updated)
+    }
+
     /// Applies `mutate` to the asset's cached bundle and writes it back.
     ///
     /// The bundle is loaded from disk first, so a caller that produces only one
     /// kind of result (shot detection, an audio profile) updates its own slot
     /// without discarding what earlier runs stored. When no bundle exists yet,
     /// a fresh one is created from `fallback_metadata`.
-    ///
-    /// The load, the mutation and the write happen under an exclusive advisory
-    /// lock on the bundle: the GUI job worker and a CLI invocation can update
-    /// different slots of the same bundle at the same time, and without the lock
-    /// the later write would silently drop the earlier one.
     ///
     /// Returns the merged bundle that was persisted.
     pub fn merge_bundle_update<F>(
@@ -488,21 +578,59 @@ impl AnalysisJobRunner {
     where
         F: FnOnce(&mut AnalysisBundle),
     {
-        let _lock = self.lock_bundle_exclusive(asset_id)?;
+        let updated = self.locked_bundle_update(
+            asset_id,
+            MissingBundle::Create(fallback_metadata),
+            |bundle| {
+                mutate(bundle);
+                true
+            },
+        )?;
+        expect_persisted(updated)
+    }
 
-        let mut bundle = match self.load_bundle_optional(asset_id)? {
-            Some(bundle) => bundle,
-            None => AnalysisBundle::new(asset_id, fallback_metadata.clone()),
-        };
+    /// Applies `mutate` to the asset's cached bundle, letting it decline the write.
+    ///
+    /// Same locking as [`Self::merge_bundle_update`], but `mutate` returns
+    /// `false` when it finds nothing to merge into. The decision therefore
+    /// happens under the same lock as the write, so a caller cannot report a
+    /// successful update based on a state that changed before it wrote.
+    ///
+    /// Returns `None` when the mutation declined.
+    pub fn try_merge_bundle_update<F>(
+        &self,
+        asset_id: &str,
+        fallback_metadata: &VideoMetadata,
+        mutate: F,
+    ) -> CoreResult<Option<AnalysisBundle>>
+    where
+        F: FnOnce(&mut AnalysisBundle) -> bool,
+    {
+        self.locked_bundle_update(asset_id, MissingBundle::Create(fallback_metadata), mutate)
+    }
 
-        mutate(&mut bundle);
-        bundle.analyzed_at = chrono::Utc::now().to_rfc3339();
-
-        self.save_bundle(&bundle)?;
-        Ok(bundle)
+    /// Applies `mutate` to an already cached bundle, never creating one.
+    ///
+    /// For updates that only make sense on top of existing results, such as
+    /// importing diarization into a transcript the pipeline produced. Returns
+    /// `None` when no bundle is cached or when `mutate` declined; both the
+    /// existence check and the write happen under the bundle lock.
+    pub fn update_cached_bundle<F>(
+        &self,
+        asset_id: &str,
+        mutate: F,
+    ) -> CoreResult<Option<AnalysisBundle>>
+    where
+        F: FnOnce(&mut AnalysisBundle) -> bool,
+    {
+        self.locked_bundle_update(asset_id, MissingBundle::Skip, mutate)
     }
 
     /// Merges shot-detection results into the asset's cached bundle.
+    ///
+    /// Uses [`AnalysisBundle::replace_shots`], so keyframes recorded for
+    /// unchanged boundaries survive and results indexed by shot position are
+    /// dropped when the cut list changes.
     pub fn merge_bundle_shots(
         &self,
         asset_id: &str,
@@ -510,7 +638,7 @@ impl AnalysisJobRunner {
         shots: Vec<ShotResult>,
     ) -> CoreResult<AnalysisBundle> {
         self.merge_bundle_update(asset_id, fallback_metadata, |bundle| {
-            bundle.shots = Some(shots);
+            bundle.replace_shots(shots);
             bundle.errors.remove("shots");
         })
     }
@@ -961,6 +1089,184 @@ mod tests {
     }
 
     #[test]
+    fn should_not_lose_a_slot_when_a_pipeline_save_races_a_merge() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_dir = temp_dir.path().to_path_buf();
+        let metadata = VideoMetadata::new(30.0).with_audio(true);
+
+        // Stands in for the GUI job worker: publishes a whole bundle produced by
+        // a run that only enabled shot detection.
+        let pipeline_dir = project_dir.clone();
+        let pipeline_metadata = metadata.clone();
+        let pipeline_writer = std::thread::spawn(move || {
+            let runner = AnalysisJobRunner::new(&pipeline_dir);
+            for _ in 0..20 {
+                let mut bundle = AnalysisBundle::new("asset_201", pipeline_metadata.clone());
+                bundle.shots = Some(vec![ShotResult::new(0.0, 30.0, 0.9)]);
+                runner.save_bundle(&bundle).unwrap();
+            }
+        });
+
+        // Stands in for a concurrent CLI `analysis audio`.
+        let audio_writer = std::thread::spawn(move || {
+            let runner = AnalysisJobRunner::new(&project_dir);
+            for _ in 0..20 {
+                runner
+                    .merge_bundle_audio_profile("asset_201", &metadata, AudioProfile::silent(30.0))
+                    .unwrap();
+            }
+        });
+
+        pipeline_writer.join().unwrap();
+        audio_writer.join().unwrap();
+
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+        let loaded = runner.load_bundle("asset_201").unwrap();
+        assert!(loaded.shots.is_some());
+        assert!(
+            loaded.audio_profile.is_some(),
+            "a pipeline save must not overwrite a slot another writer filled"
+        );
+    }
+
+    #[test]
+    fn should_keep_cached_results_a_partial_run_did_not_reproduce() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+
+        let mut cached = AnalysisBundle::new("asset_202", VideoMetadata::new(30.0));
+        cached.audio_profile = Some(AudioProfile::silent(30.0));
+        cached.segments = Some(Vec::new());
+        runner.save_bundle(&cached).unwrap();
+
+        let mut fresh = AnalysisBundle::new("asset_202", VideoMetadata::new(30.0));
+        fresh.shots = Some(vec![ShotResult::new(0.0, 30.0, 0.9)]);
+        let persisted = runner.save_bundle(&fresh).unwrap();
+
+        assert!(persisted.shots.is_some());
+        assert!(persisted.audio_profile.is_some());
+        assert!(persisted.segments.is_some());
+        assert!(runner
+            .load_bundle("asset_202")
+            .unwrap()
+            .audio_profile
+            .is_some());
+    }
+
+    #[test]
+    fn should_drop_shot_indexed_results_when_merged_shots_change_the_cut_list() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+
+        let mut cached = AnalysisBundle::new("asset_203", VideoMetadata::new(30.0));
+        cached.shots = Some(vec![ShotResult::new(0.0, 30.0, 0.9)
+            .with_keyframe(&temp_dir.path().join("shot_000.jpg").display().to_string())]);
+        cached.frame_analysis = Some(vec![FrameAnalysis::local_fallback(0, 0.5)]);
+        cached.contact_sheet = Some(ContactSheetArtifact {
+            path: temp_dir.path().join("sheet.jpg").display().to_string(),
+            frame_count: 1,
+            columns: 1,
+            rows: 1,
+        });
+        runner.save_bundle(&cached).unwrap();
+
+        let merged = runner
+            .merge_bundle_shots(
+                "asset_203",
+                &VideoMetadata::new(30.0),
+                vec![
+                    ShotResult::new(0.0, 12.0, 0.9),
+                    ShotResult::new(12.0, 30.0, 0.9),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(merged.shots.as_ref().unwrap().len(), 2);
+        assert!(
+            merged.frame_analysis.is_none(),
+            "readings of the old shot 0 must not be re-attached to a new shot 0"
+        );
+        assert!(merged.contact_sheet.is_none());
+
+        let loaded = runner.load_bundle("asset_203").unwrap();
+        assert!(loaded.frame_analysis.is_none());
+        assert!(loaded.contact_sheet.is_none());
+    }
+
+    #[test]
+    fn should_keep_keyframes_when_merged_shots_reproduce_the_cut_list() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+        let keyframe = temp_dir.path().join("shot_000.jpg").display().to_string();
+
+        let mut cached = AnalysisBundle::new("asset_204", VideoMetadata::new(30.0));
+        cached.shots = Some(vec![
+            ShotResult::new(0.0, 30.0, 0.9).with_keyframe(&keyframe)
+        ]);
+        cached.contact_sheet = Some(ContactSheetArtifact {
+            path: temp_dir.path().join("sheet.jpg").display().to_string(),
+            frame_count: 1,
+            columns: 1,
+            rows: 1,
+        });
+        runner.save_bundle(&cached).unwrap();
+
+        // `analysis shots` re-detects the same cuts without extracting keyframes.
+        let merged = runner
+            .merge_bundle_shots(
+                "asset_204",
+                &VideoMetadata::new(30.0),
+                vec![ShotResult::new(0.0, 30.0, 0.8)],
+            )
+            .unwrap();
+
+        assert_eq!(
+            merged.shots.as_ref().unwrap()[0].keyframe_path.as_deref(),
+            Some(keyframe.as_str())
+        );
+        assert!(merged.contact_sheet.is_some());
+    }
+
+    #[test]
+    fn should_not_write_when_a_merge_declines() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+
+        let mut cached = AnalysisBundle::new("asset_205", VideoMetadata::new(30.0));
+        cached.analyzed_at = "2020-01-01T00:00:00+00:00".to_string();
+        runner.save_bundle(&cached).unwrap();
+        let stamp_before = runner.load_bundle("asset_205").unwrap().analyzed_at;
+
+        let declined = runner
+            .try_merge_bundle_update("asset_205", &VideoMetadata::new(30.0), |bundle| {
+                bundle.segments = Some(Vec::new());
+                false
+            })
+            .unwrap();
+
+        assert!(declined.is_none());
+        let loaded = runner.load_bundle("asset_205").unwrap();
+        assert!(loaded.segments.is_none());
+        assert_eq!(loaded.analyzed_at, stamp_before);
+    }
+
+    #[test]
+    fn should_not_create_a_bundle_when_updating_an_uncached_asset() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+
+        let updated = runner
+            .update_cached_bundle("asset_206", |bundle| {
+                bundle.segments = Some(Vec::new());
+                true
+            })
+            .unwrap();
+
+        assert!(updated.is_none());
+        assert!(runner.load_bundle_optional("asset_206").unwrap().is_none());
+    }
+
+    #[test]
     fn should_preserve_other_results_when_merging_shots_into_an_existing_bundle() {
         let temp_dir = TempDir::new().unwrap();
         let runner = AnalysisJobRunner::new(temp_dir.path());
@@ -1047,12 +1353,13 @@ mod tests {
     }
 
     #[test]
-    fn should_overwrite_existing_bundle_on_save() {
+    fn should_publish_fresh_results_over_an_existing_bundle_on_save() {
         let temp_dir = TempDir::new().unwrap();
         let runner = AnalysisJobRunner::new(temp_dir.path());
 
         // Save first version
-        let bundle1 = AnalysisBundle::new("asset_003", VideoMetadata::new(10.0));
+        let mut bundle1 = AnalysisBundle::new("asset_003", VideoMetadata::new(10.0));
+        bundle1.shots = Some(vec![ShotResult::new(0.0, 10.0, 0.5)]);
         runner.save_bundle(&bundle1).unwrap();
 
         // Save updated version
@@ -1061,7 +1368,7 @@ mod tests {
         runner.save_bundle(&bundle2).unwrap();
 
         let loaded = runner.load_bundle("asset_003").unwrap();
-        assert!(loaded.shots.is_some());
+        assert_eq!(loaded.shots.as_ref().unwrap()[0].confidence, 1.0);
     }
 
     #[tokio::test]

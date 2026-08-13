@@ -4,8 +4,18 @@
 
 use rusqlite::Connection;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::core::{CoreError, CoreResult};
+
+/// How long a statement waits for a lock held by another connection.
+///
+/// The GUI and the CLI open the same `index.db` as separate processes. Without
+/// a busy timeout SQLite fails a contended statement immediately with
+/// `SQLITE_BUSY`, and that includes the schema DDL every open runs — which no
+/// caller-side write retry can cover. Letting SQLite wait handles opens, DDL
+/// and writes uniformly.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 // =============================================================================
 // Index Database
@@ -23,6 +33,7 @@ impl IndexDb {
             .map_err(|e| CoreError::Internal(format!("Failed to create index database: {}", e)))?;
 
         let db = Self { conn };
+        db.configure_connection()?;
         db.init_schema()?;
         Ok(db)
     }
@@ -33,6 +44,7 @@ impl IndexDb {
             .map_err(|e| CoreError::Internal(format!("Failed to open index database: {}", e)))?;
 
         let db = Self { conn };
+        db.configure_connection()?;
         db.init_schema()?;
         Ok(db)
     }
@@ -44,8 +56,38 @@ impl IndexDb {
         })?;
 
         let db = Self { conn };
+        db.configure_connection()?;
         db.init_schema()?;
         Ok(db)
+    }
+
+    /// Prepares a freshly opened connection for concurrent access.
+    ///
+    /// Runs before the schema DDL so the very first statement of a contended
+    /// open already waits instead of failing:
+    ///
+    /// - `busy_timeout` makes SQLite block for [`BUSY_TIMEOUT`] on a lock held
+    ///   by another connection rather than returning `SQLITE_BUSY`.
+    /// - WAL journalling lets readers (the GUI browsing shots) keep reading
+    ///   while a writer (a CLI analysis run) commits, which removes most of the
+    ///   contention in the first place. In-memory databases report `memory`
+    ///   instead; that is expected and not an error.
+    fn configure_connection(&self) -> CoreResult<()> {
+        self.conn.busy_timeout(BUSY_TIMEOUT).map_err(|e| {
+            CoreError::Internal(format!(
+                "Failed to set the index database busy timeout: {e}"
+            ))
+        })?;
+
+        self.conn
+            .query_row("PRAGMA journal_mode = WAL", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| {
+                CoreError::Internal(format!("Failed to enable index database WAL mode: {e}"))
+            })?;
+
+        Ok(())
     }
 
     /// Initializes the database schema
@@ -256,6 +298,43 @@ mod tests {
 
         assert_eq!(stats.shot_count, 0);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn should_configure_a_file_connection_for_concurrent_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_index.db");
+
+        let db = IndexDb::create(&path).unwrap();
+
+        let journal_mode: String = db
+            .connection()
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            journal_mode.to_lowercase(),
+            "wal",
+            "WAL keeps GUI readers working while the CLI writes"
+        );
+
+        let busy_timeout: i64 = db
+            .connection()
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            busy_timeout,
+            BUSY_TIMEOUT.as_millis() as i64,
+            "a contended open, DDL or write must wait rather than fail"
+        );
+
+        // A second connection to the same file must be configured identically:
+        // the open path is where an unguarded connection used to slip through.
+        let reopened = IndexDb::open(&path).unwrap();
+        let reopened_timeout: i64 = reopened
+            .connection()
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(reopened_timeout, BUSY_TIMEOUT.as_millis() as i64);
     }
 
     #[test]

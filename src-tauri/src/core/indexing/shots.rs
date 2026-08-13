@@ -520,7 +520,14 @@ impl ShotDetector {
         shots
     }
 
-    /// Saves detected shots to the index database
+    /// Saves detected shots to the index database.
+    ///
+    /// The asset's rows are replaced wholesale, so keyframe thumbnails already
+    /// recorded for an unchanged boundary are carried onto the incoming shot
+    /// first. Detection and keyframe extraction are separate steps and a
+    /// detect-only caller supplies `keyframe_path: None`; without the
+    /// carry-forward, re-running detection would blank thumbnails an earlier
+    /// extraction produced.
     pub fn save_to_db(&self, db: &IndexDb, shots: &[Shot]) -> CoreResult<()> {
         let conn = db.connection();
 
@@ -539,6 +546,17 @@ impl ShotDetector {
         // Manual transaction: rusqlite's transaction API may require &mut Connection.
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| CoreError::Internal(format!("Failed to begin transaction: {}", e)))?;
+
+        // Read inside the transaction so the carry-forward sees exactly the rows
+        // the DELETE below removes.
+        let stored = match Self::load_from_db(db, &asset_id) {
+            Ok(stored) => stored,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        };
+        let shots = carry_keyframes_forward(shots, &stored);
 
         // Replace existing cache for this asset to avoid duplicates.
         conn.execute("DELETE FROM shots WHERE asset_id = ?", [&asset_id])
@@ -559,7 +577,7 @@ impl ShotDetector {
                 CoreError::Internal(format!("Failed to prepare insert: {}", e))
             })?;
 
-        for shot in shots {
+        for shot in &shots {
             if !shot.start_sec.is_finite() || !shot.end_sec.is_finite() {
                 let _ = conn.execute_batch("ROLLBACK");
                 return Err(CoreError::ValidationError(
@@ -650,6 +668,37 @@ impl Default for ShotDetector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Tolerance used when matching an incoming shot against a stored one.
+///
+/// Boundaries round-trip through SQLite as `REAL`, so an exact comparison would
+/// treat a reproduced cut as a new one.
+const SHOT_BOUNDARY_EPSILON_SEC: f64 = 0.001;
+
+/// Copies keyframe paths from `stored` onto incoming shots covering the same span.
+///
+/// Only fills gaps: a caller that extracted its own keyframes keeps them.
+fn carry_keyframes_forward(shots: &[Shot], stored: &[Shot]) -> Vec<Shot> {
+    shots
+        .iter()
+        .map(|shot| {
+            if shot.keyframe_path.is_some() {
+                return shot.clone();
+            }
+            let matching = stored.iter().find(|candidate| {
+                (candidate.start_sec - shot.start_sec).abs() <= SHOT_BOUNDARY_EPSILON_SEC
+                    && (candidate.end_sec - shot.end_sec).abs() <= SHOT_BOUNDARY_EPSILON_SEC
+            });
+            match matching {
+                Some(matching) => Shot {
+                    keyframe_path: matching.keyframe_path.clone(),
+                    ..shot.clone()
+                },
+                None => shot.clone(),
+            }
+        })
+        .collect()
 }
 
 // =============================================================================
@@ -808,6 +857,69 @@ mod tests {
         assert_eq!(loaded[0].start_sec, 0.0);
         assert_eq!(loaded[1].start_sec, 5.0);
         assert_eq!(loaded[2].start_sec, 10.0);
+    }
+
+    #[test]
+    fn should_keep_stored_keyframes_when_resaving_the_same_boundaries() {
+        let db = IndexDb::in_memory().unwrap();
+        let detector = ShotDetector::new();
+
+        let mut with_keyframes = vec![
+            Shot::new("asset_001", 0.0, 5.0),
+            Shot::new("asset_001", 5.0, 10.0),
+        ];
+        with_keyframes[0].keyframe_path = Some("keyframes/shot_000.jpg".to_string());
+        with_keyframes[1].keyframe_path = Some("keyframes/shot_001.jpg".to_string());
+        detector.save_to_db(&db, &with_keyframes).unwrap();
+
+        // A detect-only re-run reports the same cuts without extracting keyframes.
+        detector
+            .save_to_db(
+                &db,
+                &[
+                    Shot::new("asset_001", 0.0, 5.0),
+                    Shot::new("asset_001", 5.0, 10.0),
+                ],
+            )
+            .unwrap();
+
+        let loaded = ShotDetector::load_from_db(&db, "asset_001").unwrap();
+        assert_eq!(
+            loaded[0].keyframe_path.as_deref(),
+            Some("keyframes/shot_000.jpg"),
+            "re-detecting the same cuts must not blank existing thumbnails"
+        );
+        assert_eq!(
+            loaded[1].keyframe_path.as_deref(),
+            Some("keyframes/shot_001.jpg")
+        );
+    }
+
+    #[test]
+    fn should_not_carry_keyframes_onto_shots_with_different_boundaries() {
+        let db = IndexDb::in_memory().unwrap();
+        let detector = ShotDetector::new();
+
+        let mut stored = vec![Shot::new("asset_001", 0.0, 10.0)];
+        stored[0].keyframe_path = Some("keyframes/shot_000.jpg".to_string());
+        detector.save_to_db(&db, &stored).unwrap();
+
+        detector
+            .save_to_db(
+                &db,
+                &[
+                    Shot::new("asset_001", 0.0, 4.0),
+                    Shot::new("asset_001", 4.0, 10.0),
+                ],
+            )
+            .unwrap();
+
+        let loaded = ShotDetector::load_from_db(&db, "asset_001").unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(
+            loaded.iter().all(|shot| shot.keyframe_path.is_none()),
+            "a thumbnail of the old cut does not represent a new one"
+        );
     }
 
     #[test]

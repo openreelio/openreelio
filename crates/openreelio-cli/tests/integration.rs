@@ -2638,6 +2638,48 @@ fn test_analysis_run_preserves_results_from_earlier_partial_runs() {
     assert_eq!(report["coverage"]["audio"], true);
 }
 
+#[test]
+fn test_analysis_shots_keeps_keyframes_a_previous_run_extracted() {
+    let Some((_dir, path, asset_id)) = create_project_with_media(
+        "analysis_shots_keyframe_test",
+        "scene_change.mp4",
+        create_sample_video_with_scene_change,
+    ) else {
+        return;
+    };
+
+    // A full run detects shots and extracts a keyframe per shot.
+    run_cli_ok(&[
+        "analysis", "run", "--path", &path, "--id", &asset_id, "--shots",
+    ]);
+
+    let cached: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(bundle_path(&path, &asset_id)).unwrap())
+            .unwrap();
+    let cached_shots = cached["shots"].as_array().unwrap().clone();
+    assert!(
+        cached_shots
+            .iter()
+            .any(|shot| shot["keyframePath"].is_string()),
+        "the full run must extract keyframes for this test to mean anything: {cached}"
+    );
+
+    // `analysis shots` re-detects boundaries and deliberately extracts nothing.
+    run_cli_ok(&["analysis", "shots", "--path", &path, "--id", &asset_id]);
+
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(bundle_path(&path, &asset_id)).unwrap())
+            .unwrap();
+    let after_shots = after["shots"].as_array().unwrap();
+    assert_eq!(after_shots.len(), cached_shots.len());
+    for (before, after) in cached_shots.iter().zip(after_shots) {
+        assert_eq!(
+            before["keyframePath"], after["keyframePath"],
+            "re-detecting the same cuts must not blank the keyframe thumbnails"
+        );
+    }
+}
+
 // =============================================================================
 // verify
 // =============================================================================
