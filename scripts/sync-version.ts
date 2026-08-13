@@ -130,6 +130,30 @@ function repinLockstepOptionalDependencies(
 }
 
 /**
+ * Lists `@openreelio/*` optional dependencies of a package manifest that are not
+ * pinned to the given version.
+ *
+ * The version field and the lockstep pins can drift apart — a manual edit, or a
+ * pin added after the last bump — so a manifest whose version already matches
+ * can still ship stale pins. Checking must catch that, not just fixing.
+ */
+export function findStaleLockstepPins(filePath: string, expectedVersion: string): string[] {
+  const json = JSON.parse(readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
+  const optionalDependencies = json.optionalDependencies;
+
+  if (typeof optionalDependencies !== 'object' || optionalDependencies === null) {
+    return [];
+  }
+
+  return Object.entries(optionalDependencies as Record<string, string>)
+    .filter(
+      ([name, range]) =>
+        name.startsWith(LOCKSTEP_DEPENDENCY_SCOPE) && range !== expectedVersion
+    )
+    .map(([name]) => name);
+}
+
+/**
  * Updates version in Cargo.toml
  */
 export function updateCargoVersion(filePath: string, newVersion: string): void {
@@ -218,6 +242,11 @@ export interface VersionMismatch {
   kind: VersionFileKind;
   currentVersion: string;
   expectedVersion: string;
+  /**
+   * Set when the version field itself matches but something else in the file is
+   * out of sync, so reports can say what actually has to change.
+   */
+  detail?: string;
 }
 
 export interface SkippedTarget {
@@ -260,6 +289,24 @@ export function checkVersionSync(config: VersionSyncConfig): CheckResult {
         currentVersion,
         expectedVersion: sourceVersion,
       });
+      continue;
+    }
+
+    // A manifest can carry the right version and still pin its lockstep
+    // siblings at an older one; the writer repins them, so report it as a
+    // mismatch to get the writer invoked.
+    if (target.kind === 'package-json') {
+      const stalePins = findStaleLockstepPins(target.path, sourceVersion);
+      if (stalePins.length > 0) {
+        mismatches.push({
+          file: target.file,
+          path: target.path,
+          kind: target.kind,
+          currentVersion,
+          expectedVersion: sourceVersion,
+          detail: `stale ${LOCKSTEP_DEPENDENCY_SCOPE}* pins: ${stalePins.join(', ')}`,
+        });
+      }
     }
   }
 
@@ -371,7 +418,11 @@ function main(): void {
       } else {
         console.log('\n✗ Version mismatch detected:\n');
         for (const m of result.mismatches) {
-          console.log(`  ${m.file}: ${m.currentVersion} (expected ${m.expectedVersion})`);
+          console.log(
+            m.detail
+              ? `  ${m.file}: ${m.detail} (expected ${m.expectedVersion})`
+              : `  ${m.file}: ${m.currentVersion} (expected ${m.expectedVersion})`
+          );
         }
         console.log('\nRun with --fix to sync versions.');
         process.exit(1);

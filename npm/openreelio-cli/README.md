@@ -19,9 +19,10 @@ npm install -g openreelio-cli
 npx openreelio-cli --help
 ```
 
-The package downloads nothing at install time. The binary ships in a
-platform-specific optional dependency that npm resolves from `os`/`cpu`, so
-installs work with lifecycle scripts disabled (the npm v12 default).
+npm downloads this package and the one platform package matching your `os`/`cpu`;
+no install script downloads the binary. It ships as content of that
+platform-specific optional dependency, so installs also work with lifecycle
+scripts disabled (`--ignore-scripts`).
 
 | Platform          | Package                        | Release target             |
 | ----------------- | ------------------------------ | -------------------------- |
@@ -95,7 +96,7 @@ command log and stays undoable.
 
 MCP registry identifier:
 
-```
+```text
 mcp-name: io.github.openreelio/openreelio
 ```
 

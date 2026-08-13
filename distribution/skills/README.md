@@ -11,7 +11,7 @@ repository root, so this repo is not itself a plugin or a skills container.
 
 ## Layout
 
-```
+```text
 distribution/skills/
 ├── .claude-plugin/plugin.json     plugin manifest (name, version, author, license)
 ├── .mcp.json                      MCP server wiring for openreelio-cli
@@ -45,7 +45,11 @@ These are structural requirements, not style preferences.
 5. **Every command and flag must exist.** Cross-check against
    `openreelio-cli help-json` or `openreelio-cli <verb> --help` before writing it
    down. The CLI is self-describing; this package exists to orient an agent, not
-   to replace the binary's own help.
+   to replace the binary's own help. Never copy a `help-json` *example*
+   verbatim: they carry placeholder IDs (`asset_001`) rather than the ULIDs the
+   CLI returns, and some spell a negative option in the spaced form
+   (`--target-lufs -14`) that argument parsing rejects. Take flags from per-verb
+   `--help`, and run an example before writing it down.
 6. **Keep each `REFERENCE.md` under about 150 lines.** If a topic outgrows that,
    split it into a new topic and add a router entry.
 
@@ -55,7 +59,9 @@ These are structural requirements, not style preferences.
 `--stdio` is required — without it the command prints a discovery payload and
 exits instead of serving.
 
-The server is **read-only by default**. Mutating tools (`openreelio.media.insert`,
+The server is **read-only by default**. The read tools are always registered,
+including `openreelio.verify`, so deterministic QC is available without any
+write grant. Mutating tools (`openreelio.media.insert`,
 `openreelio.plan.apply`) appear only when the operator adds `--allow-write` — a
 local-trust switch that drops the per-call approval requirement — or when the
 host supplies `OPENREELIO_MCP_APPROVAL_TOKEN` for a single call. Editing through

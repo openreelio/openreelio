@@ -35,6 +35,13 @@ Treat the binary as the source of truth, not this skill.
 is roughly 58 KB — fetch per-verb help instead of loading all of it. Use
 `openreelio-cli command schema` for the 79 backend command types.
 
+Its *examples* are not copy-paste ready: IDs are readable placeholders
+(`asset_001`) rather than the ULIDs the CLI actually returns, and some spell a
+negative option in the spaced form (`--target-lufs -14`) that argument parsing
+rejects. Check an example against
+[the conventions](./setup/REFERENCE.md#conventions-that-apply-everywhere) and the
+verb's own `--help` before running it.
+
 ## Never full-render to check your work
 
 A full export is the most expensive way to answer "did that cut land?". Use

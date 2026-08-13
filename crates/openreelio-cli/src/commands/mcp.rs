@@ -93,7 +93,7 @@ pub fn execute(action: McpAction) -> anyhow::Result<()> {
                 "version": env!("CARGO_PKG_VERSION"),
                 "transport": "stdio"
             },
-            "command": "openreelio-cli mcp --stdio --project <project-path>",
+            "command": build_discovery_command(&state),
             "tools": build_tools(&state),
             "resources": build_resources(),
             "policy": build_discovery_policy(&state)
@@ -101,15 +101,34 @@ pub fn execute(action: McpAction) -> anyhow::Result<()> {
     }
 }
 
+/// Command line an operator copies into a client config.
+///
+/// It has to reproduce the mode this discovery run reported, otherwise copying
+/// it silently downgrades a local-write server to read-only.
+fn build_discovery_command(state: &McpServerState) -> &'static str {
+    if state.allow_write {
+        "openreelio-cli mcp --stdio --project <project-path> --allow-write"
+    } else {
+        "openreelio-cli mcp --stdio --project <project-path>"
+    }
+}
+
 /// Policy block of the non-stdio discovery payload.
 ///
 /// This is what an operator reads before wiring the server into a client, so it
 /// has to name the write mode plainly rather than leave it to be inferred from
-/// the tool list.
+/// the tool list. The mode names match `policy.approvalMode` in the stdio host
+/// context, and `mutations` tracks the same predicate that gates the tool list.
 fn build_discovery_policy(state: &McpServerState) -> Value {
     serde_json::json!({
-        "mode": if state.allow_write { "read-write-local" } else { "read-only" },
-        "mutations": if state.allow_write { "enabled" } else { "disabled" }
+        "mode": if state.allow_write {
+            "read-write-local"
+        } else if state.has_active_approval_token() {
+            "approve-mutations"
+        } else {
+            "read-only"
+        },
+        "mutations": if state.mutations_enabled() { "enabled" } else { "disabled" }
     })
 }
 
@@ -2601,14 +2620,47 @@ mod tests {
             serde_json::json!({ "mode": "read-write-local", "mutations": "enabled" })
         );
         assert_eq!(
+            build_discovery_command(&state),
+            "openreelio-cli mcp --stdio --project <project-path> --allow-write"
+        );
+        assert_eq!(
             build_discovery_policy(&McpServerState::default()),
             serde_json::json!({ "mode": "read-only", "mutations": "disabled" })
+        );
+        assert_eq!(
+            build_discovery_command(&McpServerState::default()),
+            "openreelio-cli mcp --stdio --project <project-path>"
         );
 
         let context = build_host_context(&state);
         assert_eq!(context["policy"]["approvalMode"], "allow-write-local");
         assert_eq!(context["capabilities"]["planApplyWithApproval"], true);
         assert_eq!(context["capabilities"]["mediaInsertWithApproval"], true);
+    }
+
+    #[test]
+    fn should_report_token_authorized_policy_when_an_approval_token_is_active() {
+        let state = McpServerState {
+            approval_token: Some("token".to_string()),
+            ..Default::default()
+        };
+
+        // The tool list already exposes the mutating tools here, so the policy
+        // block must not claim the server is read-only.
+        assert_eq!(
+            build_discovery_policy(&state),
+            serde_json::json!({ "mode": "approve-mutations", "mutations": "enabled" })
+        );
+        assert_eq!(
+            build_discovery_command(&state),
+            "openreelio-cli mcp --stdio --project <project-path>"
+        );
+
+        let response = handle_jsonrpc_request(&state, request("tools/list", serde_json::json!({})));
+        let tools = response["result"]["tools"].as_array().expect("tools array");
+        assert!(tools
+            .iter()
+            .any(|tool| tool["name"] == "openreelio.plan.apply"));
     }
 
     #[test]

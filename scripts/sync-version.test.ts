@@ -425,5 +425,43 @@ edition = "2021"
         'unrelated-package': '^2.0.0',
       });
     });
+
+    it('should repin a stale lockstep dependency when the manifest version already matches', () => {
+      mkdirSync(dirname(TEST_MISSING_PACKAGE_JSON), { recursive: true });
+      writeFileSync(
+        TEST_MISSING_PACKAGE_JSON,
+        JSON.stringify(
+          {
+            name: 'demo',
+            version: '1.2.3',
+            optionalDependencies: {
+              '@openreelio/cli-linux-x64': '1.2.3',
+              '@openreelio/cli-win32-x64': '1.1.0',
+            },
+          },
+          null,
+          2
+        )
+      );
+
+      const checkResult = checkVersionSync({
+        packageJson: TEST_PACKAGE_JSON, // version: 1.2.3
+        targets: [optionalMissingTarget],
+      });
+
+      expect(checkResult.synced).toBe(false);
+
+      const result = syncVersions({
+        packageJson: TEST_PACKAGE_JSON,
+        targets: [optionalMissingTarget],
+      });
+
+      expect(result.updatedFiles).toEqual(['npm/demo/package.json']);
+      const updated = JSON.parse(readFileSync(TEST_MISSING_PACKAGE_JSON, 'utf-8'));
+      expect(updated.optionalDependencies).toEqual({
+        '@openreelio/cli-linux-x64': '1.2.3',
+        '@openreelio/cli-win32-x64': '1.2.3',
+      });
+    });
   });
 });

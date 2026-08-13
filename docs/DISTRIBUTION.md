@@ -339,10 +339,13 @@ overrides that lookup with an explicit path.
 
 ### Why there is no postinstall download
 
-npm v12 disables dependency lifecycle scripts by default, so the classic
-"postinstall downloads a binary" pattern now fails silently for a growing share
-of installs. The binary therefore has to arrive as package *content*. This is
-the same shape esbuild, Biome and turbo use.
+npm still runs lifecycle scripts by default (`ignore-scripts` is `false` in npm
+v12), but a growing share of installs turn them off — `--ignore-scripts`,
+a hardened CI image, or an organization-wide policy — and the classic
+"postinstall downloads a binary" pattern then fails silently. The binary
+therefore has to arrive as package *content*, so the package stays fully
+functional with lifecycle scripts disabled. This is the same shape esbuild,
+Biome and turbo use.
 
 Consequences worth remembering:
 
@@ -360,7 +363,7 @@ target, so Alpine users must download a standalone archive and set
 
 ### Assets to packages: the flow
 
-```
+```text
 release.yml (build-tauri)
   └─ openreelio-cli-<version>-<triple>.zip|.tar.gz  + .sha256   (draft release)
 release.yml (publish-release)
@@ -415,7 +418,8 @@ workflow cannot publish anything.
 2. **Set up authentication.** Preferred: **Trusted Publishing (OIDC)** — on
    npmjs.com, configure a GitHub Actions trusted publisher for each of the five
    packages, pointing at repository `openreelio/openreelio` and workflow
-   `npm-publish.yml`. It needs npm ≥ 11.5.1 (the workflow installs it) and
+   `npm-publish.yml`. It needs Node.js ≥ 22.14.0 and npm ≥ 11.5.1 (the workflow
+   resolves the latest Node 22, asserts that minimum, then installs npm 11) and
    `id-token: write` (already granted), and attaches provenance automatically.
 
    Chicken-and-egg caveat: a trusted publisher can only be configured on a

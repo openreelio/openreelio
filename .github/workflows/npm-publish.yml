@@ -31,9 +31,9 @@ name: npm Publish
 #       On npmjs.com, for `openreelio-cli` and each `@openreelio/cli-*`
 #       package: Settings -> Trusted publisher -> GitHub Actions, with
 #       repository `openreelio/openreelio` and workflow `npm-publish.yml`.
-#       Requires npm >= 11.5.1 on the runner (installed below) and
-#       `id-token: write` (granted below). Provenance is attached
-#       automatically.
+#       Requires Node.js >= 22.14.0 and npm >= 11.5.1 on the runner (both
+#       enforced below) and `id-token: write` (granted below). Provenance is
+#       attached automatically.
 #       Note: a trusted publisher must be configured per package, and a
 #       package must exist before it can be configured -- so the very first
 #       release of each of the five packages has to use path (b).
@@ -100,13 +100,14 @@ jobs:
             exit 1
           fi
 
-          case "${RELEASE_TAG}" in
-            v*) ;;
-            *)
-              echo "Refusing to publish from a non-tag ref: ${RELEASE_TAG}" >&2
-              exit 1
-              ;;
-          esac
+          # Strict semver, so the tag cannot carry shell metacharacters that a
+          # later step would have to defend against.
+          if ! printf '%s' "${RELEASE_TAG}" |
+            grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "Refusing to publish from a non-release ref: ${RELEASE_TAG}" >&2
+            echo "Expected a tag of the form vMAJOR.MINOR.PATCH[-PRERELEASE]." >&2
+            exit 1
+          fi
 
           if [ "${DRY_RUN}" != "true" ] && [ "${NPM_PUBLISH_ENABLED}" != "true" ]; then
             echo "npm publishing is disabled." >&2
@@ -129,6 +130,8 @@ jobs:
           persist-credentials: false
 
       - name: Verify npm sources exist at this tag
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -139,8 +142,8 @@ jobs:
           fi
 
           SHIM_VERSION="$(node -p "require('./npm/openreelio-cli/package.json').version")"
-          if [ "$SHIM_VERSION" != "${{ steps.release.outputs.version }}" ]; then
-            echo "Shim version ($SHIM_VERSION) does not match tag (${{ steps.release.outputs.version }})." >&2
+          if [ "$SHIM_VERSION" != "$VERSION" ]; then
+            echo "Shim version ($SHIM_VERSION) does not match tag ($VERSION)." >&2
             exit 1
           fi
 
@@ -148,12 +151,22 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
+          # Trusted Publishing needs Node.js >= 22.14.0; without this the action
+          # may pick an older 22.x already cached on the runner.
+          check-latest: true
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Upgrade npm for Trusted Publishing
-        # Trusted Publishing (OIDC) requires npm >= 11.5.1; Node 22 ships npm 10.
+      - name: Verify Node.js and upgrade npm for Trusted Publishing
+        # Trusted Publishing (OIDC) requires Node.js >= 22.14.0 and npm >= 11.5.1;
+        # Node 22 ships npm 10.
         run: |
           set -euo pipefail
+
+          if [ "$(node -p 'const v = process.versions.node.split(".").map(Number); v[0] > 22 || (v[0] === 22 && v[1] >= 14)')" != "true" ]; then
+            echo "npm Trusted Publishing requires Node.js >= 22.14.0; got $(node --version)." >&2
+            exit 1
+          fi
+
           npm install -g npm@^11.5.1
           npm --version
 
