@@ -514,7 +514,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.verify",
             "OpenReelio verify",
-            "Run deterministic quality control over a sequence and, with 'file', over a rendered export. Every check that ran, was skipped, or errored is reported, so 'checked and clean' is distinguishable from 'never checked'. Violations carry an executable suggestedFix plan.",
+            "Run deterministic quality control over a sequence and, with 'file', over a rendered export. Every check that ran, was skipped, or errored is reported, so 'checked and clean' is distinguishable from 'never checked'. Per-check status is passed (ran, found nothing), warned (ran, warning/info findings only), failed (ran, error or critical findings), skipped, or errored; checks[].passed is true only for 'passed', while the top-level status/passed follow severity. Violations carry an executable suggestedFix plan.",
             serde_json::json!({
                 "type": "object",
                 "properties": {

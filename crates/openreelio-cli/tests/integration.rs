@@ -2729,15 +2729,24 @@ fn test_verify_structural_only_passes_on_a_healthy_project() {
     assert_eq!(report["target"]["measured"], false);
     assert_eq!(report["measurements"]["measured"], false);
 
+    // The stats check always reports its metrics as an informational finding,
+    // which is a finding all the same: "warned", never "passed".
     let stats = find_check(&report, "shot.length_stats");
-    assert_eq!(stats["status"], "passed");
+    assert_eq!(stats["status"], "warned");
+    assert_eq!(stats["passed"], false);
+    assert_eq!(stats["severity"], "info");
     assert_eq!(stats["metrics"]["count"], 1);
     assert!(stats["metrics"]["medianSec"].as_f64().unwrap() > 0.0);
 
     // A passing check still has to appear, or an agent cannot tell it ran.
     let gap = find_check(&report, "timeline.gap");
     assert_eq!(gap["status"], "passed");
+    assert_eq!(gap["passed"], true);
     assert_eq!(gap["violationCount"], 0);
+
+    // A project with clips must not trip the empty-sequence floor.
+    let empty = find_check(&report, "sequence.empty");
+    assert_eq!(empty["status"], "passed");
 
     // Rendered checks are skipped with a reason rather than silently passed.
     let black = find_check(&report, "render.black_frames");
@@ -2747,6 +2756,53 @@ fn test_verify_structural_only_passes_on_a_healthy_project() {
         .as_str()
         .unwrap()
         .contains("measurements"));
+
+    // Nothing may be measured against a file that was never supplied.
+    let duration = find_check(&report, "render.duration_mismatch");
+    assert_eq!(duration["status"], "skipped");
+    assert_eq!(duration["passed"], false);
+}
+
+/// Feature: Verify
+/// Scenario: should not report a project it never looked at as clean
+#[test]
+fn test_verify_warns_that_an_empty_sequence_was_never_edited() {
+    let dir = create_temp_project("verify_empty_sequence");
+    let path = project_path(&dir, "verify_empty_sequence");
+
+    let (stdout, stderr, code) = run_cli_exit(&["verify", "--path", &path, "--structural-only"]);
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+
+    let empty = find_check(&report, "sequence.empty");
+    assert_eq!(
+        empty["status"], "warned",
+        "an empty timeline must never verify silently.\nstderr: {stderr}"
+    );
+    assert_eq!(empty["passed"], false);
+    assert_eq!(empty["severity"], "warning");
+    assert_eq!(empty["violationCount"], 1);
+    assert_eq!(empty["metrics"]["clipCount"], 0);
+    assert!(
+        empty["suggestedFix"].is_null(),
+        "what belongs on an empty timeline is not a QC decision"
+    );
+
+    // A warning is a finding to read, not a failing verdict: the default
+    // threshold is `error`, so the run still exits zero.
+    assert_eq!(report["status"], "warning");
+    assert_eq!(code, 0);
+
+    // Raising the threshold turns the same finding into a failure.
+    let (_stdout, _stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--structural-only",
+        "--fail-on",
+        "warning",
+    ]);
+    assert_eq!(code, 1, "--fail-on warning must catch an empty sequence");
 }
 
 #[test]
@@ -2881,6 +2937,10 @@ fn test_verify_measures_a_rendered_file() {
         return;
     }
 
+    // A two-second slice of a longer sequence is not the deliverable, and
+    // `render.duration_mismatch` says so. That is asserted on its own below;
+    // here it is skipped so the measurement assertions stand alone.
+    //
     // The fixture is a bare test tone, so its absolute loudness says nothing
     // about the edit; the measurement itself is still asserted below.
     let (stdout, stderr, code) = run_cli_exit(&[
@@ -2890,7 +2950,7 @@ fn test_verify_measures_a_rendered_file() {
         "--file",
         render_path.to_str().unwrap(),
         "--skip",
-        "audio.loudness",
+        "audio.loudness,render.duration_mismatch",
     ]);
     assert_eq!(
         code, 0,
@@ -2927,6 +2987,41 @@ fn test_verify_measures_a_rendered_file() {
 
     let loudness = find_check(&report, "audio.loudness");
     assert_eq!(loudness["status"], "skipped");
+
+    // Feature: Verify against a rendered file
+    // Scenario: should refuse to grade a file that is not the sequence
+    //
+    // The same render, now with the duration check left on. Two seconds of a
+    // ten-second timeline measures perfectly well and is still the wrong file;
+    // without this check every measurement above would describe a program
+    // nobody asked for.
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        render_path.to_str().unwrap(),
+        "--skip",
+        "audio.loudness",
+    ]);
+    assert_eq!(
+        code, 1,
+        "a truncated render must not be graded as the deliverable.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}\n{stdout}"));
+
+    let duration = find_check(&report, "render.duration_mismatch");
+    assert_eq!(duration["status"], "failed");
+    assert_eq!(duration["severity"], "error");
+    assert!(duration["metrics"]["deltaSec"].as_f64().unwrap() < 0.0);
+    assert!(
+        duration["metrics"]["fileDurationSec"].as_f64().unwrap()
+            < duration["metrics"]["sequenceDurationSec"].as_f64().unwrap()
+    );
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["passed"], false);
 }
 
 #[test]

@@ -10,6 +10,15 @@
 //! `2` the tool itself failed (bad arguments, unreadable file, FFmpeg failure,
 //! or a rule that errored, leaving the verdict incomplete).
 //!
+//! Two different questions share the word "passed", and the document keeps them
+//! apart. Per check, `status`/`passed` answer "did this check find anything?" —
+//! `passed` is true only for a check that ran and reported nothing, and a check
+//! with warning- or info-level findings reports `warned` (see [`CheckStatus`]).
+//! At the top level, `status`/`passed` answer "is the report a failing verdict?"
+//! — driven by severity, so warnings and info leave `passed` true and only
+//! error-or-worse findings (or a tool error) turn it false. A report can
+//! therefore pass overall while individual checks are `warned`.
+//!
 //! Measurement times are file-relative while structural findings are
 //! timeline-relative. The two are compared directly (see
 //! [`crossref_black_ranges_with_gaps`]), so `--file` expects a render of the
@@ -432,14 +441,75 @@ struct ViolationEntry {
     suggested_fix: Option<Value>,
 }
 
-/// One check, whether it passed, failed, was skipped, or errored.
+/// What a single check concluded.
+///
+/// `Passed` means the check ran and found nothing at all, which is the only
+/// state an agent may read as "clean". A check that ran and produced findings
+/// is `Warned` or `Failed` depending on the worst severity among them —
+/// never `Passed`, however mild the findings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckStatus {
+    /// Ran and found nothing
+    Passed,
+    /// Ran and found only warning- or info-level issues
+    Warned,
+    /// Ran and found at least one error or critical issue
+    Failed,
+    /// Did not run, because it was disabled or its inputs were missing
+    Skipped,
+    /// Ran and raised an error, leaving its part of the verdict unknown
+    Errored,
+}
+
+impl CheckStatus {
+    /// The wire name reported in the JSON document.
+    fn as_str(self) -> &'static str {
+        match self {
+            CheckStatus::Passed => "passed",
+            CheckStatus::Warned => "warned",
+            CheckStatus::Failed => "failed",
+            CheckStatus::Skipped => "skipped",
+            CheckStatus::Errored => "errored",
+        }
+    }
+
+    /// Whether the check ran and found nothing.
+    fn is_clean(self) -> bool {
+        matches!(self, CheckStatus::Passed)
+    }
+
+    /// Grades one check from how its rule ended and the worst finding it made.
+    ///
+    /// The severity of the findings decides between [`CheckStatus::Warned`] and
+    /// [`CheckStatus::Failed`]; their mere existence decides against
+    /// [`CheckStatus::Passed`].
+    fn grade(rule_status: RuleStatus, max_severity: Option<Severity>) -> Self {
+        match rule_status {
+            RuleStatus::Skipped => CheckStatus::Skipped,
+            RuleStatus::Errored => CheckStatus::Errored,
+            RuleStatus::Ran => match max_severity {
+                None => CheckStatus::Passed,
+                Some(severity) if severity >= Severity::Error => CheckStatus::Failed,
+                Some(_) => CheckStatus::Warned,
+            },
+        }
+    }
+}
+
+impl Serialize for CheckStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// One check, whether it passed, warned, failed, was skipped, or errored.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CheckEntry {
     id: String,
     rule: String,
     category: String,
-    status: &'static str,
+    status: CheckStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     severity: Option<String>,
     passed: bool,
@@ -488,7 +558,9 @@ fn build_output(inputs: OutputInputs<'_>, mut warnings: Vec<String>, errors: Vec
     }
 
     // The verdict follows the findings, not the diagnostics: a clean run that
-    // simply had nothing rendered to inspect is still "ok".
+    // simply had nothing rendered to inspect is still "ok". This is the
+    // severity question, not the "did any check find something" question that
+    // each entry's own status answers.
     let status = if !report.passed || !errors.is_empty() {
         "failed"
     } else if report.count(Severity::Warning) > 0 {
@@ -537,17 +609,10 @@ fn build_checks(report: &QCReport, engine: &QCEngine) -> Vec<CheckEntry> {
 
             let max_severity = violations.iter().map(|violation| violation.severity).max();
 
-            let status = match outcome.status {
-                RuleStatus::Skipped => "skipped",
-                RuleStatus::Errored => "errored",
-                RuleStatus::Ran => {
-                    if max_severity.is_some_and(|severity| severity >= Severity::Error) {
-                        "failed"
-                    } else {
-                        "passed"
-                    }
-                }
-            };
+            // "Ran and found nothing" is the only clean outcome; a check that
+            // reported anything at all says so, and the severity says how
+            // loudly.
+            let status = CheckStatus::grade(outcome.status, max_severity);
 
             let description = engine
                 .get_rule_by_check_id(&outcome.check_id)
@@ -596,8 +661,7 @@ fn build_checks(report: &QCReport, engine: &QCEngine) -> Vec<CheckEntry> {
                 category: outcome.category.to_string(),
                 status,
                 severity: max_severity.map(|severity| severity_key(severity).to_string()),
-                passed: matches!(outcome.status, RuleStatus::Ran)
-                    && max_severity.is_none_or(|severity| severity < Severity::Error),
+                passed: status.is_clean(),
                 skipped: matches!(outcome.status, RuleStatus::Skipped),
                 skip_reason: match outcome.status {
                     RuleStatus::Skipped => outcome.reason.clone(),
@@ -874,6 +938,59 @@ mod tests {
         );
     }
 
+    /// Feature: Check status reporting
+    /// Scenario: should never call a check with findings "passed"
+    #[test]
+    fn test_check_status_should_separate_clean_from_merely_non_failing() {
+        assert_eq!(
+            CheckStatus::grade(RuleStatus::Ran, None),
+            CheckStatus::Passed
+        );
+        assert!(CheckStatus::grade(RuleStatus::Ran, None).is_clean());
+
+        for severity in [Severity::Info, Severity::Warning] {
+            let status = CheckStatus::grade(RuleStatus::Ran, Some(severity));
+            assert_eq!(
+                status,
+                CheckStatus::Warned,
+                "{severity} findings are findings, not a clean check"
+            );
+            assert!(
+                !status.is_clean(),
+                "{severity} findings must not report passed: true"
+            );
+        }
+
+        for severity in [Severity::Error, Severity::Critical] {
+            let status = CheckStatus::grade(RuleStatus::Ran, Some(severity));
+            assert_eq!(status, CheckStatus::Failed);
+            assert!(!status.is_clean());
+        }
+    }
+
+    /// Feature: Check status reporting
+    /// Scenario: should keep "did not run" distinct from "ran and passed"
+    #[test]
+    fn test_check_status_should_not_call_an_unrun_check_passed() {
+        for rule_status in [RuleStatus::Skipped, RuleStatus::Errored] {
+            let status = CheckStatus::grade(rule_status, None);
+            assert!(!status.is_clean());
+            assert!(matches!(
+                status,
+                CheckStatus::Skipped | CheckStatus::Errored
+            ));
+        }
+    }
+
+    #[test]
+    fn test_check_status_wire_names_are_stable() {
+        assert_eq!(CheckStatus::Passed.as_str(), "passed");
+        assert_eq!(CheckStatus::Warned.as_str(), "warned");
+        assert_eq!(CheckStatus::Failed.as_str(), "failed");
+        assert_eq!(CheckStatus::Skipped.as_str(), "skipped");
+        assert_eq!(CheckStatus::Errored.as_str(), "errored");
+    }
+
     #[test]
     fn test_to_edit_script_should_produce_executable_plan_steps() {
         let fix = ViolationFix::new(
@@ -947,6 +1064,73 @@ mod tests {
         };
 
         assert!(build_engine_config(&engine, &args).is_err());
+    }
+
+    /// Feature: The fix loop
+    /// Scenario: should hand back plan steps the command layer accepts
+    ///
+    /// `to_edit_script` is the only translation between what a QC rule
+    /// describes and what `plan execute` runs. This drives that translation
+    /// with a real rule's output and parses the result with the same strict
+    /// parser the plan executor uses, so a step that would be rejected on
+    /// execution fails here instead.
+    #[tokio::test]
+    async fn test_to_edit_script_steps_should_parse_as_real_commands() {
+        use openreelio_core::project::ProjectState;
+        use openreelio_core::qc::{QCEngine, RenderMeasurements};
+        use openreelio_core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Fix loop", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("V1");
+        for timeline_in in [0.0, 4.0] {
+            let mut clip = Clip::with_range("asset_1", 0.0, 2.0);
+            clip.place.timeline_in_sec = timeline_in;
+            clip.place.duration_sec = 2.0;
+            track.add_clip(clip);
+        }
+        sequence.add_track(track);
+
+        let report = QCEngine::new()
+            .check_with_measurements(
+                &sequence,
+                &ProjectState::new("Fix loop"),
+                RenderMeasurements {
+                    true_peak_dbtp: Some(-0.2),
+                    file_duration_sec: Some(sequence.duration()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("QC run completes");
+
+        let fixes: Vec<_> = report
+            .violations
+            .iter()
+            .filter_map(|violation| violation.suggested_fix.as_ref())
+            .collect();
+        assert!(
+            !fixes.is_empty(),
+            "the fixture must produce at least one fix, or this proves nothing"
+        );
+
+        for fix in fixes {
+            let script = to_edit_script(fix).expect("every emitted fix translates to plan steps");
+
+            for step in script["steps"].as_array().expect("steps array") {
+                let command_type = step["commandType"]
+                    .as_str()
+                    .expect("step carries a commandType")
+                    .to_string();
+
+                openreelio_core::ipc::CommandPayload::parse(
+                    command_type.clone(),
+                    step["payload"].clone(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("plan step '{command_type}' would be rejected on execution: {error}")
+                });
+            }
+        }
     }
 
     #[test]

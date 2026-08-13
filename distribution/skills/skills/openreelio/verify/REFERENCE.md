@@ -32,14 +32,18 @@ Exit `2` is never "the video is bad" — it means the verdict is unknown.
 
 ## Checks
 
-**structural** — `timeline.gap`, `clip.orphan`, `clip.missing_asset`,
-`clip.aspect_ratio`, `audio.silent_clip`, `caption.overlap`,
-`caption.reading_rate`, `caption.out_of_bounds`, `caption.safe_area`,
-`shot.length_stats`, `shot.cut_rhythm`, plus opt-in `asset.license` and
-`sequence.duration`.
+**structural** — `sequence.empty`, `timeline.gap`, `clip.orphan`,
+`clip.missing_asset`, `clip.aspect_ratio`, `audio.silent_clip`,
+`caption.overlap`, `caption.reading_rate`, `caption.out_of_bounds`,
+`caption.safe_area`, `shot.length_stats`, `shot.cut_rhythm`, plus opt-in
+`asset.license` and `sequence.duration`.
 
-**rendered** (require `--file`) — `render.black_frames`, `audio.peak`,
-`audio.loudness`.
+**rendered** (require `--file`) — `render.duration_mismatch`,
+`render.black_frames`, `audio.peak`, `audio.loudness`.
+
+`render.duration_mismatch` compares the measured file against the sequence
+duration and errors when the file is shorter: a stale or truncated render
+measures perfectly well and is still not the deliverable.
 
 `asset.license` and `sequence.duration` run only when named in `--checks`.
 Narrow any run with `--checks a,b` or `--skip a,b`.
@@ -51,8 +55,8 @@ Narrow any run with `--checks a,b` or `--skip a,b`.
   "status": "warning", "passed": true, "checkedAt": "…", "durationMs": 812,
   "target": { "sequenceId": "…", "renderedFile": "…", "measured": true, "selectedChecks": ["…"] },
   "summary": { "critical": 0, "error": 0, "warning": 1, "info": 1, "skipped": 2 },
-  "checks": [ { "id": "audio.loudness", "category": "rendered", "status": "failed",
-                "severity": "warning", "violationCount": 1, "timeRanges": [],
+  "checks": [ { "id": "audio.loudness", "category": "rendered", "status": "warned",
+                "passed": false, "severity": "warning", "violationCount": 1, "timeRanges": [],
                 "metrics": { }, "autoFixable": true, "suggestedFix": { } } ],
   "measurements": { "measured": true, "durationSec": 12.0,
                     "blackRanges": [], "freezeRanges": [], "silenceRanges": [],
@@ -63,8 +67,25 @@ Narrow any run with `--checks a,b` or `--skip a,b`.
 ```
 
 Every check that ran, was skipped, or errored appears in `checks` — so "checked
-and clean" is distinguishable from "never looked". `status` per check is
-`passed`, `failed`, `skipped`, or `errored`, with `skipReason` when skipped.
+and clean" is distinguishable from "never looked".
+
+## Reading `passed`
+
+The word means something different at each level, and both are load-bearing.
+
+| Field                | True when                                                          |
+| -------------------- | ------------------------------------------------------------------ |
+| `checks[].passed`    | The check ran and found **nothing at all**                          |
+| top-level `passed`   | No error-or-worse finding anywhere, and no tool error               |
+
+Per check, `status` is `passed` (ran, clean), `warned` (ran, found only
+warning/info issues), `failed` (ran, found error or critical), `skipped` (with
+`skipReason`), or `errored`. `checks[].passed` is true only for `passed` — a
+`warned` check reports `passed: false` and lets `severity` say how loudly.
+
+The top level is the verdict and follows severity alone, so a report can be
+`"passed": true` while individual checks are `warned`. Treat `warned` checks as
+findings to read, not as failures to fix before shipping.
 
 ## The fix loop
 

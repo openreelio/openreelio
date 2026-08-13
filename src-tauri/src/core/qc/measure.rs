@@ -183,7 +183,13 @@ pub async fn measure_rendered_file_detailed(
 
     let stderr = capture.stderr;
     let duration_sec = media.duration_sec;
-    let mut measurements = RenderMeasurements::default();
+    // Carried into the measurements so rules can compare the file against the
+    // sequence; a probe that reported no usable duration stays `None` rather
+    // than claiming a zero-length file.
+    let mut measurements = RenderMeasurements {
+        file_duration_sec: (duration_sec.is_finite() && duration_sec > 0.0).then_some(duration_sec),
+        ..Default::default()
+    };
 
     if has_video {
         measurements.black_ranges = parse_black_ranges(&stderr, duration_sec)

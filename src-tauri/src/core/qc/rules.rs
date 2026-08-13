@@ -11,7 +11,7 @@ use super::context::QCContext;
 use super::violation::{QCViolation, Severity, ViolationFix};
 use crate::core::captions::{CaptionPosition, CaptionStyle, CustomPosition, VerticalPosition};
 use crate::core::project::ProjectState;
-use crate::core::timeline::{Clip, Sequence};
+use crate::core::timeline::{Clip, Sequence, Track};
 use crate::core::CoreResult;
 
 /// Configuration for QC rules
@@ -136,14 +136,27 @@ pub trait QCRule: Send + Sync {
 }
 
 /// Collects clips on video tracks that overlap the given timeline range.
-fn video_clips_in_range(sequence: &Sequence, start_sec: f64, end_sec: f64) -> Vec<&Clip> {
+///
+/// Each hit carries the track that owns it: every clip-scoped edit command
+/// takes a `trackId`, so a rule that loses it cannot suggest an executable fix.
+fn video_clips_in_range(sequence: &Sequence, start_sec: f64, end_sec: f64) -> Vec<(&Track, &Clip)> {
     sequence
         .tracks
         .iter()
         .filter(|track| track.is_video())
-        .flat_map(|track| track.clips.iter())
-        .filter(|clip| clip.place.timeline_in_sec < end_sec && clip.timeline_end() > start_sec)
+        .flat_map(|track| track.clips.iter().map(move |clip| (track, clip)))
+        .filter(|(_, clip)| clip.place.timeline_in_sec < end_sec && clip.timeline_end() > start_sec)
         .collect()
+}
+
+/// Returns a clip's playback speed, guarding the zero and non-finite cases.
+fn safe_clip_speed(clip: &Clip) -> f64 {
+    let speed = clip.speed as f64;
+    if speed.is_finite() && speed > 0.0 {
+        speed
+    } else {
+        1.0
+    }
 }
 
 // ============================================================================
@@ -167,6 +180,57 @@ impl BlackFrameRule {
 
     /// Minimum duration to flag (seconds)
     const DEFAULT_MIN_DURATION: f64 = 0.1;
+
+    /// Builds the slip that pushes a clip's source past its leading black.
+    ///
+    /// Leading black is removed by moving the source window forward, not by
+    /// trimming the clip: a trim shortens the clip and leaves a hole where the
+    /// black was, and rippling the hole shut would shift one track out of sync
+    /// with every other. A slip keeps the timeline placement and duration
+    /// exactly as they are and only changes which frames are shown.
+    ///
+    /// Returns `None` unless the source has `black_duration` of unused footage
+    /// after the clip's out point, since a slip past the end of the media would
+    /// trade black for a frozen or missing tail.
+    fn slip_past_leading_black(
+        sequence: &Sequence,
+        track: &Track,
+        clip: &Clip,
+        state: &ProjectState,
+        black_duration_sec: f64,
+    ) -> Option<ViolationFix> {
+        // Timeline seconds map to source seconds through the clip's speed.
+        let source_shift = black_duration_sec * safe_clip_speed(clip);
+        if !source_shift.is_finite() || source_shift <= 0.0 {
+            return None;
+        }
+
+        let asset_duration = state.get_asset(&clip.asset_id)?.duration_sec?;
+        let new_source_out = clip.range.source_out_sec + source_shift;
+        if !asset_duration.is_finite() || new_source_out > asset_duration {
+            return None;
+        }
+
+        Some(
+            ViolationFix::new(
+                format!(
+                    "Slip the clip's source {:.2}s forward, past the leading black",
+                    source_shift
+                ),
+                vec![serde_json::json!({
+                    "type": "TrimClip",
+                    "sequenceId": sequence.id,
+                    "trackId": track.id,
+                    "clipId": clip.id,
+                    "newSourceIn": clip.range.source_in_sec + source_shift,
+                    "newSourceOut": new_source_out
+                })],
+            )
+            // The black is measured, but whether the frames behind it are the
+            // ones the edit wants is a judgement this rule cannot make.
+            .with_confidence(0.6),
+        )
+    }
 }
 
 #[async_trait]
@@ -201,7 +265,7 @@ impl QCRule for BlackFrameRule {
     async fn check(
         &self,
         sequence: &Sequence,
-        _state: &ProjectState,
+        state: &ProjectState,
         config: &RuleConfig,
         context: &QCContext,
     ) -> CoreResult<Vec<QCViolation>> {
@@ -227,7 +291,10 @@ impl QCRule for BlackFrameRule {
             }
 
             let overlapping = video_clips_in_range(sequence, start_sec, end_sec);
-            let entity_ids: Vec<String> = overlapping.iter().map(|clip| clip.id.clone()).collect();
+            let entity_ids: Vec<String> = overlapping
+                .iter()
+                .map(|(_, clip)| clip.id.clone())
+                .collect();
 
             let mut violation = QCViolation::new(
                 self.name(),
@@ -245,24 +312,19 @@ impl QCRule for BlackFrameRule {
                 format!("{} video clip(s) cover this range.", overlapping.len())
             });
 
-            // Only a black range that begins at a clip boundary can be trimmed
-            // away without shifting everything that follows it.
-            if let Some(clip) = overlapping
-                .iter()
-                .find(|clip| (clip.place.timeline_in_sec - start_sec).abs() <= frame_tolerance)
-            {
-                violation = violation.with_fix(
-                    ViolationFix::new(
-                        format!("Trim {:.2}s from the start of the clip", black_duration),
-                        vec![serde_json::json!({
-                            "type": "TrimClip",
-                            "sequenceId": sequence.id,
-                            "clipId": clip.id,
-                            "trimStart": black_duration
-                        })],
-                    )
-                    .with_confidence(0.9),
-                );
+            // Only black that begins at a clip's own head can be slipped away:
+            // black in the middle of a clip has no source window to move past
+            // it without changing what the surrounding frames show.
+            let head_clip = overlapping.iter().find(|(_, clip)| {
+                (clip.place.timeline_in_sec - start_sec).abs() <= frame_tolerance
+            });
+
+            if let Some((track, clip)) = head_clip {
+                if let Some(fix) =
+                    Self::slip_past_leading_black(sequence, track, clip, state, black_duration)
+                {
+                    violation = violation.with_fix(fix);
+                }
             }
 
             violations.push(violation);
@@ -606,6 +668,152 @@ impl QCRule for AudioLoudnessRule {
 
     fn supports_auto_fix(&self) -> bool {
         true
+    }
+}
+
+// ============================================================================
+// RenderDurationRule - Checks the measured file against the sequence
+// ============================================================================
+
+/// Rule that checks whether the measured file is actually this sequence
+///
+/// Every other rendered rule grades the file it was handed as though it were
+/// the deliverable. Nothing else asks the prior question: is this file the
+/// timeline at all? A stale render from before the last edit, or a render that
+/// died partway and left a truncated file, measures perfectly well and passes
+/// every check while describing a program nobody edited.
+///
+/// The comparison is against [`Sequence::duration`], so it also anchors the
+/// other rendered checks: their timestamps are only comparable to the timeline
+/// while the file covers the whole sequence from zero.
+#[derive(Debug, Default)]
+pub struct RenderDurationRule;
+
+impl RenderDurationRule {
+    /// Creates a new RenderDurationRule
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Smallest divergence worth reporting, in seconds
+    ///
+    /// Container timestamps, a trailing partial GOP and audio priming all move
+    /// the reported duration by fractions of a second without anything being
+    /// wrong.
+    const DEFAULT_TOLERANCE_SEC: f64 = 0.5;
+
+    /// Divergence tolerated as a fraction of the sequence duration
+    ///
+    /// Long programs accumulate more container drift than short ones, so the
+    /// effective tolerance is whichever of the two limits is larger.
+    const DEFAULT_TOLERANCE_FRACTION: f64 = 0.02;
+}
+
+#[async_trait]
+impl QCRule for RenderDurationRule {
+    fn name(&self) -> &str {
+        "RenderDurationRule"
+    }
+
+    fn check_id(&self) -> &str {
+        "render.duration_mismatch"
+    }
+
+    fn category(&self) -> CheckCategory {
+        CheckCategory::Rendered
+    }
+
+    fn description(&self) -> &str {
+        "Checks that the measured file's duration matches the sequence"
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Error
+    }
+
+    fn skip_reason(&self, context: &QCContext) -> Option<String> {
+        let Some(measurements) = context.measurements.as_ref() else {
+            return Some("no rendered measurements available".to_string());
+        };
+        if measurements.file_duration_sec.is_none() {
+            return Some("measured file reported no usable duration".to_string());
+        }
+        None
+    }
+
+    async fn check(
+        &self,
+        sequence: &Sequence,
+        _state: &ProjectState,
+        config: &RuleConfig,
+        context: &QCContext,
+    ) -> CoreResult<Vec<QCViolation>> {
+        let Some(file_duration) = context
+            .measurements
+            .as_ref()
+            .and_then(|measurements| measurements.file_duration_sec)
+        else {
+            // The engine reports this rule as skipped (see `skip_reason`).
+            return Ok(Vec::new());
+        };
+
+        let sequence_duration = sequence.duration();
+        if !sequence_duration.is_finite() || sequence_duration <= 0.0 {
+            // An empty sequence has no duration to match; `sequence.empty`
+            // owns that finding.
+            return Ok(Vec::new());
+        }
+
+        let tolerance_sec = config
+            .get_param::<f64>("tolerance_sec")
+            .unwrap_or(Self::DEFAULT_TOLERANCE_SEC)
+            .abs()
+            .max(sequence_duration * Self::DEFAULT_TOLERANCE_FRACTION);
+
+        let delta = file_duration - sequence_duration;
+        if !delta.is_finite() || delta.abs() <= tolerance_sec {
+            return Ok(Vec::new());
+        }
+
+        // A file shorter than the timeline is missing program: it is truncated,
+        // stale, or a partial render, and it is not the deliverable whatever
+        // the reason. A longer file is suspicious but still contains the whole
+        // program, so it is graded as a warning.
+        let severity = config.severity_override.unwrap_or(if delta < 0.0 {
+            self.default_severity()
+        } else {
+            Severity::Warning
+        });
+
+        let message = if delta < 0.0 {
+            format!(
+                "Rendered file is {:.2}s shorter than the sequence ({:.2}s vs {:.2}s)",
+                -delta, file_duration, sequence_duration
+            )
+        } else {
+            format!(
+                "Rendered file is {:.2}s longer than the sequence ({:.2}s vs {:.2}s)",
+                delta, file_duration, sequence_duration
+            )
+        };
+
+        Ok(vec![QCViolation::new(self.name(), severity, message)
+            .with_location(0.0, sequence_duration)
+            .with_details(
+                "The measured file does not match the timeline, so every other rendered check \
+                 describes a different program. Re-render the sequence and verify again."
+                    .to_string(),
+            )
+            .with_metric("fileDurationSec", (file_duration * 1000.0).round() / 1000.0)
+            .with_metric(
+                "sequenceDurationSec",
+                (sequence_duration * 1000.0).round() / 1000.0,
+            )
+            .with_metric("deltaSec", (delta * 1000.0).round() / 1000.0)
+            .with_metric(
+                "toleranceSec",
+                (tolerance_sec * 1000.0).round() / 1000.0,
+            )])
     }
 }
 
@@ -1092,6 +1300,14 @@ impl QCRule for LicenseRule {
 // ============================================================================
 
 /// Rule that checks if all clips match the sequence aspect ratio
+///
+/// Reports the mismatch and stops there. The export pipeline already fits every
+/// source into the canvas with `force_original_aspect_ratio=decrease` plus a
+/// pad, so a mismatch shows as bars rather than as broken output — and the only
+/// command that could override that framing, `SetClipTransform`, puts the clip
+/// on a non-identity transform, which the final export path rejects outright.
+/// Suggesting it would turn a cosmetic warning into a render that will not
+/// start, so this rule deliberately carries no fix.
 #[derive(Debug, Default)]
 pub struct AspectRatioRule;
 
@@ -1147,16 +1363,6 @@ impl QCRule for AspectRatioRule {
                         let diff = (asset_aspect - seq_aspect).abs();
 
                         if diff > tolerance {
-                            let fix = ViolationFix::new(
-                                "Apply crop/letterbox to match sequence",
-                                vec![serde_json::json!({
-                                    "type": "SetTransform",
-                                    "clipId": clip.id,
-                                    "crop": {"fit": "cover"}
-                                })],
-                            )
-                            .with_confidence(0.7);
-
                             let violation = QCViolation::new(
                                 self.name(),
                                 severity,
@@ -1168,13 +1374,18 @@ impl QCRule for AspectRatioRule {
                             .with_location(clip.place.timeline_in_sec, clip.timeline_end())
                             .with_entities(vec![clip.id.clone()])
                             .with_details(format!(
-                                "Asset {}x{} doesn't match sequence {}x{}",
+                                "Asset {}x{} doesn't match sequence {}x{}. Export fits the source \
+                                 into the canvas and pads the remainder, so this shows as bars \
+                                 rather than as a broken picture; reframe the shot or change the \
+                                 sequence canvas if that is not wanted.",
                                 video_info.width,
                                 video_info.height,
                                 sequence.format.canvas.width,
                                 sequence.format.canvas.height
                             ))
-                            .with_fix(fix);
+                            .with_metric("assetAspect", (asset_aspect * 1000.0).round() / 1000.0)
+                            .with_metric("sequenceAspect", (seq_aspect * 1000.0).round() / 1000.0)
+                            .with_metric("trackId", track.id.clone());
 
                             violations.push(violation);
                         }
@@ -1184,10 +1395,6 @@ impl QCRule for AspectRatioRule {
         }
 
         Ok(violations)
-    }
-
-    fn supports_auto_fix(&self) -> bool {
-        true
     }
 }
 
@@ -1347,6 +1554,28 @@ mod tests {
         }
     }
 
+    /// Registers a 1920x1080 video asset of the given source length.
+    fn state_with_video_asset(asset_id: &str, duration_sec: Option<f64>) -> ProjectState {
+        use crate::core::assets::{Asset, VideoInfo};
+
+        let mut asset = Asset::new_video(
+            "clip.mp4",
+            "clip.mp4",
+            VideoInfo {
+                width: 1920,
+                height: 1080,
+                codec: "h264".to_string(),
+                ..Default::default()
+            },
+        );
+        asset.id = asset_id.to_string();
+        asset.duration_sec = duration_sec;
+
+        let mut state = ProjectState::new("QC Test");
+        state.assets.insert(asset.id.clone(), asset);
+        state
+    }
+
     // ========================================================================
     // RuleConfig Tests
     // ========================================================================
@@ -1407,7 +1636,7 @@ mod tests {
     #[tokio::test]
     async fn test_black_frame_rule_should_report_ranges_when_measurements_are_provided() {
         let sequence = sequence_with_video_clip(0.0, 5.0);
-        let state = ProjectState::new("QC Test");
+        let state = state_with_video_asset("asset_001", Some(20.0));
         let context = QCContext::from_sequence(&sequence)
             // The 0.02s range is below the default 0.1s duration threshold
             .with_measurements(measurements_with_black_ranges(vec![
@@ -1427,8 +1656,97 @@ mod tests {
         assert_eq!(violations[0].affected_entities.len(), 1);
         assert!(
             violations[0].auto_fixable,
-            "a black range starting at the clip start is trimmable"
+            "black at a clip's head can be slipped past when the source has room"
         );
+    }
+
+    /// Feature: Black frame fixes
+    /// Scenario: should suggest a slip the command layer can execute
+    #[tokio::test]
+    async fn test_black_frame_rule_should_suggest_a_slip_with_every_field_trim_clip_requires() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        let state = state_with_video_asset("asset_001", Some(20.0));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_black_ranges(vec![(0.0, 0.6)]));
+
+        let violations = BlackFrameRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        let command = &violations[0].suggested_fix.as_ref().expect("fix").commands[0];
+
+        assert_eq!(command["type"], "TrimClip");
+        assert_eq!(command["sequenceId"], sequence.id);
+        assert_eq!(
+            command["trackId"], sequence.tracks[0].id,
+            "TrimClip is rejected without a trackId"
+        );
+        assert_eq!(command["clipId"], sequence.tracks[0].clips[0].id);
+        // A slip moves both ends of the source window, so the clip keeps its
+        // place and length and no other track moves.
+        assert!((command["newSourceIn"].as_f64().expect("newSourceIn") - 0.6).abs() < 1e-9);
+        assert!((command["newSourceOut"].as_f64().expect("newSourceOut") - 5.6).abs() < 1e-9);
+        assert!(
+            command.get("trimStart").is_none(),
+            "trimStart is not a field TrimClipPayload accepts"
+        );
+    }
+
+    /// Feature: Black frame fixes
+    /// Scenario: should stay silent when the source cannot absorb the slip
+    #[tokio::test]
+    async fn test_black_frame_rule_should_not_suggest_a_slip_past_the_end_of_the_source() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        // Only 5.2s of source behind a 5.0s clip: slipping 0.6s forward would
+        // run off the end and trade black for a frozen or missing tail.
+        let state = state_with_video_asset("asset_001", Some(5.2));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_black_ranges(vec![(0.0, 0.6)]));
+
+        let violations = BlackFrameRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert!(!violations[0].auto_fixable);
+        assert!(violations[0].suggested_fix.is_none());
+    }
+
+    /// Feature: Black frame fixes
+    /// Scenario: should stay silent when the source length is unknown
+    #[tokio::test]
+    async fn test_black_frame_rule_should_not_suggest_a_slip_without_a_known_source_length() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        let state = state_with_video_asset("asset_001", None);
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_black_ranges(vec![(0.0, 0.6)]));
+
+        let violations = BlackFrameRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(violations[0].suggested_fix.is_none());
+    }
+
+    /// Feature: Black frame fixes
+    /// Scenario: should not suggest anything for black in the middle of a clip
+    #[tokio::test]
+    async fn test_black_frame_rule_should_not_suggest_a_slip_for_mid_clip_black() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        let state = state_with_video_asset("asset_001", Some(20.0));
+        let context = QCContext::from_sequence(&sequence)
+            .with_measurements(measurements_with_black_ranges(vec![(2.0, 2.8)]));
+
+        let violations = BlackFrameRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].suggested_fix.is_none());
     }
 
     #[tokio::test]
@@ -1722,7 +2040,152 @@ mod tests {
         let rule = AspectRatioRule::new();
         assert_eq!(rule.name(), "AspectRatioRule");
         assert_eq!(rule.default_severity(), Severity::Warning);
-        assert!(rule.supports_auto_fix());
+        assert!(
+            !rule.supports_auto_fix(),
+            "no single command reframes a clip without breaking export"
+        );
+    }
+
+    /// Feature: Aspect ratio mismatch
+    /// Scenario: should report the mismatch without an unexecutable fix
+    #[tokio::test]
+    async fn test_aspect_ratio_rule_should_report_the_mismatch_and_offer_no_fix() {
+        let sequence = sequence_with_video_clip(0.0, 5.0);
+        // A 4:3 source in a 16:9 sequence.
+        let mut state = state_with_video_asset("asset_001", Some(20.0));
+        if let Some(asset) = state.assets.get_mut("asset_001") {
+            if let Some(video) = asset.video.as_mut() {
+                video.width = 1440;
+                video.height = 1080;
+            }
+        }
+
+        let context = QCContext::from_sequence(&sequence);
+        let violations = AspectRatioRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Warning);
+        assert!(
+            !violations[0].auto_fixable,
+            "SetClipTransform puts the clip on a transform the export path rejects"
+        );
+        assert!(violations[0].suggested_fix.is_none());
+        assert_eq!(violations[0].metrics["trackId"], sequence.tracks[0].id);
+    }
+
+    // ========================================================================
+    // RenderDurationRule Tests
+    // ========================================================================
+
+    #[test]
+    fn test_render_duration_rule_properties() {
+        let rule = RenderDurationRule::new();
+        assert_eq!(rule.name(), "RenderDurationRule");
+        assert_eq!(rule.check_id(), "render.duration_mismatch");
+        assert_eq!(rule.category(), CheckCategory::Rendered);
+        assert_eq!(rule.default_severity(), Severity::Error);
+    }
+
+    fn measurements_of_length(file_duration_sec: f64) -> RenderMeasurements {
+        RenderMeasurements {
+            file_duration_sec: Some(file_duration_sec),
+            ..Default::default()
+        }
+    }
+
+    /// Feature: Render/sequence duration match
+    /// Scenario: should error when the rendered file is truncated
+    #[tokio::test]
+    async fn test_render_duration_rule_should_error_when_the_file_is_shorter() {
+        let sequence = sequence_with_video_clip(0.0, 60.0);
+        let state = state_with_video_asset("asset_001", Some(60.0));
+        let context =
+            QCContext::from_sequence(&sequence).with_measurements(measurements_of_length(12.0));
+
+        let violations = RenderDurationRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].severity,
+            Severity::Error,
+            "a file missing 48s of program is not the deliverable"
+        );
+        assert!(violations[0].message.contains("shorter"));
+        assert_eq!(violations[0].metrics["fileDurationSec"], 12.0);
+        assert_eq!(violations[0].metrics["sequenceDurationSec"], 60.0);
+        assert!(
+            violations[0].suggested_fix.is_none(),
+            "the answer is to re-render, not to edit the timeline"
+        );
+    }
+
+    /// Feature: Render/sequence duration match
+    /// Scenario: should warn when the rendered file runs past the sequence
+    #[tokio::test]
+    async fn test_render_duration_rule_should_warn_when_the_file_is_longer() {
+        let sequence = sequence_with_video_clip(0.0, 60.0);
+        let state = state_with_video_asset("asset_001", Some(60.0));
+        let context =
+            QCContext::from_sequence(&sequence).with_measurements(measurements_of_length(75.0));
+
+        let violations = RenderDurationRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].severity,
+            Severity::Warning,
+            "a longer file still contains the whole program"
+        );
+        assert!(violations[0].message.contains("longer"));
+    }
+
+    /// Feature: Render/sequence duration match
+    /// Scenario: should tolerate container-level rounding
+    #[tokio::test]
+    async fn test_render_duration_rule_should_tolerate_small_divergence() {
+        let sequence = sequence_with_video_clip(0.0, 60.0);
+        let state = state_with_video_asset("asset_001", Some(60.0));
+        // 0.9s is under the 2% (1.2s) tolerance a 60s program allows.
+        let context =
+            QCContext::from_sequence(&sequence).with_measurements(measurements_of_length(60.9));
+
+        let violations = RenderDurationRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert!(violations.is_empty());
+    }
+
+    /// Feature: Render/sequence duration match
+    /// Scenario: should be skipped rather than silently passed without a probe
+    #[tokio::test]
+    async fn test_render_duration_rule_should_skip_when_the_file_duration_is_unknown() {
+        let sequence = sequence_with_video_clip(0.0, 60.0);
+        let state = state_with_video_asset("asset_001", Some(60.0));
+        let rule = RenderDurationRule::new();
+
+        let no_measurements = QCContext::from_sequence(&sequence);
+        assert!(rule.skip_reason(&no_measurements).is_some());
+
+        let no_duration =
+            QCContext::from_sequence(&sequence).with_measurements(RenderMeasurements::default());
+        assert!(rule.skip_reason(&no_duration).is_some());
+
+        let violations = rule
+            .check(&sequence, &state, &RuleConfig::default(), &no_duration)
+            .await
+            .expect("rule runs");
+        assert!(violations.is_empty());
     }
 
     // ========================================================================

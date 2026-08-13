@@ -274,21 +274,33 @@ openreelio-cli verify --path ./demo --file ./proxy.mp4 \
 Without `--file`, only structural checks run and FFmpeg is never invoked.
 `--structural-only` makes that explicit and conflicts with `--file`.
 
-Sixteen checks in two categories. **structural**: `timeline.gap`,
-`clip.orphan`, `clip.missing_asset`, `clip.aspect_ratio`, `audio.silent_clip`,
-`caption.overlap`, `caption.reading_rate`, `caption.out_of_bounds`,
-`caption.safe_area`, `shot.length_stats`, `shot.cut_rhythm`, plus the opt-in
-`asset.license` and `sequence.duration`. **rendered**: `render.black_frames`,
-`audio.peak`, `audio.loudness`. The two opt-ins run only when named in
-`--checks`; narrow any run with `--checks a,b` or `--skip a,b`.
+Eighteen checks in two categories. **structural**: `sequence.empty`,
+`timeline.gap`, `clip.orphan`, `clip.missing_asset`, `clip.aspect_ratio`,
+`audio.silent_clip`, `caption.overlap`, `caption.reading_rate`,
+`caption.out_of_bounds`, `caption.safe_area`, `shot.length_stats`,
+`shot.cut_rhythm`, plus the opt-in `asset.license` and `sequence.duration`.
+**rendered**: `render.duration_mismatch`, `render.black_frames`, `audio.peak`,
+`audio.loudness`. The two opt-ins run only when named in `--checks`; narrow any
+run with `--checks a,b` or `--skip a,b`.
+
+`render.duration_mismatch` asks the question the other rendered checks assume
+an answer to: is the measured file this sequence at all? A stale or truncated
+render measures perfectly well and is still not the deliverable, so a file
+shorter than the timeline is an error.
 
 The report always lists every check that ran, was skipped, or errored — so
 "checked and clean" is distinguishable from "never looked". Each entry carries
-`id`, `category`, `status` (`passed`/`failed`/`skipped`/`errored`),
-`violationCount`, `timeRanges`, `metrics`, `autoFixable` and, when the rule
-knows the repair, `suggestedFix`. `measurements` holds the file-level numbers:
-`blackRanges`, `freezeRanges`, `silenceRanges`, `integratedLufs`,
-`loudnessRangeLu`, `truePeakDbtp`, `samplePeakDb`, `flatFactor`.
+`id`, `category`, `status`, `violationCount`, `timeRanges`, `metrics`,
+`autoFixable` and, when the rule knows the repair, `suggestedFix`.
+`measurements` holds the file-level numbers: `blackRanges`, `freezeRanges`,
+`silenceRanges`, `integratedLufs`, `loudnessRangeLu`, `truePeakDbtp`,
+`samplePeakDb`, `flatFactor`.
+
+Per-check `status` is `passed` (ran, found nothing), `warned` (ran, found only
+warning/info issues), `failed` (ran, found error or critical), `skipped` or
+`errored`; `checks[].passed` is true only for `passed`. The top-level
+`status`/`passed` are the verdict and follow severity alone, so a report can be
+`"passed": true` with `warned` checks inside it.
 
 `--fail-on info|warning|error|critical` (default `error`) sets which severity
 turns exit `0` into exit `1`. Taste-adjacent findings stay at warning/info;

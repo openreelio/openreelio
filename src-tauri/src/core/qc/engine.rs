@@ -12,11 +12,12 @@ use tokio::sync::RwLock;
 use super::context::{QCContext, RenderMeasurements};
 use super::rules::{
     AspectRatioRule, AudioLoudnessRule, AudioPeakRule, BlackFrameRule, CaptionSafeAreaRule,
-    CheckCategory, CutRhythmRule, DurationRule, LicenseRule, QCRule, RuleConfig,
+    CheckCategory, CutRhythmRule, DurationRule, LicenseRule, QCRule, RenderDurationRule,
+    RuleConfig,
 };
 use super::structural::{
     CaptionOutOfBoundsRule, CaptionOverlapRule, CaptionReadingRateRule, ClipOrphanRule,
-    MissingAssetRule, ShotLengthStatsRule, SilentClipRule, TimelineGapRule,
+    EmptySequenceRule, MissingAssetRule, ShotLengthStatsRule, SilentClipRule, TimelineGapRule,
 };
 use super::violation::{QCViolation, Severity, ViolationFix};
 use crate::core::project::ProjectState;
@@ -378,6 +379,9 @@ impl QCEngine {
     /// Registers all built-in rules
     fn register_builtin_rules(&mut self) {
         // Structural rules: readable from project state alone.
+        // `EmptySequenceRule` runs first because it is the only rule that can
+        // report on a sequence every other rule would pass vacuously.
+        self.register_rule(Arc::new(EmptySequenceRule::new()));
         self.register_rule(Arc::new(TimelineGapRule::new()));
         self.register_rule(Arc::new(ClipOrphanRule::new()));
         self.register_rule(Arc::new(MissingAssetRule::new()));
@@ -393,6 +397,9 @@ impl QCEngine {
         self.register_rule(Arc::new(DurationRule::new()));
 
         // Rendered rules: need measurements from an exported file.
+        // `RenderDurationRule` runs first because the others only describe the
+        // sequence while the measured file actually is the sequence.
+        self.register_rule(Arc::new(RenderDurationRule::new()));
         self.register_rule(Arc::new(BlackFrameRule::new()));
         self.register_rule(Arc::new(AudioPeakRule::new()));
         self.register_rule(Arc::new(AudioLoudnessRule::new()));
