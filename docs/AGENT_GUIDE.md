@@ -376,15 +376,25 @@ openreelio-cli mcp --stdio --project ./demo --allow-write
 
 **`--allow-write` is a local-trust switch.** It adds `openreelio.media.insert`
 and `openreelio.plan.apply` and drops the per-call approval token those tools
-otherwise require; the policy block then reports `"mode": "read-write-local"`.
-Every mutation still goes through the command log and stays undoable, but use it
-only with a locally trusted client. Without the flag, a host can still authorize
-a single call by supplying `OPENREELIO_MCP_APPROVAL_TOKEN`.
+otherwise require; the policy block then reports `"mode": "allow-write-local"`
+and `"filesystemAccess": "project-write"`. Every mutation still goes through the
+command log and stays undoable, but use it only with a locally trusted client.
+Without the flag, a host can still authorize a single call by supplying
+`OPENREELIO_MCP_APPROVAL_TOKEN` — an empty value is not a grant, and a token
+scoped with `OPENREELIO_MCP_APPROVAL_PROJECT_ID` or
+`OPENREELIO_MCP_APPROVAL_PLAN_ID` is rejected outside that scope. Discovery and
+`host.context` report the same policy object, so the two can never disagree.
+
+**The project directory is the whole filesystem scope.** Every path a client
+sends resolves inside it: a relative path is joined onto the project root, and
+absolute paths outside it, `..` escapes, UNC/network paths, and URLs are
+rejected before they reach the filesystem or FFmpeg.
 
 **`openreelio.verify`** is read-only-safe and always advertised. It accepts
 `{sequenceId?, file?, structuralOnly?, checks?[], skip?[], failOn?}` and returns
 the same report document the CLI prints — so an MCP client gets the fix loop
-without shelling out.
+without shelling out. `file` must be inside the project directory, so render
+into the project before verifying.
 
 ## 9. Environment variables
 
