@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "openreelio",
+  "description": "Headless video editing, analysis and rendering with the openreelio CLI — timeline edits on an event-sourced project, shot/silence detection, frame inspection, proxy renders and deterministic QC.",
+  "version": "0.1.10",
+  "author": {
+    "name": "Junseo5",
+    "url": "https://github.com/Junseo5"
+  },
+  "homepage": "https://github.com/openreelio/openreelio",
+  "repository": "https://github.com/openreelio/openreelio",
+  "license": "MIT",
+  "keywords": [
+    "video",
+    "video-editing",
+    "ffmpeg",
+    "timeline",
+    "captions",
+    "render",
+    "mcp"
+  ]
+}

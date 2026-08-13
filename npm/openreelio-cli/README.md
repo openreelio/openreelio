@@ -47,7 +47,7 @@ openreelio-cli project create --name "Demo" --path ./demo
 openreelio-cli asset import --path ./demo --file ./footage.mp4
 
 # 2. Look before you cut: shots, silence, loudness
-openreelio-cli analysis run --path ./demo --progress
+openreelio-cli analysis run --path ./demo --id <ASSET_ID> --progress
 
 # 3. Edit through commands (append-only, undoable)
 openreelio-cli timeline insert --path ./demo --asset asset_001 --track track_v1 --at 0.0
@@ -55,8 +55,8 @@ openreelio-cli timeline split  --path ./demo --clip clip_001 --at 5.0
 openreelio-cli timeline undo   --path ./demo
 
 # 4. See the result, not just the JSON
-openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30
-openreelio-cli render start --path ./demo --proxy --start 0 --end 30 --progress
+openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out ./frames/sheet.jpg
+openreelio-cli render start --path ./demo --proxy --output ./out/proxy.mp4 --start 0 --end 30 --progress
 
 # 5. Prove it is deliverable
 openreelio-cli verify --path ./demo --file ./out/proxy.mp4
@@ -85,8 +85,8 @@ render → look at frames → verify → fix**. `analysis`, `frame extract`,
 it as a tool provider:
 
 ```bash
-openreelio-cli mcp                 # read-only tools
-openreelio-cli mcp --allow-write   # also expose mutating tools (local trust)
+openreelio-cli mcp --project ./demo --stdio                 # read-only tools
+openreelio-cli mcp --project ./demo --stdio --allow-write   # also expose mutating tools (local trust)
 ```
 
 `--allow-write` drops the per-call approval requirement for mutating tools. Use
