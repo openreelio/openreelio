@@ -17,6 +17,54 @@ use crate::core::{
 };
 
 // =============================================================================
+// Asset path validation
+// =============================================================================
+
+/// Validates a workspace-relative asset path before it is stored on an asset.
+///
+/// [`Asset::resolved_path`](crate::core::assets::Asset::resolved_path) joins this
+/// value onto the project root with no traversal check of its own, so a `..`
+/// segment or an absolute/UNC prefix stored here escapes the project exactly like
+/// an out-of-tree `uri` would — and the result is handed to FFmpeg by render,
+/// analysis, and transcription.
+///
+/// Rejection is purely lexical: the path is never touched on disk, so validating
+/// a hostile value cannot itself probe outside the project or open a network
+/// connection.
+fn validate_asset_relative_path(relative_path: &str, label: &str) -> Result<(), String> {
+    let trimmed = relative_path.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is empty"));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(format!("{label} contains control characters"));
+    }
+    if trimmed.contains("://") {
+        return Err(format!("{label} must be a relative path, not a URL"));
+    }
+
+    let candidate = std::path::Path::new(trimmed);
+    if candidate.is_absolute() {
+        return Err(format!("{label} must be relative to the project root"));
+    }
+    if candidate.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::CurDir
+                | std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err(format!(
+            "{label} must not contain '.', '..', or a drive/UNC prefix"
+        ));
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // ImportAssetCommand
 // =============================================================================
 
@@ -164,7 +212,11 @@ impl Command for ImportAssetCommand {
         // Security boundary: UI/AI can attempt to import a URL or an invalid path.
         // We validate at the command level so all call sites (IPC, AI, plugins) are protected.
         if let Some(rel_path) = &self.asset.relative_path {
-            // Workspace file: resolve relative to project root
+            // Workspace file: resolve relative to project root. The lexical check
+            // runs before the join so a traversing value is refused without the
+            // filesystem being touched at all.
+            validate_asset_relative_path(rel_path, "asset.relativePath")
+                .map_err(CoreError::ValidationError)?;
             let project_root = self.project_root.as_ref().ok_or_else(|| {
                 CoreError::ValidationError(
                     "project_root required for workspace-relative imports".to_string(),
@@ -486,6 +538,31 @@ impl UpdateAssetCommand {
 
 impl Command for UpdateAssetCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        // Security boundary: `uri` and `relativePath` relink the asset to a new
+        // file, and that file is later opened by FFmpeg through
+        // `Asset::resolved_path` during render, analysis, and transcription. This
+        // command is therefore held to the same bar as `ImportAssetCommand`, and
+        // for the same reason: every surface that can execute a command — the
+        // Tauri IPC, the CLI, the agent plan executor, and MCP `plan.apply` —
+        // shares this one check. Without it, `UpdateAsset` was the cheapest way
+        // to write a URL or an out-of-tree path into project state.
+        //
+        // Validation runs before the first mutation, so a rejected update leaves
+        // the asset exactly as it was.
+        let validated_uri = self
+            .uri
+            .as_deref()
+            .map(|uri| {
+                validate_local_input_path(uri, "asset.uri")
+                    .map(|path| path.to_string_lossy().to_string())
+                    .map_err(CoreError::ValidationError)
+            })
+            .transpose()?;
+        if let Some(Some(relative_path)) = &self.relative_path {
+            validate_asset_relative_path(relative_path, "asset.relativePath")
+                .map_err(CoreError::ValidationError)?;
+        }
+
         let asset = state
             .assets
             .get_mut(&self.asset_id)
@@ -526,7 +603,7 @@ impl Command for UpdateAssetCommand {
         if let Some(proxy_url) = &self.proxy_url {
             asset.proxy_url = proxy_url.clone();
         }
-        if let Some(uri) = &self.uri {
+        if let Some(uri) = &validated_uri {
             asset.uri = uri.clone();
         }
         if let Some(duration_sec) = self.duration_sec {
@@ -837,7 +914,8 @@ mod tests {
         update_cmd.execute(&mut state).unwrap();
 
         let asset = state.assets.get(asset_id).unwrap();
-        assert_eq!(asset.uri, replacement_uri);
+        // The relink stores the canonicalized path, exactly like an import does.
+        assert_eq!(normalize_windows_unc_prefix(&asset.uri), replacement_uri);
         assert_eq!(asset.duration_sec, Some(42.0));
         assert_eq!(asset.file_size, 2048);
         assert_eq!(asset.video.as_ref().unwrap().width, 3840);
@@ -863,6 +941,108 @@ mod tests {
         assert_eq!(asset.relative_path, None);
         assert!(!asset.workspace_managed);
         assert!(!asset.missing);
+    }
+
+    /// Imports one asset backed by a real file and returns its ID.
+    fn import_asset_for_update(state: &mut ProjectState) -> (tempfile::TempDir, String) {
+        let (dir, uri) = create_temp_asset_file("video.mp4");
+        let mut import_cmd = ImportAssetCommand::video("video.mp4", &uri, VideoInfo::default());
+        let result = import_cmd.execute(state).unwrap();
+        (dir, result.created_ids[0].clone())
+    }
+
+    #[test]
+    fn test_update_asset_rejects_uri_that_is_not_a_local_file() {
+        let mut state = create_test_state();
+        let (_dir, asset_id) = import_asset_for_update(&mut state);
+        let original_uri = state.assets.get(&asset_id).unwrap().uri.clone();
+
+        // Every one of these later becomes an FFmpeg input path. A URL makes
+        // FFmpeg speak a network protocol; a UNC path makes the host open an
+        // outbound SMB connection; a relative or traversing path escapes the
+        // project root once `Asset::resolved_path` joins it.
+        for hostile in [
+            "https://attacker.example/probe.mp4",
+            "http://attacker.example/probe.mp4",
+            "file:///etc/passwd",
+            "\\\\attacker.example\\share\\probe.mp4",
+            "relative/probe.mp4",
+            "/tmp/../etc/passwd",
+        ] {
+            let mut update_cmd = UpdateAssetCommand::new(&asset_id).with_uri(hostile);
+            let err = update_cmd
+                .execute(&mut state)
+                .expect_err(&format!("'{hostile}' must be rejected"));
+            assert!(
+                matches!(err, CoreError::ValidationError(_)),
+                "'{hostile}' must be refused as a validation error, got {err:?}"
+            );
+            assert_eq!(
+                state.assets.get(&asset_id).unwrap().uri,
+                original_uri,
+                "'{hostile}' must leave the asset untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn test_update_asset_rejects_relative_path_that_escapes_the_project() {
+        let mut state = create_test_state();
+        let (_dir, asset_id) = import_asset_for_update(&mut state);
+
+        for hostile in [
+            "../outside.mp4",
+            "footage/../../outside.mp4",
+            "/absolute/outside.mp4",
+            "\\\\attacker.example\\share\\probe.mp4",
+            "",
+        ] {
+            let mut update_cmd =
+                UpdateAssetCommand::new(&asset_id).with_relative_path(Some(hostile.to_string()));
+            let err = update_cmd
+                .execute(&mut state)
+                .expect_err(&format!("'{hostile}' must be rejected"));
+            assert!(
+                matches!(err, CoreError::ValidationError(_)),
+                "'{hostile}' must be refused as a validation error, got {err:?}"
+            );
+            assert!(
+                state.assets.get(&asset_id).unwrap().relative_path.is_none(),
+                "'{hostile}' must leave the asset untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn test_update_asset_still_accepts_a_real_relink_and_clears_relative_path() {
+        let mut state = create_test_state();
+        let (_dir, asset_id) = import_asset_for_update(&mut state);
+        let (_replacement_dir, replacement_uri) = create_temp_asset_file("replacement.mp4");
+
+        let mut update_cmd = UpdateAssetCommand::new(&asset_id)
+            .with_uri(&replacement_uri)
+            .with_relative_path(None);
+        update_cmd.execute(&mut state).unwrap();
+
+        let asset = state.assets.get(&asset_id).unwrap();
+        assert_eq!(normalize_windows_unc_prefix(&asset.uri), replacement_uri);
+        assert!(asset.relative_path.is_none());
+    }
+
+    #[test]
+    fn test_import_asset_rejects_relative_path_that_escapes_the_project() {
+        let mut state = create_test_state();
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let asset = Asset::new_video("clip.mp4", "", VideoInfo::default())
+            .with_relative_path("../outside.mp4")
+            .as_workspace_managed();
+        let mut cmd =
+            ImportAssetCommand::from_asset(asset).with_project_root(dir.path().to_path_buf());
+
+        let err = cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::ValidationError(_)));
+        assert!(state.assets.is_empty());
     }
 
     #[test]
