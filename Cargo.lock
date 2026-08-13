@@ -3939,7 +3939,7 @@ dependencies = [
 
 [[package]]
 name = "openreelio"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "argon2",
  "async-trait",
@@ -3997,7 +3997,7 @@ dependencies = [
 
 [[package]]
 name = "openreelio-cli"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4013,7 +4013,7 @@ dependencies = [
 
 [[package]]
 name = "openreelio-core"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "openreelio",
  "serde",
