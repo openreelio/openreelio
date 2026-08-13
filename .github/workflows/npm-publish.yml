@@ -233,6 +233,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          mkdir -p dist/npm-tarballs
           for PACKAGE_DIR in dist/npm-packages/cli-* dist/npm-packages/openreelio-cli; do
             echo "::group::npm pack ${PACKAGE_DIR}"
             npm pack --pack-destination dist/npm-tarballs "${PACKAGE_DIR}"
