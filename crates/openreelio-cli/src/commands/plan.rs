@@ -314,6 +314,12 @@ pub(crate) fn apply_edit_plan(
     let mut succeeded = 0;
     let mut applied_op_ids: Vec<String> = Vec::new();
 
+    // Rollback unwinds the executor's in-memory undo stack, and that stack is
+    // capped for interactive use — far below the plan step cap. Without this,
+    // a plan that fails deep enough has already had its earliest steps evicted
+    // and could not undo them.
+    project.executor.ensure_history_capacity(plan.steps.len());
+
     let sorted_steps = topological_sort(&plan.steps)?;
     for step in sorted_steps {
         match execute_step(project, step) {

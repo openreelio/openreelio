@@ -104,6 +104,20 @@ impl CommandExecutor {
         self
     }
 
+    /// Raises the undo history cap to at least `size` entries.
+    ///
+    /// A transactional caller can only unwind what the undo stack still holds.
+    /// The default cap ([`DEFAULT_MAX_HISTORY_SIZE`]) is sized for a human
+    /// pressing Ctrl+Z, not for a batch: a plan that fails after more than that
+    /// many applied steps has already had its earliest entries evicted, and the
+    /// rollback silently stops short. Callers that execute a known number of
+    /// commands as one unit must size the history to that unit first.
+    ///
+    /// The cap is only ever raised, so this cannot shrink a caller's history.
+    pub fn ensure_history_capacity(&mut self, size: usize) {
+        self.max_history_size = self.max_history_size.max(size);
+    }
+
     /// Executes a command and adds it to history
     pub fn execute(
         &mut self,
@@ -3749,6 +3763,58 @@ mod tests {
         }
 
         assert_eq!(executor.undo_count(), 3);
+    }
+
+    /// A batch caller can size the undo stack to the batch it is about to run.
+    ///
+    /// The default cap is sized for interactive undo, so a transaction longer
+    /// than that would have its earliest entries evicted mid-flight and could
+    /// only unwind part of itself.
+    #[test]
+    fn test_executor_history_capacity_can_be_raised_to_cover_a_batch() {
+        let mut executor = CommandExecutor::new().with_max_history(3);
+        let mut state = ProjectState::new("Test");
+        let batch_size = 10;
+
+        executor.ensure_history_capacity(batch_size);
+        for index in 0..batch_size {
+            let asset = Asset::new_video(
+                &format!("video_{index}.mp4"),
+                &format!("/video_{index}.mp4"),
+                VideoInfo::default(),
+            );
+            executor
+                .execute(Box::new(TestAddAssetCommand { asset }), &mut state)
+                .unwrap();
+        }
+
+        assert_eq!(executor.undo_count(), batch_size);
+        for _ in 0..batch_size {
+            executor.undo(&mut state).unwrap();
+        }
+        assert_eq!(executor.undo_count(), 0);
+        assert!(state.assets.is_empty(), "the whole batch must unwind");
+    }
+
+    /// Raising the cap must never shrink a history that is already larger.
+    #[test]
+    fn test_executor_history_capacity_is_never_lowered() {
+        let mut executor = CommandExecutor::new().with_max_history(8);
+        let mut state = ProjectState::new("Test");
+
+        executor.ensure_history_capacity(2);
+        for index in 0..8 {
+            let asset = Asset::new_video(
+                &format!("video_{index}.mp4"),
+                &format!("/video_{index}.mp4"),
+                VideoInfo::default(),
+            );
+            executor
+                .execute(Box::new(TestAddAssetCommand { asset }), &mut state)
+                .unwrap();
+        }
+
+        assert_eq!(executor.undo_count(), 8);
     }
 
     #[test]
