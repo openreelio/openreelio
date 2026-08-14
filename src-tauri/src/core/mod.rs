@@ -41,6 +41,7 @@ pub mod render;
 pub mod search;
 pub mod settings;
 pub mod shapes;
+pub mod style;
 pub mod template;
 pub mod terminal_command_line;
 pub mod text;

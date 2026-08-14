@@ -1600,7 +1600,10 @@ impl Effect {
     /// - `x`: Normalized X position 0.0-1.0 (default: 0.5 = center)
     /// - `y`: Normalized Y position 0.0-1.0 (default: 0.5 = center)
     /// - `background_color`: Background box color as hex (optional)
+    /// - `background_opacity`: Box alpha 0.0-1.0, composed with `opacity` (default: 1.0)
     /// - `shadow_color`: Shadow color as hex (optional)
+    /// - `shadow_opacity`: Shadow alpha 0.0-1.0, composed with `opacity` (default: 0.8)
+    /// - `outline_opacity`: Outline alpha 0.0-1.0, composed with `opacity` (default: 1.0)
     /// - `shadow_x`: Shadow X offset in pixels (default: 2)
     /// - `shadow_y`: Shadow Y offset in pixels (default: 2)
     /// - `outline_color`: Outline/border color as hex (optional)
@@ -1702,9 +1705,17 @@ impl Effect {
         }
 
         // Background box
+        //
+        // `background_opacity` carries the alpha channel of the style's box
+        // color. It composes with the text opacity rather than replacing it, so
+        // a translucent box inside a faded overlay fades with the overlay.
         if let Some(bg_color) = self.get_param("background_color").and_then(|v| v.as_str()) {
             if !bg_color.is_empty() {
-                let bg_ffmpeg = hex_to_ffmpeg_color(bg_color, opacity);
+                let bg_alpha = self
+                    .get_float("background_opacity")
+                    .unwrap_or(1.0)
+                    .clamp(0.0, 1.0);
+                let bg_ffmpeg = hex_to_ffmpeg_color(bg_color, bg_alpha * opacity);
                 let padding = self
                     .get_param("background_padding")
                     .and_then(|v| v.as_int())
@@ -1726,7 +1737,13 @@ impl Effect {
                 .get_param("shadow_y")
                 .and_then(|v| v.as_int())
                 .unwrap_or(2);
-            let shadow_ffmpeg = hex_to_ffmpeg_color(shadow_color, opacity * 0.8);
+            // A shadow with no alpha of its own keeps the historical 80% of the
+            // text opacity; one that names an alpha uses it.
+            let shadow_alpha = self
+                .get_float("shadow_opacity")
+                .map(|alpha| alpha.clamp(0.0, 1.0))
+                .unwrap_or(0.8);
+            let shadow_ffmpeg = hex_to_ffmpeg_color(shadow_color, opacity * shadow_alpha);
             params.push(format!("shadowcolor={}", shadow_ffmpeg));
             params.push(format!("shadowx={}", shadow_x));
             params.push(format!("shadowy={}", shadow_y));
@@ -1738,7 +1755,11 @@ impl Effect {
                 .get_param("outline_width")
                 .and_then(|v| v.as_int())
                 .unwrap_or(2);
-            let outline_ffmpeg = hex_to_ffmpeg_color(outline_color, opacity);
+            let outline_alpha = self
+                .get_float("outline_opacity")
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            let outline_ffmpeg = hex_to_ffmpeg_color(outline_color, outline_alpha * opacity);
             params.push(format!("borderw={}", outline_width));
             params.push(format!("bordercolor={}", outline_ffmpeg));
         }

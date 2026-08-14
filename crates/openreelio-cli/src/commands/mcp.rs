@@ -41,6 +41,7 @@ use crate::{
 use clap::Args;
 use openreelio_core::commands::{get_text_data, is_text_clip, InsertMediaCommand};
 use openreelio_core::ipc::CommandPayload;
+use openreelio_core::style::{caption_pack_ids, transition_recipe_ids};
 use openreelio_core::timeline::TrackKind;
 use serde_json::Value;
 use std::io::{BufRead, Write};
@@ -1374,6 +1375,12 @@ fn load_annotation_for_asset(
 }
 
 fn build_command_schema() -> Value {
+    // Read the curated ids from the core registries rather than restating them:
+    // a pack added to core shows up in the hints, and a hint can never name an
+    // id the validator would reject.
+    let caption_style_pack_ids = caption_pack_ids();
+    let transition_recipe_ids = transition_recipe_ids();
+
     serde_json::json!({
         "commands": CommandPayload::SUPPORTED_COMMAND_TYPES,
         "count": CommandPayload::SUPPORTED_COMMAND_TYPES.len(),
@@ -1395,11 +1402,27 @@ fn build_command_schema() -> Value {
             },
             "ImportGeneratedCaptions": {
                 "required": ["sequenceId", "trackId", "segments"],
-                "optional": ["style", "position", "replaceExisting"],
+                "optional": ["stylePack", "style", "position", "replaceExisting"],
                 "segmentShape": { "startSec": "number", "endSec": "number", "text": "string" },
                 "styleShape": "Caption style may include fontFamily, fontSize, fontWeight, bold, italic, underline, color, opacity, backgroundColor, backgroundPadding, outlineColor, outlineWidth, shadowColor, shadowOffsetX, shadowOffsetY, shadowBlur, alignment, lineHeight, and letterSpacing.",
                 "positionShape": "Caption position supports preset top/center/bottom or custom xPercent/yPercent.",
-                "note": "Use this for AI/STT transcript segments so generated captions are imported atomically and remain undoable as one command."
+                "stylePackHints": caption_style_pack_ids,
+                "stylePackShape": "stylePack names a curated caption pack that is applied as the base layer; style and position override it key by key. Every pack is checked to stay inside the title-safe area on both 1920x1080 and 1080x1920.",
+                "note": "Use this for AI/STT transcript segments so generated captions are imported atomically and remain undoable as one command. Prefer stylePack over hand-assembled style values unless the brief needs something no pack expresses."
+            },
+            "CreateCaption": {
+                "required": ["sequenceId", "trackId", "text", "startSec", "endSec"],
+                "optional": ["stylePack", "style", "position"],
+                "stylePackHints": caption_style_pack_ids,
+                "stylePackShape": "stylePack names a curated caption pack that is applied as the base layer; style and position override it key by key.",
+                "note": "Use this for individual caption lines. UpdateCaption accepts the same stylePack field, where it restyles WITHOUT moving the caption: an update keeps the existing anchor unless it also carries an explicit position."
+            },
+            "AddEffect": {
+                "required": ["sequenceId", "trackId", "clipId"],
+                "optional": ["effectType", "recipe", "params", "keyframes", "position"],
+                "recipeHints": transition_recipe_ids,
+                "recipeShape": "recipe names a curated transition recipe and supplies both effectType and its baseline params (duration, offset, direction, fade_in); anything in params overrides the recipe key by key. Naming a recipe and a contradictory effectType is rejected.",
+                "note": "Transitions are effects: there is no AddTransition command. Either effectType or recipe must be present. fade-out is anchored on the clip's tail when the command is executed, so pass params.start_time only to place the fade somewhere else."
             },
             "transcriptionGenerate": {
                 "tool": "openreelio.transcription.generate",
@@ -1451,6 +1474,7 @@ fn build_command_schema() -> Value {
                 "Prefer openreelio.transcription.generate(sequenceAudio=true, sequenceId, language=\"auto\", model=\"auto\") as the default captioning path: its segment times are TIMELINE-relative and reflect cuts, trims, overlaps, and volume, so they pass straight to ImportGeneratedCaptions.",
                 "Use openreelio.transcription.generate(assetId, language=\"auto\", model=\"auto\") for source-asset analysis only: its times are SOURCE-relative (0-based to the asset) and must be mapped to the placed clip before ImportGeneratedCaptions, not used as direct timeline caption times.",
                 "Use ImportGeneratedCaptions for AI transcript segments or CreateCaption/UpdateCaption for individual caption lines.",
+                "Pass stylePack (a curated caption pack id) rather than assembling caption typography field by field; the packs are the checked quality floor and stay inside the title-safe area on landscape and vertical canvases alike.",
                 "Use caption style/position metadata for subtitle readability instead of editable overlay text when the user wants semantic subtitles."
             ],
             "placementDefaults": {
@@ -2302,6 +2326,56 @@ mod tests {
             schema["textWorkflows"]["placementDefaults"]["subtitle"],
             "Bottom center around y=0.85 with outline/shadow unless it covers important visual content."
         );
+    }
+
+    #[test]
+    fn should_advertise_curated_pack_ids_from_the_core_registries() {
+        let schema = build_command_schema();
+
+        // The hint lists must be the registries themselves, not a restatement:
+        // an id an agent reads here has to be an id the parser accepts.
+        for hint_path in ["CreateCaption", "ImportGeneratedCaptions"] {
+            let hints = schema["payloadHints"][hint_path]["stylePackHints"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{hint_path} must advertise stylePackHints"));
+            let advertised: Vec<&str> = hints.iter().filter_map(Value::as_str).collect();
+            assert_eq!(advertised, caption_pack_ids());
+        }
+
+        let recipes = schema["payloadHints"]["AddEffect"]["recipeHints"]
+            .as_array()
+            .expect("AddEffect must advertise recipeHints");
+        let advertised: Vec<&str> = recipes.iter().filter_map(Value::as_str).collect();
+        assert_eq!(advertised, transition_recipe_ids());
+
+        // Every advertised id must round-trip through the strict parser.
+        for pack_id in caption_pack_ids() {
+            CommandPayload::parse(
+                "CreateCaption".to_string(),
+                serde_json::json!({
+                    "sequenceId": "seq",
+                    "trackId": "track",
+                    "text": "hint check",
+                    "startSec": 0.0,
+                    "endSec": 1.0,
+                    "stylePack": pack_id,
+                }),
+            )
+            .unwrap_or_else(|error| panic!("advertised pack '{pack_id}' must parse: {error}"));
+        }
+
+        for recipe_id in transition_recipe_ids() {
+            CommandPayload::parse(
+                "AddEffect".to_string(),
+                serde_json::json!({
+                    "sequenceId": "seq",
+                    "trackId": "track",
+                    "clipId": "clip",
+                    "recipe": recipe_id,
+                }),
+            )
+            .unwrap_or_else(|error| panic!("advertised recipe '{recipe_id}' must parse: {error}"));
+        }
     }
 
     #[test]

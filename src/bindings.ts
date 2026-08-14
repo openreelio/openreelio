@@ -3072,8 +3072,18 @@ export type AISettingsDto = { assistantRuntime?: AssistantRuntimeDto; codexModel
 export type AddAudioKeyframePayload = { sequenceId: string; trackId: string; clipId: string; timeOffset: number; valueDb: number; interpolation?: KeyframeInterpolation }
 /**
  * Payload for adding an effect to a clip.
+ * 
+ * Either `effectType` or `recipe` must be present. A curated transition recipe
+ * (see `core::style::transition_recipes`) supplies the effect type and its
+ * baseline parameters; anything in `params` overrides the recipe key by key.
+ * `CommandPayload::parse` performs that resolution, so a payload that reaches
+ * command construction always carries an explicit effect type.
  */
-export type AddEffectPayload = { sequenceId: string; trackId: string; clipId: string; effectType: EffectType; params?: { [key in string]: ParamValue }; keyframes?: { [key in string]: Keyframe[] }; 
+export type AddEffectPayload = { sequenceId: string; trackId: string; clipId: string; effectType?: EffectType | null; 
+/**
+ * Curated transition recipe id, resolved into `effectType` + `params`.
+ */
+recipe?: string | null; params?: { [key in string]: ParamValue }; keyframes?: { [key in string]: Keyframe[] }; 
 /**
  * Optional position in the effect list (None = append at end)
  */
@@ -4938,7 +4948,11 @@ export type CreateAdjustmentLayerPayload = { sequenceId: string; trackId: string
  * Input payload for creating an agent session kernel row.
  */
 export type CreateAgentSessionInputDto = { projectId: string; sequenceId: string | null; title: string | null; runtimeKind: string | null; agentProfileId: string | null; sessionMode: string | null; parentSessionId: string | null; branchFromSessionId: string | null; rootSessionId: string | null; modelProvider: string | null; modelId: string | null; id: string | null }
-export type CreateCaptionPayload = { sequenceId: string; trackId: string; text: string; startSec: number; endSec: number; style: JsonValue | null; position: JsonValue | null }
+export type CreateCaptionPayload = { sequenceId: string; trackId: string; text: string; startSec: number; endSec: number; style: JsonValue | null; position: JsonValue | null; 
+/**
+ * Curated caption pack id, resolved into `style` + `position`.
+ */
+stylePack?: string | null }
 /**
  * Arguments for creating a compound clip from selected clips.
  */
@@ -5801,7 +5815,11 @@ undoCount: number;
  */
 redoCount: number }
 export type ImportAssetPayload = { name: string; uri: string }
-export type ImportGeneratedCaptionsPayload = { sequenceId: string; trackId: string; segments: GeneratedCaptionSegmentPayload[]; style: JsonValue | null; position: JsonValue | null; replaceExisting?: boolean }
+export type ImportGeneratedCaptionsPayload = { sequenceId: string; trackId: string; segments: GeneratedCaptionSegmentPayload[]; style: JsonValue | null; position: JsonValue | null; 
+/**
+ * Curated caption pack id, resolved into `style` + `position`.
+ */
+stylePack?: string | null; replaceExisting?: boolean }
 export type InsertClipPayload = { sequenceId: string; trackId: string; assetId: string; 
 /**
  * Timeline position to insert at.
@@ -9161,7 +9179,15 @@ export type UnnestCompoundClipPayload = { sequenceId: string; trackId: string; c
  */
 export type UpdateAgentRunPhaseInput = { runId: string; phase: string; traceId: string | null; toolCallsUsed: number | null; plannedStepCount: number | null; completedStepCount: number | null; outputMessageId: string | null; rollbackReportJson: string | null; errorCode: string | null; errorMessage: string | null; currentPlanId: string | null; pendingApprovalId: string | null; activeCheckpointId: string | null; permissionStateVersion: number | null; compactionVersion: number | null; resumeCursorVersion: number | null; lastCompactedAt: number | null; lastResumedAt: number | null; endedAt: number | null }
 export type UpdateAssetPayload = { assetId: string; name: string | null; tags: string[] | null; license: LicenseInfo | null; thumbnailUrl: string | null; proxyStatus: ProxyStatus | null; proxyUrl: string | null; uri: string | null; durationSec: number | null; fileSize: number | null; video: VideoInfo | null; audio: AudioInfo | null; relativePath: string | null; workspaceManaged: boolean | null; missing: boolean | null }
-export type UpdateCaptionPayload = { sequenceId: string; trackId: string; captionId: string; text: string | null; startSec: number | null; endSec: number | null; style: JsonValue | null; position: JsonValue | null }
+export type UpdateCaptionPayload = { sequenceId: string; trackId: string; captionId: string; text: string | null; startSec: number | null; endSec: number | null; style: JsonValue | null; position: JsonValue | null; 
+/**
+ * Curated caption pack id, resolved into `style` only.
+ * 
+ * An update replaces the stored anchor whenever it carries one, so a pack
+ * on an update restyles without moving the caption. Pass `position` to
+ * move it.
+ */
+stylePack?: string | null }
 /**
  * DTO for update check result
  */

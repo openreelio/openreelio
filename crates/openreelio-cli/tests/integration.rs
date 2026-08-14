@@ -5718,3 +5718,335 @@ fn test_agent_perception_loop_end_to_end() {
     assert_eq!(gap["status"], "passed");
     assert_eq!(gap["violationCount"], 0);
 }
+
+// ============================================================================
+// Curated style packs
+// ============================================================================
+
+#[test]
+fn test_packs_list_returns_both_registries() {
+    let all = run_cli_ok(&["packs", "list"]);
+    assert_eq!(all["status"], "ok");
+    assert_eq!(all["kind"], "all");
+
+    let packs = all["packs"].as_array().expect("packs array");
+    assert_eq!(all["count"].as_u64().unwrap() as usize, packs.len());
+
+    let caption_ids: Vec<&str> = packs
+        .iter()
+        .filter(|pack| pack["kind"] == "caption")
+        .filter_map(|pack| pack["id"].as_str())
+        .collect();
+    let transition_ids: Vec<&str> = packs
+        .iter()
+        .filter(|pack| pack["kind"] == "transition")
+        .filter_map(|pack| pack["id"].as_str())
+        .collect();
+
+    assert!(caption_ids.contains(&"clean-minimal"), "{caption_ids:?}");
+    assert!(caption_ids.contains(&"boxed-contrast"), "{caption_ids:?}");
+    assert!(
+        transition_ids.contains(&"dissolve-standard"),
+        "{transition_ids:?}"
+    );
+    assert!(transition_ids.contains(&"wipe-left"), "{transition_ids:?}");
+
+    // Every entry carries the fields an agent needs to choose without guessing.
+    for pack in packs {
+        assert!(pack["id"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(pack["description"]
+            .as_str()
+            .is_some_and(|desc| !desc.is_empty()));
+        match pack["kind"].as_str() {
+            Some("caption") => {
+                assert!(pack["style"].is_object(), "{pack}");
+                assert!(pack["position"].is_object(), "{pack}");
+            }
+            Some("transition") => {
+                assert!(pack["effectType"].is_string(), "{pack}");
+                assert!(pack["params"].is_object(), "{pack}");
+            }
+            other => panic!("unexpected pack kind {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn test_packs_list_filters_by_kind() {
+    let captions = run_cli_ok(&["packs", "list", "--kind", "caption"]);
+    assert_eq!(captions["kind"], "caption");
+    assert!(captions["packs"]
+        .as_array()
+        .expect("packs")
+        .iter()
+        .all(|pack| pack["kind"] == "caption"));
+
+    let transitions = run_cli_ok(&["packs", "list", "--kind", "transition"]);
+    assert_eq!(transitions["kind"], "transition");
+    assert!(transitions["packs"]
+        .as_array()
+        .expect("packs")
+        .iter()
+        .all(|pack| pack["kind"] == "transition"));
+
+    let (_stdout, stderr) = run_cli_err(&["packs", "list", "--kind", "nonsense"]);
+    assert!(
+        stderr.contains("caption") && stderr.contains("transition"),
+        "clap must list the valid kinds, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_caption_style_pack_applies_and_is_overridable() {
+    let dir = create_temp_project("caption_style_pack_test");
+    let path = project_path(&dir, "caption_style_pack_test");
+
+    run_cli_ok(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Packed caption",
+        "--start",
+        "0",
+        "--end",
+        "2",
+        "--style-pack",
+        "boxed-contrast",
+    ]);
+
+    let list = run_cli_ok(&["caption", "list", "--path", &path]);
+    let caption = &list["captions"][0];
+    let caption_id = caption["id"].as_str().unwrap().to_string();
+    assert_eq!(caption["style"]["fontFamily"], "Arial");
+    assert_eq!(caption["style"]["fontSize"], 48);
+    assert_eq!(caption["style"]["backgroundColor"]["a"], 180);
+    assert_eq!(caption["position"]["type"], "preset");
+    assert_eq!(caption["position"]["vertical"], "bottom");
+    assert_eq!(caption["position"]["marginPercent"], 10.0);
+
+    // A pack is a base layer, not a lock: the explicit size wins and everything
+    // else stays packed.
+    run_cli_ok(&[
+        "caption",
+        "update",
+        "--path",
+        &path,
+        "--id",
+        &caption_id,
+        "--style-pack",
+        "boxed-contrast",
+        "--style-json",
+        r##"{"fontSize":96}"##,
+    ]);
+
+    let restyled = run_cli_ok(&["caption", "list", "--path", &path]);
+    assert_eq!(restyled["captions"][0]["style"]["fontSize"], 96);
+    assert_eq!(
+        restyled["captions"][0]["style"]["backgroundColor"]["a"],
+        180
+    );
+}
+
+#[test]
+fn test_caption_style_pack_rejects_unknown_id_with_the_valid_list() {
+    let dir = create_temp_project("caption_style_pack_error_test");
+    let path = project_path(&dir, "caption_style_pack_error_test");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Bad pack",
+        "--start",
+        "0",
+        "--end",
+        "2",
+        "--style-pack",
+        "not-a-pack",
+    ]);
+
+    assert!(stderr.contains("not-a-pack"), "{stderr}");
+    assert!(stderr.contains("clean-minimal"), "{stderr}");
+    assert!(stderr.contains("boxed-contrast"), "{stderr}");
+}
+
+#[test]
+fn test_command_execute_accepts_style_pack_and_recipe() {
+    let dir = create_temp_project("pack_command_execute_test");
+    let path = project_path(&dir, "pack_command_execute_test");
+
+    let info = run_cli_ok(&["timeline", "info", "--path", &path]);
+    let sequence_id = info["sequenceId"].as_str().unwrap().to_string();
+
+    let track = run_cli_ok(&[
+        "timeline",
+        "add-track",
+        "--path",
+        &path,
+        "--kind",
+        "caption",
+        "--name",
+        "Captions",
+    ]);
+    let caption_track_id = track["createdIds"][0].as_str().unwrap().to_string();
+
+    let payload = serde_json::json!({
+        "sequenceId": sequence_id,
+        "trackId": caption_track_id,
+        "text": "From command execute",
+        "startSec": 0.0,
+        "endSec": 2.0,
+        "stylePack": "yellow-classic",
+    })
+    .to_string();
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "CreateCaption",
+        "--payload",
+        &payload,
+    ]);
+
+    let list = run_cli_ok(&["caption", "list", "--path", &path]);
+    assert_eq!(list["captions"][0]["style"]["color"]["r"], 255);
+    assert_eq!(list["captions"][0]["style"]["color"]["b"], 0);
+
+    // The recipe half of the same chokepoint: validate without a project write.
+    let effect_payload = serde_json::json!({
+        "sequenceId": sequence_id,
+        "trackId": caption_track_id,
+        "clipId": "clip_placeholder",
+        "recipe": "dissolve-soft",
+    })
+    .to_string();
+    let validated = run_cli_ok(&[
+        "command",
+        "validate",
+        "--type",
+        "AddEffect",
+        "--payload",
+        &effect_payload,
+    ]);
+    assert_eq!(validated["status"], "ok");
+    assert_eq!(validated["commandType"], "AddEffect");
+
+    let bad_payload = serde_json::json!({
+        "sequenceId": sequence_id,
+        "trackId": caption_track_id,
+        "clipId": "clip_placeholder",
+        "recipe": "not-a-recipe",
+    })
+    .to_string();
+    let (stdout, stderr, _success) = run_cli(&[
+        "command",
+        "validate",
+        "--type",
+        "AddEffect",
+        "--payload",
+        &bad_payload,
+    ]);
+    let combined = format!("{stdout}{stderr}");
+    assert!(combined.contains("dissolve-standard"), "{combined}");
+}
+
+#[test]
+fn test_caption_style_pack_never_overrides_an_explicit_placement() {
+    let dir = create_temp_project("caption_pack_placement_test");
+    let path = project_path(&dir, "caption_pack_placement_test");
+
+    // A --position-json without a `type` is a custom anchor (the validator
+    // itself reads it that way), so the pack styles the caption while the
+    // caller places it.
+    let placed = run_cli_ok(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Custom placed",
+        "--start",
+        "0",
+        "--end",
+        "2",
+        "--style-pack",
+        "clean-minimal",
+        "--position-json",
+        r##"{"xPercent":25,"yPercent":80}"##,
+    ]);
+    let placed_id = placed["createdIds"][0].as_str().unwrap().to_string();
+
+    // --position names a vertical anchor only, so a pack lifted clear of
+    // platform UI keeps its own margin instead of dropping to a synthesized
+    // default.
+    let anchored = run_cli_ok(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Anchored",
+        "--start",
+        "3",
+        "--end",
+        "5",
+        "--style-pack",
+        "shorts-bold-outline",
+        "--position",
+        "bottom",
+    ]);
+    let anchored_id = anchored["createdIds"][0].as_str().unwrap().to_string();
+
+    let find = |list: &serde_json::Value, id: &str| -> serde_json::Value {
+        list["captions"]
+            .as_array()
+            .expect("captions")
+            .iter()
+            .find(|caption| caption["id"] == id)
+            .expect("caption present")
+            .clone()
+    };
+
+    let list = run_cli_ok(&["caption", "list", "--path", &path]);
+
+    let placed_caption = find(&list, &placed_id);
+    assert_eq!(placed_caption["position"]["xPercent"], 25.0);
+    assert_eq!(placed_caption["position"]["yPercent"], 80.0);
+    assert!(
+        placed_caption["position"].get("marginPercent").is_none(),
+        "a custom anchor must not carry the pack's preset keys: {}",
+        placed_caption["position"]
+    );
+    assert_eq!(placed_caption["style"]["fontSize"], 48);
+
+    let anchored_caption = find(&list, &anchored_id);
+    assert_eq!(anchored_caption["position"]["vertical"], "bottom");
+    assert_eq!(anchored_caption["position"]["marginPercent"], 18.0);
+
+    // Restyling is not a move.
+    run_cli_ok(&[
+        "caption",
+        "update",
+        "--path",
+        &path,
+        "--id",
+        &placed_id,
+        "--style-pack",
+        "boxed-contrast",
+    ]);
+
+    let restyled = find(
+        &run_cli_ok(&["caption", "list", "--path", &path]),
+        &placed_id,
+    );
+    assert_eq!(restyled["position"]["xPercent"], 25.0);
+    assert_eq!(restyled["position"]["yPercent"], 80.0);
+    assert_eq!(restyled["style"]["backgroundColor"]["a"], 180);
+}

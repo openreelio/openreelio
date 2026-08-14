@@ -15,6 +15,7 @@ mod ffmpeg;
 mod frame;
 mod help_json;
 mod mcp;
+mod packs;
 mod perception;
 mod plan;
 mod project;
@@ -74,6 +75,12 @@ pub enum Commands {
     Caption {
         #[command(subcommand)]
         action: caption::CaptionAction,
+    },
+
+    /// Curated caption style packs and transition recipes
+    Packs {
+        #[command(subcommand)]
+        action: packs::PacksAction,
     },
 
     /// Speech-to-text transcription and auto-caption generation
@@ -142,6 +149,7 @@ pub fn execute(cli: Cli) -> anyhow::Result<()> {
         Commands::Analysis { action } => analysis::execute(action),
         Commands::Timeline { action } => timeline::execute(action),
         Commands::Caption { action } => caption::execute(action),
+        Commands::Packs { action } => packs::execute(action),
         Commands::Transcription { action } => transcription::execute(action),
         Commands::Text { action } => text::execute(action),
         Commands::Render { action } => render::execute(action),

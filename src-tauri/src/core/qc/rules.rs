@@ -9,7 +9,9 @@ use std::collections::HashMap;
 
 use super::context::QCContext;
 use super::violation::{merged_span_duration_sec, QCViolation, Severity, ViolationFix};
-use crate::core::captions::{CaptionPosition, CaptionStyle, CustomPosition, VerticalPosition};
+use crate::core::captions::{
+    CaptionPosition, CaptionStyle, CustomPosition, TextAlignment, VerticalPosition,
+};
 use crate::core::project::ProjectState;
 use crate::core::timeline::{Clip, Sequence, Track};
 use crate::core::CoreResult;
@@ -1460,6 +1462,14 @@ impl QCRule for AudioClippingRule {
 /// style as untyped JSON, which is deserialized defensively so a legacy or
 /// partially written blob degrades to the caption defaults instead of failing
 /// the whole check.
+///
+/// Both anchoring modes are measured against the canvas, not just compared to a
+/// margin: a preset anchor places the *center* of the text block on its margin
+/// line, so a large enough font pushes the block past the edge the margin was
+/// supposed to protect. Horizontal extent is modelled for custom anchors, where
+/// the caller chose x and the renderer honors alignment; a preset anchor is
+/// always horizontally centered, and an over-long line there is a
+/// text-authoring problem this rule cannot fix by moving the caption.
 #[derive(Debug, Default)]
 pub struct CaptionSafeAreaRule;
 
@@ -1479,15 +1489,19 @@ impl CaptionSafeAreaRule {
     /// while breaching only the title-safe margin stays informational.
     const ACTION_SAFE_MARGIN_PERCENT: f64 = 5.0;
 
-    /// Characters that fit across the full canvas width at the default font size
+    /// Average glyph advance as a fraction of the font size
     ///
     /// Core has no text shaping, so rendered text width can only be
-    /// approximated; this average glyph advance keeps the estimate conservative
-    /// for Latin text and is intentionally coarse.
-    const CHARS_PER_CANVAS_WIDTH: f64 = 42.0;
+    /// approximated; half an em is the usual figure for mixed-case Latin and is
+    /// intentionally coarse.
+    const GLYPH_ADVANCE_FACTOR: f64 = 0.5;
 
     /// Maximum estimated text-box width as a percentage of canvas width
-    const MAX_TEXT_BOX_WIDTH_PERCENT: f64 = 90.0;
+    ///
+    /// A cap only so a pathological font size cannot produce a nonsense span in
+    /// the violation message; it is far above the safe band, so it never hides
+    /// an overflow.
+    const MAX_TEXT_BOX_WIDTH_PERCENT: f64 = 500.0;
 
     /// Line height as a multiple of the font size (typographic default)
     const LINE_HEIGHT_FACTOR: f64 = 1.2;
@@ -1515,23 +1529,84 @@ impl CaptionSafeAreaRule {
     }
 
     /// Returns the estimated text box size as (width, height) percentages.
-    fn estimate_text_box_percent(clip: &Clip, canvas_height: u32) -> (f64, f64) {
+    ///
+    /// Both axes scale with the font size and the canvas, because that is what
+    /// the renderer does: `drawtext` emits an absolute `fontsize` and does not
+    /// wrap, so the same caption occupies twice the width on a 1080-wide
+    /// vertical canvas that it does on a 1920-wide landscape one.
+    fn estimate_text_box_percent(clip: &Clip, canvas_width: u32, canvas_height: u32) -> (f64, f64) {
         let char_count = clip
             .label
             .as_ref()
             .map(|label| label.chars().count())
             .unwrap_or(0) as f64;
 
-        let width_percent = (char_count / Self::CHARS_PER_CANVAS_WIDTH * 100.0)
-            .min(Self::MAX_TEXT_BOX_WIDTH_PERCENT);
+        let font_size = Self::font_size_px(clip.caption_style.as_ref());
+
+        let canvas_width = if canvas_width > 0 { canvas_width } else { 1 };
+        let width_percent =
+            (char_count * font_size * Self::GLYPH_ADVANCE_FACTOR / f64::from(canvas_width) * 100.0)
+                .min(Self::MAX_TEXT_BOX_WIDTH_PERCENT);
 
         let canvas_height = if canvas_height > 0 { canvas_height } else { 1 };
-        let height_percent = Self::font_size_px(clip.caption_style.as_ref())
-            * Self::LINE_HEIGHT_FACTOR
-            / f64::from(canvas_height)
-            * 100.0;
+        let height_percent =
+            font_size * Self::LINE_HEIGHT_FACTOR / f64::from(canvas_height) * 100.0;
 
         (width_percent, height_percent)
+    }
+
+    /// Reads the caption's horizontal alignment from its style JSON.
+    ///
+    /// Mirrors the render path's alias list; anything unrecognized is centered,
+    /// which is the renderer's own default.
+    fn alignment(style: Option<&serde_json::Value>) -> TextAlignment {
+        let Some(value) = style.and_then(serde_json::Value::as_object) else {
+            return TextAlignment::Center;
+        };
+
+        let raw = ["alignment", "textAlign", "text_align"]
+            .iter()
+            .find_map(|key| value.get(*key))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        match raw.as_str() {
+            "left" => TextAlignment::Left,
+            "right" => TextAlignment::Right,
+            _ => TextAlignment::Center,
+        }
+    }
+
+    /// Returns the horizontal span a text box of `width_percent` occupies.
+    ///
+    /// Matches `build_drawtext_filter`: a left-aligned run starts at the anchor,
+    /// a right-aligned one ends there, and a centered one straddles it.
+    fn horizontal_span(
+        anchor_percent: f64,
+        width_percent: f64,
+        alignment: &TextAlignment,
+    ) -> (f64, f64) {
+        match alignment {
+            TextAlignment::Left => (anchor_percent, anchor_percent + width_percent),
+            TextAlignment::Right => (anchor_percent - width_percent, anchor_percent),
+            TextAlignment::Center => (
+                anchor_percent - width_percent / 2.0,
+                anchor_percent + width_percent / 2.0,
+            ),
+        }
+    }
+
+    /// Returns the vertical center of a preset anchor, as a canvas percentage.
+    ///
+    /// The renderer centers the text block on the margin line, which is why the
+    /// block can breach an edge the margin itself clears.
+    fn preset_center_y_percent(vertical: &VerticalPosition, margin_percent: f64) -> f64 {
+        match vertical {
+            VerticalPosition::Top => margin_percent,
+            VerticalPosition::Center => 50.0,
+            VerticalPosition::Bottom => 100.0 - margin_percent,
+        }
     }
 
     /// Centers a box of `size_percent` inside the safe band, without panicking
@@ -1634,15 +1709,59 @@ impl QCRule for CaptionSafeAreaRule {
                                 },
                             )
                         } else {
-                            continue;
+                            // The margin clears both bands, but it only places
+                            // the *center* of the text block: the renderer
+                            // draws a block of `font_size * line_height` around
+                            // that line, so a large enough font still breaches
+                            // the edge the margin was chosen to protect.
+                            if context.canvas_height == 0 {
+                                continue;
+                            }
+
+                            let (_, box_height) = Self::estimate_text_box_percent(
+                                clip,
+                                context.canvas_width,
+                                context.canvas_height,
+                            );
+                            let center_y = Self::preset_center_y_percent(vertical, *margin_percent);
+                            let top = center_y - box_height / 2.0;
+                            let bottom = center_y + box_height / 2.0;
+                            let upper_bound = 100.0 - action_safe_margin;
+
+                            if top >= action_safe_margin && bottom <= upper_bound {
+                                continue;
+                            }
+
+                            (
+                                severity,
+                                "Caption text extends outside the action-safe area".to_string(),
+                                format!(
+                                    "Estimated text block spans y {:.1}%-{:.1}% at {:.0}px on a {}px-tall canvas, outside the {:.1}%-{:.1}% safe band (block size is an approximation)",
+                                    top,
+                                    bottom,
+                                    Self::font_size_px(clip.caption_style.as_ref()),
+                                    context.canvas_height,
+                                    action_safe_margin,
+                                    upper_bound
+                                ),
+                                CaptionPosition::Preset {
+                                    vertical: vertical.clone(),
+                                    margin_percent: (title_safe_margin + box_height / 2.0)
+                                        .min(45.0),
+                                },
+                            )
                         }
                     }
                     CaptionPosition::Custom(custom) => {
-                        let (box_width, box_height) =
-                            Self::estimate_text_box_percent(clip, context.canvas_height);
+                        let (box_width, box_height) = Self::estimate_text_box_percent(
+                            clip,
+                            context.canvas_width,
+                            context.canvas_height,
+                        );
+                        let alignment = Self::alignment(clip.caption_style.as_ref());
 
-                        let left = custom.x_percent - box_width / 2.0;
-                        let right = custom.x_percent + box_width / 2.0;
+                        let (left, right) =
+                            Self::horizontal_span(custom.x_percent, box_width, &alignment);
                         let top = custom.y_percent - box_height / 2.0;
                         let bottom = custom.y_percent + box_height / 2.0;
 
@@ -1655,6 +1774,17 @@ impl QCRule for CaptionSafeAreaRule {
                             continue;
                         }
 
+                        // The fix has to be expressed in the same anchoring the
+                        // renderer reads, so the clamped center is converted
+                        // back into a left/right/center anchor.
+                        let clamped_center_x =
+                            Self::clamp_center((left + right) / 2.0, box_width, action_safe_margin);
+                        let fixed_x = match alignment {
+                            TextAlignment::Left => clamped_center_x - box_width / 2.0,
+                            TextAlignment::Right => clamped_center_x + box_width / 2.0,
+                            TextAlignment::Center => clamped_center_x,
+                        };
+
                         (
                             severity,
                             "Caption positioned outside the action-safe area".to_string(),
@@ -1663,11 +1793,7 @@ impl QCRule for CaptionSafeAreaRule {
                                 left, right, top, bottom, action_safe_margin, upper_bound
                             ),
                             CaptionPosition::Custom(CustomPosition {
-                                x_percent: Self::clamp_center(
-                                    custom.x_percent,
-                                    box_width,
-                                    action_safe_margin,
-                                ),
+                                x_percent: fixed_x,
                                 y_percent: Self::clamp_center(
                                     custom.y_percent,
                                     box_height,
@@ -2645,6 +2771,92 @@ mod tests {
                 .commands[0]["position"]["marginPercent"],
             10.0
         );
+    }
+
+    #[tokio::test]
+    async fn test_caption_safe_area_rule_should_flag_preset_whose_text_block_leaves_the_canvas() {
+        // The margin itself is safe; the type is not. A preset places the
+        // block's center on the margin line, so an oversized font breaches the
+        // edge the margin was chosen to protect.
+        let sequence = sequence_with_caption(
+            "Caption set in an enormous font",
+            Some(serde_json::json!({
+                "type": "preset",
+                "vertical": "bottom",
+                "marginPercent": 10.0
+            })),
+            Some(serde_json::json!({ "fontSize": 500 })),
+        );
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence);
+
+        let violations = CaptionSafeAreaRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Warning);
+        assert!(
+            violations[0]
+                .message
+                .contains("outside the action-safe area"),
+            "{}",
+            violations[0].message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_caption_safe_area_rule_should_measure_a_left_aligned_custom_anchor_from_its_edge()
+    {
+        // A left-aligned run starts at its anchor, so a 10% anchor is safe and
+        // a 90% anchor is not — the centered reading would judge both the
+        // other way round.
+        let safe = sequence_with_caption(
+            "Dr. Jane Doe",
+            Some(serde_json::json!({ "type": "custom", "xPercent": 10.0, "yPercent": 84.0 })),
+            Some(serde_json::json!({ "fontSize": 40, "alignment": "left" })),
+        );
+        let state = ProjectState::new("QC Test");
+
+        let violations = CaptionSafeAreaRule::new()
+            .check(
+                &safe,
+                &state,
+                &RuleConfig::default(),
+                &QCContext::from_sequence(&safe),
+            )
+            .await
+            .expect("rule runs");
+        assert!(violations.is_empty(), "{violations:?}");
+
+        let overflowing = sequence_with_caption(
+            "Dr. Jane Doe",
+            Some(serde_json::json!({ "type": "custom", "xPercent": 90.0, "yPercent": 84.0 })),
+            Some(serde_json::json!({ "fontSize": 40, "alignment": "left" })),
+        );
+
+        let violations = CaptionSafeAreaRule::new()
+            .check(
+                &overflowing,
+                &state,
+                &RuleConfig::default(),
+                &QCContext::from_sequence(&overflowing),
+            )
+            .await
+            .expect("rule runs");
+        assert_eq!(violations.len(), 1);
+
+        // The fix must re-anchor in the same terms the renderer reads, so the
+        // suggested x stays a left edge rather than a center.
+        let fixed_x = violations[0]
+            .suggested_fix
+            .as_ref()
+            .expect("fix suggested")
+            .commands[0]["position"]["xPercent"]
+            .as_f64()
+            .expect("x percent");
+        assert!(fixed_x < 90.0, "{fixed_x}");
     }
 
     #[tokio::test]

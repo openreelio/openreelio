@@ -9,7 +9,7 @@
 
 pub mod cache;
 pub mod executor;
-mod export;
+pub(crate) mod export;
 pub mod ffmpeg_graph;
 mod ffmpeg_plan;
 pub mod graph;

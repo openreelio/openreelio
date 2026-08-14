@@ -50,6 +50,31 @@ Payloads are camelCase JSON objects matching the IPC payload format. Use
 `command validate` runs the same strict parser without touching the project —
 check before you execute.
 
+## Transitions
+
+Transitions are effects — there is no `AddTransition` command. `AddEffect`
+accepts a curated `recipe` instead of an `effectType` plus hand-picked params:
+
+```bash
+openreelio-cli packs list --kind transition
+
+openreelio-cli command execute --path ./demo --type AddEffect \
+  --payload '{"sequenceId":"…","trackId":"…","clipId":"…","recipe":"dissolve-soft"}'
+```
+
+The recipes are `dissolve-soft` / `dissolve-standard` / `dissolve-long`,
+`fade-in` / `fade-out`, `wipe-left` / `wipe-right` / `wipe-up` / `wipe-down`,
+and `slide-left` / `slide-right`. Each supplies the effect type plus the
+duration and direction that go with it, so the choice is one token rather than
+four guesses.
+
+Like caption packs, a recipe is a base layer: `params` overrides it key by key
+(`{"recipe":"dissolve-soft","params":{"duration":1.5}}`). Naming a recipe *and*
+a contradictory `effectType` is rejected rather than silently resolved.
+`fade-out` is anchored on the clip's tail when the command executes — it reads
+the target clip's duration — so pass `params.start_time` only to put the fade
+somewhere else in the clip.
+
 ## Atomic batches: `plan execute`
 
 An edit plan is:
