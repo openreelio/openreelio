@@ -80,6 +80,14 @@ pub struct ActiveProject {
     pub ops_log: OpsLog,
     /// Persistent history metadata used by headless clients.
     pub history: ProjectHistory,
+    /// Operations this session folded into the history manifest when it opened.
+    ///
+    /// Empty for the normal case, where the manifest already described the
+    /// whole log. A non-empty list means the ops log had a tail the manifest
+    /// did not know about — another writer's work, adopted as history to build
+    /// on. Callers that reposition history report it, because unwinding past
+    /// entries nobody in this session wrote is not something to do silently.
+    pub adopted_op_ids: Vec<String>,
 }
 
 pub struct PreparedProjectSave {
@@ -469,6 +477,8 @@ impl ActiveProject {
             executor,
             ops_log,
             history,
+            // A project this session just created has no history but its own.
+            adopted_op_ids: Vec::new(),
         })
     }
 
@@ -557,7 +567,8 @@ impl ActiveProject {
         if history.base_meta.is_none() {
             history.base_meta = Some(meta.clone());
         }
-        Self::sync_history_with_operations(&mut history, &read_result.operations);
+        let adopted_op_ids =
+            Self::sync_history_with_operations(&mut history, &read_result.operations);
         let history_meta = history.base_meta.clone().unwrap_or_else(|| meta.clone());
 
         // Load state from history when available. Fall back to snapshot + replay or full ops replay.
@@ -603,6 +614,7 @@ impl ActiveProject {
             executor,
             ops_log,
             history,
+            adopted_op_ids,
         })
     }
 
@@ -702,14 +714,21 @@ impl ActiveProject {
 
     fn sync_history_with_ops_log(&mut self) -> crate::core::CoreResult<()> {
         let read_result = self.ops_log.read_all_with_archive()?;
-        Self::sync_history_with_operations(&mut self.history, &read_result.operations);
+        let _ = Self::sync_history_with_operations(&mut self.history, &read_result.operations);
         Ok(())
     }
 
+    /// Folds operations the history manifest does not know about into it, and
+    /// reports which ones were adopted.
+    ///
+    /// A CLI invocation opens, edits and exits, so operations appended by an
+    /// earlier writer are history to build on rather than a conflict. The
+    /// adopted ids are returned because "history I did not write" is exactly
+    /// what a caller repositioning history has to be able to see.
     fn sync_history_with_operations(
         history: &mut ProjectHistory,
         operations: &[crate::core::project::Operation],
-    ) {
+    ) -> Vec<String> {
         history.sanitize(operations);
 
         let known_ids: std::collections::HashSet<&str> = history
@@ -735,8 +754,10 @@ impl ActiveProject {
                 .collect::<Vec<_>>()
         };
 
-        history.append_new_operations(new_ids);
+        history.append_new_operations(new_ids.clone());
         history.sanitize(operations);
+
+        new_ids
     }
 
     fn build_state_from_operations(
@@ -773,7 +794,7 @@ impl ActiveProject {
         mut candidate_history: ProjectHistory,
     ) -> crate::core::CoreResult<()> {
         let read_result = self.ops_log.read_all_with_archive()?;
-        Self::sync_history_with_operations(&mut candidate_history, &read_result.operations);
+        let _ = Self::sync_history_with_operations(&mut candidate_history, &read_result.operations);
         let candidate_state =
             self.build_state_from_operations(&mut candidate_history, &read_result.operations)?;
         // Undo/redo/jump rewrite the manifest without appending, so the guarded
@@ -815,7 +836,7 @@ impl ActiveProject {
         }
 
         let read_result = self.ops_log.read_all_with_archive()?;
-        Self::sync_history_with_operations(&mut self.history, &read_result.operations);
+        let _ = Self::sync_history_with_operations(&mut self.history, &read_result.operations);
 
         let mut candidate_history = self.history.clone();
         let skipped_protected = candidate_history.discard_operations(op_ids.iter().cloned());

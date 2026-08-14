@@ -586,6 +586,22 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 },
                 "example": "openreelio-cli state ops --path ./project --last 20"
             },
+            "state.history": {
+                "description": "List the edit history and the position the project sits at. 'entries' is one index space: indices 0..appliedCount are applied, the rest are redoable, and 'currentIndex' is the last applied index (-1 when everything is undone). Read-only — it never writes to the project. Pair it with 'state jump' to walk between candidate edits",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "last": { "type": "number", "required": false, "desc": "Show only the most recent N entries (default: all of them). appliedCount plus redoCount always describes the full history, so truncation stays visible." }
+                },
+                "example": "openreelio-cli state history --path ./project --last 20"
+            },
+            "state.jump": {
+                "description": "Move the project to a position in its edit history and save it there. Index N leaves the history positioned after applied entry N; --index -1 undoes every entry. Out-of-range indices are rejected with the valid range. This is the best-of-N loop's rewind: apply candidate plan A, render and judge it, jump back, apply candidate B, then re-apply the winner's plan. History is linear, so a new edit made after jumping back clears the redo branch — keep the winner's plan JSON rather than relying on redo. Refuses to run when another process has edited the project since this command opened it. The index space is recomputed per invocation, so a baseline read before another writer appended no longer means the same thing: the response reports 'unwound' ([{opId, commandType}] for every applied entry the rewind removed, in order) and 'adopted' (ops this invocation folded in from the log at open). Re-read 'state history' immediately before jumping and check 'unwound' after. If the reposition persists but the save fails, the response is {'status':'error','historyMoved':true,...} with exit code 2 — the move is already durable, so do not retry it expecting the old position",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "index": { "type": "number", "required": true, "desc": "History index to move to, from 'state history'; -1 undoes everything. Negative values also accept the '=' form: --index=-1" }
+                },
+                "example": "openreelio-cli state jump --path ./project --index 3"
+            },
             "state.snapshot": {
                 "description": "Force a snapshot save of the current state",
                 "params": {
@@ -626,23 +642,27 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli ffmpeg info"
             },
             "frame.extract": {
-                "description": "Extract still frames for visual inspection: one asset-time frame, one or many timeline-time frames, or a contact sheet grid. Timeline 'fast' mode captures the topmost file-backed clip only (no effects, text, or compositing) and falls back to 'composite' automatically when no such clip covers the requested time, including over a gap, where a black frame is the correct result. Timeline times must fall inside the sequence; one at or past the end is rejected with the sequence duration in the message.",
+                "description": "Extract still frames for visual inspection: one asset-time frame, one or many timeline-time frames, a contact sheet grid, or — with --file — stills and sheets from an already rendered video. Timeline 'fast' mode captures the topmost file-backed clip only (no effects, text, or compositing) and falls back to 'composite' automatically when no such clip covers the requested time, including over a gap, where a black frame is the correct result. Timeline times must fall inside the sequence; one at or past the end is rejected with the sequence duration in the message. Seeks resolve FORWARD (the first frame at or after the requested time), so the frame before a cut is sampled at cut - 1.5/fps and the frame after it at the cut time itself. Output shapes: --asset gives 'mode':'asset' with 'frames'; timeline stills give 'mode':'fast'|'composite' with 'frames' (each carrying 'timeSec'); timeline grids give 'mode':'grid' with 'sheet' (cells carry 'timelineSec'); --file gives 'mode':'file' with a 'source' object plus either 'frames' or 'sheet', whose times are named 'fileSec' because they are relative to the file, not the timeline.",
                 "params": {
-                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
-                    "out": { "type": "string", "required": true, "desc": "Output image file; must be a directory when --times is used. A .png/.jpg extension selects the format and is written as given." },
+                    "path": { "type": "string", "required": true, "desc": "Project directory path. Not read in --file mode, which needs no project state." },
+                    "out": { "type": "string", "required": true, "desc": "Output image file; must be a directory when --times is used without --grid. A .png/.jpg extension selects the format and is written as given." },
+                    "file": { "type": "string", "required": false, "desc": "Rendered video file to extract from instead of the project timeline, using fast seeking in the file's own timebase. Works with --time, --times, and --grid (+ --between or --times). This is the cheap judging path: it sheets the artifact that was actually produced, so no per-cell timeline render happens and the frames match what 'verify --file' measured. Conflicts with --asset, --source-time, --sequence, and --mode. Times are validated against the VIDEO stream's end, reported as source.videoDurationSec, rather than source.durationSec (the container, i.e. the longest stream) — so a file whose audio outlasts its picture is rejected where the picture stops. A seek that produces no frame is reported as an error naming the requested time, never as a success over a stale image at --out." },
                     "asset": { "type": "string", "required": false, "desc": "Asset ID to extract from; requires --source-time and cannot be combined with timeline selectors" },
                     "source-time": { "type": "number", "required": false, "desc": "Time in seconds inside the asset's own media; requires --asset" },
                     "time": { "type": "number", "required": false, "desc": "Timeline time in seconds for a single still" },
-                    "times": { "type": "string", "required": false, "desc": "Comma-separated timeline times in seconds; --out must be a directory and files are named frame_<ms>.<ext>" },
+                    "times": { "type": "string", "required": false, "desc": "Comma-separated times in seconds. On its own it writes one still per time, so --out must be a directory and files are named frame_<ms>.<ext>. With --grid it becomes the contact sheet's cell list instead, in the order given — that is how cut-boundary sheets are built from 'timeline clips'." },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" },
-                    "mode": { "type": "string", "required": false, "desc": "Timeline extraction mode: fast (default, topmost clip only) or composite (full render of a minimal window; decodes from timeline zero so cost grows with the timestamp)" },
-                    "max-width": { "type": "number", "required": false, "desc": "Maximum output width in pixels, aspect ratio preserved and never upscaled (default: 1280 for timeline modes, native for --asset)" },
+                    "mode": { "type": "string", "required": false, "desc": "Timeline extraction mode: fast (default, topmost clip only) or composite (full render of a minimal window; decodes from timeline zero so cost grows with the timestamp). Irrelevant with --file, which reads finished frames, and rejected there." },
+                    "max-width": { "type": "number", "required": false, "desc": "Maximum output width in pixels, aspect ratio preserved and never upscaled (default: 1280 for timeline and --file stills, native for --asset). For grid cells the default is the cell width instead, so passing it only matters when you want an oversampled source." },
                     "format": { "type": "string", "required": false, "desc": "Output image format: png or jpeg. Defaults to the --out extension, falling back to png for directories and extensionless paths; a value that contradicts a .png/.jpg extension is rejected. Grid cells are always JPEG; the sheet itself uses this format." },
-                    "grid": { "type": "string", "required": false, "desc": "Contact sheet layout as COLSxROWS (e.g. 3x2), at most 100 cells; requires --between" },
-                    "between": { "type": "string", "required": false, "desc": "Timeline range sampled by --grid, given as two values: START END" },
-                    "count": { "type": "number", "required": false, "desc": "Number of grid samples (default: columns * rows; must not exceed the grid capacity). Rows no sample reaches are dropped, so the reported rows can be fewer than --grid asked for." }
+                    "grid": { "type": "string", "required": false, "desc": "Contact sheet layout as COLSxROWS (e.g. 3x2), at most 100 cells. Requires exactly one time source: --between to sample a range evenly, or --times to place a specific list of moments." },
+                    "between": { "type": "string", "required": false, "desc": "Range sampled by --grid, given as two values: START END. Requires --grid (and is rejected without it) and conflicts with --times." },
+                    "count": { "type": "number", "required": false, "desc": "Number of --between samples (default: columns * rows; must not exceed the grid capacity). Requires --grid and is rejected without it. Rows no sample reaches are dropped, so the reported rows can be fewer than --grid asked for. Meaningless with --times, which already fixes the cell count." },
+                    "cell-width": { "type": "number", "required": false, "desc": "Contact sheet cell width in pixels, 64-1024 (default: 320); requires --grid and is rejected without it. Out-of-range values are rejected rather than clamped. Passing it alone derives the height from the default 16:9 cell (--cell-width 640 gives a 640x360 cell), because cells are fitted with force_original_aspect_ratio=decrease: a 640x180 cell would only pad black around the same 320x180 picture. Grid cells are extracted at the cell width, so raising the pair really does buy detail; --max-width overrides the extraction width." },
+                    "cell-height": { "type": "number", "required": false, "desc": "Contact sheet cell height in pixels, 64-1024 (default: 180); requires --grid and is rejected without it. Passing it alone derives the width at 16:9 the same way --cell-width does; passing both keeps exactly what was asked for, including a deliberately non-16:9 cell. A derived dimension is clamped into the 64-1024 range. The reported sheet.cellWidth/cellHeight always name the values actually used." },
+                    "label-cells": { "type": "boolean", "required": false, "desc": "Burn '<index> | <seconds>s' into the bottom-left of every cell so the sheet.cells mapping is readable from the image itself; requires --grid and is rejected without it. The label carries the REQUESTED time, not the decoded frame's PTS, so it identifies the cell rather than proving which frame was decoded. Costs one extra FFmpeg pass per cell and needs an FFmpeg build with the drawtext filter. The sheet reports 'labeled': true when it was applied." }
                 },
-                "example": "openreelio-cli frame extract --path ./project --time 12.5 --out frame.png"
+                "example": "openreelio-cli frame extract --path ./project --file proxy.mp4 --grid 3x2 --between 0 12 --label-cells --out sheet.jpg"
             },
             "verify": {
                 "description": "Run deterministic quality control over a sequence and, with --file, over a rendered export. Emits one entry per check — including the ones that passed or were skipped — so an agent can tell 'checked and clean' from 'never checked'. Each check reports status passed (ran, found nothing), warned (ran, warning/info findings only), failed (ran, error or critical findings), skipped, or errored; checks[].passed is true only for 'passed', while the top-level status/passed follow severity and stay true when findings are warnings or info. Exit codes: 0 = ran without breaching --fail-on, 1 = threshold breached, 2 = tool failure (bad arguments, unreadable file, FFmpeg failure, or a check that errored).",
@@ -752,5 +772,49 @@ mod tests {
         assert!(commands.contains_key("analysis.search-library"));
         assert!(commands.contains_key("analysis.build-selects"));
         assert!(commands.contains_key("render.graph"));
+    }
+
+    #[test]
+    fn build_schema_documents_the_judge_loop_surface() {
+        let schema = build_schema();
+        let commands = schema["commands"]
+            .as_object()
+            .expect("schema commands must be an object");
+
+        // Judging a render: sheet the artifact, sized and labelled to be read.
+        let frame_params = &commands["frame.extract"]["params"];
+        for flag in ["file", "cell-width", "cell-height", "label-cells"] {
+            assert!(
+                frame_params[flag].is_object(),
+                "frame extract --{flag} must be documented"
+            );
+        }
+        assert!(
+            commands["frame.extract"]["description"]
+                .as_str()
+                .expect("description")
+                .contains("fileSec"),
+            "The --file payload names its times differently; the schema must say so"
+        );
+        assert!(
+            frame_params["times"]["desc"]
+                .as_str()
+                .expect("desc")
+                .contains("--grid"),
+            "--times doubles as the grid's cell list and must document it"
+        );
+
+        // Walking between candidates.
+        assert!(commands.contains_key("state.history"));
+        assert!(commands.contains_key("state.jump"));
+        assert!(commands["state.history"]["params"]["last"].is_object());
+        assert!(commands["state.jump"]["params"]["index"]["required"] == true);
+        assert!(
+            commands["state.jump"]["description"]
+                .as_str()
+                .expect("description")
+                .contains("redo"),
+            "The jump verb must warn that a new edit clears the redo branch"
+        );
     }
 }

@@ -472,6 +472,32 @@ fn ffprobe_duration_secs(path: &std::path::Path) -> Option<f64> {
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
+/// Probe the duration of the first video stream via ffprobe.
+///
+/// This is deliberately not `format=duration`: the container duration is the
+/// maximum across all streams, so it says nothing about where the pictures stop.
+fn ffprobe_video_duration_secs(path: &std::path::Path) -> Option<f64> {
+    let ffprobe_path = system_ffprobe_path()?;
+    let output = Command::new(ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
 /// Probe the height (in pixels) of the first video stream via ffprobe.
 /// Returns `None` if ffprobe is unavailable or the output cannot be parsed.
 fn ffprobe_video_height(path: &std::path::Path) -> Option<u32> {
@@ -494,6 +520,35 @@ fn ffprobe_video_height(path: &std::path::Path) -> Option<u32> {
         return None;
     }
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// Probe the pixel dimensions of the first video stream via ffprobe.
+///
+/// Works for still images too — ffprobe reports them as a single-frame video
+/// stream. Returns `None` if ffprobe is unavailable or the output cannot be
+/// parsed.
+fn ffprobe_image_size(path: &std::path::Path) -> Option<(u32, u32)> {
+    let ffprobe_path = system_ffprobe_path()?;
+    let output = Command::new(ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (width, height) = text.trim().split_once('x')?;
+    Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
 }
 
 // =============================================================================
@@ -1955,6 +2010,697 @@ fn test_frame_extract_builds_contact_sheet_for_grid() {
     );
 }
 
+/// Build a project with one clip and render it to a proxy file.
+///
+/// Returns the project fixture plus the rendered file, which is what the
+/// `--file` judging path reads. `None` when FFmpeg is unavailable.
+fn create_project_with_rendered_proxy(
+    name: &str,
+    duration_secs: u32,
+) -> Option<(tempfile::TempDir, String, PathBuf)> {
+    let (dir, path, _asset_id) = create_project_with_timeline_clip(name, duration_secs)?;
+
+    let proxy_path = dir.path().join("proxy.mp4");
+    let result = run_cli_ok(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--output",
+        proxy_path.to_str().unwrap(),
+    ]);
+    assert_eq!(result["status"], "ok");
+    if !proxy_path.exists() {
+        return None;
+    }
+
+    Some((dir, path, proxy_path))
+}
+
+#[test]
+fn test_frame_extract_reads_a_rendered_file_in_its_own_timebase() {
+    let Some((dir, path, proxy_path)) = create_project_with_rendered_proxy("frame_file_test", 4)
+    else {
+        return;
+    };
+
+    let still_path = dir.path().join("judge.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        proxy_path.to_str().unwrap(),
+        "--time",
+        "1.0",
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["mode"], "file");
+    assert_eq!(
+        result["source"]["path"].as_str().unwrap(),
+        proxy_path.to_string_lossy()
+    );
+    assert!(result["source"]["durationSec"].as_f64().unwrap() > 0.0);
+    assert_eq!(result["frames"][0]["fileSec"], 1.0);
+    assert!(
+        result["frames"][0]["timeSec"].is_null(),
+        "File-mode frames must not claim a timeline time"
+    );
+    assert!(still_path.exists(), "Expected the still to be written");
+    assert_eq!(file_signature(&still_path), PNG_SIGNATURE);
+}
+
+#[test]
+fn test_frame_extract_sheets_a_rendered_file_without_touching_the_timeline() {
+    let Some((dir, path, proxy_path)) =
+        create_project_with_rendered_proxy("frame_file_sheet_test", 4)
+    else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("judge_sheet.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        proxy_path.to_str().unwrap(),
+        "--grid",
+        "3x2",
+        "--between",
+        "0",
+        "3",
+        "--label-cells",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["mode"], "file");
+    assert_eq!(result["sheet"]["cols"], 3);
+    assert_eq!(result["sheet"]["rows"], 2);
+    assert_eq!(result["sheet"]["labeled"], true);
+
+    let cells = result["sheet"]["cells"].as_array().unwrap();
+    assert_eq!(cells.len(), 6);
+    assert!(
+        cells.iter().all(|cell| cell["fileSec"].is_number()),
+        "Sheet cells must map back to file times, got: {cells:?}"
+    );
+    assert!(
+        cells.iter().all(|cell| cell["timelineSec"].is_null()),
+        "File-mode cells must not claim a timeline time"
+    );
+    assert!(sheet_path.exists(), "Expected the sheet to be written");
+}
+
+#[test]
+fn test_frame_extract_names_the_file_duration_when_asked_past_its_end() {
+    let Some((dir, path, proxy_path)) =
+        create_project_with_rendered_proxy("frame_file_range_test", 4)
+    else {
+        return;
+    };
+
+    let still_path = dir.path().join("past_end.png");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        proxy_path.to_str().unwrap(),
+        "--time",
+        "600",
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("past the end of the video") && stderr.contains("proxy.mp4"),
+        "Expected the error to name the file and where its video ends, got: {stderr}"
+    );
+    let video_end =
+        ffprobe_video_duration_secs(&proxy_path).or_else(|| ffprobe_duration_secs(&proxy_path));
+    if let Some(video_end) = video_end {
+        assert!(
+            stderr.contains(&format!("{:.3}s", video_end)),
+            "Expected the error to quote the video's end {video_end:.3}s, got: {stderr}"
+        );
+    }
+    assert!(!still_path.exists());
+}
+
+/// Builds a file whose audio outlasts its video, the case that makes the
+/// container duration a lie about where frames can be found.
+fn create_video_with_longer_audio(
+    path: &std::path::Path,
+    video_secs: u32,
+    audio_secs: u32,
+) -> bool {
+    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+        return false;
+    };
+    let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
+        return false;
+    };
+    if !ffmpeg_supports_encoder(&ffmpeg_path, "aac") {
+        return false;
+    }
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!("color=c=black:s=320x240:r=25:d={video_secs}"),
+        "-f",
+        "lavfi",
+        "-i",
+        &format!("sine=frequency=440:sample_rate=44100:duration={audio_secs}"),
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p"]);
+    }
+    // Deliberately no -shortest: the audio tail is the point of the fixture.
+    command.args(["-c:a", "aac"]);
+
+    command
+        .arg(path)
+        .status()
+        .expect("Failed to generate the mixed-duration fixture")
+        .success()
+}
+
+#[test]
+fn test_frame_extract_bounds_a_file_by_its_video_stream_not_its_container() {
+    let dir = create_temp_project("frame_file_video_end_test");
+    let path = project_path(&dir, "frame_file_video_end_test");
+
+    let mixed_path = dir.path().join("audio_tail.mp4");
+    if !create_video_with_longer_audio(&mixed_path, 2, 6) {
+        return;
+    }
+    let Some(container_duration) = ffprobe_duration_secs(&mixed_path) else {
+        return;
+    };
+    let Some(video_duration) = ffprobe_video_duration_secs(&mixed_path) else {
+        return;
+    };
+    if container_duration - video_duration < 1.0 {
+        // FFmpeg trimmed the audio tail, so there is nothing to test here.
+        return;
+    }
+
+    // A time inside the container but past the picture must be refused, and the
+    // message must name where the video ends rather than where the file does.
+    let still_path = dir.path().join("past_video.png");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        mixed_path.to_str().unwrap(),
+        "--time",
+        "4.0",
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+    assert!(
+        stderr.contains("past the end of the video")
+            && stderr.contains(&format!("{:.3}s", video_duration)),
+        "Expected the error to name the video's end {video_duration:.3}s, got: {stderr}"
+    );
+    assert!(
+        !still_path.exists(),
+        "A refused request must not write an image"
+    );
+
+    // A sheet sampled across the whole container is refused the same way,
+    // rather than tiling black cells the JSON claims timecodes for.
+    let sheet_path = dir.path().join("past_video_sheet.jpg");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        mixed_path.to_str().unwrap(),
+        "--grid",
+        "2x2",
+        "--between",
+        "0",
+        &format!("{container_duration}"),
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+    assert!(
+        stderr.contains("past the end of the video"),
+        "Expected the sheet to be refused for the same reason, got: {stderr}"
+    );
+    assert!(!sheet_path.exists());
+
+    // Inside the picture it still works.
+    let good_path = dir.path().join("inside.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        mixed_path.to_str().unwrap(),
+        "--time",
+        "1.0",
+        "--out",
+        good_path.to_str().unwrap(),
+    ]);
+    assert_eq!(result["status"], "ok");
+    assert!(
+        (result["source"]["videoDurationSec"].as_f64().unwrap() - video_duration).abs() < 0.2,
+        "The payload should report where the picture ends, got: {result}"
+    );
+    assert!(good_path.exists());
+}
+
+#[test]
+fn test_frame_extract_from_a_file_ignores_the_project_path() {
+    // `--file` is documented as needing no project state. A directory that is
+    // not a project at all is the only way to prove the project is never opened.
+    let Some((dir, _path, proxy_path)) =
+        create_project_with_rendered_proxy("frame_file_no_project_test", 4)
+    else {
+        return;
+    };
+
+    let bare = tempfile::tempdir().expect("bare dir");
+    let still_path = dir.path().join("no_project.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        bare.path().to_str().unwrap(),
+        "--file",
+        proxy_path.to_str().unwrap(),
+        "--time",
+        "1.0",
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["mode"], "file");
+    assert!(still_path.exists(), "Expected the still to be written");
+}
+
+#[test]
+fn test_frame_extract_rejects_contact_sheet_flags_without_a_grid() {
+    let dir = create_temp_project("frame_cell_flags_without_grid_test");
+    let path = project_path(&dir, "frame_cell_flags_without_grid_test");
+    let still_path = dir.path().join("still.png");
+
+    // clap waives `requires = "grid"` whenever a present argument conflicts with
+    // --grid, which both --time and --asset do, so the rejection has to be ours.
+    for selector in [
+        vec!["--time", "1.0"],
+        vec!["--asset", "A", "--source-time", "1.0"],
+    ] {
+        let mut args = vec![
+            "frame",
+            "extract",
+            "--path",
+            &path,
+            "--out",
+            still_path.to_str().unwrap(),
+        ];
+        args.extend(selector);
+        args.extend(["--cell-width", "640", "--label-cells"]);
+
+        let (_stdout, stderr) = run_cli_err(&args);
+        assert!(
+            stderr.contains("--cell-width")
+                && stderr.contains("--label-cells")
+                && stderr.contains("--grid"),
+            "Expected the error to name the ignored flags, got: {stderr}"
+        );
+        assert!(
+            !still_path.exists(),
+            "A rejected request must not write anything"
+        );
+    }
+}
+
+#[test]
+fn test_frame_extract_rejects_a_file_without_a_video_stream() {
+    let dir = create_temp_project("frame_file_no_video_test");
+    let path = project_path(&dir, "frame_file_no_video_test");
+    if system_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let audio_path = dir.path().join("audio_only.wav");
+    if !create_sample_audio(&audio_path) {
+        return;
+    }
+
+    let still_path = dir.path().join("still.png");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        audio_path.to_str().unwrap(),
+        "--time",
+        "0.5",
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("no video stream"),
+        "Expected the error to explain the missing video stream, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_frame_extract_rejects_a_file_combined_with_timeline_sources() {
+    let dir = create_temp_project("frame_file_conflict_test");
+    let path = project_path(&dir, "frame_file_conflict_test");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        "render.mp4",
+        "--time",
+        "1.0",
+        "--mode",
+        "composite",
+        "--out",
+        "still.png",
+    ]);
+
+    assert!(
+        stderr.contains("cannot be used with"),
+        "Expected a clap conflict error, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_frame_extract_builds_a_contact_sheet_from_an_explicit_time_list() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_grid_times_test", 4) else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("cuts.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--times",
+        "3.0,0.5,1.75",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["sheet"]["cols"], 2);
+    assert_eq!(
+        result["sheet"]["rows"], 2,
+        "Three cells over two columns fill two rows"
+    );
+
+    let cells = result["sheet"]["cells"].as_array().unwrap();
+    let placed: Vec<(u64, u64, u64, f64)> = cells
+        .iter()
+        .map(|cell| {
+            (
+                cell["index"].as_u64().unwrap(),
+                cell["row"].as_u64().unwrap(),
+                cell["col"].as_u64().unwrap(),
+                cell["timelineSec"].as_f64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        placed,
+        vec![(0, 0, 0, 3.0), (1, 0, 1, 0.5), (2, 1, 0, 1.75)],
+        "Listed times must fill the grid in the order given"
+    );
+
+    assert!(sheet_path.exists(), "Expected the contact sheet to exist");
+}
+
+#[test]
+fn test_frame_extract_rejects_a_grid_without_a_time_source() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_grid_source_test", 4)
+    else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("sheet.jpg");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("--between") && stderr.contains("--times"),
+        "Expected the error to name both accepted time sources, got: {stderr}"
+    );
+    assert!(!sheet_path.exists());
+}
+
+#[test]
+fn test_frame_extract_sizes_contact_sheet_cells_from_the_requested_geometry() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_cell_size_test", 4) else {
+        return;
+    };
+
+    let default_sheet = dir.path().join("default.jpg");
+    let default_result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x1",
+        "--between",
+        "0",
+        "4",
+        "--out",
+        default_sheet.to_str().unwrap(),
+    ]);
+    assert_eq!(default_result["sheet"]["cellWidth"], 320);
+    assert_eq!(default_result["sheet"]["cellHeight"], 180);
+
+    let large_sheet = dir.path().join("large.jpg");
+    let large_result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x1",
+        "--between",
+        "0",
+        "4",
+        "--cell-width",
+        "640",
+        "--cell-height",
+        "360",
+        "--out",
+        large_sheet.to_str().unwrap(),
+    ]);
+    assert_eq!(large_result["sheet"]["cellWidth"], 640);
+    assert_eq!(large_result["sheet"]["cellHeight"], 360);
+
+    let Some((default_width, default_height)) = ffprobe_image_size(&default_sheet) else {
+        return;
+    };
+    let (large_width, large_height) =
+        ffprobe_image_size(&large_sheet).expect("Large sheet must be probeable");
+
+    // The tiler's gutters are a fixed cost, so only the cells themselves grow:
+    // two columns gain 320px each and the single row gains 180px.
+    assert_eq!(
+        (large_width - default_width, large_height - default_height),
+        (640, 180),
+        "Cell geometry should drive the sheet size, got ({large_width}, {large_height}) against ({default_width}, {default_height})"
+    );
+}
+
+#[test]
+fn test_frame_extract_rejects_a_cell_size_outside_the_supported_range() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_cell_range_test", 4) else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("sheet.jpg");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x1",
+        "--between",
+        "0",
+        "4",
+        "--cell-width",
+        "32",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("cell-width"),
+        "Expected the error to name the rejected flag, got: {stderr}"
+    );
+    assert!(
+        !sheet_path.exists(),
+        "A rejected request must not write anything"
+    );
+}
+
+#[test]
+fn test_frame_extract_labels_contact_sheet_cells_on_request() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_label_cells_test", 4)
+    else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("labeled.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--between",
+        "0",
+        "4",
+        "--label-cells",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["sheet"]["labeled"], true);
+    assert_eq!(result["sheet"]["cells"].as_array().unwrap().len(), 4);
+    assert!(sheet_path.exists(), "Expected the labelled sheet to exist");
+    assert_eq!(file_signature(&sheet_path), JPEG_SIGNATURE);
+
+    // Labelling pre-fits every cell, so the sheet keeps the unlabelled layout.
+    let plain_path = dir.path().join("plain.jpg");
+    run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--between",
+        "0",
+        "4",
+        "--out",
+        plain_path.to_str().unwrap(),
+    ]);
+
+    // The pixels must actually differ. Both sheets are tiled from the same
+    // times through the same encoder, so identical bytes mean nothing was burnt
+    // in — which is exactly what every other assertion here survives.
+    assert_ne!(
+        std::fs::read(&sheet_path).unwrap(),
+        std::fs::read(&plain_path).unwrap(),
+        "--label-cells must change the pixels, not just the reported flag"
+    );
+
+    let (Some(labeled), Some(plain)) = (
+        ffprobe_image_size(&sheet_path),
+        ffprobe_image_size(&plain_path),
+    ) else {
+        return;
+    };
+    assert_eq!(labeled, plain);
+}
+
+#[test]
+fn test_frame_extract_derives_the_other_cell_dimension_at_sixteen_by_nine() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_cell_aspect_test", 4)
+    else {
+        return;
+    };
+
+    // A 640x180 cell would fit a 16:9 frame by height and pad the rest black,
+    // so one dimension on its own has to bring the other with it.
+    let sheet_path = dir.path().join("wide_cells.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x1",
+        "--between",
+        "0",
+        "4",
+        "--cell-width",
+        "640",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["sheet"]["cellWidth"], 640);
+    assert_eq!(
+        result["sheet"]["cellHeight"], 360,
+        "A width on its own must derive a 16:9 height, got: {result}"
+    );
+
+    // Both flags together stay exactly as asked, including a non-16:9 cell.
+    let explicit_path = dir.path().join("explicit_cells.jpg");
+    let explicit = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x1",
+        "--between",
+        "0",
+        "4",
+        "--cell-width",
+        "640",
+        "--cell-height",
+        "180",
+        "--out",
+        explicit_path.to_str().unwrap(),
+    ]);
+    assert_eq!(explicit["sheet"]["cellWidth"], 640);
+    assert_eq!(explicit["sheet"]["cellHeight"], 180);
+}
+
 // =============================================================================
 // Plan Commands
 // =============================================================================
@@ -2390,6 +3136,408 @@ fn test_state_snapshot() {
     assert_eq!(result["status"], "ok");
 }
 
+/// Build a project with `clip_count` clips inserted at one-second spacing.
+///
+/// Needs no FFmpeg: the asset never gets decoded, only referenced.
+fn create_project_with_edit_history(name: &str, clip_count: usize) -> (tempfile::TempDir, String) {
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+
+    let dummy_file = dir.path().join("history_clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    for index in 0..clip_count {
+        run_cli_ok(&[
+            "timeline",
+            "insert",
+            "--path",
+            &path,
+            "--asset",
+            &asset_id,
+            "--track",
+            &track_id,
+            "--at",
+            &format!("{}.0", index * 10),
+        ]);
+    }
+
+    (dir, path)
+}
+
+#[test]
+fn test_state_history_lists_operations_with_the_current_position() {
+    let (_dir, path) = create_project_with_edit_history("state_history_test", 3);
+
+    let result = run_cli_ok(&["state", "history", "--path", &path]);
+
+    assert_eq!(result["status"], "ok");
+    let applied_count = result["appliedCount"].as_u64().unwrap();
+    assert!(
+        applied_count >= 4,
+        "Expected the import plus three inserts, got {applied_count}"
+    );
+    assert_eq!(result["redoCount"], 0);
+    assert_eq!(result["discardedCount"], 0);
+    assert_eq!(
+        result["currentIndex"].as_i64().unwrap(),
+        applied_count as i64 - 1,
+        "A project with nothing undone sits at its last applied entry"
+    );
+
+    let entries = result["entries"].as_array().unwrap();
+    assert_eq!(entries.len() as u64, applied_count);
+    assert!(
+        entries.iter().enumerate().all(|(position, entry)| {
+            entry["index"] == position
+                && entry["opId"].as_str().is_some_and(|id| !id.is_empty())
+                && entry["commandType"]
+                    .as_str()
+                    .is_some_and(|kind| !kind.is_empty())
+                && entry["timestamp"]
+                    .as_str()
+                    .is_some_and(|stamp| !stamp.is_empty())
+        }),
+        "Entries should be indexed and describe their op, got: {entries:?}"
+    );
+    assert_eq!(
+        entries[0]["commandType"], "ImportAsset",
+        "History should start at the first undoable edit, got: {entries:?}"
+    );
+
+    // --last trims the window without changing the reported totals, and it
+    // keeps the *most recent* entries: a window that kept the oldest N would
+    // have the same length and point an agent at the start of the project.
+    let trimmed = run_cli_ok(&["state", "history", "--path", &path, "--last", "2"]);
+    let trimmed_entries = trimmed["entries"].as_array().unwrap();
+    assert_eq!(trimmed_entries.len(), 2);
+    assert_eq!(trimmed["appliedCount"], result["appliedCount"]);
+    assert_eq!(
+        trimmed_entries[0]["index"].as_i64().unwrap(),
+        entries.len() as i64 - 2,
+        "--last must keep the newest window, got: {trimmed}"
+    );
+    assert_eq!(
+        trimmed_entries[1]["index"],
+        entries[entries.len() - 1]["index"],
+        "--last must end on the newest entry, got: {trimmed}"
+    );
+}
+
+#[test]
+fn test_state_jump_moves_between_history_positions() {
+    let (_dir, path) = create_project_with_edit_history("state_jump_test", 3);
+
+    let before = run_cli_ok(&["state", "history", "--path", &path]);
+    let head_index = before["currentIndex"].as_i64().unwrap();
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        3
+    );
+
+    // Rewind past the last two inserts.
+    let target = head_index - 2;
+    let jumped = run_cli_ok(&[
+        "state",
+        "jump",
+        "--path",
+        &path,
+        "--index",
+        &target.to_string(),
+    ]);
+    assert_eq!(jumped["status"], "ok");
+    assert_eq!(jumped["previousIndex"].as_i64().unwrap(), head_index);
+    assert_eq!(jumped["currentIndex"].as_i64().unwrap(), target);
+    assert_eq!(jumped["redoCount"], 2);
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        1
+    );
+
+    // And forward again: the rewind is a position, not a deletion.
+    let restored = run_cli_ok(&[
+        "state",
+        "jump",
+        "--path",
+        &path,
+        "--index",
+        &head_index.to_string(),
+    ]);
+    assert_eq!(restored["currentIndex"].as_i64().unwrap(), head_index);
+    assert_eq!(restored["redoCount"], 0);
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        3
+    );
+}
+
+#[test]
+fn test_state_jump_reports_the_entries_it_unwound() {
+    let (_dir, path) = create_project_with_edit_history("state_jump_unwound_test", 3);
+
+    let before = run_cli_ok(&["state", "history", "--path", &path]);
+    let entries = before["entries"].as_array().unwrap().clone();
+    let head_index = before["currentIndex"].as_i64().unwrap();
+
+    // History carries no author, so the only way a caller can tell that a
+    // rewind reached work it did not write is to be told what came off.
+    let jumped = run_cli_ok(&[
+        "state",
+        "jump",
+        "--path",
+        &path,
+        "--index",
+        &(head_index - 2).to_string(),
+    ]);
+
+    let unwound = jumped["unwound"].as_array().unwrap();
+    assert_eq!(unwound.len(), 2, "Two entries came off, got: {jumped}");
+    let expected: Vec<&serde_json::Value> = entries[entries.len() - 2..]
+        .iter()
+        .map(|entry| &entry["opId"])
+        .collect();
+    let reported: Vec<&serde_json::Value> = unwound.iter().map(|entry| &entry["opId"]).collect();
+    assert_eq!(
+        reported, expected,
+        "unwound must name the removed ops in order, got: {jumped}"
+    );
+    assert!(
+        unwound
+            .iter()
+            .all(|entry| entry["commandType"].as_str().is_some_and(|k| !k.is_empty())),
+        "unwound entries must describe their command, got: {jumped}"
+    );
+    assert_eq!(
+        jumped["adopted"], 0,
+        "Nothing was written behind this invocation's back, got: {jumped}"
+    );
+
+    // A jump that removes nothing says so rather than omitting the field.
+    let forward = run_cli_ok(&[
+        "state",
+        "jump",
+        "--path",
+        &path,
+        "--index",
+        &head_index.to_string(),
+    ]);
+    assert_eq!(forward["unwound"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn test_state_jump_reports_a_durable_move_when_the_save_fails() {
+    let (dir, path) = create_project_with_edit_history("state_jump_save_failure_test", 2);
+
+    let before = run_cli_ok(&["state", "history", "--path", &path]);
+    let head_index = before["currentIndex"].as_i64().unwrap();
+
+    // The history manifest is rewritten before the snapshot is written, so a
+    // snapshot that cannot be replaced leaves the move durable. A directory in
+    // the snapshot's place is a portable way to make that write fail.
+    let snapshot_path = dir
+        .path()
+        .join("state_jump_save_failure_test")
+        .join(".openreelio")
+        .join("state")
+        .join("snapshot.json");
+    assert!(snapshot_path.exists(), "expected a snapshot to replace");
+    std::fs::remove_file(&snapshot_path).expect("remove snapshot");
+    std::fs::create_dir(&snapshot_path).expect("block the snapshot path");
+
+    let output = Command::new(cli_bin())
+        .args([
+            "state",
+            "jump",
+            "--path",
+            &path,
+            "--index",
+            &(head_index - 1).to_string(),
+        ])
+        .output()
+        .expect("Failed to execute CLI binary");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    if output.status.success() {
+        // The platform let the snapshot write through anyway; nothing to assert.
+        return;
+    }
+
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!("A jump that moved history must still report on stdout: {error}\nstdout: {stdout}")
+    });
+    assert_eq!(report["status"], "error");
+    assert_eq!(
+        report["historyMoved"], true,
+        "The move is durable and must be reported as such, got: {report}"
+    );
+    assert_eq!(report["currentIndex"].as_i64().unwrap(), head_index - 1);
+    assert_eq!(output.status.code(), Some(2), "stdout: {stdout}");
+    assert!(
+        report["message"].as_str().unwrap().contains("do NOT retry"),
+        "The report must warn against a blind retry, got: {report}"
+    );
+
+    // And the move really did survive: the next open reads the new position.
+    std::fs::remove_dir(&snapshot_path).expect("unblock the snapshot path");
+    let after = run_cli_ok(&["state", "history", "--path", &path]);
+    assert_eq!(after["currentIndex"].as_i64().unwrap(), head_index - 1);
+}
+
+#[test]
+fn test_state_jump_to_minus_one_undoes_everything() {
+    let (_dir, path) = create_project_with_edit_history("state_jump_zero_test", 2);
+
+    let result = run_cli_ok(&["state", "jump", "--path", &path, "--index=-1"]);
+
+    assert_eq!(result["currentIndex"], -1);
+    assert_eq!(result["appliedCount"], 0);
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        0
+    );
+}
+
+#[test]
+fn test_state_jump_rejects_an_index_outside_the_history() {
+    let (_dir, path) = create_project_with_edit_history("state_jump_range_test", 2);
+
+    let (_stdout, stderr) = run_cli_err(&["state", "jump", "--path", &path, "--index", "99"]);
+
+    assert!(
+        stderr.contains("--index") && stderr.contains("history range"),
+        "Expected the error to name the valid range, got: {stderr}"
+    );
+
+    // The rejected jump left the project alone.
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        2
+    );
+}
+
+#[test]
+fn test_state_jump_then_new_edit_clears_the_redo_branch() {
+    let (dir, path) = create_project_with_edit_history("state_jump_branch_test", 3);
+
+    let head_index = run_cli_ok(&["state", "history", "--path", &path])["currentIndex"]
+        .as_i64()
+        .unwrap();
+    run_cli_ok(&[
+        "state",
+        "jump",
+        "--path",
+        &path,
+        "--index",
+        &(head_index - 2).to_string(),
+    ]);
+    let rewound = run_cli_ok(&["state", "history", "--path", &path]);
+    assert_eq!(rewound["redoCount"], 2);
+    assert_eq!(
+        rewound["entries"].as_array().unwrap().len() as u64,
+        rewound["appliedCount"].as_u64().unwrap() + 2,
+        "Redoable entries stay listed after the applied ones, got: {rewound}"
+    );
+    assert_eq!(
+        rewound["currentIndex"].as_i64().unwrap(),
+        rewound["appliedCount"].as_i64().unwrap() - 1,
+        "currentIndex is the last applied index, got: {rewound}"
+    );
+
+    // A new edit from the rewound position abandons the branch it left behind:
+    // the judge loop must re-apply a winning plan, not rely on redo.
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+    let asset_id = run_cli_ok(&["asset", "list", "--path", &path])["assets"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "50.0",
+    ]);
+
+    let after = run_cli_ok(&["state", "history", "--path", &path]);
+    assert_eq!(
+        after["redoCount"], 0,
+        "A new edit must clear the redo branch, got: {after}"
+    );
+    run_cli_err(&["timeline", "redo", "--path", &path]);
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips["count"], 2);
+    drop(dir);
+}
+
+#[test]
+fn test_state_jump_adopts_operations_written_since_the_last_command() {
+    let (dir, path) = create_project_with_edit_history("state_jump_adopt_test", 2);
+
+    // Each CLI invocation opens fresh, so work another writer finished before
+    // this one started is history to build on, not a conflict. (The
+    // external-edit guard covers the overlapping case, where a second writer
+    // moves while a session is open — see the ActiveProject unit tests.)
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+    let asset_id = run_cli_ok(&["asset", "list", "--path", &path])["assets"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "80.0",
+    ]);
+
+    let history = run_cli_ok(&["state", "history", "--path", &path]);
+    let head_index = history["currentIndex"].as_i64().unwrap();
+    let jumped = run_cli_ok(&[
+        "state",
+        "jump",
+        "--path",
+        &path,
+        "--index",
+        &(head_index - 1).to_string(),
+    ]);
+
+    assert_eq!(jumped["currentIndex"].as_i64().unwrap(), head_index - 1);
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        2
+    );
+    drop(dir);
+}
+
 // =============================================================================
 // Help-JSON Command
 // =============================================================================
@@ -2441,9 +3589,12 @@ fn test_help_json_contains_all_commands() {
         "command.schema",
         "state.dump",
         "state.ops",
+        "state.history",
+        "state.jump",
         "state.snapshot",
         "render.presets",
         "render.start",
+        "frame.extract",
         "help-json",
     ];
 

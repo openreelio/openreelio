@@ -2,17 +2,20 @@
 //!
 //! Gives agents a way to *see* the project: single stills from a source asset
 //! or a timeline position, batches of stills, and contact sheets that map grid
-//! cells back to timeline timecodes.
+//! cells back to timecodes.
+//!
+//! With `--file` the same selectors read an already rendered video instead of
+//! the timeline. That is the judging path: it inspects the artifact that was
+//! actually produced, in the file's own timebase, without re-rendering anything.
 
 use crate::ffmpeg_env::ensure_ffmpeg;
 use crate::output;
 use crate::validate;
 use clap::{Args, Subcommand};
-use openreelio_core::analysis::visual::{
-    VisualAnalyzer, CONTACT_SHEET_CELL_HEIGHT, CONTACT_SHEET_CELL_WIDTH,
-};
+use openreelio_core::analysis::types::ContactSheetArtifact;
+use openreelio_core::analysis::visual::{ContactSheetCellSize, VisualAnalyzer};
 use openreelio_core::assets::Asset;
-use openreelio_core::effects::Effect;
+use openreelio_core::effects::{Effect, EffectType, IntoFFmpegFilter, ParamValue};
 use openreelio_core::ffmpeg::{FFmpegRunner, FrameExtractOptions};
 use openreelio_core::render::{
     build_render_graph, build_render_plan, clip_source_time_at, probed_image_dimensions,
@@ -41,6 +44,41 @@ const MAX_GRID_CELLS: usize = 100;
 /// composited frame is rendered as a tiny non-zero window.
 const MIN_COMPOSITE_WINDOW_SEC: f64 = 0.05;
 
+/// Smallest accepted contact-sheet cell dimension.
+///
+/// Below this a cell carries no usable detail for a vision model, so a smaller
+/// request is a mistake rather than an economy.
+const MIN_CELL_SIZE_PX: u32 = 64;
+
+/// Largest accepted contact-sheet cell dimension.
+///
+/// A full grid of 1024px cells is already a very large image; anything beyond
+/// it should be extracted as individual stills instead.
+const MAX_CELL_SIZE_PX: u32 = 1024;
+
+/// Share of a cell's height given to the burnt-in label's type size.
+///
+/// A twelfth of the cell puts the label at 15px on the default 320x180 cell,
+/// which stays readable once the sheet is downsampled by a vision model.
+const CELL_LABEL_HEIGHT_DIVISOR: f64 = 12.0;
+
+/// Smallest label type size, in pixels.
+const CELL_LABEL_MIN_FONT_PX: f64 = 10.0;
+
+/// Largest label type size, in pixels.
+///
+/// Past this the label starts competing with the frame it annotates.
+const CELL_LABEL_MAX_FONT_PX: f64 = 40.0;
+
+/// Padding around the label inside its contrast box, in pixels.
+const CELL_LABEL_BOX_PADDING_PX: i64 = 3;
+
+/// Label text colour.
+const CELL_LABEL_TEXT_COLOR: &str = "#FFFFFF";
+
+/// Colour of the box drawn behind the label so it survives a bright frame.
+const CELL_LABEL_BOX_COLOR: &str = "#000000";
+
 #[derive(Subcommand)]
 pub enum FrameAction {
     /// Extract still frames from an asset, a timeline position, or a grid of timeline positions
@@ -58,6 +96,10 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub out: PathBuf,
 
+    /// Rendered video file to extract from instead of the project timeline
+    #[arg(long, conflicts_with_all = ["asset", "source_time", "sequence", "mode"])]
+    pub file: Option<PathBuf>,
+
     /// Asset ID to extract from (requires --source-time)
     #[arg(long, requires = "source_time", conflicts_with_all = ["time", "times", "grid"])]
     pub asset: Option<String>,
@@ -70,17 +112,17 @@ pub struct ExtractArgs {
     #[arg(long, conflicts_with_all = ["times", "grid"])]
     pub time: Option<f64>,
 
-    /// Comma-separated timeline times in seconds; --out must be a directory
-    #[arg(long, value_delimiter = ',', conflicts_with = "grid")]
+    /// Comma-separated timeline times in seconds; --out must be a directory unless --grid is given
+    #[arg(long, value_delimiter = ',')]
     pub times: Option<Vec<f64>>,
 
     /// Sequence ID (defaults to active)
     #[arg(long)]
     pub sequence: Option<String>,
 
-    /// Timeline extraction mode: fast (topmost clip only) or composite (full render)
-    #[arg(long, default_value = "fast")]
-    pub mode: String,
+    /// Timeline extraction mode: fast (default, topmost clip only) or composite (full render)
+    #[arg(long)]
+    pub mode: Option<String>,
 
     /// Maximum output width in pixels (aspect ratio preserved, never upscaled)
     #[arg(long)]
@@ -90,17 +132,34 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub format: Option<String>,
 
-    /// Contact sheet grid as COLSxROWS (requires --between)
-    #[arg(long, requires = "between")]
+    /// Contact sheet grid as COLSxROWS (requires --between or --times)
+    #[arg(long)]
     pub grid: Option<String>,
 
-    /// Timeline range to sample for --grid
-    #[arg(long, num_args = 2, value_names = ["START", "END"])]
+    /// Time range to sample for --grid
+    #[arg(long, num_args = 2, value_names = ["START", "END"], requires = "grid", conflicts_with = "times")]
     pub between: Option<Vec<f64>>,
 
-    /// Number of grid samples (defaults to columns * rows)
-    #[arg(long, requires = "grid")]
+    /// Number of grid samples (defaults to columns * rows; only for --between)
+    #[arg(long, requires = "grid", conflicts_with = "times")]
     pub count: Option<usize>,
+
+    /// Contact sheet cell width in pixels (64-1024, default 320; alone it derives the height at 16:9)
+    #[arg(long, requires = "grid", value_parser = cell_size_parser())]
+    pub cell_width: Option<u32>,
+
+    /// Contact sheet cell height in pixels (64-1024, default 180; alone it derives the width at 16:9)
+    #[arg(long, requires = "grid", value_parser = cell_size_parser())]
+    pub cell_height: Option<u32>,
+
+    /// Burn each cell's index and timecode into the contact sheet
+    #[arg(long, requires = "grid")]
+    pub label_cells: bool,
+}
+
+/// Value parser enforcing the accepted contact-sheet cell dimension range.
+fn cell_size_parser() -> clap::builder::RangedI64ValueParser<u32> {
+    clap::value_parser!(u32).range(i64::from(MIN_CELL_SIZE_PX)..=i64::from(MAX_CELL_SIZE_PX))
 }
 
 pub fn execute(action: FrameAction) -> anyhow::Result<()> {
@@ -121,6 +180,18 @@ enum TimelineMode {
 }
 
 impl TimelineMode {
+    /// Resolves `--mode`, defaulting to the cheap topmost-clip path.
+    ///
+    /// The default lives here rather than in clap so an explicitly passed
+    /// `--mode` stays distinguishable from an absent one, which is what lets
+    /// `--file` reject it as irrelevant.
+    fn resolve(raw: Option<&str>) -> anyhow::Result<Self> {
+        match raw {
+            Some(value) => Self::parse(value),
+            None => Ok(Self::Fast),
+        }
+    }
+
     fn parse(raw: &str) -> anyhow::Result<Self> {
         match raw.trim().to_lowercase().as_str() {
             "fast" => Ok(Self::Fast),
@@ -141,6 +212,7 @@ impl TimelineMode {
 }
 
 /// What the caller asked for, after argument validation.
+#[derive(Debug)]
 enum Selection {
     /// A single frame from an asset's own media timebase.
     AssetTime { asset_id: String, source_time: f64 },
@@ -148,68 +220,173 @@ enum Selection {
     SingleTime(f64),
     /// Several timeline stills written into the `--out` directory.
     BatchTimes(Vec<f64>),
-    /// A contact sheet sampled over a timeline range.
+    /// A contact sheet, either sampled over a range or built from listed times.
     Grid {
         columns: usize,
         /// Rows the samples fill, which is fewer than `--grid` asked for when
-        /// `--count` does not fill the layout.
+        /// `--count` or the `--times` list does not fill the layout.
         rows: usize,
         times: Vec<f64>,
     },
 }
 
-fn resolve_selection(args: &ExtractArgs) -> anyhow::Result<Selection> {
-    if let Some(grid) = &args.grid {
-        let (columns, rows) = parse_grid_spec(grid)?;
-        let range = args
-            .between
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("--grid requires --between <START> <END>"))?;
-        if range.len() != 2 {
-            return Err(anyhow::anyhow!("--between takes exactly two values"));
-        }
-        validate::time_range_ordered(range[0], range[1], "between START", "between END")?;
-
-        let capacity = columns.checked_mul(rows).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Invalid value for --grid: {}x{} is too large",
-                columns,
-                rows
-            )
-        })?;
-        if capacity > MAX_GRID_CELLS {
-            return Err(anyhow::anyhow!(
-                "Invalid value for --grid: {}x{} needs {} cells, more than the maximum of {}",
-                columns,
-                rows,
-                capacity,
-                MAX_GRID_CELLS
-            ));
-        }
-        let count = args.count.unwrap_or(capacity);
-        if count < 1 {
-            return Err(anyhow::anyhow!("Invalid value for --count: must be >= 1"));
-        }
-        if count > capacity {
-            return Err(anyhow::anyhow!(
-                "Invalid value for --count: {} exceeds the {}x{} grid capacity of {}",
-                count,
-                columns,
-                rows,
-                capacity
-            ));
-        }
-
-        let times = sample_times(range[0], range[1], count);
-
-        return Ok(Selection::Grid {
+/// Resolves a `--grid` request into the times its cells will show.
+///
+/// The layout accepts two sources: `--between`, which samples the range evenly,
+/// and `--times`, which takes the caller's own list in the order given — that is
+/// what makes cut-boundary sheets possible, since the agent already knows the
+/// cut times from `timeline clips`.
+fn resolve_grid_selection(args: &ExtractArgs, grid: &str) -> anyhow::Result<Selection> {
+    let (columns, rows) = parse_grid_spec(grid)?;
+    let capacity = columns.checked_mul(rows).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid value for --grid: {}x{} is too large",
             columns,
-            // FFmpeg's `tile` filter fills unused cells with black, so a sheet
-            // built from fewer samples than the requested capacity would carry
-            // dead rows. Keep only the rows the samples reach.
-            rows: times.len().div_ceil(columns),
-            times,
-        });
+            rows
+        )
+    })?;
+    if capacity > MAX_GRID_CELLS {
+        return Err(anyhow::anyhow!(
+            "Invalid value for --grid: {}x{} needs {} cells, more than the maximum of {}",
+            columns,
+            rows,
+            capacity,
+            MAX_GRID_CELLS
+        ));
+    }
+
+    let times = match (&args.between, &args.times) {
+        (Some(range), None) => sampled_grid_times(args, range, columns, rows, capacity)?,
+        (None, Some(listed)) => listed_grid_times(listed, columns, rows, capacity)?,
+        (Some(_), Some(_)) => {
+            return Err(anyhow::anyhow!(
+                "--grid takes either --between <START> <END> or --times <A,B,...>, not both"
+            ))
+        }
+        (None, None) => {
+            return Err(anyhow::anyhow!(
+                "--grid requires --between <START> <END> or --times <A,B,...>"
+            ))
+        }
+    };
+
+    Ok(Selection::Grid {
+        columns,
+        // FFmpeg's `tile` filter fills unused cells with black, so a sheet
+        // built from fewer samples than the requested capacity would carry
+        // dead rows. Keep only the rows the samples reach.
+        rows: times.len().div_ceil(columns),
+        times,
+    })
+}
+
+/// Evenly samples the `--between` range for a contact sheet.
+fn sampled_grid_times(
+    args: &ExtractArgs,
+    range: &[f64],
+    columns: usize,
+    rows: usize,
+    capacity: usize,
+) -> anyhow::Result<Vec<f64>> {
+    if range.len() != 2 {
+        return Err(anyhow::anyhow!("--between takes exactly two values"));
+    }
+    validate::time_range_ordered(range[0], range[1], "between START", "between END")?;
+
+    let count = args.count.unwrap_or(capacity);
+    if count < 1 {
+        return Err(anyhow::anyhow!("Invalid value for --count: must be >= 1"));
+    }
+    if count > capacity {
+        return Err(anyhow::anyhow!(
+            "Invalid value for --count: {} exceeds the {}x{} grid capacity of {}",
+            count,
+            columns,
+            rows,
+            capacity
+        ));
+    }
+
+    Ok(sample_times(range[0], range[1], count))
+}
+
+/// Validates an explicit `--times` list used as contact-sheet cells.
+///
+/// The order is the caller's: cell 0 shows the first listed time, so a list of
+/// cut boundaries reads across the sheet the way the edit plays.
+fn listed_grid_times(
+    listed: &[f64],
+    columns: usize,
+    rows: usize,
+    capacity: usize,
+) -> anyhow::Result<Vec<f64>> {
+    if listed.is_empty() {
+        return Err(anyhow::anyhow!("--times requires at least one value"));
+    }
+    for time in listed {
+        validate::time_non_negative(*time, "times")?;
+    }
+    if listed.len() > capacity {
+        return Err(anyhow::anyhow!(
+            "Invalid value for --times: {} values exceed the {}x{} grid capacity of {}",
+            listed.len(),
+            columns,
+            rows,
+            capacity
+        ));
+    }
+
+    Ok(listed.to_vec())
+}
+
+/// Flags that only mean something on a contact sheet, with the spelling the
+/// caller typed.
+const GRID_ONLY_FLAGS: [&str; 5] = [
+    "--between",
+    "--count",
+    "--cell-width",
+    "--cell-height",
+    "--label-cells",
+];
+
+/// Rejects contact-sheet flags passed without `--grid`.
+///
+/// clap's own `requires = "grid"` cannot carry this: it is waived whenever a
+/// present argument declares a conflict with `--grid`, which `--time` and
+/// `--asset` both do. Without this check the flags parse, nothing on the
+/// single-still paths ever reads them, and the caller is told nothing.
+fn ensure_grid_only_flags_unused(args: &ExtractArgs) -> anyhow::Result<()> {
+    if args.grid.is_some() {
+        return Ok(());
+    }
+
+    let present: Vec<&str> = [
+        args.between.is_some(),
+        args.count.is_some(),
+        args.cell_width.is_some(),
+        args.cell_height.is_some(),
+        args.label_cells,
+    ]
+    .iter()
+    .zip(GRID_ONLY_FLAGS)
+    .filter_map(|(used, flag)| used.then_some(flag))
+    .collect();
+
+    if present.is_empty() {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "{} only applies to a contact sheet and needs --grid <COLSxROWS>. Add --grid, or drop the flag for a single still.",
+        present.join(", ")
+    ))
+}
+
+fn resolve_selection(args: &ExtractArgs) -> anyhow::Result<Selection> {
+    ensure_grid_only_flags_unused(args)?;
+
+    if let Some(grid) = &args.grid {
+        return resolve_grid_selection(args, grid);
     }
 
     if let Some(asset_id) = &args.asset {
@@ -249,7 +426,7 @@ fn resolve_selection(args: &ExtractArgs) -> anyhow::Result<Selection> {
 fn extract(args: ExtractArgs) -> anyhow::Result<()> {
     let selection = resolve_selection(&args)?;
     let format = resolve_image_format(args.format.as_deref(), &args.out)?;
-    let mode = TimelineMode::parse(&args.mode)?;
+    let mode = TimelineMode::resolve(args.mode.as_deref())?;
     if let Some(max_width) = args.max_width {
         if max_width == 0 {
             return Err(anyhow::anyhow!(
@@ -259,13 +436,22 @@ fn extract(args: ExtractArgs) -> anyhow::Result<()> {
     }
 
     let ffmpeg_info = ensure_ffmpeg()?;
-    let project = super::load_project(&args.path)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| anyhow::anyhow!("Failed to create Tokio runtime: {error}"))?;
     let runner = FFmpegRunner::new(ffmpeg_info);
+
+    // A rendered file is self-contained, so the judge path never opens the
+    // project: it costs an ops replay it has no use for, and it keeps sheeting a
+    // finished render independent of whatever the project is doing meanwhile.
+    if let Some(file) = args.file.clone() {
+        let result = runtime.block_on(run_file_mode(&runner, &file, &args, format, &selection))?;
+        return output::print_json_pretty(&result);
+    }
+
+    let project = super::load_project(&args.path)?;
 
     let result = match selection {
         Selection::AssetTime {
@@ -302,6 +488,308 @@ fn extract(args: ExtractArgs) -> anyhow::Result<()> {
     };
 
     output::print_json_pretty(&result)
+}
+
+/// A rendered file used as the extraction source, with the facts needed to
+/// validate requests against it.
+struct FileSource {
+    path: PathBuf,
+    duration_sec: f64,
+    /// Duration of the video stream, when the file declares one.
+    ///
+    /// This is what bounds the requestable range: `duration_sec` is the
+    /// container duration, i.e. the maximum across all streams, so a file whose
+    /// audio outlasts its video advertises seconds that hold no picture.
+    video_duration_sec: Option<f64>,
+}
+
+impl FileSource {
+    /// Probes `file` and rejects anything a still cannot be taken from.
+    async fn probe(runner: &FFmpegRunner, file: &Path) -> anyhow::Result<Self> {
+        if !file.exists() {
+            return Err(anyhow::anyhow!(
+                "Render file '{}' not found",
+                file.display()
+            ));
+        }
+
+        let info = runner
+            .probe(file)
+            .await
+            .map_err(|error| anyhow::anyhow!("Failed to probe '{}': {}", file.display(), error))?;
+        if info.video.is_none() {
+            return Err(anyhow::anyhow!(
+                "'{}' has no video stream, so there is no frame to extract",
+                file.display()
+            ));
+        }
+        if !info.duration_sec.is_finite() || info.duration_sec <= 0.0 {
+            return Err(anyhow::anyhow!(
+                "'{}' reports no duration, so there is no frame to extract",
+                file.display()
+            ));
+        }
+
+        // Containers that carry no per-stream duration fall back to the
+        // container's: a slightly loose guard is still better than none, and
+        // `ensure_frame_written` catches whatever slips through it.
+        let video_duration_sec = runner
+            .probe_video_duration(file)
+            .await
+            .ok()
+            .flatten()
+            .filter(|value| value.is_finite() && *value > 0.0);
+
+        Ok(Self {
+            path: file.to_path_buf(),
+            duration_sec: info.duration_sec,
+            video_duration_sec,
+        })
+    }
+
+    /// Last time the file can still be asked for a picture at.
+    fn video_end_sec(&self) -> f64 {
+        self.video_duration_sec.unwrap_or(self.duration_sec)
+    }
+
+    /// Rejects requested times the file has no frame at.
+    ///
+    /// The message names where the *video* ends: a judge working from a partial
+    /// render, or from a file whose audio runs past its picture, needs to see
+    /// that the range it asked for does not exist rather than a decoder error.
+    fn ensure_times_inside(&self, times: &[f64]) -> anyhow::Result<()> {
+        if let Some(before) = times.iter().find(|time| **time < 0.0) {
+            return Err(anyhow::anyhow!(
+                "Requested time {:.3}s is before the start of '{}'",
+                before,
+                self.path.display()
+            ));
+        }
+        let video_end_sec = self.video_end_sec();
+        if let Some(past_end) = times.iter().find(|time| **time >= video_end_sec) {
+            return Err(anyhow::anyhow!(
+                "Requested time {:.3}s is at or past the end of the video in '{}' ({:.3}s). Ask for a time inside the file.",
+                past_end,
+                self.path.display(),
+                video_end_sec
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Fast-seeks to `time_sec` and writes the frame, reporting its size.
+    async fn extract(
+        &self,
+        runner: &FFmpegRunner,
+        time_sec: f64,
+        output_path: &Path,
+        max_width: u32,
+    ) -> anyhow::Result<(u32, u32)> {
+        // Clear the target first so the check below can tell a fresh frame from
+        // a leftover one. FFmpeg exits 0 and writes nothing when the seek lands
+        // past the last decodable frame, and it does not truncate what is
+        // already there, so without this a previous candidate's image survives
+        // and gets probed and reported as the frame just requested.
+        remove_stale_output(output_path)?;
+
+        runner
+            .extract_frame_with_options(
+                &self.path,
+                time_sec,
+                output_path,
+                &FrameExtractOptions {
+                    overwrite: true,
+                    max_width: Some(max_width),
+                    quality: None,
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("Frame extraction failed: {}", error))?;
+        ensure_frame_written(output_path, time_sec, &self.path)?;
+
+        Ok(probed_image_dimensions(runner, output_path)
+            .await
+            .unwrap_or((0, 0)))
+    }
+
+    fn describe(&self) -> serde_json::Value {
+        serde_json::json!({
+            "path": self.path.display().to_string(),
+            "durationSec": self.duration_sec,
+            "videoDurationSec": self.video_end_sec(),
+        })
+    }
+}
+
+/// Deletes an output file left behind by an earlier run.
+///
+/// A stale image at the target path is indistinguishable from a fresh one, and
+/// the extraction FFmpeg silently declines to perform leaves it in place.
+fn remove_stale_output(output_path: &Path) -> anyhow::Result<()> {
+    match std::fs::remove_file(output_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow::anyhow!(
+            "Failed to replace '{}': {}",
+            output_path.display(),
+            error
+        )),
+    }
+}
+
+/// Rejects an extraction that produced no image.
+///
+/// FFmpeg reports success for an input seek that lands past the last decodable
+/// frame — it simply writes nothing. Reporting that as an extracted frame is
+/// the worst outcome available: the caller reads plausible dimensions probed
+/// from whatever was at the path before.
+fn ensure_frame_written(output_path: &Path, time_sec: f64, source: &Path) -> anyhow::Result<()> {
+    let written = std::fs::metadata(output_path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false);
+    if written {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "FFmpeg produced no frame at {:.3}s of '{}'. The seek landed past the last decodable frame; ask for an earlier time.",
+        time_sec,
+        source.display()
+    ))
+}
+
+/// Extracts stills or a contact sheet from a rendered file rather than the
+/// project timeline.
+///
+/// This is the cheap judging path: the frames come from the artifact that was
+/// actually produced, so no per-cell timeline render is involved and what the
+/// judge sees is exactly what `verify --file` measured. All times are in the
+/// file's own timebase.
+async fn run_file_mode(
+    runner: &FFmpegRunner,
+    file: &Path,
+    args: &ExtractArgs,
+    format: ImageFormat,
+    selection: &Selection,
+) -> anyhow::Result<serde_json::Value> {
+    let source = FileSource::probe(runner, file).await?;
+    let max_width = args.max_width.unwrap_or(DEFAULT_MAX_WIDTH);
+
+    match selection {
+        Selection::AssetTime { .. } => Err(anyhow::anyhow!(
+            "--file reads a rendered video, so it cannot be combined with --asset"
+        )),
+        Selection::SingleTime(time) => {
+            source.ensure_times_inside(std::slice::from_ref(time))?;
+            let output_path = resolve_single_output_path(&args.out, *time, format)?;
+            let (width, height) = source
+                .extract(runner, *time, &output_path, max_width)
+                .await?;
+
+            Ok(file_frames_payload(
+                &source,
+                vec![FileFrameEntry {
+                    index: 0,
+                    file_sec: *time,
+                    path: output_path.display().to_string(),
+                    width,
+                    height,
+                }],
+            ))
+        }
+        Selection::BatchTimes(times) => {
+            source.ensure_times_inside(times)?;
+            std::fs::create_dir_all(&args.out).map_err(|error| {
+                anyhow::anyhow!(
+                    "Failed to create output directory '{}': {}",
+                    args.out.display(),
+                    error
+                )
+            })?;
+
+            let mut frames = Vec::with_capacity(times.len());
+            for (index, time) in times.iter().enumerate() {
+                let output_path = args.out.join(batch_frame_name(*time, &format));
+                let (width, height) = source
+                    .extract(runner, *time, &output_path, max_width)
+                    .await?;
+                frames.push(FileFrameEntry {
+                    index,
+                    file_sec: *time,
+                    path: output_path.display().to_string(),
+                    width,
+                    height,
+                });
+            }
+
+            Ok(file_frames_payload(&source, frames))
+        }
+        Selection::Grid {
+            columns,
+            rows,
+            times,
+        } => run_file_grid_mode(runner, &source, args, format, *columns, *rows, times).await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_file_grid_mode(
+    runner: &FFmpegRunner,
+    source: &FileSource,
+    args: &ExtractArgs,
+    format: ImageFormat,
+    columns: usize,
+    rows: usize,
+    times: &[f64],
+) -> anyhow::Result<serde_json::Value> {
+    source.ensure_times_inside(times)?;
+    let cell = resolve_cell_size(args);
+    let staging = CellStaging::new(cell, args.label_cells)?;
+    let extract_width = grid_cell_extract_width(args, cell);
+
+    let mut cell_paths = Vec::with_capacity(times.len());
+    let mut cells = Vec::with_capacity(times.len());
+    for (index, time) in times.iter().enumerate() {
+        source
+            .extract(runner, *time, &staging.extract_path(index), extract_width)
+            .await?;
+        cell_paths.push(staging.finish(runner, index, *time).await?);
+        cells.push(FileGridCell {
+            index,
+            row: index / columns,
+            col: index % columns,
+            file_sec: *time,
+        });
+    }
+
+    let sheet =
+        build_contact_sheet(runner, args, &format, &cell_paths, columns, rows, cell).await?;
+
+    Ok(serde_json::json!({
+        "status": "ok",
+        "mode": "file",
+        "source": source.describe(),
+        "sheet": {
+            "path": sheet.path,
+            "cols": sheet.columns,
+            "rows": sheet.rows,
+            "cellWidth": cell.width,
+            "cellHeight": cell.height,
+            "labeled": args.label_cells,
+            "cells": cells,
+        },
+    }))
+}
+
+fn file_frames_payload(source: &FileSource, frames: Vec<FileFrameEntry>) -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "mode": "file",
+        "source": source.describe(),
+        "count": frames.len(),
+        "frames": frames,
+    })
 }
 
 async fn run_asset_mode(
@@ -428,6 +916,7 @@ async fn run_grid_mode(
 ) -> anyhow::Result<serde_json::Value> {
     let (sequence_id, sequence) = resolve_sequence(project, args.sequence.clone())?;
     ensure_times_inside_sequence(sequence, times)?;
+    let cell = resolve_cell_size(args);
     let context = TimelineFrameContext {
         engine: ExportEngine::new(runner.clone()),
         runner,
@@ -437,20 +926,19 @@ async fn run_grid_mode(
         // Contact sheet cells are always JPEG: FFmpeg reads them back as a
         // `%d.jpg` image sequence.
         format: ImageFormat::Jpeg,
-        max_width: args.max_width.unwrap_or(DEFAULT_MAX_WIDTH),
+        max_width: grid_cell_extract_width(args, cell),
         mode,
     };
 
-    let cell_dir = tempfile::tempdir()
-        .map_err(|error| anyhow::anyhow!("Failed to create temporary cell directory: {error}"))?;
+    let staging = CellStaging::new(cell, args.label_cells)?;
 
     let mut cell_paths = Vec::with_capacity(times.len());
     let mut cells = Vec::with_capacity(times.len());
     for (index, time) in times.iter().enumerate() {
-        // The contact-sheet input pattern is a zero-based `%d.jpg` sequence.
-        let cell_path = cell_dir.path().join(format!("{}.jpg", index));
-        context.extract(index, *time, &cell_path).await?;
-        cell_paths.push(cell_path);
+        context
+            .extract(index, *time, &staging.extract_path(index))
+            .await?;
+        cell_paths.push(staging.finish(runner, index, *time).await?);
         cells.push(GridCell {
             index,
             row: index / columns,
@@ -459,26 +947,198 @@ async fn run_grid_mode(
         });
     }
 
-    let sheet_path = normalize_extension(args.out.clone(), &format);
-    let analyzer = VisualAnalyzer::new(runner.info().ffmpeg_path.clone());
-    let artifact = analyzer
-        .generate_contact_sheet_with_layout(&cell_paths, &sheet_path, Some((columns, rows)))
-        .await
-        .map_err(|error| anyhow::anyhow!("Contact sheet generation failed: {}", error))?
-        .ok_or_else(|| anyhow::anyhow!("Contact sheet generation produced no output"))?;
+    let sheet =
+        build_contact_sheet(runner, args, &format, &cell_paths, columns, rows, cell).await?;
 
     Ok(serde_json::json!({
         "status": "ok",
         "mode": "grid",
         "sheet": {
-            "path": artifact.path,
-            "cols": artifact.columns,
-            "rows": artifact.rows,
-            "cellWidth": CONTACT_SHEET_CELL_WIDTH,
-            "cellHeight": CONTACT_SHEET_CELL_HEIGHT,
+            "path": sheet.path,
+            "cols": sheet.columns,
+            "rows": sheet.rows,
+            "cellWidth": cell.width,
+            "cellHeight": cell.height,
+            "labeled": args.label_cells,
             "cells": cells,
         },
     }))
+}
+
+/// Staging directories the contact-sheet cells pass through.
+///
+/// FFmpeg reads the cells back as a zero-based `%d.jpg` image sequence, so the
+/// finished cells must share one directory and one naming scheme. Labelling
+/// needs a second copy because FFmpeg cannot write over its own input, so the
+/// raw extraction lands in `raw_dir` and the labelled result in `sheet_dir`.
+struct CellStaging {
+    sheet_dir: tempfile::TempDir,
+    raw_dir: Option<tempfile::TempDir>,
+    cell: ContactSheetCellSize,
+}
+
+impl CellStaging {
+    fn new(cell: ContactSheetCellSize, label_cells: bool) -> anyhow::Result<Self> {
+        let sheet_dir = tempfile::tempdir().map_err(|error| {
+            anyhow::anyhow!("Failed to create temporary cell directory: {error}")
+        })?;
+        let raw_dir = if label_cells {
+            Some(tempfile::tempdir().map_err(|error| {
+                anyhow::anyhow!("Failed to create temporary cell directory: {error}")
+            })?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            sheet_dir,
+            raw_dir,
+            cell,
+        })
+    }
+
+    /// Path the frame extractor writes the untouched cell to.
+    fn extract_path(&self, index: usize) -> PathBuf {
+        match &self.raw_dir {
+            Some(dir) => dir.path().join(format!("{}.jpg", index)),
+            None => self.sheet_path(index),
+        }
+    }
+
+    /// Path the tiler reads the finished cell from.
+    fn sheet_path(&self, index: usize) -> PathBuf {
+        self.sheet_dir.path().join(format!("{}.jpg", index))
+    }
+
+    /// Burns the cell label when one was requested, and reports the finished path.
+    ///
+    /// A cell the extractor never wrote is an error rather than a gap: the
+    /// tiler reads the cells back as a `%d.jpg` image sequence, which stops at
+    /// the first missing index and pads the rest of the sheet with black, while
+    /// `sheet.cells` still claims a timecode for every one of them.
+    async fn finish(
+        &self,
+        runner: &FFmpegRunner,
+        index: usize,
+        time_sec: f64,
+    ) -> anyhow::Result<PathBuf> {
+        ensure_cell_written(&self.extract_path(index), index, time_sec)?;
+
+        let sheet_path = self.sheet_path(index);
+        if self.raw_dir.is_none() {
+            return Ok(sheet_path);
+        }
+
+        let filter = build_cell_label_filter(index, time_sec, self.cell);
+        runner
+            .filter_image(&self.extract_path(index), &sheet_path, &filter, None)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Failed to label contact sheet cell {}: {}. Cell labels need an FFmpeg build with the drawtext filter; drop --label-cells to build the sheet without them.",
+                    index,
+                    error
+                )
+            })?;
+        ensure_cell_written(&sheet_path, index, time_sec)?;
+
+        Ok(sheet_path)
+    }
+}
+
+/// Rejects a contact-sheet cell that was never written.
+fn ensure_cell_written(cell_path: &Path, index: usize, time_sec: f64) -> anyhow::Result<()> {
+    let written = std::fs::metadata(cell_path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false);
+    if written {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "No frame was produced for contact sheet cell {} at {:.3}s, so the sheet would show a black cell the JSON claims a timecode for. Narrow the sampled range to where the picture actually is.",
+        index,
+        time_sec
+    ))
+}
+
+/// Text burnt into a labelled contact-sheet cell.
+fn cell_label_text(index: usize, time_sec: f64) -> String {
+    format!("{} | {:.2}s", index, time_sec.max(0.0))
+}
+
+/// Type size used for a cell label, in pixels of the finished cell.
+fn cell_label_font_size(cell_height: usize) -> f64 {
+    ((cell_height as f64) / CELL_LABEL_HEIGHT_DIVISOR)
+        .round()
+        .clamp(CELL_LABEL_MIN_FONT_PX, CELL_LABEL_MAX_FONT_PX)
+}
+
+/// Builds the filter chain that fits a raw cell into the sheet's cell box and
+/// burns its index and timecode into the bottom-left corner.
+///
+/// Fitting happens here rather than in the tiler so the label is drawn at the
+/// cell's final resolution: the type size is chosen against `cell`, not against
+/// whatever the source frame was extracted at. The tiler's own scale/pad stage
+/// then becomes a no-op on an already-fitted cell.
+///
+/// The drawtext parameters come from the shared text-overlay effect builder, so
+/// labels resolve fonts exactly the way burnt-in captions do.
+fn build_cell_label_filter(index: usize, time_sec: f64, cell: ContactSheetCellSize) -> String {
+    let font_size = cell_label_font_size(cell.height);
+    // Keep the contrast box clear of the frame edge: its border grows outward
+    // from the text by the padding, so the margin has to cover it.
+    let margin = (font_size * 0.5)
+        .round()
+        .max(CELL_LABEL_BOX_PADDING_PX as f64 + 2.0);
+
+    let mut label = Effect::new(EffectType::TextOverlay);
+    label.set_param("text", ParamValue::String(cell_label_text(index, time_sec)));
+    label.set_param("font_size", ParamValue::Float(font_size));
+    label.set_param(
+        "color",
+        ParamValue::String(CELL_LABEL_TEXT_COLOR.to_string()),
+    );
+    label.set_param(
+        "background_color",
+        ParamValue::String(CELL_LABEL_BOX_COLOR.to_string()),
+    );
+    label.set_param(
+        "background_padding",
+        ParamValue::Int(CELL_LABEL_BOX_PADDING_PX),
+    );
+    label.set_param("alignment", ParamValue::String("left".to_string()));
+    label.set_param("x", ParamValue::Float(margin / cell.width as f64));
+    label.set_param(
+        "y",
+        ParamValue::Float(1.0 - (font_size / 2.0 + margin) / cell.height as f64),
+    );
+
+    format!(
+        "scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,{drawtext}",
+        w = cell.width,
+        h = cell.height,
+        drawtext = label.to_filter_body(),
+    )
+}
+
+/// Tiles already extracted cells into the contact sheet at `--out`.
+async fn build_contact_sheet(
+    runner: &FFmpegRunner,
+    args: &ExtractArgs,
+    format: &ImageFormat,
+    cell_paths: &[PathBuf],
+    columns: usize,
+    rows: usize,
+    cell: ContactSheetCellSize,
+) -> anyhow::Result<ContactSheetArtifact> {
+    let sheet_path = normalize_extension(args.out.clone(), format);
+    let analyzer = VisualAnalyzer::new(runner.info().ffmpeg_path.clone());
+    analyzer
+        .generate_contact_sheet_with_options(cell_paths, &sheet_path, Some((columns, rows)), cell)
+        .await
+        .map_err(|error| anyhow::anyhow!("Contact sheet generation failed: {}", error))?
+        .ok_or_else(|| anyhow::anyhow!("Contact sheet generation produced no output"))
 }
 
 // ── Timeline frame extraction ───────────────────────────────────────────
@@ -676,6 +1336,31 @@ struct GridCell {
     timeline_sec: f64,
 }
 
+/// One still extracted from a rendered file, in that file's own timebase.
+///
+/// The time field is deliberately not `timeSec`: a rendered range starts at
+/// zero regardless of where it sat on the timeline, so calling it a timeline
+/// time would be a lie the judge could act on.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileFrameEntry {
+    index: usize,
+    file_sec: f64,
+    path: String,
+    width: u32,
+    height: u32,
+}
+
+/// One contact-sheet cell mapped back to a rendered file's timebase.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileGridCell {
+    index: usize,
+    row: usize,
+    col: usize,
+    file_sec: f64,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Last timeline position the sequence has any content at.
@@ -790,6 +1475,54 @@ fn resolve_image_format(explicit: Option<&str>, out: &Path) -> anyhow::Result<Im
     Ok(requested)
 }
 
+/// Resolves the contact-sheet cell geometry from the CLI flags.
+///
+/// One dimension on its own derives the other from the default cell's 16:9
+/// aspect, because a cell is filled with `force_original_aspect_ratio=decrease`:
+/// a 640x180 cell shows the same 320x180 picture the default does, between
+/// black bars, at twice the pixel cost. Passing both keeps exactly what was
+/// asked for, including a deliberately non-16:9 cell.
+fn resolve_cell_size(args: &ExtractArgs) -> ContactSheetCellSize {
+    let default = ContactSheetCellSize::default();
+    let (width, height) = match (args.cell_width, args.cell_height) {
+        (Some(width), Some(height)) => (width as usize, height as usize),
+        (Some(width), None) => (
+            width as usize,
+            derived_cell_size(width as usize, default.height, default.width),
+        ),
+        (None, Some(height)) => (
+            derived_cell_size(height as usize, default.width, default.height),
+            height as usize,
+        ),
+        (None, None) => (default.width, default.height),
+    };
+
+    ContactSheetCellSize::new(width, height)
+}
+
+/// Scales `given` by `numerator / denominator`, kept inside the accepted range.
+///
+/// The clamp matters at the extremes: deriving a 1024px cell's partner at 16:9
+/// would leave the accepted range, and a cell FFmpeg would refuse is worse than
+/// a slightly squarer one.
+fn derived_cell_size(given: usize, numerator: usize, denominator: usize) -> usize {
+    let scaled = (given as f64 * numerator as f64 / denominator as f64).round() as usize;
+    scaled.clamp(MIN_CELL_SIZE_PX as usize, MAX_CELL_SIZE_PX as usize)
+}
+
+/// Width the grid's source cells are extracted at.
+///
+/// The tiler fits every cell into a `cellWidth x cellHeight` box, so extracting
+/// wider than the cell only pays for pixels the tiler immediately discards —
+/// which is what made `--max-width` wasted work on grids. The cell width is
+/// therefore the default, and it is never *below* the cell either, so a large
+/// `--cell-width` gets a correspondingly detailed source instead of an upscale.
+/// `--max-width` remains an explicit override for callers who want to oversample
+/// (portrait cells fit by height, so a wider source keeps more vertical detail).
+fn grid_cell_extract_width(args: &ExtractArgs, cell: ContactSheetCellSize) -> u32 {
+    args.max_width.unwrap_or(cell.width as u32)
+}
+
 /// Parses a `COLSxROWS` grid specification.
 fn parse_grid_spec(raw: &str) -> anyhow::Result<(usize, usize)> {
     let normalized = raw.trim().to_lowercase();
@@ -899,18 +1632,294 @@ mod tests {
         ExtractArgs {
             path: PathBuf::from("."),
             out: PathBuf::from("sheet.jpg"),
+            file: None,
             asset: None,
             source_time: None,
             time: None,
             times: None,
             sequence: None,
-            mode: "fast".to_string(),
+            mode: None,
             max_width: None,
             format: None,
             grid: Some(grid.to_string()),
             between: Some(vec![0.0, 4.0]),
             count,
+            cell_width: None,
+            cell_height: None,
+            label_cells: false,
         }
+    }
+
+    #[test]
+    fn resolve_selection_should_build_a_grid_from_an_explicit_time_list() {
+        let mut args = grid_args("3x2", None);
+        args.between = None;
+        args.times = Some(vec![4.0, 1.5, 9.25]);
+
+        let Selection::Grid {
+            columns,
+            rows,
+            times,
+        } = resolve_selection(&args).expect("selection resolves")
+        else {
+            panic!("Expected a grid selection");
+        };
+        assert_eq!(columns, 3);
+        assert_eq!(rows, 1, "Three samples over three columns fill one row");
+        assert_eq!(
+            times,
+            vec![4.0, 1.5, 9.25],
+            "Listed times must keep the caller's order"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_more_listed_times_than_the_grid_holds() {
+        let mut args = grid_args("2x2", None);
+        args.between = None;
+        args.times = Some(vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+
+        let error = resolve_selection(&args).expect_err("Five times cannot fill a 2x2 sheet");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("--times") && message.contains("capacity"),
+            "Error should name the flag and the capacity, got: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_a_grid_without_a_time_source() {
+        let mut args = grid_args("2x2", None);
+        args.between = None;
+
+        let error = resolve_selection(&args).expect_err("A grid needs times to show");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("--between") && message.contains("--times"),
+            "Error should name both accepted sources, got: {message}"
+        );
+    }
+
+    #[test]
+    fn cell_label_text_should_pair_the_index_with_a_timecode() {
+        assert_eq!(cell_label_text(3, 12.5), "3 | 12.50s");
+        assert_eq!(cell_label_text(0, 0.0), "0 | 0.00s");
+    }
+
+    #[test]
+    fn cell_label_font_size_should_scale_with_the_cell_and_stay_readable() {
+        assert_eq!(cell_label_font_size(180), 15.0);
+        assert_eq!(cell_label_font_size(360), 30.0);
+        assert_eq!(
+            cell_label_font_size(64),
+            CELL_LABEL_MIN_FONT_PX,
+            "A tiny cell must not get an illegible label"
+        );
+        assert_eq!(
+            cell_label_font_size(1024),
+            CELL_LABEL_MAX_FONT_PX,
+            "A large cell must not get a label that swamps the frame"
+        );
+    }
+
+    #[test]
+    fn build_cell_label_filter_should_fit_the_cell_then_draw_the_label() {
+        let filter = build_cell_label_filter(3, 12.5, ContactSheetCellSize::default());
+
+        assert!(
+            filter.starts_with(
+                "scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,drawtext="
+            ),
+            "The cell must be fitted before the label is drawn, got: {filter}"
+        );
+        assert!(
+            filter.contains("text='3 | 12.50s'"),
+            "Label should carry the index and timecode, got: {filter}"
+        );
+        assert!(
+            filter.contains("fontsize=15"),
+            "Label should be sized against the cell, got: {filter}"
+        );
+        assert!(
+            filter.contains("box=1") && filter.contains("boxcolor=0x000000"),
+            "Label needs a contrasting box to survive a bright frame, got: {filter}"
+        );
+    }
+
+    #[test]
+    fn build_cell_label_filter_should_keep_the_label_inside_the_bottom_left_corner() {
+        let filter = build_cell_label_filter(0, 1.0, ContactSheetCellSize::default());
+
+        // Left-aligned at a small margin, near the bottom edge but not on it.
+        assert!(
+            filter.contains("x=(w*0.0250)"),
+            "Label should sit just inside the left edge, got: {filter}"
+        );
+        assert!(
+            filter.contains("y=(h*0.9139)-(text_h/2)"),
+            "Label should sit just inside the bottom edge, got: {filter}"
+        );
+    }
+
+    #[test]
+    fn resolve_cell_size_should_default_to_the_shared_contact_sheet_geometry() {
+        let cell = resolve_cell_size(&grid_args("3x2", None));
+
+        assert_eq!(cell, ContactSheetCellSize::default());
+    }
+
+    #[test]
+    fn resolve_cell_size_should_derive_the_missing_dimension_from_the_default_aspect() {
+        // A cell is filled with force_original_aspect_ratio=decrease, so a
+        // 640x180 cell would still show a 320x180 picture between black bars.
+        let mut wide = grid_args("3x2", None);
+        wide.cell_width = Some(640);
+        assert_eq!(
+            resolve_cell_size(&wide),
+            ContactSheetCellSize::new(640, 360)
+        );
+
+        let mut tall = grid_args("3x2", None);
+        tall.cell_height = Some(360);
+        assert_eq!(
+            resolve_cell_size(&tall),
+            ContactSheetCellSize::new(640, 360)
+        );
+    }
+
+    #[test]
+    fn resolve_cell_size_should_keep_both_dimensions_when_both_are_given() {
+        let mut args = grid_args("3x2", None);
+        args.cell_width = Some(640);
+        args.cell_height = Some(180);
+
+        assert_eq!(
+            resolve_cell_size(&args),
+            ContactSheetCellSize::new(640, 180)
+        );
+    }
+
+    #[test]
+    fn resolve_cell_size_should_keep_a_derived_dimension_inside_the_accepted_range() {
+        let mut widest = grid_args("3x2", None);
+        widest.cell_height = Some(1024);
+        assert_eq!(
+            resolve_cell_size(&widest).width,
+            MAX_CELL_SIZE_PX as usize,
+            "A derived width must stay within the range FFmpeg is asked for"
+        );
+
+        let mut narrowest = grid_args("3x2", None);
+        narrowest.cell_width = Some(64);
+        assert_eq!(
+            resolve_cell_size(&narrowest).height,
+            MIN_CELL_SIZE_PX as usize
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_contact_sheet_flags_without_a_grid() {
+        let mut args = grid_args("3x2", None);
+        args.grid = None;
+        args.between = None;
+        args.time = Some(12.5);
+        args.cell_width = Some(640);
+        args.label_cells = true;
+
+        let error = resolve_selection(&args).expect_err("Cell flags need a grid to apply to");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("--cell-width")
+                && message.contains("--label-cells")
+                && message.contains("--grid"),
+            "Error should name the ignored flags and the flag they need, got: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_accept_a_single_still_without_contact_sheet_flags() {
+        let mut args = grid_args("3x2", None);
+        args.grid = None;
+        args.between = None;
+        args.time = Some(12.5);
+
+        assert!(matches!(
+            resolve_selection(&args).expect("A plain still is still valid"),
+            Selection::SingleTime(_)
+        ));
+    }
+
+    #[test]
+    fn ensure_frame_written_should_reject_a_missing_or_empty_output() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("missing.png");
+        let error = ensure_frame_written(&missing, 1.99, Path::new("render.mp4"))
+            .expect_err("A frame FFmpeg never wrote is not an extraction");
+        let message = error.to_string();
+        assert!(
+            message.contains("1.990s") && message.contains("render.mp4"),
+            "Error should name the requested time and the source, got: {message}"
+        );
+
+        let empty = dir.path().join("empty.png");
+        std::fs::write(&empty, b"").expect("write empty file");
+        assert!(ensure_frame_written(&empty, 1.0, Path::new("render.mp4")).is_err());
+
+        let written = dir.path().join("written.png");
+        std::fs::write(&written, b"not empty").expect("write file");
+        assert!(ensure_frame_written(&written, 1.0, Path::new("render.mp4")).is_ok());
+    }
+
+    #[test]
+    fn ensure_cell_written_should_reject_a_cell_the_extractor_skipped() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("3.jpg");
+
+        let error = ensure_cell_written(&missing, 3, 2.25)
+            .expect_err("A missing cell would tile as black under a claimed timecode");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("cell 3") && message.contains("2.250s"),
+            "Error should name the cell and its time, got: {message}"
+        );
+    }
+
+    #[test]
+    fn remove_stale_output_should_clear_a_previous_frame_and_tolerate_a_missing_one() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("frame.png");
+        std::fs::write(&target, b"previous candidate").expect("write file");
+
+        remove_stale_output(&target).expect("stale output is removed");
+        assert!(!target.exists());
+        remove_stale_output(&target).expect("a missing output is not an error");
+    }
+
+    #[test]
+    fn grid_cell_extract_width_should_follow_the_cell_width_by_default() {
+        let mut args = grid_args("3x2", None);
+        args.cell_width = Some(640);
+
+        assert_eq!(
+            grid_cell_extract_width(&args, resolve_cell_size(&args)),
+            640,
+            "Grid cells should be extracted at the size the tiler needs"
+        );
+    }
+
+    #[test]
+    fn grid_cell_extract_width_should_honour_an_explicit_max_width() {
+        let mut args = grid_args("3x2", None);
+        args.max_width = Some(1920);
+
+        assert_eq!(
+            grid_cell_extract_width(&args, resolve_cell_size(&args)),
+            1920
+        );
     }
 
     #[test]

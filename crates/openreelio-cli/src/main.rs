@@ -1,4 +1,7 @@
-#![recursion_limit = "256"]
+// `help_json::build_schema` is one `serde_json::json!` literal covering every
+// CLI leaf command, and the macro recurses once per nesting level it expands.
+// The limit tracks that literal's size, so adding commands may need it raised.
+#![recursion_limit = "512"]
 //! OpenReelio CLI
 //!
 //! Headless command-line interface for AI agent-driven video editing.

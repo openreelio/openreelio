@@ -71,7 +71,9 @@ one audio track. `asset import` returns
   from `createdIds` in a command result, or from `asset list`,
   `timeline tracks`, `timeline clips`.
 - **Negative numbers need `=`**: write `--target-lufs=-14`, not
-  `--target-lufs -14`. (`analysis silence --threshold-db -40` is the one option
-  that accepts the spaced form.)
-- **Exit codes**: `0` success, `1` failure. `verify` is the exception — see
-  [Verify](../verify/REFERENCE.md).
+  `--target-lufs -14`. (`analysis silence --threshold-db -40` and
+  `state jump --index -1` are the exceptions that also accept the spaced form;
+  the `=` form works for every option, so use it everywhere.)
+- **Exit codes**: `0` success, `1` failure. `verify` and `plan execute` have
+  richer contracts — see [Verify](../verify/REFERENCE.md) and
+  [Editing](../editing/REFERENCE.md#atomic-batches-plan-execute).

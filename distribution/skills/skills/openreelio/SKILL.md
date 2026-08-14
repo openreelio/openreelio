@@ -78,3 +78,9 @@ the render to a range. Load [Render](./render/REFERENCE.md).
 
 Run deterministic quality control over the sequence and the rendered file, then
 feed the suggested fixes back as an edit plan. Load [Verify](./verify/REFERENCE.md).
+
+## Judging
+
+Try N candidate edits, score each rendered result against a fixed rubric, and
+keep the best — contact sheets from the render, history jumps between
+candidates. Load [Judging](./judging/REFERENCE.md).
