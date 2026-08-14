@@ -788,10 +788,18 @@ impl ActiveProject {
         Ok(())
     }
 
-    pub(crate) fn discard_persisted_operations(
-        &mut self,
-        op_ids: &[OpId],
-    ) -> crate::core::CoreResult<()> {
+    /// Excludes already-persisted operations from history replay.
+    ///
+    /// The ops log is append-only, so work that has to be rolled back cannot be
+    /// deleted from disk: `CommandExecutor::execute` fsyncs each op before it
+    /// returns, and `CommandExecutor::undo` only unwinds memory. Recording the
+    /// ids as discarded is what stops the next `sync_history_with_ops_log` from
+    /// mistaking those durable entries for new user edits and replaying them.
+    ///
+    /// Every transactional caller that rolls back — the agent plan executor and
+    /// the CLI/MCP plan path — must call this, or the rollback silently reverts
+    /// itself on the next open.
+    pub fn discard_persisted_operations(&mut self, op_ids: &[OpId]) -> crate::core::CoreResult<()> {
         if op_ids.is_empty() {
             return Ok(());
         }
