@@ -609,12 +609,12 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.plan.validate",
             "OpenReelio plan validation",
-            "Validate a multi-step command plan without executing it.",
+            "Validate a multi-step command plan without executing it. Reports duplicate and missing step ids, dependency cycles, the step cap, and any payload that does not parse.",
             serde_json::json!({
                 "type": "object",
                 "required": ["plan"],
                 "properties": {
-                    "plan": { "type": "object" }
+                    "plan": plan_schema()
                 },
                 "additionalProperties": false
             }),
@@ -696,13 +696,13 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         tools.push(tool(
             "openreelio.plan.apply",
             "OpenReelio approved plan apply",
-            "Apply a validated edit plan, including text/caption commands, through the OpenReelio command log path using an approval token.",
+            "Apply a validated edit plan, including text/caption commands, through the OpenReelio command log path using an approval token. The whole plan is validated before anything is mutated, and a step failure rolls every applied step back.",
             serde_json::json!({
                 "type": "object",
                 "required": required_fields(state, &["plan"]),
                 "properties": {
                     "approvalToken": { "type": "string" },
-                    "plan": { "type": "object" }
+                    "plan": plan_schema()
                 },
                 "additionalProperties": false
             }),
@@ -710,6 +710,55 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
     }
 
     tools
+}
+
+/// JSON Schema for an [`plan::EditPlan`], shared by both plan tools.
+///
+/// Spelled out rather than left as an opaque object: a client that cannot see
+/// the step shape has to guess it, and a guessed plan fails validation for
+/// reasons the schema could have prevented. Nested objects stay open because
+/// the deserializer tolerates unknown fields — a stricter schema than the
+/// parser would reject plans that actually work.
+fn plan_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "An atomic edit plan. Every step is validated before any is applied, and a step failure rolls the whole plan back.",
+        "required": ["id", "steps"],
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "Plan identifier. An approval token is scoped to this value."
+            },
+            "steps": {
+                "type": "array",
+                "maxItems": plan::MAX_PLAN_STEPS,
+                "description": "Plan steps. Execution order comes from dependsOn, not array order; a dependency cycle rejects the plan.",
+                "items": {
+                    "type": "object",
+                    "required": ["id", "commandType", "payload"],
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Step identifier, unique within the plan."
+                        },
+                        "commandType": {
+                            "type": "string",
+                            "description": "Backend command type, e.g. SplitClip. Call openreelio.command.schema for the supported list."
+                        },
+                        "payload": {
+                            "type": "object",
+                            "description": "Command payload for commandType, in the same shape openreelio.command.validate accepts."
+                        },
+                        "dependsOn": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Step ids that must complete first. Each must name a step in this plan."
+                        }
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Builds a mutating tool's `required` list.
@@ -1887,87 +1936,46 @@ fn validate_command(arguments: Value) -> Result<Value, ToolError> {
 }
 
 fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
-    let plan = arguments
+    let plan_value = arguments
         .get("plan")
+        .cloned()
         .ok_or_else(|| ToolError::InvalidArguments("plan is required".to_string()))?;
-    let plan_id = plan.get("id").and_then(Value::as_str).unwrap_or("unknown");
-    let steps = plan
-        .get("steps")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ToolError::InvalidArguments("plan.steps must be an array".to_string()))?;
-
-    let mut errors = Vec::new();
-    let mut step_ids = std::collections::HashSet::new();
-    if plan
+    let plan_id = plan_value
         .get("id")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .is_empty()
-    {
-        errors.push("plan.id is required".to_string());
-    }
+        .unwrap_or("unknown")
+        .to_string();
 
-    for step in steps {
-        let step_id = step.get("id").and_then(Value::as_str).unwrap_or_default();
-        if step_id.is_empty() {
-            errors.push("Every step must include id".to_string());
-        } else if !step_ids.insert(step_id.to_string()) {
-            errors.push(format!("Duplicate step id '{step_id}'"));
+    // A plan that will not even deserialize is a validation finding, not a
+    // protocol error: the caller asked what is wrong with the plan, and an
+    // error list answers that better than a JSON-RPC failure does.
+    let edit_plan: plan::EditPlan = match serde_json::from_value(plan_value) {
+        Ok(edit_plan) => edit_plan,
+        Err(error) => {
+            return Ok(serde_json::json!({
+                "status": "error",
+                "planId": plan_id,
+                "message": "Plan validation failed",
+                "errors": [format!("Plan does not match the expected shape: {error}")]
+            }))
         }
+    };
 
-        let command_type = step.get("commandType").and_then(Value::as_str);
-        let payload = step.get("payload").cloned();
-        match (command_type, payload) {
-            (Some(_), Some(payload)) if payload.is_object() => {}
-            _ => errors.push(format!(
-                "Step '{}' must include commandType and object payload",
-                if step_id.is_empty() {
-                    "<missing>"
-                } else {
-                    step_id
-                }
-            )),
-        }
-    }
-
-    for step in steps {
-        let step_id = step
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("<missing>");
-        let Some(depends_on) = step.get("dependsOn").and_then(Value::as_array) else {
-            continue;
-        };
-        for dependency in depends_on {
-            let Some(dependency_id) = dependency.as_str() else {
-                errors.push(format!("Step '{step_id}' has a non-string dependency"));
-                continue;
-            };
-            if !step_ids.contains(dependency_id) {
-                errors.push(format!(
-                    "Step '{step_id}' depends on missing step '{dependency_id}'"
-                ));
-            }
-        }
-    }
-
-    if errors.is_empty() {
-        let edit_plan: plan::EditPlan = serde_json::from_value(plan.clone())
-            .map_err(|error| ToolError::InvalidArguments(format!("Invalid plan JSON: {error}")))?;
-        errors.extend(plan::validate_edit_plan(&edit_plan));
-    }
+    // Everything structural lives in the shared validator, so this surface
+    // cannot drift from what `plan execute` will actually accept.
+    let errors = plan::validate_edit_plan(&edit_plan);
 
     Ok(if errors.is_empty() {
         serde_json::json!({
             "status": "ok",
-            "planId": plan_id,
-            "stepCount": steps.len(),
+            "planId": edit_plan.id,
+            "stepCount": edit_plan.steps.len(),
             "message": "Plan is valid"
         })
     } else {
         serde_json::json!({
             "status": "error",
-            "planId": plan_id,
+            "planId": edit_plan.id,
             "message": "Plan validation failed",
             "errors": errors
         })
@@ -2674,6 +2682,104 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.as_str().expect("error").contains("Cycle detected")));
+    }
+
+    /// The step cap lives in the shared validator, so MCP must inherit it
+    /// without mcp.rs knowing the number.
+    #[test]
+    fn should_reject_an_over_cap_plan_through_the_mcp_validator() {
+        let steps: Vec<Value> = (0..=plan::MAX_PLAN_STEPS)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("step-{index}"),
+                    "commandType": "AddTrack",
+                    "payload": { "sequenceId": "sequence-1", "name": "T", "kind": "video" }
+                })
+            })
+            .collect();
+
+        let result = call_plan_validate(serde_json::json!({
+            "id": "over-cap",
+            "steps": steps
+        }));
+
+        assert_eq!(result["status"], "error");
+        assert!(
+            result["errors"]
+                .as_array()
+                .expect("errors")
+                .iter()
+                .any(|error| error
+                    .as_str()
+                    .expect("error")
+                    .contains("exceeds the maximum")),
+            "the shared step cap must reach MCP: {result}"
+        );
+    }
+
+    /// Asking what is wrong with a plan must answer with findings, not with a
+    /// protocol failure the caller cannot act on.
+    #[test]
+    fn should_report_a_malformed_plan_as_validation_findings() {
+        let result = call_plan_validate(serde_json::json!({
+            "id": "malformed",
+            "steps": [{ "id": "step-a", "payload": {} }]
+        }));
+
+        assert_eq!(result["status"], "error");
+        assert_eq!(result["planId"], "malformed");
+        assert!(!result["errors"].as_array().expect("errors").is_empty());
+    }
+
+    #[test]
+    fn should_describe_real_plan_steps_in_both_plan_tool_schemas() {
+        let state = McpServerState {
+            allow_write: true,
+            ..Default::default()
+        };
+        let tools = build_tools(&state);
+
+        for name in ["openreelio.plan.validate", "openreelio.plan.apply"] {
+            let schema = &tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("{name} must be advertised"))["inputSchema"]
+                ["properties"]["plan"];
+
+            let step = &schema["properties"]["steps"]["items"];
+            assert_eq!(
+                schema["required"],
+                serde_json::json!(["id", "steps"]),
+                "{name} must name the plan's required fields"
+            );
+            assert_eq!(
+                step["required"],
+                serde_json::json!(["id", "commandType", "payload"]),
+                "{name} must describe a step instead of an opaque object"
+            );
+            assert!(step["properties"]["dependsOn"].is_object());
+            assert_eq!(
+                schema["properties"]["steps"]["maxItems"],
+                plan::MAX_PLAN_STEPS
+            );
+        }
+    }
+
+    fn call_plan_validate(plan: Value) -> Value {
+        let response = handle_jsonrpc_request(
+            &McpServerState::default(),
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.plan.validate",
+                    "arguments": { "plan": plan }
+                }),
+            ),
+        );
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text content");
+        serde_json::from_str(text).expect("validate result JSON")
     }
 
     #[test]
