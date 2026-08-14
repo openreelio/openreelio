@@ -296,6 +296,17 @@ interface LegacyExecutePlanRoute {
     legacyStepId: string;
     backendStepIds: string[];
   }>;
+  /**
+   * Steps to run the mutation preflight on, under their ORIGINAL tool name and
+   * args.
+   *
+   * The plan's own steps carry backend command names and mapped params by then,
+   * and neither round-trips back to a registered tool, so preflighting those
+   * would silently resolve no category and skip every snapshot check. Only
+   * steps that nothing in the plan precedes are listed: a later step's inputs
+   * may not exist until an earlier step creates them.
+   */
+  preflightSteps: Array<{ toolName: string; params: Record<string, unknown> }>;
 }
 
 /**
@@ -310,6 +321,14 @@ interface BackendExecutionTarget {
   requestedToolName: string;
   effectiveToolName: string;
   params: Record<string, unknown>;
+  /**
+   * The tool's own args, before `mapParams` rewrote them for the payload.
+   *
+   * The mutation preflight is keyed on argument names — `sequenceId`,
+   * `trackId`, `clipId`, `duration` — and several routes rename or drop exactly
+   * those, so it has to see the args the model actually sent.
+   */
+  sourceParams: Record<string, unknown>;
   metaAction?: string;
 }
 
@@ -527,6 +546,7 @@ export class BackendToolExecutor implements IToolExecutor {
         requestedToolName: toolName,
         effectiveToolName: action,
         params: normalizeBackendParamsForBackend(action, metaToolArgs),
+        sourceParams: metaToolArgs,
         metaAction: action,
       };
     }
@@ -539,6 +559,7 @@ export class BackendToolExecutor implements IToolExecutor {
       requestedToolName: toolName,
       effectiveToolName: toolName,
       params: normalizeBackendParamsForBackend(toolName, args),
+      sourceParams: args,
     };
   }
 
@@ -568,6 +589,7 @@ export class BackendToolExecutor implements IToolExecutor {
     const lastBackendStepIdByLegacyId = new Map<string, string>();
     const backendSteps: AgentPlan['steps'] = [];
     const stepMappings: LegacyExecutePlanRoute['stepMappings'] = [];
+    const preflightSteps: LegacyExecutePlanRoute['preflightSteps'] = [];
     let previousLegacyFinalStepId: string | null = null;
 
     for (const step of steps) {
@@ -607,6 +629,10 @@ export class BackendToolExecutor implements IToolExecutor {
 
       const inheritedDependsOn = previousLegacyFinalStepId ? [previousLegacyFinalStepId] : [];
       const firstStepDependsOn = dedupeDependencies([...inheritedDependsOn, ...explicitDependsOn]);
+
+      if (firstStepDependsOn.length === 0) {
+        preflightSteps.push({ toolName: step.toolName, params: step.params });
+      }
 
       const expander = compoundExpanders.get(step.toolName);
       if (expander) {
@@ -692,6 +718,7 @@ export class BackendToolExecutor implements IToolExecutor {
           sessionId: context.sessionId,
         },
         stepMappings,
+        preflightSteps,
       },
     };
   }
@@ -777,13 +804,10 @@ export class BackendToolExecutor implements IToolExecutor {
 
       {
         const planRoute = planOutcome.route;
-        for (const step of planRoute.plan.steps) {
-          if ((step.dependsOn?.length ?? 0) > 0) {
-            continue;
-          }
+        for (const step of planRoute.preflightSteps) {
           const preflightFailure = this.getMutationPreflightFailure(
-            step.toolName.replace(/[A-Z]/g, (match) => `_${match.toLowerCase()}`),
-            step.params as Record<string, unknown>,
+            step.toolName,
+            step.params,
             context,
           );
           if (preflightFailure) {
@@ -894,7 +918,7 @@ export class BackendToolExecutor implements IToolExecutor {
 
     const preflightFailure = this.getMutationPreflightFailure(
       executionTarget.effectiveToolName,
-      executionTarget.params,
+      executionTarget.sourceParams,
       context,
     );
     if (preflightFailure) {
@@ -1082,7 +1106,7 @@ export class BackendToolExecutor implements IToolExecutor {
         if (shouldPreflightNow) {
           const preflightFailure = this.getMutationPreflightFailure(
             executionTarget.effectiveToolName,
-            executionTarget.params,
+            executionTarget.sourceParams,
             context,
           );
           if (preflightFailure) {

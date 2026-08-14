@@ -179,6 +179,18 @@ const TOOL_DEFS: TestToolDef[] = [
     parameters: { type: 'object', properties: {} },
   },
   {
+    name: 'set_transition_duration',
+    description: 'Change a transition duration',
+    category: 'transition',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'mute_clip',
+    description: 'Mute a clip',
+    category: 'audio',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
     name: 'add_text_clip',
     description: 'Add an on-video text clip',
     category: 'text',
@@ -1153,6 +1165,127 @@ describe('BackendToolExecutor', () => {
       expect(result.success).toBe(false);
       expect(result.error).toContain('step budget');
       expect(mockInvoke).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===========================================================================
+  // Mutation preflight sees the tool's own name and args
+  // ===========================================================================
+
+  describe('mutation preflight input fidelity', () => {
+    // The preflight is keyed on the tool name and on argument names. Routes
+    // that rename the command or rewrite the params must not be able to hide a
+    // bad id or a bad number from it, on either the single-call or batch path.
+
+    it('should preflight a renamed route under its own tool name', async () => {
+      const result = await backend.execute(
+        'mute_clip',
+        { sequenceId: 'seq-1', trackId: 'track-missing', clipId: 'clip-1', muted: true },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('PRECONDITION_FAILED');
+      expect(result.error).toContain('track-missing');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should preflight a renamed route inside a batch under its own tool name', async () => {
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'mute-step',
+              toolName: 'mute_clip',
+              params: { sequenceId: 'seq-1', trackId: 'track-missing', clipId: 'clip-1' },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('PRECONDITION_FAILED');
+      expect(result.error).toContain('track-missing');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should preflight a mapParams route against the args the caller sent', async () => {
+      const result = await backend.execute(
+        'set_transition_duration',
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-missing',
+          transitionId: 'effect-1',
+          duration: -2,
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('PRECONDITION_FAILED');
+      expect(result.error).toContain('track-missing');
+      expect(result.error).toContain('duration must be >= 0');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should preflight a mapParams route inside a batch against the args the caller sent', async () => {
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'transition-step',
+              toolName: 'set_transition_duration',
+              params: {
+                sequenceId: 'seq-1',
+                trackId: 'track-1',
+                transitionId: 'effect-1',
+                duration: -2,
+              },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('duration must be >= 0');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should still promote a batch whose first step passes preflight', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'mute-plan',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [{ stepId: 'mute-step', success: true, data: {}, durationMs: 3 }],
+        operationIds: ['op-1'],
+        executionTimeMs: 3,
+      });
+
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'mute-step',
+              toolName: 'mute_clip',
+              params: { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', muted: true },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          steps: [expect.objectContaining({ toolName: 'setClipMute' })],
+        }),
+      });
     });
   });
 
