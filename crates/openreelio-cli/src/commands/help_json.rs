@@ -3,10 +3,34 @@
 //! This enables AI agents to discover and use the CLI without parsing --help text.
 //! The schema includes command names, descriptions, parameters, types, and examples.
 
+use openreelio_core::style::{text_preset_ids, NO_TEXT_PRESET, TEXT_PRESETS};
+
 use crate::output;
 
 pub fn execute() -> anyhow::Result<()> {
     output::print_json_pretty(&build_schema())
+}
+
+/// Every accepted `text add --preset` value, in registry order.
+///
+/// Built from the core registry rather than restated, because a hand-kept list
+/// here is exactly how the schema came to advertise `quote`, `watermark`, and
+/// `countdown` while the parser rejected all three.
+fn text_preset_enum() -> Vec<String> {
+    std::iter::once(NO_TEXT_PRESET.to_string())
+        .chain(text_preset_ids().into_iter().map(str::to_string))
+        .collect()
+}
+
+/// One-line `--preset` description naming the registry as the source of ids.
+fn text_preset_desc() -> String {
+    format!(
+        "Curated text preset id or alias, or '{}' for none. {} presets; each supplies typography, \
+         anchor, starter copy, and a default duration. Run 'packs list --kind text' for the full \
+         entries",
+        NO_TEXT_PRESET,
+        TEXT_PRESETS.len()
+    )
 }
 
 pub(crate) fn build_schema() -> serde_json::Value {
@@ -316,9 +340,9 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli caption add --path ./project --text \"Hello\" --start 0.0 --end 3.0"
             },
             "packs.list": {
-                "description": "List curated caption style packs and transition recipes. Packs are the quality floor: name one instead of assembling typography or a transition duration by hand. Every listed id is accepted by caption --style-pack, by stylePack on CreateCaption/UpdateCaption/ImportGeneratedCaptions, and by recipe on AddEffect",
+                "description": "List curated caption style packs, transition recipes, and text presets. Packs are the quality floor: name one instead of assembling typography or a transition duration by hand. Every listed id is accepted by caption --style-pack, by stylePack on CreateCaption/UpdateCaption/ImportGeneratedCaptions, by recipe on AddEffect, and by text add --preset / preset on AddTextClip",
                 "params": {
-                    "kind": { "type": "string", "required": false, "desc": "Registry to list: caption, transition, or all (default: all)" }
+                    "kind": { "type": "string", "required": false, "desc": "Registry to list: caption, transition, text, or all (default: all)", "enum": ["caption", "transition", "text", "all"] }
                 },
                 "example": "openreelio-cli packs list --kind caption"
             },
@@ -435,7 +459,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "text": { "type": "string", "required": true, "desc": "Text content" },
                     "start": { "type": "number", "required": true, "desc": "Timeline start time in seconds" },
                     "duration": { "type": "number", "required": false, "desc": "Clip duration in seconds. Defaults to the selected preset's recommended duration." },
-                    "preset": { "type": "string", "required": false, "desc": "default, title, centered-title, epic-title, chapter-title, lower-third, lower-third-news, lower-third-name-role, subtitle, callout, callout-stat, credits, credit-line, logo-bug, social-handle, quote, watermark, or countdown" },
+                    "preset": { "type": "string", "required": false, "desc": text_preset_desc(), "enum": text_preset_enum() },
                     "text-json": { "type": "string", "required": false, "desc": "Full TextClipData JSON object" },
                     "style-json": { "type": "string", "required": false, "desc": "Full TextStyle JSON object" },
                     "position-json": { "type": "string", "required": false, "desc": "Text position JSON object" },
@@ -557,7 +581,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli plan template --type split-and-move"
             },
             "command.execute": {
-                "description": "Execute any supported backend edit command using the shared CommandPayload parser. Curated packs are resolved by that parser, so CreateCaption/UpdateCaption/ImportGeneratedCaptions accept stylePack and AddEffect accepts recipe; see packs.list for the ids",
+                "description": "Execute any supported backend edit command using the shared CommandPayload parser. Curated packs are resolved by that parser, so CreateCaption/UpdateCaption/ImportGeneratedCaptions accept stylePack, AddEffect accepts recipe, and AddTextClip accepts preset (its textData then carries only the overrides); see packs.list for the ids",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "type": { "type": "string", "required": true, "desc": "Backend command type, e.g. SplitClip or AddMask" },
@@ -712,7 +736,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::build_schema;
+    use super::{build_schema, text_preset_ids, NO_TEXT_PRESET};
     use crate::commands::Cli;
     use clap::{Command, CommandFactory};
 
@@ -814,6 +838,35 @@ mod tests {
             execute_description.contains("recipe"),
             "{execute_description}"
         );
+        assert!(
+            execute_description.contains("preset"),
+            "{execute_description}"
+        );
+    }
+
+    #[test]
+    fn build_schema_advertises_exactly_the_text_presets_the_parser_accepts() {
+        // The bug this replaces: the schema listed quote, watermark, and
+        // countdown while `text add --preset quote` answered "Unsupported text
+        // preset". A hand-kept list cannot be checked, so there is none.
+        let schema = build_schema();
+        let advertised: Vec<String> = schema["commands"]["text.add"]["params"]["preset"]["enum"]
+            .as_array()
+            .expect("preset enum must be an array")
+            .iter()
+            .map(|value| value.as_str().expect("preset id").to_string())
+            .collect();
+
+        let mut expected = vec![NO_TEXT_PRESET.to_string()];
+        expected.extend(text_preset_ids().into_iter().map(str::to_string));
+        assert_eq!(advertised, expected);
+
+        for id in &advertised {
+            assert!(
+                crate::commands::text::preset_is_accepted(id),
+                "advertised preset '{id}' must be accepted by text add --preset"
+            );
+        }
     }
 
     #[test]
