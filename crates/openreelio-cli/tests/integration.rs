@@ -5956,3 +5956,97 @@ fn test_command_execute_accepts_style_pack_and_recipe() {
     let combined = format!("{stdout}{stderr}");
     assert!(combined.contains("dissolve-standard"), "{combined}");
 }
+
+#[test]
+fn test_caption_style_pack_never_overrides_an_explicit_placement() {
+    let dir = create_temp_project("caption_pack_placement_test");
+    let path = project_path(&dir, "caption_pack_placement_test");
+
+    // A --position-json without a `type` is a custom anchor (the validator
+    // itself reads it that way), so the pack styles the caption while the
+    // caller places it.
+    let placed = run_cli_ok(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Custom placed",
+        "--start",
+        "0",
+        "--end",
+        "2",
+        "--style-pack",
+        "clean-minimal",
+        "--position-json",
+        r##"{"xPercent":25,"yPercent":80}"##,
+    ]);
+    let placed_id = placed["createdIds"][0].as_str().unwrap().to_string();
+
+    // --position names a vertical anchor only, so a pack lifted clear of
+    // platform UI keeps its own margin instead of dropping to a synthesized
+    // default.
+    let anchored = run_cli_ok(&[
+        "caption",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Anchored",
+        "--start",
+        "3",
+        "--end",
+        "5",
+        "--style-pack",
+        "shorts-bold-outline",
+        "--position",
+        "bottom",
+    ]);
+    let anchored_id = anchored["createdIds"][0].as_str().unwrap().to_string();
+
+    let find = |list: &serde_json::Value, id: &str| -> serde_json::Value {
+        list["captions"]
+            .as_array()
+            .expect("captions")
+            .iter()
+            .find(|caption| caption["id"] == id)
+            .expect("caption present")
+            .clone()
+    };
+
+    let list = run_cli_ok(&["caption", "list", "--path", &path]);
+
+    let placed_caption = find(&list, &placed_id);
+    assert_eq!(placed_caption["position"]["xPercent"], 25.0);
+    assert_eq!(placed_caption["position"]["yPercent"], 80.0);
+    assert!(
+        placed_caption["position"].get("marginPercent").is_none(),
+        "a custom anchor must not carry the pack's preset keys: {}",
+        placed_caption["position"]
+    );
+    assert_eq!(placed_caption["style"]["fontSize"], 48);
+
+    let anchored_caption = find(&list, &anchored_id);
+    assert_eq!(anchored_caption["position"]["vertical"], "bottom");
+    assert_eq!(anchored_caption["position"]["marginPercent"], 18.0);
+
+    // Restyling is not a move.
+    run_cli_ok(&[
+        "caption",
+        "update",
+        "--path",
+        &path,
+        "--id",
+        &placed_id,
+        "--style-pack",
+        "boxed-contrast",
+    ]);
+
+    let restyled = find(
+        &run_cli_ok(&["caption", "list", "--path", &path]),
+        &placed_id,
+    );
+    assert_eq!(restyled["position"]["xPercent"], 25.0);
+    assert_eq!(restyled["position"]["yPercent"], 80.0);
+    assert_eq!(restyled["style"]["backgroundColor"]["a"], 180);
+}
