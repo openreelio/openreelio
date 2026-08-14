@@ -850,7 +850,9 @@ const META_TOOLS: ToolDefinition[] = [
     name: 'execute_plan',
     description:
       'Execute a batch of editing operations sequentially. Backend-safe steps run atomically with rollback on failure; unsupported mutating steps are rejected. ' +
-      'Each step specifies a tool name and its parameters. Use this for complex multi-step edits.',
+      'Each step specifies a tool name and its parameters. Use this for complex multi-step edits. ' +
+      'Limitation: compound steps (ripple_edit, roll_edit, slip_edit, slide_edit) are expanded against the timeline as it is when the plan is submitted, ' +
+      'so do not place one after a step that shifts the clips it measures — send those in a later plan.',
     category: 'timeline',
     parameters: {
       type: 'object',

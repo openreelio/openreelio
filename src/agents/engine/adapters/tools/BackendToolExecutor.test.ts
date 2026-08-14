@@ -1877,6 +1877,92 @@ describe('BackendToolExecutor', () => {
       unregisterCompoundExpander('ripple_edit');
     });
 
+    it('should reject a batch whose compound step follows an edit to the same clip', async () => {
+      // Expanders read the timeline at plan-build time and emit absolute
+      // coordinates, so a stale expansion applies cleanly and silently leaves a
+      // gap. Refuse rather than produce one.
+      registerCompoundExpander('ripple_edit', (args) => [
+        { toolName: 'trimClip', params: { clipId: args.clipId, newSourceOut: args.trimEnd } },
+      ]);
+
+      const extendedFrontend = createMockFrontendExecutor([
+        ...TOOL_DEFS,
+        { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
+      ]);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      const result = await extendedBackend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'move-step',
+              toolName: 'move_clip',
+              params: { trackId: 'track-1', clipId: 'clip-1', newTimelineIn: 4 },
+            },
+            {
+              id: 'ripple-step',
+              toolName: 'ripple_edit',
+              params: { trackId: 'track-1', clipId: 'clip-1', trimEnd: 8 },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Step 'ripple-step'");
+      expect(result.error).toContain('clip-1');
+      expect(result.error).toContain('stale');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should promote a batch whose compound step comes first', async () => {
+      registerCompoundExpander('ripple_edit', (args) => [
+        { toolName: 'trimClip', params: { clipId: args.clipId, newSourceOut: args.trimEnd } },
+      ]);
+
+      const extendedFrontend = createMockFrontendExecutor([
+        ...TOOL_DEFS,
+        { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
+      ]);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'plan-ordered',
+        success: true,
+        totalSteps: 2,
+        stepsCompleted: 2,
+        stepResults: [
+          { stepId: 'ripple-step__1', success: true, data: {}, durationMs: 2 },
+          { stepId: 'move-step', success: true, data: {}, durationMs: 2 },
+        ],
+        operationIds: ['op-1', 'op-2'],
+        executionTimeMs: 4,
+      });
+
+      const result = await extendedBackend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'ripple-step',
+              toolName: 'ripple_edit',
+              params: { trackId: 'track-1', clipId: 'clip-1', trimEnd: 8 },
+            },
+            {
+              id: 'move-step',
+              toolName: 'move_clip',
+              params: { trackId: 'track-1', clipId: 'clip-1', newTimelineIn: 4 },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+    });
+
     it('should expand compound tool into multiple sub-steps for single execute', async () => {
       // Register compound expander for ripple_edit
       registerCompoundExpander('ripple_edit', (args) => [

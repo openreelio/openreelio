@@ -168,7 +168,8 @@ const BATCH_EXECUTION = `## Batch Execution (meta-tool: execute_plan)
 - Prefer execute_plan for any edit of 3+ mutating steps: it applies them as one atomic backend plan (all-or-nothing rollback) in a single round trip, instead of N separate calls that can leave a half-finished timeline.
 - steps: [{ id, toolName, params, dependsOn? }] — toolName is the individual tool (split_clip, add_effect, ...), params are that tool's args. Steps run in order; dependsOn may only name earlier step ids.
 - The plan is rejected as a whole if any step names a tool with no atomic backend route; the error names the step and lists the tools that are supported. Run those steps as individual calls.
-- Use single tool calls when a later step's params depend on an earlier result you have not seen yet.`;
+- Use single tool calls when a later step's params depend on an earlier result you have not seen yet.
+- Compound steps (ripple_edit, roll_edit, slip_edit, slide_edit) are expanded against the timeline as it is when the plan is submitted, not as each step leaves it. Do not put one after a step that shifts the clips it measures — finish that plan first and send the compound step in the next one.`;
 
 const WORKSPACE_READ_TOOLS = `## Workspace Document Tools (read-only)
 - list_workspace_documents / read_workspace_document`;

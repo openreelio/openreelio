@@ -590,6 +590,7 @@ export class BackendToolExecutor implements IToolExecutor {
     const backendSteps: AgentPlan['steps'] = [];
     const stepMappings: LegacyExecutePlanRoute['stepMappings'] = [];
     const preflightSteps: LegacyExecutePlanRoute['preflightSteps'] = [];
+    const clipIdsMutatedEarlier = new Set<string>();
     let previousLegacyFinalStepId: string | null = null;
 
     for (const step of steps) {
@@ -635,6 +636,28 @@ export class BackendToolExecutor implements IToolExecutor {
       }
 
       const expander = compoundExpanders.get(step.toolName);
+      const stepClipId = typeof step.params.clipId === 'string' ? step.params.clipId : null;
+
+      if (expander && stepClipId && clipIdsMutatedEarlier.has(stepClipId)) {
+        // Expanders measure the timeline as it is when the plan is BUILT and
+        // emit absolute coordinates, so an earlier step in the same batch that
+        // moved or retimed the clip they measure makes the expansion stale.
+        // The stale commands still apply cleanly, leaving a silent gap or
+        // overlap that the atomic rollback never sees, so refuse up front.
+        return {
+          ok: false,
+          error:
+            `Step '${step.id}' (${step.toolName}) is expanded from the timeline as it is now, ` +
+            `but an earlier step in this plan already edits clip '${stepClipId}', so the ` +
+            `expansion would be stale. Run the steps up to and including that edit as one plan, ` +
+            `then send '${step.toolName}' in the next one.`,
+        };
+      }
+
+      if (stepClipId) {
+        clipIdsMutatedEarlier.add(stepClipId);
+      }
+
       if (expander) {
         let expanded: ReturnType<CompoundExpander>;
         try {
