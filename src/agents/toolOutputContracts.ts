@@ -76,9 +76,27 @@ function matchesTimelineInfoPath(path: string): boolean {
   );
 }
 
-function matchesInsertClipPath(path: string): boolean {
+/**
+ * Fields every backend `CommandResult` carries, whatever the command.
+ *
+ * A tool routed straight to the backend can promise these and nothing else —
+ * anything richer has to be reconstructed on the frontend from the refreshed
+ * snapshot, which a backend-routed tool never does.
+ */
+function matchesBackendCommandResultPath(path: string): boolean {
   return (
     path === 'data' ||
+    path === 'data.operationId' ||
+    path === 'data.createdIds' ||
+    /^data\.createdIds\[\d+\]$/.test(path) ||
+    path === 'data.deletedIds' ||
+    /^data\.deletedIds\[\d+\]$/.test(path)
+  );
+}
+
+function matchesInsertClipPath(path: string): boolean {
+  return (
+    matchesBackendCommandResultPath(path) ||
     path === 'data.clipId' ||
     path === 'data.linkedAudio' ||
     path === 'data.linkedAudio.trackId' ||
@@ -86,20 +104,15 @@ function matchesInsertClipPath(path: string): boolean {
     path === 'data.linkedAudio.createdTrack' ||
     path === 'data.sourceIn' ||
     path === 'data.sourceOut' ||
-    path === 'data.durationSec' ||
-    path === 'data.operationId' ||
-    path === 'data.createdIds' ||
-    /^data\.createdIds\[\d+\]$/.test(path)
+    path === 'data.durationSec'
   );
 }
 
 function matchesSplitClipPath(path: string): boolean {
   return (
-    matchesInsertClipPath(path) ||
+    matchesBackendCommandResultPath(path) ||
     path === 'data.newClipId' ||
-    path === 'data.sourceClipId' ||
-    path === 'data.deletedIds' ||
-    /^data\.deletedIds\[\d+\]$/.test(path)
+    path === 'data.sourceClipId'
   );
 }
 

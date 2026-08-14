@@ -59,4 +59,32 @@ describe('ToolApprovalPartRenderer', () => {
     expect(screen.queryByTestId('tool-approval-allow-btn')).not.toBeInTheDocument();
     expect(screen.queryByTestId('tool-approval-deny-btn')).not.toBeInTheDocument();
   });
+
+  it('names the steps a batch approval would run', () => {
+    render(
+      <ToolApprovalPartRenderer
+        part={{
+          ...pendingPart,
+          tool: 'execute_plan',
+          args: {
+            steps: [
+              { id: 's1', toolName: 'delete_clip', params: {} },
+              { id: 's2', toolName: 'delete_clip', params: {} },
+              { id: 's3', toolName: 'add_marker', params: {} },
+            ],
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId('tool-approval-batch-steps')).toHaveTextContent(
+      'delete_clip x2, add_marker',
+    );
+  });
+
+  it('shows no batch summary for an ordinary tool call', () => {
+    render(<ToolApprovalPartRenderer part={pendingPart} />);
+
+    expect(screen.queryByTestId('tool-approval-batch-steps')).not.toBeInTheDocument();
+  });
 });

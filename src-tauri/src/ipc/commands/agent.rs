@@ -9,13 +9,15 @@ use std::sync::OnceLock;
 use tauri::State;
 use tokio::sync::Mutex;
 
-use std::collections::HashMap;
-
 use tauri::Emitter;
 
-use crate::core::ai::agent_plan::{AgentPlan, AgentPlanResult, StepResult};
+use crate::core::ai::agent_plan::{AgentPlan, AgentPlanResult};
 use crate::core::ai::memory::{AgentMemoryDb, MemoryEntry};
-use crate::core::ai::plan_executor::{resolve_step_references, PlanExecutor};
+use crate::core::ai::plan_executor::PlanExecutor;
+use crate::core::ai::plan_runner::{
+    execute_prepared_plan, PlanStepCompleteEvent, PlanStepEvent, PlanStepFailedEvent,
+    PlanStepReporter,
+};
 use crate::core::assets::{
     evaluate_license_policy, LicenseInfo, LicensePolicyContext, LicensePolicyDecision,
     LicensePolicyStatus,
@@ -32,7 +34,6 @@ use crate::core::{
     fs::{validate_path_id_component, write_bytes_atomic_no_symlink},
     CoreError,
 };
-use crate::ipc::payloads::CommandPayload;
 use crate::AppState;
 
 // =============================================================================
@@ -344,37 +345,23 @@ pub async fn read_agent_trace(
 // Plan Execution
 // =============================================================================
 
-/// Tauri event payload for plan step progress.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlanStepEvent {
-    plan_id: String,
-    step_id: String,
-    step_index: usize,
-    total_steps: usize,
+/// Forwards plan step progress to the frontend as Tauri events.
+struct TauriPlanStepReporter<'a> {
+    app: &'a tauri::AppHandle,
 }
 
-/// Tauri event payload for plan step completion.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlanStepCompleteEvent {
-    plan_id: String,
-    step_id: String,
-    step_index: usize,
-    total_steps: usize,
-    operation_id: Option<String>,
-    duration_ms: u64,
-}
+impl PlanStepReporter for TauriPlanStepReporter<'_> {
+    fn step_start(&self, event: PlanStepEvent) {
+        let _ = self.app.emit("agent:plan_step_start", event);
+    }
 
-/// Tauri event payload for plan step failure.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlanStepFailedEvent {
-    plan_id: String,
-    step_id: String,
-    step_index: usize,
-    total_steps: usize,
-    error: String,
+    fn step_complete(&self, event: PlanStepCompleteEvent) {
+        let _ = self.app.emit("agent:plan_step_complete", event);
+    }
+
+    fn step_failed(&self, event: PlanStepFailedEvent) {
+        let _ = self.app.emit("agent:plan_step_failed", event);
+    }
 }
 
 fn build_agent_plan_failure(
@@ -477,11 +464,12 @@ fn plan_requires_backend_approval_proof(plan: &AgentPlan) -> bool {
 /// respecting step dependencies via topological sort and resolving
 /// `$fromStep`/`$path` references between steps.
 ///
-/// On failure, rolls back completed steps in reverse order and marks their
-/// persisted operation IDs as discarded so the append-only ops log cannot
-/// resurrect partial plan work on reopen or history sync. Emits Tauri events
-/// for each step's lifecycle (`agent:plan_step_start`,
-/// `agent:plan_step_complete`, `agent:plan_step_failed`).
+/// This is the Tauri shell around [`execute_prepared_plan`]: it checks
+/// approval, validates the plan *before* consuming the approval proof, locks
+/// the project, and forwards step lifecycle progress to the frontend as
+/// `agent:plan_step_start` / `agent:plan_step_complete` /
+/// `agent:plan_step_failed`. Execution, rollback and persisted-op discarding
+/// live in the Tauri-free runner.
 #[tauri::command]
 #[specta::specta]
 #[tracing::instrument(skip(app, state), fields(plan_id = %plan.id))]
@@ -530,318 +518,16 @@ pub async fn execute_agent_plan(
     {
         return Ok(build_agent_plan_failure(plan_id, total_steps, start, error));
     }
-    let project_path = project.path.clone();
 
-    let mut step_results: Vec<StepResult> = Vec::with_capacity(total_steps);
-    let mut results_by_id: HashMap<String, StepResult> = HashMap::new();
-    let mut operation_ids: Vec<String> = Vec::new();
-    let mut steps_completed: usize = 0;
-
-    tracing::info!(
-        plan_id = %plan_id,
-        total_steps = total_steps,
-        "Executing agent plan"
-    );
-
-    for &step_idx in &execution_order {
-        let step = &plan.steps[step_idx];
-        let step_start = std::time::Instant::now();
-
-        // Emit step start event
-        let _ = app.emit(
-            "agent:plan_step_start",
-            PlanStepEvent {
-                plan_id: plan_id.clone(),
-                step_id: step.id.clone(),
-                step_index: step_idx,
-                total_steps,
-            },
-        );
-
-        // Resolve $fromStep/$path references in step params
-        let resolved_params = match resolve_step_references(&step.params, &results_by_id) {
-            Ok(params) => params,
-            Err(e) => {
-                let duration_ms = step_start.elapsed().as_millis() as u64;
-                let error_msg = format!("Reference resolution failed: {e}");
-
-                let _ = app.emit(
-                    "agent:plan_step_failed",
-                    PlanStepFailedEvent {
-                        plan_id: plan_id.clone(),
-                        step_id: step.id.clone(),
-                        step_index: step_idx,
-                        total_steps,
-                        error: error_msg.clone(),
-                    },
-                );
-
-                let result = StepResult {
-                    step_id: step.id.clone(),
-                    success: false,
-                    data: None,
-                    error: Some(error_msg),
-                    duration_ms,
-                    operation_id: None,
-                };
-                step_results.push(result);
-
-                // Rollback completed steps
-                let rollback_report = rollback_steps(project, &executor, step_idx, &step_results);
-
-                return Ok(AgentPlanResult {
-                    plan_id,
-                    success: false,
-                    total_steps,
-                    steps_completed,
-                    step_results,
-                    operation_ids,
-                    rollback_report: Some(rollback_report),
-                    error_message: Some(format!(
-                        "Step '{}' failed: reference resolution error",
-                        step.id
-                    )),
-                    execution_time_ms: start.elapsed().as_millis() as u64,
-                });
-            }
-        };
-
-        // Parse tool_name + resolved_params into a CommandPayload
-        let typed_payload = match CommandPayload::parse(step.tool_name.clone(), resolved_params) {
-            Ok(payload) => payload,
-            Err(e) => {
-                let duration_ms = step_start.elapsed().as_millis() as u64;
-                let error_msg = format!("Invalid command '{}': {e}", step.tool_name);
-
-                let _ = app.emit(
-                    "agent:plan_step_failed",
-                    PlanStepFailedEvent {
-                        plan_id: plan_id.clone(),
-                        step_id: step.id.clone(),
-                        step_index: step_idx,
-                        total_steps,
-                        error: error_msg.clone(),
-                    },
-                );
-
-                let result = StepResult {
-                    step_id: step.id.clone(),
-                    success: false,
-                    data: None,
-                    error: Some(error_msg),
-                    duration_ms,
-                    operation_id: None,
-                };
-                step_results.push(result);
-
-                let rollback_report = rollback_steps(project, &executor, step_idx, &step_results);
-
-                return Ok(AgentPlanResult {
-                    plan_id,
-                    success: false,
-                    total_steps,
-                    steps_completed,
-                    step_results,
-                    operation_ids,
-                    rollback_report: Some(rollback_report),
-                    error_message: Some(format!("Step '{}' failed: invalid command", step.id)),
-                    execution_time_ms: start.elapsed().as_millis() as u64,
-                });
-            }
-        };
-
-        // Build and execute the command
-        let command = typed_payload.build_command(&project_path);
-        match project.executor.execute(command, &mut project.state) {
-            Ok(cmd_result) => {
-                let duration_ms = step_start.elapsed().as_millis() as u64;
-                let op_id = cmd_result.op_id.clone();
-
-                let step_data = serde_json::json!({
-                    "operationId": op_id,
-                    "createdIds": cmd_result.created_ids,
-                    "deletedIds": cmd_result.deleted_ids,
-                });
-
-                let result = StepResult {
-                    step_id: step.id.clone(),
-                    success: true,
-                    data: Some(step_data),
-                    error: None,
-                    duration_ms,
-                    operation_id: Some(op_id.clone()),
-                };
-
-                let _ = app.emit(
-                    "agent:plan_step_complete",
-                    PlanStepCompleteEvent {
-                        plan_id: plan_id.clone(),
-                        step_id: step.id.clone(),
-                        step_index: step_idx,
-                        total_steps,
-                        operation_id: Some(op_id.clone()),
-                        duration_ms,
-                    },
-                );
-
-                operation_ids.push(op_id);
-                results_by_id.insert(step.id.clone(), result.clone());
-                step_results.push(result);
-                steps_completed += 1;
-
-                tracing::debug!(
-                    step_id = %step.id,
-                    step_index = step_idx,
-                    duration_ms = duration_ms,
-                    "Plan step completed successfully"
-                );
-            }
-            Err(e) => {
-                let duration_ms = step_start.elapsed().as_millis() as u64;
-                let error_msg = format!("Command execution failed: {e}");
-
-                let _ = app.emit(
-                    "agent:plan_step_failed",
-                    PlanStepFailedEvent {
-                        plan_id: plan_id.clone(),
-                        step_id: step.id.clone(),
-                        step_index: step_idx,
-                        total_steps,
-                        error: error_msg.clone(),
-                    },
-                );
-
-                let result = StepResult {
-                    step_id: step.id.clone(),
-                    success: false,
-                    data: None,
-                    error: Some(error_msg),
-                    duration_ms,
-                    operation_id: None,
-                };
-                step_results.push(result);
-
-                tracing::warn!(
-                    step_id = %step.id,
-                    step_index = step_idx,
-                    error = %e,
-                    "Plan step failed, initiating rollback"
-                );
-
-                // Rollback completed steps
-                let rollback_report = rollback_steps(project, &executor, step_idx, &step_results);
-
-                return Ok(AgentPlanResult {
-                    plan_id,
-                    success: false,
-                    total_steps,
-                    steps_completed,
-                    step_results,
-                    operation_ids,
-                    rollback_report: Some(rollback_report),
-                    error_message: Some(format!("Step '{}' failed during execution", step.id)),
-                    execution_time_ms: start.elapsed().as_millis() as u64,
-                });
-            }
-        }
-    }
-
-    tracing::info!(
-        plan_id = %plan_id,
-        steps_completed = steps_completed,
-        elapsed_ms = start.elapsed().as_millis(),
-        "Agent plan executed successfully"
-    );
-
-    Ok(AgentPlanResult {
-        plan_id,
-        success: true,
-        total_steps,
-        steps_completed,
-        step_results,
-        operation_ids,
-        rollback_report: None,
-        error_message: None,
-        execution_time_ms: start.elapsed().as_millis() as u64,
-    })
-}
-
-/// Rollback completed steps in reverse order and exclude their persisted ops from history replay.
-fn rollback_steps(
-    project: &mut crate::ActiveProject,
-    executor: &PlanExecutor,
-    failed_index: usize,
-    step_results: &[StepResult],
-) -> crate::core::ai::agent_plan::RollbackReport {
-    // Build the initial report (with candidate steps identified)
-    let mut report = executor.build_rollback_report(failed_index, step_results);
-
-    if !report.attempted {
-        return report;
-    }
-
-    // Undo completed operations in reverse order via the CommandExecutor's undo stack
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
-    let mut rollback_errors = Vec::new();
-    let completed_operation_ids = step_results
-        .iter()
-        .filter_map(|result| result.operation_id.clone())
-        .collect::<Vec<_>>();
-
-    for step_id in &report.rolled_back_steps.clone() {
-        match project.executor.undo(&mut project.state) {
-            Ok(()) => {
-                succeeded += 1;
-                tracing::debug!(step_id = %step_id, "Rolled back step successfully");
-            }
-            Err(e) => {
-                failed += 1;
-                let error_msg = format!("Failed to undo step '{}': {}", step_id, e);
-                tracing::error!("{}", error_msg);
-                rollback_errors.push(error_msg);
-                // Stop rollback on first undo failure to avoid inconsistent state
-                break;
-            }
-        }
-    }
-
-    if !completed_operation_ids.is_empty() {
-        match project.discard_persisted_operations(&completed_operation_ids) {
-            Ok(still_applied) => {
-                if still_applied.is_empty() {
-                    tracing::debug!(
-                        discarded_ops = completed_operation_ids.len(),
-                        "Discarded rolled-back agent plan operations from persisted history"
-                    );
-                } else {
-                    // Protected operations stay applied and return on the next
-                    // open, so this rollback did not put the project back.
-                    let error_msg = format!(
-                        "Rollback could not discard protected operation(s) [{}]: they stay in the \
-                         project's applied history and will be present on the next open",
-                        still_applied.join(", ")
-                    );
-                    tracing::error!("{}", error_msg);
-                    rollback_errors.push(error_msg);
-                    failed = failed.max(1);
-                }
-            }
-            Err(e) => {
-                let error_msg =
-                    format!("Failed to discard rolled-back operations from persisted history: {e}");
-                tracing::error!("{}", error_msg);
-                rollback_errors.push(error_msg);
-                failed = failed.max(1);
-            }
-        }
-    }
-
-    report.succeeded_count = succeeded;
-    report.failed_count = failed;
-    report.rollback_errors = rollback_errors;
-
-    report
+    let reporter = TauriPlanStepReporter { app: &app };
+    Ok(execute_prepared_plan(
+        project,
+        &plan,
+        &executor,
+        &execution_order,
+        &reporter,
+        start,
+    ))
 }
 
 // =============================================================================

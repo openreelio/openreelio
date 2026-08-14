@@ -24,10 +24,9 @@ use std::path::{Path, PathBuf};
 
 /// Upper bound on the steps a single plan may carry.
 ///
-/// A backstop against runaway generation, not a capacity limit: an agent that
-/// emits thousands of steps in one plan has lost the thread, and the damage of
-/// letting that run is far larger than the cost of refusing it.
-pub const MAX_PLAN_STEPS: usize = 1000;
+/// Owned by core so every plan surface (CLI, MCP, backend `execute_agent_plan`
+/// and the in-app `execute_plan` meta-tool) refuses the same plan size.
+pub use openreelio_core::ai::MAX_PLAN_STEPS;
 
 /// Exit code for a plan that was rejected, or failed and rolled back cleanly.
 const EXIT_PLAN_FAILED: i32 = 1;

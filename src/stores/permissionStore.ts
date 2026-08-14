@@ -25,6 +25,7 @@ import type {
   PermissionDecision,
   PermissionDecisionSource,
 } from '@/agents/engine/core/agentSession';
+import { extractBatchStepCalls, type BatchStepCall } from '@/agents/tools/batchToolSteps';
 
 // =============================================================================
 // Types
@@ -50,6 +51,14 @@ interface MatchablePermissionRule {
 
 export type PermissionPreset = 'restrictive' | 'balanced' | 'permissive';
 
+/** A step inside a batch call that its own rules resolved more restrictively. */
+export interface PermissionStepEscalation {
+  toolName: string;
+  subject: string;
+  permission: ToolPermission;
+  matchedPattern: string | null;
+}
+
 export interface PermissionResolution {
   subjectType: PermissionSubjectType;
   subject: string;
@@ -59,6 +68,11 @@ export interface PermissionResolution {
   matchedPattern: string | null;
   matchedScope: PermissionRule['scope'] | null;
   source: PermissionDecisionSource;
+  /**
+   * Steps inside a batch call whose own subjects resolved more restrictively
+   * than the batch subject did. Empty for every non-batch call.
+   */
+  escalatingSteps: PermissionStepEscalation[];
 }
 
 export interface PermissionStoreState {
@@ -189,6 +203,70 @@ function toResolution(
     matchedPattern: match?.rule.pattern ?? null,
     matchedScope: match && match.rule.scope !== 'builtin' ? match.rule.scope : null,
     source,
+    escalatingSteps: [],
+  };
+}
+
+/**
+ * Fold a batch call's own resolution together with its steps', most restrictive
+ * wins: any deny denies the batch, otherwise any ask asks it.
+ *
+ * A batch is one tool call but many edits, so allowing it has to mean allowing
+ * every edit it carries. Resolving only the wrapper subject
+ * (`approval.plan.execute`) let a permissive `*` rule authorize deletes that a
+ * `delete_*` rule exists to stop, and skipped an explicit deny outright — the
+ * same calls issued one at a time were all checked.
+ *
+ * The reported rule is the one that decided, so the audit trail names the rule
+ * the user actually configured rather than the wrapper's.
+ */
+function resolveBatchPermission(
+  batchResolution: PermissionResolution,
+  stepCalls: BatchStepCall[],
+  globalRules: PermissionRule[],
+  sessionRules: PermissionRule[],
+): PermissionResolution {
+  let decided = batchResolution;
+  const escalatingSteps: PermissionStepEscalation[] = [];
+  const reportedToolNames = new Set<string>();
+
+  for (const stepCall of stepCalls) {
+    const stepSubject = buildPermissionSubject(stepCall.toolName, stepCall.args);
+    const stepResolution = toResolution(
+      stepSubject,
+      resolveMatchingRule(globalRules, sessionRules, stepSubject),
+    );
+
+    if (
+      PERMISSION_PRIORITY[stepResolution.permission] <=
+      PERMISSION_PRIORITY[batchResolution.permission]
+    ) {
+      continue;
+    }
+
+    if (!reportedToolNames.has(stepSubject.normalizedToolName)) {
+      reportedToolNames.add(stepSubject.normalizedToolName);
+      escalatingSteps.push({
+        toolName: stepSubject.normalizedToolName,
+        subject: stepResolution.subject,
+        permission: stepResolution.permission,
+        matchedPattern: stepResolution.matchedPattern,
+      });
+    }
+
+    if (PERMISSION_PRIORITY[stepResolution.permission] > PERMISSION_PRIORITY[decided.permission]) {
+      decided = stepResolution;
+    }
+  }
+
+  return {
+    ...batchResolution,
+    permission: decided.permission,
+    matchedRuleId: decided.matchedRuleId,
+    matchedPattern: decided.matchedPattern,
+    matchedScope: decided.matchedScope,
+    source: decided.source,
+    escalatingSteps,
   };
 }
 
@@ -328,7 +406,14 @@ export const usePermissionStore = create<PermissionStoreState>()(
         const { globalRules, sessionRules } = get();
         const subject = buildPermissionSubject(toolName, args);
         const bestMatch = resolveMatchingRule(globalRules, sessionRules, subject);
-        return toResolution(subject, bestMatch);
+        const resolution = toResolution(subject, bestMatch);
+
+        const stepCalls = extractBatchStepCalls(toolName, args);
+        if (stepCalls.length === 0) {
+          return resolution;
+        }
+
+        return resolveBatchPermission(resolution, stepCalls, globalRules, sessionRules);
       },
 
       hasHydratedSessionRules: (sessionId: string): boolean => {

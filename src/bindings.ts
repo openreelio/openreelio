@@ -2635,11 +2635,12 @@ async readAgentTrace(traceId: string) : Promise<Result<string, string>> {
  * respecting step dependencies via topological sort and resolving
  * `$fromStep`/`$path` references between steps.
  * 
- * On failure, rolls back completed steps in reverse order and marks their
- * persisted operation IDs as discarded so the append-only ops log cannot
- * resurrect partial plan work on reopen or history sync. Emits Tauri events
- * for each step's lifecycle (`agent:plan_step_start`,
- * `agent:plan_step_complete`, `agent:plan_step_failed`).
+ * This is the Tauri shell around [`execute_prepared_plan`]: it checks
+ * approval, validates the plan *before* consuming the approval proof, locks
+ * the project, and forwards step lifecycle progress to the frontend as
+ * `agent:plan_step_start` / `agent:plan_step_complete` /
+ * `agent:plan_step_failed`. Execution, rollback and persisted-op discarding
+ * live in the Tauri-free runner.
  */
 async executeAgentPlan(plan: AgentPlan) : Promise<Result<AgentPlanResult, string>> {
     try {

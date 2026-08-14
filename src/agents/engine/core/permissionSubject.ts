@@ -5,6 +5,8 @@
  * preserving compatibility with legacy tool-name wildcard rules.
  */
 
+import { getActionDispatchingMetaToolNames } from '@/agents/tools/metaTools';
+
 export type PermissionSubjectType =
   | 'capability'
   | 'resource'
@@ -26,7 +28,17 @@ export interface PermissionSubject {
   aliases: string[];
 }
 
-const META_TOOL_NAMES = new Set(['query', 'edit', 'audio', 'effects', 'text', 'generate']);
+/**
+ * Meta-tool names, derived from the registry that defines them.
+ *
+ * A meta-tool call carries the real tool in its `action` argument, so the
+ * permission subject must be compiled from that action, not from the wrapper.
+ * Deriving the set means a new meta-tool cannot silently be permissioned as
+ * itself.
+ */
+const META_TOOL_NAMES: ReadonlySet<string> = new Set(
+  getActionDispatchingMetaToolNames().map((name) => name.toLowerCase()),
+);
 
 const EXACT_SUBJECTS: Record<string, { subjectType: PermissionSubjectType; subject: string }> = {
   analyze_asset: {

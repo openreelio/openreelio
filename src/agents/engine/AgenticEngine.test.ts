@@ -943,6 +943,62 @@ describe('AgenticEngine', () => {
       expect(mockToolExecutor.getExecutionCount()).toBe(0);
     });
 
+    it('Given a batch tool that charges what it applied, When the next step runs, Then it sees the smaller remaining budget', async () => {
+      // A batch tool hides many edits behind one plan step, so the budget it
+      // reads has to be live: frozen per iteration, every batch call in the run
+      // is offered the same full remainder.
+      const planWithTwoSteps: Plan = {
+        goal: 'Two batches',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'split_clip',
+            args: { clipId: 'clip-1', position: 5 },
+            description: 'First batch',
+            riskLevel: 'low',
+            estimatedDuration: 10,
+          },
+          {
+            id: 'step-2',
+            tool: 'split_clip',
+            args: { clipId: 'clip-1', position: 9 },
+            description: 'Second batch',
+            riskLevel: 'low',
+            estimatedDuration: 10,
+            dependsOn: ['step-1'],
+          },
+        ],
+        estimatedTotalDuration: 20,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo operations',
+      };
+
+      let structuredCallCount = 0;
+      vi.spyOn(mockLLM, 'generateStructured').mockImplementation(async () => {
+        structuredCallCount += 1;
+        if (structuredCallCount === 1) return mockThought;
+        if (structuredCallCount === 2) return planWithTwoSteps;
+        return mockObservation;
+      });
+
+      const observedBudgets: Array<number | undefined> = [];
+      const baseExecute = mockToolExecutor.execute.bind(mockToolExecutor);
+      vi.spyOn(mockToolExecutor, 'execute').mockImplementation(async (tool, args, context) => {
+        observedBudgets.push(context.remainingStepBudget);
+        context.chargeStepBudget?.(40);
+        return baseExecute(tool, args, context);
+      });
+
+      const budgetEngine = createAgenticEngine(mockLLM, mockToolExecutor, {
+        enableFastPath: false,
+        maxStepsPerRun: 60,
+      });
+
+      await budgetEngine.run('Run two batches', agentContext, executionContext);
+
+      expect(observedBudgets).toEqual([58, 18]);
+    });
+
     it('Given a destructive fast-path request, When guardrail is enabled, Then approval is required', async () => {
       agentContext.sequenceId = 'sequence-1';
 

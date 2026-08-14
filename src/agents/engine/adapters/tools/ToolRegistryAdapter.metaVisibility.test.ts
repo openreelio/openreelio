@@ -39,11 +39,18 @@ function createTool(name: string, category: ToolCategory, description = name): T
 describe('ToolRegistryAdapter meta-tool visibility', () => {
   beforeEach(() => {
     mockIsMetaToolsEnabled.mockReturnValue(true);
-    mockGetVisibleMetaToolNames.mockReturnValue(['query', 'edit', 'audio', 'effects', 'text']);
+    mockGetVisibleMetaToolNames.mockReturnValue([
+      'query',
+      'edit',
+      'audio',
+      'effects',
+      'text',
+      'execute_plan',
+    ]);
     mockGetWorkspaceToolNames.mockReturnValue(['list_workspace_documents']);
   });
 
-  it('hides execute_plan and individual tools from the default tool surface', () => {
+  it('shows execute_plan and hides individual tools on the default tool surface', () => {
     const registry = new ToolRegistry();
     registry.register(createTool('query', 'analysis'));
     registry.register(createTool('edit', 'timeline'));
@@ -54,7 +61,7 @@ describe('ToolRegistryAdapter meta-tool visibility', () => {
     const adapter = createToolRegistryAdapter(registry);
     const visibleNames = adapter.getAvailableTools().map((tool) => tool.name);
 
-    expect(visibleNames).toEqual(['query', 'edit', 'list_workspace_documents']);
+    expect(visibleNames).toEqual(['query', 'edit', 'execute_plan', 'list_workspace_documents']);
   });
 
   it('keeps category-specific reads unfiltered for non-LLM callers', () => {

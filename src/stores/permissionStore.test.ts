@@ -383,3 +383,85 @@ describe('permissionStore', () => {
     );
   });
 });
+
+describe('permissionStore batch calls', () => {
+  // A batch is one tool call but many edits, so allowing it must mean allowing
+  // every edit it carries — otherwise batching is a way around the per-tool
+  // rules the same calls would hit one at a time.
+
+  function batchArgs(...toolNames: string[]): Record<string, unknown> {
+    return {
+      steps: toolNames.map((toolName, index) => ({
+        id: `s${index + 1}`,
+        toolName,
+        params: { sequenceId: 'seq-1', trackId: 'track-1' },
+      })),
+    };
+  }
+
+  it('should ask for a permissive-preset batch that carries a destructive step', () => {
+    usePermissionStore.getState().setPreset('permissive');
+    const store = usePermissionStore.getState();
+
+    expect(store.resolvePermission('execute_plan', batchArgs('split_clip', 'move_clip'))).toBe(
+      'allow',
+    );
+    expect(
+      store.resolvePermission(
+        'execute_plan',
+        batchArgs('split_clip', 'delete_workspace_entry', 'delete_clip'),
+      ),
+    ).toBe('ask');
+  });
+
+  it('should deny a whole batch when one step is explicitly denied', () => {
+    usePermissionStore.getState().setPreset('permissive');
+    usePermissionStore.getState().addRule('timeline.clip.delete', 'deny', 'global');
+
+    const resolution = usePermissionStore
+      .getState()
+      .resolvePermissionDetails('execute_plan', batchArgs('split_clip', 'delete_clip'));
+
+    expect(resolution.permission).toBe('deny');
+    expect(resolution.matchedPattern).toBe('timeline.clip.delete');
+    expect(resolution.subject).toBe('approval.plan.execute');
+  });
+
+  it('should name the steps that escalated the batch', () => {
+    usePermissionStore.getState().setPreset('permissive');
+    const store = usePermissionStore.getState();
+
+    const resolution = store.resolvePermissionDetails(
+      'execute_plan',
+      batchArgs('split_clip', 'delete_clip', 'delete_clip', 'remove_track'),
+    );
+
+    expect(resolution.escalatingSteps.map((step) => step.toolName)).toEqual([
+      'delete_clip',
+      'remove_track',
+    ]);
+    expect(resolution.escalatingSteps.every((step) => step.permission === 'ask')).toBe(true);
+  });
+
+  it('should not escalate a batch whose steps are all allowed', () => {
+    usePermissionStore.getState().setPreset('permissive');
+    const store = usePermissionStore.getState();
+
+    const resolution = store.resolvePermissionDetails(
+      'execute_plan',
+      batchArgs('split_clip', 'move_clip', 'trim_clip'),
+    );
+
+    expect(resolution.permission).toBe('allow');
+    expect(resolution.escalatingSteps).toEqual([]);
+  });
+
+  it('should stop an allow_always batch grant from covering destructive steps later', () => {
+    usePermissionStore.getState().setPreset('permissive');
+    usePermissionStore.getState().allowAlways('execute_plan', batchArgs('split_clip'));
+
+    const store = usePermissionStore.getState();
+    expect(store.resolvePermission('execute_plan', batchArgs('split_clip'))).toBe('allow');
+    expect(store.resolvePermission('execute_plan', batchArgs('delete_clip'))).toBe('ask');
+  });
+});

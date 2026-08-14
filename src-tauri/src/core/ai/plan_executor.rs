@@ -9,6 +9,22 @@ use std::collections::HashMap;
 use super::agent_plan::{AgentPlan, PlanStep, RollbackReport, StepResult};
 
 // =============================================================================
+// Limits
+// =============================================================================
+
+/// Upper bound on the steps a single plan may carry, shared by every plan
+/// surface (backend `execute_agent_plan`, CLI `plan execute`, MCP `plan.apply`
+/// and the in-app `execute_plan` meta-tool).
+///
+/// A backstop against runaway generation, not a capacity limit: an agent that
+/// emits thousands of steps in one plan has lost the thread, and the damage of
+/// letting that run is far larger than the cost of refusing it.
+///
+/// The TypeScript intercept pins the same value in
+/// `src/agents/engine/adapters/tools/BackendToolExecutor.ts`.
+pub const MAX_PLAN_STEPS: usize = 1000;
+
+// =============================================================================
 // PlanExecutor
 // =============================================================================
 
@@ -35,9 +51,21 @@ impl PlanExecutor {
     }
 
     /// Validates the plan structure and returns execution order as step
-    /// indices. Returns an error if circular dependencies are detected
-    /// or a `depends_on` reference points to a non-existent step.
+    /// indices. Returns an error if the plan exceeds [`MAX_PLAN_STEPS`],
+    /// if circular dependencies are detected, or if a `depends_on` reference
+    /// points to a non-existent step.
+    ///
+    /// Callers run this before touching the project, so an over-cap plan is
+    /// refused before any step mutates state.
     pub fn validate_and_prepare(&self) -> Result<Vec<usize>, String> {
+        if self.plan.steps.len() > MAX_PLAN_STEPS {
+            return Err(format!(
+                "Plan has {} steps, which exceeds the maximum of {}",
+                self.plan.steps.len(),
+                MAX_PLAN_STEPS
+            ));
+        }
+
         topological_sort(&self.plan.steps)
     }
 
@@ -901,5 +929,48 @@ mod tests {
             .expect("Should undo step-1 (insert)");
         // After undoing first insert: 0 clips remain
         assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 0);
+    }
+
+    // =========================================================================
+    // 9. Step cap
+    // =========================================================================
+
+    fn make_capped_plan(step_count: usize) -> AgentPlan {
+        AgentPlan {
+            id: "plan-cap".to_string(),
+            goal: "Step cap probe".to_string(),
+            steps: (0..step_count)
+                .map(|index| make_step(&format!("step-{index}"), vec![]))
+                .collect(),
+            approval_granted: true,
+            approval_proof: None,
+            session_id: None,
+        }
+    }
+
+    #[test]
+    fn validate_and_prepare_rejects_a_plan_over_the_step_cap() {
+        let executor = PlanExecutor::new(make_capped_plan(MAX_PLAN_STEPS + 1));
+
+        let error = executor
+            .validate_and_prepare()
+            .expect_err("an over-cap plan must be refused before any step runs");
+
+        assert!(
+            error.contains(&(MAX_PLAN_STEPS + 1).to_string())
+                && error.contains(&MAX_PLAN_STEPS.to_string()),
+            "the rejection must report the actual and the maximum step count: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_and_prepare_accepts_a_plan_at_the_step_cap() {
+        let executor = PlanExecutor::new(make_capped_plan(MAX_PLAN_STEPS));
+
+        let order = executor
+            .validate_and_prepare()
+            .expect("a plan exactly at the cap is still valid");
+
+        assert_eq!(order.len(), MAX_PLAN_STEPS);
     }
 }

@@ -14,6 +14,7 @@ import {
   createBackendToolExecutor,
   registerCompoundExpander,
   unregisterCompoundExpander,
+  MAX_PLAN_STEPS,
 } from './BackendToolExecutor';
 import type {
   IToolExecutor,
@@ -175,6 +176,24 @@ const TOOL_DEFS: TestToolDef[] = [
     name: 'add_transition',
     description: 'Add a transition',
     category: 'transition',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'set_transition_duration',
+    description: 'Change a transition duration',
+    category: 'transition',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'mute_clip',
+    description: 'Mute a clip',
+    category: 'audio',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'add_text_clip',
+    description: 'Add an on-video text clip',
+    category: 'text',
     parameters: { type: 'object', properties: {} },
   },
   {
@@ -515,17 +534,64 @@ describe('BackendToolExecutor', () => {
       expect(extendedFrontend.execute).not.toHaveBeenCalled();
     });
 
-    it('should fall back to frontend execution for mutating transition tools that are not backend-safe', async () => {
+    it('should route add_transition to backend IPC as an effect command', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'plan-transition',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { createdIds: ['effect-1'] }, durationMs: 5 },
+        ],
+        operationIds: ['op-1'],
+        executionTimeMs: 5,
+      });
+
       const result = await backend.execute(
         'add_transition',
-        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', transitionType: 'dissolve' },
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          clipId: 'clip-1',
+          transitionType: 'dissolve',
+          duration: 1.5,
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      // Callers address the new transition by the effect id the command created.
+      expect(result.data).toMatchObject({ transitionId: 'effect-1' });
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          steps: [
+            expect.objectContaining({
+              toolName: 'addEffect',
+              params: {
+                sequenceId: 'seq-1',
+                trackId: 'track-1',
+                clipId: 'clip-1',
+                effectType: 'cross_dissolve',
+                params: { duration: 1.5 },
+              },
+            }),
+          ],
+        }),
+      });
+      expect(frontend.execute).not.toHaveBeenCalled();
+    });
+
+    it('should fall back to frontend execution for mutating tools that are not backend-safe', async () => {
+      const result = await backend.execute(
+        'add_text_clip',
+        { sequenceId: 'seq-1', text: 'Hello', startTime: 0 },
         CONTEXT,
       );
 
       expect(result.success).toBe(true);
       expect(frontend.execute).toHaveBeenCalledWith(
-        'add_transition',
-        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', transitionType: 'dissolve' },
+        'add_text_clip',
+        { sequenceId: 'seq-1', text: 'Hello', startTime: 0 },
         CONTEXT,
       );
       expect(mockInvoke).not.toHaveBeenCalled();
@@ -836,7 +902,7 @@ describe('BackendToolExecutor', () => {
       });
       expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
         plan: expect.objectContaining({
-          goal: expect.stringContaining('legacy execute_plan'),
+          goal: expect.stringContaining('2-step plan atomically'),
           sessionId: 'session-1',
           steps: [
             expect.objectContaining({
@@ -868,9 +934,9 @@ describe('BackendToolExecutor', () => {
               params: { clipId: 'clip-1', splitTime: 5 },
             },
             {
-              id: 'transition-step',
-              toolName: 'add_transition',
-              params: { clipId: 'clip-1b', transitionType: 'dissolve' },
+              id: 'text-step',
+              toolName: 'add_text_clip',
+              params: { text: 'Hello', startTime: 0 },
             },
           ],
         },
@@ -878,7 +944,10 @@ describe('BackendToolExecutor', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('not approved for backend-safe agent execution');
+      // The rejection must name the step that blocked it and list what is supported.
+      expect(result.error).toContain("Step 'text-step'");
+      expect(result.error).toContain('add_text_clip');
+      expect(result.error).toContain('split_clip');
       expect(frontend.execute).not.toHaveBeenCalled();
       expect(mockInvoke).not.toHaveBeenCalled();
     });
@@ -908,7 +977,8 @@ describe('BackendToolExecutor', () => {
         const result = await extendedBackend.execute('execute_plan', args, CONTEXT);
 
         expect(result.success).toBe(false);
-        expect(result.error).toContain('not approved for backend-safe agent execution');
+        expect(result.error).toContain("Step 'ripple-step'");
+        expect(result.error).toContain('Invalid ripple request');
         expect(extendedFrontend.execute).not.toHaveBeenCalled();
         expect(mockInvoke).not.toHaveBeenCalled();
       } finally {
@@ -975,7 +1045,7 @@ describe('BackendToolExecutor', () => {
       });
       expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
         plan: expect.objectContaining({
-          goal: expect.stringContaining('Promote legacy execute_plan'),
+          goal: expect.stringContaining('2-step plan atomically'),
           steps: [
             expect.objectContaining({ id: 'step-a', toolName: 'splitClip' }),
             expect.objectContaining({ id: 'step-b', toolName: 'moveClip' }),
@@ -1050,13 +1120,8 @@ describe('BackendToolExecutor', () => {
           { id: 'step-a', toolName: 'split_clip', params: { clipId: 'clip-1', atTimelineSec: 5 } },
           {
             id: 'step-b',
-            toolName: 'add_transition',
-            params: {
-              sequenceId: 'seq-1',
-              trackId: 'track-1',
-              clipId: 'clip-1',
-              transitionType: 'dissolve',
-            },
+            toolName: 'add_text_clip',
+            params: { sequenceId: 'seq-1', text: 'Hello', startTime: 0 },
           },
         ],
       };
@@ -1064,9 +1129,259 @@ describe('BackendToolExecutor', () => {
       const result = await extendedBackend.execute('execute_plan', args, CONTEXT);
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('not approved for backend-safe agent execution');
+      expect(result.error).toContain("Step 'step-b'");
+      expect(result.error).toContain('add_text_clip');
       expect(extendedFrontend.execute).not.toHaveBeenCalled();
       expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should reject a plan larger than the shared step cap before invoking the backend', async () => {
+      const steps = Array.from({ length: MAX_PLAN_STEPS + 1 }, (_value, index) => ({
+        id: `step-${index}`,
+        toolName: 'split_clip',
+        params: { clipId: 'clip-1', splitTime: index },
+      }));
+
+      const result = await backend.execute('execute_plan', { steps }, CONTEXT);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain(String(MAX_PLAN_STEPS));
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should reject a plan that alone exceeds the remaining per-run step budget', async () => {
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [
+            { id: 'step-a', toolName: 'split_clip', params: { clipId: 'clip-1', splitTime: 1 } },
+            { id: 'step-b', toolName: 'split_clip', params: { clipId: 'clip-1', splitTime: 2 } },
+            { id: 'step-c', toolName: 'split_clip', params: { clipId: 'clip-1', splitTime: 3 } },
+          ],
+        },
+        { ...CONTEXT, remainingStepBudget: 2 },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('step budget');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should charge applied steps so a later batch in the same run sees the smaller budget', async () => {
+      // A checked-but-never-charged budget bounds one call, not the run: two
+      // batches of 3 would both pass a 4-step remainder.
+      const maxStepsPerRun = 4;
+      const spent = { steps: 0 };
+      const budgetedContext: ExecutionContext = {
+        ...CONTEXT,
+        get remainingStepBudget(): number {
+          return Math.max(0, maxStepsPerRun - spent.steps);
+        },
+        chargeStepBudget: (steps: number): void => {
+          spent.steps += steps;
+        },
+      };
+      const buildSteps = (prefix: string) =>
+        [1, 2, 3].map((index) => ({
+          id: `${prefix}-${index}`,
+          toolName: 'split_clip',
+          params: { clipId: 'clip-1', splitTime: index },
+        }));
+
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'batch-1',
+        success: true,
+        totalSteps: 3,
+        stepsCompleted: 3,
+        stepResults: buildSteps('first').map((step) => ({
+          stepId: step.id,
+          success: true,
+          data: {},
+          durationMs: 1,
+        })),
+        operationIds: ['op-1'],
+        executionTimeMs: 3,
+      });
+
+      const first = await backend.execute(
+        'execute_plan',
+        { steps: buildSteps('first') },
+        budgetedContext,
+      );
+      const second = await backend.execute(
+        'execute_plan',
+        { steps: buildSteps('second') },
+        budgetedContext,
+      );
+
+      expect(first.success).toBe(true);
+      expect(second.success).toBe(false);
+      expect(second.error).toContain('step budget');
+      expect(second.error).toContain('needs 3 steps but only 1');
+      expect(
+        mockInvoke.mock.calls.filter(([command]) => command === 'execute_agent_plan'),
+      ).toHaveLength(1);
+    });
+
+    it('should not charge a batch the backend rolled back', async () => {
+      const maxStepsPerRun = 4;
+      const spent = { steps: 0 };
+      const budgetedContext: ExecutionContext = {
+        ...CONTEXT,
+        get remainingStepBudget(): number {
+          return Math.max(0, maxStepsPerRun - spent.steps);
+        },
+        chargeStepBudget: (steps: number): void => {
+          spent.steps += steps;
+        },
+      };
+
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'batch-rolled-back',
+        success: false,
+        totalSteps: 3,
+        stepsCompleted: 1,
+        stepResults: [{ stepId: 'roll-1', success: false, error: 'boom', durationMs: 1 }],
+        operationIds: [],
+        errorMessage: 'Step failed',
+        executionTimeMs: 2,
+      });
+
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [1, 2, 3].map((index) => ({
+            id: `roll-${index}`,
+            toolName: 'split_clip',
+            params: { clipId: 'clip-1', splitTime: index },
+          })),
+        },
+        budgetedContext,
+      );
+
+      expect(result.success).toBe(false);
+      expect(spent.steps).toBe(0);
+    });
+  });
+
+  // ===========================================================================
+  // Mutation preflight sees the tool's own name and args
+  // ===========================================================================
+
+  describe('mutation preflight input fidelity', () => {
+    // The preflight is keyed on the tool name and on argument names. Routes
+    // that rename the command or rewrite the params must not be able to hide a
+    // bad id or a bad number from it, on either the single-call or batch path.
+
+    it('should preflight a renamed route under its own tool name', async () => {
+      const result = await backend.execute(
+        'mute_clip',
+        { sequenceId: 'seq-1', trackId: 'track-missing', clipId: 'clip-1', muted: true },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('PRECONDITION_FAILED');
+      expect(result.error).toContain('track-missing');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should preflight a renamed route inside a batch under its own tool name', async () => {
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'mute-step',
+              toolName: 'mute_clip',
+              params: { sequenceId: 'seq-1', trackId: 'track-missing', clipId: 'clip-1' },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('PRECONDITION_FAILED');
+      expect(result.error).toContain('track-missing');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should preflight a mapParams route against the args the caller sent', async () => {
+      const result = await backend.execute(
+        'set_transition_duration',
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-missing',
+          transitionId: 'effect-1',
+          duration: -2,
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('PRECONDITION_FAILED');
+      expect(result.error).toContain('track-missing');
+      expect(result.error).toContain('duration must be >= 0');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should preflight a mapParams route inside a batch against the args the caller sent', async () => {
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'transition-step',
+              toolName: 'set_transition_duration',
+              params: {
+                sequenceId: 'seq-1',
+                trackId: 'track-1',
+                transitionId: 'effect-1',
+                duration: -2,
+              },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('duration must be >= 0');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should still promote a batch whose first step passes preflight', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'mute-plan',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [{ stepId: 'mute-step', success: true, data: {}, durationMs: 3 }],
+        operationIds: ['op-1'],
+        executionTimeMs: 3,
+      });
+
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'mute-step',
+              toolName: 'mute_clip',
+              params: { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', muted: true },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          steps: [expect.objectContaining({ toolName: 'setClipMute' })],
+        }),
+      });
     });
   });
 
@@ -1138,13 +1453,8 @@ describe('BackendToolExecutor', () => {
           tools: [
             { name: 'split_clip', args: { clipId: 'c1', atTimelineSec: 5 } },
             {
-              name: 'add_transition',
-              args: {
-                sequenceId: 'seq-1',
-                trackId: 'track-1',
-                clipId: 'clip-1',
-                transitionType: 'dissolve',
-              },
+              name: 'add_text_clip',
+              args: { sequenceId: 'seq-1', text: 'Hello', startTime: 0 },
             },
           ],
           mode: 'sequential',
@@ -1156,15 +1466,10 @@ describe('BackendToolExecutor', () => {
       expect(result.success).toBe(true);
       expect(result.successCount).toBe(2);
       expect(result.failureCount).toBe(0);
-      expect(result.results.map((entry) => entry.tool)).toEqual(['split_clip', 'add_transition']);
+      expect(result.results.map((entry) => entry.tool)).toEqual(['split_clip', 'add_text_clip']);
       expect(frontend.execute).toHaveBeenCalledWith(
-        'add_transition',
-        {
-          sequenceId: 'seq-1',
-          trackId: 'track-1',
-          clipId: 'clip-1',
-          transitionType: 'dissolve',
-        },
+        'add_text_clip',
+        { sequenceId: 'seq-1', text: 'Hello', startTime: 0 },
         CONTEXT,
       );
     });
@@ -1570,6 +1875,92 @@ describe('BackendToolExecutor', () => {
   describe('compound tool expansion', () => {
     afterEach(() => {
       unregisterCompoundExpander('ripple_edit');
+    });
+
+    it('should reject a batch whose compound step follows an edit to the same clip', async () => {
+      // Expanders read the timeline at plan-build time and emit absolute
+      // coordinates, so a stale expansion applies cleanly and silently leaves a
+      // gap. Refuse rather than produce one.
+      registerCompoundExpander('ripple_edit', (args) => [
+        { toolName: 'trimClip', params: { clipId: args.clipId, newSourceOut: args.trimEnd } },
+      ]);
+
+      const extendedFrontend = createMockFrontendExecutor([
+        ...TOOL_DEFS,
+        { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
+      ]);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      const result = await extendedBackend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'move-step',
+              toolName: 'move_clip',
+              params: { trackId: 'track-1', clipId: 'clip-1', newTimelineIn: 4 },
+            },
+            {
+              id: 'ripple-step',
+              toolName: 'ripple_edit',
+              params: { trackId: 'track-1', clipId: 'clip-1', trimEnd: 8 },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Step 'ripple-step'");
+      expect(result.error).toContain('clip-1');
+      expect(result.error).toContain('stale');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should promote a batch whose compound step comes first', async () => {
+      registerCompoundExpander('ripple_edit', (args) => [
+        { toolName: 'trimClip', params: { clipId: args.clipId, newSourceOut: args.trimEnd } },
+      ]);
+
+      const extendedFrontend = createMockFrontendExecutor([
+        ...TOOL_DEFS,
+        { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
+      ]);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'plan-ordered',
+        success: true,
+        totalSteps: 2,
+        stepsCompleted: 2,
+        stepResults: [
+          { stepId: 'ripple-step__1', success: true, data: {}, durationMs: 2 },
+          { stepId: 'move-step', success: true, data: {}, durationMs: 2 },
+        ],
+        operationIds: ['op-1', 'op-2'],
+        executionTimeMs: 4,
+      });
+
+      const result = await extendedBackend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'ripple-step',
+              toolName: 'ripple_edit',
+              params: { trackId: 'track-1', clipId: 'clip-1', trimEnd: 8 },
+            },
+            {
+              id: 'move-step',
+              toolName: 'move_clip',
+              params: { trackId: 'track-1', clipId: 'clip-1', newTimelineIn: 4 },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
     });
 
     it('should expand compound tool into multiple sub-steps for single execute', async () => {

@@ -10,6 +10,7 @@ import { useState } from 'react';
 import { ChevronRight, Shield, ShieldAlert, ShieldCheck } from 'lucide-react';
 import type { ToolApprovalPart } from '@/agents/engine/core/conversation';
 import type { RiskLevel } from '@/agents/engine/core/types';
+import { summarizeBatchStepCalls } from '@/agents/tools/batchToolSteps';
 
 // =============================================================================
 // Types
@@ -97,6 +98,9 @@ export function ToolApprovalPartRenderer({
   const RiskIcon = risk.icon;
   const canAct = part.status === 'pending';
   const hasArgs = Object.keys(part.args).length > 0;
+  // A batch tool's own name says nothing about what it would run, so the
+  // prompt has to name the steps the approval actually covers.
+  const batchSteps = summarizeBatchStepCalls(part.tool, part.args);
 
   return (
     <div
@@ -131,6 +135,14 @@ export function ToolApprovalPartRenderer({
           </div>
           {part.description && (
             <p className="mt-0.5 break-words text-xs text-text-tertiary">{part.description}</p>
+          )}
+          {batchSteps && (
+            <p
+              className="mt-0.5 break-words text-xs text-text-tertiary"
+              data-testid="tool-approval-batch-steps"
+            >
+              Runs: {batchSteps}
+            </p>
           )}
         </div>
       </div>

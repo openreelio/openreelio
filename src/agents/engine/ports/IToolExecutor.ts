@@ -26,6 +26,25 @@ export interface ExecutionContext {
   traceId?: string;
   /** Expected project state version for optimistic consistency checks */
   expectedStateVersion?: number;
+  /**
+   * Plan steps the run may still spend, from the engine's per-run step budget.
+   *
+   * A batch tool applies many edit steps behind a single tool call, so without
+   * this it could smuggle an unbounded amount of work past the budget the
+   * planner is held to. Read it at call time: the engine keeps it live, so it
+   * already reflects everything charged earlier in the run. Undefined means the
+   * caller imposes no step budget.
+   */
+  remainingStepBudget?: number;
+  /**
+   * Charge steps a batch tool actually applied against the run's step budget.
+   *
+   * A checked-but-never-charged budget bounds one call, not the run: N batch
+   * calls would each be offered the full remainder. Call this once per batch
+   * that really executed, with the same step count `remainingStepBudget` was
+   * checked against. Undefined means the caller does no step accounting.
+   */
+  chargeStepBudget?: (steps: number) => void;
   /** Whether this is a dry run */
   dryRun?: boolean;
 }
