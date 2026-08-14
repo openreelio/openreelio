@@ -582,10 +582,10 @@ impl StylePlanner {
             return steps;
         };
 
-        let mut transition_index = 0usize;
-        for boundary in (0..cut_times.len()).step_by(cadence.every_n) {
+        for (transition_index, boundary) in
+            (0..cut_times.len()).step_by(cadence.every_n).enumerate()
+        {
             let step_id = format!("step-{}", cut_times.len() + 2 + transition_index);
-            transition_index += 1;
 
             steps.push(PlanStep {
                 id: step_id,

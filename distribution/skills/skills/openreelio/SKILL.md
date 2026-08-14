@@ -35,7 +35,8 @@ Treat the binary as the source of truth, not this skill.
 is roughly 68 KB — fetch per-verb help instead of loading all of it. Use
 `openreelio-cli command schema` for the 79 backend command types, and
 `openreelio-cli packs list` for the curated caption styles, transition
-recipes, and text presets (`--kind caption|transition|text`).
+recipes, text presets, and pacing profiles
+(`--kind caption|transition|text|pacing`).
 
 Its *examples* are not copy-paste ready: IDs are readable placeholders
 (`asset_001`) rather than the ULIDs the CLI actually returns, and some spell a
@@ -64,8 +65,8 @@ you can look at. Load [Perception](./perception/REFERENCE.md).
 ## Editing
 
 Place, trim, split, move, and speed-change clips; add transitions from curated
-recipes; reach every backend command; run atomic batches. Load
-[Editing](./editing/REFERENCE.md).
+recipes; cut a whole asset to a curated pacing profile; reach every backend
+command; run atomic batches. Load [Editing](./editing/REFERENCE.md).
 
 ## Captions and text
 

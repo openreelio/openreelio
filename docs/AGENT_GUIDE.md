@@ -87,7 +87,7 @@ it into a context window. Fetch help per verb instead
 (`openreelio-cli verify --help`, `openreelio-cli frame extract --help`), use
 `openreelio-cli command schema` for the 79 backend command types, and
 `openreelio-cli packs list` for the curated caption styles, transition recipes,
-and text presets (`--kind caption|transition|text`).
+text presets, and pacing profiles (`--kind caption|transition|text|pacing`).
 
 ### Self-diagnosis
 
@@ -205,6 +205,75 @@ failed and rolled back cleanly, `2` the tool failed, the rollback was
 incomplete (`rollbackIncomplete: true`), or the plan applied but could not be
 saved (`appliedNotSaved: true` — the work is already durable; do **not** re-run
 the plan).
+
+### Pacing profiles: `plan from-profile`
+
+A curated pacing profile names the four decisions an automated cut has to make —
+mean shot length, how far shots swing either side of it, which transition to
+place, and how often — so `dynamic-social` replaces four guesses with one checked
+id. `packs list --kind pacing` prints the registry.
+
+| Profile | Target shot | Variance | Tempo | Transition | Snaps to shot changes |
+|---------|-------------|----------|-------|------------|-----------------------|
+| `shorts-hook-fast` | 1.8 s | 0.6 s | fast | none, hard cuts | yes |
+| `music-montage` | 1.5 s | 0.2 s | fast | none, hard cuts | no |
+| `dynamic-social` | 2.5 s | 1.0 s | moderate | `dissolve-soft` every 4 cuts | yes |
+| `steady-documentary` | 4.5 s | 1.5 s | moderate | `dissolve-standard` every 3 cuts | yes |
+| `calm-longform` | 7.0 s | 2.0 s | slow | `dissolve-long` every 2 cuts | yes |
+
+`transitionEveryN` counts cut boundaries from the first, so `3` places one on the
+1st, 4th and 7th cut. Ids resolve case- and separator-insensitively and accept
+aliases (`shorts`, `montage`, `social`, `doc`, `calm`, …).
+
+Analysis is a precondition, not a nicety: the plan needs the source duration, and
+shot boundaries are what let cuts land on real shot changes. Without a cached
+bundle the command fails and names `analysis run`.
+
+```bash
+openreelio-cli analysis run      --path ./demo --id <ASSET_ID> --shots
+openreelio-cli plan from-profile --path ./demo --profile dynamic-social \
+  --asset <ASSET_ID> [--sequence <SEQUENCE_ID>] [--track-name "Cut"] --out plan.json
+openreelio-cli plan validate     --path ./demo --file plan.json
+openreelio-cli plan execute      --path ./demo --file plan.json
+openreelio-cli verify            --path ./demo --structural-only
+openreelio-cli render start      --path ./demo --proxy --output ./proxy.mp4 --progress
+```
+
+`from-profile` mutates nothing. It prints one JSON object — `status`, `planId`,
+`profile`, `assetId`, `sequenceId`, `stepCount`, `cutCount`, `transitionCount`,
+`transitionRecipe`, `fidelityScore`, `warnings`, `errors`, `outputPath`, and the
+plan inlined under `plan` — and writes the bare plan to `--out`. `--track-name`
+defaults to `Pacing: <profile>`. Review the file, then validate and execute it;
+after the proxy render, score it with a contact sheet against the rubric in the
+skill's `judging/REFERENCE.md`. Two profiles are two candidates, so a profile is
+a natural axis for best-of-N.
+
+The plan creates its own video track (`AddTrack`), inserts the asset
+(`InsertClip`), splits it (`SplitClip` per cut) and adds any transitions
+(`AddEffect`). Steps reference ids earlier steps create, as
+`{"$fromStep": "step-0", "$path": "createdIds.0"}`, so run it whole through
+`plan execute` rather than replaying steps by hand — and `plan validate` rejects
+a reference whose target step is not ordered behind it via `dependsOn`.
+
+### What a pacing profile does not decide
+
+A profile decides pace and transition cadence. Nothing else.
+
+- **No beat sync.** The analysis bundle carries BPM as a single average scalar,
+  not a beat grid. `music-montage` is metronomic, not beat-locked; cutting on the
+  beat needs analysis that does not exist yet.
+- **No content awareness beyond shot boundaries.** The planner does not know what
+  is in frame, whether a sentence finished, or whether a face is mid-blink.
+  `respectShotBoundaries` snapping — a cut moves at most half a target shot to
+  reach a detected shot change — is the whole of it, and it does nothing without
+  cached shot detection.
+- **No randomness.** Shot lengths alternate deterministically, half a variance
+  either side of the target, then scale to fill the source, so the same profile
+  on the same source always yields the same plan. That makes the plan reviewable;
+  it is not a claim of variety.
+- **`fidelityScore` is not a quality score.** It measures how close the mean
+  generated shot is to the profile's target, and says nothing about whether the
+  edit is any good. That judgement belongs to the judging loop.
 
 ### Undo and history
 
