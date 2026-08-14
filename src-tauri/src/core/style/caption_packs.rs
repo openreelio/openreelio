@@ -10,27 +10,60 @@
 //!
 //! Every pack in [`CAPTION_PACKS`] is verified by contract test to:
 //!
-//! - deserialize back into a typed [`CaptionStyle`] after JSON round-trip, and
+//! - deserialize back into a typed [`CaptionStyle`] after JSON round-trip,
 //! - produce zero `CaptionSafeAreaRule` violations on both a 1920x1080 and a
-//!   1080x1920 canvas.
+//!   1080x1920 canvas — the rule measures the text block against the canvas, so
+//!   the two runs are two different measurements rather than one repeated, and
+//! - reach the export `drawtext` filter with the typography it advertises.
 //!
-//! The safe-area guarantee is why every pack anchors with
-//! [`CaptionPosition::Preset`] at a margin at or above the 10% title-safe band:
-//! a preset margin is canvas-independent, so it holds for landscape and vertical
-//! deliveries alike.
+//! Most packs anchor with [`CaptionPosition::Preset`] at a margin at or above
+//! the 10% title-safe band. A pack whose alignment is not centered anchors with
+//! [`CaptionPosition::Custom`] instead, because the renderer reads a preset
+//! anchor as horizontally centered: pairing left alignment with a preset would
+//! put the text's left edge at frame center.
 //!
 //! # Stability
 //!
-//! Pack ids are a public contract. The op log records the id an edit was made
-//! with, so ids are append-only: rename nothing, and add rather than repurpose.
+//! Pack ids are a public contract, so ids are append-only: rename nothing, and
+//! add rather than repurpose. The op log records the concrete style a pack
+//! produced, not the id that produced it — replay never consults this table —
+//! so a rename cannot be repaired by rewriting history.
 
 use serde::{Deserialize, Serialize};
 
 use crate::core::captions::{
-    CaptionPosition, CaptionStyle, Color, FontWeight, TextAlignment, VerticalPosition,
+    CaptionPosition, CaptionStyle, Color, CustomPosition, FontWeight, TextAlignment,
+    VerticalPosition,
 };
 
 use super::normalize_pack_id;
+
+/// Where a pack places its captions.
+///
+/// A preset anchor is canvas-independent, which is what a centered dialogue
+/// subtitle wants. A pack that is not centered has to name its own coordinates:
+/// the render path reads every preset anchor as x = 50%, so pairing left
+/// alignment with a preset would put the text's *left edge* at frame center.
+#[derive(Clone, Debug)]
+enum PackAnchor {
+    /// Vertical preset at a margin percentage of the canvas height.
+    Preset {
+        /// Which edge the margin is measured from.
+        vertical: VerticalPosition,
+        /// Distance from that edge, as a percentage of canvas height.
+        margin_percent: f64,
+    },
+    /// Explicit canvas-percentage anchor.
+    ///
+    /// `x_percent` is the text's left edge for a left-aligned pack and its
+    /// center for a centered one, matching how `drawtext` reads the anchor.
+    Custom {
+        /// Horizontal anchor, as a percentage of canvas width.
+        x_percent: f64,
+        /// Vertical center of the text block, as a percentage of canvas height.
+        y_percent: f64,
+    },
+}
 
 /// Immutable definition of one curated caption style pack.
 ///
@@ -56,8 +89,7 @@ pub struct CaptionPackSpec {
     shadow_color: Option<Color>,
     shadow_offset: f32,
     alignment: TextAlignment,
-    vertical: VerticalPosition,
-    margin_percent: f64,
+    anchor: PackAnchor,
 }
 
 impl CaptionPackSpec {
@@ -81,9 +113,21 @@ impl CaptionPackSpec {
 
     /// Materializes the typed caption position for this pack.
     pub fn position(&self) -> CaptionPosition {
-        CaptionPosition::Preset {
-            vertical: self.vertical.clone(),
-            margin_percent: self.margin_percent,
+        match &self.anchor {
+            PackAnchor::Preset {
+                vertical,
+                margin_percent,
+            } => CaptionPosition::Preset {
+                vertical: vertical.clone(),
+                margin_percent: *margin_percent,
+            },
+            PackAnchor::Custom {
+                x_percent,
+                y_percent,
+            } => CaptionPosition::Custom(CustomPosition {
+                x_percent: *x_percent,
+                y_percent: *y_percent,
+            }),
         }
     }
 
@@ -159,8 +203,10 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         }),
         shadow_offset: 2.0,
         alignment: TextAlignment::Center,
-        vertical: VerticalPosition::Bottom,
-        margin_percent: 10.0,
+        anchor: PackAnchor::Preset {
+            vertical: VerticalPosition::Bottom,
+            margin_percent: 10.0,
+        },
     },
     CaptionPackSpec {
         id: "clean-minimal",
@@ -177,8 +223,10 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         shadow_color: None,
         shadow_offset: 0.0,
         alignment: TextAlignment::Center,
-        vertical: VerticalPosition::Bottom,
-        margin_percent: 10.0,
+        anchor: PackAnchor::Preset {
+            vertical: VerticalPosition::Bottom,
+            margin_percent: 10.0,
+        },
     },
     CaptionPackSpec {
         id: "boxed-contrast",
@@ -200,8 +248,10 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         shadow_color: None,
         shadow_offset: 0.0,
         alignment: TextAlignment::Center,
-        vertical: VerticalPosition::Bottom,
-        margin_percent: 10.0,
+        anchor: PackAnchor::Preset {
+            vertical: VerticalPosition::Bottom,
+            margin_percent: 10.0,
+        },
     },
     CaptionPackSpec {
         id: "yellow-classic",
@@ -228,8 +278,10 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         }),
         shadow_offset: 2.0,
         alignment: TextAlignment::Center,
-        vertical: VerticalPosition::Bottom,
-        margin_percent: 10.0,
+        anchor: PackAnchor::Preset {
+            vertical: VerticalPosition::Bottom,
+            margin_percent: 10.0,
+        },
     },
     CaptionPackSpec {
         id: "shorts-bold-outline",
@@ -251,12 +303,14 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         }),
         shadow_offset: 3.0,
         alignment: TextAlignment::Center,
-        vertical: VerticalPosition::Bottom,
-        margin_percent: 18.0,
+        anchor: PackAnchor::Preset {
+            vertical: VerticalPosition::Bottom,
+            margin_percent: 18.0,
+        },
     },
     CaptionPackSpec {
         id: "broadcast-lower",
-        description: "Left-aligned boxed caption at lower-third height, for name plates and \
+        description: "Left-aligned boxed name plate anchored in the lower-left third, for \
                       attribution rather than dialogue.",
         aliases: &["broadcast", "lower-third"],
         font_family: "Arial",
@@ -279,8 +333,14 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         }),
         shadow_offset: 2.0,
         alignment: TextAlignment::Left,
-        vertical: VerticalPosition::Bottom,
-        margin_percent: 14.0,
+        // The only non-centered pack, so the only one that cannot use a preset:
+        // `drawtext` puts a left-aligned run's left edge on the anchor, and a
+        // preset anchor is always x = 50%. 10% from the left is the title-safe
+        // edge, which is where a name plate belongs.
+        anchor: PackAnchor::Custom {
+            x_percent: 10.0,
+            y_percent: 84.0,
+        },
     },
     CaptionPackSpec {
         id: "high-contrast-accessible",
@@ -302,8 +362,10 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         shadow_color: None,
         shadow_offset: 0.0,
         alignment: TextAlignment::Center,
-        vertical: VerticalPosition::Bottom,
-        margin_percent: 12.0,
+        anchor: PackAnchor::Preset {
+            vertical: VerticalPosition::Bottom,
+            margin_percent: 12.0,
+        },
     },
     CaptionPackSpec {
         id: "caption-top",
@@ -325,8 +387,10 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         }),
         shadow_offset: 2.0,
         alignment: TextAlignment::Center,
-        vertical: VerticalPosition::Top,
-        margin_percent: 12.0,
+        anchor: PackAnchor::Preset {
+            vertical: VerticalPosition::Top,
+            margin_percent: 12.0,
+        },
     },
 ];
 
@@ -425,6 +489,25 @@ mod tests {
                 error.contains(pack.id),
                 "error must name '{}': {error}",
                 pack.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_centered_pack_never_anchors_with_a_preset() {
+        // The render path resolves every preset anchor to x = 50%, so left or
+        // right alignment paired with one puts the text's edge at frame center
+        // instead of where the pack says it goes.
+        for pack in CAPTION_PACKS {
+            if pack.style().alignment == TextAlignment::Center {
+                continue;
+            }
+
+            assert!(
+                matches!(pack.position(), CaptionPosition::Custom(_)),
+                "pack '{}' is {:?}-aligned, so it must name its own x anchor",
+                pack.id,
+                pack.style().alignment
             );
         }
     }
