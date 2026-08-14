@@ -2102,7 +2102,21 @@ fn active_sequence(path: &str) -> String {
         .to_string()
 }
 
-/// A plan that applies cleanly exits 0 and survives a reopen.
+/// Reads the persisted snapshot, the cache only a completed save advances.
+///
+/// A reopen alone cannot tell a saved plan from an unsaved one — replaying the
+/// append-only ops log rebuilds the same state either way, which is exactly the
+/// trap `appliedNotSaved` exists to report. The snapshot is where the two
+/// outcomes differ.
+fn persisted_snapshot(path: &str) -> serde_json::Value {
+    let snapshot_path = std::path::Path::new(path)
+        .join(".openreelio")
+        .join("state")
+        .join("snapshot.json");
+    serde_json::from_str(&std::fs::read_to_string(&snapshot_path).unwrap()).unwrap()
+}
+
+/// A plan that applies cleanly exits 0, reaches the snapshot, and survives a reopen.
 #[test]
 fn test_plan_execute_applies_and_persists() {
     let dir = create_temp_project("plan_execute_ok");
@@ -2124,6 +2138,16 @@ fn test_plan_execute_applies_and_persists() {
     let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(result["status"], "ok");
     assert_eq!(result["stepsExecuted"], 1);
+
+    // Exit 0 promises applied *and saved*. Without this, an
+    // applied-but-not-saved run would satisfy the reopen assertion below just
+    // as well, and the exit code would be asserting nothing.
+    let applied_op_id = result["stepResults"][0]["opId"].as_str().unwrap();
+    assert_eq!(
+        persisted_snapshot(&path)["lastOpId"],
+        applied_op_id,
+        "exit 0 must mean the plan reached the snapshot, not only the ops log"
+    );
 
     // A separate process, so this reads the project back off disk.
     assert!(track_names(&path).contains(&"KEPT".to_string()));
