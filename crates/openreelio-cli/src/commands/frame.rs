@@ -104,8 +104,8 @@ pub struct ExtractArgs {
     #[arg(long, conflicts_with_all = ["times", "grid"])]
     pub time: Option<f64>,
 
-    /// Comma-separated timeline times in seconds; --out must be a directory
-    #[arg(long, value_delimiter = ',', conflicts_with = "grid")]
+    /// Comma-separated timeline times in seconds; --out must be a directory unless --grid is given
+    #[arg(long, value_delimiter = ',')]
     pub times: Option<Vec<f64>>,
 
     /// Sequence ID (defaults to active)
@@ -124,16 +124,16 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub format: Option<String>,
 
-    /// Contact sheet grid as COLSxROWS (requires --between)
-    #[arg(long, requires = "between")]
+    /// Contact sheet grid as COLSxROWS (requires --between or --times)
+    #[arg(long)]
     pub grid: Option<String>,
 
-    /// Timeline range to sample for --grid
-    #[arg(long, num_args = 2, value_names = ["START", "END"])]
+    /// Time range to sample for --grid
+    #[arg(long, num_args = 2, value_names = ["START", "END"], requires = "grid", conflicts_with = "times")]
     pub between: Option<Vec<f64>>,
 
-    /// Number of grid samples (defaults to columns * rows)
-    #[arg(long, requires = "grid")]
+    /// Number of grid samples (defaults to columns * rows; only for --between)
+    #[arg(long, requires = "grid", conflicts_with = "times")]
     pub count: Option<usize>,
 
     /// Contact sheet cell width in pixels (64-1024, default 320)
@@ -192,6 +192,7 @@ impl TimelineMode {
 }
 
 /// What the caller asked for, after argument validation.
+#[derive(Debug)]
 enum Selection {
     /// A single frame from an asset's own media timebase.
     AssetTime { asset_id: String, source_time: f64 },
@@ -199,68 +200,128 @@ enum Selection {
     SingleTime(f64),
     /// Several timeline stills written into the `--out` directory.
     BatchTimes(Vec<f64>),
-    /// A contact sheet sampled over a timeline range.
+    /// A contact sheet, either sampled over a range or built from listed times.
     Grid {
         columns: usize,
         /// Rows the samples fill, which is fewer than `--grid` asked for when
-        /// `--count` does not fill the layout.
+        /// `--count` or the `--times` list does not fill the layout.
         rows: usize,
         times: Vec<f64>,
     },
 }
 
+/// Resolves a `--grid` request into the times its cells will show.
+///
+/// The layout accepts two sources: `--between`, which samples the range evenly,
+/// and `--times`, which takes the caller's own list in the order given — that is
+/// what makes cut-boundary sheets possible, since the agent already knows the
+/// cut times from `timeline clips`.
+fn resolve_grid_selection(args: &ExtractArgs, grid: &str) -> anyhow::Result<Selection> {
+    let (columns, rows) = parse_grid_spec(grid)?;
+    let capacity = columns.checked_mul(rows).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid value for --grid: {}x{} is too large",
+            columns,
+            rows
+        )
+    })?;
+    if capacity > MAX_GRID_CELLS {
+        return Err(anyhow::anyhow!(
+            "Invalid value for --grid: {}x{} needs {} cells, more than the maximum of {}",
+            columns,
+            rows,
+            capacity,
+            MAX_GRID_CELLS
+        ));
+    }
+
+    let times = match (&args.between, &args.times) {
+        (Some(range), None) => sampled_grid_times(args, range, columns, rows, capacity)?,
+        (None, Some(listed)) => listed_grid_times(listed, columns, rows, capacity)?,
+        (Some(_), Some(_)) => {
+            return Err(anyhow::anyhow!(
+                "--grid takes either --between <START> <END> or --times <A,B,...>, not both"
+            ))
+        }
+        (None, None) => {
+            return Err(anyhow::anyhow!(
+                "--grid requires --between <START> <END> or --times <A,B,...>"
+            ))
+        }
+    };
+
+    Ok(Selection::Grid {
+        columns,
+        // FFmpeg's `tile` filter fills unused cells with black, so a sheet
+        // built from fewer samples than the requested capacity would carry
+        // dead rows. Keep only the rows the samples reach.
+        rows: times.len().div_ceil(columns),
+        times,
+    })
+}
+
+/// Evenly samples the `--between` range for a contact sheet.
+fn sampled_grid_times(
+    args: &ExtractArgs,
+    range: &[f64],
+    columns: usize,
+    rows: usize,
+    capacity: usize,
+) -> anyhow::Result<Vec<f64>> {
+    if range.len() != 2 {
+        return Err(anyhow::anyhow!("--between takes exactly two values"));
+    }
+    validate::time_range_ordered(range[0], range[1], "between START", "between END")?;
+
+    let count = args.count.unwrap_or(capacity);
+    if count < 1 {
+        return Err(anyhow::anyhow!("Invalid value for --count: must be >= 1"));
+    }
+    if count > capacity {
+        return Err(anyhow::anyhow!(
+            "Invalid value for --count: {} exceeds the {}x{} grid capacity of {}",
+            count,
+            columns,
+            rows,
+            capacity
+        ));
+    }
+
+    Ok(sample_times(range[0], range[1], count))
+}
+
+/// Validates an explicit `--times` list used as contact-sheet cells.
+///
+/// The order is the caller's: cell 0 shows the first listed time, so a list of
+/// cut boundaries reads across the sheet the way the edit plays.
+fn listed_grid_times(
+    listed: &[f64],
+    columns: usize,
+    rows: usize,
+    capacity: usize,
+) -> anyhow::Result<Vec<f64>> {
+    if listed.is_empty() {
+        return Err(anyhow::anyhow!("--times requires at least one value"));
+    }
+    for time in listed {
+        validate::time_non_negative(*time, "times")?;
+    }
+    if listed.len() > capacity {
+        return Err(anyhow::anyhow!(
+            "Invalid value for --times: {} values exceed the {}x{} grid capacity of {}",
+            listed.len(),
+            columns,
+            rows,
+            capacity
+        ));
+    }
+
+    Ok(listed.to_vec())
+}
+
 fn resolve_selection(args: &ExtractArgs) -> anyhow::Result<Selection> {
     if let Some(grid) = &args.grid {
-        let (columns, rows) = parse_grid_spec(grid)?;
-        let range = args
-            .between
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("--grid requires --between <START> <END>"))?;
-        if range.len() != 2 {
-            return Err(anyhow::anyhow!("--between takes exactly two values"));
-        }
-        validate::time_range_ordered(range[0], range[1], "between START", "between END")?;
-
-        let capacity = columns.checked_mul(rows).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Invalid value for --grid: {}x{} is too large",
-                columns,
-                rows
-            )
-        })?;
-        if capacity > MAX_GRID_CELLS {
-            return Err(anyhow::anyhow!(
-                "Invalid value for --grid: {}x{} needs {} cells, more than the maximum of {}",
-                columns,
-                rows,
-                capacity,
-                MAX_GRID_CELLS
-            ));
-        }
-        let count = args.count.unwrap_or(capacity);
-        if count < 1 {
-            return Err(anyhow::anyhow!("Invalid value for --count: must be >= 1"));
-        }
-        if count > capacity {
-            return Err(anyhow::anyhow!(
-                "Invalid value for --count: {} exceeds the {}x{} grid capacity of {}",
-                count,
-                columns,
-                rows,
-                capacity
-            ));
-        }
-
-        let times = sample_times(range[0], range[1], count);
-
-        return Ok(Selection::Grid {
-            columns,
-            // FFmpeg's `tile` filter fills unused cells with black, so a sheet
-            // built from fewer samples than the requested capacity would carry
-            // dead rows. Keep only the rows the samples reach.
-            rows: times.len().div_ceil(columns),
-            times,
-        });
+        return resolve_grid_selection(args, grid);
     }
 
     if let Some(asset_id) = &args.asset {
@@ -1140,6 +1201,58 @@ mod tests {
             cell_height: None,
             label_cells: false,
         }
+    }
+
+    #[test]
+    fn resolve_selection_should_build_a_grid_from_an_explicit_time_list() {
+        let mut args = grid_args("3x2", None);
+        args.between = None;
+        args.times = Some(vec![4.0, 1.5, 9.25]);
+
+        let Selection::Grid {
+            columns,
+            rows,
+            times,
+        } = resolve_selection(&args).expect("selection resolves")
+        else {
+            panic!("Expected a grid selection");
+        };
+        assert_eq!(columns, 3);
+        assert_eq!(rows, 1, "Three samples over three columns fill one row");
+        assert_eq!(
+            times,
+            vec![4.0, 1.5, 9.25],
+            "Listed times must keep the caller's order"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_more_listed_times_than_the_grid_holds() {
+        let mut args = grid_args("2x2", None);
+        args.between = None;
+        args.times = Some(vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+
+        let error = resolve_selection(&args).expect_err("Five times cannot fill a 2x2 sheet");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("--times") && message.contains("capacity"),
+            "Error should name the flag and the capacity, got: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_a_grid_without_a_time_source() {
+        let mut args = grid_args("2x2", None);
+        args.between = None;
+
+        let error = resolve_selection(&args).expect_err("A grid needs times to show");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("--between") && message.contains("--times"),
+            "Error should name both accepted sources, got: {message}"
+        );
     }
 
     #[test]

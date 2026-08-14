@@ -1985,6 +1985,80 @@ fn test_frame_extract_builds_contact_sheet_for_grid() {
 }
 
 #[test]
+fn test_frame_extract_builds_a_contact_sheet_from_an_explicit_time_list() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_grid_times_test", 4) else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("cuts.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--times",
+        "3.0,0.5,1.75",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["sheet"]["cols"], 2);
+    assert_eq!(
+        result["sheet"]["rows"], 2,
+        "Three cells over two columns fill two rows"
+    );
+
+    let cells = result["sheet"]["cells"].as_array().unwrap();
+    let placed: Vec<(u64, u64, u64, f64)> = cells
+        .iter()
+        .map(|cell| {
+            (
+                cell["index"].as_u64().unwrap(),
+                cell["row"].as_u64().unwrap(),
+                cell["col"].as_u64().unwrap(),
+                cell["timelineSec"].as_f64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        placed,
+        vec![(0, 0, 0, 3.0), (1, 0, 1, 0.5), (2, 1, 0, 1.75)],
+        "Listed times must fill the grid in the order given"
+    );
+
+    assert!(sheet_path.exists(), "Expected the contact sheet to exist");
+}
+
+#[test]
+fn test_frame_extract_rejects_a_grid_without_a_time_source() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_grid_source_test", 4)
+    else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("sheet.jpg");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("--between") && stderr.contains("--times"),
+        "Expected the error to name both accepted time sources, got: {stderr}"
+    );
+    assert!(!sheet_path.exists());
+}
+
+#[test]
 fn test_frame_extract_sizes_contact_sheet_cells_from_the_requested_geometry() {
     let Some((dir, path, _)) = create_project_with_timeline_clip("frame_cell_size_test", 4) else {
         return;
