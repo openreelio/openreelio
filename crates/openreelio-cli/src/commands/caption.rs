@@ -3,9 +3,11 @@
 use crate::output;
 use crate::validate;
 use clap::Subcommand;
-use openreelio_core::captions::{map_source_segments_to_timeline, parse_srt, parse_vtt, Caption};
+use openreelio_core::captions::{
+    map_source_segments_to_timeline, parse_srt, parse_vtt, Caption, CaptionPosition,
+};
 use openreelio_core::commands::*;
-use openreelio_core::style::resolve_caption_layers;
+use openreelio_core::style::{resolve_caption_layers, resolve_caption_pack, resolve_caption_style};
 use openreelio_core::timeline::{Clip, Sequence, TrackKind};
 use openreelio_core::ActiveProject;
 use serde_json::{Map, Value};
@@ -44,7 +46,8 @@ pub enum CaptionAction {
         #[arg(long = "style-json")]
         style_json: Option<String>,
 
-        /// Optional position preset: top, center, bottom
+        /// Optional position preset: top, center, bottom. Names a vertical
+        /// anchor only; the margin comes from --style-pack when one is named.
         #[arg(long)]
         position: Option<String>,
 
@@ -84,7 +87,8 @@ pub enum CaptionAction {
         end: Option<f64>,
 
         /// Optional curated caption pack id (see `packs list --kind caption`).
-        /// The pack is the base layer; --style-json and --position override it.
+        /// Restyles only: the caption keeps its position unless --position or
+        /// --position-json is also given. --style-json overrides the pack.
         #[arg(long = "style-pack")]
         style_pack: Option<String>,
 
@@ -92,7 +96,8 @@ pub enum CaptionAction {
         #[arg(long = "style-json")]
         style_json: Option<String>,
 
-        /// Optional position preset: top, center, bottom
+        /// Optional position preset: top, center, bottom. Names a vertical
+        /// anchor only; the margin comes from --style-pack when one is named.
         #[arg(long)]
         position: Option<String>,
 
@@ -166,7 +171,8 @@ pub enum CaptionAction {
         #[arg(long = "style-json")]
         style_json: Option<String>,
 
-        /// Optional position preset: top, center, bottom
+        /// Optional position preset: top, center, bottom. Names a vertical
+        /// anchor only; the margin comes from --style-pack when one is named.
         #[arg(long)]
         position: Option<String>,
 
@@ -517,7 +523,33 @@ fn validate_caption_style_json(style: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_position_preset(position: Option<String>) -> anyhow::Result<Option<serde_json::Value>> {
+/// Margin the CLI falls back to when nothing else supplies one.
+const DEFAULT_PRESET_MARGIN_PERCENT: f64 = 5.0;
+
+/// Returns the margin `--position top|center|bottom` should carry.
+///
+/// The flag names a vertical anchor, not a margin, so the number underneath it
+/// is the CLI's choice rather than the caller's. When a pack is named, the
+/// pack's own checked margin is that choice: a synthesized default would
+/// otherwise displace the margin the pack exists to guarantee, dropping a
+/// caption lifted clear of platform UI back under it.
+fn preset_margin_percent(style_pack: Option<&str>) -> anyhow::Result<f64> {
+    let Some(pack_id) = style_pack else {
+        return Ok(DEFAULT_PRESET_MARGIN_PERCENT);
+    };
+
+    let pack = resolve_caption_pack(pack_id).map_err(|error| anyhow::anyhow!("{}", error))?;
+    Ok(match pack.position() {
+        CaptionPosition::Preset { margin_percent, .. } => margin_percent,
+        // A pack anchored by coordinates has no margin to lend.
+        CaptionPosition::Custom(_) => DEFAULT_PRESET_MARGIN_PERCENT,
+    })
+}
+
+fn parse_position_preset(
+    position: Option<String>,
+    margin_percent: f64,
+) -> anyhow::Result<Option<serde_json::Value>> {
     let Some(position) = position else {
         return Ok(None);
     };
@@ -537,7 +569,7 @@ fn parse_position_preset(position: Option<String>) -> anyhow::Result<Option<serd
     Ok(Some(serde_json::json!({
         "type": "preset",
         "vertical": vertical,
-        "marginPercent": 5,
+        "marginPercent": margin_percent,
     })))
 }
 
@@ -621,6 +653,7 @@ fn validate_custom_position_coordinate(
 fn parse_caption_position(
     position: Option<String>,
     position_json: Option<String>,
+    style_pack: Option<&str>,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     if position.is_some() && position_json.is_some() {
         return Err(anyhow::anyhow!(
@@ -633,7 +666,7 @@ fn parse_caption_position(
         return Ok(parsed_json);
     }
 
-    parse_position_preset(position)
+    parse_position_preset(position, preset_margin_percent(style_pack)?)
 }
 
 /// Applies a curated caption pack underneath the caller's explicit style and
@@ -651,6 +684,18 @@ fn apply_caption_pack(
     let resolved = resolve_caption_layers(style_pack, style, position)
         .map_err(|error| anyhow::anyhow!("{}", error))?;
     Ok((resolved.style, resolved.position))
+}
+
+/// Applies a curated caption pack as style only.
+///
+/// `caption update` writes whatever position it is given, so a pack anchor
+/// riding along with a restyle would move a caption the caller only asked to
+/// restyle. `--position`/`--position-json` remain the way to move one.
+fn apply_caption_pack_style(
+    style_pack: Option<&str>,
+    style: Option<serde_json::Value>,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    resolve_caption_style(style_pack, style).map_err(|error| anyhow::anyhow!("{}", error))
 }
 
 fn get_sequence<'a>(project: &'a ActiveProject, sequence_id: &str) -> anyhow::Result<&'a Sequence> {
@@ -1071,7 +1116,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             validate::time_range_ordered(start, end, "start", "end")?;
 
             let style = parse_style_json(style_json)?;
-            let position = parse_caption_position(position, position_json)?;
+            let position = parse_caption_position(position, position_json, style_pack.as_deref())?;
             let (style, position) = apply_caption_pack(style_pack.as_deref(), style, position)?;
 
             let mut project = super::load_project(&path)?;
@@ -1120,8 +1165,10 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             }
 
             let style = parse_style_json(style_json)?;
-            let position = parse_caption_position(position, position_json)?;
-            let (style, position) = apply_caption_pack(style_pack.as_deref(), style, position)?;
+            // A pack on an update restyles; only an explicit position moves the
+            // caption.
+            let position = parse_caption_position(position, position_json, style_pack.as_deref())?;
+            let style = apply_caption_pack_style(style_pack.as_deref(), style)?;
 
             if text.is_none()
                 && start.is_none()
@@ -1241,7 +1288,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             let language = normalize_caption_language_arg(language)?;
             let captions = load_caption_file(&subtitle_path, format)?;
             let style = parse_style_json(style_json)?;
-            let position = parse_caption_position(position, position_json)?;
+            let position = parse_caption_position(position, position_json, style_pack.as_deref())?;
             let (style, position) = apply_caption_pack(style_pack.as_deref(), style, position)?;
 
             if captions.is_empty() {

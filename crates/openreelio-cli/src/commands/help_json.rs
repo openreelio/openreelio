@@ -309,7 +309,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "end": { "type": "number", "required": true, "desc": "End time in seconds" },
                     "style-pack": { "type": "string", "required": false, "desc": "Curated caption pack id from packs.list; the pack is the base layer and --style-json/--position override it key by key" },
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object" },
-                    "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
+                    "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom. A vertical anchor only; the margin comes from --style-pack when one is named, else 5%" },
                     "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
@@ -350,7 +350,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "language": { "type": "string", "required": false, "desc": "Language code stored on the caption track and generated caption segments" },
                     "style-pack": { "type": "string", "required": false, "desc": "Curated caption pack id from packs.list applied to every imported cue" },
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object applied to all cues" },
-                    "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
+                    "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom. A vertical anchor only; the margin comes from --style-pack when one is named, else 5%" },
                     "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object applied to all cues" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
@@ -409,9 +409,9 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "text": { "type": "string", "required": false, "desc": "New caption text" },
                     "start": { "type": "number", "required": false, "desc": "New caption start time in seconds" },
                     "end": { "type": "number", "required": false, "desc": "New caption end time in seconds" },
-                    "style-pack": { "type": "string", "required": false, "desc": "Curated caption pack id from packs.list; restyles an existing caption in one flag" },
+                    "style-pack": { "type": "string", "required": false, "desc": "Curated caption pack id from packs.list; restyles an existing caption in one flag and leaves its position alone (pass --position to move it)" },
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object" },
-                    "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
+                    "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom. A vertical anchor only; the margin comes from --style-pack when one is named, else 5%" },
                     "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },

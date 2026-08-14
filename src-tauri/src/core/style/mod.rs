@@ -25,6 +25,15 @@
 //! so an override spelled one way removes every spelling the pack contributed.
 //! Without that, a pack's `fontSize` would silently outrank a caller's
 //! `font_size`.
+//!
+//! Positions layer only within one anchoring mode. A pack anchor and a caller
+//! anchor that disagree about *how* they place the caption do not blend, so the
+//! caller's replaces the pack's outright — see [`resolve_caption_layers`].
+//!
+//! Restyling is the one place a pack is style-only: `UpdateCaption` replaces
+//! whatever position the command carries, so a pack anchor riding along with a
+//! restyle would move a caption nobody asked to move. [`resolve_caption_style`]
+//! is the entry point for that case.
 
 pub mod caption_packs;
 pub mod transition_recipes;
@@ -86,6 +95,15 @@ const CAPTION_POSITION_KEY_GROUPS: &[&[&str]] = &[
     &["yPercent", "y_percent", "y"],
 ];
 
+/// Position JSON keys that name a custom anchor's coordinates.
+///
+/// A position object carrying any of these is a custom anchor even when it
+/// omits `type`, because that is how every consumer already reads it: the CLI
+/// validator defaults a missing `type` to `custom`, and the render path falls
+/// through to the coordinate branch when no `type` is present.
+const CUSTOM_POSITION_COORDINATE_KEYS: &[&str] =
+    &["xPercent", "x_percent", "x", "yPercent", "y_percent", "y"];
+
 /// The style and position a caption command should store on its clip.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedCaptionLayers {
@@ -107,8 +125,11 @@ pub struct ResolvedEffectRecipe {
 /// Resolves a caption style pack against caller-supplied style and position.
 ///
 /// The pack is the base layer; `style` and `position` override it key by key.
-/// A position override whose `type` differs from the pack's replaces the pack
+/// A position override that anchors differently from the pack replaces the pack
 /// position outright, because a preset anchor and a custom anchor do not merge.
+/// Anchoring mode is read from `type` when present and from the coordinate keys
+/// when it is not, so `{"xPercent": 25, "yPercent": 80}` replaces a preset pack
+/// anchor rather than decorating it with keys the render path never reads.
 ///
 /// Returns an error naming every valid pack id when `style_pack` is unknown.
 pub fn resolve_caption_layers(
@@ -135,6 +156,22 @@ pub fn resolve_caption_layers(
         )),
         position: Some(merge_position_layer(pack_position, position)),
     })
+}
+
+/// Resolves a caption style pack for an edit that must not move the caption.
+///
+/// `UpdateCaption` replaces the stored anchor whenever the command carries one,
+/// so a pack anchor riding along with a restyle would silently reposition a
+/// caption that was placed deliberately — a caption lifted clear of a burned-in
+/// lower third would drop straight back into it. A pack on an update therefore
+/// contributes style only; a new anchor has to be asked for explicitly.
+///
+/// Returns an error naming every valid pack id when `style_pack` is unknown.
+pub fn resolve_caption_style(
+    style_pack: Option<&str>,
+    style: Option<Value>,
+) -> Result<Option<Value>, String> {
+    Ok(resolve_caption_layers(style_pack, style, None)?.style)
 }
 
 /// Resolves a transition recipe against a caller-supplied effect type and params.
@@ -220,23 +257,67 @@ fn merge_json_layer(base: Value, overrides: Option<Value>, groups: &[&[&str]]) -
     Value::Object(merged)
 }
 
+/// Classifies a caption position object as `preset` or `custom`.
+///
+/// `type` decides when it is present. Otherwise a coordinate key decides, which
+/// is what makes a type-less `{"xPercent": …, "yPercent": …}` a custom anchor
+/// rather than an untyped fragment. `None` means the object names neither — a
+/// partial such as `{"marginPercent": 20}`, which can only be read as an
+/// overlay on whatever it is merged onto.
+fn position_anchor_kind(value: &Value) -> Option<String> {
+    if let Some(explicit) = value.get("type").and_then(Value::as_str) {
+        return Some(explicit.trim().to_ascii_lowercase());
+    }
+
+    CUSTOM_POSITION_COORDINATE_KEYS
+        .iter()
+        .any(|key| value.get(*key).is_some())
+        .then(|| "custom".to_string())
+}
+
 /// Merges a caption position override onto a pack position.
 ///
-/// Positions only merge within one anchoring mode: an override that names a
-/// different `type` replaces the pack position instead of blending preset and
-/// custom fields into an object that means neither.
+/// Positions only merge within one anchoring mode: an override that anchors
+/// differently from the pack replaces the pack position instead of blending
+/// preset and custom fields into an object that means neither.
 fn merge_position_layer(base: Value, overrides: Option<Value>) -> Value {
     let Some(overrides) = overrides.filter(|value| !value.is_null()) else {
         return base;
     };
 
-    let base_type = base.get("type").and_then(Value::as_str);
-    let override_type = overrides.get("type").and_then(Value::as_str);
-    if override_type.is_some() && override_type != base_type {
+    let base_kind = position_anchor_kind(&base);
+    let override_kind = position_anchor_kind(&overrides);
+    if override_kind.is_some() && override_kind != base_kind {
         return overrides;
     }
 
-    merge_json_layer(base, Some(overrides), CAPTION_POSITION_KEY_GROUPS)
+    let merged = merge_json_layer(base, Some(overrides), CAPTION_POSITION_KEY_GROUPS);
+    drop_dead_preset_coordinates(merged)
+}
+
+/// Removes coordinate keys from a preset anchor.
+///
+/// The render path returns as soon as it reads `"type":"preset"`, so `xPercent`
+/// or `yPercent` sitting next to it are keys no consumer reads while looking
+/// exactly like an applied position. One object must mean one anchor.
+fn drop_dead_preset_coordinates(position: Value) -> Value {
+    let is_preset = position
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("preset"));
+    if !is_preset {
+        return position;
+    }
+
+    match position {
+        Value::Object(mut object) => {
+            for key in CUSTOM_POSITION_COORDINATE_KEYS {
+                object.remove(*key);
+            }
+            Value::Object(object)
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +411,68 @@ mod tests {
             resolve_caption_layers(Some("standard-outline"), None, Some(custom.clone())).unwrap();
 
         assert_eq!(resolved.position, Some(custom));
+    }
+
+    #[test]
+    fn type_less_custom_coordinates_replace_the_pack_anchor() {
+        // The CLI accepts and range-validates this shape without stamping a
+        // `type`, so it has to read as a custom anchor here too.
+        let custom = serde_json::json!({ "xPercent": 25.0, "yPercent": 80.0 });
+        let resolved =
+            resolve_caption_layers(Some("clean-minimal"), None, Some(custom.clone())).unwrap();
+
+        assert_eq!(resolved.position, Some(custom));
+    }
+
+    #[test]
+    fn a_merged_preset_never_carries_coordinate_keys() {
+        let resolved = resolve_caption_layers(
+            Some("clean-minimal"),
+            None,
+            Some(serde_json::json!({ "type": "preset", "vertical": "top", "yPercent": 12.0 })),
+        )
+        .unwrap();
+
+        let position = resolved.position.expect("position");
+        assert!(
+            position.get("yPercent").is_none(),
+            "a preset anchor must not carry dead coordinates: {position}"
+        );
+        let typed: CaptionPosition = serde_json::from_value(position).unwrap();
+        assert!(matches!(typed, CaptionPosition::Preset { .. }));
+    }
+
+    #[test]
+    fn a_margin_only_override_still_merges_onto_a_preset_pack() {
+        let resolved = resolve_caption_layers(
+            Some("shorts-bold-outline"),
+            None,
+            Some(serde_json::json!({ "marginPercent": 22.0 })),
+        )
+        .unwrap();
+
+        let position: CaptionPosition =
+            serde_json::from_value(resolved.position.expect("position")).unwrap();
+        assert_eq!(
+            position,
+            CaptionPosition::Preset {
+                vertical: crate::core::captions::VerticalPosition::Bottom,
+                margin_percent: 22.0,
+            }
+        );
+    }
+
+    #[test]
+    fn style_only_resolution_never_produces_a_position() {
+        let style = resolve_caption_style(Some("boxed-contrast"), None)
+            .unwrap()
+            .expect("style");
+
+        let typed: CaptionStyle = serde_json::from_value(style).unwrap();
+        assert_eq!(
+            typed,
+            resolve_caption_pack("boxed-contrast").unwrap().style()
+        );
     }
 
     #[test]
@@ -431,9 +574,9 @@ mod tests {
 
     #[test]
     fn resolution_is_idempotent_for_recipes() {
-        let first = resolve_effect_recipe(Some("zoom-punch"), None, HashMap::new()).unwrap();
+        let first = resolve_effect_recipe(Some("wipe-down"), None, HashMap::new()).unwrap();
         let second = resolve_effect_recipe(
-            Some("zoom-punch"),
+            Some("wipe-down"),
             first.effect_type.clone(),
             first.params.clone(),
         )

@@ -9181,7 +9181,11 @@ export type UpdateAgentRunPhaseInput = { runId: string; phase: string; traceId: 
 export type UpdateAssetPayload = { assetId: string; name: string | null; tags: string[] | null; license: LicenseInfo | null; thumbnailUrl: string | null; proxyStatus: ProxyStatus | null; proxyUrl: string | null; uri: string | null; durationSec: number | null; fileSize: number | null; video: VideoInfo | null; audio: AudioInfo | null; relativePath: string | null; workspaceManaged: boolean | null; missing: boolean | null }
 export type UpdateCaptionPayload = { sequenceId: string; trackId: string; captionId: string; text: string | null; startSec: number | null; endSec: number | null; style: JsonValue | null; position: JsonValue | null; 
 /**
- * Curated caption pack id, resolved into `style` + `position`.
+ * Curated caption pack id, resolved into `style` only.
+ * 
+ * An update replaces the stored anchor whenever it carries one, so a pack
+ * on an update restyles without moving the caption. Pass `position` to
+ * move it.
  */
 stylePack?: string | null }
 /**

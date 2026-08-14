@@ -651,7 +651,11 @@ pub struct UpdateCaptionPayload {
     // Keep them to avoid rejecting payloads during strict parsing.
     pub style: Option<serde_json::Value>,
     pub position: Option<serde_json::Value>,
-    /// Curated caption pack id, resolved into `style` + `position`.
+    /// Curated caption pack id, resolved into `style` only.
+    ///
+    /// An update replaces the stored anchor whenever it carries one, so a pack
+    /// on an update restyles without moving the caption. Pass `position` to
+    /// move it.
     #[serde(default)]
     pub style_pack: Option<String>,
 }
@@ -1546,15 +1550,23 @@ impl CommandPayload {
     ///
     /// This runs at the single strict-parsing chokepoint every JSON entry point
     /// shares — GUI IPC, `command execute`, `plan execute`, agent steps — so a
-    /// pack id is resolved once, before the command is built, and the op log
-    /// records the concrete style or effect type it produced alongside the id
-    /// that produced it.
+    /// pack id is resolved once, before the command is built. What reaches the
+    /// op log is the concrete style or effect type the pack produced; the id
+    /// itself is not persisted, which is what makes replay independent of the
+    /// pack table rather than a lookup into a registry that may have moved.
     ///
     /// The resolution is idempotent: re-parsing an already-resolved payload
     /// yields the same values, because the explicit fields it wrote fully cover
     /// the pack layer underneath.
+    ///
+    /// `UpdateCaption` is the one asymmetric case: a pack there contributes
+    /// style only. The command replaces the stored anchor whenever it carries
+    /// one, so inheriting the pack anchor would move a caption whose placement
+    /// the caller never mentioned.
     fn resolve_curated_packs(&mut self) -> Result<(), String> {
-        use crate::core::style::{resolve_caption_layers, resolve_effect_recipe};
+        use crate::core::style::{
+            resolve_caption_layers, resolve_caption_style, resolve_effect_recipe,
+        };
 
         /// Applies a caption pack in place, leaving explicit values on top.
         fn apply_caption_pack(
@@ -1574,11 +1586,10 @@ impl CommandPayload {
                 &mut payload.style,
                 &mut payload.position,
             )?,
-            Self::UpdateCaption(payload) => apply_caption_pack(
-                payload.style_pack.as_deref(),
-                &mut payload.style,
-                &mut payload.position,
-            )?,
+            Self::UpdateCaption(payload) => {
+                payload.style =
+                    resolve_caption_style(payload.style_pack.as_deref(), payload.style.take())?;
+            }
             Self::ImportGeneratedCaptions(payload) => apply_caption_pack(
                 payload.style_pack.as_deref(),
                 &mut payload.style,
