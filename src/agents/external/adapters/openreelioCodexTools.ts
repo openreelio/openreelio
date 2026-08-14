@@ -4150,15 +4150,15 @@ function buildCommandSchema(): CodexJsonObject {
         note: 'Use this read-only tool before ImportGeneratedCaptions. Set sequenceAudio=true (default captioning path) for the edited timeline mix; its captionSegments are TIMELINE-relative and pass straight to ImportGeneratedCaptions. assetId transcription is SOURCE-relative (0-based to the asset) and is not safe as direct timeline caption times; pass clipId plus sequenceId/trackId to receive timelineCaptionSegments remapped onto a timeline clip.',
       },
       AddTextClip: {
-        required: ['sequenceId', 'trackId', 'timelineIn', 'duration', 'textData'],
-        optional: ['preset'],
+        required: ['sequenceId', 'trackId', 'timelineIn', 'duration'],
+        optional: ['preset', 'textData'],
         textDataShape:
           'TextClipData includes content, style(fontFamily/fontSize/fontWeight/color/backgroundColor/backgroundPadding/alignment/bold/italic/underline/lineHeight/letterSpacing), position(x/y 0..1), shadow(color/offsetX/offsetY/blur), outline(color/width), rotation, and opacity.',
         presetHints: textPresetKeys(),
         presetShape:
-          'preset names a curated text preset that supplies the whole TextClipData; textData then carries only what overrides it, commonly just content. Every id and alias listed here is accepted.',
+          'preset names a curated text preset that supplies the whole TextClipData; textData then carries only what overrides it, commonly just content, and may be omitted entirely. Every id and alias listed here is accepted. Nested layers merge key by key, so {"style":{"bold":false}} or {"shadow":{"offsetX":2}} keeps everything else the preset chose.',
         presetCatalog: textPresetCatalog(),
-        note: 'Text clips must be placed on a top/front video or overlay track above the base video. The Codex bridge will correct below-base text tracks when possible. Use SetClipTransform after creation when scale or anchor must be exact.',
+        note: 'Either preset or textData must be present: without a preset, textData is required and must be complete. Text clips must be placed on a top/front video or overlay track above the base video. The Codex bridge will correct below-base text tracks when possible. Use SetClipTransform after creation when scale or anchor must be exact.',
       },
       UpdateTextClip: {
         required: ['sequenceId', 'trackId', 'clipId', 'textData'],
@@ -4259,7 +4259,7 @@ function buildCommandSchema(): CodexJsonObject {
         'Read timeline_snapshot to find active sequence, existing text clips, and usable video/overlay tracks.',
         'Read annotation_read for overlapping source assets when placement should avoid faces, objects, or OCR text.',
         'CreateTrack(kind="video" or "overlay", position=0) when there is no unlocked non-overlapping text track above the media.',
-        'AddTextClip with complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity.',
+        'AddTextClip with a preset id, or with a complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity when no preset fits.',
         'Prefer preset plus a content override over hand-assembled typography; presetCatalog under payloadHints.AddTextClip says what each id is for.',
         'SetClipTransform for exact preview drag/resize/rotate parity using normalized position, scale, rotationDeg, and anchor.',
         'SetClipMotionKeyframes for editable text or media motion presets such as zoom in, zoom out, and Ken Burns.',

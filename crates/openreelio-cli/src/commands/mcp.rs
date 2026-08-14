@@ -1482,13 +1482,13 @@ fn build_command_schema() -> Value {
                 "note": "Use this read-only MCP tool to check whether local Whisper is compiled in and which model files are installed."
             },
             "AddTextClip": {
-                "required": ["sequenceId", "trackId", "timelineIn", "duration", "textData"],
-                "optional": ["preset"],
+                "required": ["sequenceId", "trackId", "timelineIn", "duration"],
+                "optional": ["preset", "textData"],
                 "textDataShape": "TextClipData includes content, style(fontFamily/fontSize/fontWeight/color/backgroundColor/backgroundPadding/alignment/bold/italic/underline/lineHeight/letterSpacing), position(x/y 0..1), shadow(color/offsetX/offsetY/blur), outline(color/width), rotation, and opacity.",
                 "presetHints": text_preset_keys,
-                "presetShape": "preset names a curated text preset that supplies the whole TextClipData; textData then carries only what overrides it, commonly just content. Every id and alias listed here is accepted by this payload and by `text add --preset`.",
+                "presetShape": "preset names a curated text preset that supplies the whole TextClipData; textData then carries only what overrides it, commonly just content, and may be omitted entirely. Every id and alias listed here is accepted by this payload and by `text add --preset`. Nested layers merge key by key, so {\"style\":{\"bold\":false}} or {\"shadow\":{\"offsetX\":2}} keeps everything else the preset chose.",
                 "presetCatalog": text_preset_catalog,
-                "note": "Text clips must be placed on a video or overlay track. Use SetClipTransform after creation when scale or anchor must be exact."
+                "note": "Either preset or textData must be present: without a preset, textData is required and must be complete. Text clips must be placed on a video or overlay track. Use SetClipTransform after creation when scale or anchor must be exact."
             },
             "UpdateTextClip": {
                 "required": ["sequenceId", "trackId", "clipId", "textData"],
@@ -1512,7 +1512,7 @@ fn build_command_schema() -> Value {
                 "Read timeline.snapshot to find the active sequence, existing text clips, and usable video/overlay tracks.",
                 "Read annotation.read for overlapping source assets when placement should avoid faces, objects, or OCR text.",
                 "CreateTrack(kind=\"video\" or \"overlay\") when there is no unlocked non-overlapping text track above the media.",
-                "AddTextClip with complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity.",
+                "AddTextClip with a preset id, or with a complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity when no preset fits.",
                 "Prefer preset plus a content override over hand-assembled typography; see presetCatalog under payloadHints.AddTextClip for what each id is for.",
                 "SetClipTransform for exact preview drag/resize/rotate parity using normalized position, scale, rotationDeg, and anchor."
             ],
@@ -2460,6 +2460,63 @@ mod tests {
             .as_array()
             .expect("AddTextClip must describe what each preset is for");
         assert_eq!(catalog.len(), TEXT_PRESETS.len());
+    }
+
+    #[test]
+    fn should_declare_the_add_text_clip_fields_the_parser_actually_requires() {
+        // A hint is only worth reading if it matches the wire shape. `textData`
+        // was left in `required` when `preset` was added, which tells a client
+        // to hand-assemble the typography the preset field exists to replace.
+        let schema = build_command_schema();
+        let hint = &schema["payloadHints"]["AddTextClip"];
+
+        let required: Vec<&str> = hint["required"]
+            .as_array()
+            .expect("required list")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let optional: Vec<&str> = hint["optional"]
+            .as_array()
+            .expect("optional list")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+
+        assert!(
+            !required.contains(&"textData"),
+            "textData is optional once a preset is named: {required:?}"
+        );
+        assert!(optional.contains(&"textData") && optional.contains(&"preset"));
+
+        // The payload built from exactly the required fields plus a preset is
+        // the one the hint promises works.
+        let mut payload = serde_json::Map::new();
+        for field in &required {
+            payload.insert(
+                (*field).to_string(),
+                match *field {
+                    "timelineIn" => serde_json::json!(0.0),
+                    "duration" => serde_json::json!(3.0),
+                    other => serde_json::json!(other),
+                },
+            );
+        }
+        payload.insert("preset".to_string(), serde_json::json!("centered-title"));
+        CommandPayload::parse("AddTextClip".to_string(), Value::Object(payload))
+            .expect("the advertised required set plus a preset must parse");
+
+        // And without either half it must still fail, which is what the note says.
+        CommandPayload::parse(
+            "AddTextClip".to_string(),
+            serde_json::json!({
+                "sequenceId": "seq",
+                "trackId": "track",
+                "timelineIn": 0.0,
+                "duration": 3.0,
+            }),
+        )
+        .expect_err("neither preset nor textData must be rejected");
     }
 
     #[test]
