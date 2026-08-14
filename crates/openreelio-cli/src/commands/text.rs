@@ -7,7 +7,9 @@ use openreelio_core::commands::{
     get_text_data, is_text_clip, AddTextClipCommand, AddTrackCommand, MoveClipCommand,
     RemoveTextClipCommand, SetClipTransformCommand, TrimClipCommand, UpdateTextCommand,
 };
-use openreelio_core::style::{resolve_text_preset, text_preset_ids, NO_TEXT_PRESET};
+use openreelio_core::style::{
+    reconcile_bold_and_font_weight, resolve_text_preset, text_preset_ids, NO_TEXT_PRESET,
+};
 use openreelio_core::timeline::{Sequence, Track, TrackKind, Transform};
 use openreelio_core::{
     text::{TextAlignment, TextClipData, TextPosition, TextStyle},
@@ -557,6 +559,13 @@ fn merge_style(base: &mut TextStyle, style_json: &str) -> anyhow::Result<()> {
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("--style-json must be a JSON object"))?;
 
+    // `bold` and `fontWeight` are one decision, so which half the caller named
+    // decides which one follows the other. Recorded before the fields are
+    // written and settled afterwards by the shared core reconciler, so this
+    // patch and the `preset` merge at the payload boundary cannot disagree.
+    let bold_was_named = object.contains_key("bold");
+    let font_weight_was_named = style_field(object, "fontWeight", "font_weight").is_some();
+
     if let Some(value) = style_field(object, "fontFamily", "font_family") {
         base.font_family = json_string(value, "fontFamily")?;
     }
@@ -565,7 +574,6 @@ fn merge_style(base: &mut TextStyle, style_json: &str) -> anyhow::Result<()> {
     }
     if let Some(value) = style_field(object, "fontWeight", "font_weight") {
         base.font_weight = json_number::<u16>(value, "fontWeight")?.clamp(100, 900);
-        base.bold = base.font_weight >= 600;
     }
     if let Some(value) = object.get("color") {
         base.color = json_string(value, "color")?;
@@ -585,7 +593,6 @@ fn merge_style(base: &mut TextStyle, style_json: &str) -> anyhow::Result<()> {
     }
     if let Some(value) = object.get("bold") {
         base.bold = json_bool(value, "bold")?;
-        base.font_weight = if base.bold { 700 } else { 400 };
     }
     if let Some(value) = object.get("italic") {
         base.italic = json_bool(value, "italic")?;
@@ -599,6 +606,8 @@ fn merge_style(base: &mut TextStyle, style_json: &str) -> anyhow::Result<()> {
     if let Some(value) = style_field(object, "letterSpacing", "letter_spacing") {
         base.letter_spacing = json_i32(value, "letterSpacing")?;
     }
+
+    reconcile_bold_and_font_weight(base, bold_was_named, font_weight_was_named);
 
     Ok(())
 }
@@ -616,6 +625,11 @@ fn parse_alignment(value: &str) -> anyhow::Result<TextAlignment> {
 }
 
 fn apply_patch(mut text_data: TextClipData, patch: TextPatch) -> anyhow::Result<TextClipData> {
+    // Flags outrank `--style-json`, so the pair is settled once, from the flags,
+    // after everything else has been written. See `reconcile_bold_and_font_weight`.
+    let bold_was_named = patch.bold.is_some();
+    let font_weight_was_named = patch.font_weight.is_some();
+
     if let Some(raw) = patch.text_json {
         text_data = parse_json_object("--text-json", &raw)?;
     }
@@ -650,7 +664,6 @@ fn apply_patch(mut text_data: TextClipData, patch: TextPatch) -> anyhow::Result<
     }
     if let Some(value) = patch.font_weight {
         text_data.style.font_weight = value.clamp(100, 900);
-        text_data.style.bold = text_data.style.font_weight >= 600;
     }
     if let Some(value) = patch.color {
         text_data.style.color = value;
@@ -663,7 +676,6 @@ fn apply_patch(mut text_data: TextClipData, patch: TextPatch) -> anyhow::Result<
     }
     if let Some(value) = patch.bold {
         text_data.style.bold = value;
-        text_data.style.font_weight = if value { 700 } else { 400 };
     }
     if let Some(value) = patch.italic {
         text_data.style.italic = value;
@@ -692,6 +704,8 @@ fn apply_patch(mut text_data: TextClipData, patch: TextPatch) -> anyhow::Result<
     if let Some(value) = patch.opacity {
         text_data.opacity = value;
     }
+
+    reconcile_bold_and_font_weight(&mut text_data.style, bold_was_named, font_weight_was_named);
 
     text_data.validate().map_err(anyhow::Error::msg)?;
     Ok(text_data)
@@ -1224,6 +1238,96 @@ mod tests {
         assert_eq!(patched.style.font_family, "Georgia");
         assert!(patched.style.italic);
         assert!((patched.opacity - 0.95).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_settle_the_weight_pair_the_way_the_payload_boundary_does() {
+        // `text add --preset X --style-json '{"bold":false}'` and the same
+        // logical input through `AddTextClip` must produce one overlay: both
+        // route the pair through the shared core reconciler.
+        let flags_and_json: [(TextPatch, serde_json::Value); 3] = [
+            (
+                TextPatch {
+                    style_json: Some(r#"{"bold":false}"#.to_string()),
+                    ..Default::default()
+                },
+                serde_json::json!({ "style": { "bold": false } }),
+            ),
+            (
+                TextPatch {
+                    style_json: Some(r#"{"fontWeight":400}"#.to_string()),
+                    ..Default::default()
+                },
+                serde_json::json!({ "style": { "fontWeight": 400 } }),
+            ),
+            (
+                TextPatch {
+                    style_json: Some(r#"{"bold":true,"fontWeight":900}"#.to_string()),
+                    ..Default::default()
+                },
+                serde_json::json!({ "style": { "bold": true, "fontWeight": 900 } }),
+            ),
+        ];
+
+        for (patch, text_data) in flags_and_json {
+            let described = format!("{text_data}");
+            let base = parse_text_preset(Some("centered-title".to_string()), "Copy").unwrap();
+            let patched = apply_patch(base, patch).expect("patch applies");
+
+            let mut text_data = text_data;
+            text_data["content"] = serde_json::json!("Copy");
+            let resolved = openreelio_core::style::resolve_text_clip_data(
+                Some("centered-title"),
+                Some(text_data),
+            )
+            .expect("payload resolves");
+
+            assert_eq!(
+                (patched.style.bold, patched.style.font_weight),
+                (resolved.style.bold, resolved.style.font_weight),
+                "the CLI and the payload boundary disagree on {described}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_let_the_named_half_of_the_weight_pair_decide_the_other() {
+        // Turning bold off must drop the preset's derived 700, or the render
+        // paths OR it straight back on and the readback lies about the frame.
+        let unbolded = apply_patch(
+            parse_text_preset(Some("centered-title".to_string()), "Copy").unwrap(),
+            TextPatch {
+                bold: Some(false),
+                ..Default::default()
+            },
+        )
+        .expect("patch applies");
+        assert!(!unbolded.style.bold);
+        assert_eq!(unbolded.style.font_weight, 400);
+
+        let lightened = apply_patch(
+            parse_text_preset(Some("centered-title".to_string()), "Copy").unwrap(),
+            TextPatch {
+                font_weight: Some(400),
+                ..Default::default()
+            },
+        )
+        .expect("patch applies");
+        assert!(!lightened.style.bold);
+        assert_eq!(lightened.style.font_weight, 400);
+
+        // Naming both leaves both alone: there is nothing left to infer.
+        let explicit = apply_patch(
+            parse_text_preset(Some("subtitle".to_string()), "Copy").unwrap(),
+            TextPatch {
+                bold: Some(true),
+                font_weight: Some(900),
+                ..Default::default()
+            },
+        )
+        .expect("patch applies");
+        assert!(explicit.style.bold);
+        assert_eq!(explicit.style.font_weight, 900);
     }
 
     #[test]

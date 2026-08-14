@@ -1022,6 +1022,39 @@ fn ffmpeg_hex_color(hex: &str, opacity: f64) -> String {
     }
 }
 
+/// The ASS script the libass export path burns this project's overlays with.
+fn ass_script_for(state: &ProjectState) -> String {
+    let sequence_id = state
+        .active_sequence_id
+        .clone()
+        .expect("the fixture sets an active sequence");
+    let sequence = state.sequences.get(&sequence_id).expect("sequence exists");
+    crate::core::render::export::build_ass_text_overlay_script(sequence, &state.effects, 1920, 1080)
+        .expect("the ASS script must build")
+        .expect("a text overlay must produce an ASS script")
+}
+
+/// The preview render spec the graph hands the compositor for the text clip.
+fn preview_text_render_spec(state: &ProjectState) -> crate::core::render::graph::TextRenderSpec {
+    let sequence_id = state
+        .active_sequence_id
+        .clone()
+        .expect("the fixture sets an active sequence");
+    let graph = crate::core::render::graph::build_render_graph(state, &sequence_id)
+        .expect("the render graph must build");
+
+    graph
+        .visual_layers
+        .iter()
+        .find_map(|layer| match &layer.source {
+            crate::core::render::graph::VisualRenderSource::Text { render_spec, .. } => {
+                render_spec.clone()
+            }
+            _ => None,
+        })
+        .expect("the text clip must reach the preview graph with a render spec")
+}
+
 /// The `x=` expression a preset's anchor and alignment must produce.
 fn expected_text_x_expression(clip_data: &crate::core::text::TextClipData) -> String {
     let x = clip_data.position.x;
@@ -1092,6 +1125,109 @@ fn explicit_text_data_overrides_the_preset_key_by_key() {
     assert!(stored.style.italic, "the quote preset is italic");
     assert_eq!(stored.opacity, preset.default_clip_data().opacity);
     assert_eq!(stored.shadow, preset.default_clip_data().shadow);
+}
+
+/// Asserts every render path agrees the overlay is regular weight, not bold.
+///
+/// `bold` and `fontWeight` are two spellings of one decision, and each render
+/// path reconciles them by OR-ing, so a stored pair that disagrees renders bold
+/// no matter which half said otherwise. Checking the merged JSON alone would
+/// miss exactly that.
+fn assert_renders_regular_weight(state: &ProjectState, clip: &Clip, case: &str) {
+    let stored = crate::core::commands::get_text_data(clip, state)
+        .unwrap_or_else(|| panic!("{case}: the clip must store text data"));
+    assert!(!stored.style.bold, "{case}: readback must not claim bold");
+    assert_eq!(
+        stored.style.font_weight, 400,
+        "{case}: readback weight must agree with the readback bold flag"
+    );
+
+    // drawtext expresses bold through the fontconfig style suffix.
+    let filter =
+        crate::core::render::export::build_text_clip_drawtext_with_enable(clip, &state.effects)
+            .unwrap_or_else(|error| panic!("{case}: the filter must build: {error}"));
+    assert!(
+        !filter.contains(":style=Bold"),
+        "{case}: drawtext must not select a bold face, got: {filter}"
+    );
+
+    // The ASS export carries the weight into every dialogue line.
+    let script = ass_script_for(state);
+    assert!(
+        script.contains(r"\b400") && !script.contains(r"\b700"),
+        "{case}: the ASS event must carry weight 400, got: {script}"
+    );
+
+    // The preview graph reconciles the same pair for the canvas compositor.
+    let spec = preview_text_render_spec(state);
+    assert!(
+        !spec.style.bold,
+        "{case}: the preview spec must not be bold, got: {spec:?}"
+    );
+    assert_eq!(
+        spec.style.font_weight, 400,
+        "{case}: the preview spec weight must agree with its bold flag"
+    );
+}
+
+#[test]
+fn turning_bold_off_on_a_bold_preset_renders_regular_everywhere() {
+    // `centered-title` is bold, so its serialized base carries fontWeight 700.
+    // A caller who never mentions fontWeight must still get a regular overlay.
+    let (state, clip) = add_text_clip_with_preset(
+        "centered-title",
+        Some(json!({
+            "content": TEXT_OVERLAY_CONTENT,
+            "style": { "bold": false },
+        })),
+    );
+
+    assert_renders_regular_weight(&state, &clip, "bold:false");
+
+    // Nothing else about the preset moved.
+    let preset = crate::core::style::resolve_text_preset("centered-title").expect("preset");
+    let stored = crate::core::commands::get_text_data(&clip, &state).expect("text data");
+    assert_eq!(stored.style.font_size, preset.style().font_size);
+    assert_eq!(stored.position, preset.position());
+}
+
+#[test]
+fn lowering_the_font_weight_on_a_bold_preset_renders_regular_everywhere() {
+    // The symmetric case: naming only the numeric half must drop `bold` too,
+    // or the effect layer promotes the weight straight back to 700.
+    let (state, clip) = add_text_clip_with_preset(
+        "centered-title",
+        Some(json!({
+            "content": TEXT_OVERLAY_CONTENT,
+            "style": { "fontWeight": 400 },
+        })),
+    );
+
+    assert_renders_regular_weight(&state, &clip, "fontWeight:400");
+}
+
+#[test]
+fn naming_both_halves_of_the_weight_pair_keeps_both() {
+    // With both named there is nothing to infer, so neither is rewritten —
+    // which is also what makes replaying a resolved op idempotent.
+    let (state, clip) = add_text_clip_with_preset(
+        "subtitle",
+        Some(json!({
+            "content": TEXT_OVERLAY_CONTENT,
+            "style": { "bold": true, "fontWeight": 900 },
+        })),
+    );
+
+    let stored = crate::core::commands::get_text_data(&clip, &state).expect("text data");
+    assert!(stored.style.bold);
+    assert_eq!(stored.style.font_weight, 900);
+
+    let filter =
+        crate::core::render::export::build_text_clip_drawtext_with_enable(&clip, &state.effects)
+            .expect("filter builds");
+    assert!(filter.contains(":style=Bold"), "got: {filter}");
+    assert!(ass_script_for(&state).contains(r"\b900"));
+    assert!(preview_text_render_spec(&state).style.bold);
 }
 
 #[test]

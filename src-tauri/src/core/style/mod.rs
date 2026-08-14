@@ -50,7 +50,7 @@ use std::collections::HashMap;
 use serde_json::{Map, Value};
 
 use crate::core::effects::{EffectType, ParamValue};
-use crate::core::text::TextClipData;
+use crate::core::text::{TextClipData, TextStyle};
 
 pub use caption_packs::{
     caption_pack_ids, list_caption_packs, resolve_caption_pack, CaptionPackDescriptor,
@@ -64,6 +64,15 @@ pub use transition_recipes::{
     list_transition_recipes, resolve_transition_recipe, transition_recipe_ids, RecipeParam,
     TransitionRecipeDescriptor, TransitionRecipeSpec, TRANSITION_RECIPES,
 };
+
+/// The numeric weight a bold text style carries.
+const BOLD_FONT_WEIGHT: u16 = 700;
+
+/// The numeric weight a regular text style carries.
+const REGULAR_FONT_WEIGHT: u16 = 400;
+
+/// The weight at and above which every render path reads a style as bold.
+const BOLD_FONT_WEIGHT_THRESHOLD: u16 = 600;
 
 /// The preset id that means "no preset", accepted everywhere a preset is named.
 ///
@@ -242,8 +251,13 @@ pub fn resolve_effect_recipe(
 /// `null` clears an optional layer, so `{"shadow":null}` drops the preset's
 /// shadow.
 ///
+/// `bold` and `fontWeight` are reconciled after the merge, because they are one
+/// decision spelled two ways — see [`reconcile_bold_and_font_weight`].
+///
 /// Without a preset this is just the strict `TextClipData` parse the payload
-/// always did, so `text_data` stays required in that case.
+/// always did, so `text_data` stays required in that case. Reconciliation is
+/// likewise skipped there: with no base layer underneath, nothing the caller
+/// left out was filled in on its behalf.
 ///
 /// Returns an error naming every valid preset id when `preset` is unknown.
 pub fn resolve_text_clip_data(
@@ -263,13 +277,68 @@ pub fn resolve_text_clip_data(
     };
 
     let preset = resolve_text_preset(preset_id)?;
+    let overrides = text_data.filter(|value| !value.is_null());
+    let (bold_was_named, font_weight_was_named) = named_bold_and_font_weight(overrides.as_ref());
 
     let mut base = serde_json::to_value(preset.default_clip_data())
         .map_err(|error| format!("Failed to serialize text preset: {error}"))?;
-    merge_json_deep(&mut base, text_data.filter(|value| !value.is_null()));
+    merge_json_deep(&mut base, overrides);
 
-    serde_json::from_value(base)
-        .map_err(|error| format!("Invalid textData for preset '{}': {error}", preset.id))
+    let mut resolved: TextClipData = serde_json::from_value(base)
+        .map_err(|error| format!("Invalid textData for preset '{}': {error}", preset.id))?;
+    reconcile_bold_and_font_weight(&mut resolved.style, bold_was_named, font_weight_was_named);
+
+    Ok(resolved)
+}
+
+/// Reconciles the paired `bold` and `fontWeight` fields after a layered override.
+///
+/// The two are one decision spelled two ways: every render path reads bold as
+/// `bold || fontWeight >= 600`, so a caller who layers `{"bold": false}` onto a
+/// base that carries `fontWeight: 700` gets an overlay that renders bold, reads
+/// back as regular, and matches neither the base nor the request. Whichever half
+/// the caller named wins and the other follows it; naming both keeps both, since
+/// then there is nothing left to infer.
+///
+/// Every surface that layers a style onto a base — the payload boundary's preset
+/// merge and the CLI's `--style-json` patch — routes through here, so the two
+/// cannot answer identical input differently.
+pub fn reconcile_bold_and_font_weight(
+    style: &mut TextStyle,
+    bold_was_named: bool,
+    font_weight_was_named: bool,
+) {
+    match (bold_was_named, font_weight_was_named) {
+        (true, false) => {
+            style.font_weight = if style.bold {
+                BOLD_FONT_WEIGHT
+            } else {
+                REGULAR_FONT_WEIGHT
+            };
+        }
+        (false, true) => {
+            style.bold = style.font_weight >= BOLD_FONT_WEIGHT_THRESHOLD;
+        }
+        _ => {}
+    }
+}
+
+/// Reports which half of the bold/`fontWeight` pair a `textData` override named.
+///
+/// Only the spelling the [`TextStyle`] deserializer actually reads counts:
+/// `font_weight` is dropped on the floor by serde, so treating it as named would
+/// make `bold` follow a value that never landed.
+fn named_bold_and_font_weight(text_data: Option<&Value>) -> (bool, bool) {
+    let Some(style) = text_data
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("style"))
+        .and_then(Value::as_object)
+    else {
+        return (false, false);
+    };
+
+    let named = |key: &str| style.get(key).is_some_and(|value| !value.is_null());
+    (named("bold"), named("fontWeight"))
 }
 
 /// Merges `overrides` onto `base` recursively, key by key.

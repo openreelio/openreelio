@@ -3743,7 +3743,11 @@ fn append_ass_text_style_and_event(
     }
 }
 
-fn build_ass_text_overlay_script(
+/// Builds the ASS script the libass export path burns text overlays with.
+///
+/// Exposed to the crate so the curated text preset contract tests can assert a
+/// resolved style reaches the second render path as well as `drawtext`.
+pub(crate) fn build_ass_text_overlay_script(
     sequence: &Sequence,
     effects: &HashMap<String, Effect>,
     output_width: u32,
