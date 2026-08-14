@@ -15,6 +15,7 @@ pub mod knowledge;
 pub mod knowledge_commands;
 pub mod memory;
 pub mod plan_executor;
+pub mod plan_runner;
 pub mod proposal;
 pub mod provider;
 pub mod providers;
@@ -54,7 +55,11 @@ pub use gateway::{
 };
 pub use knowledge::{KnowledgeDb, KnowledgeRow};
 pub use memory::{AgentMemoryDb, MemoryEntry};
-pub use plan_executor::{resolve_step_references, PlanExecutor};
+pub use plan_executor::{resolve_step_references, PlanExecutor, MAX_PLAN_STEPS};
+pub use plan_runner::{
+    execute_prepared_plan, run_agent_plan, NullPlanStepReporter, PlanStepCompleteEvent,
+    PlanStepEvent, PlanStepFailedEvent, PlanStepReporter,
+};
 pub use proposal::{Proposal, ProposalManager, ProposalStatus};
 pub use provider::{
     AIIntent, AIIntentType, AIProvider, AIResponse, CompletionRequest, CompletionResponse,
