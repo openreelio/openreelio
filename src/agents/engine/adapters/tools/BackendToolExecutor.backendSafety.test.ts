@@ -18,6 +18,7 @@ import { resetFeatureFlags, setFeatureFlag } from '@/config/featureFlags';
 import { isMutatingToolName } from '@/agents/engine/core/toolSemantics';
 import { getToolOutputContract } from '@/agents/toolOutputContracts';
 import {
+  buildBackendRoutePayload,
   getBackendDirectToolNames,
   hasCompoundExpander,
   normalizeBackendSingleStepData,
@@ -157,6 +158,131 @@ describe('BackendToolExecutor backend safety', () => {
       'trim_clip',
       'update_mask',
     ]);
+  });
+
+  it('pins the backend command every route emits', () => {
+    // The command name is a plain string on both sides, so nothing but this
+    // catches a rename. A wrong name fails at CommandPayload::parse mid-plan,
+    // after the earlier steps applied and had to be rolled back.
+    const commandTypeByToolName = Object.fromEntries(
+      getBackendDirectToolNames().map((toolName) => [
+        toolName,
+        buildBackendRoutePayload(toolName, {})?.commandType,
+      ]),
+    );
+
+    expect(commandTypeByToolName).toEqual({
+      add_effect: 'addEffect',
+      add_fade_in: 'setClipAudio',
+      add_fade_out: 'setClipAudio',
+      add_marker: 'addMarker',
+      add_mask: 'addMask',
+      add_track: 'addTrack',
+      add_transition: 'addEffect',
+      adjust_effect_param: 'updateEffect',
+      change_clip_speed: 'changeClipSpeed',
+      create_workspace_folder: 'createFolder',
+      delete_clip: 'deleteClip',
+      delete_workspace_entry: 'deleteFile',
+      move_clip: 'moveClip',
+      move_workspace_entry: 'moveFile',
+      mute_clip: 'setClipMute',
+      remove_effect: 'removeEffect',
+      remove_marker: 'removeMarker',
+      remove_mask: 'removeMask',
+      remove_track: 'removeTrack',
+      rename_track: 'renameTrack',
+      rename_workspace_entry: 'renameFile',
+      set_transition_duration: 'updateEffect',
+      split_clip: 'splitClip',
+      trim_clip: 'trimClip',
+      update_mask: 'updateMask',
+    });
+  });
+
+  it('pins the payload every param-transforming route emits', () => {
+    // These payload structs deny unknown fields, so an added or renamed key is
+    // a hard parse rejection. Golden inputs make the transform reviewable.
+    expect(
+      buildBackendRoutePayload('add_transition', {
+        sequenceId: 'seq-1',
+        trackId: 'track-1',
+        clipId: 'clip-1',
+        transitionType: 'dissolve',
+        duration: 1,
+      }),
+    ).toEqual({
+      commandType: 'addEffect',
+      params: {
+        sequenceId: 'seq-1',
+        trackId: 'track-1',
+        clipId: 'clip-1',
+        effectType: 'cross_dissolve',
+        params: { duration: 1 },
+      },
+    });
+
+    expect(
+      buildBackendRoutePayload('set_transition_duration', {
+        sequenceId: 'seq-1',
+        trackId: 'track-1',
+        transitionId: 'effect-1',
+        duration: 1,
+      }),
+    ).toEqual({
+      commandType: 'updateEffect',
+      params: { effectId: 'effect-1', params: { duration: 1 } },
+    });
+
+    expect(
+      buildBackendRoutePayload('adjust_effect_param', {
+        sequenceId: 'seq-1',
+        trackId: 'track-1',
+        clipId: 'clip-1',
+        effectId: 'effect-1',
+        paramName: 'opacity',
+        paramValue: 0.5,
+      }),
+    ).toEqual({
+      commandType: 'updateEffect',
+      params: { effectId: 'effect-1', params: { opacity: 0.5 } },
+    });
+
+    expect(
+      buildBackendRoutePayload('add_fade_in', {
+        sequenceId: 'seq-1',
+        trackId: 'track-1',
+        clipId: 'clip-1',
+        duration: 1.5,
+      }),
+    ).toEqual({
+      commandType: 'setClipAudio',
+      params: { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', fadeInSec: 1.5 },
+    });
+
+    expect(
+      buildBackendRoutePayload('add_fade_out', {
+        sequenceId: 'seq-1',
+        trackId: 'track-1',
+        clipId: 'clip-1',
+        duration: 1.5,
+      }),
+    ).toEqual({
+      commandType: 'setClipAudio',
+      params: { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', fadeOutSec: 1.5 },
+    });
+
+    expect(
+      buildBackendRoutePayload('add_marker', {
+        sequenceId: 'seq-1',
+        time: 2,
+        label: 'Beat',
+        color: 'blue',
+      }),
+    ).toEqual({
+      commandType: 'addMarker',
+      params: { sequenceId: 'seq-1', time: 2, label: 'Beat', color: { r: 0, g: 0, b: 1 } },
+    });
   });
 });
 

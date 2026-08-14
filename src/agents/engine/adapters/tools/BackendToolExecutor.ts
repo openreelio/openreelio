@@ -189,6 +189,29 @@ export function getBackendDirectToolNames(): readonly string[] {
   return [...BACKEND_DIRECT_ROUTES.keys()];
 }
 
+/**
+ * The backend command a route emits for a given tool call.
+ *
+ * Exported for the backend-safety guard, which pins both halves: a renamed
+ * command or a quietly changed param mapping is only caught at runtime by a
+ * `deny_unknown_fields` parse error mid-plan, after earlier steps applied.
+ * Returns null for a tool with no route.
+ */
+export function buildBackendRoutePayload(
+  toolName: string,
+  params: Record<string, unknown>,
+): { commandType: string; params: Record<string, unknown> } | null {
+  const route = BACKEND_DIRECT_ROUTES.get(toolName);
+  if (!route) {
+    return null;
+  }
+
+  return {
+    commandType: route.commandType,
+    params: normalizeBackendParamsForBackend(toolName, params),
+  };
+}
+
 function normalizeToolNameForBackend(toolName: string): string {
   const route = BACKEND_DIRECT_ROUTES.get(toolName);
   if (route) {
