@@ -181,10 +181,10 @@ openreelio-cli command execute --path ./demo --type AddEffect   --payload '{"seq
 
 Recipes: `dissolve-soft`, `dissolve-standard`, `dissolve-long`, `fade-in`,
 `fade-out`, `wipe-left`, `wipe-right`, `wipe-up`, `wipe-down`, `slide-left`,
-`slide-right`, `zoom-punch`. A recipe is a base layer — `params` overrides it
-key by key — and a recipe paired with a contradictory `effectType` is rejected.
-`fade-out` cannot know the clip length, so pass
-`params.start_time = clipDuration - 1.0` for a tail fade.
+`slide-right`. A recipe is a base layer — `params` overrides it key by key —
+and a recipe paired with a contradictory `effectType` is rejected. `fade-out`
+is anchored on the clip's tail when the command executes; pass
+`params.start_time` only to put the fade somewhere else in the clip.
 
 ### Atomic batches: `plan execute`
 
@@ -486,8 +486,9 @@ openreelio-cli text remove    --path ./demo --id <CLIP_ID>
 
 Packs are the quality floor — reach for free-form styling only when a pack
 cannot express the brief. Each pairs typography with an anchor and is verified to
-stay inside the title-safe area on both 1920x1080 and 1080x1920, the same check
-`verify` runs as `caption.safe_area`.
+draw zero `caption.safe_area` violations on both 1920x1080 and 1080x1920 — the
+same check `verify` runs, measuring the text block against each canvas rather
+than only comparing margins.
 
 ```bash
 openreelio-cli packs list --kind caption
@@ -499,9 +500,16 @@ openreelio-cli packs list --kind caption
 
 A pack is a base layer, not a lock: `--style-json` / `--position` override it key
 by key, so `--style-pack boxed-contrast --style-json '{"fontSize":96}'` is the
-boxed pack at 96pt. The same field is `stylePack` on `CreateCaption`,
-`UpdateCaption`, and `ImportGeneratedCaptions`, so `command execute` and MCP
-clients get it for free. An unknown id is rejected with the full valid list.
+boxed pack at 96pt. `--position top|center|bottom` names a vertical anchor only,
+so it keeps the pack's checked margin rather than replacing it. The same field is
+`stylePack` on `CreateCaption`, `UpdateCaption`, and `ImportGeneratedCaptions`,
+so `command execute` and MCP clients get it for free. An unknown id is rejected
+with the full valid list.
+
+On an **update** a pack restyles without moving the caption: `caption update
+--style-pack …` keeps the anchor the caption already has, because an update
+replaces whatever position it carries. Pass `--position` when you do want it
+moved.
 
 Speech-to-text is local (Whisper); `--import` writes the result straight into a
 caption track.

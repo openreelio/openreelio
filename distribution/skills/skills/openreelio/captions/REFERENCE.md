@@ -36,9 +36,10 @@ Export supports `srt` and `vtt`.
 
 Packs are the quality floor — reach for free-form styling only when a pack
 cannot express the brief. A pack is a named, checked pairing of typography and
-anchor: every one is verified to stay inside the title-safe area on both a
-1920x1080 and a 1080x1920 canvas, which is exactly the check `verify` runs as
-`caption.safe_area`. Hand-assembled styling gets no such guarantee.
+anchor: every one is verified to draw zero `caption.safe_area` violations on both
+a 1920x1080 and a 1080x1920 canvas — exactly the check `verify` runs, and it
+measures the text block against each canvas rather than only comparing margins.
+Hand-assembled styling gets no such guarantee.
 
 ```bash
 openreelio-cli packs list --kind caption
@@ -51,7 +52,7 @@ openreelio-cli packs list --kind caption
 | `boxed-contrast` | Translucent black box; survives busy or bright backgrounds. |
 | `yellow-classic` | Legacy broadcast yellow; reads as dialogue subtitling. |
 | `shorts-bold-outline` | Large bold with thick outline, lifted clear of vertical-platform UI. |
-| `broadcast-lower` | Left-aligned boxed name plate at lower-third height. |
+| `broadcast-lower` | Left-aligned boxed name plate anchored in the lower-left third. |
 | `high-contrast-accessible` | Oversized bold on a near-opaque box; highest legibility floor. |
 | `caption-top` | Top-anchored, for shots whose lower half is already busy. |
 
@@ -67,9 +68,14 @@ openreelio-cli caption add --path ./demo --text "Hello" --start 0 --end 3 \
   --style-pack boxed-contrast --style-json '{"fontSize":96}'
 ```
 
-`--style-pack` on `caption update` restyles an existing caption in one flag.
-`caption import` applies a pack to every cue it writes. The same field is
-available on the backend commands as `stylePack`, so
+`--position top|center|bottom` names a vertical anchor only, so combining it
+with a pack keeps the pack's checked margin instead of replacing it.
+
+`--style-pack` on `caption update` restyles an existing caption in one flag and
+leaves it where it is — an update replaces whatever position it carries, so the
+pack's own anchor deliberately stays out of it. Pass `--position` when the
+caption should move as well. `caption import` applies a pack to every cue it
+writes. The same field is available on the backend commands as `stylePack`, so
 `command execute --type CreateCaption|UpdateCaption|ImportGeneratedCaptions`
 takes it too. An unknown id is rejected with the full list of valid ids.
 

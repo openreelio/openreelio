@@ -1415,14 +1415,14 @@ fn build_command_schema() -> Value {
                 "optional": ["stylePack", "style", "position"],
                 "stylePackHints": caption_style_pack_ids,
                 "stylePackShape": "stylePack names a curated caption pack that is applied as the base layer; style and position override it key by key.",
-                "note": "Use this for individual caption lines. UpdateCaption accepts the same stylePack field, so restyling an existing caption is one call."
+                "note": "Use this for individual caption lines. UpdateCaption accepts the same stylePack field, where it restyles WITHOUT moving the caption: an update keeps the existing anchor unless it also carries an explicit position."
             },
             "AddEffect": {
                 "required": ["sequenceId", "trackId", "clipId"],
                 "optional": ["effectType", "recipe", "params", "keyframes", "position"],
                 "recipeHints": transition_recipe_ids,
-                "recipeShape": "recipe names a curated transition recipe and supplies both effectType and its baseline params (duration, offset, direction, fade_in, zoom_factor); anything in params overrides the recipe key by key. Naming a recipe and a contradictory effectType is rejected.",
-                "note": "Transitions are effects: there is no AddTransition command. Either effectType or recipe must be present. fade-out does not set start_time because only the caller knows the clip duration; pass params.start_time = (clip duration - fade duration) for a tail fade."
+                "recipeShape": "recipe names a curated transition recipe and supplies both effectType and its baseline params (duration, offset, direction, fade_in); anything in params overrides the recipe key by key. Naming a recipe and a contradictory effectType is rejected.",
+                "note": "Transitions are effects: there is no AddTransition command. Either effectType or recipe must be present. fade-out is anchored on the clip's tail when the command is executed, so pass params.start_time only to place the fade somewhere else."
             },
             "transcriptionGenerate": {
                 "tool": "openreelio.transcription.generate",
