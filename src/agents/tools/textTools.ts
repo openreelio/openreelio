@@ -56,9 +56,26 @@ const HEX_COLOR_PATTERN = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})
 
 type TextPlacementPresetName = 'default' | 'title' | 'lower_third' | 'subtitle' | 'callout';
 
-const AGENT_TEXT_PRESET_VALUES = Array.from(
+/**
+ * Every text preset spelling an agent may pass: ids, aliases, and `default`.
+ *
+ * Derived from the catalog rather than restated, and exported so the meta-tool
+ * boundary advertises the same set instead of a hand-copied subset of it.
+ */
+export const AGENT_TEXT_PRESET_VALUES = Array.from(
   new Set(['default', ...TEXT_PRESETS.flatMap((preset) => [preset.id, ...(preset.aliases ?? [])])]),
 );
+
+/**
+ * Shared `preset` parameter description, built from the catalog.
+ *
+ * The ids are spelled out because a model reads the description before it reads
+ * the enum; listing them by hand is how the CLI, the prompts, and the UI came
+ * to advertise three different catalogs.
+ */
+export const AGENT_TEXT_PRESET_DESCRIPTION = `Optional starter text preset supplying typography, placement, and a suggested duration. Ids: ${TEXT_PRESETS.map(
+  (preset) => preset.id,
+).join(', ')}. Aliases in the enum resolve to these ids; use default for an unstyled overlay.`;
 
 const TEXT_STYLE_PARAMETER_PROPERTIES = {
   fontFamily: { type: 'string', description: 'Font family name' },
@@ -1108,8 +1125,7 @@ const TEXT_TOOLS: ToolDefinition[] = [
         preset: {
           type: 'string',
           enum: AGENT_TEXT_PRESET_VALUES,
-          description:
-            'Optional starter text preset. Supports preset IDs plus aliases such as title, lower_third, credits, logo_bug, and social_handle.',
+          description: AGENT_TEXT_PRESET_DESCRIPTION,
         },
         style: { type: 'object', description: 'Text style overrides' },
         ...TEXT_STYLE_PARAMETER_PROPERTIES,

@@ -29,7 +29,11 @@ import { getAudioToolNames } from './audioTools';
 import { getEffectToolNames } from './effectTools';
 import { getTransitionToolNames } from './transitionTools';
 import { getCaptionToolNames } from './captionTools';
-import { getTextToolNames } from './textTools';
+import {
+  getTextToolNames,
+  AGENT_TEXT_PRESET_DESCRIPTION,
+  AGENT_TEXT_PRESET_VALUES,
+} from './textTools';
 import { getGenerationToolNames } from './generationTools';
 import { getGenerativeTimelineToolNames } from './generativeTimelineTools';
 import {
@@ -638,9 +642,12 @@ const META_TOOLS: ToolDefinition[] = [
           description: 'Editable text clip duration in seconds; use endTime for captions',
         },
         preset: {
+          // The full catalog, not a four-value sample of it: a meta-tool enum
+          // narrower than the tool it dispatches to makes the other eighteen
+          // presets unreachable through the surface the model actually sees.
           type: 'string',
-          description: 'Editable text starter preset: default, title, lower_third, or subtitle',
-          enum: ['default', 'title', 'lower_third', 'subtitle'],
+          description: AGENT_TEXT_PRESET_DESCRIPTION,
+          enum: AGENT_TEXT_PRESET_VALUES,
         },
         segments: {
           type: 'array',
