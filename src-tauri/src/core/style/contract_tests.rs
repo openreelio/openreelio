@@ -1249,6 +1249,104 @@ fn an_explicit_null_layer_clears_the_preset_layer() {
 }
 
 #[test]
+fn a_partial_shadow_override_merges_on_every_preset() {
+    // `epic-title` declares a shadow, `watermark` does not. The same fragment
+    // has to mean the same thing on both, or an agent that learned the pattern
+    // from one preset gets a parse error about a field it never named.
+    for (preset_id, declares_shadow) in [("epic-title", true), ("watermark", false)] {
+        let (state, clip) = add_text_clip_with_preset(
+            preset_id,
+            Some(json!({
+                "content": TEXT_OVERLAY_CONTENT,
+                "shadow": { "offsetX": 7 },
+            })),
+        );
+
+        let stored = crate::core::commands::get_text_data(&clip, &state)
+            .unwrap_or_else(|| panic!("preset '{preset_id}' must store text data"));
+        let shadow = stored
+            .shadow
+            .unwrap_or_else(|| panic!("preset '{preset_id}' must carry the merged shadow"));
+
+        assert_eq!(shadow.offset_x, 7, "preset '{preset_id}'");
+
+        let base = crate::core::style::resolve_text_preset(preset_id)
+            .expect("preset")
+            .default_clip_data()
+            .shadow
+            .unwrap_or_default();
+        assert_eq!(
+            (shadow.color.as_str(), shadow.offset_y, shadow.blur),
+            (base.color.as_str(), base.offset_y, base.blur),
+            "preset '{preset_id}' must keep the rest of the layer \
+             (declared: {declares_shadow})"
+        );
+    }
+}
+
+#[test]
+fn a_partial_outline_override_merges_on_every_preset() {
+    for preset_id in ["epic-title", "subtitle"] {
+        let (state, clip) = add_text_clip_with_preset(
+            preset_id,
+            Some(json!({
+                "content": TEXT_OVERLAY_CONTENT,
+                "outline": { "width": 3 },
+            })),
+        );
+
+        let stored = crate::core::commands::get_text_data(&clip, &state)
+            .unwrap_or_else(|| panic!("preset '{preset_id}' must store text data"));
+        let outline = stored
+            .outline
+            .unwrap_or_else(|| panic!("preset '{preset_id}' must carry the merged outline"));
+
+        assert_eq!(outline.width, 3, "preset '{preset_id}'");
+
+        let base = crate::core::style::resolve_text_preset(preset_id)
+            .expect("preset")
+            .default_clip_data()
+            .outline
+            .unwrap_or_default();
+        assert_eq!(
+            outline.color, base.color,
+            "preset '{preset_id}' must keep the color it did not name"
+        );
+    }
+}
+
+#[test]
+fn seeding_a_missing_layer_does_not_resurrect_a_cleared_one() {
+    // The seed only applies to a layer the caller is actually merging into, so
+    // an explicit null still clears and an untouched layer stays absent.
+    let (state, clip) = add_text_clip_with_preset(
+        "epic-title",
+        Some(json!({
+            "content": TEXT_OVERLAY_CONTENT,
+            "outline": null,
+            "shadow": { "blur": 12 },
+        })),
+    );
+
+    let stored = crate::core::commands::get_text_data(&clip, &state).expect("text data");
+    assert!(
+        stored.outline.is_none(),
+        "an explicit null must still clear"
+    );
+    assert_eq!(stored.shadow.expect("shadow merged").blur, 12);
+
+    let (state, clip) = add_text_clip_with_preset(
+        "watermark",
+        Some(json!({ "content": TEXT_OVERLAY_CONTENT })),
+    );
+    let stored = crate::core::commands::get_text_data(&clip, &state).expect("text data");
+    assert!(
+        stored.shadow.is_none() && stored.outline.is_none(),
+        "a preset that declares no decoration must not gain one"
+    );
+}
+
+#[test]
 fn the_resolved_text_payload_never_carries_the_preset_id() {
     // The op log has to be readable without the registry: what a preset
     // produced is recorded, not which preset produced it.

@@ -50,7 +50,7 @@ use std::collections::HashMap;
 use serde_json::{Map, Value};
 
 use crate::core::effects::{EffectType, ParamValue};
-use crate::core::text::{TextClipData, TextStyle};
+use crate::core::text::{TextClipData, TextOutline, TextShadow, TextStyle};
 
 pub use caption_packs::{
     caption_pack_ids, list_caption_packs, resolve_caption_pack, CaptionPackDescriptor,
@@ -251,6 +251,11 @@ pub fn resolve_effect_recipe(
 /// `null` clears an optional layer, so `{"shadow":null}` drops the preset's
 /// shadow.
 ///
+/// `shadow` and `outline` are optional, so roughly half the catalog declares
+/// neither and there would be nothing for a partial override to merge into.
+/// Those two merge onto their type defaults instead of demanding a complete
+/// layer, so `{"shadow":{"offsetX":2}}` means the same thing on every preset.
+///
 /// `bold` and `fontWeight` are reconciled after the merge, because they are one
 /// decision spelled two ways — see [`reconcile_bold_and_font_weight`].
 ///
@@ -282,6 +287,7 @@ pub fn resolve_text_clip_data(
 
     let mut base = serde_json::to_value(preset.default_clip_data())
         .map_err(|error| format!("Failed to serialize text preset: {error}"))?;
+    seed_optional_text_layers(&mut base, overrides.as_ref());
     merge_json_deep(&mut base, overrides);
 
     let mut resolved: TextClipData = serde_json::from_value(base)
@@ -289,6 +295,43 @@ pub fn resolve_text_clip_data(
     reconcile_bold_and_font_weight(&mut resolved.style, bold_was_named, font_weight_was_named);
 
     Ok(resolved)
+}
+
+/// Gives a partial `shadow` or `outline` override a layer to merge into.
+///
+/// Both are `Option` on [`TextClipData`] and skipped when absent, so on the
+/// roughly half of the catalog that declares neither, `merge_json_deep` would
+/// install the caller's fragment as the whole layer and the parse would fail on
+/// a field the caller never meant to set. Seeding the type's defaults first
+/// makes `{"shadow":{"offsetX":2}}` mean the same thing on every preset, which
+/// is what the documented key-by-key contract promises.
+fn seed_optional_text_layers(base: &mut Value, overrides: Option<&Value>) {
+    let (Some(base_object), Some(override_object)) =
+        (base.as_object_mut(), overrides.and_then(Value::as_object))
+    else {
+        return;
+    };
+
+    for (key, value) in override_object {
+        if !value.is_object() {
+            continue;
+        }
+        if base_object.get(key).is_some_and(|layer| !layer.is_null()) {
+            continue;
+        }
+        if let Some(defaults) = default_optional_text_layer(key) {
+            base_object.insert(key.clone(), defaults);
+        }
+    }
+}
+
+/// The base layer a partial override of `key` merges onto, when there is one.
+fn default_optional_text_layer(key: &str) -> Option<Value> {
+    match key {
+        "shadow" => serde_json::to_value(TextShadow::default()).ok(),
+        "outline" => serde_json::to_value(TextOutline::default()).ok(),
+        _ => None,
+    }
 }
 
 /// Reconciles the paired `bold` and `fontWeight` fields after a layered override.
