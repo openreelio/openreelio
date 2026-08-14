@@ -11,7 +11,8 @@
 //!
 //! Exit codes for `plan execute`: `0` applied and saved, `1` the plan was
 //! rejected or a step failed and the rollback completed cleanly, `2` the tool
-//! could not run or the rollback was incomplete (`rollbackIncomplete: true`).
+//! could not run, the rollback was incomplete (`rollbackIncomplete: true`), or
+//! the plan applied but could not be saved (`appliedNotSaved: true`).
 //! `plan validate` and `plan template` keep reporting through JSON alone.
 
 use crate::output;
@@ -31,7 +32,8 @@ pub const MAX_PLAN_STEPS: usize = 1000;
 /// Exit code for a plan that was rejected, or failed and rolled back cleanly.
 const EXIT_PLAN_FAILED: i32 = 1;
 
-/// Exit code for a failure of the tool itself, or an incomplete rollback.
+/// Exit code for a failure of the tool itself, an incomplete rollback, or a
+/// plan that applied but could not be saved.
 const EXIT_TOOL_FAILURE: i32 = 2;
 
 #[derive(Subcommand)]
@@ -202,9 +204,13 @@ fn read_plan(file: &Path) -> anyhow::Result<EditPlan> {
 
 /// Validates and applies the plan, prints the report, returns the exit code.
 ///
-/// Returning `Err` means the tool failed before it could produce a report; a
-/// plan that was merely rejected or rolled back returns `Ok` with a non-zero
-/// code, so stdout still carries exactly one JSON object.
+/// Returning `Err` is reserved for failures that happen *before* anything is
+/// applied — an unreadable plan file, a project that will not open. Every
+/// outcome that touched the project reports through `Ok` with a non-zero code,
+/// including a plan that applied but could not be saved: a bare `Err` there
+/// would leave stdout empty and invite the caller to retry work that is already
+/// durable. stdout therefore carries exactly one JSON object whenever the
+/// project was mutated.
 fn run_execute(path: &PathBuf, file: &Path) -> anyhow::Result<i32> {
     let plan = read_plan(file)?;
     let mut project = super::load_project(path)?;
@@ -223,9 +229,11 @@ fn run_execute(path: &PathBuf, file: &Path) -> anyhow::Result<i32> {
         return Ok(EXIT_PLAN_FAILED);
     }
 
-    let result = apply_edit_plan(&mut project, &plan)?;
+    let mut result = apply_edit_plan(&mut project, &plan)?;
     if result["status"] == "ok" {
-        super::save_project(&mut project)?;
+        if let Err(save_error) = super::save_project(&mut project) {
+            result = applied_not_saved_report(&plan, &result, &save_error);
+        }
     }
 
     let exit_code = plan_exit_code(&result);
@@ -233,13 +241,45 @@ fn run_execute(path: &PathBuf, file: &Path) -> anyhow::Result<i32> {
     Ok(exit_code)
 }
 
+/// Report for a plan whose steps all applied but whose save failed.
+///
+/// Every step is already fsynced into the append-only ops log by the time the
+/// save runs, so the plan is durably applied whether or not the snapshot caught
+/// up — the next open folds those ops back in. Discarding them is not on the
+/// table either: they are legitimately applied truth, and the discard writes
+/// through the same handle that just failed. What the caller needs instead is
+/// to be told, in the report rather than in an empty stdout, that re-running
+/// the plan would apply it twice.
+fn applied_not_saved_report(
+    plan: &EditPlan,
+    applied: &serde_json::Value,
+    save_error: &anyhow::Error,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": "error",
+        "message": format!(
+            "Plan applied but the project could not be saved: {save_error}. \
+             Every step is already in the operations log and will be present on \
+             the next open — do NOT re-run this plan."
+        ),
+        "planId": plan.id,
+        "appliedNotSaved": true,
+        "stepsApplied": applied["stepsExecuted"].clone(),
+        "error": save_error.to_string(),
+        "stepResults": applied["stepResults"].clone(),
+    })
+}
+
 /// Maps an [`apply_edit_plan`] report onto the process exit code.
 fn plan_exit_code(result: &serde_json::Value) -> i32 {
     if result["status"] == "ok" {
         0
-    } else if result["rollbackIncomplete"] == serde_json::Value::Bool(true) {
-        // The project is not back where it started and no further command can
-        // assume it is, so this is a tool failure rather than a rejected plan.
+    } else if result["rollbackIncomplete"] == serde_json::Value::Bool(true)
+        || result["appliedNotSaved"] == serde_json::Value::Bool(true)
+    {
+        // The project is not where any further command would assume it is —
+        // either not back at the start, or applied without a current snapshot —
+        // so this is a tool failure rather than a rejected plan.
         EXIT_TOOL_FAILURE
     } else {
         EXIT_PLAN_FAILED
@@ -590,6 +630,45 @@ mod tests {
                 "rollbackFailures": ["undo failed"],
             })),
             EXIT_TOOL_FAILURE
+        );
+    }
+
+    #[test]
+    fn should_map_an_applied_but_unsaved_plan_to_the_tool_failure_exit_code() {
+        assert_eq!(
+            plan_exit_code(&serde_json::json!({
+                "status": "error",
+                "appliedNotSaved": true,
+            })),
+            EXIT_TOOL_FAILURE
+        );
+    }
+
+    #[test]
+    fn should_report_an_applied_but_unsaved_plan_without_inviting_a_retry() {
+        let applied = serde_json::json!({
+            "status": "ok",
+            "planId": "plan-1",
+            "stepsExecuted": 2,
+            "stepResults": [{ "stepId": "a" }, { "stepId": "b" }],
+        });
+
+        let report = applied_not_saved_report(
+            &plan(vec![step("a", &[]), step("b", &["a"])]),
+            &applied,
+            &anyhow::anyhow!("disk is full"),
+        );
+
+        assert_eq!(report["status"], "error");
+        assert_eq!(report["appliedNotSaved"], true);
+        assert_eq!(report["stepsApplied"], 2);
+        assert_eq!(report["planId"], "plan-1");
+        assert_eq!(report["stepResults"], applied["stepResults"]);
+        let message = report["message"].as_str().unwrap();
+        assert!(message.contains("disk is full"), "{message}");
+        assert!(
+            message.contains("do NOT re-run this plan"),
+            "the report has to say the work is already durable: {message}"
         );
     }
 }

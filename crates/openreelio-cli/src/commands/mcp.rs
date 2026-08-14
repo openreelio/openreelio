@@ -2035,8 +2035,17 @@ fn apply_plan(state: &McpServerState, arguments: Value) -> Result<Value, ToolErr
         .map_err(|error| ToolError::Execution(error.to_string()))?;
 
     if result["status"] == "ok" {
-        super::save_project(&mut project)
-            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        // Every step is already fsynced into the append-only ops log, so a save
+        // failure leaves the plan durably applied: the next open folds those ops
+        // back in. The message has to say so, or a client reading a plain
+        // execution error will re-apply the whole plan.
+        super::save_project(&mut project).map_err(|error| {
+            ToolError::Execution(format!(
+                "Plan applied but the project could not be saved: {error}. \
+                 Every step is already in the operations log and will be present \
+                 on the next open — do NOT re-apply this plan."
+            ))
+        })?;
     }
 
     Ok(result)
