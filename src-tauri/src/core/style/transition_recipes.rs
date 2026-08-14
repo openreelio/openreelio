@@ -14,16 +14,24 @@
 //! - `offset` (seconds) — `xfade`-backed families (cross dissolve, wipe, slide)
 //! - `direction` (`left`/`right`/`up`/`down`) — wipe and slide
 //! - `fade_in` (bool) — fade
-//! - `zoom_type`, `zoom_factor` — zoom
 //!
-//! A recipe never sets a parameter it cannot know, which is why `fade-out` omits
-//! `start_time`: only the caller knows the clip's duration. Pass it explicitly
-//! alongside the recipe when the fade must land on the tail.
+//! A recipe never sets a parameter it cannot know. `fade-out` therefore ships
+//! without `start_time`, which only the target clip's duration can supply;
+//! `AddEffectCommand::execute` computes it there, before the op is logged.
+//!
+//! # Admission
+//!
+//! The table is a quality floor, so an entry earns its place by rendering what
+//! its description promises. A recipe whose builder cannot produce the described
+//! result is removed rather than shipped with a caveat — an agent picking a
+//! one-token curated option must not have to know which entries are sound.
 //!
 //! # Stability
 //!
-//! Recipe ids are a public contract. The op log records the id an edit was made
-//! with, so ids are append-only: rename nothing, and add rather than repurpose.
+//! Recipe ids are a public contract, so ids are append-only: rename nothing, and
+//! add rather than repurpose. The op log records the parameters a recipe
+//! produced, not the id that produced them, so a rename would silently split
+//! one recipe into two for every surface that lists them.
 
 use std::collections::BTreeMap;
 
@@ -160,8 +168,8 @@ pub const TRANSITION_RECIPES: &[TransitionRecipeSpec] = &[
     },
     TransitionRecipeSpec {
         id: "fade-out",
-        description: "One-second fade down to black. Pass an explicit start_time of \
-                      (clip duration - 1.0) so the fade lands on the tail.",
+        description: "One-second fade down to black, anchored on the clip's tail. Pass an \
+                      explicit start_time to move the fade somewhere else in the clip.",
         aliases: &["fadeout", "fade-to-black"],
         effect_type: EffectType::Fade,
         params: &[
@@ -235,17 +243,6 @@ pub const TRANSITION_RECIPES: &[TransitionRecipeSpec] = &[
             ("direction", RecipeParam::Str("right")),
             ("duration", RecipeParam::Float(0.5)),
             ("offset", RecipeParam::Float(0.0)),
-        ],
-    },
-    TransitionRecipeSpec {
-        id: "zoom-punch",
-        description: "0.4s 1.15x zoom in. A beat-accent for social cuts, not a scene change.",
-        aliases: &["punch-in", "zoom"],
-        effect_type: EffectType::Zoom,
-        params: &[
-            ("duration", RecipeParam::Float(0.4)),
-            ("zoom_factor", RecipeParam::Float(1.15)),
-            ("zoom_type", RecipeParam::Str("in")),
         ],
     },
 ];
