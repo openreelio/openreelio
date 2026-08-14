@@ -86,7 +86,8 @@ everywhere rather than tracking the exceptions.
 it into a context window. Fetch help per verb instead
 (`openreelio-cli verify --help`, `openreelio-cli frame extract --help`), use
 `openreelio-cli command schema` for the 79 backend command types, and
-`openreelio-cli packs list` for the curated caption styles and transitions.
+`openreelio-cli packs list` for the curated caption styles, transition recipes,
+and text presets (`--kind caption|transition|text`).
 
 ### Self-diagnosis
 
@@ -475,7 +476,7 @@ openreelio-cli caption remove --path ./demo --id <CAPTION_ID>
 openreelio-cli caption import --path ./demo --file subs.srt [--format srt|vtt|transcript-json]
 openreelio-cli caption export --path ./demo --format srt --output subs.srt
 
-openreelio-cli text add       --path ./demo --text "Title" --start 0 --duration 3 [--preset credits]
+openreelio-cli text add       --path ./demo --text "Title" --start 0 [--duration 3] [--preset <PRESET_ID>]
 openreelio-cli text update    --path ./demo --id <CLIP_ID> --text "New"
 openreelio-cli text transform --path ./demo --id <CLIP_ID> --x 0.38 --y 0.42 --scale-x 1.2
 openreelio-cli text list      --path ./demo
@@ -510,6 +511,32 @@ On an **update** a pack restyles without moving the caption: `caption update
 --style-pack …` keeps the anchor the caption already has, because an update
 replaces whatever position it carries. Pass `--position` when you do want it
 moved.
+
+### Text presets
+
+`--preset` is the same idea for text overlays: one id supplies typography,
+anchor, starter copy, and a suggested duration (used when `--duration` is
+omitted).
+
+```bash
+openreelio-cli packs list --kind text
+```
+
+One registry serves the CLI, MCP, the agent tools, and the app, so the ids the
+hints advertise are exactly the ids the parser accepts — `quote`, `watermark`,
+`countdown`, `label`, `tech-style`, `callout-warning`, `subtitle-outline`,
+`end-card-title`, and `lower-third-minimal` used to be advertised and rejected,
+and now work. Entries print `category` (`lower-third`, `title`, `subtitle`,
+`callout`, `credit`, `brand`, `creative`), `defaultDurationSec`, aliases, and
+the full `clip`.
+
+A preset is a base layer, not a lock: explicit flags override it, so
+`--preset quote --font-size 96` is the quote preset at 96pt. The same field is
+`preset` on `AddTextClip`, so `command execute`, `plan execute`, and MCP clients
+get it too, and `textData` there carries only the overrides (commonly just
+`content`). The op log records the concrete values, never the preset id, so
+replay never depends on the catalog. An unknown id is rejected with the full
+valid list; `default` means no preset.
 
 Speech-to-text is local (Whisper); `--import` writes the result straight into a
 caption track.
