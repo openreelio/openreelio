@@ -82,10 +82,11 @@ everywhere rather than tracking the exceptions.
 
 ### Discovering the surface
 
-`help-json` prints the whole command schema, but it is ~58 KB — do not preload
+`help-json` prints the whole command schema, but it is ~68 KB — do not preload
 it into a context window. Fetch help per verb instead
-(`openreelio-cli verify --help`, `openreelio-cli frame extract --help`), and use
-`openreelio-cli command schema` for the 79 backend command types.
+(`openreelio-cli verify --help`, `openreelio-cli frame extract --help`), use
+`openreelio-cli command schema` for the 79 backend command types, and
+`openreelio-cli packs list` for the curated caption styles and transitions.
 
 ### Self-diagnosis
 
@@ -166,6 +167,24 @@ openreelio-cli command execute  --path ./demo --type SplitClip \
 Payloads are camelCase JSON objects. Use `--payload-file <FILE>` instead of
 `--payload` when the JSON is large or shell quoting is awkward. `command
 validate` runs the same strict parser without touching the project.
+
+### Transitions
+
+Transitions are effects — there is no `AddTransition` command. `AddEffect`
+accepts a curated `recipe` in place of an `effectType` plus hand-picked
+parameters:
+
+```bash
+openreelio-cli packs list --kind transition
+openreelio-cli command execute --path ./demo --type AddEffect   --payload '{"sequenceId":"…","trackId":"…","clipId":"…","recipe":"dissolve-soft"}'
+```
+
+Recipes: `dissolve-soft`, `dissolve-standard`, `dissolve-long`, `fade-in`,
+`fade-out`, `wipe-left`, `wipe-right`, `wipe-up`, `wipe-down`, `slide-left`,
+`slide-right`, `zoom-punch`. A recipe is a base layer — `params` overrides it
+key by key — and a recipe paired with a contradictory `effectType` is rejected.
+`fade-out` cannot know the clip length, so pass
+`params.start_time = clipDuration - 1.0` for a tail fade.
 
 ### Atomic batches: `plan execute`
 
@@ -449,8 +468,8 @@ Captions are timed subtitle entries; text clips are styled overlays with
 position, transform and effects. Both are ordinary commands in the op log.
 
 ```bash
-openreelio-cli caption add    --path ./demo --text "Hello" --start 0.5 --end 3.0
-openreelio-cli caption update --path ./demo --id <CAPTION_ID> --text "Updated"
+openreelio-cli caption add    --path ./demo --text "Hello" --start 0.5 --end 3.0 [--style-pack <PACK_ID>]
+openreelio-cli caption update --path ./demo --id <CAPTION_ID> --text "Updated" [--style-pack <PACK_ID>]
 openreelio-cli caption list   --path ./demo
 openreelio-cli caption remove --path ./demo --id <CAPTION_ID>
 openreelio-cli caption import --path ./demo --file subs.srt [--format srt|vtt|transcript-json]
@@ -462,6 +481,27 @@ openreelio-cli text transform --path ./demo --id <CLIP_ID> --x 0.38 --y 0.42 --s
 openreelio-cli text list      --path ./demo
 openreelio-cli text remove    --path ./demo --id <CLIP_ID>
 ```
+
+### Caption style packs
+
+Packs are the quality floor — reach for free-form styling only when a pack
+cannot express the brief. Each pairs typography with an anchor and is verified to
+stay inside the title-safe area on both 1920x1080 and 1080x1920, the same check
+`verify` runs as `caption.safe_area`.
+
+```bash
+openreelio-cli packs list --kind caption
+```
+
+`standard-outline` (the default), `clean-minimal`, `boxed-contrast`,
+`yellow-classic`, `shorts-bold-outline`, `broadcast-lower`,
+`high-contrast-accessible`, `caption-top`.
+
+A pack is a base layer, not a lock: `--style-json` / `--position` override it key
+by key, so `--style-pack boxed-contrast --style-json '{"fontSize":96}'` is the
+boxed pack at 96pt. The same field is `stylePack` on `CreateCaption`,
+`UpdateCaption`, and `ImportGeneratedCaptions`, so `command execute` and MCP
+clients get it for free. An unknown id is rejected with the full valid list.
 
 Speech-to-text is local (Whisper); `--import` writes the result straight into a
 caption track.

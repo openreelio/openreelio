@@ -8,9 +8,11 @@ op log, so both are undoable.
 
 ```bash
 openreelio-cli caption add    --path ./demo --text "Hello" --start 0.5 --end 3.0 \
-                              [--track <TRACK_ID>] [--position <POS>] [--style-json '{…}']
+                              [--track <TRACK_ID>] [--style-pack <PACK_ID>] \
+                              [--position <POS>] [--style-json '{…}']
 openreelio-cli caption update --path ./demo --id <CAPTION_ID> [--text "Updated"] \
-                              [--start 1.0] [--end 4.0] [--style-json '{…}']
+                              [--start 1.0] [--end 4.0] [--style-pack <PACK_ID>] \
+                              [--style-json '{…}']
 openreelio-cli caption list   --path ./demo
 openreelio-cli caption remove --path ./demo --id <CAPTION_ID>
 ```
@@ -29,6 +31,47 @@ openreelio-cli caption export --path ./demo --format srt --output subs.srt
 
 `--format` is auto-detected from the file extension on import when omitted.
 Export supports `srt` and `vtt`.
+
+## Caption style packs
+
+Packs are the quality floor — reach for free-form styling only when a pack
+cannot express the brief. A pack is a named, checked pairing of typography and
+anchor: every one is verified to stay inside the title-safe area on both a
+1920x1080 and a 1080x1920 canvas, which is exactly the check `verify` runs as
+`caption.safe_area`. Hand-assembled styling gets no such guarantee.
+
+```bash
+openreelio-cli packs list --kind caption
+```
+
+| Pack | Use it for |
+|------|-----------|
+| `standard-outline` | The default. White text, thin black outline, soft shadow. |
+| `clean-minimal` | No outline or shadow — controlled, consistently dark footage only. |
+| `boxed-contrast` | Translucent black box; survives busy or bright backgrounds. |
+| `yellow-classic` | Legacy broadcast yellow; reads as dialogue subtitling. |
+| `shorts-bold-outline` | Large bold with thick outline, lifted clear of vertical-platform UI. |
+| `broadcast-lower` | Left-aligned boxed name plate at lower-third height. |
+| `high-contrast-accessible` | Oversized bold on a near-opaque box; highest legibility floor. |
+| `caption-top` | Top-anchored, for shots whose lower half is already busy. |
+
+Ids tolerate `_` and spaces and case (`clean_minimal`, `Clean Minimal`), and each
+pack carries short aliases (`minimal`, `boxed`, `shorts`, `accessible`) that
+`packs list` prints.
+
+A pack is a **base layer, not a lock**. Anything you also pass overrides it key
+by key, so this is the boxed pack at 96pt with everything else intact:
+
+```bash
+openreelio-cli caption add --path ./demo --text "Hello" --start 0 --end 3 \
+  --style-pack boxed-contrast --style-json '{"fontSize":96}'
+```
+
+`--style-pack` on `caption update` restyles an existing caption in one flag.
+`caption import` applies a pack to every cue it writes. The same field is
+available on the backend commands as `stylePack`, so
+`command execute --type CreateCaption|UpdateCaption|ImportGeneratedCaptions`
+takes it too. An unknown id is rejected with the full list of valid ids.
 
 ## Text overlays
 
