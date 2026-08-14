@@ -1959,30 +1959,40 @@ fn test_frame_extract_builds_contact_sheet_for_grid() {
 // Plan Commands
 // =============================================================================
 
+/// Both spellings of the template flag must work.
+///
+/// `--type` is what the docs and `help-json` have always advertised;
+/// `--template-type` is what the binary actually accepted, so it stays a hidden
+/// alias rather than breaking callers that learned the real flag.
 #[test]
 fn test_plan_template_split_and_move() {
-    let result = run_cli_ok(&["plan", "template", "--template-type", "split-and-move"]);
-    assert_eq!(result["id"], "plan_001");
-    let steps = result["steps"].as_array().unwrap();
-    assert_eq!(steps.len(), 2);
-    assert_eq!(steps[0]["commandType"], "SplitClip");
-    assert_eq!(steps[1]["commandType"], "MoveClip");
+    for flag in ["--type", "--template-type"] {
+        let result = run_cli_ok(&["plan", "template", flag, "split-and-move"]);
+        assert_eq!(result["id"], "plan_001", "flag {flag}");
+        let steps = result["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0]["commandType"], "SplitClip");
+        assert_eq!(steps[1]["commandType"], "MoveClip");
+    }
 }
 
 #[test]
 fn test_plan_template_multi_trim() {
-    let result = run_cli_ok(&["plan", "template", "--template-type", "multi-trim"]);
-    assert_eq!(result["id"], "plan_002");
+    for flag in ["--type", "--template-type"] {
+        let result = run_cli_ok(&["plan", "template", flag, "multi-trim"]);
+        assert_eq!(result["id"], "plan_002", "flag {flag}");
+    }
 }
 
 #[test]
 fn test_plan_template_invalid() {
-    let (_stdout, stderr) = run_cli_err(&["plan", "template", "--template-type", "nonexistent"]);
-    assert!(
-        stderr.contains("Unknown template type"),
-        "Expected template type error, got: {}",
-        stderr
-    );
+    for flag in ["--type", "--template-type"] {
+        let (_stdout, stderr) = run_cli_err(&["plan", "template", flag, "nonexistent"]);
+        assert!(
+            stderr.contains("Unknown template type"),
+            "Expected template type error for {flag}, got: {stderr}"
+        );
+    }
 }
 
 #[test]

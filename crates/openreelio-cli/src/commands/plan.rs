@@ -37,7 +37,10 @@ pub enum PlanAction {
     /// Generate a plan template
     Template {
         /// Template type (e.g., split-and-move, multi-trim)
-        #[arg(long, name = "type")]
+        ///
+        /// `--template-type` stays accepted as a hidden alias: it was the flag
+        /// this command actually shipped while the docs advertised `--type`.
+        #[arg(long = "type", alias = "template-type")]
         template_type: String,
     },
 }
