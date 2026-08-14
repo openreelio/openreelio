@@ -22,6 +22,20 @@ use crate::core::{
     AssetId, CoreError, CoreResult, EffectId, SequenceId,
 };
 
+/// `ClipUpdate` payload key holding the realized clip flags replay must assign.
+///
+/// An [`Operation`] carries an [`OpKind`] and no record of the command behind
+/// it, and `ClipUpdate` is shared by sixteen commands whose payload roots
+/// overlap — `SetClipSpeed` writes a root-level `reverse`, exactly like
+/// `ReverseClip`. Nesting the replayable flags under a key that only
+/// `SetClipOpacity`, `SetClipEnabled` and `ReverseClip` write is what lets
+/// replay tell "this command owns this field" from "this field happens to be
+/// here", so no command is ever half-applied.
+///
+/// The three commands became executable in this same change, so no operation
+/// written by a released build carries these flags at the payload root.
+pub(crate) const CLIP_FLAGS_PAYLOAD_KEY: &str = "clipFlags";
+
 // =============================================================================
 // Project Metadata
 // =============================================================================
@@ -1098,8 +1112,27 @@ impl ProjectState {
     /// toggle, and re-toggling on replay would diverge the moment an op is
     /// skipped. A missing or null field means "no change", matching the rest of
     /// `apply_clip_update`.
+    ///
+    /// The flags are read only from [`CLIP_FLAGS_PAYLOAD_KEY`], never from the
+    /// payload root. An [`Operation`] records an [`OpKind`] and nothing about
+    /// the command that produced it, and `ClipUpdate` covers sixteen commands:
+    /// `SetClipSpeed` logs a root-level `reverse` of its own, so reading the
+    /// root would replay half of that command — its reverse without its speed —
+    /// which is worse than replaying none of it.
     fn apply_replayed_clip_flags(clip: &mut Clip, payload: &serde_json::Value) -> CoreResult<()> {
-        if let Some(value) = payload.get("opacity") {
+        let Some(flags) = payload.get(CLIP_FLAGS_PAYLOAD_KEY) else {
+            return Ok(());
+        };
+        if flags.is_null() {
+            return Ok(());
+        }
+        if !flags.is_object() {
+            return Err(CoreError::InvalidCommand(format!(
+                "Invalid {CLIP_FLAGS_PAYLOAD_KEY} value (expected object)"
+            )));
+        }
+
+        if let Some(value) = flags.get("opacity") {
             if !value.is_null() {
                 let opacity = value.as_f64().ok_or_else(|| {
                     CoreError::InvalidCommand("Invalid opacity value (expected number)".to_string())
@@ -1113,7 +1146,7 @@ impl ProjectState {
             }
         }
 
-        if let Some(value) = payload.get("enabled") {
+        if let Some(value) = flags.get("enabled") {
             if !value.is_null() {
                 clip.enabled = value.as_bool().ok_or_else(|| {
                     CoreError::InvalidCommand(
@@ -1123,7 +1156,7 @@ impl ProjectState {
             }
         }
 
-        if let Some(value) = payload.get("reverse") {
+        if let Some(value) = flags.get("reverse") {
             if !value.is_null() {
                 clip.reverse = value.as_bool().ok_or_else(|| {
                     CoreError::InvalidCommand(

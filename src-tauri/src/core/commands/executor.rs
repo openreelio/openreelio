@@ -1432,16 +1432,23 @@ impl CommandExecutor {
                 // and `ReverseClip` is a toggle whose payload says nothing at
                 // all about the resulting value. Logging what the clip actually
                 // holds keeps replay idempotent.
-                if type_name == "SetClipOpacity" {
-                    payload.insert("opacity".to_string(), to_value(&clip.opacity)?);
-                }
-
-                if type_name == "SetClipEnabled" {
-                    payload.insert("enabled".to_string(), to_value(&clip.enabled)?);
-                }
-
-                if type_name == "ReverseClip" {
-                    payload.insert("reverse".to_string(), to_value(&clip.reverse)?);
+                //
+                // They go under `CLIP_FLAGS_PAYLOAD_KEY` rather than at the
+                // payload root because the root is shared: `SetClipSpeed` also
+                // writes `reverse` there, and replay — which sees only the
+                // `ClipUpdate` op kind — would otherwise apply that command's
+                // reverse without its speed.
+                let clip_flags = match type_name {
+                    "SetClipOpacity" => Some(serde_json::json!({ "opacity": clip.opacity })),
+                    "SetClipEnabled" => Some(serde_json::json!({ "enabled": clip.enabled })),
+                    "ReverseClip" => Some(serde_json::json!({ "reverse": clip.reverse })),
+                    _ => None,
+                };
+                if let Some(clip_flags) = clip_flags {
+                    payload.insert(
+                        crate::core::project::CLIP_FLAGS_PAYLOAD_KEY.to_string(),
+                        clip_flags,
+                    );
                 }
 
                 Ok(serde_json::Value::Object(payload))
@@ -2293,9 +2300,9 @@ mod tests {
         LinkClipsCommand, MoveClipCommand, OverwriteEditCommand, ReverseClipCommand,
         RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
         SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMotionKeyframesCommand,
-        SetClipOpacityCommand, SetMasterVolumeCommand, SetTrackBlendModeCommand, SplitClipCommand,
-        StateChange, TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand,
-        UnnestCompoundClipCommand,
+        SetClipOpacityCommand, SetClipSpeedCommand, SetMasterVolumeCommand,
+        SetTrackBlendModeCommand, SplitClipCommand, StateChange, TrimClipCommand,
+        UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
     };
     use crate::core::effects::{EffectType, ParamValue};
     use crate::core::masks::{MaskShape, RectMask};
@@ -3847,6 +3854,9 @@ mod tests {
     /// appending an op that replay ignores, so the edit would vanish on the
     /// next reopen instead of failing loudly. Opacity is clamped on execute and
     /// reverse is a toggle, so both are asserted against the realized value.
+    ///
+    /// Every asserted value differs from the field's default, or a replay that
+    /// did nothing at all would satisfy the assertion.
     #[test]
     fn test_executor_persists_clip_flag_updates_as_replayable() {
         let temp_dir = TempDir::new().unwrap();
@@ -3893,6 +3903,27 @@ mod tests {
                 &mut state,
             )
             .unwrap();
+        assert_eq!(
+            state.sequences[&seq_id]
+                .get_track(&track_id)
+                .unwrap()
+                .get_clip(&clip_id)
+                .unwrap()
+                .opacity,
+            1.0,
+            "opacity must clamp on execute"
+        );
+
+        // Settle on a value the default (1.0) cannot be mistaken for, so the
+        // replay assertion below can actually fail when replay drops the flag.
+        executor
+            .execute(
+                Box::new(SetClipOpacityCommand::new(
+                    &seq_id, &track_id, &clip_id, 0.5,
+                )),
+                &mut state,
+            )
+            .unwrap();
         executor
             .execute(
                 Box::new(SetClipEnabledCommand::new(
@@ -3914,7 +3945,7 @@ mod tests {
             .get_clip(&clip_id)
             .unwrap()
             .clone();
-        assert_eq!(live_clip.opacity, 1.0);
+        assert_eq!(live_clip.opacity, 0.5);
         assert!(!live_clip.enabled);
         assert!(live_clip.reverse);
 
@@ -3930,6 +3961,74 @@ mod tests {
         assert_eq!(replayed_clip.opacity, live_clip.opacity);
         assert_eq!(replayed_clip.enabled, live_clip.enabled);
         assert_eq!(replayed_clip.reverse, live_clip.reverse);
+    }
+
+    /// Replay must never apply part of a command it does not replay in full.
+    ///
+    /// `SetClipSpeed` shares the `ClipUpdate` op kind with `ReverseClip` and
+    /// logs its own root-level `reverse`. Replaying that field on its own would
+    /// leave the clip reversed at the wrong speed — a half-applied command,
+    /// strictly worse than the skipped one. Full `SetClipSpeed` replay is a
+    /// separate gap; the invariant here is all-or-nothing.
+    #[test]
+    fn test_replay_does_not_half_apply_a_speed_change_as_a_reverse() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+
+        let insert_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, import_cmd.asset_id(), 0.0)
+                        .with_source_range(0.0, 5.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let clip_id = insert_result.created_ids[0].clone();
+
+        executor
+            .execute(
+                Box::new(SetClipSpeedCommand::new(
+                    &seq_id, &track_id, &clip_id, 2.0, true,
+                )),
+                &mut state,
+            )
+            .unwrap();
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_clip = replayed.sequences[&seq_id]
+            .get_track(&track_id)
+            .unwrap()
+            .get_clip(&clip_id)
+            .unwrap();
+
+        assert_eq!(
+            (replayed_clip.speed, replayed_clip.reverse),
+            (1.0, false),
+            "SetClipSpeed replays neither field or both, never just reverse"
+        );
     }
 
     /// Command types whose `Command::type_name()` differs from the payload tag.
