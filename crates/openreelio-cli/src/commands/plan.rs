@@ -353,12 +353,24 @@ pub(crate) fn apply_edit_plan(
                 // in as new user edits and the rollback reverts itself. Marking
                 // them discarded is what makes the rollback stick.
                 if !applied_op_ids.is_empty() {
-                    if let Err(discard_error) =
-                        project.discard_persisted_operations(&applied_op_ids)
-                    {
-                        rollback_failures.push(format!(
-                            "Failed to discard rolled-back operations from persisted history: {discard_error}"
-                        ));
+                    match project.discard_persisted_operations(&applied_op_ids) {
+                        // A protected operation stays applied and comes back on
+                        // the next open, so the project is not where it started.
+                        // Reporting that as a clean rollback would be a lie the
+                        // caller cannot check.
+                        Ok(still_applied) if !still_applied.is_empty() => {
+                            rollback_failures.push(format!(
+                                "Rollback could not discard protected operation(s) [{}]: they stay \
+                                 in the project's applied history and will be present on the next open",
+                                still_applied.join(", ")
+                            ));
+                        }
+                        Ok(_) => {}
+                        Err(discard_error) => {
+                            rollback_failures.push(format!(
+                                "Failed to discard rolled-back operations from persisted history: {discard_error}"
+                            ));
+                        }
                     }
                 }
 

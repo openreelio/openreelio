@@ -799,16 +799,26 @@ impl ActiveProject {
     /// Every transactional caller that rolls back — the agent plan executor and
     /// the CLI/MCP plan path — must call this, or the rollback silently reverts
     /// itself on the next open.
-    pub fn discard_persisted_operations(&mut self, op_ids: &[OpId]) -> crate::core::CoreResult<()> {
+    ///
+    /// Returns the requested ids that stay applied because they sit inside the
+    /// history's protected prefix (the project's first `SequenceCreate` is
+    /// never discardable). A non-empty result is a rollback shortfall, not a
+    /// detail: those operations survive the next open, so the caller must not
+    /// report a clean rollback.
+    #[must_use = "a non-empty result means part of the rollback did not stick"]
+    pub fn discard_persisted_operations(
+        &mut self,
+        op_ids: &[OpId],
+    ) -> crate::core::CoreResult<Vec<OpId>> {
         if op_ids.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let read_result = self.ops_log.read_all_with_archive()?;
         Self::sync_history_with_operations(&mut self.history, &read_result.operations);
 
         let mut candidate_history = self.history.clone();
-        candidate_history.discard_operations(op_ids.iter().cloned());
+        let skipped_protected = candidate_history.discard_operations(op_ids.iter().cloned());
         candidate_history.sanitize(&read_result.operations);
 
         let candidate_state =
@@ -820,7 +830,7 @@ impl ActiveProject {
         self.state = candidate_state;
         self.executor.clear_history();
 
-        Ok(())
+        Ok(skipped_protected)
     }
 
     fn visible_history_current_index_for(history: &ProjectHistory) -> i32 {
@@ -2570,9 +2580,13 @@ mod tests {
 
         assert_eq!(project.state.meta.name, "Discarded Name");
 
-        project
+        let still_applied = project
             .discard_persisted_operations(std::slice::from_ref(&result.op_id))
             .unwrap();
+        assert!(
+            still_applied.is_empty(),
+            "nothing here is protected: {still_applied:?}"
+        );
         project.save().unwrap();
 
         assert_eq!(project.state.meta.name, "History Discard");
@@ -2625,9 +2639,13 @@ mod tests {
             )
             .unwrap();
 
-        project
+        let still_applied = project
             .discard_persisted_operations(std::slice::from_ref(&track_result.op_id))
             .unwrap();
+        assert!(
+            still_applied.is_empty(),
+            "nothing here is protected: {still_applied:?}"
+        );
 
         assert_eq!(
             project.state.active_sequence_id.as_deref(),
@@ -2639,6 +2657,45 @@ mod tests {
             .tracks
             .iter()
             .any(|track| track.name == "Temporary Captions"));
+    }
+
+    /// A discard that hits the protected prefix must say so.
+    ///
+    /// The project's first `SequenceCreate` is never discardable, so a
+    /// transaction whose first step created it cannot be rolled back to
+    /// nothing. Returning `Ok(())` there told every caller the rollback was
+    /// clean while the operation stayed applied and came back on the next open.
+    #[test]
+    fn test_active_project_discard_reports_operations_the_protected_prefix_kept() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("history_discard_protected_project");
+        std::fs::create_dir_all(&project_path).unwrap();
+
+        // Opened rather than created, so the ops log starts empty and the first
+        // command's operation becomes the protected head.
+        let mut project = ActiveProject::open(project_path.clone()).unwrap();
+        let created = project
+            .executor
+            .execute(
+                Box::new(crate::core::commands::CreateSequenceCommand::new(
+                    "Plan Sequence",
+                    "1080p",
+                )),
+                &mut project.state,
+            )
+            .unwrap();
+
+        let still_applied = project
+            .discard_persisted_operations(std::slice::from_ref(&created.op_id))
+            .unwrap();
+
+        assert_eq!(
+            still_applied,
+            vec![created.op_id.clone()],
+            "the protected operation stayed applied, so the caller has to hear about it"
+        );
+        assert!(project.history.applied_op_ids.contains(&created.op_id));
+        assert!(!project.history.discarded_op_ids.contains(&created.op_id));
     }
 
     #[test]
@@ -2658,9 +2715,13 @@ mod tests {
             )
             .unwrap();
 
-        project
+        let still_applied = project
             .discard_persisted_operations(std::slice::from_ref(&discarded.op_id))
             .unwrap();
+        assert!(
+            still_applied.is_empty(),
+            "nothing here is protected: {still_applied:?}"
+        );
 
         let kept = project
             .executor

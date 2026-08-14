@@ -156,7 +156,13 @@ impl ProjectHistory {
     /// The ops log remains append-only, so failed transactional work cannot be
     /// deleted from disk. Recording discarded IDs prevents later history syncs
     /// from treating those durable log entries as newly applied user edits.
-    pub fn discard_operations<I>(&mut self, op_ids: I)
+    ///
+    /// Operations inside the protected prefix are refused, and their ids are
+    /// returned in the order they were requested. A caller rolling a
+    /// transaction back has to know about that shortfall: those ops stay
+    /// applied, so the rollback did not put the project back where it started.
+    #[must_use = "a non-empty result means part of the rollback did not stick"]
+    pub fn discard_operations<I>(&mut self, op_ids: I) -> Vec<OpId>
     where
         I: IntoIterator<Item = OpId>,
     {
@@ -166,9 +172,13 @@ impl ProjectHistory {
             .take(self.protected_prefix_len)
             .cloned()
             .collect();
+        let mut skipped_protected = Vec::new();
         let mut discard_set = HashSet::new();
         for op_id in op_ids {
             if protected_ids.contains(&op_id) {
+                if !skipped_protected.contains(&op_id) {
+                    skipped_protected.push(op_id);
+                }
                 continue;
             }
 
@@ -183,7 +193,7 @@ impl ProjectHistory {
         }
 
         if discard_set.is_empty() {
-            return;
+            return skipped_protected;
         }
 
         self.applied_op_ids
@@ -191,6 +201,8 @@ impl ProjectHistory {
         self.redo_op_ids
             .retain(|op_id| !discard_set.contains(op_id));
         self.protected_prefix_len = self.protected_prefix_len.min(self.applied_op_ids.len());
+
+        skipped_protected
     }
 
     /// Removes references to missing/duplicate operation IDs.
@@ -327,7 +339,8 @@ mod tests {
         let mut history =
             ProjectHistory::from_operations(&operations, ProjectMeta::new("History Test"));
 
-        history.discard_operations(["op2".to_string(), "op3".to_string()]);
+        let skipped = history.discard_operations(["op2".to_string(), "op3".to_string()]);
+        assert!(skipped.is_empty(), "nothing here is protected: {skipped:?}");
         history.sanitize(&operations);
         history.append_new_operations(["op2".to_string(), "op3".to_string()]);
         history.sanitize(&operations);
@@ -351,11 +364,16 @@ mod tests {
         let mut history =
             ProjectHistory::from_operations(&operations, ProjectMeta::new("History Test"));
 
-        history.discard_operations(["op1".to_string(), "op2".to_string()]);
+        let skipped = history.discard_operations(["op1".to_string(), "op2".to_string()]);
         history.sanitize(&operations);
 
         assert_eq!(history.applied_op_ids, vec!["op1".to_string()]);
         assert_eq!(history.discarded_op_ids, vec!["op2".to_string()]);
         assert_eq!(history.protected_prefix_len, 1);
+        assert_eq!(
+            skipped,
+            vec!["op1".to_string()],
+            "the protected op it refused to discard has to be reported, not swallowed"
+        );
     }
 }
