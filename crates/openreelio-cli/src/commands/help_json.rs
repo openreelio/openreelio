@@ -307,12 +307,20 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "text": { "type": "string", "required": true, "desc": "Caption text" },
                     "start": { "type": "number", "required": true, "desc": "Start time in seconds" },
                     "end": { "type": "number", "required": true, "desc": "End time in seconds" },
+                    "style-pack": { "type": "string", "required": false, "desc": "Curated caption pack id from packs.list; the pack is the base layer and --style-json/--position override it key by key" },
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object" },
                     "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
                     "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
                 "example": "openreelio-cli caption add --path ./project --text \"Hello\" --start 0.0 --end 3.0"
+            },
+            "packs.list": {
+                "description": "List curated caption style packs and transition recipes. Packs are the quality floor: name one instead of assembling typography or a transition duration by hand. Every listed id is accepted by caption --style-pack, by stylePack on CreateCaption/UpdateCaption/ImportGeneratedCaptions, and by recipe on AddEffect",
+                "params": {
+                    "kind": { "type": "string", "required": false, "desc": "Registry to list: caption, transition, or all (default: all)" }
+                },
+                "example": "openreelio-cli packs list --kind caption"
             },
             "caption.list": {
                 "description": "List all captions in the sequence",
@@ -340,6 +348,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "track": { "type": "string", "required": false, "desc": "Caption track ID (auto-created when omitted)" },
                     "format": { "type": "string", "required": false, "desc": "Subtitle format: srt, vtt, or transcript-json (auto-detected when omitted)" },
                     "language": { "type": "string", "required": false, "desc": "Language code stored on the caption track and generated caption segments" },
+                    "style-pack": { "type": "string", "required": false, "desc": "Curated caption pack id from packs.list applied to every imported cue" },
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object applied to all cues" },
                     "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
                     "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object applied to all cues" },
@@ -400,6 +409,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "text": { "type": "string", "required": false, "desc": "New caption text" },
                     "start": { "type": "number", "required": false, "desc": "New caption start time in seconds" },
                     "end": { "type": "number", "required": false, "desc": "New caption end time in seconds" },
+                    "style-pack": { "type": "string", "required": false, "desc": "Curated caption pack id from packs.list; restyles an existing caption in one flag" },
                     "style-json": { "type": "string", "required": false, "desc": "Caption style override JSON object" },
                     "position": { "type": "string", "required": false, "desc": "Position preset: top, center, bottom" },
                     "position-json": { "type": "string", "required": false, "desc": "Caption position JSON object" },
@@ -547,7 +557,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli plan template --type split-and-move"
             },
             "command.execute": {
-                "description": "Execute any supported backend edit command using the shared CommandPayload parser",
+                "description": "Execute any supported backend edit command using the shared CommandPayload parser. Curated packs are resolved by that parser, so CreateCaption/UpdateCaption/ImportGeneratedCaptions accept stylePack and AddEffect accepts recipe; see packs.list for the ids",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "type": { "type": "string", "required": true, "desc": "Backend command type, e.g. SplitClip or AddMask" },
@@ -563,7 +573,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "payload": { "type": "string", "required": false, "desc": "Inline JSON object payload" },
                     "payload-file": { "type": "string", "required": false, "desc": "Path to a JSON object payload file" }
                 },
-                "example": "openreelio-cli command validate --type RenameTrack --payload '{\"sequenceId\":\"seq_1\",\"trackId\":\"track_v1\",\"name\":\"Main Video\"}'"
+                "example": "openreelio-cli command validate --type AddEffect --payload '{\"sequenceId\":\"seq_1\",\"trackId\":\"track_v1\",\"clipId\":\"clip_1\",\"recipe\":\"dissolve-soft\"}'"
             },
             "command.schema": {
                 "description": "Print the backend command surface available to headless agents",
@@ -772,6 +782,38 @@ mod tests {
         assert!(commands.contains_key("analysis.search-library"));
         assert!(commands.contains_key("analysis.build-selects"));
         assert!(commands.contains_key("render.graph"));
+    }
+
+    #[test]
+    fn build_schema_documents_the_curated_pack_surface() {
+        let schema = build_schema();
+        let commands = schema["commands"]
+            .as_object()
+            .expect("schema commands must be an object");
+
+        assert!(commands.contains_key("packs.list"));
+        assert!(commands["packs.list"]["params"]["kind"].is_object());
+
+        for verb in ["caption.add", "caption.update", "caption.import"] {
+            assert!(
+                commands[verb]["params"]["style-pack"].is_object(),
+                "{verb} --style-pack must be documented"
+            );
+        }
+
+        // `command execute` inherits the payload fields, so its description has
+        // to say so or an agent will only ever find them through the CLI flags.
+        let execute_description = commands["command.execute"]["description"]
+            .as_str()
+            .expect("description");
+        assert!(
+            execute_description.contains("stylePack"),
+            "{execute_description}"
+        );
+        assert!(
+            execute_description.contains("recipe"),
+            "{execute_description}"
+        );
     }
 
     #[test]

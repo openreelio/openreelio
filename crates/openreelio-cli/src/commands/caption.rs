@@ -5,6 +5,7 @@ use crate::validate;
 use clap::Subcommand;
 use openreelio_core::captions::{map_source_segments_to_timeline, parse_srt, parse_vtt, Caption};
 use openreelio_core::commands::*;
+use openreelio_core::style::resolve_caption_layers;
 use openreelio_core::timeline::{Clip, Sequence, TrackKind};
 use openreelio_core::ActiveProject;
 use serde_json::{Map, Value};
@@ -33,6 +34,11 @@ pub enum CaptionAction {
         /// End time in seconds
         #[arg(long)]
         end: f64,
+
+        /// Optional curated caption pack id (see `packs list --kind caption`).
+        /// The pack is the base layer; --style-json and --position override it.
+        #[arg(long = "style-pack")]
+        style_pack: Option<String>,
 
         /// Optional caption style JSON object
         #[arg(long = "style-json")]
@@ -76,6 +82,11 @@ pub enum CaptionAction {
         /// Optional new end time in seconds
         #[arg(long)]
         end: Option<f64>,
+
+        /// Optional curated caption pack id (see `packs list --kind caption`).
+        /// The pack is the base layer; --style-json and --position override it.
+        #[arg(long = "style-pack")]
+        style_pack: Option<String>,
 
         /// Optional caption style JSON object
         #[arg(long = "style-json")]
@@ -145,6 +156,11 @@ pub enum CaptionAction {
         /// Optional language code stored on the caption track and generated caption segments
         #[arg(long)]
         language: Option<String>,
+
+        /// Optional curated caption pack id (see `packs list --kind caption`).
+        /// The pack is the base layer; --style-json and --position override it.
+        #[arg(long = "style-pack")]
+        style_pack: Option<String>,
 
         /// Optional caption style JSON object applied to every imported caption
         #[arg(long = "style-json")]
@@ -620,6 +636,23 @@ fn parse_caption_position(
     parse_position_preset(position)
 }
 
+/// Applies a curated caption pack underneath the caller's explicit style and
+/// position.
+///
+/// This is the same core resolver `CommandPayload::parse` uses, so
+/// `--style-pack clean-minimal` and a `stylePack` in a `command execute`
+/// payload land on identical clip state. The pack is the base layer: whatever
+/// `--style-json` or `--position`/`--position-json` supplied wins key by key.
+fn apply_caption_pack(
+    style_pack: Option<&str>,
+    style: Option<serde_json::Value>,
+    position: Option<serde_json::Value>,
+) -> anyhow::Result<(Option<serde_json::Value>, Option<serde_json::Value>)> {
+    let resolved = resolve_caption_layers(style_pack, style, position)
+        .map_err(|error| anyhow::anyhow!("{}", error))?;
+    Ok((resolved.style, resolved.position))
+}
+
 fn get_sequence<'a>(project: &'a ActiveProject, sequence_id: &str) -> anyhow::Result<&'a Sequence> {
     project
         .state
@@ -1028,6 +1061,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             text,
             start,
             end,
+            style_pack,
             style_json,
             position,
             position_json,
@@ -1038,6 +1072,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
 
             let style = parse_style_json(style_json)?;
             let position = parse_caption_position(position, position_json)?;
+            let (style, position) = apply_caption_pack(style_pack.as_deref(), style, position)?;
 
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
@@ -1069,6 +1104,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             text,
             start,
             end,
+            style_pack,
             style_json,
             position,
             position_json,
@@ -1085,6 +1121,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
 
             let style = parse_style_json(style_json)?;
             let position = parse_caption_position(position, position_json)?;
+            let (style, position) = apply_caption_pack(style_pack.as_deref(), style, position)?;
 
             if text.is_none()
                 && start.is_none()
@@ -1093,7 +1130,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
                 && position.is_none()
             {
                 return Err(anyhow::anyhow!(
-                    "No update requested. Provide one of --text, --start, --end, --style-json, --position, or --position-json."
+                    "No update requested. Provide one of --text, --start, --end, --style-pack, --style-json, --position, or --position-json."
                 ));
             }
 
@@ -1190,6 +1227,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             track,
             format,
             language,
+            style_pack,
             style_json,
             position,
             position_json,
@@ -1204,6 +1242,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             let captions = load_caption_file(&subtitle_path, format)?;
             let style = parse_style_json(style_json)?;
             let position = parse_caption_position(position, position_json)?;
+            let (style, position) = apply_caption_pack(style_pack.as_deref(), style, position)?;
 
             if captions.is_empty() {
                 return Err(anyhow::anyhow!(
