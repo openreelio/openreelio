@@ -16,9 +16,11 @@ import { registerAllTools, unregisterAllTools } from '@/agents/tools';
 import { getMetaToolNames } from '@/agents/tools/metaTools';
 import { resetFeatureFlags, setFeatureFlag } from '@/config/featureFlags';
 import { isMutatingToolName } from '@/agents/engine/core/toolSemantics';
+import { getToolOutputContract } from '@/agents/toolOutputContracts';
 import {
   getBackendDirectToolNames,
   hasCompoundExpander,
+  normalizeBackendSingleStepData,
   MAX_PLAN_STEPS,
 } from './BackendToolExecutor';
 import { registerDefaultCompoundExpanders } from './registerDefaultCompoundExpanders';
@@ -54,6 +56,9 @@ const FRONTEND_ONLY_MUTATING_TOOLS: Readonly<Record<string, string>> = {
   delete_text_clip: 'resolves sequence/track from the clip id',
   set_text_transform: 'composes against the transform currently on the clip',
   insert_clip_from_file: 'resolves the workspace file, then refreshes to learn the assetId',
+  insert_clip:
+    'result contract (linkedAudio/durationSec/sourceIn/sourceOut) is reconstructed from the ' +
+    'refreshed snapshot; backend CommandResult does not carry it',
 
   // Not a CommandPayload at all.
   delete_transcript_range: 'dedicated IPC, no command payload',
@@ -138,7 +143,6 @@ describe('BackendToolExecutor backend safety', () => {
       'create_workspace_folder',
       'delete_clip',
       'delete_workspace_entry',
-      'insert_clip',
       'move_clip',
       'move_workspace_entry',
       'mute_clip',
@@ -153,6 +157,127 @@ describe('BackendToolExecutor backend safety', () => {
       'trim_clip',
       'update_mask',
     ]);
+  });
+});
+
+/**
+ * Files that promise result paths to the model: the machine-readable contracts
+ * and the two prompts that quote them in prose.
+ */
+const PROMISED_PATH_SOURCES = [
+  '../../../toolOutputContracts.ts',
+  '../../prompts/toolReference.ts',
+  '../../phases/Planner.ts',
+] as const;
+
+/** Every `data.*` path any contract or prompt names, in any form. */
+function collectPromisedResultPaths(): string[] {
+  const paths = new Set<string>();
+
+  for (const relativePath of PROMISED_PATH_SOURCES) {
+    const source = readFileSync(resolve(__dirname, relativePath), 'utf-8');
+    for (const match of source.matchAll(/\bdata(?:\.[A-Za-z_][A-Za-z0-9_]*|\[\d+\])+/g)) {
+      paths.add(match[0]);
+    }
+  }
+
+  return [...paths].sort();
+}
+
+function resolveResultPath(root: unknown, path: string): unknown {
+  const segments = path.match(/[A-Za-z_][A-Za-z0-9_]*|\[\d+\]/g) ?? [];
+  let current: unknown = { data: root };
+
+  for (const segment of segments) {
+    if (current === null || current === undefined) {
+      return undefined;
+    }
+
+    if (segment.startsWith('[')) {
+      if (!Array.isArray(current)) {
+        return undefined;
+      }
+      current = current[Number(segment.slice(1, -1))];
+      continue;
+    }
+
+    if (typeof current !== 'object' || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+
+  return current;
+}
+
+describe('backend route result fidelity', () => {
+  /**
+   * A backend-routed tool returns the backend `CommandResult` reshaped by
+   * `normalizeBackendSingleStepData` — never anything read back from the
+   * refreshed store. So every result path its output contract accepts has to
+   * exist in that shape, or a chained `$fromStep` reference passes plan-time
+   * validation and then fails at runtime with the earlier edit already applied.
+   */
+  it('satisfies every result path the contracts and prompts promise', () => {
+    const promisedPaths = collectPromisedResultPaths();
+    const canonicalStepData = {
+      operationId: 'op-1',
+      createdIds: ['created-1', 'created-2'],
+      deletedIds: ['deleted-1'],
+    };
+    const canonicalParams = {
+      sequenceId: 'seq-1',
+      trackId: 'track-1',
+      clipId: 'clip-1',
+      assetId: 'asset-1',
+    };
+
+    const unmet: string[] = [];
+    for (const toolName of getBackendDirectToolNames()) {
+      const contract = getToolOutputContract(toolName);
+      if (!contract) {
+        continue;
+      }
+
+      const normalized = normalizeBackendSingleStepData(
+        toolName,
+        canonicalParams,
+        canonicalStepData,
+      );
+      const accepted = new Set([
+        ...contract.examples,
+        ...(contract.validatePath
+          ? promisedPaths.filter((path) => contract.validatePath!(path))
+          : []),
+      ]);
+
+      for (const path of [...accepted].sort()) {
+        if (resolveResultPath(normalized, path) === undefined) {
+          unmet.push(`${toolName} -> ${path}`);
+        }
+      }
+    }
+
+    expect(
+      unmet,
+      'These backend routes promise result paths their backend result does not carry:\n' +
+        `  ${unmet.join('\n  ')}\n` +
+        'Pick one:\n' +
+        '  - map the field in normalizeBackendSingleStepData (only possible from the ' +
+        'CommandResult ids the backend already returns)\n' +
+        '  - surface the field through the backend CommandResult itself\n' +
+        '  - drop the BACKEND_DIRECT_ROUTES entry and record the tool in ' +
+        'FRONTEND_ONLY_MUTATING_TOOLS with the contract as the reason.',
+    ).toEqual([]);
+  });
+
+  it('collects the promised paths it claims to check', () => {
+    // A silently empty corpus would make the guard above pass vacuously.
+    const promisedPaths = collectPromisedResultPaths();
+
+    expect(promisedPaths).toContain('data.linkedAudio.clipId');
+    expect(promisedPaths).toContain('data.newClipId');
+    expect(promisedPaths).toContain('data.createdIds[0]');
   });
 });
 

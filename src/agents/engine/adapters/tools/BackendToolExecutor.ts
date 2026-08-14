@@ -123,9 +123,6 @@ const BACKEND_DIRECT_ROUTES: ReadonlyMap<string, BackendDirectRoute> = new Map<
   ['rename_workspace_entry', { commandType: 'renameFile' }],
   ['move_workspace_entry', { commandType: 'moveFile' }],
   ['delete_workspace_entry', { commandType: 'deleteFile' }],
-  // `InsertClipPayload` has no `audioOnly` field and denies unknown fields;
-  // `InsertMedia` is the composite command the frontend handler already calls.
-  ['insert_clip', { commandType: 'insertMedia' }],
 
   // --- Deterministic arg remaps ---------------------------------------------
   [
@@ -387,7 +384,15 @@ function dedupeDependencies(dependsOn: string[]): string[] {
   return Array.from(new Set(dependsOn.filter((value) => value.length > 0)));
 }
 
-function normalizeBackendSingleStepData(
+/**
+ * Reshape one backend step result into the tool's advertised output shape.
+ *
+ * The backend `CommandResult` only carries `operationId`/`createdIds`/
+ * `deletedIds`, so a route may only exist for a tool whose output contract this
+ * function can satisfy. The route-fidelity guard in
+ * `BackendToolExecutor.backendSafety.test.ts` calls it for exactly that reason.
+ */
+export function normalizeBackendSingleStepData(
   toolName: string,
   params: Record<string, unknown>,
   data: unknown,
@@ -410,13 +415,6 @@ function normalizeBackendSingleStepData(
             ? params.clipId
             : undefined,
       newClipId: typeof data.newClipId === 'string' ? data.newClipId : (createdIds[0] ?? null),
-    };
-  }
-
-  if (toolName === 'insert_clip') {
-    return {
-      ...data,
-      clipId: typeof data.clipId === 'string' ? data.clipId : (createdIds[0] ?? null),
     };
   }
 
