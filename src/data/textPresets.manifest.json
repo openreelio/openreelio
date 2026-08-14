@@ -1,0 +1,856 @@
+[
+  {
+    "aliases": [
+      "lower_third",
+      "lowerthird",
+      "name_title"
+    ],
+    "category": "lower-third",
+    "clip": {
+      "content": "Speaker Name\nTitle or Role",
+      "opacity": 1.0,
+      "position": {
+        "x": 0.08,
+        "y": 0.82
+      },
+      "rotation": 0.0,
+      "shadow": {
+        "blur": 4,
+        "color": "#000000",
+        "offsetX": 2,
+        "offsetY": 2
+      },
+      "style": {
+        "alignment": "left",
+        "backgroundColor": "#000000B3",
+        "backgroundPadding": 12,
+        "bold": true,
+        "color": "#FFFFFF",
+        "fontFamily": "Arial",
+        "fontSize": 42,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 1,
+        "lineHeight": 1.2,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 5.0,
+    "description": "Classic lower third for names and titles",
+    "id": "lower-third",
+    "kind": "text",
+    "name": "Lower Third"
+  },
+  {
+    "aliases": [
+      "minimal_lower_third"
+    ],
+    "category": "lower-third",
+    "clip": {
+      "content": "Speaker Name",
+      "opacity": 0.95,
+      "outline": {
+        "color": "#000000",
+        "width": 1
+      },
+      "position": {
+        "x": 0.05,
+        "y": 0.88
+      },
+      "rotation": 0.0,
+      "style": {
+        "alignment": "left",
+        "backgroundPadding": 0,
+        "bold": false,
+        "color": "#FFFFFF",
+        "fontFamily": "Helvetica",
+        "fontSize": 36,
+        "fontWeight": 400,
+        "italic": false,
+        "letterSpacing": 2,
+        "lineHeight": 1.3,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 4.0,
+    "description": "Clean minimal lower third",
+    "id": "lower-third-minimal",
+    "kind": "text",
+    "name": "Lower Third Minimal"
+  },
+  {
+    "aliases": [
+      "broadcast_lower_third",
+      "news-lower-third"
+    ],
+    "category": "lower-third",
+    "clip": {
+      "content": "Breaking Story\nLocation",
+      "opacity": 1.0,
+      "position": {
+        "x": 0.07,
+        "y": 0.78
+      },
+      "rotation": 0.0,
+      "shadow": {
+        "blur": 3,
+        "color": "#00000080",
+        "offsetX": 1,
+        "offsetY": 2
+      },
+      "style": {
+        "alignment": "left",
+        "backgroundColor": "#123E7CCC",
+        "backgroundPadding": 14,
+        "bold": true,
+        "color": "#FFFFFF",
+        "fontFamily": "Arial",
+        "fontSize": 40,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 1,
+        "lineHeight": 1.15,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 6.0,
+    "description": "Broadcast-style lower third with a strong title band",
+    "id": "lower-third-news",
+    "kind": "text",
+    "name": "News Lower Third"
+  },
+  {
+    "aliases": [
+      "interview_lower_third",
+      "speaker_id",
+      "name_role"
+    ],
+    "category": "lower-third",
+    "clip": {
+      "content": "Jane Doe\nCreative Director",
+      "opacity": 1.0,
+      "outline": {
+        "color": "#00000066",
+        "width": 1
+      },
+      "position": {
+        "x": 0.08,
+        "y": 0.84
+      },
+      "rotation": 0.0,
+      "style": {
+        "alignment": "left",
+        "backgroundColor": "#111827D9",
+        "backgroundPadding": 10,
+        "bold": true,
+        "color": "#F8FAFC",
+        "fontFamily": "Helvetica",
+        "fontSize": 38,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 1,
+        "lineHeight": 1.25,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 5.0,
+    "description": "Interview lower third with compact name and role styling",
+    "id": "lower-third-name-role",
+    "kind": "text",
+    "name": "Name + Role"
+  },
+  {
+    "aliases": [
+      "annotation_label",
+      "tag"
+    ],
+    "category": "callout",
+    "clip": {
+      "content": "Label",
+      "opacity": 0.9,
+      "position": {
+        "x": 0.1,
+        "y": 0.1
+      },
+      "rotation": 0.0,
+      "style": {
+        "alignment": "left",
+        "backgroundColor": "#333333",
+        "backgroundPadding": 6,
+        "bold": false,
+        "color": "#FFFFFF",
+        "fontFamily": "Arial",
+        "fontSize": 24,
+        "fontWeight": 400,
+        "italic": false,
+        "letterSpacing": 0,
+        "lineHeight": 1.3,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 3.0,
+    "description": "Simple label for annotations",
+    "id": "label",
+    "kind": "text",
+    "name": "Label"
+  },
+  {
+    "aliases": [
+      "title"
+    ],
+    "category": "title",
+    "clip": {
+      "content": "Main Title",
+      "opacity": 1.0,
+      "position": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "rotation": 0.0,
+      "shadow": {
+        "blur": 8,
+        "color": "#000000",
+        "offsetX": 3,
+        "offsetY": 3
+      },
+      "style": {
+        "alignment": "center",
+        "backgroundPadding": 0,
+        "bold": true,
+        "color": "#FFFFFF",
+        "fontFamily": "Arial",
+        "fontSize": 72,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 4,
+        "lineHeight": 1.1,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 4.0,
+    "description": "Bold centered title for intros",
+    "id": "centered-title",
+    "kind": "text",
+    "name": "Centered Title"
+  },
+  {
+    "aliases": [
+      "impact_title",
+      "hero_title"
+    ],
+    "category": "title",
+    "clip": {
+      "content": "Big Moment",
+      "opacity": 1.0,
+      "outline": {
+        "color": "#000000",
+        "width": 3
+      },
+      "position": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "rotation": 0.0,
+      "shadow": {
+        "blur": 12,
+        "color": "#000000",
+        "offsetX": 4,
+        "offsetY": 4
+      },
+      "style": {
+        "alignment": "center",
+        "backgroundPadding": 0,
+        "bold": true,
+        "color": "#FFFFFF",
+        "fontFamily": "Impact",
+        "fontSize": 96,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 6,
+        "lineHeight": 1.0,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 3.0,
+    "description": "Large dramatic title for impact",
+    "id": "epic-title",
+    "kind": "text",
+    "name": "Epic Title"
+  },
+  {
+    "aliases": [
+      "chapter",
+      "chapter_card",
+      "section_title"
+    ],
+    "category": "title",
+    "clip": {
+      "content": "Chapter One\nThe Setup",
+      "opacity": 1.0,
+      "position": {
+        "x": 0.5,
+        "y": 0.45
+      },
+      "rotation": 0.0,
+      "shadow": {
+        "blur": 8,
+        "color": "#00000099",
+        "offsetX": 2,
+        "offsetY": 3
+      },
+      "style": {
+        "alignment": "center",
+        "backgroundPadding": 0,
+        "bold": true,
+        "color": "#F8FAFC",
+        "fontFamily": "Georgia",
+        "fontSize": 62,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 2,
+        "lineHeight": 1.18,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 5.0,
+    "description": "Editorial chapter card with title and subtitle",
+    "id": "chapter-title",
+    "kind": "text",
+    "name": "Chapter Title"
+  },
+  {
+    "aliases": [
+      "end_card",
+      "outro_title"
+    ],
+    "category": "title",
+    "clip": {
+      "content": "Thanks for Watching",
+      "opacity": 1.0,
+      "position": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "rotation": 0.0,
+      "style": {
+        "alignment": "center",
+        "backgroundColor": "#111827CC",
+        "backgroundPadding": 18,
+        "bold": true,
+        "color": "#FFFFFF",
+        "fontFamily": "Arial",
+        "fontSize": 58,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 1,
+        "lineHeight": 1.25,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 6.0,
+    "description": "Centered end screen title for channels and credits",
+    "id": "end-card-title",
+    "kind": "text",
+    "name": "End Card"
+  },
+  {
+    "aliases": [
+      "caption",
+      "subtitles"
+    ],
+    "category": "subtitle",
+    "clip": {
+      "content": "Subtitle text",
+      "opacity": 1.0,
+      "position": {
+        "x": 0.5,
+        "y": 0.9
+      },
+      "rotation": 0.0,
+      "style": {
+        "alignment": "center",
+        "backgroundColor": "#00000099",
+        "backgroundPadding": 8,
+        "bold": false,
+        "color": "#FFFFFF",
+        "fontFamily": "Arial",
+        "fontSize": 32,
+        "fontWeight": 400,
+        "italic": false,
+        "letterSpacing": 0,
+        "lineHeight": 1.4,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 3.0,
+    "description": "Standard subtitle/caption style",
+    "id": "subtitle",
+    "kind": "text",
+    "name": "Subtitle"
+  },
+  {
+    "aliases": [
+      "outlined_subtitle"
+    ],
+    "category": "subtitle",
+    "clip": {
+      "content": "Subtitle text",
+      "opacity": 1.0,
+      "outline": {
+        "color": "#000000",
+        "width": 2
+      },
+      "position": {
+        "x": 0.5,
+        "y": 0.9
+      },
+      "rotation": 0.0,
+      "style": {
+        "alignment": "center",
+        "backgroundPadding": 0,
+        "bold": true,
+        "color": "#FFFFFF",
+        "fontFamily": "Arial",
+        "fontSize": 34,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 0,
+        "lineHeight": 1.4,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 3.0,
+    "description": "Subtitle with outline (no background)",
+    "id": "subtitle-outline",
+    "kind": "text",
+    "name": "Subtitle Outline"
+  },
+  {
+    "aliases": [
+      "emphasis"
+    ],
+    "category": "callout",
+    "clip": {
+      "content": "Key Point",
+      "opacity": 1.0,
+      "outline": {
+        "color": "#000000",
+        "width": 2
+      },
+      "position": {
+        "x": 0.5,
+        "y": 0.35
+      },
+      "rotation": 0.0,
+      "shadow": {
+        "blur": 6,
+        "color": "#000000",
+        "offsetX": 2,
+        "offsetY": 2
+      },
+      "style": {
+        "alignment": "center",
+        "backgroundPadding": 0,
+        "bold": true,
+        "color": "#FFD700",
+        "fontFamily": "Arial",
+        "fontSize": 48,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 2,
+        "lineHeight": 1.2,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 3.0,
+    "description": "Attention-grabbing callout text",
+    "id": "callout",
+    "kind": "text",
+    "name": "Callout"
+  },
+  {
+    "aliases": [
+      "stat",
+      "number_callout",
+      "price_callout"
+    ],
+    "category": "callout",
+    "clip": {
+      "content": "42%",
+      "opacity": 1.0,
+      "outline": {
+        "color": "#082F49",
+        "width": 2
+      },
+      "position": {
+        "x": 0.5,
+        "y": 0.42
+      },
+      "rotation": 0.0,
+      "shadow": {
+        "blur": 8,
+        "color": "#000000",
+        "offsetX": 3,
+        "offsetY": 4
+      },
+      "style": {
+        "alignment": "center",
+        "backgroundPadding": 0,
+        "bold": true,
+        "color": "#38BDF8",
+        "fontFamily": "Arial",
+        "fontSize": 82,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 1,
+        "lineHeight": 1.0,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 3.0,
+    "description": "Large numeric callout for data, prices, and milestones",
+    "id": "callout-stat",
+    "kind": "text",
+    "name": "Stat Callout"
+  },
+  {
+    "aliases": [
+      "warning",
+      "important_callout"
+    ],
+    "category": "callout",
+    "clip": {
+      "content": "Important",
+      "opacity": 1.0,
+      "outline": {
+        "color": "#FFFFFF",
+        "width": 1
+      },
+      "position": {
+        "x": 0.5,
+        "y": 0.22
+      },
+      "rotation": 0.0,
+      "style": {
+        "alignment": "center",
+        "backgroundColor": "#FACC15E6",
+        "backgroundPadding": 14,
+        "bold": true,
+        "color": "#111827",
+        "fontFamily": "Arial",
+        "fontSize": 46,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 1,
+        "lineHeight": 1.15,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 3.0,
+    "description": "High-contrast warning or safety note",
+    "id": "callout-warning",
+    "kind": "text",
+    "name": "Warning Callout"
+  },
+  {
+    "aliases": [
+      "timer"
+    ],
+    "category": "callout",
+    "clip": {
+      "content": "3",
+      "opacity": 1.0,
+      "outline": {
+        "color": "#FFFFFF",
+        "width": 4
+      },
+      "position": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "rotation": 0.0,
+      "shadow": {
+        "blur": 8,
+        "color": "#000000",
+        "offsetX": 4,
+        "offsetY": 4
+      },
+      "style": {
+        "alignment": "center",
+        "backgroundPadding": 0,
+        "bold": true,
+        "color": "#FF0000",
+        "fontFamily": "Impact",
+        "fontSize": 120,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 0,
+        "lineHeight": 1.0,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 1.0,
+    "description": "Bold countdown/timer style",
+    "id": "countdown",
+    "kind": "text",
+    "name": "Countdown"
+  },
+  {
+    "aliases": [
+      "credits",
+      "credit_block",
+      "end_credits"
+    ],
+    "category": "credit",
+    "clip": {
+      "content": "Directed by\nJane Doe\n\nProduced by\nOpenReelio",
+      "opacity": 1.0,
+      "position": {
+        "x": 0.5,
+        "y": 0.52
+      },
+      "rotation": 0.0,
+      "shadow": {
+        "blur": 5,
+        "color": "#000000AA",
+        "offsetX": 1,
+        "offsetY": 2
+      },
+      "style": {
+        "alignment": "center",
+        "backgroundPadding": 0,
+        "bold": false,
+        "color": "#F8FAFC",
+        "fontFamily": "Georgia",
+        "fontSize": 34,
+        "fontWeight": 400,
+        "italic": false,
+        "letterSpacing": 1,
+        "lineHeight": 1.45,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 8.0,
+    "description": "Centered credit block for ending cards",
+    "id": "credits-block",
+    "kind": "text",
+    "name": "Credits Block"
+  },
+  {
+    "aliases": [
+      "source_credit",
+      "attribution"
+    ],
+    "category": "credit",
+    "clip": {
+      "content": "Source: OpenReelio",
+      "opacity": 0.9,
+      "position": {
+        "x": 0.94,
+        "y": 0.92
+      },
+      "rotation": 0.0,
+      "style": {
+        "alignment": "right",
+        "backgroundColor": "#00000080",
+        "backgroundPadding": 6,
+        "bold": false,
+        "color": "#E5E7EB",
+        "fontFamily": "Arial",
+        "fontSize": 24,
+        "fontWeight": 400,
+        "italic": false,
+        "letterSpacing": 0,
+        "lineHeight": 1.2,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 5.0,
+    "description": "Small single-line attribution or source credit",
+    "id": "credit-line",
+    "kind": "text",
+    "name": "Credit Line"
+  },
+  {
+    "aliases": [
+      "bug",
+      "channel_bug",
+      "brand_bug"
+    ],
+    "category": "brand",
+    "clip": {
+      "content": "OPEN",
+      "opacity": 0.85,
+      "position": {
+        "x": 0.94,
+        "y": 0.08
+      },
+      "rotation": 0.0,
+      "style": {
+        "alignment": "right",
+        "backgroundColor": "#0F766ECC",
+        "backgroundPadding": 8,
+        "bold": true,
+        "color": "#FFFFFF",
+        "fontFamily": "Arial",
+        "fontSize": 24,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 1,
+        "lineHeight": 1.15,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 10.0,
+    "description": "Subtle top-right brand bug or channel label",
+    "id": "logo-bug",
+    "kind": "text",
+    "name": "Logo Bug"
+  },
+  {
+    "aliases": [
+      "handle",
+      "social"
+    ],
+    "category": "brand",
+    "clip": {
+      "content": "@openreelio",
+      "opacity": 1.0,
+      "position": {
+        "x": 0.07,
+        "y": 0.91
+      },
+      "rotation": 0.0,
+      "shadow": {
+        "blur": 4,
+        "color": "#00000099",
+        "offsetX": 1,
+        "offsetY": 2
+      },
+      "style": {
+        "alignment": "left",
+        "backgroundColor": "#7C3AEDCC",
+        "backgroundPadding": 10,
+        "bold": true,
+        "color": "#FFFFFF",
+        "fontFamily": "Arial",
+        "fontSize": 30,
+        "fontWeight": 700,
+        "italic": false,
+        "letterSpacing": 0,
+        "lineHeight": 1.2,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 5.0,
+    "description": "Creator handle or social profile lower bug",
+    "id": "social-handle",
+    "kind": "text",
+    "name": "Social Handle"
+  },
+  {
+    "aliases": [
+      "pull_quote"
+    ],
+    "category": "creative",
+    "clip": {
+      "content": "\"Pull quote goes here\"",
+      "opacity": 0.95,
+      "position": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "rotation": 0.0,
+      "shadow": {
+        "blur": 3,
+        "color": "#000000",
+        "offsetX": 1,
+        "offsetY": 1
+      },
+      "style": {
+        "alignment": "center",
+        "backgroundPadding": 0,
+        "bold": false,
+        "color": "#FFFFFF",
+        "fontFamily": "Georgia",
+        "fontSize": 42,
+        "fontWeight": 400,
+        "italic": true,
+        "letterSpacing": 1,
+        "lineHeight": 1.6,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 5.0,
+    "description": "Elegant quote style with italics",
+    "id": "quote",
+    "kind": "text",
+    "name": "Quote"
+  },
+  {
+    "aliases": [
+      "tech",
+      "terminal"
+    ],
+    "category": "creative",
+    "clip": {
+      "content": "SYSTEM READY",
+      "opacity": 1.0,
+      "position": {
+        "x": 0.05,
+        "y": 0.05
+      },
+      "rotation": 0.0,
+      "style": {
+        "alignment": "left",
+        "backgroundColor": "#000000CC",
+        "backgroundPadding": 10,
+        "bold": false,
+        "color": "#00FF00",
+        "fontFamily": "Courier New",
+        "fontSize": 36,
+        "fontWeight": 400,
+        "italic": false,
+        "letterSpacing": 0,
+        "lineHeight": 1.4,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 4.0,
+    "description": "Modern monospace tech aesthetic",
+    "id": "tech-style",
+    "kind": "text",
+    "name": "Tech Style"
+  },
+  {
+    "aliases": [],
+    "category": "creative",
+    "clip": {
+      "content": "Brand",
+      "opacity": 0.4,
+      "position": {
+        "x": 0.95,
+        "y": 0.95
+      },
+      "rotation": 0.0,
+      "style": {
+        "alignment": "right",
+        "backgroundPadding": 0,
+        "bold": false,
+        "color": "#FFFFFF",
+        "fontFamily": "Arial",
+        "fontSize": 24,
+        "fontWeight": 400,
+        "italic": false,
+        "letterSpacing": 0,
+        "lineHeight": 1.2,
+        "underline": false
+      }
+    },
+    "defaultDurationSec": 10.0,
+    "description": "Subtle watermark/branding text",
+    "id": "watermark",
+    "kind": "text",
+    "name": "Watermark"
+  }
+]

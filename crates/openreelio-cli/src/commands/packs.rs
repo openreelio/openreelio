@@ -1,13 +1,13 @@
 //! Curated style pack listing.
 //!
-//! Packs are the quality floor for captions and transitions: a named,
-//! hand-checked style beats a guessed one, and the id is the whole payload. This
-//! verb is the discovery half of that — the same `const` tables that validate a
-//! `--style-pack` or a `recipe` are what it prints, so a listed id is by
-//! construction an accepted id.
+//! Packs are the quality floor for captions, transitions, and text overlays: a
+//! named, hand-checked style beats a guessed one, and the id is the whole
+//! payload. This verb is the discovery half of that — the same `const` tables
+//! that validate a `--style-pack`, a `recipe`, or a `--preset` are what it
+//! prints, so a listed id is by construction an accepted id.
 
 use clap::{Subcommand, ValueEnum};
-use openreelio_core::style::{list_caption_packs, list_transition_recipes};
+use openreelio_core::style::{list_caption_packs, list_text_presets, list_transition_recipes};
 use serde_json::Value;
 
 use crate::output;
@@ -19,7 +19,9 @@ pub enum PackKind {
     Caption,
     /// Transition recipes only.
     Transition,
-    /// Both registries.
+    /// Text overlay presets only.
+    Text,
+    /// Every registry.
     #[default]
     All,
 }
@@ -29,6 +31,7 @@ impl PackKind {
         match self {
             Self::Caption => "caption",
             Self::Transition => "transition",
+            Self::Text => "text",
             Self::All => "all",
         }
     }
@@ -36,9 +39,9 @@ impl PackKind {
 
 #[derive(Subcommand)]
 pub enum PacksAction {
-    /// List curated caption style packs and transition recipes
+    /// List curated caption style packs, transition recipes, and text presets
     List {
-        /// Which registry to list: caption, transition, or all
+        /// Which registry to list: caption, transition, text, or all
         #[arg(long, value_enum, default_value_t = PackKind::All)]
         kind: PackKind,
     },
@@ -61,6 +64,14 @@ pub fn execute(action: PacksAction) -> anyhow::Result<()> {
                 for descriptor in list_transition_recipes() {
                     packs.push(serde_json::to_value(descriptor).map_err(|error| {
                         anyhow::anyhow!("Failed to serialize transition recipe: {}", error)
+                    })?);
+                }
+            }
+
+            if matches!(kind, PackKind::Text | PackKind::All) {
+                for descriptor in list_text_presets() {
+                    packs.push(serde_json::to_value(descriptor).map_err(|error| {
+                        anyhow::anyhow!("Failed to serialize text preset: {}", error)
                     })?);
                 }
             }

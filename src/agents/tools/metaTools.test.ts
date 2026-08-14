@@ -10,6 +10,7 @@ import {
   unregisterMetaTools,
 } from './metaTools';
 import { setFeatureFlag, resetFeatureFlags } from '@/config/featureFlags';
+import { TEXT_PRESETS } from '@/data/textPresets';
 
 describe('metaTools', () => {
   beforeEach(() => {
@@ -81,6 +82,41 @@ describe('metaTools', () => {
     expect(properties.autoPlacement).toBeDefined();
     expect(properties.placementIntent).toBeDefined();
     expect(properties.safeMargin).toBeDefined();
+  });
+
+  it('offers the whole text preset catalog through the text meta-tool, not a sample', () => {
+    // The meta-tool is the only text surface the model sees when USE_META_TOOLS
+    // is on. A four-value enum here made eighteen shipped presets unreachable
+    // no matter what add_text_clip itself accepted.
+    const metaPreset = globalToolRegistry.get('text')?.parameters.properties?.preset as
+      | { enum?: string[] }
+      | undefined;
+    const toolPreset = globalToolRegistry.get('add_text_clip')?.parameters.properties?.preset as
+      | { enum?: string[] }
+      | undefined;
+
+    expect(metaPreset?.enum).toEqual(toolPreset?.enum);
+    expect(metaPreset?.enum).toEqual(expect.arrayContaining(TEXT_PRESETS.map((p) => p.id)));
+    expect(metaPreset?.enum).toContain('default');
+    // Presets the previous four-value enum hid from the model.
+    expect(metaPreset?.enum).toEqual(
+      expect.arrayContaining(['quote', 'watermark', 'countdown', 'callout-stat', 'logo-bug']),
+    );
+  });
+
+  it('accepts a preset the old meta-tool enum rejected', () => {
+    const adapter = createToolRegistryAdapter(globalToolRegistry);
+
+    const valid = adapter.validateArgs('text', {
+      action: 'add_text_clip',
+      sequenceId: 'seq-1',
+      text: 'Pull quote',
+      startTime: 0,
+      duration: 5,
+      preset: 'quote',
+    });
+
+    expect(valid.valid).toBe(true);
   });
 
   it('routes get_caption_style through the text meta-tool', () => {

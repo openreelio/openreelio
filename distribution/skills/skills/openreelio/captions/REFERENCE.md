@@ -99,6 +99,73 @@ than guessing — the flag list is the largest in the CLI.
 
 Positions are normalized (`0.0`–`1.0`) fractions of the canvas.
 
+### Text presets
+
+`--preset` is the text equivalent of a caption pack: one id supplies typography,
+anchor, starter copy, and a suggested duration (used when `--duration` is
+omitted). The catalog is one registry shared by the CLI, the MCP tools, the
+agent tools, and the app — the CLI, the prompts, and the UI no longer disagree
+about which ids exist, so `quote`, `watermark`, `countdown`, `label`,
+`tech-style`, `callout-warning`, `subtitle-outline`, `end-card-title`, and
+`lower-third-minimal` all work where they were previously advertised and
+rejected.
+
+```bash
+openreelio-cli packs list --kind text
+```
+
+Each entry prints its `category`, `defaultDurationSec`, aliases, and the full
+`clip` it produces, so nothing has to be guessed. Categories group the catalog
+and decide placement: `lower-third`, `title`, `subtitle`, and `callout` may be
+moved by smart placement, while `credit`, `brand`, and `creative` keep the
+anchor the preset chose.
+Ids tolerate `_`, spaces, and case (`lower_third`, `Lower Third`), and short
+aliases (`title`, `credits`, `stat`, `timer`, `handle`) resolve too. `default`
+means "no preset".
+
+A preset is a **base layer, not a lock** — explicit flags override it:
+
+```bash
+openreelio-cli text add --path ./demo --text '"Cut the noise"' --start 12 \
+  --preset quote --font-size 96
+```
+
+The same catalog is reachable from the backend command as `preset`, which fills
+in everything `textData` leaves out — including all of it, when `textData` is
+omitted:
+
+```bash
+openreelio-cli command execute --path ./demo --type AddTextClip --payload \
+  '{"sequenceId":"seq_1","trackId":"v2","timelineIn":90,"duration":6,
+    "preset":"logo-bug","textData":{"content":"OPENREELIO"}}'
+```
+
+Nested layers merge key by key, so `{"style":{"bold":false}}` un-bolds a bold
+preset and `{"shadow":{"offsetX":2}}` nudges the shadow without restating it —
+on every preset, including those that declare no shadow of their own.
+
+The op log records the concrete values the preset produced, never the id, so a
+project replays identically even if the catalog later changes. An unknown id is
+rejected with the full list of valid ids.
+
+### Three ids changed meaning
+
+Unifying the CLI table onto the app's catalog changed what `title`,
+`lower-third`, and `subtitle` produce. Existing projects replay unchanged (the
+op log holds concrete values), but a script that names one of these renders
+differently than it used to:
+
+| Id | Was | Now |
+|----|-----|-----|
+| `title` (alias of `centered-title`) | upper third, y=0.15 | frame center, y=0.5 |
+| `lower-third` | centered (0.5, 0.80), 36pt, regular, no shadow | left-aligned (0.08, 0.82), 42pt, bold, with shadow |
+| `subtitle` | y=0.85, thin outline, background `#000000AA` | y=0.9, no outline, background `#00000099` |
+
+No id reproduces the old layouts; re-anchor with flags where the placement
+mattered, e.g. `--preset title --y 0.15`, or
+`--preset lower-third --x 0.5 --y 0.8 --align center --font-size 36 --style-json '{"bold":false}'`.
+Preset ids are append-only from here on.
+
 ## Transcription
 
 Speech-to-text runs locally with Whisper. Check readiness first; the model is a

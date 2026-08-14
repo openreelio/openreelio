@@ -86,7 +86,8 @@ everywhere rather than tracking the exceptions.
 it into a context window. Fetch help per verb instead
 (`openreelio-cli verify --help`, `openreelio-cli frame extract --help`), use
 `openreelio-cli command schema` for the 79 backend command types, and
-`openreelio-cli packs list` for the curated caption styles and transitions.
+`openreelio-cli packs list` for the curated caption styles, transition recipes,
+and text presets (`--kind caption|transition|text`).
 
 ### Self-diagnosis
 
@@ -475,7 +476,7 @@ openreelio-cli caption remove --path ./demo --id <CAPTION_ID>
 openreelio-cli caption import --path ./demo --file subs.srt [--format srt|vtt|transcript-json]
 openreelio-cli caption export --path ./demo --format srt --output subs.srt
 
-openreelio-cli text add       --path ./demo --text "Title" --start 0 --duration 3 [--preset credits]
+openreelio-cli text add       --path ./demo --text "Title" --start 0 [--duration 3] [--preset <PRESET_ID>]
 openreelio-cli text update    --path ./demo --id <CLIP_ID> --text "New"
 openreelio-cli text transform --path ./demo --id <CLIP_ID> --x 0.38 --y 0.42 --scale-x 1.2
 openreelio-cli text list      --path ./demo
@@ -510,6 +511,63 @@ On an **update** a pack restyles without moving the caption: `caption update
 --style-pack …` keeps the anchor the caption already has, because an update
 replaces whatever position it carries. Pass `--position` when you do want it
 moved.
+
+### Text presets
+
+`--preset` is the same idea for text overlays: one id supplies typography,
+anchor, starter copy, and a suggested duration (used when `--duration` is
+omitted).
+
+```bash
+openreelio-cli packs list --kind text
+```
+
+One registry serves the CLI, MCP, the agent tools, and the app, so the ids the
+hints advertise are exactly the ids the parser accepts — `quote`, `watermark`,
+`countdown`, `label`, `tech-style`, `callout-warning`, `subtitle-outline`,
+`end-card-title`, and `lower-third-minimal` used to be advertised and rejected,
+and now work. Entries print `category` (`lower-third`, `title`, `subtitle`,
+`callout`, `credit`, `brand`, `creative`), `defaultDurationSec`, aliases, and
+the full `clip`.
+
+A preset is a base layer, not a lock: explicit flags override it, so
+`--preset quote --font-size 96` is the quote preset at 96pt. The same field is
+`preset` on `AddTextClip`, so `command execute`, `plan execute`, and MCP clients
+get it too, and `textData` there carries only the overrides (commonly just
+`content`) or may be omitted entirely. Nested layers merge key by key, so
+`{"style":{"bold":false}}` un-bolds a bold preset and leaves everything else
+alone. The op log records the concrete values, never the preset id, so replay
+never depends on the catalog. An unknown id is rejected with the full valid
+list; `default` means no preset.
+
+**Changed geometry.** Unifying on the app's catalog changed what three
+already-shipped spellings produce. Existing projects replay unchanged, because
+the op log stores concrete values — only new runs of a script that names one of
+these is affected:
+
+| Id | Was | Now |
+|----|-----|-----|
+| `title` (alias of `centered-title`) | upper third, y=0.15, 72pt bold | frame center, y=0.5, 72pt bold with wider letter spacing |
+| `lower-third` | centered (0.5, 0.80), 36pt, regular, no shadow | left-aligned (0.08, 0.82), 42pt, bold, with shadow |
+| `subtitle` | y=0.85 with a thin outline, background `#000000AA` | y=0.9, no outline, background `#00000099` |
+
+No id reproduces the old layouts, so re-anchor with flags where the previous
+placement mattered:
+
+```bash
+# the old upper-third title
+openreelio-cli text add --path ./demo --text "Chapter One" --start 0 --preset title --y 0.15
+# the old centered lower third
+openreelio-cli text add --path ./demo --text "Name" --start 0 --preset lower-third \
+  --x 0.5 --y 0.8 --align center --font-size 36 --style-json '{"bold":false}'
+# the old outlined subtitle
+openreelio-cli text add --path ./demo --text "Line" --start 0 --preset subtitle --y 0.85 \
+  --background-color "#000000AA" --outline-json '{"color":"#000000","width":1}'
+```
+
+Preset ids are append-only from here — see the stability note in
+`src-tauri/src/core/style/text_presets.rs`, which a contract test now enforces
+for these three.
 
 Speech-to-text is local (Whisper); `--import` writes the result straight into a
 caption track.

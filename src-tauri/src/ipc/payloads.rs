@@ -957,6 +957,11 @@ pub struct RemoveMaskPayload {
 /// Creates a new clip with a virtual text asset and applies a TextOverlay
 /// effect containing the text styling data.
 ///
+/// A curated text preset id may stand in for most of `textData`; explicit
+/// fields override the preset key by key. The preset is resolved during
+/// deserialization, so what reaches the op log is the concrete `TextClipData`
+/// the preset produced and never the id — replay does not consult the registry.
+///
 /// # Example
 ///
 /// ```json
@@ -975,18 +980,79 @@ pub struct RemoveMaskPayload {
 ///     }
 /// }
 /// ```
-#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+///
+/// The same clip from a preset, where only the copy is the caller's business:
+///
+/// ```json
+/// {
+///     "sequenceId": "seq_001",
+///     "trackId": "video_001",
+///     "timelineIn": 5.0,
+///     "duration": 3.0,
+///     "preset": "quote",
+///     "textData": { "content": "Hello World" }
+/// }
+/// ```
+///
+/// Unknown fields are rejected by the wire shape this deserializes from, and
+/// `timelineStart` is accepted there as an alias for `timelineIn`.
+#[derive(Debug, Serialize, Clone, specta::Type)]
+#[serde(rename_all = "camelCase")]
 pub struct AddTextClipPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     /// Timeline position to insert the text clip at (seconds)
-    #[serde(alias = "timelineStart")]
     pub timeline_in: TimeSec,
     /// Duration of the text clip (seconds)
     pub duration: TimeSec,
+    /// Curated text preset id or alias, resolved into `text_data` on parse.
+    ///
+    /// Always `None` after deserialization: the preset has been expanded into
+    /// concrete values by then, and keeping the id would put a registry lookup
+    /// between the op log and the clip it describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     /// Text content and styling data
+    ///
+    /// Required unless `preset` names a preset, in which case it carries only
+    /// the fields that override the preset.
     pub text_data: TextClipData,
+}
+
+impl<'de> Deserialize<'de> for AddTextClipPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// The wire shape, where `textData` may be partial or absent.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            sequence_id: SequenceId,
+            track_id: TrackId,
+            #[serde(alias = "timelineStart")]
+            timeline_in: TimeSec,
+            duration: TimeSec,
+            #[serde(default)]
+            preset: Option<String>,
+            #[serde(default)]
+            text_data: Option<serde_json::Value>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let text_data =
+            crate::core::style::resolve_text_clip_data(wire.preset.as_deref(), wire.text_data)
+                .map_err(serde::de::Error::custom)?;
+
+        Ok(Self {
+            sequence_id: wire.sequence_id,
+            track_id: wire.track_id,
+            timeline_in: wire.timeline_in,
+            duration: wire.duration,
+            preset: None,
+            text_data,
+        })
+    }
 }
 
 /// Payload for updating a text clip's content and styling.

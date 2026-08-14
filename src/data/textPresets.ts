@@ -2,7 +2,15 @@
  * Text Presets Data
  *
  * Pre-configured text styles for common video text use cases.
- * Used by TextPresetPicker component in TextInspector.
+ * Used by the TextPresetPicker component in TextInspector and by the agent text
+ * tools.
+ *
+ * This catalog is one half of a pair: the Rust core registry in
+ * `src-tauri/src/core/style/text_presets.rs` serves the CLI, MCP, and the
+ * `preset` field on `AddTextClip`, and `textPresets.manifest.json` — generated
+ * from that registry — pins the two together. A change here that is not made
+ * there (or the reverse) fails `textPresets.test.ts` on this side and
+ * `the_text_preset_manifest_matches_the_registry` on the other.
  *
  * @module data/textPresets
  */
@@ -89,7 +97,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     opacity: 1.0,
     defaultContent: 'Speaker Name\nTitle or Role',
     defaultDurationSec: 5,
-    aliases: ['lower_third', 'name_title', 'name-role'],
+    aliases: ['lower_third', 'lowerthird', 'name_title'],
   },
   {
     id: 'lower-third-minimal',
@@ -117,7 +125,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     opacity: 0.95,
     defaultContent: 'Speaker Name',
     defaultDurationSec: 4,
-    aliases: ['minimal_lower_third', 'minimal-lower-third'],
+    aliases: ['minimal_lower_third'],
   },
   {
     id: 'lower-third-news',
@@ -357,7 +365,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     opacity: 1.0,
     defaultContent: 'Subtitle text',
     defaultDurationSec: 3,
-    aliases: ['outlined_subtitle', 'subtitle_outline'],
+    aliases: ['outlined_subtitle'],
   },
 
   // -------------------------------------------------------------------------
@@ -395,13 +403,16 @@ export const TEXT_PRESETS: TextPreset[] = [
     opacity: 1.0,
     defaultContent: 'Key Point',
     defaultDurationSec: 3,
-    aliases: ['callout', 'emphasis'],
+    aliases: ['emphasis'],
   },
   {
     id: 'label',
     name: 'Label',
     description: 'Simple label for annotations',
-    category: 'lower-third',
+    // Anchored top-left, so it is a corner annotation rather than a name plate.
+    // The category drives smart placement, and 'lower-third' relocated it to
+    // the bottom of the frame.
+    category: 'callout',
     style: {
       fontSize: 24,
       fontFamily: 'Arial',
@@ -598,7 +609,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     opacity: 1,
     defaultContent: '@openreelio',
     defaultDurationSec: 5,
-    aliases: ['handle', 'social', 'social_handle'],
+    aliases: ['handle', 'social'],
   },
 
   // -------------------------------------------------------------------------
@@ -632,7 +643,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     opacity: 0.95,
     defaultContent: '"Pull quote goes here"',
     defaultDurationSec: 5,
-    aliases: ['pull_quote', 'quote'],
+    aliases: ['pull_quote'],
   },
   {
     id: 'tech-style',
@@ -681,7 +692,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     opacity: 0.4,
     defaultContent: 'Brand',
     defaultDurationSec: 10,
-    aliases: ['watermark'],
+    aliases: [],
   },
   {
     id: 'countdown',
@@ -715,7 +726,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     opacity: 1.0,
     defaultContent: '3',
     defaultDurationSec: 1,
-    aliases: ['timer', 'countdown'],
+    aliases: ['timer'],
   },
 ];
 

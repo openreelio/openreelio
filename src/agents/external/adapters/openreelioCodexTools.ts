@@ -22,6 +22,7 @@ import {
 } from '@/bindings';
 
 import { hasActiveTimeRemap, type TimeRemapCurve } from '@/types';
+import { TEXT_PRESETS } from '@/data/textPresets';
 import type { ExternalAgentApprovalDecisionProvider, ExternalAgentApprovalRequest } from '../types';
 import { isCodexDynamicToolCallOutputTextItem } from './CodexAppServerClient';
 import type {
@@ -4054,6 +4055,40 @@ function validateContextToken(
   return { valid: true, record };
 }
 
+/**
+ * Every text preset spelling this bridge accepts: ids first, then aliases.
+ *
+ * Read from the catalog rather than restated, because a hint that names a
+ * preset the parser rejects is worse than no hint at all.
+ */
+function textPresetKeys(): string[] {
+  return [
+    ...TEXT_PRESETS.map((preset) => preset.id),
+    ...TEXT_PRESETS.flatMap((preset) => preset.aliases ?? []),
+  ];
+}
+
+/**
+ * Text preset ids whose anchor is part of the template, not a suggestion.
+ *
+ * Smart placement moves a title, lower third, subtitle, or callout. Everything
+ * else was placed deliberately by the preset, so the category decides this
+ * rather than a hand-kept list of ids.
+ */
+function templatePlacementTextPresetIds(): string[] {
+  return TEXT_PRESETS.filter((preset) =>
+    ['credit', 'brand', 'creative'].includes(preset.category),
+  ).map((preset) => preset.id);
+}
+
+/** One line per text preset: what it is for, and how long it usually runs. */
+function textPresetCatalog(): string[] {
+  return TEXT_PRESETS.map(
+    (preset) =>
+      `${preset.id} (${preset.category}, ~${preset.defaultDurationSec ?? 3}s): ${preset.description}`,
+  );
+}
+
 function buildCommandSchema(): CodexJsonObject {
   return {
     commands: OPENREELIO_COMMAND_TYPES,
@@ -4115,12 +4150,15 @@ function buildCommandSchema(): CodexJsonObject {
         note: 'Use this read-only tool before ImportGeneratedCaptions. Set sequenceAudio=true (default captioning path) for the edited timeline mix; its captionSegments are TIMELINE-relative and pass straight to ImportGeneratedCaptions. assetId transcription is SOURCE-relative (0-based to the asset) and is not safe as direct timeline caption times; pass clipId plus sequenceId/trackId to receive timelineCaptionSegments remapped onto a timeline clip.',
       },
       AddTextClip: {
-        required: ['sequenceId', 'trackId', 'timelineIn', 'duration', 'textData'],
+        required: ['sequenceId', 'trackId', 'timelineIn', 'duration'],
+        optional: ['preset', 'textData'],
         textDataShape:
           'TextClipData includes content, style(fontFamily/fontSize/fontWeight/color/backgroundColor/backgroundPadding/alignment/bold/italic/underline/lineHeight/letterSpacing), position(x/y 0..1), shadow(color/offsetX/offsetY/blur), outline(color/width), rotation, and opacity.',
-        presetHints:
-          'Production presets supported by UI/agent/CLI include title, centered-title, epic-title, chapter-title, lower-third, lower-third-news, lower-third-name-role, subtitle, callout, callout-stat, credits, credit-line, logo-bug, social-handle, quote, watermark, and countdown.',
-        note: 'Text clips must be placed on a top/front video or overlay track above the base video. The Codex bridge will correct below-base text tracks when possible. Use SetClipTransform after creation when scale or anchor must be exact.',
+        presetHints: textPresetKeys(),
+        presetShape:
+          'preset names a curated text preset that supplies the whole TextClipData; textData then carries only what overrides it, commonly just content, and may be omitted entirely. Every id and alias listed here is accepted. Nested layers merge key by key, so {"style":{"bold":false}} or {"shadow":{"offsetX":2}} keeps everything else the preset chose.',
+        presetCatalog: textPresetCatalog(),
+        note: 'Either preset or textData must be present: without a preset, textData is required and must be complete. Text clips must be placed on a top/front video or overlay track above the base video. The Codex bridge will correct below-base text tracks when possible. Use SetClipTransform after creation when scale or anchor must be exact.',
       },
       UpdateTextClip: {
         required: ['sequenceId', 'trackId', 'clipId', 'textData'],
@@ -4221,8 +4259,8 @@ function buildCommandSchema(): CodexJsonObject {
         'Read timeline_snapshot to find active sequence, existing text clips, and usable video/overlay tracks.',
         'Read annotation_read for overlapping source assets when placement should avoid faces, objects, or OCR text.',
         'CreateTrack(kind="video" or "overlay", position=0) when there is no unlocked non-overlapping text track above the media.',
-        'AddTextClip with complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity.',
-        'Use production text presets for common work: credits for end cards, logo-bug for channel marks, social-handle for creator IDs, lower-third-name-role for interviews, and callout-stat for numeric emphasis.',
+        'AddTextClip with a preset id, or with a complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity when no preset fits.',
+        'Prefer preset plus a content override over hand-assembled typography; presetCatalog under payloadHints.AddTextClip says what each id is for.',
         'SetClipTransform for exact preview drag/resize/rotate parity using normalized position, scale, rotationDeg, and anchor.',
         'SetClipMotionKeyframes for editable text or media motion presets such as zoom in, zoom out, and Ken Burns.',
       ],
@@ -4247,8 +4285,7 @@ function buildCommandSchema(): CodexJsonObject {
           'Bottom center around y=0.85 with outline/shadow unless it covers important visual content.',
         title: 'Center or upper third depending on the shot composition.',
         lowerThird: 'Lower-left or lower-center with enough safe margin and readable contrast.',
-        creditBrand:
-          'Credits, credit lines, logo bugs, social handles, quote, and watermark presets preserve their template position unless the user asks for automatic placement.',
+        creditBrand: `These presets preserve their template position unless the user asks for automatic placement: ${templatePlacementTextPresetIds().join(', ')}.`,
       },
     },
   };

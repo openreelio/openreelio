@@ -41,7 +41,9 @@ use crate::{
 use clap::Args;
 use openreelio_core::commands::{get_text_data, is_text_clip, InsertMediaCommand};
 use openreelio_core::ipc::CommandPayload;
-use openreelio_core::style::{caption_pack_ids, transition_recipe_ids};
+use openreelio_core::style::{
+    caption_pack_ids, text_preset_keys, transition_recipe_ids, TextPresetCategory, TEXT_PRESETS,
+};
 use openreelio_core::timeline::TrackKind;
 use serde_json::Value;
 use std::io::{BufRead, Write};
@@ -1374,12 +1376,55 @@ fn load_annotation_for_asset(
         })
 }
 
+/// Text preset ids whose anchor is part of the template, not a suggestion.
+///
+/// Smart placement moves an overlay it believes is a title, a lower third, a
+/// subtitle, or a callout. Everything else — credits, brand marks, creative
+/// treatments — was placed deliberately by the preset, so the category decides
+/// this rather than a hand-kept list of ids.
+fn template_placement_text_preset_ids() -> Vec<&'static str> {
+    TEXT_PRESETS
+        .iter()
+        .filter(|preset| {
+            matches!(
+                preset.category,
+                TextPresetCategory::Credit
+                    | TextPresetCategory::Brand
+                    | TextPresetCategory::Creative
+            )
+        })
+        .map(|preset| preset.id)
+        .collect()
+}
+
+/// One line per text preset: what it is for, and how long it usually runs.
+///
+/// Reading the catalog out of the registry is what keeps a hint from
+/// advertising a preset the parser rejects.
+fn text_preset_catalog_line() -> Vec<String> {
+    TEXT_PRESETS
+        .iter()
+        .map(|preset| {
+            format!(
+                "{} ({}, ~{}s): {}",
+                preset.id,
+                preset.category.as_str(),
+                preset.default_duration_sec,
+                preset.description
+            )
+        })
+        .collect()
+}
+
 fn build_command_schema() -> Value {
     // Read the curated ids from the core registries rather than restating them:
     // a pack added to core shows up in the hints, and a hint can never name an
     // id the validator would reject.
     let caption_style_pack_ids = caption_pack_ids();
     let transition_recipe_ids = transition_recipe_ids();
+    let text_preset_keys = text_preset_keys();
+    let template_placement_preset_ids = template_placement_text_preset_ids();
+    let text_preset_catalog = text_preset_catalog_line();
 
     serde_json::json!({
         "commands": CommandPayload::SUPPORTED_COMMAND_TYPES,
@@ -1437,10 +1482,13 @@ fn build_command_schema() -> Value {
                 "note": "Use this read-only MCP tool to check whether local Whisper is compiled in and which model files are installed."
             },
             "AddTextClip": {
-                "required": ["sequenceId", "trackId", "timelineIn", "duration", "textData"],
+                "required": ["sequenceId", "trackId", "timelineIn", "duration"],
+                "optional": ["preset", "textData"],
                 "textDataShape": "TextClipData includes content, style(fontFamily/fontSize/fontWeight/color/backgroundColor/backgroundPadding/alignment/bold/italic/underline/lineHeight/letterSpacing), position(x/y 0..1), shadow(color/offsetX/offsetY/blur), outline(color/width), rotation, and opacity.",
-                "presetHints": "Production presets supported by UI/agent/CLI include title, centered-title, epic-title, chapter-title, lower-third, lower-third-news, lower-third-name-role, subtitle, callout, callout-stat, credits, credit-line, logo-bug, social-handle, quote, watermark, and countdown.",
-                "note": "Text clips must be placed on a video or overlay track. Use SetClipTransform after creation when scale or anchor must be exact."
+                "presetHints": text_preset_keys,
+                "presetShape": "preset names a curated text preset that supplies the whole TextClipData; textData then carries only what overrides it, commonly just content, and may be omitted entirely. Every id and alias listed here is accepted by this payload and by `text add --preset`. Nested layers merge key by key, so {\"style\":{\"bold\":false}} or {\"shadow\":{\"offsetX\":2}} keeps everything else the preset chose.",
+                "presetCatalog": text_preset_catalog,
+                "note": "Either preset or textData must be present: without a preset, textData is required and must be complete. Text clips must be placed on a video or overlay track. Use SetClipTransform after creation when scale or anchor must be exact."
             },
             "UpdateTextClip": {
                 "required": ["sequenceId", "trackId", "clipId", "textData"],
@@ -1464,8 +1512,8 @@ fn build_command_schema() -> Value {
                 "Read timeline.snapshot to find the active sequence, existing text clips, and usable video/overlay tracks.",
                 "Read annotation.read for overlapping source assets when placement should avoid faces, objects, or OCR text.",
                 "CreateTrack(kind=\"video\" or \"overlay\") when there is no unlocked non-overlapping text track above the media.",
-                "AddTextClip with complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity.",
-                "Use production text presets for common work: credits for end cards, logo-bug for channel marks, social-handle for creator IDs, lower-third-name-role for interviews, and callout-stat for numeric emphasis.",
+                "AddTextClip with a preset id, or with a complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity when no preset fits.",
+                "Prefer preset plus a content override over hand-assembled typography; see presetCatalog under payloadHints.AddTextClip for what each id is for.",
                 "SetClipTransform for exact preview drag/resize/rotate parity using normalized position, scale, rotationDeg, and anchor."
             ],
             "timedSubtitles": [
@@ -1481,7 +1529,10 @@ fn build_command_schema() -> Value {
                 "subtitle": "Bottom center around y=0.85 with outline/shadow unless it covers important visual content.",
                 "title": "Center or upper third depending on the shot composition.",
                 "lowerThird": "Lower-left or lower-center with enough safe margin and readable contrast.",
-                "creditBrand": "Credits, credit lines, logo bugs, social handles, quote, and watermark presets preserve their template position unless the user asks for automatic placement."
+                "creditBrand": format!(
+                    "These presets preserve their template position unless the user asks for automatic placement: {}.",
+                    template_placement_preset_ids.join(", ")
+                )
             }
         },
         "payloadFormat": {
@@ -2376,6 +2427,96 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("advertised recipe '{recipe_id}' must parse: {error}"));
         }
+    }
+
+    #[test]
+    fn should_advertise_text_preset_ids_from_the_core_registry() {
+        let schema = build_command_schema();
+
+        let hints = schema["payloadHints"]["AddTextClip"]["presetHints"]
+            .as_array()
+            .expect("AddTextClip must advertise presetHints");
+        let advertised: Vec<&str> = hints.iter().filter_map(Value::as_str).collect();
+        assert_eq!(advertised, text_preset_keys());
+
+        // Every advertised spelling must round-trip through the strict parser.
+        // The bug this closes advertised quote, watermark, and countdown while
+        // the parser rejected all three.
+        for key in text_preset_keys() {
+            CommandPayload::parse(
+                "AddTextClip".to_string(),
+                serde_json::json!({
+                    "sequenceId": "seq",
+                    "trackId": "track",
+                    "timelineIn": 0.0,
+                    "duration": 3.0,
+                    "preset": key,
+                }),
+            )
+            .unwrap_or_else(|error| panic!("advertised preset '{key}' must parse: {error}"));
+        }
+
+        let catalog = schema["payloadHints"]["AddTextClip"]["presetCatalog"]
+            .as_array()
+            .expect("AddTextClip must describe what each preset is for");
+        assert_eq!(catalog.len(), TEXT_PRESETS.len());
+    }
+
+    #[test]
+    fn should_declare_the_add_text_clip_fields_the_parser_actually_requires() {
+        // A hint is only worth reading if it matches the wire shape. `textData`
+        // was left in `required` when `preset` was added, which tells a client
+        // to hand-assemble the typography the preset field exists to replace.
+        let schema = build_command_schema();
+        let hint = &schema["payloadHints"]["AddTextClip"];
+
+        let required: Vec<&str> = hint["required"]
+            .as_array()
+            .expect("required list")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let optional: Vec<&str> = hint["optional"]
+            .as_array()
+            .expect("optional list")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+
+        assert!(
+            !required.contains(&"textData"),
+            "textData is optional once a preset is named: {required:?}"
+        );
+        assert!(optional.contains(&"textData") && optional.contains(&"preset"));
+
+        // The payload built from exactly the required fields plus a preset is
+        // the one the hint promises works.
+        let mut payload = serde_json::Map::new();
+        for field in &required {
+            payload.insert(
+                (*field).to_string(),
+                match *field {
+                    "timelineIn" => serde_json::json!(0.0),
+                    "duration" => serde_json::json!(3.0),
+                    other => serde_json::json!(other),
+                },
+            );
+        }
+        payload.insert("preset".to_string(), serde_json::json!("centered-title"));
+        CommandPayload::parse("AddTextClip".to_string(), Value::Object(payload))
+            .expect("the advertised required set plus a preset must parse");
+
+        // And without either half it must still fail, which is what the note says.
+        CommandPayload::parse(
+            "AddTextClip".to_string(),
+            serde_json::json!({
+                "sequenceId": "seq",
+                "trackId": "track",
+                "timelineIn": 0.0,
+                "duration": 3.0,
+            }),
+        )
+        .expect_err("neither preset nor textData must be rejected");
     }
 
     #[test]

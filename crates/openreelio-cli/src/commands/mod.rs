@@ -77,7 +77,7 @@ pub enum Commands {
         action: caption::CaptionAction,
     },
 
-    /// Curated caption style packs and transition recipes
+    /// Curated caption style packs, transition recipes, and text presets
     Packs {
         #[command(subcommand)]
         action: packs::PacksAction,

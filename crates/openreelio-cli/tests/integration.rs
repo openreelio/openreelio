@@ -5724,7 +5724,7 @@ fn test_agent_perception_loop_end_to_end() {
 // ============================================================================
 
 #[test]
-fn test_packs_list_returns_both_registries() {
+fn test_packs_list_returns_every_registry() {
     let all = run_cli_ok(&["packs", "list"]);
     assert_eq!(all["status"], "ok");
     assert_eq!(all["kind"], "all");
@@ -5766,6 +5766,12 @@ fn test_packs_list_returns_both_registries() {
                 assert!(pack["effectType"].is_string(), "{pack}");
                 assert!(pack["params"].is_object(), "{pack}");
             }
+            Some("text") => {
+                assert!(pack["category"].is_string(), "{pack}");
+                assert!(pack["defaultDurationSec"].is_number(), "{pack}");
+                assert!(pack["clip"]["style"].is_object(), "{pack}");
+                assert!(pack["clip"]["position"].is_object(), "{pack}");
+            }
             other => panic!("unexpected pack kind {other:?}"),
         }
     }
@@ -5789,9 +5795,38 @@ fn test_packs_list_filters_by_kind() {
         .iter()
         .all(|pack| pack["kind"] == "transition"));
 
+    let texts = run_cli_ok(&["packs", "list", "--kind", "text"]);
+    assert_eq!(texts["kind"], "text");
+    let text_packs = texts["packs"].as_array().expect("packs");
+    assert_eq!(texts["count"].as_u64().unwrap() as usize, text_packs.len());
+    assert!(text_packs.iter().all(|pack| pack["kind"] == "text"));
+
+    let text_ids: Vec<&str> = text_packs
+        .iter()
+        .filter_map(|pack| pack["id"].as_str())
+        .collect();
+    // Presets the CLI used to reject outright.
+    for id in ["quote", "watermark", "countdown", "label", "tech-style"] {
+        assert!(text_ids.contains(&id), "{text_ids:?}");
+    }
+
+    let quote = text_packs
+        .iter()
+        .find(|pack| pack["id"] == "quote")
+        .expect("quote preset");
+    assert_eq!(quote["category"], "creative");
+    assert_eq!(quote["defaultDurationSec"], 5.0);
+    assert_eq!(quote["clip"]["style"]["fontFamily"], "Georgia");
+    assert_eq!(quote["clip"]["style"]["italic"], true);
+    assert!(quote["aliases"]
+        .as_array()
+        .expect("aliases")
+        .iter()
+        .any(|alias| alias == "pull_quote"));
+
     let (_stdout, stderr) = run_cli_err(&["packs", "list", "--kind", "nonsense"]);
     assert!(
-        stderr.contains("caption") && stderr.contains("transition"),
+        stderr.contains("caption") && stderr.contains("transition") && stderr.contains("text"),
         "clap must list the valid kinds, got: {stderr}"
     );
 }
@@ -6049,4 +6084,189 @@ fn test_caption_style_pack_never_overrides_an_explicit_placement() {
     assert_eq!(restyled["position"]["xPercent"], 25.0);
     assert_eq!(restyled["position"]["yPercent"], 80.0);
     assert_eq!(restyled["style"]["backgroundColor"]["a"], 180);
+}
+
+#[test]
+fn test_text_add_accepts_every_curated_preset() {
+    // Before the catalog was unified, `--preset quote` answered "Unsupported
+    // text preset" while help-json and the MCP hints advertised it. Every id
+    // the registry publishes now has to survive an actual add.
+    let dir = create_temp_project("text_preset_catalog_test");
+    let path = project_path(&dir, "text_preset_catalog_test");
+
+    let listing = run_cli_ok(&["packs", "list", "--kind", "text"]);
+    let presets = listing["packs"].as_array().expect("packs").clone();
+    assert!(presets.len() >= 22, "{} presets listed", presets.len());
+
+    for (index, preset) in presets.iter().enumerate() {
+        let id = preset["id"].as_str().expect("preset id");
+        let start = (index as f64) * 20.0;
+        let add = run_cli_ok(&[
+            "text",
+            "add",
+            "--path",
+            &path,
+            "--text",
+            "Catalog Probe",
+            "--start",
+            &start.to_string(),
+            "--preset",
+            id,
+        ]);
+        assert_eq!(add["status"], "ok", "preset '{id}' must add");
+    }
+
+    let list = run_cli_ok(&["text", "list", "--path", &path]);
+    assert_eq!(list["count"].as_u64().unwrap() as usize, presets.len());
+}
+
+#[test]
+fn test_text_add_preset_supplies_style_and_default_duration() {
+    let dir = create_temp_project("text_preset_defaults_test");
+    let path = project_path(&dir, "text_preset_defaults_test");
+
+    let add = run_cli_ok(&[
+        "text",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "\"Cut the noise\"",
+        "--start",
+        "3",
+        "--preset",
+        "quote",
+    ]);
+    assert_eq!(add["status"], "ok");
+
+    let list = run_cli_ok(&["text", "list", "--path", &path]);
+    let clip = &list["clips"][0];
+    // The preset's own typography, not a generic default.
+    assert_eq!(clip["textData"]["style"]["fontFamily"], "Georgia");
+    assert_eq!(clip["textData"]["style"]["fontSize"], 42);
+    assert_eq!(clip["textData"]["style"]["italic"], true);
+    assert_eq!(clip["textData"]["opacity"], 0.95);
+    // ...and the preset's suggested duration, since --duration was omitted.
+    assert_eq!(clip["durationSec"], 5.0);
+
+    // An explicit flag still wins over the preset value.
+    let dir2 = create_temp_project("text_preset_override_test");
+    let path2 = project_path(&dir2, "text_preset_override_test");
+    run_cli_ok(&[
+        "text",
+        "add",
+        "--path",
+        &path2,
+        "--text",
+        "Override",
+        "--start",
+        "0",
+        "--preset",
+        "quote",
+        "--font-size",
+        "96",
+        "--duration",
+        "2",
+    ]);
+    let list2 = run_cli_ok(&["text", "list", "--path", &path2]);
+    assert_eq!(list2["clips"][0]["textData"]["style"]["fontSize"], 96);
+    assert_eq!(
+        list2["clips"][0]["textData"]["style"]["fontFamily"],
+        "Georgia"
+    );
+    assert_eq!(list2["clips"][0]["durationSec"], 2.0);
+}
+
+#[test]
+fn test_text_add_rejects_an_unknown_preset_with_the_valid_list() {
+    let dir = create_temp_project("text_preset_unknown_test");
+    let path = project_path(&dir, "text_preset_unknown_test");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "text",
+        "add",
+        "--path",
+        &path,
+        "--text",
+        "Nope",
+        "--start",
+        "0",
+        "--preset",
+        "not-a-preset",
+    ]);
+
+    assert!(stderr.contains("Unknown text preset"), "{stderr}");
+    for id in ["lower-third", "quote", "watermark", "countdown"] {
+        assert!(stderr.contains(id), "error must name '{id}': {stderr}");
+    }
+    assert!(stderr.contains("default"), "{stderr}");
+}
+
+#[test]
+fn test_command_execute_resolves_a_text_preset_into_concrete_values() {
+    let dir = create_temp_project("text_preset_command_test");
+    let path = project_path(&dir, "text_preset_command_test");
+
+    let info = run_cli_ok(&["timeline", "info", "--path", &path]);
+    let sequence_id = info["sequenceId"]
+        .as_str()
+        .expect("sequence id")
+        .to_string();
+
+    let track = run_cli_ok(&[
+        "timeline",
+        "add-track",
+        "--path",
+        &path,
+        "--kind",
+        "video",
+        "--name",
+        "Text",
+    ]);
+    let track_id = track["createdIds"][0]
+        .as_str()
+        .expect("track id")
+        .to_string();
+
+    let payload = serde_json::json!({
+        "sequenceId": sequence_id,
+        "trackId": track_id,
+        "timelineIn": 2.0,
+        "duration": 6.0,
+        "preset": "logo-bug",
+        "textData": { "content": "OPENREELIO" },
+    })
+    .to_string();
+
+    let executed = run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "AddTextClip",
+        "--payload",
+        &payload,
+    ]);
+    assert_eq!(executed["status"], "ok");
+
+    let list = run_cli_ok(&["text", "list", "--path", &path]);
+    let clip = &list["clips"][0];
+    assert_eq!(clip["textData"]["content"], "OPENREELIO");
+    assert_eq!(clip["textData"]["style"]["backgroundColor"], "#0F766ECC");
+    assert_eq!(clip["textData"]["position"]["x"], 0.94);
+    assert_eq!(clip["textData"]["opacity"], 0.85);
+
+    // The op log records what the preset produced, never the id that produced
+    // it, so replay does not depend on the registry.
+    let ops = run_cli_ok(&["state", "ops", "--path", &path]);
+    let raw = ops.to_string();
+    assert!(
+        !raw.contains("logo-bug"),
+        "the op log must not name a preset"
+    );
+    assert!(
+        raw.contains("#0F766ECC"),
+        "the op log must carry the values"
+    );
 }

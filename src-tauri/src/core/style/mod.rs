@@ -12,6 +12,9 @@
 //!   that pass `CaptionSafeAreaRule` on both landscape and vertical canvases.
 //! - [`transition_recipes`] — transition [`EffectType`] plus the parameters the
 //!   FFmpeg filter builder actually reads.
+//! - [`text_presets`] — typed [`TextClipData`](crate::core::text::TextClipData)
+//!   overlays: typography, anchor, shadow, outline, starter copy, and a
+//!   suggested duration.
 //!
 //! # Layering
 //!
@@ -36,6 +39,7 @@
 //! is the entry point for that case.
 
 pub mod caption_packs;
+pub mod text_presets;
 pub mod transition_recipes;
 
 #[cfg(test)]
@@ -46,23 +50,70 @@ use std::collections::HashMap;
 use serde_json::{Map, Value};
 
 use crate::core::effects::{EffectType, ParamValue};
+use crate::core::text::{TextClipData, TextOutline, TextShadow, TextStyle};
 
 pub use caption_packs::{
     caption_pack_ids, list_caption_packs, resolve_caption_pack, CaptionPackDescriptor,
     CaptionPackSpec, CAPTION_PACKS,
+};
+pub use text_presets::{
+    list_text_presets, resolve_text_preset, text_preset_ids, text_preset_keys, TextPresetCategory,
+    TextPresetDescriptor, TextPresetSpec, TEXT_PRESETS,
 };
 pub use transition_recipes::{
     list_transition_recipes, resolve_transition_recipe, transition_recipe_ids, RecipeParam,
     TransitionRecipeDescriptor, TransitionRecipeSpec, TRANSITION_RECIPES,
 };
 
-/// Normalizes a pack or recipe identifier for matching.
+/// The numeric weight a bold text style carries.
+const BOLD_FONT_WEIGHT: u16 = 700;
+
+/// The numeric weight a regular text style carries.
+const REGULAR_FONT_WEIGHT: u16 = 400;
+
+/// The weight at and above which every render path reads a style as bold.
+const BOLD_FONT_WEIGHT_THRESHOLD: u16 = 600;
+
+/// The preset id that means "no preset", accepted everywhere a preset is named.
 ///
-/// Follows the same contract as `ExportPreset::from_legacy_id`: trim, lowercase,
-/// and fold `_` and spaces onto the canonical `-` separator, so `Clean_Minimal`,
-/// `clean minimal`, and `clean-minimal` are one id.
+/// The CLI has always defaulted `--preset` to this word and the agent tool enums
+/// advertise it, so the payload boundary accepts it too rather than rejecting a
+/// spelling every other surface teaches.
+pub const NO_TEXT_PRESET: &str = "default";
+
+/// Normalizes a pack, recipe, or preset identifier for matching.
+///
+/// Trim, lowercase, then collapse each run of whitespace or `_` onto a single
+/// canonical `-`, so `Clean_Minimal`, `clean minimal`, and `clean-minimal` are
+/// one id. This is the TypeScript `normalizeTextPresetKey`
+/// (`.trim().toLowerCase().replace(/[\s_]+/g, '-')`) transcribed: the catalog is
+/// shared with the app, so a key one half accepts must not be a key the other
+/// half rejects. Substituting per character instead of per run would turn
+/// `lower  third` into `lower--third` and fail on a spelling the app resolves.
 pub(crate) fn normalize_pack_id(raw: &str) -> String {
-    raw.trim().to_ascii_lowercase().replace(['_', ' '], "-")
+    let lowered = raw.trim().to_lowercase();
+    let mut normalized = String::with_capacity(lowered.len());
+    let mut pending_separator = false;
+
+    for character in lowered.chars() {
+        if character == '_' || character.is_whitespace() {
+            pending_separator = true;
+            continue;
+        }
+        if pending_separator {
+            normalized.push('-');
+            pending_separator = false;
+        }
+        normalized.push(character);
+    }
+
+    // A trailing run is a separator too: `trim` clears trailing whitespace but
+    // not a trailing `_`, and the regex would have replaced it.
+    if pending_separator {
+        normalized.push('-');
+    }
+
+    normalized
 }
 
 /// Caption style JSON keys that mean the same thing to the render path.
@@ -215,6 +266,174 @@ pub fn resolve_effect_recipe(
         effect_type: Some(recipe.effect_type.clone()),
         params: merged,
     })
+}
+
+/// Resolves a text preset against caller-supplied text clip data.
+///
+/// The preset is the base layer; `text_data` overrides it field by field, and
+/// nested objects (`style`, `position`, `shadow`, `outline`) merge key by key
+/// rather than replacing wholesale — `{"style":{"fontSize":64}}` on top of
+/// `quote` is the quote preset at 64pt, not a style with one field. An explicit
+/// `null` clears an optional layer, so `{"shadow":null}` drops the preset's
+/// shadow.
+///
+/// `shadow` and `outline` are optional, so roughly half the catalog declares
+/// neither and there would be nothing for a partial override to merge into.
+/// Those two merge onto their type defaults instead of demanding a complete
+/// layer, so `{"shadow":{"offsetX":2}}` means the same thing on every preset.
+///
+/// `bold` and `fontWeight` are reconciled after the merge, because they are one
+/// decision spelled two ways — see [`reconcile_bold_and_font_weight`].
+///
+/// Without a preset this is just the strict `TextClipData` parse the payload
+/// always did, so `text_data` stays required in that case. Reconciliation is
+/// likewise skipped there: with no base layer underneath, nothing the caller
+/// left out was filled in on its behalf.
+///
+/// Returns an error naming every valid preset id when `preset` is unknown.
+pub fn resolve_text_clip_data(
+    preset: Option<&str>,
+    text_data: Option<Value>,
+) -> Result<TextClipData, String> {
+    let preset_id = preset
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && !normalize_pack_id(id).eq(NO_TEXT_PRESET));
+
+    let Some(preset_id) = preset_id else {
+        let text_data = text_data
+            .filter(|value| !value.is_null())
+            .ok_or_else(|| "textData is required unless a preset is named".to_string())?;
+        return serde_json::from_value(text_data)
+            .map_err(|error| format!("Invalid textData: {error}"));
+    };
+
+    let preset = resolve_text_preset(preset_id)?;
+    let overrides = text_data.filter(|value| !value.is_null());
+    let (bold_was_named, font_weight_was_named) = named_bold_and_font_weight(overrides.as_ref());
+
+    let mut base = serde_json::to_value(preset.default_clip_data())
+        .map_err(|error| format!("Failed to serialize text preset: {error}"))?;
+    seed_optional_text_layers(&mut base, overrides.as_ref());
+    merge_json_deep(&mut base, overrides);
+
+    let mut resolved: TextClipData = serde_json::from_value(base)
+        .map_err(|error| format!("Invalid textData for preset '{}': {error}", preset.id))?;
+    reconcile_bold_and_font_weight(&mut resolved.style, bold_was_named, font_weight_was_named);
+
+    Ok(resolved)
+}
+
+/// Gives a partial `shadow` or `outline` override a layer to merge into.
+///
+/// Both are `Option` on [`TextClipData`] and skipped when absent, so on the
+/// roughly half of the catalog that declares neither, `merge_json_deep` would
+/// install the caller's fragment as the whole layer and the parse would fail on
+/// a field the caller never meant to set. Seeding the type's defaults first
+/// makes `{"shadow":{"offsetX":2}}` mean the same thing on every preset, which
+/// is what the documented key-by-key contract promises.
+fn seed_optional_text_layers(base: &mut Value, overrides: Option<&Value>) {
+    let (Some(base_object), Some(override_object)) =
+        (base.as_object_mut(), overrides.and_then(Value::as_object))
+    else {
+        return;
+    };
+
+    for (key, value) in override_object {
+        if !value.is_object() {
+            continue;
+        }
+        if base_object.get(key).is_some_and(|layer| !layer.is_null()) {
+            continue;
+        }
+        if let Some(defaults) = default_optional_text_layer(key) {
+            base_object.insert(key.clone(), defaults);
+        }
+    }
+}
+
+/// The base layer a partial override of `key` merges onto, when there is one.
+fn default_optional_text_layer(key: &str) -> Option<Value> {
+    match key {
+        "shadow" => serde_json::to_value(TextShadow::default()).ok(),
+        "outline" => serde_json::to_value(TextOutline::default()).ok(),
+        _ => None,
+    }
+}
+
+/// Reconciles the paired `bold` and `fontWeight` fields after a layered override.
+///
+/// The two are one decision spelled two ways: every render path reads bold as
+/// `bold || fontWeight >= 600`, so a caller who layers `{"bold": false}` onto a
+/// base that carries `fontWeight: 700` gets an overlay that renders bold, reads
+/// back as regular, and matches neither the base nor the request. Whichever half
+/// the caller named wins and the other follows it; naming both keeps both, since
+/// then there is nothing left to infer.
+///
+/// Every surface that layers a style onto a base — the payload boundary's preset
+/// merge and the CLI's `--style-json` patch — routes through here, so the two
+/// cannot answer identical input differently.
+pub fn reconcile_bold_and_font_weight(
+    style: &mut TextStyle,
+    bold_was_named: bool,
+    font_weight_was_named: bool,
+) {
+    match (bold_was_named, font_weight_was_named) {
+        (true, false) => {
+            style.font_weight = if style.bold {
+                BOLD_FONT_WEIGHT
+            } else {
+                REGULAR_FONT_WEIGHT
+            };
+        }
+        (false, true) => {
+            style.bold = style.font_weight >= BOLD_FONT_WEIGHT_THRESHOLD;
+        }
+        _ => {}
+    }
+}
+
+/// Reports which half of the bold/`fontWeight` pair a `textData` override named.
+///
+/// Only the spelling the [`TextStyle`] deserializer actually reads counts:
+/// `font_weight` is dropped on the floor by serde, so treating it as named would
+/// make `bold` follow a value that never landed.
+fn named_bold_and_font_weight(text_data: Option<&Value>) -> (bool, bool) {
+    let Some(style) = text_data
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("style"))
+        .and_then(Value::as_object)
+    else {
+        return (false, false);
+    };
+
+    let named = |key: &str| style.get(key).is_some_and(|value| !value.is_null());
+    (named("bold"), named("fontWeight"))
+}
+
+/// Merges `overrides` onto `base` recursively, key by key.
+///
+/// Objects merge; everything else replaces, so an explicit `null` clears the
+/// key it names and a scalar wins outright.
+fn merge_json_deep(base: &mut Value, overrides: Option<Value>) {
+    let Some(overrides) = overrides else {
+        return;
+    };
+
+    match (base, overrides) {
+        (Value::Object(base_object), Value::Object(override_object)) => {
+            for (key, value) in override_object {
+                match base_object.get_mut(&key) {
+                    Some(existing) if existing.is_object() && value.is_object() => {
+                        merge_json_deep(existing, Some(value));
+                    }
+                    _ => {
+                        base_object.insert(key, value);
+                    }
+                }
+            }
+        }
+        (base, overrides) => *base = overrides,
+    }
 }
 
 /// Renders an effect type for an error message.
@@ -579,6 +798,69 @@ mod tests {
             Some("wipe-down"),
             first.effect_type.clone(),
             first.params.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn absent_text_preset_parses_the_given_clip_data_unchanged() {
+        let text_data = serde_json::json!({
+            "content": "Hand assembled",
+            "style": { "fontFamily": "Arial", "fontSize": 30, "color": "#FFFFFF" },
+            "position": { "x": 0.2, "y": 0.7 },
+        });
+
+        let resolved = resolve_text_clip_data(None, Some(text_data)).expect("resolves");
+
+        assert_eq!(resolved.content, "Hand assembled");
+        assert_eq!(resolved.style.font_size, 30);
+        assert_eq!(resolved.position.x, 0.2);
+    }
+
+    #[test]
+    fn the_no_preset_sentinel_is_accepted_in_every_spelling() {
+        let text_data = serde_json::json!({
+            "content": "Plain",
+            "style": { "fontFamily": "Arial", "fontSize": 30, "color": "#FFFFFF" },
+            "position": { "x": 0.5, "y": 0.5 },
+        });
+
+        for spelling in ["default", "DEFAULT", "  default  "] {
+            let resolved = resolve_text_clip_data(Some(spelling), Some(text_data.clone()))
+                .unwrap_or_else(|error| panic!("'{spelling}' must resolve: {error}"));
+            assert_eq!(resolved.style.font_size, 30);
+        }
+    }
+
+    #[test]
+    fn a_nested_text_override_merges_instead_of_replacing_its_object() {
+        // A partial style has to leave the rest of the preset's typography
+        // intact; replacing the object outright would fail to deserialize and,
+        // worse, would silently drop the look the caller asked for by name.
+        let resolved = resolve_text_clip_data(
+            Some("tech-style"),
+            Some(serde_json::json!({ "style": { "color": "#FF00FF" } })),
+        )
+        .expect("resolves");
+
+        assert_eq!(resolved.style.color, "#FF00FF");
+        assert_eq!(resolved.style.font_family, "Courier New");
+        assert_eq!(resolved.style.font_size, 36);
+    }
+
+    #[test]
+    fn resolution_is_idempotent_for_text_presets() {
+        let first = resolve_text_clip_data(
+            Some("credits-block"),
+            Some(serde_json::json!({ "content": "Directed by" })),
+        )
+        .unwrap();
+
+        let second = resolve_text_clip_data(
+            Some("credits-block"),
+            Some(serde_json::to_value(&first).unwrap()),
         )
         .unwrap();
 

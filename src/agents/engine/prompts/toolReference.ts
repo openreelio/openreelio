@@ -12,6 +12,15 @@
  */
 
 import { buildToolOutputContractSection } from '@/agents/toolOutputContracts';
+import { TEXT_PRESETS } from '@/data/textPresets';
+
+/**
+ * Text preset ids, read from the catalog the tools validate against.
+ *
+ * A prompt that lists presets by hand drifts from the parser that accepts them;
+ * this list came to advertise ids the CLI rejected outright.
+ */
+const TEXT_PRESET_IDS = TEXT_PRESETS.map((preset) => preset.id).join(', ');
 
 // =============================================================================
 // Role type (duplicated from system.ts to avoid circular dependency)
@@ -131,7 +140,7 @@ Editable text overlays default to the active sequence when sequenceId is omitted
 - Use caption-track actions for semantic timed subtitles/captions and AI transcript import.
 - list_text_clips() → inspect editable text overlay clips with textData, style, transform, trackId, and clipId
 - add_text_clip(text, startTime, duration?, endTime?, trackId?, preset?, style?, position?, x?, y?, xPercent?, yPercent?, shadow?, outline?, transform?, autoPlacement?, placementIntent?) → add editable on-video text; video text track auto-created if needed. Auto-placement is on by default when no explicit position is supplied.
-- Text presets: title/centered-title, epic-title, chapter-title, lower_third/lower-third, lower-third-news, lower-third-name-role, subtitle, callout, callout-stat, credits/credits-block, credit-line, logo-bug, social-handle, quote, watermark, countdown.
+- Text presets (each supplies typography, placement, and a default duration): ${TEXT_PRESET_IDS}. Common aliases resolve too (title, lower_third, credits, stat, timer).
 - update_text_clip(clipId, text?, style?, fontFamily?, fontSize?, fontWeight?, color?, backgroundColor?, backgroundPadding?, alignment?, bold?, italic?, underline?, lineHeight?, letterSpacing?, position?, x?, y?, shadow?, outline?, clearShadow?, clearOutline?, clearBackground?, opacity?, rotation?, transform?, autoPlacement?) → edit text content, font, size, weight, color, outline, shadow, background, rotation, opacity, and transform
 - set_text_transform(clipId, transform? or transformX/transformY/scaleX/scaleY/rotationDeg/anchorX/anchorY) → move, resize, rotate, or re-anchor a text clip
 - delete_text_clip(clipId) → remove an editable text overlay clip
@@ -146,7 +155,7 @@ Editable text overlays default to the active sequence when sequenceId is omitted
 - auto_transcribe_sequence(sequenceId?, language?, model?) → transcribe the audible edited timeline mix into TIMELINE-relative segments that are safe to pass straight to add_captions_from_transcription. Default path for creating captions. Language is auto-detected by default; pass \`language\` only as an optional override when the user explicitly states the spoken language.
 - add_captions_from_transcription(segments, trackId?, replaceExisting?, clipId?, style?, position?) → create captions from timed transcript segments as one atomic caption import. Provide clipId only when segments come from auto_transcribe (source-relative); omit it for auto_transcribe_sequence (already timeline-relative). Pass style/position to apply a consistent look; omit them to use the track default.
 - import_captions_from_file(relativePath, format?, trackId?) → import SRT/VTT subtitle files from the workspace
-- Placement defaults: add_text_clip auto-places title/lower-third/subtitle/callout presets when no exact position is supplied, scoring default candidate regions against available faces/objects/OCR annotations and existing text. Credit, brand, watermark, and quote presets preserve their template position unless autoPlacement:true or a placement override is supplied.`;
+- Placement defaults: add_text_clip auto-places presets in the title, lower-third, subtitle, and callout categories when no exact position is supplied, scoring default candidate regions against available faces/objects/OCR annotations and existing text. Presets in the credit, brand, and creative categories preserve their template position unless autoPlacement:true or a placement override is supplied.`;
 
 const GENERATE_ACTIONS = `## Generate Actions (meta-tool: generate)
 - generate_timeline_media(prompt, mediaType?, provider?, sequenceId?, trackId?, timelineStart?) → submit provider-neutral generation or SFX discovery; video jobs can create a pending marker and auto-place when ready
@@ -209,7 +218,7 @@ const COMMON_WORKFLOWS = `## Common Workflows
 11. Generative edit: generate_timeline_media with sequenceId/trackId/timelineStart creates a pending timeline marker and stores placement intent; the generation store imports and places the asset when the provider job completes. Use resolve_generation_job for explicit status checks.
 12. SFX discovery/import: search_sound_for_scene → present usable candidates and license policy → import_asset_candidate only with licenseAck=true → insert_clip on an audio track.
 13. AI subtitles: transcription_status() FIRST — when only weak models (tiny/base/small) are installed and the recommended model is missing, do not silently transcribe; run install_whisper_model(large-v3-turbo-q5_0) before transcribing, especially for non-English/sung/music content → install_whisper_model(model?) when approved and needed → auto_transcribe_sequence(sequenceId?) is the DEFAULT path; its segments are timeline-relative and pass straight to add_captions_from_transcription. Use auto_transcribe(assetId) for source-asset analysis only — its times are source-relative; first call find_clips_by_asset(assetId) → take data[0].id as the clipId → pass that clipId to add_captions_from_transcription(..., clipId) so the times get mapped to timeline time. → inspect returned segments → add_captions_from_transcription(segments, replaceExisting?) → style_caption for readable typography when needed.
-14. Editable on-video text: list_text_clips when editing existing text, otherwise add_text_clip with preset and style. Use production presets for common jobs: credits for end cards, logo-bug for channel marks, social-handle for creator IDs, lower-third-name-role for interviews, and callout-stat for numeric emphasis → set_text_transform for exact preview position/size/rotation.
+14. Editable on-video text: list_text_clips when editing existing text, otherwise add_text_clip with preset and style. Name a preset from the Text Actions list instead of assembling typography field by field; each one carries a checked look, an anchor, and a default duration → set_text_transform for exact preview position/size/rotation.
 15. If the user asks to save the analysis as a file but does not specify a location, do not add a separate write step: source-analysis tools already save "<asset-name>.analysis.md" beside the asset by default. Use write_workspace_document only for a custom second copy/path.`;
 
 const CLI_REFERENCE = `## CLI (headless alternative)

@@ -7,9 +7,12 @@ use openreelio_core::commands::{
     get_text_data, is_text_clip, AddTextClipCommand, AddTrackCommand, MoveClipCommand,
     RemoveTextClipCommand, SetClipTransformCommand, TrimClipCommand, UpdateTextCommand,
 };
+use openreelio_core::style::{
+    reconcile_bold_and_font_weight, resolve_text_preset, text_preset_ids, NO_TEXT_PRESET,
+};
 use openreelio_core::timeline::{Sequence, Track, TrackKind, Transform};
 use openreelio_core::{
-    text::{TextAlignment, TextClipData, TextOutline, TextPosition, TextShadow, TextStyle},
+    text::{TextAlignment, TextClipData, TextPosition, TextStyle},
     ActiveProject, Point2D,
 };
 use std::path::PathBuf;
@@ -38,8 +41,7 @@ pub enum TextAction {
         #[arg(long)]
         duration: Option<f64>,
 
-        /// Preset: default, title, lower-third, subtitle, callout, credits, credit-line, logo-bug, social-handle
-        #[arg(long)]
+        #[arg(long, help = text_preset_help())]
         preset: Option<String>,
 
         /// Full TextClipData JSON object. CLI flags are applied after this object.
@@ -427,304 +429,77 @@ fn text_data_for_clip(
         .ok_or_else(|| anyhow::anyhow!("TextOverlay effect not found on clip '{}'", clip_id))
 }
 
+/// Help text for `--preset`, built from the core registry.
+///
+/// The list used to be a doc comment, which is how it came to advertise nine
+/// presets while the parser accepted fourteen and the UI shipped twenty-two.
+pub(crate) fn text_preset_help() -> String {
+    format!(
+        "Text preset id or alias, or '{}' for none. Ids: {}",
+        NO_TEXT_PRESET,
+        text_preset_ids().join(", ")
+    )
+}
+
+/// Normalizes a `--preset` value, defaulting an absent flag to `default`.
+///
+/// Matching itself belongs to the core registry, which folds case, `-`, `_`,
+/// and spaces onto one key; this only supplies the "no preset named" sentinel.
 fn normalize_text_preset_key(preset: Option<&str>) -> String {
-    preset.unwrap_or("default").to_lowercase().replace('_', "-")
+    preset
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(NO_TEXT_PRESET)
+        .to_lowercase()
+        .replace(['_', ' '], "-")
 }
 
+/// True when the value names no preset at all.
+fn is_no_preset(preset: Option<&str>) -> bool {
+    normalize_text_preset_key(preset) == NO_TEXT_PRESET
+}
+
+/// True when `text add --preset <value>` would be accepted.
+///
+/// Exposed so the surfaces that advertise preset ids can assert they advertise
+/// only ids this parser takes.
+#[cfg(test)]
+pub(crate) fn preset_is_accepted(preset: &str) -> bool {
+    parse_text_preset(Some(preset.to_string()), "probe").is_ok()
+}
+
+/// Suggested clip duration for a preset, used when `--duration` is omitted.
+///
+/// The durations live with the presets in the core registry, so a preset added
+/// there arrives here with its own timing rather than silently taking the
+/// three-second fallback.
 fn text_preset_default_duration(preset: Option<&str>) -> f64 {
-    match normalize_text_preset_key(preset).as_str() {
-        "lower-third"
-        | "lowerthird"
-        | "lower-third-name-role"
-        | "interview-lower-third"
-        | "speaker-id"
-        | "name-role"
-        | "credit-line"
-        | "source-credit"
-        | "attribution"
-        | "social-handle"
-        | "handle"
-        | "social" => 5.0,
-        "lower-third-news"
-        | "broadcast-lower-third"
-        | "news-lower-third"
-        | "end-card-title"
-        | "end-card"
-        | "outro-title" => 6.0,
-        "credits" | "credits-block" | "credit-block" | "end-credits" => 8.0,
-        "logo-bug" | "bug" | "channel-bug" | "brand-bug" => 10.0,
-        "countdown" | "timer" => 1.0,
-        "title" | "centered-title" | "tech-style" | "tech" | "terminal" => 4.0,
-        _ => 3.0,
+    const FALLBACK_DURATION_SEC: f64 = 3.0;
+
+    if is_no_preset(preset) {
+        return FALLBACK_DURATION_SEC;
     }
+
+    preset
+        .and_then(|value| resolve_text_preset(value).ok())
+        .map(|spec| spec.default_duration_sec)
+        .unwrap_or(FALLBACK_DURATION_SEC)
 }
 
+/// Builds the base text clip data a `--preset` names.
+///
+/// Delegates to the core registry so the CLI accepts exactly the presets every
+/// other surface advertises. An unknown id fails here with the valid list
+/// rather than silently rendering something else.
 fn parse_text_preset(preset: Option<String>, content: &str) -> anyhow::Result<TextClipData> {
-    let normalized = normalize_text_preset_key(preset.as_deref());
-
-    match normalized.as_str() {
-        "default" => Ok(TextClipData::new(content)),
-        "title" => Ok(TextClipData::title(content)),
-        "centered-title" => Ok(TextClipData {
-            content: content.to_string(),
-            style: TextStyle::default().with_font_size(72).with_bold(true),
-            position: TextPosition::new(0.5, 0.5),
-            shadow: Some(TextShadow {
-                color: "#000000".to_string(),
-                offset_x: 3,
-                offset_y: 3,
-                blur: 8,
-            }),
-            outline: None,
-            rotation: 0.0,
-            opacity: 1.0,
-        }),
-        "epic-title" | "impact-title" | "hero-title" => Ok(TextClipData {
-            content: content.to_string(),
-            style: TextStyle::default()
-                .with_font_family("Impact")
-                .with_font_size(96)
-                .with_bold(true),
-            position: TextPosition::new(0.5, 0.5),
-            shadow: Some(TextShadow {
-                color: "#000000".to_string(),
-                offset_x: 4,
-                offset_y: 4,
-                blur: 12,
-            }),
-            outline: Some(TextOutline {
-                color: "#000000".to_string(),
-                width: 3,
-            }),
-            rotation: 0.0,
-            opacity: 1.0,
-        }),
-        "chapter-title" | "chapter" | "chapter-card" | "section-title" => Ok(TextClipData {
-            content: content.to_string(),
-            style: TextStyle {
-                font_family: "Georgia".to_string(),
-                font_size: 62,
-                font_weight: 700,
-                color: "#F8FAFC".to_string(),
-                background_color: None,
-                background_padding: 0,
-                alignment: TextAlignment::Center,
-                bold: true,
-                italic: false,
-                underline: false,
-                line_height: 1.18,
-                letter_spacing: 2,
-            },
-            position: TextPosition::new(0.5, 0.45),
-            shadow: Some(TextShadow {
-                color: "#00000099".to_string(),
-                offset_x: 2,
-                offset_y: 3,
-                blur: 8,
-            }),
-            outline: None,
-            rotation: 0.0,
-            opacity: 1.0,
-        }),
-        "lower-third" | "lowerthird" => Ok(TextClipData::lower_third(content)),
-        "lower-third-news" | "broadcast-lower-third" | "news-lower-third" => Ok(TextClipData {
-            content: content.to_string(),
-            style: TextStyle {
-                font_family: "Arial".to_string(),
-                font_size: 40,
-                font_weight: 700,
-                color: "#FFFFFF".to_string(),
-                background_color: Some("#123E7CCC".to_string()),
-                background_padding: 14,
-                alignment: TextAlignment::Left,
-                bold: true,
-                italic: false,
-                underline: false,
-                line_height: 1.15,
-                letter_spacing: 1,
-            },
-            position: TextPosition::new(0.07, 0.78),
-            shadow: Some(TextShadow {
-                color: "#00000080".to_string(),
-                offset_x: 1,
-                offset_y: 2,
-                blur: 3,
-            }),
-            outline: None,
-            rotation: 0.0,
-            opacity: 1.0,
-        }),
-        "lower-third-name-role" | "interview-lower-third" | "speaker-id" | "name-role" => {
-            Ok(TextClipData {
-                content: content.to_string(),
-                style: TextStyle {
-                    font_family: "Helvetica".to_string(),
-                    font_size: 38,
-                    font_weight: 700,
-                    color: "#F8FAFC".to_string(),
-                    background_color: Some("#111827D9".to_string()),
-                    background_padding: 10,
-                    alignment: TextAlignment::Left,
-                    bold: true,
-                    italic: false,
-                    underline: false,
-                    line_height: 1.25,
-                    letter_spacing: 1,
-                },
-                position: TextPosition::new(0.08, 0.84),
-                shadow: None,
-                outline: Some(TextOutline {
-                    color: "#00000066".to_string(),
-                    width: 1,
-                }),
-                rotation: 0.0,
-                opacity: 1.0,
-            })
-        }
-        "subtitle" => Ok(TextClipData::subtitle(content)),
-        "callout" | "emphasis" => Ok(TextClipData {
-            content: content.to_string(),
-            style: TextStyle::default()
-                .with_font_size(48)
-                .with_font_weight(700)
-                .with_color("#FFD700"),
-            position: TextPosition::new(0.5, 0.35),
-            shadow: Some(TextShadow {
-                color: "#000000".to_string(),
-                offset_x: 2,
-                offset_y: 2,
-                blur: 6,
-            }),
-            outline: Some(TextOutline {
-                color: "#000000".to_string(),
-                width: 2,
-            }),
-            rotation: 0.0,
-            opacity: 1.0,
-        }),
-        "callout-stat" | "stat" | "number-callout" | "price-callout" => Ok(TextClipData {
-            content: content.to_string(),
-            style: TextStyle::default()
-                .with_font_size(82)
-                .with_font_weight(700)
-                .with_color("#38BDF8"),
-            position: TextPosition::new(0.5, 0.42),
-            shadow: Some(TextShadow {
-                color: "#000000".to_string(),
-                offset_x: 3,
-                offset_y: 4,
-                blur: 8,
-            }),
-            outline: Some(TextOutline {
-                color: "#082F49".to_string(),
-                width: 2,
-            }),
-            rotation: 0.0,
-            opacity: 1.0,
-        }),
-        "credits" | "credits-block" | "credit-block" | "end-credits" => Ok(TextClipData {
-            content: content.to_string(),
-            style: TextStyle {
-                font_family: "Georgia".to_string(),
-                font_size: 34,
-                font_weight: 400,
-                color: "#F8FAFC".to_string(),
-                background_color: None,
-                background_padding: 0,
-                alignment: TextAlignment::Center,
-                bold: false,
-                italic: false,
-                underline: false,
-                line_height: 1.45,
-                letter_spacing: 1,
-            },
-            position: TextPosition::new(0.5, 0.52),
-            shadow: Some(TextShadow {
-                color: "#000000AA".to_string(),
-                offset_x: 1,
-                offset_y: 2,
-                blur: 5,
-            }),
-            outline: None,
-            rotation: 0.0,
-            opacity: 1.0,
-        }),
-        "credit-line" | "source-credit" | "attribution" => Ok(TextClipData {
-            content: content.to_string(),
-            style: TextStyle {
-                font_family: "Arial".to_string(),
-                font_size: 24,
-                font_weight: 400,
-                color: "#E5E7EB".to_string(),
-                background_color: Some("#00000080".to_string()),
-                background_padding: 6,
-                alignment: TextAlignment::Right,
-                bold: false,
-                italic: false,
-                underline: false,
-                line_height: 1.2,
-                letter_spacing: 0,
-            },
-            position: TextPosition::new(0.94, 0.92),
-            shadow: None,
-            outline: None,
-            rotation: 0.0,
-            opacity: 0.9,
-        }),
-        "logo-bug" | "bug" | "channel-bug" | "brand-bug" => Ok(TextClipData {
-            content: content.to_string(),
-            style: TextStyle {
-                font_family: "Arial".to_string(),
-                font_size: 24,
-                font_weight: 700,
-                color: "#FFFFFF".to_string(),
-                background_color: Some("#0F766ECC".to_string()),
-                background_padding: 8,
-                alignment: TextAlignment::Right,
-                bold: true,
-                italic: false,
-                underline: false,
-                line_height: 1.15,
-                letter_spacing: 1,
-            },
-            position: TextPosition::new(0.94, 0.08),
-            shadow: None,
-            outline: None,
-            rotation: 0.0,
-            opacity: 0.85,
-        }),
-        "social-handle" | "handle" | "social" => Ok(TextClipData {
-            content: content.to_string(),
-            style: TextStyle {
-                font_family: "Arial".to_string(),
-                font_size: 30,
-                font_weight: 700,
-                color: "#FFFFFF".to_string(),
-                background_color: Some("#7C3AEDCC".to_string()),
-                background_padding: 10,
-                alignment: TextAlignment::Left,
-                bold: true,
-                italic: false,
-                underline: false,
-                line_height: 1.2,
-                letter_spacing: 0,
-            },
-            position: TextPosition::new(0.07, 0.91),
-            shadow: Some(TextShadow {
-                color: "#00000099".to_string(),
-                offset_x: 1,
-                offset_y: 2,
-                blur: 4,
-            }),
-            outline: None,
-            rotation: 0.0,
-            opacity: 1.0,
-        }),
-        other => Err(anyhow::anyhow!(
-            "Unsupported text preset '{}'. Use: default, title, centered-title, epic-title, chapter-title, lower-third, lower-third-news, lower-third-name-role, subtitle, callout, callout-stat, credits, credit-line, logo-bug, social-handle",
-            other
-        )),
+    if is_no_preset(preset.as_deref()) {
+        return Ok(TextClipData::new(content));
     }
+
+    let spec = resolve_text_preset(preset.as_deref().unwrap_or_default())
+        .map_err(|error| anyhow::anyhow!("{} (or '{}' for none)", error, NO_TEXT_PRESET))?;
+
+    Ok(spec.clip_data(content))
 }
 
 fn parse_json_object<T>(label: &str, raw: &str) -> anyhow::Result<T>
@@ -784,6 +559,13 @@ fn merge_style(base: &mut TextStyle, style_json: &str) -> anyhow::Result<()> {
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("--style-json must be a JSON object"))?;
 
+    // `bold` and `fontWeight` are one decision, so which half the caller named
+    // decides which one follows the other. Recorded before the fields are
+    // written and settled afterwards by the shared core reconciler, so this
+    // patch and the `preset` merge at the payload boundary cannot disagree.
+    let bold_was_named = object.contains_key("bold");
+    let font_weight_was_named = style_field(object, "fontWeight", "font_weight").is_some();
+
     if let Some(value) = style_field(object, "fontFamily", "font_family") {
         base.font_family = json_string(value, "fontFamily")?;
     }
@@ -792,7 +574,6 @@ fn merge_style(base: &mut TextStyle, style_json: &str) -> anyhow::Result<()> {
     }
     if let Some(value) = style_field(object, "fontWeight", "font_weight") {
         base.font_weight = json_number::<u16>(value, "fontWeight")?.clamp(100, 900);
-        base.bold = base.font_weight >= 600;
     }
     if let Some(value) = object.get("color") {
         base.color = json_string(value, "color")?;
@@ -812,7 +593,6 @@ fn merge_style(base: &mut TextStyle, style_json: &str) -> anyhow::Result<()> {
     }
     if let Some(value) = object.get("bold") {
         base.bold = json_bool(value, "bold")?;
-        base.font_weight = if base.bold { 700 } else { 400 };
     }
     if let Some(value) = object.get("italic") {
         base.italic = json_bool(value, "italic")?;
@@ -826,6 +606,8 @@ fn merge_style(base: &mut TextStyle, style_json: &str) -> anyhow::Result<()> {
     if let Some(value) = style_field(object, "letterSpacing", "letter_spacing") {
         base.letter_spacing = json_i32(value, "letterSpacing")?;
     }
+
+    reconcile_bold_and_font_weight(base, bold_was_named, font_weight_was_named);
 
     Ok(())
 }
@@ -843,6 +625,11 @@ fn parse_alignment(value: &str) -> anyhow::Result<TextAlignment> {
 }
 
 fn apply_patch(mut text_data: TextClipData, patch: TextPatch) -> anyhow::Result<TextClipData> {
+    // Flags outrank `--style-json`, so the pair is settled once, from the flags,
+    // after everything else has been written. See `reconcile_bold_and_font_weight`.
+    let bold_was_named = patch.bold.is_some();
+    let font_weight_was_named = patch.font_weight.is_some();
+
     if let Some(raw) = patch.text_json {
         text_data = parse_json_object("--text-json", &raw)?;
     }
@@ -877,7 +664,6 @@ fn apply_patch(mut text_data: TextClipData, patch: TextPatch) -> anyhow::Result<
     }
     if let Some(value) = patch.font_weight {
         text_data.style.font_weight = value.clamp(100, 900);
-        text_data.style.bold = text_data.style.font_weight >= 600;
     }
     if let Some(value) = patch.color {
         text_data.style.color = value;
@@ -890,7 +676,6 @@ fn apply_patch(mut text_data: TextClipData, patch: TextPatch) -> anyhow::Result<
     }
     if let Some(value) = patch.bold {
         text_data.style.bold = value;
-        text_data.style.font_weight = if value { 700 } else { 400 };
     }
     if let Some(value) = patch.italic {
         text_data.style.italic = value;
@@ -919,6 +704,8 @@ fn apply_patch(mut text_data: TextClipData, patch: TextPatch) -> anyhow::Result<
     if let Some(value) = patch.opacity {
         text_data.opacity = value;
     }
+
+    reconcile_bold_and_font_weight(&mut text_data.style, bold_was_named, font_weight_was_named);
 
     text_data.validate().map_err(anyhow::Error::msg)?;
     Ok(text_data)
@@ -1371,5 +1158,188 @@ mod tests {
         assert_eq!(text_preset_default_duration(Some("logo_bug")), 10.0);
         assert_eq!(text_preset_default_duration(Some("callout")), 3.0);
         assert_eq!(text_preset_default_duration(None), 3.0);
+    }
+
+    #[test]
+    fn should_accept_every_preset_the_registry_defines() {
+        // The regression this closes: the CLI carried its own table of 14 while
+        // the UI shipped 22 and the hints advertised 17, so `--preset quote`
+        // was documented and rejected at the same time.
+        for spec in openreelio_core::style::TEXT_PRESETS {
+            let clip = parse_text_preset(Some(spec.id.to_string()), "Copy")
+                .unwrap_or_else(|error| panic!("preset '{}' must parse: {error}", spec.id));
+            assert_eq!(clip, spec.clip_data("Copy"));
+
+            for alias in spec.aliases {
+                let aliased = parse_text_preset(Some((*alias).to_string()), "Copy")
+                    .unwrap_or_else(|error| panic!("alias '{alias}' must parse: {error}"));
+                assert_eq!(aliased, clip, "alias '{alias}' must match its preset");
+            }
+        }
+    }
+
+    #[test]
+    fn should_add_the_presets_the_old_inline_table_rejected() {
+        for id in ["quote", "watermark", "countdown", "tech-style", "label"] {
+            let clip = parse_text_preset(Some(id.to_string()), "Copy")
+                .unwrap_or_else(|error| panic!("preset '{id}' must parse: {error}"));
+            assert_eq!(clip.content, "Copy");
+        }
+    }
+
+    #[test]
+    fn should_reject_an_unknown_preset_with_the_valid_list() {
+        let error = parse_text_preset(Some("not-a-preset".to_string()), "Copy")
+            .expect_err("unknown preset must fail")
+            .to_string();
+
+        for spec in openreelio_core::style::TEXT_PRESETS {
+            assert!(
+                error.contains(spec.id),
+                "error must name '{}': {error}",
+                spec.id
+            );
+        }
+        assert!(error.contains(NO_TEXT_PRESET), "{error}");
+    }
+
+    #[test]
+    fn should_treat_an_absent_or_default_preset_as_no_preset() {
+        let plain = TextClipData::new("Copy");
+        assert_eq!(parse_text_preset(None, "Copy").unwrap(), plain);
+        assert_eq!(
+            parse_text_preset(Some("default".to_string()), "Copy").unwrap(),
+            plain
+        );
+        assert_eq!(
+            parse_text_preset(Some("  DEFAULT ".to_string()), "Copy").unwrap(),
+            plain
+        );
+    }
+
+    #[test]
+    fn should_let_explicit_flags_override_preset_values() {
+        // Preset first, flags second: the flag override contract does not
+        // change now that the base comes from the core registry.
+        let base = parse_text_preset(Some("quote".to_string()), "Copy").unwrap();
+        let patched = apply_patch(
+            base,
+            TextPatch {
+                font_size: Some(96),
+                color: Some("#FF0000".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("patch applies");
+
+        assert_eq!(patched.style.font_size, 96);
+        assert_eq!(patched.style.color, "#FF0000");
+        // Untouched preset values survive the patch.
+        assert_eq!(patched.style.font_family, "Georgia");
+        assert!(patched.style.italic);
+        assert!((patched.opacity - 0.95).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_settle_the_weight_pair_the_way_the_payload_boundary_does() {
+        // `text add --preset X --style-json '{"bold":false}'` and the same
+        // logical input through `AddTextClip` must produce one overlay: both
+        // route the pair through the shared core reconciler.
+        let flags_and_json: [(TextPatch, serde_json::Value); 3] = [
+            (
+                TextPatch {
+                    style_json: Some(r#"{"bold":false}"#.to_string()),
+                    ..Default::default()
+                },
+                serde_json::json!({ "style": { "bold": false } }),
+            ),
+            (
+                TextPatch {
+                    style_json: Some(r#"{"fontWeight":400}"#.to_string()),
+                    ..Default::default()
+                },
+                serde_json::json!({ "style": { "fontWeight": 400 } }),
+            ),
+            (
+                TextPatch {
+                    style_json: Some(r#"{"bold":true,"fontWeight":900}"#.to_string()),
+                    ..Default::default()
+                },
+                serde_json::json!({ "style": { "bold": true, "fontWeight": 900 } }),
+            ),
+        ];
+
+        for (patch, text_data) in flags_and_json {
+            let described = format!("{text_data}");
+            let base = parse_text_preset(Some("centered-title".to_string()), "Copy").unwrap();
+            let patched = apply_patch(base, patch).expect("patch applies");
+
+            let mut text_data = text_data;
+            text_data["content"] = serde_json::json!("Copy");
+            let resolved = openreelio_core::style::resolve_text_clip_data(
+                Some("centered-title"),
+                Some(text_data),
+            )
+            .expect("payload resolves");
+
+            assert_eq!(
+                (patched.style.bold, patched.style.font_weight),
+                (resolved.style.bold, resolved.style.font_weight),
+                "the CLI and the payload boundary disagree on {described}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_let_the_named_half_of_the_weight_pair_decide_the_other() {
+        // Turning bold off must drop the preset's derived 700, or the render
+        // paths OR it straight back on and the readback lies about the frame.
+        let unbolded = apply_patch(
+            parse_text_preset(Some("centered-title".to_string()), "Copy").unwrap(),
+            TextPatch {
+                bold: Some(false),
+                ..Default::default()
+            },
+        )
+        .expect("patch applies");
+        assert!(!unbolded.style.bold);
+        assert_eq!(unbolded.style.font_weight, 400);
+
+        let lightened = apply_patch(
+            parse_text_preset(Some("centered-title".to_string()), "Copy").unwrap(),
+            TextPatch {
+                font_weight: Some(400),
+                ..Default::default()
+            },
+        )
+        .expect("patch applies");
+        assert!(!lightened.style.bold);
+        assert_eq!(lightened.style.font_weight, 400);
+
+        // Naming both leaves both alone: there is nothing left to infer.
+        let explicit = apply_patch(
+            parse_text_preset(Some("subtitle".to_string()), "Copy").unwrap(),
+            TextPatch {
+                bold: Some(true),
+                font_weight: Some(900),
+                ..Default::default()
+            },
+        )
+        .expect("patch applies");
+        assert!(explicit.style.bold);
+        assert_eq!(explicit.style.font_weight, 900);
+    }
+
+    #[test]
+    fn preset_help_lists_every_id_the_parser_accepts() {
+        let help = text_preset_help();
+        for spec in openreelio_core::style::TEXT_PRESETS {
+            assert!(
+                help.contains(spec.id),
+                "help must name '{}': {help}",
+                spec.id
+            );
+        }
+        assert!(help.contains(NO_TEXT_PRESET), "{help}");
     }
 }

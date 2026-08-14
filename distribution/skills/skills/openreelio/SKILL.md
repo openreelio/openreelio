@@ -34,7 +34,8 @@ Treat the binary as the source of truth, not this skill.
 `openreelio-cli <verb> --help` is authoritative for any single verb. `help-json`
 is roughly 68 KB — fetch per-verb help instead of loading all of it. Use
 `openreelio-cli command schema` for the 79 backend command types, and
-`openreelio-cli packs list` for the curated caption styles and transitions.
+`openreelio-cli packs list` for the curated caption styles, transition
+recipes, and text presets (`--kind caption|transition|text`).
 
 Its *examples* are not copy-paste ready: IDs are readable placeholders
 (`asset_001`) rather than the ULIDs the CLI actually returns, and some spell a
@@ -68,8 +69,8 @@ recipes; reach every backend command; run atomic batches. Load
 
 ## Captions and text
 
-Add subtitles and styled text overlays with curated style packs, import/export
-SRT and VTT, and generate transcripts locally. Load
+Add subtitles with curated caption packs and text overlays with curated text
+presets, import/export SRT and VTT, and generate transcripts locally. Load
 [Captions](./captions/REFERENCE.md).
 
 ## Render

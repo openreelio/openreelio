@@ -1,0 +1,4 @@
+# Generated from src-tauri/src/core/style/text_presets.rs by
+# `cargo test -p openreelio --lib regenerate_text_preset_manifest -- --ignored`.
+# Reformatting it here would only churn against the generator.
+src/data/textPresets.manifest.json

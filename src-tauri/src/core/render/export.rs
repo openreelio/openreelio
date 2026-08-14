@@ -3401,7 +3401,11 @@ pub(super) fn append_text_clip_overlays(
     )
 }
 
-fn build_text_clip_drawtext_with_enable(
+/// Builds the time-gated `drawtext` filter a text overlay clip renders as.
+///
+/// Exposed to the crate so the curated text preset contract tests can assert a
+/// preset's typography survives all the way to the filter string.
+pub(crate) fn build_text_clip_drawtext_with_enable(
     clip: &Clip,
     effects: &HashMap<String, Effect>,
 ) -> Result<String, ExportError> {
@@ -3739,7 +3743,11 @@ fn append_ass_text_style_and_event(
     }
 }
 
-fn build_ass_text_overlay_script(
+/// Builds the ASS script the libass export path burns text overlays with.
+///
+/// Exposed to the crate so the curated text preset contract tests can assert a
+/// resolved style reaches the second render path as well as `drawtext`.
+pub(crate) fn build_ass_text_overlay_script(
     sequence: &Sequence,
     effects: &HashMap<String, Effect>,
     output_width: u32,

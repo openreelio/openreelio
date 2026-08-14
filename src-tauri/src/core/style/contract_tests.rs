@@ -13,7 +13,13 @@
 //!   export;
 //! * every transition recipe resolves through `AddEffect` and builds the exact
 //!   FFmpeg transition token and duration it advertises, not merely something
-//!   from the right family.
+//!   from the right family;
+//! * every text preset — and every alias of one — survives `AddTextClip`,
+//!   stores the exact [`TextClipData`](crate::core::text::TextClipData) the
+//!   registry declares, leaves no preset id behind in the logged op, and
+//!   renders its own typography into the overlay `drawtext` filter;
+//! * `src/data/textPresets.manifest.json` still equals this registry, which is
+//!   what stops the TypeScript catalog from drifting away from it.
 
 use std::collections::HashMap;
 
@@ -28,7 +34,7 @@ use crate::core::qc::rules::{QCRule, RuleConfig};
 use crate::core::qc::CaptionSafeAreaRule;
 use crate::core::render::export::build_caption_drawtext_with_enable;
 use crate::core::style::{
-    caption_pack_ids, transition_recipe_ids, CAPTION_PACKS, TRANSITION_RECIPES,
+    caption_pack_ids, transition_recipe_ids, CAPTION_PACKS, TEXT_PRESETS, TRANSITION_RECIPES,
 };
 use crate::core::timeline::{Clip, Sequence, SequenceFormat, Track, TrackKind};
 use crate::ipc::CommandPayload;
@@ -942,4 +948,756 @@ fn recipe_params_do_not_leak_between_recipes() {
         );
     }
     assert_eq!(seen.len(), TRANSITION_RECIPES.len());
+}
+
+// =============================================================================
+// Curated text presets
+// =============================================================================
+
+/// Copy short enough to stay legible and distinct from any preset's own text.
+const TEXT_OVERLAY_CONTENT: &str = "Contract Text";
+
+/// Builds a project holding one video track and returns its ids.
+fn project_with_video_track() -> (ProjectState, String, String) {
+    let mut state = ProjectState::new_empty("Curated Text Presets");
+
+    let mut sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
+    let video = Track::new_video("V1");
+    let track_id = video.id.clone();
+    sequence.add_track(video);
+
+    let sequence_id = sequence.id.clone();
+    state.active_sequence_id = Some(sequence_id.clone());
+    state.sequences.insert(sequence_id.clone(), sequence);
+
+    (state, sequence_id, track_id)
+}
+
+/// Adds one text clip from `preset` and returns the resulting project and clip.
+fn add_text_clip_with_preset(preset_id: &str, text_data: Option<Value>) -> (ProjectState, Clip) {
+    let (mut state, sequence_id, track_id) = project_with_video_track();
+
+    let mut payload = json!({
+        "sequenceId": sequence_id,
+        "trackId": track_id,
+        "timelineIn": 1.0,
+        "duration": 4.0,
+        "preset": preset_id,
+    });
+    if let Some(text_data) = text_data {
+        payload["textData"] = text_data;
+    }
+
+    let created = execute_payload(&mut state, "AddTextClip", payload)
+        .unwrap_or_else(|error| panic!("preset '{preset_id}' must add a text clip: {error}"));
+    let clip_id = created.first().expect("clip id").clone();
+
+    let clip = state
+        .sequences
+        .get(&sequence_id)
+        .expect("sequence exists")
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .find(|clip| clip.id == clip_id)
+        .expect("text clip exists")
+        .clone();
+
+    (state, clip)
+}
+
+/// Renders a preset color the way `hex_to_ffmpeg_color` does.
+///
+/// Full opacity has no `@alpha` suffix. Only the RGB triplet is read, which is
+/// why an `#RRGGBBAA` background's own alpha does not appear here: the drawtext
+/// path composes alpha from the clip opacity instead.
+fn ffmpeg_hex_color(hex: &str, opacity: f64) -> String {
+    let clean = hex.trim().trim_start_matches('#');
+    let rgb = &clean[0..6];
+    let opacity = opacity.clamp(0.0, 1.0);
+    if (opacity - 1.0).abs() < 0.001 {
+        format!("0x{}", rgb.to_ascii_uppercase())
+    } else {
+        format!("0x{}@{:.2}", rgb.to_ascii_uppercase(), opacity)
+    }
+}
+
+/// The ASS script the libass export path burns this project's overlays with.
+fn ass_script_for(state: &ProjectState) -> String {
+    let sequence_id = state
+        .active_sequence_id
+        .clone()
+        .expect("the fixture sets an active sequence");
+    let sequence = state.sequences.get(&sequence_id).expect("sequence exists");
+    crate::core::render::export::build_ass_text_overlay_script(sequence, &state.effects, 1920, 1080)
+        .expect("the ASS script must build")
+        .expect("a text overlay must produce an ASS script")
+}
+
+/// The preview render spec the graph hands the compositor for the text clip.
+fn preview_text_render_spec(state: &ProjectState) -> crate::core::render::graph::TextRenderSpec {
+    let sequence_id = state
+        .active_sequence_id
+        .clone()
+        .expect("the fixture sets an active sequence");
+    let graph = crate::core::render::graph::build_render_graph(state, &sequence_id)
+        .expect("the render graph must build");
+
+    graph
+        .visual_layers
+        .iter()
+        .find_map(|layer| match &layer.source {
+            crate::core::render::graph::VisualRenderSource::Text { render_spec, .. } => {
+                render_spec.clone()
+            }
+            _ => None,
+        })
+        .expect("the text clip must reach the preview graph with a render spec")
+}
+
+/// The `x=` expression a preset's anchor and alignment must produce.
+fn expected_text_x_expression(clip_data: &crate::core::text::TextClipData) -> String {
+    let x = clip_data.position.x;
+    match clip_data.style.alignment {
+        crate::core::text::TextAlignment::Left => format!("(w*{x:.4})"),
+        crate::core::text::TextAlignment::Right => format!("(w*{x:.4})-text_w"),
+        crate::core::text::TextAlignment::Center => format!("(w*{x:.4})-(text_w/2)"),
+    }
+}
+
+#[test]
+fn every_text_preset_round_trips_into_typed_clip_data() {
+    for preset in TEXT_PRESETS {
+        let (state, clip) = add_text_clip_with_preset(preset.id, None);
+
+        assert!(
+            crate::core::commands::is_text_clip(&clip),
+            "preset '{}' must produce a text clip",
+            preset.id
+        );
+
+        let stored = crate::core::commands::get_text_data(&clip, &state)
+            .unwrap_or_else(|| panic!("preset '{}' must store text data", preset.id));
+
+        assert_eq!(
+            stored,
+            preset.default_clip_data(),
+            "preset '{}' drifted between the registry and the clip",
+            preset.id
+        );
+    }
+}
+
+#[test]
+fn every_text_preset_alias_resolves_to_the_same_clip_data() {
+    for preset in TEXT_PRESETS {
+        let expected = preset.default_clip_data();
+        for alias in preset.aliases {
+            let (state, clip) = add_text_clip_with_preset(alias, None);
+            let stored = crate::core::commands::get_text_data(&clip, &state)
+                .unwrap_or_else(|| panic!("alias '{alias}' must store text data"));
+            assert_eq!(
+                stored, expected,
+                "alias '{alias}' must produce the '{}' overlay",
+                preset.id
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_text_data_overrides_the_preset_key_by_key() {
+    let (state, clip) = add_text_clip_with_preset(
+        "quote",
+        Some(json!({
+            "content": TEXT_OVERLAY_CONTENT,
+            "style": { "fontSize": 64 },
+        })),
+    );
+
+    let stored = crate::core::commands::get_text_data(&clip, &state).expect("text data");
+    let preset = crate::core::style::resolve_text_preset("quote").expect("preset");
+
+    assert_eq!(stored.content, TEXT_OVERLAY_CONTENT);
+    assert_eq!(stored.style.font_size, 64);
+    // Everything the caller did not mention still comes from the preset.
+    assert_eq!(stored.style.font_family, preset.style().font_family);
+    assert!(stored.style.italic, "the quote preset is italic");
+    assert_eq!(stored.opacity, preset.default_clip_data().opacity);
+    assert_eq!(stored.shadow, preset.default_clip_data().shadow);
+}
+
+/// Asserts every render path agrees the overlay is regular weight, not bold.
+///
+/// `bold` and `fontWeight` are two spellings of one decision, and each render
+/// path reconciles them by OR-ing, so a stored pair that disagrees renders bold
+/// no matter which half said otherwise. Checking the merged JSON alone would
+/// miss exactly that.
+fn assert_renders_regular_weight(state: &ProjectState, clip: &Clip, case: &str) {
+    let stored = crate::core::commands::get_text_data(clip, state)
+        .unwrap_or_else(|| panic!("{case}: the clip must store text data"));
+    assert!(!stored.style.bold, "{case}: readback must not claim bold");
+    assert_eq!(
+        stored.style.font_weight, 400,
+        "{case}: readback weight must agree with the readback bold flag"
+    );
+
+    // drawtext expresses bold through the fontconfig style suffix.
+    let filter =
+        crate::core::render::export::build_text_clip_drawtext_with_enable(clip, &state.effects)
+            .unwrap_or_else(|error| panic!("{case}: the filter must build: {error}"));
+    assert!(
+        !filter.contains(":style=Bold"),
+        "{case}: drawtext must not select a bold face, got: {filter}"
+    );
+
+    // The ASS export carries the weight into every dialogue line.
+    let script = ass_script_for(state);
+    assert!(
+        script.contains(r"\b400") && !script.contains(r"\b700"),
+        "{case}: the ASS event must carry weight 400, got: {script}"
+    );
+
+    // The preview graph reconciles the same pair for the canvas compositor.
+    let spec = preview_text_render_spec(state);
+    assert!(
+        !spec.style.bold,
+        "{case}: the preview spec must not be bold, got: {spec:?}"
+    );
+    assert_eq!(
+        spec.style.font_weight, 400,
+        "{case}: the preview spec weight must agree with its bold flag"
+    );
+}
+
+#[test]
+fn turning_bold_off_on_a_bold_preset_renders_regular_everywhere() {
+    // `centered-title` is bold, so its serialized base carries fontWeight 700.
+    // A caller who never mentions fontWeight must still get a regular overlay.
+    let (state, clip) = add_text_clip_with_preset(
+        "centered-title",
+        Some(json!({
+            "content": TEXT_OVERLAY_CONTENT,
+            "style": { "bold": false },
+        })),
+    );
+
+    assert_renders_regular_weight(&state, &clip, "bold:false");
+
+    // Nothing else about the preset moved.
+    let preset = crate::core::style::resolve_text_preset("centered-title").expect("preset");
+    let stored = crate::core::commands::get_text_data(&clip, &state).expect("text data");
+    assert_eq!(stored.style.font_size, preset.style().font_size);
+    assert_eq!(stored.position, preset.position());
+}
+
+#[test]
+fn lowering_the_font_weight_on_a_bold_preset_renders_regular_everywhere() {
+    // The symmetric case: naming only the numeric half must drop `bold` too,
+    // or the effect layer promotes the weight straight back to 700.
+    let (state, clip) = add_text_clip_with_preset(
+        "centered-title",
+        Some(json!({
+            "content": TEXT_OVERLAY_CONTENT,
+            "style": { "fontWeight": 400 },
+        })),
+    );
+
+    assert_renders_regular_weight(&state, &clip, "fontWeight:400");
+}
+
+#[test]
+fn naming_both_halves_of_the_weight_pair_keeps_both() {
+    // With both named there is nothing to infer, so neither is rewritten —
+    // which is also what makes replaying a resolved op idempotent.
+    let (state, clip) = add_text_clip_with_preset(
+        "subtitle",
+        Some(json!({
+            "content": TEXT_OVERLAY_CONTENT,
+            "style": { "bold": true, "fontWeight": 900 },
+        })),
+    );
+
+    let stored = crate::core::commands::get_text_data(&clip, &state).expect("text data");
+    assert!(stored.style.bold);
+    assert_eq!(stored.style.font_weight, 900);
+
+    let filter =
+        crate::core::render::export::build_text_clip_drawtext_with_enable(&clip, &state.effects)
+            .expect("filter builds");
+    assert!(filter.contains(":style=Bold"), "got: {filter}");
+    assert!(ass_script_for(&state).contains(r"\b900"));
+    assert!(preview_text_render_spec(&state).style.bold);
+}
+
+#[test]
+fn an_explicit_null_layer_clears_the_preset_layer() {
+    let (state, clip) = add_text_clip_with_preset(
+        "epic-title",
+        Some(json!({ "content": TEXT_OVERLAY_CONTENT, "outline": null })),
+    );
+
+    let stored = crate::core::commands::get_text_data(&clip, &state).expect("text data");
+    assert!(
+        stored.outline.is_none(),
+        "an explicit null must drop the preset's outline"
+    );
+    assert!(
+        stored.shadow.is_some(),
+        "clearing one layer must not clear another"
+    );
+}
+
+#[test]
+fn a_partial_shadow_override_merges_on_every_preset() {
+    // `epic-title` declares a shadow, `watermark` does not. The same fragment
+    // has to mean the same thing on both, or an agent that learned the pattern
+    // from one preset gets a parse error about a field it never named.
+    for (preset_id, declares_shadow) in [("epic-title", true), ("watermark", false)] {
+        let (state, clip) = add_text_clip_with_preset(
+            preset_id,
+            Some(json!({
+                "content": TEXT_OVERLAY_CONTENT,
+                "shadow": { "offsetX": 7 },
+            })),
+        );
+
+        let stored = crate::core::commands::get_text_data(&clip, &state)
+            .unwrap_or_else(|| panic!("preset '{preset_id}' must store text data"));
+        let shadow = stored
+            .shadow
+            .unwrap_or_else(|| panic!("preset '{preset_id}' must carry the merged shadow"));
+
+        assert_eq!(shadow.offset_x, 7, "preset '{preset_id}'");
+
+        let base = crate::core::style::resolve_text_preset(preset_id)
+            .expect("preset")
+            .default_clip_data()
+            .shadow
+            .unwrap_or_default();
+        assert_eq!(
+            (shadow.color.as_str(), shadow.offset_y, shadow.blur),
+            (base.color.as_str(), base.offset_y, base.blur),
+            "preset '{preset_id}' must keep the rest of the layer \
+             (declared: {declares_shadow})"
+        );
+    }
+}
+
+#[test]
+fn a_partial_outline_override_merges_on_every_preset() {
+    for preset_id in ["epic-title", "subtitle"] {
+        let (state, clip) = add_text_clip_with_preset(
+            preset_id,
+            Some(json!({
+                "content": TEXT_OVERLAY_CONTENT,
+                "outline": { "width": 3 },
+            })),
+        );
+
+        let stored = crate::core::commands::get_text_data(&clip, &state)
+            .unwrap_or_else(|| panic!("preset '{preset_id}' must store text data"));
+        let outline = stored
+            .outline
+            .unwrap_or_else(|| panic!("preset '{preset_id}' must carry the merged outline"));
+
+        assert_eq!(outline.width, 3, "preset '{preset_id}'");
+
+        let base = crate::core::style::resolve_text_preset(preset_id)
+            .expect("preset")
+            .default_clip_data()
+            .outline
+            .unwrap_or_default();
+        assert_eq!(
+            outline.color, base.color,
+            "preset '{preset_id}' must keep the color it did not name"
+        );
+    }
+}
+
+#[test]
+fn seeding_a_missing_layer_does_not_resurrect_a_cleared_one() {
+    // The seed only applies to a layer the caller is actually merging into, so
+    // an explicit null still clears and an untouched layer stays absent.
+    let (state, clip) = add_text_clip_with_preset(
+        "epic-title",
+        Some(json!({
+            "content": TEXT_OVERLAY_CONTENT,
+            "outline": null,
+            "shadow": { "blur": 12 },
+        })),
+    );
+
+    let stored = crate::core::commands::get_text_data(&clip, &state).expect("text data");
+    assert!(
+        stored.outline.is_none(),
+        "an explicit null must still clear"
+    );
+    assert_eq!(stored.shadow.expect("shadow merged").blur, 12);
+
+    let (state, clip) = add_text_clip_with_preset(
+        "watermark",
+        Some(json!({ "content": TEXT_OVERLAY_CONTENT })),
+    );
+    let stored = crate::core::commands::get_text_data(&clip, &state).expect("text data");
+    assert!(
+        stored.shadow.is_none() && stored.outline.is_none(),
+        "a preset that declares no decoration must not gain one"
+    );
+}
+
+#[test]
+fn the_resolved_text_payload_never_carries_the_preset_id() {
+    // The op log has to be readable without the registry: what a preset
+    // produced is recorded, not which preset produced it.
+    let parsed = CommandPayload::parse(
+        "AddTextClip".to_string(),
+        json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_1",
+            "timelineIn": 0.0,
+            "duration": 4.0,
+            "preset": "logo-bug",
+        }),
+    )
+    .expect("preset payload must parse");
+
+    let CommandPayload::AddTextClip(payload) = parsed else {
+        panic!("parsed the wrong variant");
+    };
+    assert!(payload.preset.is_none());
+
+    let serialized = serde_json::to_value(&payload).expect("payload serializes");
+    assert!(
+        serialized.get("preset").is_none(),
+        "a logged op must not name a preset: {serialized}"
+    );
+    assert_eq!(
+        serialized["textData"]["style"]["backgroundColor"],
+        json!("#0F766ECC")
+    );
+
+    // Re-parsing what was logged is a no-op, which is what makes replay stable.
+    let reparsed = CommandPayload::parse("AddTextClip".to_string(), serialized)
+        .expect("resolved payload must re-parse");
+    let CommandPayload::AddTextClip(reparsed) = reparsed else {
+        panic!("parsed the wrong variant");
+    };
+    assert_eq!(reparsed.text_data, payload.text_data);
+}
+
+#[test]
+fn an_unknown_text_preset_is_rejected_with_the_valid_list() {
+    let error = CommandPayload::parse(
+        "AddTextClip".to_string(),
+        json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_1",
+            "timelineIn": 0.0,
+            "duration": 4.0,
+            "preset": "no-such-preset",
+        }),
+    )
+    .expect_err("unknown preset must fail");
+
+    for preset in TEXT_PRESETS {
+        assert!(
+            error.contains(preset.id),
+            "error must name '{}': {error}",
+            preset.id
+        );
+    }
+}
+
+#[test]
+fn text_data_is_still_required_without_a_preset() {
+    let error = CommandPayload::parse(
+        "AddTextClip".to_string(),
+        json!({
+            "sequenceId": "seq_1",
+            "trackId": "track_1",
+            "timelineIn": 0.0,
+            "duration": 4.0,
+        }),
+    )
+    .expect_err("a payload with neither preset nor textData must fail");
+
+    assert!(error.contains("textData"), "{error}");
+}
+
+#[test]
+fn every_text_preset_renders_its_own_typography_into_the_drawtext_filter() {
+    let mut filters_by_preset: Vec<(&str, String)> = Vec::new();
+
+    for preset in TEXT_PRESETS {
+        // Every preset renders the same copy. The content is the first field of
+        // the filter body, so leaving each preset its own starter string would
+        // make the pairwise comparison below pass on the text alone and never
+        // exercise the styling it exists to separate.
+        let (state, clip) =
+            add_text_clip_with_preset(preset.id, Some(json!({ "content": TEXT_OVERLAY_CONTENT })));
+        let clip_data = preset.clip_data(TEXT_OVERLAY_CONTENT);
+
+        let filter = crate::core::render::export::build_text_clip_drawtext_with_enable(
+            &clip,
+            &state.effects,
+        )
+        .unwrap_or_else(|error| panic!("preset '{}' must render: {error}", preset.id));
+
+        assert!(
+            filter.starts_with("drawtext="),
+            "preset '{}' must render drawtext, got: {filter}",
+            preset.id
+        );
+        assert!(
+            filter.contains("enable='between(t,"),
+            "preset '{}' filter must be time gated, got: {filter}",
+            preset.id
+        );
+        // Holding the copy constant is what makes the pairwise check below
+        // about styling, so the constant has to actually reach the filter.
+        assert!(
+            filter.contains(&format!("text='{TEXT_OVERLAY_CONTENT}'")),
+            "preset '{}' must render the shared copy, got: {filter}",
+            preset.id
+        );
+
+        // The point of a preset is its own look, so each assertion names a
+        // value this preset declares rather than checking that some filter came
+        // out the other end.
+        assert!(
+            filter.contains(&format!("fontsize={}", clip_data.style.font_size)),
+            "preset '{}' must render at {}px, got: {filter}",
+            preset.id,
+            clip_data.style.font_size
+        );
+        assert!(
+            filter.contains(&format!(
+                "fontcolor={}",
+                ffmpeg_hex_color(&clip_data.style.color, clip_data.opacity)
+            )),
+            "preset '{}' must render in its own color at its own opacity, got: {filter}",
+            preset.id
+        );
+        assert!(
+            filter.contains(&format!("x={}", expected_text_x_expression(&clip_data))),
+            "preset '{}' must anchor where it says it does, got: {filter}",
+            preset.id
+        );
+        assert!(
+            filter.contains(&format!("y=(h*{:.4})-(text_h/2)", clip_data.position.y)),
+            "preset '{}' must sit at y={}, got: {filter}",
+            preset.id,
+            clip_data.position.y
+        );
+
+        match &clip_data.style.background_color {
+            Some(background) => assert!(
+                filter.contains("box=1")
+                    && filter.contains(&format!(
+                        "boxcolor={}",
+                        ffmpeg_hex_color(background, clip_data.opacity)
+                    ))
+                    && filter.contains(&format!(
+                        "boxborderw={}",
+                        clip_data.style.background_padding
+                    )),
+                "preset '{}' must render its box with {}px padding, got: {filter}",
+                preset.id,
+                clip_data.style.background_padding
+            ),
+            None => assert!(
+                !filter.contains("boxcolor="),
+                "preset '{}' declares no box, got: {filter}",
+                preset.id
+            ),
+        }
+
+        match &clip_data.outline {
+            Some(outline) => assert!(
+                filter.contains(&format!("borderw={}", outline.width))
+                    && filter.contains(&format!(
+                        "bordercolor={}",
+                        ffmpeg_hex_color(&outline.color, clip_data.opacity)
+                    )),
+                "preset '{}' must render its outline, got: {filter}",
+                preset.id
+            ),
+            None => assert!(
+                !filter.contains("bordercolor="),
+                "preset '{}' declares no outline, got: {filter}",
+                preset.id
+            ),
+        }
+
+        match &clip_data.shadow {
+            Some(shadow) => assert!(
+                filter.contains(&format!("shadowx={}", shadow.offset_x))
+                    && filter.contains(&format!("shadowy={}", shadow.offset_y)),
+                "preset '{}' must render its shadow offset, got: {filter}",
+                preset.id
+            ),
+            None => assert!(
+                !filter.contains("shadowcolor="),
+                "preset '{}' declares no shadow, got: {filter}",
+                preset.id
+            ),
+        }
+
+        filters_by_preset.push((preset.id, filter));
+    }
+
+    // Two presets that describe different looks must not compile to the same
+    // filter. With the copy held constant, only styling can separate them, so
+    // a collision here means two catalog entries are one preset wearing two
+    // ids — which the listing surfaces would advertise as a real choice.
+    for (index, (id, filter)) in filters_by_preset.iter().enumerate() {
+        for (other_id, other_filter) in filters_by_preset.iter().skip(index + 1) {
+            assert_ne!(
+                filter, other_filter,
+                "presets '{id}' and '{other_id}' render identically"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_repurposed_preset_spellings_stay_pinned_to_their_current_geometry() {
+    // `title`, `lower-third`, and `subtitle` are the three spellings whose
+    // meaning changed when the CLI's inline table gave way to this registry, so
+    // they are the three most likely to be quietly repurposed a second time.
+    // The module doc states "ids are append-only: rename nothing, and add rather
+    // than repurpose"; these numbers are that contract in executable form.
+    // Changing one is a breaking change for every existing script that names it,
+    // so update the docs and the release notes along with this list.
+    struct PinnedGeometry {
+        key: &'static str,
+        id: &'static str,
+        x: f64,
+        y: f64,
+        font_size: u32,
+        bold: bool,
+        alignment: crate::core::text::TextAlignment,
+    }
+
+    let pinned = [
+        PinnedGeometry {
+            key: "title",
+            id: "centered-title",
+            x: 0.5,
+            y: 0.5,
+            font_size: 72,
+            bold: true,
+            alignment: crate::core::text::TextAlignment::Center,
+        },
+        PinnedGeometry {
+            key: "lower-third",
+            id: "lower-third",
+            x: 0.08,
+            y: 0.82,
+            font_size: 42,
+            bold: true,
+            alignment: crate::core::text::TextAlignment::Left,
+        },
+        PinnedGeometry {
+            key: "subtitle",
+            id: "subtitle",
+            x: 0.5,
+            y: 0.9,
+            font_size: 32,
+            bold: false,
+            alignment: crate::core::text::TextAlignment::Center,
+        },
+    ];
+
+    for expected in pinned {
+        let preset = crate::core::style::resolve_text_preset(expected.key)
+            .unwrap_or_else(|error| panic!("'{}' must resolve: {error}", expected.key));
+        assert_eq!(
+            preset.id, expected.id,
+            "'{}' must keep resolving to the same preset",
+            expected.key
+        );
+
+        let clip = preset.default_clip_data();
+        assert_eq!(
+            (clip.position.x, clip.position.y),
+            (expected.x, expected.y),
+            "'{}' moved",
+            expected.key
+        );
+        assert_eq!(
+            clip.style.font_size, expected.font_size,
+            "'{}'",
+            expected.key
+        );
+        assert_eq!(clip.style.bold, expected.bold, "'{}'", expected.key);
+        assert_eq!(
+            clip.style.alignment, expected.alignment,
+            "'{}'",
+            expected.key
+        );
+    }
+}
+
+// =============================================================================
+// TypeScript parity manifest
+// =============================================================================
+
+/// Location of the manifest that pins the TypeScript catalog to this registry.
+fn text_preset_manifest_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("src")
+        .join("data")
+        .join("textPresets.manifest.json")
+}
+
+/// The manifest content this registry implies.
+fn text_preset_manifest_json() -> String {
+    let value = serde_json::to_value(crate::core::style::list_text_presets())
+        .expect("text presets serialize");
+    let mut json = serde_json::to_string_pretty(&value).expect("manifest serializes");
+    json.push('\n');
+    json
+}
+
+/// How to bring the manifest back in line after editing the registry.
+const REGENERATE_MANIFEST_HINT: &str =
+    "cargo test -p openreelio --lib regenerate_text_preset_manifest -- --ignored";
+
+#[test]
+fn the_text_preset_manifest_matches_the_registry() {
+    let path = text_preset_manifest_path();
+    let contents = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "{} is missing ({error}). Regenerate it with: {REGENERATE_MANIFEST_HINT}",
+            path.display()
+        )
+    });
+
+    let recorded: Value = serde_json::from_str(&contents).unwrap_or_else(|error| {
+        panic!(
+            "{} is not valid JSON ({error}). Regenerate it with: {REGENERATE_MANIFEST_HINT}",
+            path.display()
+        )
+    });
+    let expected: Value =
+        serde_json::from_str(&text_preset_manifest_json()).expect("manifest is valid JSON");
+
+    assert_eq!(
+        recorded,
+        expected,
+        "{} is stale, so the TypeScript catalog and this registry disagree. \
+         Regenerate it with: {REGENERATE_MANIFEST_HINT}",
+        path.display()
+    );
+}
+
+#[test]
+#[ignore = "regeneration helper: rewrites src/data/textPresets.manifest.json"]
+fn regenerate_text_preset_manifest() {
+    let path = text_preset_manifest_path();
+    std::fs::write(&path, text_preset_manifest_json())
+        .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
 }
