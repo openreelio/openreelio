@@ -39,6 +39,50 @@ fn validate_target_clips(
     Ok(())
 }
 
+/// Anchors a fade-out on the end of the clip it is being added to.
+///
+/// `fade=t=out` measures `st` from the clip's own zero, so a fade-out without a
+/// `start_time` fades during the clip's first second and holds black for the
+/// rest of it. The value cannot live in the recipe table — only the target clip
+/// knows its duration — so it is computed here, where the clip is in hand and
+/// the op has not been written yet. That keeps the logged effect concrete:
+/// replay reads the resolved `start_time` out of the op and never consults the
+/// recipe table.
+///
+/// An explicit `start_time` always wins, and a clip shorter than the fade gets
+/// the whole clip as the fade. Trimming the clip afterwards leaves the anchor
+/// where it was; re-adding the effect (or passing `start_time`) re-anchors it.
+fn anchor_fade_out_on_clip_tail(
+    effect_type: &EffectType,
+    params: &mut std::collections::HashMap<String, ParamValue>,
+    clip_duration_sec: f64,
+) {
+    if !matches!(effect_type, EffectType::Fade) || params.contains_key("start_time") {
+        return;
+    }
+
+    let fades_out = params
+        .get("fade_in")
+        .and_then(ParamValue::as_bool)
+        .is_some_and(|fade_in| !fade_in);
+    if !fades_out || !clip_duration_sec.is_finite() || clip_duration_sec <= 0.0 {
+        return;
+    }
+
+    let requested = params
+        .get("duration")
+        .and_then(ParamValue::as_float)
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+        .unwrap_or(1.0);
+
+    let duration = requested.min(clip_duration_sec);
+    params.insert("duration".to_string(), ParamValue::Float(duration));
+    params.insert(
+        "start_time".to_string(),
+        ParamValue::Float(clip_duration_sec - duration),
+    );
+}
+
 fn deserialize_source_effects(source_effects: &[serde_json::Value]) -> CoreResult<Vec<Effect>> {
     source_effects
         .iter()
@@ -177,6 +221,10 @@ impl Command for AddEffectCommand {
         let clip = track
             .get_clip_mut(&self.clip_id)
             .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        // Resolve clip-relative parameters while the clip is in hand, so the
+        // effect the op records is fully concrete.
+        anchor_fade_out_on_clip_tail(&effect_type, &mut self.params, clip.place.duration_sec);
 
         // Create the effect
         let mut effect = Effect::new(effect_type);
