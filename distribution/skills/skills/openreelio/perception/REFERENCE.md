@@ -89,11 +89,16 @@ order given) writes one sheet and returns
 `sheet.cells[{index,row,col,timelineSec}]`, mapping every cell a vision model
 comments on back to a timecode. Capped at 100 cells.
 
-- `--label-cells` burns each cell's index and timecode into the image, so the
-  mapping survives without the JSON — use it beyond a 3×3.
+- `--label-cells` burns each cell's index and *requested* timecode into the
+  image, so the mapping survives without the JSON — use it beyond a 3×3.
 - `--cell-width` / `--cell-height` (64–1024, default 320×180) size the cells.
-  640-wide cells are the floor for reading captions; grid cells are extracted at
-  the cell width, so `--max-width` only matters as an oversampling override.
+  640×360 is the floor for reading captions; one dimension on its own derives
+  the other at 16:9, since cells are fitted with
+  `force_original_aspect_ratio=decrease` and a 640×180 cell would just pad black
+  around a 320×180 picture. Grid cells are extracted at the cell width, so
+  `--max-width` only matters as an oversampling override.
+- All three flags need `--grid`; passing them with `--time` or `--asset` is
+  rejected rather than ignored.
 
 **From a rendered file.** `--file <RENDER>` extracts stills or sheets from a
 rendered video instead of the project timeline — times are in the file's own

@@ -75,9 +75,10 @@ placeholders. Real IDs look like `01KZW64VJ4JPBS5B9YZEA335J8`. Read them from
 `timeline clips`.
 
 **Negative numbers need `=`.** `--target-lufs -14` is parsed as a flag and
-errors. Write `--target-lufs=-14` and `--max-true-peak=-1`.
-(`analysis silence --threshold-db -40` is the one option that accepts the
-spaced form.)
+errors. Write `--target-lufs=-14` and `--max-true-peak=-1`. Two options accept
+the spaced form as well — `analysis silence --threshold-db -40` and
+`state jump --index -1` — but the `=` form works everywhere, so write it
+everywhere rather than tracking the exceptions.
 
 ### Discovering the surface
 
@@ -198,6 +199,16 @@ in one step (`--index=-1` undoes everything; the move persists). Any new
 mutating command after a jump clears the redo branch, so an unwound state is
 only reachable again by re-applying its plan JSON.
 
+A jump reports what it removed: `unwound:[{opId, commandType}]` lists every
+applied entry the rewind took out, in order, and `adopted` counts the ops this
+invocation folded in from the log when it opened. Both matter because the index
+space is recomputed on every invocation — an index recorded before another
+writer appended does not mean the same thing afterwards. Re-read `state history`
+immediately before jumping, confirm every entry above your baseline is your own,
+and check `unwound` after. If the save fails after the move, the response is
+`{"status":"error","historyMoved":true,…}` with exit code 2: the reposition is
+already durable, so do not retry the jump expecting the old position.
+
 ## 5. The perception loop
 
 An agent that cannot see the footage is guessing. These verbs produce the facts.
@@ -269,14 +280,22 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
   or `--times a,b,c` (explicit list, kept in order) writes one contact sheet
   and returns `sheet.cells[{index,row,col,timelineSec}]`, which maps every cell
   a vision model comments on back to a timecode. Grids are capped at 100 cells.
-- `--label-cells` burns each cell's index and timecode into the image;
-  `--cell-width` / `--cell-height` (64–1024, default 320×180) size the cells —
-  640-wide is the floor for reading captions. Grid cells are extracted at the
-  cell width, so `--max-width` only matters as an oversampling override.
+- `--label-cells` burns each cell's **requested** index and timecode into the
+  image (not the decoded frame's PTS); `--cell-width` / `--cell-height`
+  (64–1024, default 320×180) size the cells — 640×360 is the floor for reading
+  captions. Passing one dimension alone derives the other at 16:9, because
+  cells are fitted with `force_original_aspect_ratio=decrease`: a 640×180 cell
+  would only pad black around the same 320×180 picture. Grid cells are
+  extracted at the cell width, so `--max-width` only matters as an oversampling
+  override. All three flags require `--grid` and are rejected without it.
 - `--file <RENDER>` extracts stills or sheets from a rendered video file
   instead of the timeline — times are in the file's timebase and cells map back
   as `fileSec`. It is the cheap way to inspect a render you just made, and it
-  shows exactly the pixels `verify --file` measured.
+  shows exactly the pixels `verify --file` measured. Times are validated against
+  the **video stream's** end (`source.videoDurationSec`), not the container's,
+  so a file whose audio outlasts its picture is rejected where the picture
+  stops. A request FFmpeg produces no frame for is an error, never a silently
+  stale image at `--out`.
 
 Every timeline time must fall inside the sequence. Asking for one at or past
 the end is rejected with the sequence's actual duration in the message, so widen
@@ -410,6 +429,7 @@ openreelio-cli render start  --path ./demo --proxy --output ./judge/a.mp4 --prog
 openreelio-cli frame extract --path ./demo --file ./judge/a.mp4 \
   --grid 4x3 --between 0 <END> --label-cells --out ./judge/a-sheet.jpg
 openreelio-cli verify        --path ./demo --file ./judge/a.mp4 > ./judge/a-verify.json
+openreelio-cli state history --path ./demo                     # re-read: is the baseline still yours?
 openreelio-cli state jump    --path ./demo --index <BASELINE>  # unwind, try the next
 # …score every candidate, then re-apply the winner's plan JSON
 ```
@@ -417,8 +437,11 @@ openreelio-cli state jump    --path ./demo --index <BASELINE>  # unwind, try the
 Score against a fixed rubric with the deterministic signals first (`verify`,
 `shot.length_stats`), then the sheet (hook, continuity, readability,
 composition). Re-apply the winner from its plan file — a new edit after a jump
-clears the redo branch. The full rubric and judgement-file convention live in
-the skill's `judging/REFERENCE.md`.
+clears the redo branch. Re-read `state history` right before each rewind and
+check the jump's `unwound` list afterwards: rendering and verifying take
+minutes, and a baseline index recorded before another writer appended no longer
+points where it did. The full rubric and judgement-file convention live in the
+skill's `judging/REFERENCE.md`.
 
 ## 7. Captions and text
 

@@ -4,7 +4,14 @@ use crate::output;
 use clap::Subcommand;
 use openreelio_core::commands::HistoryEntryInfo;
 use openreelio_core::ActiveProject;
+use std::io::Write;
 use std::path::PathBuf;
+
+/// Exit code for a jump that moved history but could not finish the save.
+///
+/// Matches `plan execute`: the project is not where a caller assuming failure
+/// would think it is, which is a tool failure rather than a rejected request.
+const EXIT_TOOL_FAILURE: i32 = 2;
 
 #[derive(Subcommand)]
 pub enum StateAction {
@@ -77,6 +84,33 @@ fn history_entry_json(entry: &HistoryEntryInfo) -> serde_json::Value {
         "commandType": entry.command_type,
         "timestamp": entry.timestamp,
     })
+}
+
+/// Applied entries the jump removed, oldest first.
+///
+/// History is a stack, so a rewind pops a suffix: everything past the length
+/// the jump left behind is what stopped being in effect. Reporting it is the
+/// only way a caller can tell that its rewind reached work it did not write —
+/// the entries carry no author, and an index recorded before a second writer
+/// appended means something different afterwards.
+fn unwound_entries(
+    before: &[HistoryEntryInfo],
+    after: &[HistoryEntryInfo],
+) -> Vec<serde_json::Value> {
+    before
+        .iter()
+        .skip(after.len().min(before.len()))
+        .map(|entry| {
+            serde_json::json!({
+                "opId": entry.op_id,
+                "commandType": entry.command_type,
+            })
+        })
+        .collect()
+}
+
+fn flush_stdout() {
+    let _ = std::io::stdout().flush();
 }
 
 pub fn execute(action: StateAction) -> anyhow::Result<()> {
@@ -210,6 +244,7 @@ pub fn execute(action: StateAction) -> anyhow::Result<()> {
 
         StateAction::Jump { path, index } => {
             let mut project = super::load_project(&path)?;
+            let adopted = project.adopted_op_ids.len();
             let (applied, redoable, previous_index) = read_history(&mut project)?;
 
             let total = (applied.len() + redoable.len()) as i32;
@@ -223,13 +258,40 @@ pub fn execute(action: StateAction) -> anyhow::Result<()> {
 
             // The jump rewrites the history manifest through the guarded log, so
             // a project another process has edited since this one opened is
-            // refused here rather than silently reverted.
+            // refused here rather than silently reverted. That guard cannot see
+            // the window *before* this invocation opened: an index recorded
+            // minutes ago may now sit below work a second writer has finished
+            // since, which is what `unwound` exists to make visible.
             let current_index = project
                 .jump_to_history_index_persisted(index)
                 .map_err(|error| anyhow::anyhow!("History jump failed: {}", error))?;
-            super::save_project(&mut project)?;
 
             let (applied_after, redo_after, _) = read_history(&mut project)?;
+            let unwound = unwound_entries(&applied, &applied_after);
+
+            if let Err(save_error) = super::save_project(&mut project) {
+                // The manifest rewrite above is already durable and every later
+                // command reads the moved position, so reporting this as a bare
+                // failure would invite a retry that assumes nothing happened.
+                output::print_json_pretty(&serde_json::json!({
+                    "status": "error",
+                    "message": format!(
+                        "History moved to index {current_index} but the project could not be saved: {save_error}. \
+                         The move is already durable and the next open reads it — do NOT retry this jump \
+                         expecting the project to still be where it was."
+                    ),
+                    "historyMoved": true,
+                    "previousIndex": previous_index,
+                    "currentIndex": current_index,
+                    "appliedCount": applied_after.len(),
+                    "redoCount": redo_after.len(),
+                    "adopted": adopted,
+                    "unwound": unwound,
+                    "error": save_error.to_string(),
+                }))?;
+                flush_stdout();
+                std::process::exit(EXIT_TOOL_FAILURE);
+            }
 
             output::print_json_pretty(&serde_json::json!({
                 "status": "ok",
@@ -237,6 +299,8 @@ pub fn execute(action: StateAction) -> anyhow::Result<()> {
                 "currentIndex": current_index,
                 "appliedCount": applied_after.len(),
                 "redoCount": redo_after.len(),
+                "adopted": adopted,
+                "unwound": unwound,
             }))
         }
 

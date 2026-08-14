@@ -144,11 +144,11 @@ pub struct ExtractArgs {
     #[arg(long, requires = "grid", conflicts_with = "times")]
     pub count: Option<usize>,
 
-    /// Contact sheet cell width in pixels (64-1024, default 320)
+    /// Contact sheet cell width in pixels (64-1024, default 320; alone it derives the height at 16:9)
     #[arg(long, requires = "grid", value_parser = cell_size_parser())]
     pub cell_width: Option<u32>,
 
-    /// Contact sheet cell height in pixels (64-1024, default 180)
+    /// Contact sheet cell height in pixels (64-1024, default 180; alone it derives the width at 16:9)
     #[arg(long, requires = "grid", value_parser = cell_size_parser())]
     pub cell_height: Option<u32>,
 
@@ -339,7 +339,52 @@ fn listed_grid_times(
     Ok(listed.to_vec())
 }
 
+/// Flags that only mean something on a contact sheet, with the spelling the
+/// caller typed.
+const GRID_ONLY_FLAGS: [&str; 5] = [
+    "--between",
+    "--count",
+    "--cell-width",
+    "--cell-height",
+    "--label-cells",
+];
+
+/// Rejects contact-sheet flags passed without `--grid`.
+///
+/// clap's own `requires = "grid"` cannot carry this: it is waived whenever a
+/// present argument declares a conflict with `--grid`, which `--time` and
+/// `--asset` both do. Without this check the flags parse, nothing on the
+/// single-still paths ever reads them, and the caller is told nothing.
+fn ensure_grid_only_flags_unused(args: &ExtractArgs) -> anyhow::Result<()> {
+    if args.grid.is_some() {
+        return Ok(());
+    }
+
+    let present: Vec<&str> = [
+        args.between.is_some(),
+        args.count.is_some(),
+        args.cell_width.is_some(),
+        args.cell_height.is_some(),
+        args.label_cells,
+    ]
+    .iter()
+    .zip(GRID_ONLY_FLAGS)
+    .filter_map(|(used, flag)| used.then_some(flag))
+    .collect();
+
+    if present.is_empty() {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "{} only applies to a contact sheet and needs --grid <COLSxROWS>. Add --grid, or drop the flag for a single still.",
+        present.join(", ")
+    ))
+}
+
 fn resolve_selection(args: &ExtractArgs) -> anyhow::Result<Selection> {
+    ensure_grid_only_flags_unused(args)?;
+
     if let Some(grid) = &args.grid {
         return resolve_grid_selection(args, grid);
     }
@@ -450,6 +495,12 @@ fn extract(args: ExtractArgs) -> anyhow::Result<()> {
 struct FileSource {
     path: PathBuf,
     duration_sec: f64,
+    /// Duration of the video stream, when the file declares one.
+    ///
+    /// This is what bounds the requestable range: `duration_sec` is the
+    /// container duration, i.e. the maximum across all streams, so a file whose
+    /// audio outlasts its video advertises seconds that hold no picture.
+    video_duration_sec: Option<f64>,
 }
 
 impl FileSource {
@@ -479,17 +530,33 @@ impl FileSource {
             ));
         }
 
+        // Containers that carry no per-stream duration fall back to the
+        // container's: a slightly loose guard is still better than none, and
+        // `ensure_frame_written` catches whatever slips through it.
+        let video_duration_sec = runner
+            .probe_video_duration(file)
+            .await
+            .ok()
+            .flatten()
+            .filter(|value| value.is_finite() && *value > 0.0);
+
         Ok(Self {
             path: file.to_path_buf(),
             duration_sec: info.duration_sec,
+            video_duration_sec,
         })
+    }
+
+    /// Last time the file can still be asked for a picture at.
+    fn video_end_sec(&self) -> f64 {
+        self.video_duration_sec.unwrap_or(self.duration_sec)
     }
 
     /// Rejects requested times the file has no frame at.
     ///
-    /// The message names the file's real duration: a judge working from a
-    /// partial render needs to see that the range it asked for does not exist
-    /// rather than a decoder error.
+    /// The message names where the *video* ends: a judge working from a partial
+    /// render, or from a file whose audio runs past its picture, needs to see
+    /// that the range it asked for does not exist rather than a decoder error.
     fn ensure_times_inside(&self, times: &[f64]) -> anyhow::Result<()> {
         if let Some(before) = times.iter().find(|time| **time < 0.0) {
             return Err(anyhow::anyhow!(
@@ -498,12 +565,13 @@ impl FileSource {
                 self.path.display()
             ));
         }
-        if let Some(past_end) = times.iter().find(|time| **time >= self.duration_sec) {
+        let video_end_sec = self.video_end_sec();
+        if let Some(past_end) = times.iter().find(|time| **time >= video_end_sec) {
             return Err(anyhow::anyhow!(
-                "Requested time {:.3}s is at or past the end of '{}' ({:.3}s). Ask for a time inside the file.",
+                "Requested time {:.3}s is at or past the end of the video in '{}' ({:.3}s). Ask for a time inside the file.",
                 past_end,
                 self.path.display(),
-                self.duration_sec
+                video_end_sec
             ));
         }
 
@@ -518,6 +586,13 @@ impl FileSource {
         output_path: &Path,
         max_width: u32,
     ) -> anyhow::Result<(u32, u32)> {
+        // Clear the target first so the check below can tell a fresh frame from
+        // a leftover one. FFmpeg exits 0 and writes nothing when the seek lands
+        // past the last decodable frame, and it does not truncate what is
+        // already there, so without this a previous candidate's image survives
+        // and gets probed and reported as the frame just requested.
+        remove_stale_output(output_path)?;
+
         runner
             .extract_frame_with_options(
                 &self.path,
@@ -531,6 +606,7 @@ impl FileSource {
             )
             .await
             .map_err(|error| anyhow::anyhow!("Frame extraction failed: {}", error))?;
+        ensure_frame_written(output_path, time_sec, &self.path)?;
 
         Ok(probed_image_dimensions(runner, output_path)
             .await
@@ -541,8 +617,46 @@ impl FileSource {
         serde_json::json!({
             "path": self.path.display().to_string(),
             "durationSec": self.duration_sec,
+            "videoDurationSec": self.video_end_sec(),
         })
     }
+}
+
+/// Deletes an output file left behind by an earlier run.
+///
+/// A stale image at the target path is indistinguishable from a fresh one, and
+/// the extraction FFmpeg silently declines to perform leaves it in place.
+fn remove_stale_output(output_path: &Path) -> anyhow::Result<()> {
+    match std::fs::remove_file(output_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow::anyhow!(
+            "Failed to replace '{}': {}",
+            output_path.display(),
+            error
+        )),
+    }
+}
+
+/// Rejects an extraction that produced no image.
+///
+/// FFmpeg reports success for an input seek that lands past the last decodable
+/// frame — it simply writes nothing. Reporting that as an extracted frame is
+/// the worst outcome available: the caller reads plausible dimensions probed
+/// from whatever was at the path before.
+fn ensure_frame_written(output_path: &Path, time_sec: f64, source: &Path) -> anyhow::Result<()> {
+    let written = std::fs::metadata(output_path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false);
+    if written {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "FFmpeg produced no frame at {:.3}s of '{}'. The seek landed past the last decodable frame; ask for an earlier time.",
+        time_sec,
+        source.display()
+    ))
 }
 
 /// Extracts stills or a contact sheet from a rendered file rather than the
@@ -897,12 +1011,19 @@ impl CellStaging {
     }
 
     /// Burns the cell label when one was requested, and reports the finished path.
+    ///
+    /// A cell the extractor never wrote is an error rather than a gap: the
+    /// tiler reads the cells back as a `%d.jpg` image sequence, which stops at
+    /// the first missing index and pads the rest of the sheet with black, while
+    /// `sheet.cells` still claims a timecode for every one of them.
     async fn finish(
         &self,
         runner: &FFmpegRunner,
         index: usize,
         time_sec: f64,
     ) -> anyhow::Result<PathBuf> {
+        ensure_cell_written(&self.extract_path(index), index, time_sec)?;
+
         let sheet_path = self.sheet_path(index);
         if self.raw_dir.is_none() {
             return Ok(sheet_path);
@@ -919,9 +1040,26 @@ impl CellStaging {
                     error
                 )
             })?;
+        ensure_cell_written(&sheet_path, index, time_sec)?;
 
         Ok(sheet_path)
     }
+}
+
+/// Rejects a contact-sheet cell that was never written.
+fn ensure_cell_written(cell_path: &Path, index: usize, time_sec: f64) -> anyhow::Result<()> {
+    let written = std::fs::metadata(cell_path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false);
+    if written {
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "No frame was produced for contact sheet cell {} at {:.3}s, so the sheet would show a black cell the JSON claims a timecode for. Narrow the sampled range to where the picture actually is.",
+        index,
+        time_sec
+    ))
 }
 
 /// Text burnt into a labelled contact-sheet cell.
@@ -1339,16 +1477,37 @@ fn resolve_image_format(explicit: Option<&str>, out: &Path) -> anyhow::Result<Im
 
 /// Resolves the contact-sheet cell geometry from the CLI flags.
 ///
-/// Each dimension falls back to the shared default independently, so
-/// `--cell-height 360` alone widens nothing.
+/// One dimension on its own derives the other from the default cell's 16:9
+/// aspect, because a cell is filled with `force_original_aspect_ratio=decrease`:
+/// a 640x180 cell shows the same 320x180 picture the default does, between
+/// black bars, at twice the pixel cost. Passing both keeps exactly what was
+/// asked for, including a deliberately non-16:9 cell.
 fn resolve_cell_size(args: &ExtractArgs) -> ContactSheetCellSize {
     let default = ContactSheetCellSize::default();
-    ContactSheetCellSize::new(
-        args.cell_width
-            .map_or(default.width, |value| value as usize),
-        args.cell_height
-            .map_or(default.height, |value| value as usize),
-    )
+    let (width, height) = match (args.cell_width, args.cell_height) {
+        (Some(width), Some(height)) => (width as usize, height as usize),
+        (Some(width), None) => (
+            width as usize,
+            derived_cell_size(width as usize, default.height, default.width),
+        ),
+        (None, Some(height)) => (
+            derived_cell_size(height as usize, default.width, default.height),
+            height as usize,
+        ),
+        (None, None) => (default.width, default.height),
+    };
+
+    ContactSheetCellSize::new(width, height)
+}
+
+/// Scales `given` by `numerator / denominator`, kept inside the accepted range.
+///
+/// The clamp matters at the extremes: deriving a 1024px cell's partner at 16:9
+/// would leave the accepted range, and a cell FFmpeg would refuse is worse than
+/// a slightly squarer one.
+fn derived_cell_size(given: usize, numerator: usize, denominator: usize) -> usize {
+    let scaled = (given as f64 * numerator as f64 / denominator as f64).round() as usize;
+    scaled.clamp(MIN_CELL_SIZE_PX as usize, MAX_CELL_SIZE_PX as usize)
 }
 
 /// Width the grid's source cells are extracted at.
@@ -1612,14 +1771,132 @@ mod tests {
     }
 
     #[test]
-    fn resolve_cell_size_should_override_each_dimension_independently() {
+    fn resolve_cell_size_should_derive_the_missing_dimension_from_the_default_aspect() {
+        // A cell is filled with force_original_aspect_ratio=decrease, so a
+        // 640x180 cell would still show a 320x180 picture between black bars.
+        let mut wide = grid_args("3x2", None);
+        wide.cell_width = Some(640);
+        assert_eq!(
+            resolve_cell_size(&wide),
+            ContactSheetCellSize::new(640, 360)
+        );
+
+        let mut tall = grid_args("3x2", None);
+        tall.cell_height = Some(360);
+        assert_eq!(
+            resolve_cell_size(&tall),
+            ContactSheetCellSize::new(640, 360)
+        );
+    }
+
+    #[test]
+    fn resolve_cell_size_should_keep_both_dimensions_when_both_are_given() {
         let mut args = grid_args("3x2", None);
-        args.cell_height = Some(360);
+        args.cell_width = Some(640);
+        args.cell_height = Some(180);
 
-        let cell = resolve_cell_size(&args);
+        assert_eq!(
+            resolve_cell_size(&args),
+            ContactSheetCellSize::new(640, 180)
+        );
+    }
 
-        assert_eq!(cell.width, ContactSheetCellSize::default().width);
-        assert_eq!(cell.height, 360);
+    #[test]
+    fn resolve_cell_size_should_keep_a_derived_dimension_inside_the_accepted_range() {
+        let mut widest = grid_args("3x2", None);
+        widest.cell_height = Some(1024);
+        assert_eq!(
+            resolve_cell_size(&widest).width,
+            MAX_CELL_SIZE_PX as usize,
+            "A derived width must stay within the range FFmpeg is asked for"
+        );
+
+        let mut narrowest = grid_args("3x2", None);
+        narrowest.cell_width = Some(64);
+        assert_eq!(
+            resolve_cell_size(&narrowest).height,
+            MIN_CELL_SIZE_PX as usize
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_reject_contact_sheet_flags_without_a_grid() {
+        let mut args = grid_args("3x2", None);
+        args.grid = None;
+        args.between = None;
+        args.time = Some(12.5);
+        args.cell_width = Some(640);
+        args.label_cells = true;
+
+        let error = resolve_selection(&args).expect_err("Cell flags need a grid to apply to");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("--cell-width")
+                && message.contains("--label-cells")
+                && message.contains("--grid"),
+            "Error should name the ignored flags and the flag they need, got: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_selection_should_accept_a_single_still_without_contact_sheet_flags() {
+        let mut args = grid_args("3x2", None);
+        args.grid = None;
+        args.between = None;
+        args.time = Some(12.5);
+
+        assert!(matches!(
+            resolve_selection(&args).expect("A plain still is still valid"),
+            Selection::SingleTime(_)
+        ));
+    }
+
+    #[test]
+    fn ensure_frame_written_should_reject_a_missing_or_empty_output() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("missing.png");
+        let error = ensure_frame_written(&missing, 1.99, Path::new("render.mp4"))
+            .expect_err("A frame FFmpeg never wrote is not an extraction");
+        let message = error.to_string();
+        assert!(
+            message.contains("1.990s") && message.contains("render.mp4"),
+            "Error should name the requested time and the source, got: {message}"
+        );
+
+        let empty = dir.path().join("empty.png");
+        std::fs::write(&empty, b"").expect("write empty file");
+        assert!(ensure_frame_written(&empty, 1.0, Path::new("render.mp4")).is_err());
+
+        let written = dir.path().join("written.png");
+        std::fs::write(&written, b"not empty").expect("write file");
+        assert!(ensure_frame_written(&written, 1.0, Path::new("render.mp4")).is_ok());
+    }
+
+    #[test]
+    fn ensure_cell_written_should_reject_a_cell_the_extractor_skipped() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("3.jpg");
+
+        let error = ensure_cell_written(&missing, 3, 2.25)
+            .expect_err("A missing cell would tile as black under a claimed timecode");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("cell 3") && message.contains("2.250s"),
+            "Error should name the cell and its time, got: {message}"
+        );
+    }
+
+    #[test]
+    fn remove_stale_output_should_clear_a_previous_frame_and_tolerate_a_missing_one() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("frame.png");
+        std::fs::write(&target, b"previous candidate").expect("write file");
+
+        remove_stale_output(&target).expect("stale output is removed");
+        assert!(!target.exists());
+        remove_stale_output(&target).expect("a missing output is not an error");
     }
 
     #[test]

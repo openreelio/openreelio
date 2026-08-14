@@ -994,6 +994,42 @@ impl FFmpegRunner {
     /// Returns [`FFmpegError::Timeout`] when the budget elapses; the child is
     /// killed first so no orphan ffprobe is left behind.
     pub async fn probe(&self, input: &Path) -> FFmpegResult<MediaInfo> {
+        let json_str = self
+            .run_ffprobe_json(input, &["-show_format", "-show_streams"])
+            .await?;
+        parse_probe_output(&json_str)
+    }
+
+    /// Duration of the primary video stream, when the file reports one.
+    ///
+    /// [`FFmpegRunner::probe`] reports the *container* duration, which is the
+    /// maximum across all streams. A file whose audio outlasts its video
+    /// therefore looks seconds longer than the last picture it can produce, so
+    /// any check about frame availability has to ask the video stream itself.
+    ///
+    /// Returns `None` when the stream advertises neither a duration nor a frame
+    /// count the duration can be derived from, which is normal for containers
+    /// like Matroska; callers fall back to the container duration.
+    pub async fn probe_video_duration(&self, input: &Path) -> FFmpegResult<Option<f64>> {
+        let json_str = self
+            .run_ffprobe_json(
+                input,
+                &[
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=duration,nb_frames,r_frame_rate",
+                ],
+            )
+            .await?;
+        Ok(parse_video_stream_duration(&json_str))
+    }
+
+    /// Runs ffprobe with JSON output and returns its stdout.
+    ///
+    /// The probe is watchdogged by [`PROBE_TIMEOUT`] and its output is capped
+    /// ([`MAX_PROBE_STDOUT_BYTES`]) because the input file is untrusted.
+    async fn run_ffprobe_json(&self, input: &Path, args: &[&str]) -> FFmpegResult<String> {
         if !input.exists() {
             return Err(FFmpegError::InvalidInput(format!(
                 "Input file does not exist: {}",
@@ -1004,18 +1040,12 @@ impl FFmpegRunner {
         // Run ffprobe with JSON output
         let mut cmd = tokio::process::Command::new(&self.info.ffprobe_path);
         configure_tokio_command(&mut cmd);
-        cmd.args([
-            "-v",
-            "error",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-            &input.to_string_lossy(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        cmd.args(["-v", "error", "-print_format", "json"])
+            .args(args)
+            .arg(input.as_os_str())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(FFmpegError::ProcessError)?;
         let mut child_stdout = child.stdout.take();
@@ -1060,8 +1090,7 @@ impl FFmpegRunner {
             )));
         }
 
-        let json_str = String::from_utf8_lossy(&stdout.bytes);
-        parse_probe_output(&json_str)
+        Ok(String::from_utf8_lossy(&stdout.bytes).into_owned())
     }
 
     /// Generate audio waveform image
@@ -1968,6 +1997,55 @@ fn parse_probe_output(json_str: &str) -> FFmpegResult<MediaInfo> {
     })
 }
 
+/// Reads the primary video stream's duration out of an ffprobe JSON document.
+///
+/// Prefers the stream's own `duration`. When the container does not carry one
+/// per stream, the duration is derived from the frame count and the frame rate,
+/// which is the next best answer to "how far do the pictures go". Returns
+/// `None` when neither is available, so callers can fall back to the container
+/// duration rather than treating a missing value as zero.
+fn parse_video_stream_duration(json_str: &str) -> Option<f64> {
+    let json: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let stream = json.get("streams")?.as_array()?.first()?;
+
+    let declared = stream
+        .get("duration")
+        .and_then(|value| value.as_str())
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0);
+    if let Some(duration) = declared {
+        return Some(duration);
+    }
+
+    let frames = stream
+        .get("nb_frames")
+        .and_then(|value| value.as_str())
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .filter(|value| *value > 0.0)?;
+    let fps = stream
+        .get("r_frame_rate")
+        .and_then(|value| value.as_str())
+        .and_then(parse_rational)
+        .filter(|value| *value > 0.0)?;
+
+    Some(frames / fps)
+}
+
+/// Parses an FFmpeg rational such as `30/1` or `30000/1001`.
+fn parse_rational(raw: &str) -> Option<f64> {
+    match raw.split_once('/') {
+        Some((numerator, denominator)) => {
+            let numerator: f64 = numerator.trim().parse().ok()?;
+            let denominator: f64 = denominator.trim().parse().ok()?;
+            if denominator == 0.0 {
+                return None;
+            }
+            Some(numerator / denominator)
+        }
+        None => raw.trim().parse().ok(),
+    }
+}
+
 fn parse_video_stream(stream: &serde_json::Value) -> FFmpegResult<VideoStreamInfo> {
     let width = stream.get("width").and_then(|w| w.as_u64()).unwrap_or(0) as u32;
 
@@ -2581,6 +2659,59 @@ mod tests {
         let video = info.video.unwrap();
         assert!(video.is_hdr);
         assert_eq!(video.color_transfer.as_deref(), Some("smpte2084"));
+    }
+
+    // =========================================================================
+    // Video stream duration
+    // =========================================================================
+
+    #[test]
+    fn should_read_the_video_streams_own_duration_when_it_is_declared() {
+        // A container whose audio outlasts its video reports the longer value
+        // in `format.duration`, so the stream's own duration is the only
+        // answer to "how far do the pictures go".
+        let json = r#"{
+            "streams": [
+                { "duration": "2.000000", "nb_frames": "60", "r_frame_rate": "30/1" }
+            ]
+        }"#;
+
+        assert_eq!(parse_video_stream_duration(json), Some(2.0));
+    }
+
+    #[test]
+    fn should_derive_the_video_duration_from_the_frame_count_when_none_is_declared() {
+        let json = r#"{
+            "streams": [
+                { "nb_frames": "48", "r_frame_rate": "24000/1001" }
+            ]
+        }"#;
+
+        let derived = parse_video_stream_duration(json).unwrap();
+        assert!(
+            (derived - 48.0 * 1001.0 / 24000.0).abs() < 1e-9,
+            "expected the frame count divided by the frame rate, got {derived}"
+        );
+    }
+
+    #[test]
+    fn should_report_no_video_duration_when_the_stream_declares_neither() {
+        let json = r#"{ "streams": [ { "r_frame_rate": "25/1" } ] }"#;
+        assert_eq!(parse_video_stream_duration(json), None);
+
+        assert_eq!(parse_video_stream_duration(r#"{ "streams": [] }"#), None);
+        assert_eq!(parse_video_stream_duration("not json"), None);
+    }
+
+    #[test]
+    fn should_ignore_a_zero_or_negative_declared_video_duration() {
+        let json = r#"{
+            "streams": [
+                { "duration": "0.000000", "nb_frames": "50", "r_frame_rate": "25/1" }
+            ]
+        }"#;
+
+        assert_eq!(parse_video_stream_duration(json), Some(2.0));
     }
 
     // =========================================================================

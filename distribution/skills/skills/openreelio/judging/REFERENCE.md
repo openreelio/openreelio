@@ -23,6 +23,7 @@ openreelio-cli render start  --path ./demo --proxy --output ./judge/a.mp4 --prog
 openreelio-cli frame extract --path ./demo --file ./judge/a.mp4 \
   --grid 4x3 --between 0 <RENDER_END> --label-cells --out ./judge/a-sheet.jpg
 openreelio-cli verify        --path ./demo --file ./judge/a.mp4 > ./judge/a-verify.json
+openreelio-cli state history --path ./demo    # re-read before rewinding, see below
 openreelio-cli state jump    --path ./demo --index <BASELINE_INDEX>
 
 # After scoring every candidate: re-apply the winner's plan
@@ -34,8 +35,24 @@ command after a jump clears the redo branch, so an unwound candidate is
 unreachable except through its plan file. Keep every candidate's plan file until
 the winner is applied.
 
-To try candidates in parallel, copy the project directory once per candidate —
-the external-edit guard refuses two writers in one directory, by design.
+**The baseline index goes stale.** A render plus a verify takes minutes, and the
+index space is recomputed on every invocation from the ops log — so if anything
+else wrote to the project meanwhile, its ops are adopted as history and sit
+*above* your baseline. Rewinding to the baseline then unwinds them too, and the
+next `plan execute` clears them from the redo branch for good. So:
+
+- Re-read `state history` immediately before jumping and confirm every entry
+  above the baseline index is one your own candidate produced.
+- Read `unwound` on the jump's response: it lists `{opId, commandType}` for
+  every entry the rewind removed, in order. Anything in there you did not apply
+  is another writer's work, and it is now only in the append-only op log.
+- `adopted` on the same response counts ops this invocation folded in from the
+  log at open time — a non-zero value means a second writer was here.
+
+The external-edit guard does not cover this. It refuses two writers whose
+*sessions overlap*; sequential invocations minutes apart each open cleanly and
+build on whatever they find. To run candidates in parallel, copy the project
+directory once per candidate.
 
 ## Judge the render, not the timeline
 
@@ -48,18 +65,36 @@ artifact. In `--file` mode cells map back as `fileSec` (the render's own
 timebase).
 
 Cut-boundary sheets beat uniform sheets for continuity judging: read each
-clip's `timelineInSec` from `timeline clips`, and sample one frame either side
-of every cut (±1/fps; ±0.04 s works at typical frame rates):
+clip's `timelineInSec` from `timeline clips`, and sample the frame **before**
+each cut at `cut − 1.5/fps` and the frame **after** it at the cut time itself.
+
+The offsets are asymmetric on purpose. `frame extract` seeks with `-ss` before
+`-i`, which resolves **forward**: it returns the first frame whose PTS is ≥ the
+requested time. So the cut time itself already gives the incoming shot, while
+`cut − 1.5/fps` is the only offset guaranteed to land on the last outgoing frame
+at every timebase. A symmetric `±0.04 s` is not: at 24 fps one frame is 0.0417 s,
+so `cut − 0.04` resolves forward across the cut and both cells show the incoming
+shot — a sheet that looks like a valid before/after and is not.
+
+At 25 fps (1.5/fps = 0.06) with cuts at 5.0 / 9.2 / 14.2:
 
 ```bash
 openreelio-cli timeline clips --path ./demo    # cut times = clip starts > 0
 openreelio-cli frame extract  --path ./demo --file ./judge/a.mp4 \
-  --grid 6x2 --times 4.96,5.04,9.16,9.24,14.16,14.24 \
+  --grid 6x2 --times 4.94,5.0,9.14,9.2,14.14,14.2 \
   --label-cells --out ./judge/a-cuts.jpg
 ```
 
+`--label-cells` burns the **requested** time, not the decoded frame's PTS, so a
+label is proof of which cell you are looking at, never proof that the frame came
+from the side of the cut you wanted. Derive the offsets from the render's real
+fps (`verify --file` reports it) rather than reusing these numbers.
+
 Use `--cell-width 640 --cell-height 360` when captions or fine composition must
 be legible; the default 320×180 cells are for structure, not for reading text.
+Passing one dimension alone derives the other at 16:9, so `--cell-width 640` is
+already a 640×360 cell — cells are fitted with `force_original_aspect_ratio`, so
+a 640×180 cell would only add black bars around the same 320×180 picture.
 
 ## The rubric
 
