@@ -3,7 +3,7 @@
 //! This enables AI agents to discover and use the CLI without parsing --help text.
 //! The schema includes command names, descriptions, parameters, types, and examples.
 
-use openreelio_core::style::{text_preset_ids, NO_TEXT_PRESET, TEXT_PRESETS};
+use openreelio_core::style::{pacing_profile_ids, text_preset_ids, NO_TEXT_PRESET, TEXT_PRESETS};
 
 use crate::output;
 
@@ -22,6 +22,18 @@ fn text_preset_enum() -> Vec<String> {
         .collect()
 }
 
+/// Every accepted `plan from-profile --profile` value, in registry order.
+///
+/// Built from the core registry for the same reason the text presets are: a
+/// hand-kept copy drifts, and the first symptom is a schema that advertises an
+/// id the resolver rejects.
+fn pacing_profile_enum() -> Vec<String> {
+    pacing_profile_ids()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 /// One-line `--preset` description naming the registry as the source of ids.
 fn text_preset_desc() -> String {
     format!(
@@ -34,6 +46,8 @@ fn text_preset_desc() -> String {
 }
 
 pub(crate) fn build_schema() -> serde_json::Value {
+    let pacing_profile_enum = pacing_profile_enum();
+
     serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "description": "OpenReelio CLI — Headless AI agent-driven video editing",
@@ -340,9 +354,9 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli caption add --path ./project --text \"Hello\" --start 0.0 --end 3.0"
             },
             "packs.list": {
-                "description": "List curated caption style packs, transition recipes, and text presets. Packs are the quality floor: name one instead of assembling typography or a transition duration by hand. Every listed id is accepted by caption --style-pack, by stylePack on CreateCaption/UpdateCaption/ImportGeneratedCaptions, by recipe on AddEffect, and by text add --preset / preset on AddTextClip",
+                "description": "List curated caption style packs, transition recipes, text presets, and pacing profiles. Packs are the quality floor: name one instead of assembling typography, a transition duration, or a cutting rhythm by hand. Every listed id is accepted by caption --style-pack, by stylePack on CreateCaption/UpdateCaption/ImportGeneratedCaptions, by recipe on AddEffect, by text add --preset / preset on AddTextClip, and by plan from-profile --profile",
                 "params": {
-                    "kind": { "type": "string", "required": false, "desc": "Registry to list: caption, transition, text, or all (default: all)", "enum": ["caption", "transition", "text", "all"] }
+                    "kind": { "type": "string", "required": false, "desc": "Registry to list: caption, transition, text, pacing, or all (default: all)", "enum": ["caption", "transition", "text", "pacing", "all"] }
                 },
                 "example": "openreelio-cli packs list --kind caption"
             },
@@ -572,6 +586,18 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "file": { "type": "string", "required": true, "desc": "Path to plan JSON file" }
                 },
                 "example": "openreelio-cli plan validate --path ./project --file edit_plan.json"
+            },
+            "plan.from-profile": {
+                "description": "Build a plan that cuts one asset to a curated pacing profile, and print it without executing. A pacing profile answers the four decisions an automated cut has to make — mean shot length, how much shots vary, which transition to place, and how often — so 'cut this to shorts-hook-fast' replaces four guesses with one checked name. List the profiles with `packs list --kind pacing`. The asset needs a cached analysis bundle (`analysis run`): the source duration is required, and shot boundaries are what let cuts land on real shot changes instead of mid-shot. Output carries the plan inline under 'plan' plus 'cutCount', 'transitionCount', 'fidelityScore' (how close the mean generated shot is to the profile's target), and any 'warnings'. Nothing is mutated — review it, then `plan validate --file` and `plan execute --file`. Steps reference ids created by earlier steps, so run the plan whole rather than step by step",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "profile": { "type": "string", "required": true, "desc": "Pacing profile id from packs list --kind pacing", "enum": pacing_profile_enum },
+                    "asset": { "type": "string", "required": true, "desc": "Asset to cut; must already have a cached analysis bundle" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active)" },
+                    "track-name": { "type": "string", "required": false, "desc": "Name for the track the plan creates (default: 'Pacing: <profile>')" },
+                    "out": { "type": "string", "required": false, "desc": "Write the plan JSON to this file as well as stdout" }
+                },
+                "example": "openreelio-cli plan from-profile --path ./project --profile dynamic-social --asset asset_123 --out pacing_plan.json"
             },
             "plan.template": {
                 "description": "Generate a plan template for common operations",

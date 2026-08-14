@@ -1,13 +1,15 @@
 //! Curated style pack listing.
 //!
-//! Packs are the quality floor for captions, transitions, and text overlays: a
-//! named, hand-checked style beats a guessed one, and the id is the whole
-//! payload. This verb is the discovery half of that — the same `const` tables
+//! Packs are the quality floor for captions, transitions, text overlays, and
+//! cutting pace: a named, hand-checked choice beats a guessed one, and the id
+//! is the whole payload. This verb is the discovery half of that — the same `const` tables
 //! that validate a `--style-pack`, a `recipe`, or a `--preset` are what it
 //! prints, so a listed id is by construction an accepted id.
 
 use clap::{Subcommand, ValueEnum};
-use openreelio_core::style::{list_caption_packs, list_text_presets, list_transition_recipes};
+use openreelio_core::style::{
+    list_caption_packs, list_pacing_profiles, list_text_presets, list_transition_recipes,
+};
 use serde_json::Value;
 
 use crate::output;
@@ -21,6 +23,8 @@ pub enum PackKind {
     Transition,
     /// Text overlay presets only.
     Text,
+    /// Pacing profiles only.
+    Pacing,
     /// Every registry.
     #[default]
     All,
@@ -32,6 +36,7 @@ impl PackKind {
             Self::Caption => "caption",
             Self::Transition => "transition",
             Self::Text => "text",
+            Self::Pacing => "pacing",
             Self::All => "all",
         }
     }
@@ -39,9 +44,10 @@ impl PackKind {
 
 #[derive(Subcommand)]
 pub enum PacksAction {
-    /// List curated caption style packs, transition recipes, and text presets
+    /// List curated caption packs, transition recipes, text presets, and
+    /// pacing profiles
     List {
-        /// Which registry to list: caption, transition, text, or all
+        /// Which registry to list: caption, transition, text, pacing, or all
         #[arg(long, value_enum, default_value_t = PackKind::All)]
         kind: PackKind,
     },
@@ -72,6 +78,14 @@ pub fn execute(action: PacksAction) -> anyhow::Result<()> {
                 for descriptor in list_text_presets() {
                     packs.push(serde_json::to_value(descriptor).map_err(|error| {
                         anyhow::anyhow!("Failed to serialize text preset: {}", error)
+                    })?);
+                }
+            }
+
+            if matches!(kind, PackKind::Pacing | PackKind::All) {
+                for descriptor in list_pacing_profiles() {
+                    packs.push(serde_json::to_value(descriptor).map_err(|error| {
+                        anyhow::anyhow!("Failed to serialize pacing profile: {}", error)
                     })?);
                 }
             }

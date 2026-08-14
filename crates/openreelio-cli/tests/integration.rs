@@ -3107,6 +3107,300 @@ fn test_plan_execute_reports_an_unreadable_plan_as_a_tool_failure() {
 }
 
 // =============================================================================
+// Pacing Profile Plans
+// =============================================================================
+
+/// Writes a cached analysis bundle by hand.
+///
+/// Deliberately FFmpeg-free: a pacing plan needs the source duration and the
+/// shot boundaries, not the toolchain that measured them, so the whole
+/// from-profile loop stays runnable on a machine with no media stack.
+fn write_analysis_bundle(project_path: &str, asset_id: &str, shot_boundaries: &[(f64, f64)]) {
+    let bundle_dir = std::path::Path::new(project_path)
+        .join(".openreelio")
+        .join("analysis")
+        .join(asset_id);
+    std::fs::create_dir_all(&bundle_dir).unwrap();
+
+    let duration_sec = shot_boundaries
+        .last()
+        .map(|(_, end)| *end)
+        .unwrap_or_default();
+    let shots: Vec<serde_json::Value> = shot_boundaries
+        .iter()
+        .map(|(start, end)| {
+            serde_json::json!({ "startSec": start, "endSec": end, "confidence": 0.9 })
+        })
+        .collect();
+
+    let bundle = serde_json::json!({
+        "schemaVersion": 2,
+        "assetId": asset_id,
+        "shots": shots,
+        "transcript": null,
+        "audioProfile": null,
+        "segments": null,
+        "frameAnalysis": null,
+        "metadata": { "durationSec": duration_sec, "hasAudio": false },
+        "analyzedAt": "2026-01-01T00:00:00Z",
+    });
+
+    std::fs::write(bundle_dir.join("bundle.json"), bundle.to_string()).unwrap();
+}
+
+/// A project holding one imported (but unplaced) dummy asset with a bundle.
+///
+/// The dummy asset has no probeable duration, so the timeline gives it the
+/// 10s default — which is what the bundle declares too, so the plan's cuts
+/// land inside the clip the plan itself inserts.
+fn create_project_with_analysis(name: &str) -> (tempfile::TempDir, String, String) {
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+
+    let dummy_file = dir.path().join("clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    write_analysis_bundle(
+        &path,
+        &asset_id,
+        &[(0.0, 2.0), (2.0, 5.0), (5.0, 7.0), (7.0, 10.0)],
+    );
+
+    (dir, path, asset_id)
+}
+
+#[test]
+fn test_plan_from_profile_builds_a_plan_that_validates_executes_and_verifies() {
+    let (dir, path, asset_id) = create_project_with_analysis("pacing_roundtrip");
+
+    let plan_file = dir.path().join("pacing.json");
+    let built = run_cli_ok(&[
+        "plan",
+        "from-profile",
+        "--path",
+        &path,
+        "--profile",
+        "dynamic-social",
+        "--asset",
+        &asset_id,
+        "--out",
+        plan_file.to_str().unwrap(),
+    ]);
+
+    assert_eq!(built["status"], "ok", "{built}");
+    assert_eq!(built["profile"], "dynamic-social");
+    assert!(
+        built["cutCount"].as_u64().unwrap() > 0,
+        "a 10s source at a 2.5s target must be cut: {built}"
+    );
+    assert_eq!(
+        built["transitionCount"].as_u64().unwrap(),
+        built["cutCount"].as_u64().unwrap().div_ceil(4),
+        "dynamic-social places one transition every four cuts: {built}"
+    );
+    assert_eq!(built["transitionRecipe"], "dissolve-soft");
+    assert!(
+        plan_file.exists(),
+        "--out must write the plan file it advertises"
+    );
+
+    // The plan is a spec first: nothing has been mutated yet.
+    let tracks_before = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    assert_eq!(tracks_before["count"], 2, "from-profile must not execute");
+
+    let validated = run_cli_ok(&[
+        "plan",
+        "validate",
+        "--path",
+        &path,
+        "--file",
+        plan_file.to_str().unwrap(),
+    ]);
+    assert_eq!(validated["status"], "ok", "{validated}");
+
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "plan",
+        "execute",
+        "--path",
+        &path,
+        "--file",
+        plan_file.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "plan must execute: {stdout} {stderr}");
+    let executed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(executed["status"], "ok", "{executed}");
+    assert_eq!(
+        executed["stepsExecuted"].as_u64().unwrap(),
+        built["stepCount"].as_u64().unwrap()
+    );
+
+    let verified = run_cli_ok(&["verify", "--path", &path, "--structural-only"]);
+    assert_eq!(
+        verified["passed"], true,
+        "a generated cut must leave no gaps or orphans: {verified}"
+    );
+}
+
+#[test]
+fn test_plan_from_profile_places_its_transition_on_the_outgoing_clip() {
+    let (dir, path, asset_id) = create_project_with_analysis("pacing_transition");
+
+    let plan_file = dir.path().join("pacing.json");
+    run_cli_ok(&[
+        "plan",
+        "from-profile",
+        "--path",
+        &path,
+        "--profile",
+        "dynamic-social",
+        "--asset",
+        &asset_id,
+        "--out",
+        plan_file.to_str().unwrap(),
+    ]);
+    run_cli_ok(&[
+        "plan",
+        "execute",
+        "--path",
+        &path,
+        "--file",
+        plan_file.to_str().unwrap(),
+    ]);
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let graph = run_cli_ok(&["render", "graph", "--path", &path]);
+
+    let first_cut = clips["clips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|clip| clip["timelineInSec"].as_f64() == Some(0.0))
+        .filter_map(|clip| clip["id"].as_str())
+        .next()
+        .expect("a clip starting at zero");
+
+    let carries_effect = graph["visualLayers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|layer| {
+            layer["clipId"].as_str() == Some(first_cut)
+                && !layer["effects"]
+                    .as_array()
+                    .map(Vec::is_empty)
+                    .unwrap_or(true)
+        });
+
+    assert!(
+        carries_effect,
+        "the transition belongs on the clip that ends at the first cut: {graph}"
+    );
+}
+
+#[test]
+fn test_plan_from_profile_hard_cut_profile_emits_no_transitions() {
+    let (dir, path, asset_id) = create_project_with_analysis("pacing_hard_cuts");
+    let plan_file = dir.path().join("pacing.json");
+
+    let built = run_cli_ok(&[
+        "plan",
+        "from-profile",
+        "--path",
+        &path,
+        "--profile",
+        "shorts-hook-fast",
+        "--asset",
+        &asset_id,
+        "--out",
+        plan_file.to_str().unwrap(),
+    ]);
+
+    assert_eq!(built["transitionCount"], 0, "{built}");
+    assert!(built["transitionRecipe"].is_null(), "{built}");
+}
+
+#[test]
+fn test_plan_from_profile_requires_a_cached_analysis_bundle() {
+    let dir = create_temp_project("pacing_no_bundle");
+    let path = project_path(&dir, "pacing_no_bundle");
+    let dummy_file = dir.path().join("clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "plan",
+        "from-profile",
+        "--path",
+        &path,
+        "--profile",
+        "dynamic-social",
+        "--asset",
+        &asset_id,
+    ]);
+
+    assert!(
+        stderr.contains("analysis run"),
+        "the error must name the command that fixes it: {stderr}"
+    );
+}
+
+#[test]
+fn test_plan_from_profile_rejects_an_unknown_profile() {
+    let (_dir, path, asset_id) = create_project_with_analysis("pacing_unknown");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "plan",
+        "from-profile",
+        "--path",
+        &path,
+        "--profile",
+        "no-such-profile",
+        "--asset",
+        &asset_id,
+    ]);
+
+    assert!(
+        stderr.contains("dynamic-social") && stderr.contains("calm-longform"),
+        "the error must list the valid profiles: {stderr}"
+    );
+}
+
+#[test]
+fn test_plan_from_profile_rejects_an_asset_that_is_not_in_the_project() {
+    let (_dir, path, _asset_id) = create_project_with_analysis("pacing_missing_asset");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "plan",
+        "from-profile",
+        "--path",
+        &path,
+        "--profile",
+        "dynamic-social",
+        "--asset",
+        "not-an-asset",
+    ]);
+
+    assert!(stderr.contains("not in this project"), "{stderr}");
+}
+
+// =============================================================================
 // State Commands
 // =============================================================================
 
@@ -5772,6 +6066,13 @@ fn test_packs_list_returns_every_registry() {
                 assert!(pack["clip"]["style"].is_object(), "{pack}");
                 assert!(pack["clip"]["position"].is_object(), "{pack}");
             }
+            Some("pacing") => {
+                assert!(pack["tempo"].is_string(), "{pack}");
+                assert!(pack["targetShotSec"].is_number(), "{pack}");
+                assert!(pack["shotVarianceSec"].is_number(), "{pack}");
+                assert!(pack["transitionEveryN"].is_number(), "{pack}");
+                assert!(pack["respectShotBoundaries"].is_boolean(), "{pack}");
+            }
             other => panic!("unexpected pack kind {other:?}"),
         }
     }
@@ -5824,9 +6125,39 @@ fn test_packs_list_filters_by_kind() {
         .iter()
         .any(|alias| alias == "pull_quote"));
 
+    let pacing = run_cli_ok(&["packs", "list", "--kind", "pacing"]);
+    assert_eq!(pacing["kind"], "pacing");
+    let pacing_packs = pacing["packs"].as_array().expect("packs");
+    assert_eq!(
+        pacing["count"].as_u64().unwrap() as usize,
+        pacing_packs.len()
+    );
+    assert!(pacing_packs.iter().all(|pack| pack["kind"] == "pacing"));
+
+    let pacing_ids: Vec<&str> = pacing_packs
+        .iter()
+        .filter_map(|pack| pack["id"].as_str())
+        .collect();
+    for id in ["shorts-hook-fast", "dynamic-social", "calm-longform"] {
+        assert!(pacing_ids.contains(&id), "{pacing_ids:?}");
+    }
+
+    // Everything an agent needs to pick a profile without running it first.
+    let social = pacing_packs
+        .iter()
+        .find(|pack| pack["id"] == "dynamic-social")
+        .expect("dynamic-social profile");
+    assert_eq!(social["tempo"], "moderate");
+    assert_eq!(social["targetShotSec"], 2.5);
+    assert_eq!(social["transitionRecipe"], "dissolve-soft");
+    assert_eq!(social["transitionEveryN"], 4);
+
     let (_stdout, stderr) = run_cli_err(&["packs", "list", "--kind", "nonsense"]);
     assert!(
-        stderr.contains("caption") && stderr.contains("transition") && stderr.contains("text"),
+        stderr.contains("caption")
+            && stderr.contains("transition")
+            && stderr.contains("text")
+            && stderr.contains("pacing"),
         "clap must list the valid kinds, got: {stderr}"
     );
 }
