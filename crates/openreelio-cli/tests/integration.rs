@@ -3028,9 +3028,17 @@ fn test_state_jump_then_new_edit_clears_the_redo_branch() {
         "--index",
         &(head_index - 2).to_string(),
     ]);
+    let rewound = run_cli_ok(&["state", "history", "--path", &path]);
+    assert_eq!(rewound["redoCount"], 2);
     assert_eq!(
-        run_cli_ok(&["state", "history", "--path", &path])["redoCount"],
-        2
+        rewound["entries"].as_array().unwrap().len() as u64,
+        rewound["appliedCount"].as_u64().unwrap() + 2,
+        "Redoable entries stay listed after the applied ones, got: {rewound}"
+    );
+    assert_eq!(
+        rewound["currentIndex"].as_i64().unwrap(),
+        rewound["appliedCount"].as_i64().unwrap() - 1,
+        "currentIndex is the last applied index, got: {rewound}"
     );
 
     // A new edit from the rewound position abandons the branch it left behind:
@@ -3161,9 +3169,12 @@ fn test_help_json_contains_all_commands() {
         "command.schema",
         "state.dump",
         "state.ops",
+        "state.history",
+        "state.jump",
         "state.snapshot",
         "render.presets",
         "render.start",
+        "frame.extract",
         "help-json",
     ];
 

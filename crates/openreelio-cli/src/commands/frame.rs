@@ -472,7 +472,7 @@ impl FileSource {
                 file.display()
             ));
         }
-        if !(info.duration_sec > 0.0) {
+        if !info.duration_sec.is_finite() || info.duration_sec <= 0.0 {
             return Err(anyhow::anyhow!(
                 "'{}' reports no duration, so there is no frame to extract",
                 file.display()

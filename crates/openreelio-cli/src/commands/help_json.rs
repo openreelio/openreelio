@@ -662,7 +662,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "cell-height": { "type": "number", "required": false, "desc": "Contact sheet cell height in pixels, 64-1024 (default: 180); requires --grid. Each dimension defaults independently, and the reported sheet.cellWidth/cellHeight always name the values actually used." },
                     "label-cells": { "type": "boolean", "required": false, "desc": "Burn '<index> | <seconds>s' into the bottom-left of every cell so the sheet.cells mapping is readable from the image itself; requires --grid. Costs one extra FFmpeg pass per cell and needs an FFmpeg build with the drawtext filter. The sheet reports 'labeled': true when it was applied." }
                 },
-                "example": "openreelio-cli render start --path ./project --proxy --output proxy.mp4 && openreelio-cli frame extract --path ./project --file proxy.mp4 --grid 3x2 --between 0 12 --label-cells --out sheet.jpg"
+                "example": "openreelio-cli frame extract --path ./project --file proxy.mp4 --grid 3x2 --between 0 12 --label-cells --out sheet.jpg"
             },
             "verify": {
                 "description": "Run deterministic quality control over a sequence and, with --file, over a rendered export. Emits one entry per check — including the ones that passed or were skipped — so an agent can tell 'checked and clean' from 'never checked'. Each check reports status passed (ran, found nothing), warned (ran, warning/info findings only), failed (ran, error or critical findings), skipped, or errored; checks[].passed is true only for 'passed', while the top-level status/passed follow severity and stay true when findings are warnings or info. Exit codes: 0 = ran without breaching --fail-on, 1 = threshold breached, 2 = tool failure (bad arguments, unreadable file, FFmpeg failure, or a check that errored).",
@@ -772,5 +772,49 @@ mod tests {
         assert!(commands.contains_key("analysis.search-library"));
         assert!(commands.contains_key("analysis.build-selects"));
         assert!(commands.contains_key("render.graph"));
+    }
+
+    #[test]
+    fn build_schema_documents_the_judge_loop_surface() {
+        let schema = build_schema();
+        let commands = schema["commands"]
+            .as_object()
+            .expect("schema commands must be an object");
+
+        // Judging a render: sheet the artifact, sized and labelled to be read.
+        let frame_params = &commands["frame.extract"]["params"];
+        for flag in ["file", "cell-width", "cell-height", "label-cells"] {
+            assert!(
+                frame_params[flag].is_object(),
+                "frame extract --{flag} must be documented"
+            );
+        }
+        assert!(
+            commands["frame.extract"]["description"]
+                .as_str()
+                .expect("description")
+                .contains("fileSec"),
+            "The --file payload names its times differently; the schema must say so"
+        );
+        assert!(
+            frame_params["times"]["desc"]
+                .as_str()
+                .expect("desc")
+                .contains("--grid"),
+            "--times doubles as the grid's cell list and must document it"
+        );
+
+        // Walking between candidates.
+        assert!(commands.contains_key("state.history"));
+        assert!(commands.contains_key("state.jump"));
+        assert!(commands["state.history"]["params"]["last"].is_object());
+        assert!(commands["state.jump"]["params"]["index"]["required"] == true);
+        assert!(
+            commands["state.jump"]["description"]
+                .as_str()
+                .expect("description")
+                .contains("redo"),
+            "The jump verb must warn that a new edit clears the redo branch"
+        );
     }
 }
