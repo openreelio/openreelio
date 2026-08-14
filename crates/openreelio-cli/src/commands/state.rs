@@ -1,7 +1,9 @@
-//! State inspection commands: dump, ops, snapshot.
+//! State inspection commands: dump, ops, history, jump, snapshot.
 
 use crate::output;
 use clap::Subcommand;
+use openreelio_core::commands::HistoryEntryInfo;
+use openreelio_core::ActiveProject;
 use std::path::PathBuf;
 
 #[derive(Subcommand)]
@@ -28,12 +30,53 @@ pub enum StateAction {
         last: usize,
     },
 
+    /// List the edit history with the position it is currently at
+    History {
+        /// Project directory path
+        #[arg(long)]
+        path: PathBuf,
+
+        /// Number of most recent entries to show (defaults to all of them)
+        #[arg(long)]
+        last: Option<usize>,
+    },
+
+    /// Move the project to a position in its edit history
+    Jump {
+        /// Project directory path
+        #[arg(long)]
+        path: PathBuf,
+
+        /// History index to move to; -1 undoes every entry
+        #[arg(long, allow_negative_numbers = true)]
+        index: i32,
+    },
+
     /// Force a snapshot save
     Snapshot {
         /// Project directory path
         #[arg(long)]
         path: PathBuf,
     },
+}
+
+/// Reads the visible history: applied entries, redoable entries, and the index
+/// the project currently sits at.
+fn read_history(
+    project: &mut ActiveProject,
+) -> anyhow::Result<(Vec<HistoryEntryInfo>, Vec<HistoryEntryInfo>, i32)> {
+    project
+        .persisted_history_entries()
+        .map_err(|error| anyhow::anyhow!("Failed to read history: {}", error))
+}
+
+fn history_entry_json(entry: &HistoryEntryInfo) -> serde_json::Value {
+    serde_json::json!({
+        "index": entry.index,
+        "opId": entry.op_id,
+        "commandType": entry.command_type,
+        "timestamp": entry.timestamp,
+    })
 }
 
 pub fn execute(action: StateAction) -> anyhow::Result<()> {
@@ -133,6 +176,67 @@ pub fn execute(action: StateAction) -> anyhow::Result<()> {
                 "ops": ops,
                 "count": ops.len(),
                 "totalOps": lines.len(),
+            }))
+        }
+
+        StateAction::History { path, last } => {
+            let mut project = super::load_project(&path)?;
+            let (applied, redoable, current_index) = read_history(&mut project)?;
+
+            // The two lists share one index space: applied entries run
+            // 0..appliedCount and redoable entries continue from there, so
+            // `currentIndex` splits the list into what is in effect and what a
+            // jump forward would restore.
+            let mut entries: Vec<serde_json::Value> = applied
+                .iter()
+                .chain(redoable.iter())
+                .map(history_entry_json)
+                .collect();
+            if let Some(limit) = last {
+                if entries.len() > limit {
+                    entries.drain(..entries.len() - limit);
+                }
+            }
+
+            output::print_json_pretty(&serde_json::json!({
+                "status": "ok",
+                "appliedCount": applied.len(),
+                "redoCount": redoable.len(),
+                "discardedCount": project.history.discarded_op_ids.len(),
+                "currentIndex": current_index,
+                "entries": entries,
+            }))
+        }
+
+        StateAction::Jump { path, index } => {
+            let mut project = super::load_project(&path)?;
+            let (applied, redoable, previous_index) = read_history(&mut project)?;
+
+            let total = (applied.len() + redoable.len()) as i32;
+            if index < -1 || index >= total {
+                return Err(anyhow::anyhow!(
+                    "Invalid value for --index: {} is outside the history range [-1, {}). Run 'state history' to list the entries; -1 undoes all of them.",
+                    index,
+                    total
+                ));
+            }
+
+            // The jump rewrites the history manifest through the guarded log, so
+            // a project another process has edited since this one opened is
+            // refused here rather than silently reverted.
+            let current_index = project
+                .jump_to_history_index_persisted(index)
+                .map_err(|error| anyhow::anyhow!("History jump failed: {}", error))?;
+            super::save_project(&mut project)?;
+
+            let (applied_after, redo_after, _) = read_history(&mut project)?;
+
+            output::print_json_pretty(&serde_json::json!({
+                "status": "ok",
+                "previousIndex": previous_index,
+                "currentIndex": current_index,
+                "appliedCount": applied_after.len(),
+                "redoCount": redo_after.len(),
             }))
         }
 

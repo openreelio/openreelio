@@ -2841,6 +2841,275 @@ fn test_state_snapshot() {
     assert_eq!(result["status"], "ok");
 }
 
+/// Build a project with `clip_count` clips inserted at one-second spacing.
+///
+/// Needs no FFmpeg: the asset never gets decoded, only referenced.
+fn create_project_with_edit_history(name: &str, clip_count: usize) -> (tempfile::TempDir, String) {
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+
+    let dummy_file = dir.path().join("history_clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    for index in 0..clip_count {
+        run_cli_ok(&[
+            "timeline",
+            "insert",
+            "--path",
+            &path,
+            "--asset",
+            &asset_id,
+            "--track",
+            &track_id,
+            "--at",
+            &format!("{}.0", index * 10),
+        ]);
+    }
+
+    (dir, path)
+}
+
+#[test]
+fn test_state_history_lists_operations_with_the_current_position() {
+    let (_dir, path) = create_project_with_edit_history("state_history_test", 3);
+
+    let result = run_cli_ok(&["state", "history", "--path", &path]);
+
+    assert_eq!(result["status"], "ok");
+    let applied_count = result["appliedCount"].as_u64().unwrap();
+    assert!(
+        applied_count >= 4,
+        "Expected the import plus three inserts, got {applied_count}"
+    );
+    assert_eq!(result["redoCount"], 0);
+    assert_eq!(result["discardedCount"], 0);
+    assert_eq!(
+        result["currentIndex"].as_i64().unwrap(),
+        applied_count as i64 - 1,
+        "A project with nothing undone sits at its last applied entry"
+    );
+
+    let entries = result["entries"].as_array().unwrap();
+    assert_eq!(entries.len() as u64, applied_count);
+    assert!(
+        entries.iter().enumerate().all(|(position, entry)| {
+            entry["index"] == position
+                && entry["opId"].as_str().is_some_and(|id| !id.is_empty())
+                && entry["commandType"]
+                    .as_str()
+                    .is_some_and(|kind| !kind.is_empty())
+                && entry["timestamp"]
+                    .as_str()
+                    .is_some_and(|stamp| !stamp.is_empty())
+        }),
+        "Entries should be indexed and describe their op, got: {entries:?}"
+    );
+    assert_eq!(
+        entries[0]["commandType"], "ImportAsset",
+        "History should start at the first undoable edit, got: {entries:?}"
+    );
+
+    // --last trims the window without changing the reported totals.
+    let trimmed = run_cli_ok(&["state", "history", "--path", &path, "--last", "2"]);
+    assert_eq!(trimmed["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(trimmed["appliedCount"], result["appliedCount"]);
+}
+
+#[test]
+fn test_state_jump_moves_between_history_positions() {
+    let (_dir, path) = create_project_with_edit_history("state_jump_test", 3);
+
+    let before = run_cli_ok(&["state", "history", "--path", &path]);
+    let head_index = before["currentIndex"].as_i64().unwrap();
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        3
+    );
+
+    // Rewind past the last two inserts.
+    let target = head_index - 2;
+    let jumped = run_cli_ok(&[
+        "state",
+        "jump",
+        "--path",
+        &path,
+        "--index",
+        &target.to_string(),
+    ]);
+    assert_eq!(jumped["status"], "ok");
+    assert_eq!(jumped["previousIndex"].as_i64().unwrap(), head_index);
+    assert_eq!(jumped["currentIndex"].as_i64().unwrap(), target);
+    assert_eq!(jumped["redoCount"], 2);
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        1
+    );
+
+    // And forward again: the rewind is a position, not a deletion.
+    let restored = run_cli_ok(&[
+        "state",
+        "jump",
+        "--path",
+        &path,
+        "--index",
+        &head_index.to_string(),
+    ]);
+    assert_eq!(restored["currentIndex"].as_i64().unwrap(), head_index);
+    assert_eq!(restored["redoCount"], 0);
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        3
+    );
+}
+
+#[test]
+fn test_state_jump_to_minus_one_undoes_everything() {
+    let (_dir, path) = create_project_with_edit_history("state_jump_zero_test", 2);
+
+    let result = run_cli_ok(&["state", "jump", "--path", &path, "--index=-1"]);
+
+    assert_eq!(result["currentIndex"], -1);
+    assert_eq!(result["appliedCount"], 0);
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        0
+    );
+}
+
+#[test]
+fn test_state_jump_rejects_an_index_outside_the_history() {
+    let (_dir, path) = create_project_with_edit_history("state_jump_range_test", 2);
+
+    let (_stdout, stderr) = run_cli_err(&["state", "jump", "--path", &path, "--index", "99"]);
+
+    assert!(
+        stderr.contains("--index") && stderr.contains("history range"),
+        "Expected the error to name the valid range, got: {stderr}"
+    );
+
+    // The rejected jump left the project alone.
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        2
+    );
+}
+
+#[test]
+fn test_state_jump_then_new_edit_clears_the_redo_branch() {
+    let (dir, path) = create_project_with_edit_history("state_jump_branch_test", 3);
+
+    let head_index = run_cli_ok(&["state", "history", "--path", &path])["currentIndex"]
+        .as_i64()
+        .unwrap();
+    run_cli_ok(&[
+        "state",
+        "jump",
+        "--path",
+        &path,
+        "--index",
+        &(head_index - 2).to_string(),
+    ]);
+    assert_eq!(
+        run_cli_ok(&["state", "history", "--path", &path])["redoCount"],
+        2
+    );
+
+    // A new edit from the rewound position abandons the branch it left behind:
+    // the judge loop must re-apply a winning plan, not rely on redo.
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+    let asset_id = run_cli_ok(&["asset", "list", "--path", &path])["assets"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "50.0",
+    ]);
+
+    let after = run_cli_ok(&["state", "history", "--path", &path]);
+    assert_eq!(
+        after["redoCount"], 0,
+        "A new edit must clear the redo branch, got: {after}"
+    );
+    run_cli_err(&["timeline", "redo", "--path", &path]);
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    assert_eq!(clips["count"], 2);
+    drop(dir);
+}
+
+#[test]
+fn test_state_jump_adopts_operations_written_since_the_last_command() {
+    let (dir, path) = create_project_with_edit_history("state_jump_adopt_test", 2);
+
+    // Each CLI invocation opens fresh, so work another writer finished before
+    // this one started is history to build on, not a conflict. (The
+    // external-edit guard covers the overlapping case, where a second writer
+    // moves while a session is open — see the ActiveProject unit tests.)
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+    let asset_id = run_cli_ok(&["asset", "list", "--path", &path])["assets"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    run_cli_ok(&[
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "80.0",
+    ]);
+
+    let history = run_cli_ok(&["state", "history", "--path", &path]);
+    let head_index = history["currentIndex"].as_i64().unwrap();
+    let jumped = run_cli_ok(&[
+        "state",
+        "jump",
+        "--path",
+        &path,
+        "--index",
+        &(head_index - 1).to_string(),
+    ]);
+
+    assert_eq!(jumped["currentIndex"].as_i64().unwrap(), head_index - 1);
+    assert_eq!(
+        run_cli_ok(&["timeline", "clips", "--path", &path])["count"],
+        2
+    );
+    drop(dir);
+}
+
 // =============================================================================
 // Help-JSON Command
 // =============================================================================

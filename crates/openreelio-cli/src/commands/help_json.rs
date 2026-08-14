@@ -586,6 +586,22 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 },
                 "example": "openreelio-cli state ops --path ./project --last 20"
             },
+            "state.history": {
+                "description": "List the edit history and the position the project sits at. 'entries' is one index space: indices 0..appliedCount are applied, the rest are redoable, and 'currentIndex' is the last applied index (-1 when everything is undone). Read-only — it never writes to the project. Pair it with 'state jump' to walk between candidate edits",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "last": { "type": "number", "required": false, "desc": "Show only the most recent N entries (default: all of them). appliedCount plus redoCount always describes the full history, so truncation stays visible." }
+                },
+                "example": "openreelio-cli state history --path ./project --last 20"
+            },
+            "state.jump": {
+                "description": "Move the project to a position in its edit history and save it there. Index N leaves the history positioned after applied entry N; --index -1 undoes every entry. Out-of-range indices are rejected with the valid range. This is the best-of-N loop's rewind: apply candidate plan A, render and judge it, jump back, apply candidate B, then re-apply the winner's plan. History is linear, so a new edit made after jumping back clears the redo branch — keep the winner's plan JSON rather than relying on redo. Refuses to run when another process has edited the project since this command opened it",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "index": { "type": "number", "required": true, "desc": "History index to move to, from 'state history'; -1 undoes everything. Negative values also accept the '=' form: --index=-1" }
+                },
+                "example": "openreelio-cli state jump --path ./project --index 3"
+            },
             "state.snapshot": {
                 "description": "Force a snapshot save of the current state",
                 "params": {
