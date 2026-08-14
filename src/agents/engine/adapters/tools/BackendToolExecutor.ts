@@ -48,30 +48,158 @@ const AGENT_PLAN_MUTATION_TIMEOUT_MS = 5 * 60 * 1000;
 // =============================================================================
 
 /**
- * Tools that can be sent directly to backend `CommandPayload::parse` after
- * snake_case -> camelCase normalization.
+ * Upper bound on the steps one `execute_plan` call may carry.
  *
- * Keep this list conservative: only include tools whose public args are already
- * command-shaped and do not rely on extra frontend orchestration.
+ * Pinned to the backstop every other plan surface enforces — see
+ * `MAX_PLAN_STEPS` in `src-tauri/src/core/ai/plan_executor.rs`, which the CLI
+ * (`crates/openreelio-cli/src/commands/plan.rs`) and MCP re-export. A batch
+ * tool is the one place an agent can smuggle unbounded work past the engine's
+ * per-run step budget, so the cap is checked here before the plan is built.
  */
-const BACKEND_DIRECT_TOOLS = new Set([
-  'add_effect',
-  'add_marker',
-  'move_clip',
-  'trim_clip',
-  'split_clip',
-  'delete_clip',
-  'change_clip_speed',
-  'add_track',
-  'remove_track',
-  'rename_track',
-  'remove_effect',
-  'remove_marker',
+export const MAX_PLAN_STEPS = 1000;
+
+/**
+ * A tool that maps onto exactly one backend `CommandPayload`.
+ *
+ * `commandType` is the name `CommandPayload::parse` accepts (its serde alias),
+ * and `mapParams` is the deterministic, state-free transform from the tool's
+ * public args to that payload's fields. A tool belongs here only when the
+ * backend command does everything its frontend handler does; anything that
+ * reads the timeline snapshot, resolves a name, or issues more than one command
+ * is a compound expander or stays on the frontend.
+ */
+interface BackendDirectRoute {
+  readonly commandType: string;
+  readonly mapParams?: (params: Record<string, unknown>) => Record<string, unknown>;
+}
+
+function withoutKeys(
+  params: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, unknown> {
+  const next = { ...params };
+  for (const key of keys) {
+    delete next[key];
+  }
+  return next;
+}
+
+/** `dissolve` is the tool's spelling of the `cross_dissolve` effect type. */
+function mapTransitionTypeToEffectType(value: unknown): unknown {
+  return value === 'dissolve' ? 'cross_dissolve' : value;
+}
+
+/**
+ * Tools that can be sent directly to backend `CommandPayload::parse`.
+ *
+ * Every entry is an audited 1:1 mapping; the guard test in
+ * `BackendToolExecutor.backendSafety.test.ts` fails when a registered mutating
+ * tool has no decision recorded here or in `BACKEND_FRONTEND_ONLY_TOOLS`.
+ */
+const BACKEND_DIRECT_ROUTES: ReadonlyMap<string, BackendDirectRoute> = new Map<
+  string,
+  BackendDirectRoute
+>([
+  // --- Args are already payload-shaped (name normalizes, fields match) -------
+  ['add_effect', { commandType: 'addEffect' }],
+  ['add_marker', { commandType: 'addMarker' }],
+  ['move_clip', { commandType: 'moveClip' }],
+  ['trim_clip', { commandType: 'trimClip' }],
+  ['split_clip', { commandType: 'splitClip' }],
+  ['delete_clip', { commandType: 'deleteClip' }],
+  ['change_clip_speed', { commandType: 'changeClipSpeed' }],
+  ['add_track', { commandType: 'addTrack' }],
+  ['remove_track', { commandType: 'removeTrack' }],
+  ['rename_track', { commandType: 'renameTrack' }],
+  ['remove_effect', { commandType: 'removeEffect' }],
+  ['remove_marker', { commandType: 'removeMarker' }],
+  ['add_mask', { commandType: 'addMask' }],
+  ['update_mask', { commandType: 'updateMask' }],
+  ['remove_mask', { commandType: 'removeMask' }],
+
+  // --- Fields match; only the command name differs --------------------------
+  ['mute_clip', { commandType: 'setClipMute' }],
+  ['create_workspace_folder', { commandType: 'createFolder' }],
+  ['rename_workspace_entry', { commandType: 'renameFile' }],
+  ['move_workspace_entry', { commandType: 'moveFile' }],
+  ['delete_workspace_entry', { commandType: 'deleteFile' }],
+  // `InsertClipPayload` has no `audioOnly` field and denies unknown fields;
+  // `InsertMedia` is the composite command the frontend handler already calls.
+  ['insert_clip', { commandType: 'insertMedia' }],
+
+  // --- Deterministic arg remaps ---------------------------------------------
+  [
+    'add_transition',
+    {
+      commandType: 'addEffect',
+      mapParams: (params) => ({
+        ...withoutKeys(params, ['transitionType', 'duration']),
+        effectType: mapTransitionTypeToEffectType(params.transitionType),
+        params: { duration: params.duration },
+      }),
+    },
+  ],
+  [
+    'set_transition_duration',
+    {
+      commandType: 'updateEffect',
+      // UpdateEffectPayload denies unknown fields: the locating ids must go.
+      mapParams: (params) => ({
+        effectId: params.transitionId,
+        params: { duration: params.duration },
+      }),
+    },
+  ],
+  [
+    'adjust_effect_param',
+    {
+      commandType: 'updateEffect',
+      mapParams: (params) => ({
+        effectId: params.effectId,
+        params: { [String(params.paramName)]: params.paramValue },
+      }),
+    },
+  ],
+  [
+    'add_fade_in',
+    {
+      commandType: 'setClipAudio',
+      mapParams: (params) => ({
+        ...withoutKeys(params, ['duration']),
+        fadeInSec: params.duration,
+      }),
+    },
+  ],
+  [
+    'add_fade_out',
+    {
+      commandType: 'setClipAudio',
+      mapParams: (params) => ({
+        ...withoutKeys(params, ['duration']),
+        fadeOutSec: params.duration,
+      }),
+    },
+  ],
 ]);
 
+/**
+ * Names of the tools that route straight to a backend command.
+ *
+ * Exported for the backend-safety guard test; execution reads
+ * `BACKEND_DIRECT_ROUTES` directly.
+ */
+export function getBackendDirectToolNames(): readonly string[] {
+  return [...BACKEND_DIRECT_ROUTES.keys()];
+}
+
 function normalizeToolNameForBackend(toolName: string): string {
-  // Backend CommandPayload parsing uses camelCase aliases. Agent tool names are
-  // snake_case, so normalize before sending to execute_agent_plan.
+  const route = BACKEND_DIRECT_ROUTES.get(toolName);
+  if (route) {
+    return route.commandType;
+  }
+
+  // Compound sub-steps and pass-through names: backend CommandPayload parsing
+  // uses camelCase aliases, agent tool names are snake_case.
   return toolName.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase());
 }
 
@@ -79,12 +207,14 @@ function normalizeBackendParamsForBackend(
   toolName: string,
   params: Record<string, unknown>,
 ): Record<string, unknown> {
+  const routed = BACKEND_DIRECT_ROUTES.get(toolName)?.mapParams?.(params) ?? params;
+
   const isAddMarker = toolName === 'add_marker' || toolName === 'addMarker';
-  if (!isAddMarker || !Object.prototype.hasOwnProperty.call(params, 'color')) {
-    return params;
+  if (!isAddMarker || !Object.prototype.hasOwnProperty.call(routed, 'color')) {
+    return routed;
   }
 
-  const nextParams = { ...params };
+  const nextParams = { ...routed };
   const color = normalizeMarkerColor(nextParams.color);
   if (color) {
     nextParams.color = color;
@@ -171,6 +301,14 @@ interface LegacyExecutePlanRoute {
   }>;
 }
 
+/**
+ * Either a plan promoted to the atomic backend path, or the reason it could
+ * not be — naming the step that blocked it, never a blanket refusal.
+ */
+type LegacyExecutePlanOutcome =
+  | { ok: true; route: LegacyExecutePlanRoute }
+  | { ok: false; error: string };
+
 interface BackendExecutionTarget {
   requestedToolName: string;
   effectiveToolName: string;
@@ -184,16 +322,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parseLegacyExecutePlanSteps(
   args: Record<string, unknown>,
-): LegacyExecutePlanStep[] | null {
+): { ok: true; steps: LegacyExecutePlanStep[] } | { ok: false; error: string } {
   const rawSteps = args.steps;
-  if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
-    return null;
+  if (!Array.isArray(rawSteps)) {
+    return { ok: false, error: 'execute_plan requires a `steps` array.' };
+  }
+  if (rawSteps.length === 0) {
+    return { ok: false, error: 'execute_plan requires at least one step.' };
+  }
+  if (rawSteps.length > MAX_PLAN_STEPS) {
+    return {
+      ok: false,
+      error:
+        `execute_plan received ${rawSteps.length} steps, which exceeds the maximum of ` +
+        `${MAX_PLAN_STEPS}. Split the work into several plans.`,
+    };
   }
 
   const steps: LegacyExecutePlanStep[] = [];
-  for (const rawStep of rawSteps) {
+  for (const [index, rawStep] of rawSteps.entries()) {
     if (!isRecord(rawStep)) {
-      return null;
+      return { ok: false, error: `Step at index ${index} must be an object.` };
     }
 
     const id = typeof rawStep.id === 'string' ? rawStep.id.trim() : '';
@@ -204,7 +353,15 @@ function parseLegacyExecutePlanSteps(
       : undefined;
 
     if (!id || !toolName || !params) {
-      return null;
+      const missing = [
+        id ? null : 'id',
+        toolName ? null : 'toolName',
+        params ? null : 'params',
+      ].filter((field): field is string => field !== null);
+      return {
+        ok: false,
+        error: `Step at index ${index} is missing required field(s): ${missing.join(', ')}.`,
+      };
     }
 
     steps.push({
@@ -215,7 +372,15 @@ function parseLegacyExecutePlanSteps(
     });
   }
 
-  return steps;
+  return { ok: true, steps };
+}
+
+/**
+ * The tools an `execute_plan` step may use, for rejection messages.
+ * Compound tools are included because they expand into backend steps.
+ */
+function describeSupportedPlanTools(): string {
+  return [...BACKEND_DIRECT_ROUTES.keys(), ...compoundExpanders.keys()].sort().join(', ');
 }
 
 function dedupeDependencies(dependsOn: string[]): string[] {
@@ -255,6 +420,15 @@ function normalizeBackendSingleStepData(
     };
   }
 
+  if (toolName === 'add_transition') {
+    // Callers address a transition by the effect id the command created.
+    return {
+      ...data,
+      transitionId:
+        typeof data.transitionId === 'string' ? data.transitionId : (createdIds[0] ?? null),
+    };
+  }
+
   return data;
 }
 
@@ -287,7 +461,7 @@ export class BackendToolExecutor implements IToolExecutor {
       return true;
     }
 
-    return BACKEND_DIRECT_TOOLS.has(toolName);
+    return BACKEND_DIRECT_ROUTES.has(toolName);
   }
 
   private isUnsafeMutatingFallback(toolName: string, args: Record<string, unknown>): boolean {
@@ -297,13 +471,6 @@ export class BackendToolExecutor implements IToolExecutor {
     }
 
     return requiresProjectMutationPreflight(toolName, toolDefinition.category, args);
-  }
-
-  private buildUnsupportedMutationFailure(toolName: string): ToolExecutionResult {
-    return createFailureResult(
-      `Mutating tool '${toolName}' is not approved for backend-safe agent execution.`,
-      0,
-    );
   }
 
   private getMutationPreflightFailure(
@@ -380,10 +547,23 @@ export class BackendToolExecutor implements IToolExecutor {
   private tryBuildLegacyExecutePlanRoute(
     args: Record<string, unknown>,
     context: ExecutionContext,
-  ): LegacyExecutePlanRoute | null {
-    const steps = parseLegacyExecutePlanSteps(args);
-    if (!steps) {
-      return null;
+  ): LegacyExecutePlanOutcome {
+    const parsed = parseLegacyExecutePlanSteps(args);
+    if (!parsed.ok) {
+      return { ok: false, error: parsed.error };
+    }
+    const steps = parsed.steps;
+
+    // A batch tool call is one tool call but many edit steps, so it must be
+    // charged against the run's step budget like any planned step would be.
+    const remainingStepBudget = context.remainingStepBudget;
+    if (typeof remainingStepBudget === 'number' && steps.length > remainingStepBudget) {
+      return {
+        ok: false,
+        error:
+          `This plan needs ${steps.length} steps but only ${remainingStepBudget} remain in this ` +
+          `run's step budget. Run a smaller plan, or finish the run and start another.`,
+      };
     }
 
     const seenLegacyIds = new Set<string>();
@@ -393,13 +573,23 @@ export class BackendToolExecutor implements IToolExecutor {
     let previousLegacyFinalStepId: string | null = null;
 
     for (const step of steps) {
-      if (seenLegacyIds.has(step.id) || step.toolName === 'execute_plan') {
-        return null;
+      if (seenLegacyIds.has(step.id)) {
+        return { ok: false, error: `Duplicate step id '${step.id}'.` };
+      }
+      if (step.toolName === 'execute_plan') {
+        return { ok: false, error: `Step '${step.id}': execute_plan cannot call itself.` };
       }
       seenLegacyIds.add(step.id);
 
       if (!this.isBackendToolName(step.toolName)) {
-        return null;
+        return {
+          ok: false,
+          error:
+            `Step '${step.id}' uses '${step.toolName}', which has no atomic backend route, ` +
+            `so the whole plan was rejected rather than applied halfway. ` +
+            `Call '${step.toolName}' on its own and keep execute_plan for these tools: ` +
+            `${describeSupportedPlanTools()}.`,
+        };
       }
 
       let explicitDependsOn: string[];
@@ -407,12 +597,14 @@ export class BackendToolExecutor implements IToolExecutor {
         explicitDependsOn = (step.dependsOn ?? []).map((dep) => {
           const mapped = lastBackendStepIdByLegacyId.get(dep);
           if (!mapped) {
-            throw new Error(`Legacy dependency '${dep}' cannot be resolved`);
+            throw new Error(
+              `Step '${step.id}' depends on '${dep}', which is not an earlier step in this plan`,
+            );
           }
           return mapped;
         });
-      } catch {
-        return null;
+      } catch (err) {
+        return { ok: false, error: `${getErrorMessage(err)}.` };
       }
 
       const inheritedDependsOn = previousLegacyFinalStepId ? [previousLegacyFinalStepId] : [];
@@ -423,11 +615,17 @@ export class BackendToolExecutor implements IToolExecutor {
         let expanded: ReturnType<CompoundExpander>;
         try {
           expanded = expander(step.params);
-        } catch {
-          return null;
+        } catch (err) {
+          return {
+            ok: false,
+            error: `Step '${step.id}' (${step.toolName}) could not be expanded: ${getErrorMessage(err)}`,
+          };
         }
         if (expanded.length === 0) {
-          return null;
+          return {
+            ok: false,
+            error: `Step '${step.id}' (${step.toolName}) expanded into no backend commands.`,
+          };
         }
 
         const generatedIds: string[] = [];
@@ -453,7 +651,10 @@ export class BackendToolExecutor implements IToolExecutor {
 
         const finalBackendStepId = generatedIds[generatedIds.length - 1];
         if (!finalBackendStepId) {
-          return null;
+          return {
+            ok: false,
+            error: `Step '${step.id}' (${step.toolName}) produced no executable backend step.`,
+          };
         }
         previousLegacyFinalStepId = finalBackendStepId;
         lastBackendStepIdByLegacyId.set(step.id, finalBackendStepId);
@@ -483,14 +684,17 @@ export class BackendToolExecutor implements IToolExecutor {
     }
 
     return {
-      plan: {
-        id: `legacy-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        goal: `Promote legacy execute_plan to backend atomic execution (${steps.length} steps)`,
-        steps: backendSteps,
-        approvalGranted: true,
-        sessionId: context.sessionId,
+      ok: true,
+      route: {
+        plan: {
+          id: `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          goal: `Execute a ${steps.length}-step plan atomically`,
+          steps: backendSteps,
+          approvalGranted: true,
+          sessionId: context.sessionId,
+        },
+        stepMappings,
       },
-      stepMappings,
     };
   }
 
@@ -562,15 +766,20 @@ export class BackendToolExecutor implements IToolExecutor {
     context: ExecutionContext,
   ): Promise<ToolExecutionResult> {
     if (toolName === 'execute_plan') {
-      let legacyRoute: LegacyExecutePlanRoute | null;
+      let planOutcome: LegacyExecutePlanOutcome;
       try {
-        legacyRoute = this.tryBuildLegacyExecutePlanRoute(args, context);
+        planOutcome = this.tryBuildLegacyExecutePlanRoute(args, context);
       } catch (err) {
         return createFailureResult(`execute_plan validation failed: ${getErrorMessage(err)}`, 0);
       }
 
-      if (legacyRoute) {
-        for (const step of legacyRoute.plan.steps) {
+      if (!planOutcome.ok) {
+        return createFailureResult(`execute_plan rejected: ${planOutcome.error}`, 0);
+      }
+
+      {
+        const planRoute = planOutcome.route;
+        for (const step of planRoute.plan.steps) {
           if ((step.dependsOn?.length ?? 0) > 0) {
             continue;
           }
@@ -583,9 +792,9 @@ export class BackendToolExecutor implements IToolExecutor {
             return createFailureResult(preflightFailure, 0);
           }
         }
-        const execution = await this.invokeBackendPlan(legacyRoute.plan, {
+        const execution = await this.invokeBackendPlan(planRoute.plan, {
           toolName,
-          legacy: true,
+          stepCount: planRoute.plan.steps.length,
         });
 
         if (!execution.ok) {
@@ -604,7 +813,7 @@ export class BackendToolExecutor implements IToolExecutor {
         const stepResultById = new Map(
           execution.result.stepResults.map((stepResult) => [stepResult.stepId, stepResult]),
         );
-        const stepResults = legacyRoute.stepMappings.map((mapping) => {
+        const stepResults = planRoute.stepMappings.map((mapping) => {
           const slice = mapping.backendStepIds
             .map((stepId) => stepResultById.get(stepId))
             .filter((stepResult): stepResult is NonNullable<typeof stepResult> =>
@@ -638,7 +847,7 @@ export class BackendToolExecutor implements IToolExecutor {
             error:
               execution.result.errorMessage ??
               execution.result.rollbackReport?.rollbackErrors?.join('; ') ??
-              'Legacy execute_plan backend promotion failed',
+              'execute_plan failed and was rolled back',
             data: {
               stepResults,
               rollbackReport: execution.result.rollbackReport ?? null,
@@ -663,8 +872,6 @@ export class BackendToolExecutor implements IToolExecutor {
           },
         };
       }
-
-      return this.buildUnsupportedMutationFailure(toolName);
     }
 
     let executionTarget: BackendExecutionTarget | null;

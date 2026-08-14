@@ -14,6 +14,7 @@ import {
   createBackendToolExecutor,
   registerCompoundExpander,
   unregisterCompoundExpander,
+  MAX_PLAN_STEPS,
 } from './BackendToolExecutor';
 import type {
   IToolExecutor,
@@ -175,6 +176,12 @@ const TOOL_DEFS: TestToolDef[] = [
     name: 'add_transition',
     description: 'Add a transition',
     category: 'transition',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'add_text_clip',
+    description: 'Add an on-video text clip',
+    category: 'text',
     parameters: { type: 'object', properties: {} },
   },
   {
@@ -515,17 +522,64 @@ describe('BackendToolExecutor', () => {
       expect(extendedFrontend.execute).not.toHaveBeenCalled();
     });
 
-    it('should fall back to frontend execution for mutating transition tools that are not backend-safe', async () => {
+    it('should route add_transition to backend IPC as an effect command', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'plan-transition',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { createdIds: ['effect-1'] }, durationMs: 5 },
+        ],
+        operationIds: ['op-1'],
+        executionTimeMs: 5,
+      });
+
       const result = await backend.execute(
         'add_transition',
-        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', transitionType: 'dissolve' },
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          clipId: 'clip-1',
+          transitionType: 'dissolve',
+          duration: 1.5,
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      // Callers address the new transition by the effect id the command created.
+      expect(result.data).toMatchObject({ transitionId: 'effect-1' });
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          steps: [
+            expect.objectContaining({
+              toolName: 'addEffect',
+              params: {
+                sequenceId: 'seq-1',
+                trackId: 'track-1',
+                clipId: 'clip-1',
+                effectType: 'cross_dissolve',
+                params: { duration: 1.5 },
+              },
+            }),
+          ],
+        }),
+      });
+      expect(frontend.execute).not.toHaveBeenCalled();
+    });
+
+    it('should fall back to frontend execution for mutating tools that are not backend-safe', async () => {
+      const result = await backend.execute(
+        'add_text_clip',
+        { sequenceId: 'seq-1', text: 'Hello', startTime: 0 },
         CONTEXT,
       );
 
       expect(result.success).toBe(true);
       expect(frontend.execute).toHaveBeenCalledWith(
-        'add_transition',
-        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', transitionType: 'dissolve' },
+        'add_text_clip',
+        { sequenceId: 'seq-1', text: 'Hello', startTime: 0 },
         CONTEXT,
       );
       expect(mockInvoke).not.toHaveBeenCalled();
@@ -836,7 +890,7 @@ describe('BackendToolExecutor', () => {
       });
       expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
         plan: expect.objectContaining({
-          goal: expect.stringContaining('legacy execute_plan'),
+          goal: expect.stringContaining('2-step plan atomically'),
           sessionId: 'session-1',
           steps: [
             expect.objectContaining({
@@ -868,9 +922,9 @@ describe('BackendToolExecutor', () => {
               params: { clipId: 'clip-1', splitTime: 5 },
             },
             {
-              id: 'transition-step',
-              toolName: 'add_transition',
-              params: { clipId: 'clip-1b', transitionType: 'dissolve' },
+              id: 'text-step',
+              toolName: 'add_text_clip',
+              params: { text: 'Hello', startTime: 0 },
             },
           ],
         },
@@ -878,7 +932,10 @@ describe('BackendToolExecutor', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('not approved for backend-safe agent execution');
+      // The rejection must name the step that blocked it and list what is supported.
+      expect(result.error).toContain("Step 'text-step'");
+      expect(result.error).toContain('add_text_clip');
+      expect(result.error).toContain('split_clip');
       expect(frontend.execute).not.toHaveBeenCalled();
       expect(mockInvoke).not.toHaveBeenCalled();
     });
@@ -908,7 +965,8 @@ describe('BackendToolExecutor', () => {
         const result = await extendedBackend.execute('execute_plan', args, CONTEXT);
 
         expect(result.success).toBe(false);
-        expect(result.error).toContain('not approved for backend-safe agent execution');
+        expect(result.error).toContain("Step 'ripple-step'");
+        expect(result.error).toContain('Invalid ripple request');
         expect(extendedFrontend.execute).not.toHaveBeenCalled();
         expect(mockInvoke).not.toHaveBeenCalled();
       } finally {
@@ -975,7 +1033,7 @@ describe('BackendToolExecutor', () => {
       });
       expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
         plan: expect.objectContaining({
-          goal: expect.stringContaining('Promote legacy execute_plan'),
+          goal: expect.stringContaining('2-step plan atomically'),
           steps: [
             expect.objectContaining({ id: 'step-a', toolName: 'splitClip' }),
             expect.objectContaining({ id: 'step-b', toolName: 'moveClip' }),
@@ -1050,13 +1108,8 @@ describe('BackendToolExecutor', () => {
           { id: 'step-a', toolName: 'split_clip', params: { clipId: 'clip-1', atTimelineSec: 5 } },
           {
             id: 'step-b',
-            toolName: 'add_transition',
-            params: {
-              sequenceId: 'seq-1',
-              trackId: 'track-1',
-              clipId: 'clip-1',
-              transitionType: 'dissolve',
-            },
+            toolName: 'add_text_clip',
+            params: { sequenceId: 'seq-1', text: 'Hello', startTime: 0 },
           },
         ],
       };
@@ -1064,8 +1117,41 @@ describe('BackendToolExecutor', () => {
       const result = await extendedBackend.execute('execute_plan', args, CONTEXT);
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('not approved for backend-safe agent execution');
+      expect(result.error).toContain("Step 'step-b'");
+      expect(result.error).toContain('add_text_clip');
       expect(extendedFrontend.execute).not.toHaveBeenCalled();
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should reject a plan larger than the shared step cap before invoking the backend', async () => {
+      const steps = Array.from({ length: MAX_PLAN_STEPS + 1 }, (_value, index) => ({
+        id: `step-${index}`,
+        toolName: 'split_clip',
+        params: { clipId: 'clip-1', splitTime: index },
+      }));
+
+      const result = await backend.execute('execute_plan', { steps }, CONTEXT);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain(String(MAX_PLAN_STEPS));
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should reject a plan that alone exceeds the remaining per-run step budget', async () => {
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [
+            { id: 'step-a', toolName: 'split_clip', params: { clipId: 'clip-1', splitTime: 1 } },
+            { id: 'step-b', toolName: 'split_clip', params: { clipId: 'clip-1', splitTime: 2 } },
+            { id: 'step-c', toolName: 'split_clip', params: { clipId: 'clip-1', splitTime: 3 } },
+          ],
+        },
+        { ...CONTEXT, remainingStepBudget: 2 },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('step budget');
       expect(mockInvoke).not.toHaveBeenCalled();
     });
   });
@@ -1138,13 +1224,8 @@ describe('BackendToolExecutor', () => {
           tools: [
             { name: 'split_clip', args: { clipId: 'c1', atTimelineSec: 5 } },
             {
-              name: 'add_transition',
-              args: {
-                sequenceId: 'seq-1',
-                trackId: 'track-1',
-                clipId: 'clip-1',
-                transitionType: 'dissolve',
-              },
+              name: 'add_text_clip',
+              args: { sequenceId: 'seq-1', text: 'Hello', startTime: 0 },
             },
           ],
           mode: 'sequential',
@@ -1156,15 +1237,10 @@ describe('BackendToolExecutor', () => {
       expect(result.success).toBe(true);
       expect(result.successCount).toBe(2);
       expect(result.failureCount).toBe(0);
-      expect(result.results.map((entry) => entry.tool)).toEqual(['split_clip', 'add_transition']);
+      expect(result.results.map((entry) => entry.tool)).toEqual(['split_clip', 'add_text_clip']);
       expect(frontend.execute).toHaveBeenCalledWith(
-        'add_transition',
-        {
-          sequenceId: 'seq-1',
-          trackId: 'track-1',
-          clipId: 'clip-1',
-          transitionType: 'dissolve',
-        },
+        'add_text_clip',
+        { sequenceId: 'seq-1', text: 'Hello', startTime: 0 },
         CONTEXT,
       );
     });
