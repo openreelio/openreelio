@@ -532,7 +532,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli plan execute --path ./project --file edit_plan.json"
             },
             "plan.validate": {
-                "description": "Validate a plan file without executing. Checks duplicate and missing step ids, dependency cycles, the 1000-step cap, and parses every step payload. Always exits 0; read 'status' and 'errors'",
+                "description": "Validate a plan file without executing. Checks duplicate and missing step ids, dependency cycles, the 1000-step cap, and parses every step payload. Exits 0 with the findings in 'status' and 'errors' whenever the plan file parses; exits nonzero with empty stdout when the tool itself cannot run, such as an unreadable plan file, malformed plan JSON, or a project that will not open",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "file": { "type": "string", "required": true, "desc": "Path to plan JSON file" }
