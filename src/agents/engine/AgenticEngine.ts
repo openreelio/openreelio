@@ -537,6 +537,7 @@ export class AgenticEngine {
           ...executionContext,
           expectedStateVersion:
             state.context.projectStateVersion ?? executionContext.expectedStateVersion,
+          remainingStepBudget: Math.max(0, this.config.maxStepsPerRun - plannedStepCount),
         };
         const remainingToolCalls = this.config.maxToolCallsPerRun - toolCallsUsed;
 
@@ -1060,6 +1061,7 @@ export class AgenticEngine {
         ...executionContext,
         expectedStateVersion:
           state.context.projectStateVersion ?? executionContext.expectedStateVersion,
+        remainingStepBudget: Math.max(0, this.config.maxStepsPerRun - plan.steps.length),
       };
       const remainingToolCalls = this.config.maxToolCallsPerRun - toolCallsUsed;
 
@@ -1509,6 +1511,7 @@ export class AgenticEngine {
       ...executionContext,
       expectedStateVersion:
         state.context.projectStateVersion ?? executionContext.expectedStateVersion,
+      remainingStepBudget: Math.max(0, this.config.maxStepsPerRun - plan.steps.length),
     };
     const remainingToolCalls = this.config.maxToolCallsPerRun - toolCallsUsed;
 

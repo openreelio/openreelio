@@ -26,6 +26,14 @@ export interface ExecutionContext {
   traceId?: string;
   /** Expected project state version for optimistic consistency checks */
   expectedStateVersion?: number;
+  /**
+   * Plan steps the run may still spend, from the engine's per-run step budget.
+   *
+   * A batch tool applies many edit steps behind a single tool call, so without
+   * this it could smuggle an unbounded amount of work past the budget the
+   * planner is held to. Undefined means the caller imposes no step budget.
+   */
+  remainingStepBudget?: number;
   /** Whether this is a dry run */
   dryRun?: boolean;
 }
