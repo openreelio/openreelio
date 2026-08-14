@@ -3157,11 +3157,20 @@ fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
             }
         }
 
+        // Each decoration carries its own alpha. Dropping it collapsed every
+        // translucent box or shadow to fully opaque, so a style that promised
+        // to let the footage read through hid it instead.
         if let Some(background_value) =
             get_json_field(style, &["backgroundColor", "background_color"])
         {
-            if let Some((hex, _)) = parse_caption_color(background_value) {
+            if let Some((hex, alpha)) = parse_caption_color(background_value) {
                 effect.set_param("background_color", ParamValue::String(hex));
+                if let Some(alpha) = alpha {
+                    effect.set_param(
+                        "background_opacity",
+                        ParamValue::Float(alpha.clamp(0.0, 1.0)),
+                    );
+                }
             }
         }
 
@@ -3176,14 +3185,20 @@ fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
         }
 
         if let Some(shadow_value) = get_json_field(style, &["shadowColor", "shadow_color"]) {
-            if let Some((hex, _)) = parse_caption_color(shadow_value) {
+            if let Some((hex, alpha)) = parse_caption_color(shadow_value) {
                 effect.set_param("shadow_color", ParamValue::String(hex));
+                if let Some(alpha) = alpha {
+                    effect.set_param("shadow_opacity", ParamValue::Float(alpha.clamp(0.0, 1.0)));
+                }
             }
         }
 
         if let Some(outline_value) = get_json_field(style, &["outlineColor", "outline_color"]) {
-            if let Some((hex, _)) = parse_caption_color(outline_value) {
+            if let Some((hex, alpha)) = parse_caption_color(outline_value) {
                 effect.set_param("outline_color", ParamValue::String(hex));
+                if let Some(alpha) = alpha {
+                    effect.set_param("outline_opacity", ParamValue::Float(alpha.clamp(0.0, 1.0)));
+                }
             }
         }
 
@@ -3629,14 +3644,29 @@ fn append_ass_text_style_and_event(
         "#FFFFFF",
         opacity,
     );
-    let outline_color = ass_color_param(effect, "outline_color", "#000000", opacity)
-        .unwrap_or_else(AssColor::transparent_black);
+    // Decoration alphas compose with the layer opacity, exactly as they do in
+    // the drawtext path, so both renderers read one style the same way.
+    let decoration_alpha = |name: &str, fallback: f64| {
+        effect_float_param(effect, name, fallback).clamp(0.0, 1.0) * opacity
+    };
+    let outline_color = ass_color_param(
+        effect,
+        "outline_color",
+        "#000000",
+        decoration_alpha("outline_opacity", 1.0),
+    )
+    .unwrap_or_else(AssColor::transparent_black);
     let outline_width = if effect.get_param("outline_color").is_some() {
         effect_int_param(effect, "outline_width", 2).clamp(0, 100) as f64
     } else {
         0.0
     };
-    let shadow_color = ass_color_param(effect, "shadow_color", "#000000", opacity * 0.8);
+    let shadow_color = ass_color_param(
+        effect,
+        "shadow_color",
+        "#000000",
+        decoration_alpha("shadow_opacity", 0.8),
+    );
     let has_shadow = shadow_color.is_some();
     let shadow_x = if has_shadow {
         effect_int_param(effect, "shadow_x", 0).clamp(-500, 500)
@@ -3653,7 +3683,12 @@ fn append_ass_text_style_and_event(
     } else {
         0.0
     };
-    let background_color = ass_color_param(effect, "background_color", "#000000", opacity);
+    let background_color = ass_color_param(
+        effect,
+        "background_color",
+        "#000000",
+        decoration_alpha("background_opacity", 1.0),
+    );
     let background_padding = effect_int_param(effect, "background_padding", 10).clamp(0, 500);
     let border_style = if background_color.is_some() { 3 } else { 1 };
     let style_outline_width = if background_color.is_some() {
@@ -5432,6 +5467,41 @@ mod tests {
         assert!(
             script.contains(r"\bord24.00"),
             "Expected dialogue override to preserve background padding. Got: {script}"
+        );
+    }
+
+    #[test]
+    fn test_caption_decoration_alpha_reaches_the_drawtext_filter() {
+        use crate::core::timeline::Clip;
+
+        // A translucent box is the whole point of a boxed caption style: if the
+        // alpha is dropped, the box that was supposed to let the footage read
+        // through renders as an opaque slab instead.
+        let mut caption_clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        caption_clip.label = Some("Translucent".to_string());
+        caption_clip.caption_style = Some(serde_json::json!({
+            "fontSize": 48,
+            "color": { "r": 255, "g": 255, "b": 255, "a": 255 },
+            "backgroundColor": { "r": 0, "g": 0, "b": 0, "a": 153 },
+            "shadowColor": { "r": 0, "g": 0, "b": 0, "a": 128 },
+        }));
+
+        let filter = build_caption_drawtext_with_enable(&caption_clip).expect("drawtext filter");
+
+        assert!(
+            filter.contains("boxcolor=0x000000@0.60"),
+            "background alpha must reach boxcolor, got: {filter}"
+        );
+        assert!(
+            filter.contains("shadowcolor=0x000000@0.50"),
+            "shadow alpha must reach shadowcolor, got: {filter}"
+        );
+        // Fully opaque text still renders without an alpha suffix.
+        assert!(
+            filter.contains("fontcolor=0xFFFFFF:"),
+            "opaque text must not gain an alpha suffix, got: {filter}"
         );
     }
 
