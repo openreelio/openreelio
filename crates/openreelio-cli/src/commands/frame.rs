@@ -11,7 +11,7 @@ use clap::{Args, Subcommand};
 use openreelio_core::analysis::types::ContactSheetArtifact;
 use openreelio_core::analysis::visual::{ContactSheetCellSize, VisualAnalyzer};
 use openreelio_core::assets::Asset;
-use openreelio_core::effects::Effect;
+use openreelio_core::effects::{Effect, EffectType, IntoFFmpegFilter, ParamValue};
 use openreelio_core::ffmpeg::{FFmpegRunner, FrameExtractOptions};
 use openreelio_core::render::{
     build_render_graph, build_render_plan, clip_source_time_at, probed_image_dimensions,
@@ -51,6 +51,29 @@ const MIN_CELL_SIZE_PX: u32 = 64;
 /// A full grid of 1024px cells is already a very large image; anything beyond
 /// it should be extracted as individual stills instead.
 const MAX_CELL_SIZE_PX: u32 = 1024;
+
+/// Share of a cell's height given to the burnt-in label's type size.
+///
+/// A twelfth of the cell puts the label at 15px on the default 320x180 cell,
+/// which stays readable once the sheet is downsampled by a vision model.
+const CELL_LABEL_HEIGHT_DIVISOR: f64 = 12.0;
+
+/// Smallest label type size, in pixels.
+const CELL_LABEL_MIN_FONT_PX: f64 = 10.0;
+
+/// Largest label type size, in pixels.
+///
+/// Past this the label starts competing with the frame it annotates.
+const CELL_LABEL_MAX_FONT_PX: f64 = 40.0;
+
+/// Padding around the label inside its contrast box, in pixels.
+const CELL_LABEL_BOX_PADDING_PX: i64 = 3;
+
+/// Label text colour.
+const CELL_LABEL_TEXT_COLOR: &str = "#FFFFFF";
+
+/// Colour of the box drawn behind the label so it survives a bright frame.
+const CELL_LABEL_BOX_COLOR: &str = "#000000";
 
 #[derive(Subcommand)]
 pub enum FrameAction {
@@ -120,6 +143,10 @@ pub struct ExtractArgs {
     /// Contact sheet cell height in pixels (64-1024, default 180)
     #[arg(long, requires = "grid", value_parser = cell_size_parser())]
     pub cell_height: Option<u32>,
+
+    /// Burn each cell's index and timecode into the contact sheet
+    #[arg(long, requires = "grid")]
+    pub label_cells: bool,
 }
 
 /// Value parser enforcing the accepted contact-sheet cell dimension range.
@@ -466,16 +493,15 @@ async fn run_grid_mode(
         mode,
     };
 
-    let cell_dir = tempfile::tempdir()
-        .map_err(|error| anyhow::anyhow!("Failed to create temporary cell directory: {error}"))?;
+    let staging = CellStaging::new(cell, args.label_cells)?;
 
     let mut cell_paths = Vec::with_capacity(times.len());
     let mut cells = Vec::with_capacity(times.len());
     for (index, time) in times.iter().enumerate() {
-        // The contact-sheet input pattern is a zero-based `%d.jpg` sequence.
-        let cell_path = cell_dir.path().join(format!("{}.jpg", index));
-        context.extract(index, *time, &cell_path).await?;
-        cell_paths.push(cell_path);
+        context
+            .extract(index, *time, &staging.extract_path(index))
+            .await?;
+        cell_paths.push(staging.finish(runner, index, *time).await?);
         cells.push(GridCell {
             index,
             row: index / columns,
@@ -496,9 +522,143 @@ async fn run_grid_mode(
             "rows": sheet.rows,
             "cellWidth": cell.width,
             "cellHeight": cell.height,
+            "labeled": args.label_cells,
             "cells": cells,
         },
     }))
+}
+
+/// Staging directories the contact-sheet cells pass through.
+///
+/// FFmpeg reads the cells back as a zero-based `%d.jpg` image sequence, so the
+/// finished cells must share one directory and one naming scheme. Labelling
+/// needs a second copy because FFmpeg cannot write over its own input, so the
+/// raw extraction lands in `raw_dir` and the labelled result in `sheet_dir`.
+struct CellStaging {
+    sheet_dir: tempfile::TempDir,
+    raw_dir: Option<tempfile::TempDir>,
+    cell: ContactSheetCellSize,
+}
+
+impl CellStaging {
+    fn new(cell: ContactSheetCellSize, label_cells: bool) -> anyhow::Result<Self> {
+        let sheet_dir = tempfile::tempdir().map_err(|error| {
+            anyhow::anyhow!("Failed to create temporary cell directory: {error}")
+        })?;
+        let raw_dir = if label_cells {
+            Some(tempfile::tempdir().map_err(|error| {
+                anyhow::anyhow!("Failed to create temporary cell directory: {error}")
+            })?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            sheet_dir,
+            raw_dir,
+            cell,
+        })
+    }
+
+    /// Path the frame extractor writes the untouched cell to.
+    fn extract_path(&self, index: usize) -> PathBuf {
+        match &self.raw_dir {
+            Some(dir) => dir.path().join(format!("{}.jpg", index)),
+            None => self.sheet_path(index),
+        }
+    }
+
+    /// Path the tiler reads the finished cell from.
+    fn sheet_path(&self, index: usize) -> PathBuf {
+        self.sheet_dir.path().join(format!("{}.jpg", index))
+    }
+
+    /// Burns the cell label when one was requested, and reports the finished path.
+    async fn finish(
+        &self,
+        runner: &FFmpegRunner,
+        index: usize,
+        time_sec: f64,
+    ) -> anyhow::Result<PathBuf> {
+        let sheet_path = self.sheet_path(index);
+        if self.raw_dir.is_none() {
+            return Ok(sheet_path);
+        }
+
+        let filter = build_cell_label_filter(index, time_sec, self.cell);
+        runner
+            .filter_image(&self.extract_path(index), &sheet_path, &filter, None)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Failed to label contact sheet cell {}: {}. Cell labels need an FFmpeg build with the drawtext filter; drop --label-cells to build the sheet without them.",
+                    index,
+                    error
+                )
+            })?;
+
+        Ok(sheet_path)
+    }
+}
+
+/// Text burnt into a labelled contact-sheet cell.
+fn cell_label_text(index: usize, time_sec: f64) -> String {
+    format!("{} | {:.2}s", index, time_sec.max(0.0))
+}
+
+/// Type size used for a cell label, in pixels of the finished cell.
+fn cell_label_font_size(cell_height: usize) -> f64 {
+    ((cell_height as f64) / CELL_LABEL_HEIGHT_DIVISOR)
+        .round()
+        .clamp(CELL_LABEL_MIN_FONT_PX, CELL_LABEL_MAX_FONT_PX)
+}
+
+/// Builds the filter chain that fits a raw cell into the sheet's cell box and
+/// burns its index and timecode into the bottom-left corner.
+///
+/// Fitting happens here rather than in the tiler so the label is drawn at the
+/// cell's final resolution: the type size is chosen against `cell`, not against
+/// whatever the source frame was extracted at. The tiler's own scale/pad stage
+/// then becomes a no-op on an already-fitted cell.
+///
+/// The drawtext parameters come from the shared text-overlay effect builder, so
+/// labels resolve fonts exactly the way burnt-in captions do.
+fn build_cell_label_filter(index: usize, time_sec: f64, cell: ContactSheetCellSize) -> String {
+    let font_size = cell_label_font_size(cell.height);
+    // Keep the contrast box clear of the frame edge: its border grows outward
+    // from the text by the padding, so the margin has to cover it.
+    let margin = (font_size * 0.5)
+        .round()
+        .max(CELL_LABEL_BOX_PADDING_PX as f64 + 2.0);
+
+    let mut label = Effect::new(EffectType::TextOverlay);
+    label.set_param("text", ParamValue::String(cell_label_text(index, time_sec)));
+    label.set_param("font_size", ParamValue::Float(font_size));
+    label.set_param(
+        "color",
+        ParamValue::String(CELL_LABEL_TEXT_COLOR.to_string()),
+    );
+    label.set_param(
+        "background_color",
+        ParamValue::String(CELL_LABEL_BOX_COLOR.to_string()),
+    );
+    label.set_param(
+        "background_padding",
+        ParamValue::Int(CELL_LABEL_BOX_PADDING_PX),
+    );
+    label.set_param("alignment", ParamValue::String("left".to_string()));
+    label.set_param("x", ParamValue::Float(margin / cell.width as f64));
+    label.set_param(
+        "y",
+        ParamValue::Float(1.0 - (font_size / 2.0 + margin) / cell.height as f64),
+    );
+
+    format!(
+        "scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,{drawtext}",
+        w = cell.width,
+        h = cell.height,
+        drawtext = label.to_filter_body(),
+    )
 }
 
 /// Tiles already extracted cells into the contact sheet at `--out`.
@@ -978,7 +1138,69 @@ mod tests {
             count,
             cell_width: None,
             cell_height: None,
+            label_cells: false,
         }
+    }
+
+    #[test]
+    fn cell_label_text_should_pair_the_index_with_a_timecode() {
+        assert_eq!(cell_label_text(3, 12.5), "3 | 12.50s");
+        assert_eq!(cell_label_text(0, 0.0), "0 | 0.00s");
+    }
+
+    #[test]
+    fn cell_label_font_size_should_scale_with_the_cell_and_stay_readable() {
+        assert_eq!(cell_label_font_size(180), 15.0);
+        assert_eq!(cell_label_font_size(360), 30.0);
+        assert_eq!(
+            cell_label_font_size(64),
+            CELL_LABEL_MIN_FONT_PX,
+            "A tiny cell must not get an illegible label"
+        );
+        assert_eq!(
+            cell_label_font_size(1024),
+            CELL_LABEL_MAX_FONT_PX,
+            "A large cell must not get a label that swamps the frame"
+        );
+    }
+
+    #[test]
+    fn build_cell_label_filter_should_fit_the_cell_then_draw_the_label() {
+        let filter = build_cell_label_filter(3, 12.5, ContactSheetCellSize::default());
+
+        assert!(
+            filter.starts_with(
+                "scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,drawtext="
+            ),
+            "The cell must be fitted before the label is drawn, got: {filter}"
+        );
+        assert!(
+            filter.contains("text='3 | 12.50s'"),
+            "Label should carry the index and timecode, got: {filter}"
+        );
+        assert!(
+            filter.contains("fontsize=15"),
+            "Label should be sized against the cell, got: {filter}"
+        );
+        assert!(
+            filter.contains("box=1") && filter.contains("boxcolor=0x000000"),
+            "Label needs a contrasting box to survive a bright frame, got: {filter}"
+        );
+    }
+
+    #[test]
+    fn build_cell_label_filter_should_keep_the_label_inside_the_bottom_left_corner() {
+        let filter = build_cell_label_filter(0, 1.0, ContactSheetCellSize::default());
+
+        // Left-aligned at a small margin, near the bottom edge but not on it.
+        assert!(
+            filter.contains("x=(w*0.0250)"),
+            "Label should sit just inside the left edge, got: {filter}"
+        );
+        assert!(
+            filter.contains("y=(h*0.9139)-(text_h/2)"),
+            "Label should sit just inside the bottom edge, got: {filter}"
+        );
     }
 
     #[test]

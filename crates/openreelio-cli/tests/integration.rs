@@ -496,6 +496,35 @@ fn ffprobe_video_height(path: &std::path::Path) -> Option<u32> {
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
+/// Probe the pixel dimensions of the first video stream via ffprobe.
+///
+/// Works for still images too — ffprobe reports them as a single-frame video
+/// stream. Returns `None` if ffprobe is unavailable or the output cannot be
+/// parsed.
+fn ffprobe_image_size(path: &std::path::Path) -> Option<(u32, u32)> {
+    let ffprobe_path = system_ffprobe_path()?;
+    let output = Command::new(ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (width, height) = text.trim().split_once('x')?;
+    Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
+}
+
 // =============================================================================
 // Project Commands
 // =============================================================================
@@ -1953,6 +1982,151 @@ fn test_frame_extract_builds_contact_sheet_for_grid() {
         sheet_path.metadata().unwrap().len() > 0,
         "Expected contact sheet to be non-empty"
     );
+}
+
+#[test]
+fn test_frame_extract_sizes_contact_sheet_cells_from_the_requested_geometry() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_cell_size_test", 4) else {
+        return;
+    };
+
+    let default_sheet = dir.path().join("default.jpg");
+    let default_result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x1",
+        "--between",
+        "0",
+        "4",
+        "--out",
+        default_sheet.to_str().unwrap(),
+    ]);
+    assert_eq!(default_result["sheet"]["cellWidth"], 320);
+    assert_eq!(default_result["sheet"]["cellHeight"], 180);
+
+    let large_sheet = dir.path().join("large.jpg");
+    let large_result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x1",
+        "--between",
+        "0",
+        "4",
+        "--cell-width",
+        "640",
+        "--cell-height",
+        "360",
+        "--out",
+        large_sheet.to_str().unwrap(),
+    ]);
+    assert_eq!(large_result["sheet"]["cellWidth"], 640);
+    assert_eq!(large_result["sheet"]["cellHeight"], 360);
+
+    let Some((default_width, default_height)) = ffprobe_image_size(&default_sheet) else {
+        return;
+    };
+    let (large_width, large_height) =
+        ffprobe_image_size(&large_sheet).expect("Large sheet must be probeable");
+
+    // The tiler's gutters are a fixed cost, so only the cells themselves grow:
+    // two columns gain 320px each and the single row gains 180px.
+    assert_eq!(
+        (large_width - default_width, large_height - default_height),
+        (640, 180),
+        "Cell geometry should drive the sheet size, got ({large_width}, {large_height}) against ({default_width}, {default_height})"
+    );
+}
+
+#[test]
+fn test_frame_extract_rejects_a_cell_size_outside_the_supported_range() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_cell_range_test", 4) else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("sheet.jpg");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x1",
+        "--between",
+        "0",
+        "4",
+        "--cell-width",
+        "32",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("cell-width"),
+        "Expected the error to name the rejected flag, got: {stderr}"
+    );
+    assert!(
+        !sheet_path.exists(),
+        "A rejected request must not write anything"
+    );
+}
+
+#[test]
+fn test_frame_extract_labels_contact_sheet_cells_on_request() {
+    let Some((dir, path, _)) = create_project_with_timeline_clip("frame_label_cells_test", 4)
+    else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("labeled.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--between",
+        "0",
+        "4",
+        "--label-cells",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["sheet"]["labeled"], true);
+    assert_eq!(result["sheet"]["cells"].as_array().unwrap().len(), 4);
+    assert!(sheet_path.exists(), "Expected the labelled sheet to exist");
+    assert_eq!(file_signature(&sheet_path), JPEG_SIGNATURE);
+
+    // Labelling pre-fits every cell, so the sheet keeps the unlabelled layout.
+    let plain_path = dir.path().join("plain.jpg");
+    run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--grid",
+        "2x2",
+        "--between",
+        "0",
+        "4",
+        "--out",
+        plain_path.to_str().unwrap(),
+    ]);
+    let (Some(labeled), Some(plain)) = (
+        ffprobe_image_size(&sheet_path),
+        ffprobe_image_size(&plain_path),
+    ) else {
+        return;
+    };
+    assert_eq!(labeled, plain);
 }
 
 // =============================================================================

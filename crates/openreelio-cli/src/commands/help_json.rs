@@ -642,7 +642,8 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "between": { "type": "string", "required": false, "desc": "Timeline range sampled by --grid, given as two values: START END" },
                     "count": { "type": "number", "required": false, "desc": "Number of grid samples (default: columns * rows; must not exceed the grid capacity). Rows no sample reaches are dropped, so the reported rows can be fewer than --grid asked for." },
                     "cell-width": { "type": "number", "required": false, "desc": "Contact sheet cell width in pixels, 64-1024 (default: 320); requires --grid. Out-of-range values are rejected rather than clamped. Grid cells are extracted at the cell width by default, so raising it really does buy detail; --max-width overrides the extraction width." },
-                    "cell-height": { "type": "number", "required": false, "desc": "Contact sheet cell height in pixels, 64-1024 (default: 180); requires --grid. Each dimension defaults independently, and the reported sheet.cellWidth/cellHeight always name the values actually used." }
+                    "cell-height": { "type": "number", "required": false, "desc": "Contact sheet cell height in pixels, 64-1024 (default: 180); requires --grid. Each dimension defaults independently, and the reported sheet.cellWidth/cellHeight always name the values actually used." },
+                    "label-cells": { "type": "boolean", "required": false, "desc": "Burn '<index> | <seconds>s' into the bottom-left of every cell so the sheet.cells mapping is readable from the image itself; requires --grid. Costs one extra FFmpeg pass per cell and needs an FFmpeg build with the drawtext filter. The sheet reports 'labeled': true when it was applied." }
                 },
                 "example": "openreelio-cli frame extract --path ./project --time 12.5 --out frame.png"
             },
