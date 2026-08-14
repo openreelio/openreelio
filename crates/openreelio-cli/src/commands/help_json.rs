@@ -640,7 +640,9 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "format": { "type": "string", "required": false, "desc": "Output image format: png or jpeg. Defaults to the --out extension, falling back to png for directories and extensionless paths; a value that contradicts a .png/.jpg extension is rejected. Grid cells are always JPEG; the sheet itself uses this format." },
                     "grid": { "type": "string", "required": false, "desc": "Contact sheet layout as COLSxROWS (e.g. 3x2), at most 100 cells; requires --between" },
                     "between": { "type": "string", "required": false, "desc": "Timeline range sampled by --grid, given as two values: START END" },
-                    "count": { "type": "number", "required": false, "desc": "Number of grid samples (default: columns * rows; must not exceed the grid capacity). Rows no sample reaches are dropped, so the reported rows can be fewer than --grid asked for." }
+                    "count": { "type": "number", "required": false, "desc": "Number of grid samples (default: columns * rows; must not exceed the grid capacity). Rows no sample reaches are dropped, so the reported rows can be fewer than --grid asked for." },
+                    "cell-width": { "type": "number", "required": false, "desc": "Contact sheet cell width in pixels, 64-1024 (default: 320); requires --grid. Out-of-range values are rejected rather than clamped. Grid cells are extracted at the cell width by default, so raising it really does buy detail; --max-width overrides the extraction width." },
+                    "cell-height": { "type": "number", "required": false, "desc": "Contact sheet cell height in pixels, 64-1024 (default: 180); requires --grid. Each dimension defaults independently, and the reported sheet.cellWidth/cellHeight always name the values actually used." }
                 },
                 "example": "openreelio-cli frame extract --path ./project --time 12.5 --out frame.png"
             },

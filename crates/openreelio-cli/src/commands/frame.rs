@@ -8,9 +8,8 @@ use crate::ffmpeg_env::ensure_ffmpeg;
 use crate::output;
 use crate::validate;
 use clap::{Args, Subcommand};
-use openreelio_core::analysis::visual::{
-    VisualAnalyzer, CONTACT_SHEET_CELL_HEIGHT, CONTACT_SHEET_CELL_WIDTH,
-};
+use openreelio_core::analysis::types::ContactSheetArtifact;
+use openreelio_core::analysis::visual::{ContactSheetCellSize, VisualAnalyzer};
 use openreelio_core::assets::Asset;
 use openreelio_core::effects::Effect;
 use openreelio_core::ffmpeg::{FFmpegRunner, FrameExtractOptions};
@@ -40,6 +39,18 @@ const MAX_GRID_CELLS: usize = 100;
 /// `normalize_output_time_range` rejects zero-length ranges, so a single
 /// composited frame is rendered as a tiny non-zero window.
 const MIN_COMPOSITE_WINDOW_SEC: f64 = 0.05;
+
+/// Smallest accepted contact-sheet cell dimension.
+///
+/// Below this a cell carries no usable detail for a vision model, so a smaller
+/// request is a mistake rather than an economy.
+const MIN_CELL_SIZE_PX: u32 = 64;
+
+/// Largest accepted contact-sheet cell dimension.
+///
+/// A full grid of 1024px cells is already a very large image; anything beyond
+/// it should be extracted as individual stills instead.
+const MAX_CELL_SIZE_PX: u32 = 1024;
 
 #[derive(Subcommand)]
 pub enum FrameAction {
@@ -101,6 +112,19 @@ pub struct ExtractArgs {
     /// Number of grid samples (defaults to columns * rows)
     #[arg(long, requires = "grid")]
     pub count: Option<usize>,
+
+    /// Contact sheet cell width in pixels (64-1024, default 320)
+    #[arg(long, requires = "grid", value_parser = cell_size_parser())]
+    pub cell_width: Option<u32>,
+
+    /// Contact sheet cell height in pixels (64-1024, default 180)
+    #[arg(long, requires = "grid", value_parser = cell_size_parser())]
+    pub cell_height: Option<u32>,
+}
+
+/// Value parser enforcing the accepted contact-sheet cell dimension range.
+fn cell_size_parser() -> clap::builder::RangedI64ValueParser<u32> {
+    clap::value_parser!(u32).range(i64::from(MIN_CELL_SIZE_PX)..=i64::from(MAX_CELL_SIZE_PX))
 }
 
 pub fn execute(action: FrameAction) -> anyhow::Result<()> {
@@ -428,6 +452,7 @@ async fn run_grid_mode(
 ) -> anyhow::Result<serde_json::Value> {
     let (sequence_id, sequence) = resolve_sequence(project, args.sequence.clone())?;
     ensure_times_inside_sequence(sequence, times)?;
+    let cell = resolve_cell_size(args);
     let context = TimelineFrameContext {
         engine: ExportEngine::new(runner.clone()),
         runner,
@@ -437,7 +462,7 @@ async fn run_grid_mode(
         // Contact sheet cells are always JPEG: FFmpeg reads them back as a
         // `%d.jpg` image sequence.
         format: ImageFormat::Jpeg,
-        max_width: args.max_width.unwrap_or(DEFAULT_MAX_WIDTH),
+        max_width: grid_cell_extract_width(args, cell),
         mode,
     };
 
@@ -459,26 +484,40 @@ async fn run_grid_mode(
         });
     }
 
-    let sheet_path = normalize_extension(args.out.clone(), &format);
-    let analyzer = VisualAnalyzer::new(runner.info().ffmpeg_path.clone());
-    let artifact = analyzer
-        .generate_contact_sheet_with_layout(&cell_paths, &sheet_path, Some((columns, rows)))
-        .await
-        .map_err(|error| anyhow::anyhow!("Contact sheet generation failed: {}", error))?
-        .ok_or_else(|| anyhow::anyhow!("Contact sheet generation produced no output"))?;
+    let sheet =
+        build_contact_sheet(runner, args, &format, &cell_paths, columns, rows, cell).await?;
 
     Ok(serde_json::json!({
         "status": "ok",
         "mode": "grid",
         "sheet": {
-            "path": artifact.path,
-            "cols": artifact.columns,
-            "rows": artifact.rows,
-            "cellWidth": CONTACT_SHEET_CELL_WIDTH,
-            "cellHeight": CONTACT_SHEET_CELL_HEIGHT,
+            "path": sheet.path,
+            "cols": sheet.columns,
+            "rows": sheet.rows,
+            "cellWidth": cell.width,
+            "cellHeight": cell.height,
             "cells": cells,
         },
     }))
+}
+
+/// Tiles already extracted cells into the contact sheet at `--out`.
+async fn build_contact_sheet(
+    runner: &FFmpegRunner,
+    args: &ExtractArgs,
+    format: &ImageFormat,
+    cell_paths: &[PathBuf],
+    columns: usize,
+    rows: usize,
+    cell: ContactSheetCellSize,
+) -> anyhow::Result<ContactSheetArtifact> {
+    let sheet_path = normalize_extension(args.out.clone(), format);
+    let analyzer = VisualAnalyzer::new(runner.info().ffmpeg_path.clone());
+    analyzer
+        .generate_contact_sheet_with_options(cell_paths, &sheet_path, Some((columns, rows)), cell)
+        .await
+        .map_err(|error| anyhow::anyhow!("Contact sheet generation failed: {}", error))?
+        .ok_or_else(|| anyhow::anyhow!("Contact sheet generation produced no output"))
 }
 
 // ── Timeline frame extraction ───────────────────────────────────────────
@@ -790,6 +829,33 @@ fn resolve_image_format(explicit: Option<&str>, out: &Path) -> anyhow::Result<Im
     Ok(requested)
 }
 
+/// Resolves the contact-sheet cell geometry from the CLI flags.
+///
+/// Each dimension falls back to the shared default independently, so
+/// `--cell-height 360` alone widens nothing.
+fn resolve_cell_size(args: &ExtractArgs) -> ContactSheetCellSize {
+    let default = ContactSheetCellSize::default();
+    ContactSheetCellSize::new(
+        args.cell_width
+            .map_or(default.width, |value| value as usize),
+        args.cell_height
+            .map_or(default.height, |value| value as usize),
+    )
+}
+
+/// Width the grid's source cells are extracted at.
+///
+/// The tiler fits every cell into a `cellWidth x cellHeight` box, so extracting
+/// wider than the cell only pays for pixels the tiler immediately discards —
+/// which is what made `--max-width` wasted work on grids. The cell width is
+/// therefore the default, and it is never *below* the cell either, so a large
+/// `--cell-width` gets a correspondingly detailed source instead of an upscale.
+/// `--max-width` remains an explicit override for callers who want to oversample
+/// (portrait cells fit by height, so a wider source keeps more vertical detail).
+fn grid_cell_extract_width(args: &ExtractArgs, cell: ContactSheetCellSize) -> u32 {
+    args.max_width.unwrap_or(cell.width as u32)
+}
+
 /// Parses a `COLSxROWS` grid specification.
 fn parse_grid_spec(raw: &str) -> anyhow::Result<(usize, usize)> {
     let normalized = raw.trim().to_lowercase();
@@ -910,7 +976,50 @@ mod tests {
             grid: Some(grid.to_string()),
             between: Some(vec![0.0, 4.0]),
             count,
+            cell_width: None,
+            cell_height: None,
         }
+    }
+
+    #[test]
+    fn resolve_cell_size_should_default_to_the_shared_contact_sheet_geometry() {
+        let cell = resolve_cell_size(&grid_args("3x2", None));
+
+        assert_eq!(cell, ContactSheetCellSize::default());
+    }
+
+    #[test]
+    fn resolve_cell_size_should_override_each_dimension_independently() {
+        let mut args = grid_args("3x2", None);
+        args.cell_height = Some(360);
+
+        let cell = resolve_cell_size(&args);
+
+        assert_eq!(cell.width, ContactSheetCellSize::default().width);
+        assert_eq!(cell.height, 360);
+    }
+
+    #[test]
+    fn grid_cell_extract_width_should_follow_the_cell_width_by_default() {
+        let mut args = grid_args("3x2", None);
+        args.cell_width = Some(640);
+
+        assert_eq!(
+            grid_cell_extract_width(&args, resolve_cell_size(&args)),
+            640,
+            "Grid cells should be extracted at the size the tiler needs"
+        );
+    }
+
+    #[test]
+    fn grid_cell_extract_width_should_honour_an_explicit_max_width() {
+        let mut args = grid_args("3x2", None);
+        args.max_width = Some(1920);
+
+        assert_eq!(
+            grid_cell_extract_width(&args, resolve_cell_size(&args)),
+            1920
+        );
     }
 
     #[test]
