@@ -345,6 +345,21 @@ impl EffectType {
         }
     }
 
+    /// Returns true if this effect renders as an FFmpeg `xfade`.
+    ///
+    /// `xfade` takes *two* video inputs, so these effects cannot go through a
+    /// clip's single-input filter chain — FFmpeg rejects the whole graph. They
+    /// are consumed at the timeline stitch instead, where the outgoing and
+    /// incoming streams are both in hand.
+    ///
+    /// This is deliberately narrower than
+    /// [`EffectCategory::Transition`](EffectCategory::Transition), which also
+    /// covers `Fade` and `Zoom` — both single-input filters that belong in the
+    /// clip chain and would break the stitch for the same reason in reverse.
+    pub fn is_two_input_transition(&self) -> bool {
+        matches!(self, Self::CrossDissolve | Self::Wipe | Self::Slide)
+    }
+
     /// Returns true if this is an audio effect
     pub fn is_audio(&self) -> bool {
         matches!(self.category(), EffectCategory::Audio)

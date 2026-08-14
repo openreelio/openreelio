@@ -668,18 +668,18 @@ fn every_transition_recipe_builds_the_exact_filter_it_advertises() {
 
         let filter = effect.to_filter_string("in", "out");
         let expected = match recipe.id {
-            "dissolve-soft" => "xfade=transition=dissolve:duration=0.5000:offset=0.0000",
-            "dissolve-standard" => "xfade=transition=dissolve:duration=1.0000:offset=0.0000",
-            "dissolve-long" => "xfade=transition=dissolve:duration=2.0000:offset=0.0000",
+            "dissolve-soft" => "xfade=transition=dissolve:duration=0.5000",
+            "dissolve-standard" => "xfade=transition=dissolve:duration=1.0000",
+            "dissolve-long" => "xfade=transition=dissolve:duration=2.0000",
             "fade-in" => "fade=t=in:st=0:d=1.0000",
             // The fixture clip is 10s, so the tail anchor is 10 - 1.
             "fade-out" => "fade=t=out:st=9.0000:d=1.0000",
-            "wipe-left" => "xfade=transition=wipeleft:duration=0.7000:offset=0.0000",
-            "wipe-right" => "xfade=transition=wiperight:duration=0.7000:offset=0.0000",
-            "wipe-up" => "xfade=transition=wipeup:duration=0.7000:offset=0.0000",
-            "wipe-down" => "xfade=transition=wipedown:duration=0.7000:offset=0.0000",
-            "slide-left" => "xfade=transition=slideleft:duration=0.5000:offset=0.0000",
-            "slide-right" => "xfade=transition=slideright:duration=0.5000:offset=0.0000",
+            "wipe-left" => "xfade=transition=wipeleft:duration=0.7000",
+            "wipe-right" => "xfade=transition=wiperight:duration=0.7000",
+            "wipe-up" => "xfade=transition=wipeup:duration=0.7000",
+            "wipe-down" => "xfade=transition=wipedown:duration=0.7000",
+            "slide-left" => "xfade=transition=slideleft:duration=0.5000",
+            "slide-right" => "xfade=transition=slideright:duration=0.5000",
             other => panic!(
                 "recipe '{other}' has no expected filter; add one rather than \
                  letting a new curated entry ship unasserted"
@@ -783,7 +783,8 @@ fn explicit_param_overrides_the_recipe_duration() {
         .expect("effect stored");
 
     assert_eq!(effect.get_float("duration"), Some(3.0));
-    assert_eq!(effect.get_float("offset"), Some(0.0));
+    // A recipe never records an offset: the render stitch derives it.
+    assert_eq!(effect.get_float("offset"), None);
 }
 
 #[test]

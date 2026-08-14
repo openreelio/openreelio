@@ -9,7 +9,7 @@ use std::{collections::HashMap, path::Path};
 
 use crate::core::{
     assets::Asset,
-    effects::{Effect, IntoFFmpegFilter},
+    effects::Effect,
     fs::validate_local_input_path,
     timeline::{Sequence, TrackKind},
 };
@@ -200,13 +200,12 @@ pub(super) fn build_sequence_ffmpeg_args(
                         output_pixel_format,
                     );
 
-                    video_segments.push(VideoTimelineSegment {
-                        stream_label: format!("[{}]", normalized_video_label),
-                        start_sec: clip.place.timeline_in_sec,
-                        end_sec: clip.place.timeline_out_sec(),
-                        transition_filter: find_transition_effect(clip, ctx.effects)
-                            .map(|effect| effect.to_filter_body()),
-                    });
+                    video_segments.push(VideoTimelineSegment::new(
+                        format!("[{}]", normalized_video_label),
+                        clip.place.timeline_in_sec,
+                        clip.place.timeline_out_sec(),
+                        find_transition_effect(clip, ctx.effects),
+                    ));
                 }
 
                 if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
@@ -304,12 +303,12 @@ pub(super) fn build_sequence_ffmpeg_args(
                 output_fps,
                 output_pixel_format,
             );
-            video_segments.push(VideoTimelineSegment {
-                stream_label: format!("[{}]", blank_label),
-                start_sec: 0.0,
-                end_sec: generated_visual_end_sec,
-                transition_filter: None,
-            });
+            video_segments.push(VideoTimelineSegment::new(
+                format!("[{}]", blank_label),
+                0.0,
+                generated_visual_end_sec,
+                None,
+            ));
         }
     }
 
