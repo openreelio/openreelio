@@ -5,8 +5,16 @@
 //!
 //! Uses DTW alignment to map reference shot pacing onto the source
 //! timeline, producing executable `AddTrack`, `InsertClip`, and `SplitClip`
-//! plan steps. Non-cut reference transitions currently surface as warnings until
-//! transition execution is supported by agent plans.
+//! plan steps.
+//!
+//! The same cut machinery also serves a curated
+//! [`PacingProfileSpec`](crate::core::style::PacingProfileSpec) — see
+//! [`StylePlanner::plan_from_profile`] — which is the input to reach for when
+//! there is no reference video, only an idiom to cut in. A profile can also
+//! place curated transitions, which the ESD path still cannot: a reference
+//! ESD's transition inventory records *that* a dissolve happened, never which
+//! curated recipe would reproduce it, so non-cut reference transitions stay a
+//! warning rather than a guess.
 
 use std::collections::HashSet;
 
@@ -18,6 +26,7 @@ use super::esd::{AudioFingerprint, EditingStyleDocument};
 use super::types::{AnalysisBundle, AudioProfile, ContentSegment, SegmentType};
 use crate::core::ai::agent_plan::{AgentPlan, PlanRiskLevel, PlanStep};
 use crate::core::annotations::models::ShotResult;
+use crate::core::style::PacingProfileSpec;
 use crate::core::{CoreError, CoreResult};
 
 // =============================================================================
@@ -50,6 +59,14 @@ const MIN_SPLIT_GAP_SEC: f64 = 0.05;
 
 /// Minimum distance from clip edges for a valid split.
 const MIN_SPLIT_EDGE_SEC: f64 = 0.1;
+
+/// How far a profile cut may move to land on a detected source shot change,
+/// as a fraction of the profile's target shot length.
+///
+/// Half a shot is the largest move that cannot reorder cuts: beyond it a cut
+/// could snap past its neighbour's ideal position and the pacing the profile
+/// asked for stops being recognisable.
+const SHOT_SNAP_FRACTION: f64 = 0.5;
 
 // =============================================================================
 // Types
@@ -99,6 +116,21 @@ impl StylePlanningContext {
 // Style Planner
 // =============================================================================
 
+/// Where a generated plan places its curated transitions.
+#[derive(Clone, Copy, Debug)]
+struct TransitionCadence {
+    /// Curated transition recipe id, resolved at `CommandPayload::parse`.
+    recipe: &'static str,
+    /// Place a transition every N cut boundaries, starting at the first.
+    every_n: usize,
+}
+
+/// Cut times after snapping, plus how many actually moved.
+struct SnappedCutTimes {
+    cut_times: Vec<f64>,
+    moved_count: usize,
+}
+
 /// Generates edit plans that replicate a reference editing style
 pub struct StylePlanner;
 
@@ -114,22 +146,7 @@ impl StylePlanner {
         source_bundle: &AnalysisBundle,
         context: &StylePlanningContext,
     ) -> CoreResult<StylePlanResult> {
-        if context.sequence_id.trim().is_empty() {
-            return Err(CoreError::ValidationError(
-                "Style planning requires a target sequence ID".to_string(),
-            ));
-        }
-        if context.source_asset_id.trim().is_empty() {
-            return Err(CoreError::ValidationError(
-                "Style planning requires a source asset ID".to_string(),
-            ));
-        }
-        if !source_bundle.asset_id.is_empty() && source_bundle.asset_id != context.source_asset_id {
-            return Err(CoreError::ValidationError(format!(
-                "Source bundle asset '{}' does not match planning asset '{}'",
-                source_bundle.asset_id, context.source_asset_id
-            )));
-        }
+        Self::validate_context(source_bundle, context)?;
 
         let ref_durations = &esd.rhythm_profile.shot_durations;
         let source_shots = source_bundle.shots.as_deref().unwrap_or(&[]);
@@ -235,8 +252,264 @@ impl StylePlanner {
         })
     }
 
+    /// Generates an executable [`AgentPlan`] that cuts the source footage to a
+    /// curated pacing profile.
+    ///
+    /// This is the reference-free half of style planning: instead of measuring
+    /// shot durations off a reference video, the profile states the mean shot
+    /// length, how much shots should vary, and how often to place a transition.
+    /// Everything downstream is the ESD path's machinery — the same cut
+    /// validity rules, the same `AddTrack` / `InsertClip` / `SplitClip` shape —
+    /// so a plan from a profile and a plan from a reference are the same kind
+    /// of object.
+    ///
+    /// Cut placement is deterministic: the same profile on the same source
+    /// always produces the same plan, so a review of the plan is a review of
+    /// what will execute.
+    pub fn plan_from_profile(
+        profile: &PacingProfileSpec,
+        source_bundle: &AnalysisBundle,
+        context: &StylePlanningContext,
+    ) -> CoreResult<StylePlanResult> {
+        Self::validate_context(source_bundle, context)?;
+
+        let src_total = source_bundle.metadata.duration_sec;
+        let source_shots = source_bundle.shots.as_deref().unwrap_or(&[]);
+        let mut warnings = Vec::new();
+
+        if !src_total.is_finite() || src_total <= 0.0 {
+            return Err(CoreError::ValidationError(format!(
+                "Source asset '{}' has no known duration; run analysis before planning",
+                context.source_asset_id
+            )));
+        }
+
+        if src_total < profile.target_shot_sec {
+            warnings.push(format!(
+                "Source is {:.1}s, shorter than the profile's {:.1}s target shot; the plan makes no cuts",
+                src_total, profile.target_shot_sec
+            ));
+        }
+
+        let shot_durations = Self::profile_shot_durations(profile, src_total);
+        let mut cut_times = Self::compute_scaled_cut_times(&shot_durations, src_total, src_total);
+
+        if profile.respect_shot_boundaries {
+            if source_shots.is_empty() {
+                warnings.push(format!(
+                    "Profile '{}' respects shot boundaries, but no shot detection results are \
+                     cached for this asset; cuts fall on the profile's own grid. Run `analysis \
+                     shots` first to align them with the footage",
+                    profile.id
+                ));
+            } else {
+                let snapped = Self::snap_cut_times_to_shots(
+                    &cut_times,
+                    source_shots,
+                    src_total,
+                    profile.target_shot_sec * SHOT_SNAP_FRACTION,
+                );
+                let moved = snapped.moved_count;
+                cut_times = snapped.cut_times;
+                if moved > 0 {
+                    warnings.push(format!(
+                        "Moved {} of {} cuts onto detected shot changes",
+                        moved,
+                        cut_times.len()
+                    ));
+                }
+            }
+        }
+
+        let cadence = profile
+            .active_transition()
+            .map(|(recipe, every_n)| TransitionCadence { recipe, every_n });
+
+        let steps = if cut_times.is_empty() {
+            Vec::new()
+        } else {
+            Self::generate_steps_with_transitions(context, &cut_times, cadence)
+        };
+
+        let compatibility_score = Self::profile_fidelity_score(profile, &cut_times, src_total);
+
+        let plan = AgentPlan {
+            id: uuid::Uuid::new_v4().to_string(),
+            goal: format!("Cut source footage to the '{}' pacing profile", profile.id),
+            steps,
+            approval_granted: false,
+            approval_proof: None,
+            session_id: None,
+        };
+
+        Ok(StylePlanResult {
+            plan,
+            compatibility_score,
+            warnings,
+        })
+    }
+
+    /// Validates the planning context against the bundle it will cut.
+    fn validate_context(
+        source_bundle: &AnalysisBundle,
+        context: &StylePlanningContext,
+    ) -> CoreResult<()> {
+        if context.sequence_id.trim().is_empty() {
+            return Err(CoreError::ValidationError(
+                "Style planning requires a target sequence ID".to_string(),
+            ));
+        }
+        if context.source_asset_id.trim().is_empty() {
+            return Err(CoreError::ValidationError(
+                "Style planning requires a source asset ID".to_string(),
+            ));
+        }
+        if !source_bundle.asset_id.is_empty() && source_bundle.asset_id != context.source_asset_id {
+            return Err(CoreError::ValidationError(format!(
+                "Source bundle asset '{}' does not match planning asset '{}'",
+                source_bundle.asset_id, context.source_asset_id
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Builds the shot durations a profile asks for across the whole source.
+    ///
+    /// Shot lengths alternate `target - variance/2`, `target + variance/2`, so
+    /// consecutive shots differ audibly while the mean stays on target. The
+    /// alternation is a fixed pattern rather than a random draw on purpose: a
+    /// plan an agent is expected to read, edit, and re-run has to be the same
+    /// plan every time it is generated. The result is then scaled so the shots
+    /// sum to exactly the source duration, which also corrects the imbalance an
+    /// odd shot count leaves in a two-phase pattern.
+    fn profile_shot_durations(profile: &PacingProfileSpec, src_total: f64) -> Vec<f64> {
+        let target = profile.target_shot_sec;
+        if !target.is_finite() || target <= 0.0 || !src_total.is_finite() || src_total <= 0.0 {
+            return Vec::new();
+        }
+
+        let shot_count = (src_total / target).round().max(1.0) as usize;
+        let half_swing = (profile.shot_variance_sec / 2.0).clamp(0.0, target * 0.9);
+
+        let mut durations: Vec<f64> = (0..shot_count)
+            .map(|index| {
+                if index % 2 == 0 {
+                    target - half_swing
+                } else {
+                    target + half_swing
+                }
+            })
+            .collect();
+
+        let generated_total: f64 = durations.iter().sum();
+        if generated_total > 0.0 {
+            let scale = src_total / generated_total;
+            for duration in &mut durations {
+                *duration *= scale;
+            }
+        }
+
+        durations
+    }
+
+    /// Moves each cut onto the nearest detected shot change within `tolerance`.
+    ///
+    /// A cut that lands mid-shot reads as an accident; a cut on a shot change
+    /// reads as an edit. Cuts with no shot change nearby stay where the profile
+    /// put them rather than being dragged somewhere arbitrary, and a snap that
+    /// would collide with the previous cut is dropped by the same validity
+    /// rules the ESD path uses.
+    fn snap_cut_times_to_shots(
+        cut_times: &[f64],
+        source_shots: &[ShotResult],
+        src_total: f64,
+        tolerance_sec: f64,
+    ) -> SnappedCutTimes {
+        let boundaries: Vec<f64> = source_shots
+            .iter()
+            .map(|shot| shot.end_sec)
+            .filter(|time| time.is_finite() && *time > 0.0 && *time < src_total)
+            .collect();
+
+        let mut snapped = Vec::with_capacity(cut_times.len());
+        let mut moved_count = 0usize;
+        let mut last_cut = None;
+
+        for cut_time in cut_times {
+            let nearest = boundaries
+                .iter()
+                .copied()
+                .min_by(|left, right| {
+                    (left - cut_time)
+                        .abs()
+                        .partial_cmp(&(right - cut_time).abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .filter(|boundary| (boundary - cut_time).abs() <= tolerance_sec);
+
+            let Some(selected) =
+                Self::select_cut_time(nearest, Some(*cut_time), src_total, last_cut)
+            else {
+                continue;
+            };
+
+            if (selected - *cut_time).abs() > f64::EPSILON {
+                moved_count += 1;
+            }
+            snapped.push(selected);
+            last_cut = Some(selected);
+        }
+
+        SnappedCutTimes {
+            cut_times: snapped,
+            moved_count,
+        }
+    }
+
+    /// Scores how closely the generated cuts match the profile's target.
+    ///
+    /// Unlike the ESD path there is no reference to be compatible *with*, so
+    /// the score reports fidelity instead: how close the mean generated shot is
+    /// to the length the profile asked for. A source too short to cut at all
+    /// scores 0.
+    fn profile_fidelity_score(
+        profile: &PacingProfileSpec,
+        cut_times: &[f64],
+        src_total: f64,
+    ) -> f64 {
+        if cut_times.is_empty() || src_total <= 0.0 {
+            return 0.0;
+        }
+
+        let mean_shot_sec = src_total / (cut_times.len() + 1) as f64;
+        Self::ratio_proximity(mean_shot_sec, profile.target_shot_sec)
+    }
+
     /// Generates `AddTrack`, `InsertClip`, and `SplitClip` steps.
     fn generate_steps(context: &StylePlanningContext, cut_times: &[f64]) -> Vec<PlanStep> {
+        Self::generate_steps_with_transitions(context, cut_times, None)
+    }
+
+    /// Generates the cut steps, then the transition steps a cadence asks for.
+    ///
+    /// Transitions are placed on the *outgoing* clip of a boundary, which is
+    /// what the render stitch reads: `find_transition_effect` looks at the clip
+    /// that ends at the cut, not the one that starts there. Attaching to the
+    /// incoming clip would move every transition one cut later.
+    ///
+    /// The outgoing clip of boundary `i` is whatever the split at the previous
+    /// boundary left behind — `SplitClip` keeps the original id on the left
+    /// fragment and returns the right one, so boundary 0's outgoing clip is the
+    /// inserted clip itself and boundary `i`'s is the clip the split at
+    /// boundary `i - 1` created. Each `AddEffect` therefore depends on the
+    /// split that *closes* its boundary, so the clip is already its final
+    /// length when the effect lands on it.
+    fn generate_steps_with_transitions(
+        context: &StylePlanningContext,
+        cut_times: &[f64],
+        cadence: Option<TransitionCadence>,
+    ) -> Vec<PlanStep> {
         let track_step_id = "step-0".to_string();
         let insert_step_id = "step-1".to_string();
         let track_name = if context.track_name.trim().is_empty() {
@@ -275,10 +548,16 @@ impl StylePlanner {
             },
         ];
 
-        let mut previous_tail_step_id = insert_step_id;
+        let mut previous_tail_step_id = insert_step_id.clone();
+        // Boundary `i` is closed by the split at `cut_times[i]`; its outgoing
+        // clip is whatever that split's predecessor left behind.
+        let mut outgoing_step_ids = Vec::with_capacity(cut_times.len());
+        let mut closing_step_ids = Vec::with_capacity(cut_times.len());
 
         for (index, cut_time) in cut_times.iter().enumerate() {
             let step_id = format!("step-{}", index + 2);
+            outgoing_step_ids.push(previous_tail_step_id.clone());
+            closing_step_ids.push(step_id.clone());
             steps.push(PlanStep {
                 id: step_id.clone(),
                 tool_name: "SplitClip".to_string(),
@@ -297,6 +576,34 @@ impl StylePlanner {
                 optional: false,
             });
             previous_tail_step_id = step_id;
+        }
+
+        let Some(cadence) = cadence.filter(|cadence| cadence.every_n > 0) else {
+            return steps;
+        };
+
+        let mut transition_index = 0usize;
+        for boundary in (0..cut_times.len()).step_by(cadence.every_n) {
+            let step_id = format!("step-{}", cut_times.len() + 2 + transition_index);
+            transition_index += 1;
+
+            steps.push(PlanStep {
+                id: step_id,
+                tool_name: "AddEffect".to_string(),
+                params: serde_json::json!({
+                    "sequenceId": context.sequence_id.clone(),
+                    "trackId": step_reference(&track_step_id, "createdIds.0"),
+                    "clipId": step_reference(&outgoing_step_ids[boundary], "createdIds.0"),
+                    "recipe": cadence.recipe,
+                }),
+                description: format!(
+                    "Place the '{}' transition on the cut at {:.2}s",
+                    cadence.recipe, cut_times[boundary]
+                ),
+                risk_level: PlanRiskLevel::Low,
+                depends_on: vec![closing_step_ids[boundary].clone()],
+                optional: false,
+            });
         }
 
         steps
@@ -946,5 +1253,262 @@ mod tests {
         assert_eq!(parsed.plan.steps.len(), 1);
         assert!((parsed.compatibility_score - 0.85).abs() < 1e-10);
         assert_eq!(parsed.warnings.len(), 1);
+    }
+
+    // =========================================================================
+    // Pacing profile planning
+    // =========================================================================
+
+    fn profile(id: &str) -> &'static crate::core::style::PacingProfileSpec {
+        crate::core::style::resolve_pacing_profile(id).expect("profile resolves")
+    }
+
+    fn plain_bundle(duration_sec: f64) -> AnalysisBundle {
+        AnalysisBundle::new(
+            "src-asset",
+            VideoMetadata::new(duration_sec).with_audio(true),
+        )
+    }
+
+    fn split_times(plan: &AgentPlan) -> Vec<f64> {
+        plan.steps
+            .iter()
+            .filter(|step| step.tool_name == "SplitClip")
+            .map(|step| step.params["splitTime"].as_f64().expect("split time"))
+            .collect()
+    }
+
+    fn transition_steps(plan: &AgentPlan) -> Vec<&PlanStep> {
+        plan.steps
+            .iter()
+            .filter(|step| step.tool_name == "AddEffect")
+            .collect()
+    }
+
+    #[test]
+    fn a_profile_plan_cuts_near_its_target_shot_length() {
+        let bundle = plain_bundle(60.0);
+        let context = StylePlanningContext::new("seq-1", "src-asset");
+
+        let result =
+            StylePlanner::plan_from_profile(profile("steady-documentary"), &bundle, &context)
+                .expect("plan generates");
+
+        let cuts = split_times(&result.plan);
+        assert!(!cuts.is_empty(), "a 60s source must be cut");
+
+        let mean_shot = 60.0 / (cuts.len() + 1) as f64;
+        assert!(
+            (mean_shot - 4.5).abs() < 1.0,
+            "mean shot {mean_shot} should sit near the 4.5s target"
+        );
+    }
+
+    #[test]
+    fn profile_planning_is_deterministic() {
+        let bundle = make_test_bundle(vec![3.0, 4.0, 2.5, 6.0, 5.0], vec![]);
+        let context = StylePlanningContext::new("seq-1", "src-asset");
+
+        let first = StylePlanner::plan_from_profile(profile("dynamic-social"), &bundle, &context)
+            .expect("plan generates");
+        let second = StylePlanner::plan_from_profile(profile("dynamic-social"), &bundle, &context)
+            .expect("plan generates");
+
+        assert_eq!(split_times(&first.plan), split_times(&second.plan));
+        assert_eq!(
+            first.plan.steps.len(),
+            second.plan.steps.len(),
+            "the same profile on the same source must plan the same edit"
+        );
+    }
+
+    #[test]
+    fn shot_lengths_alternate_around_the_target() {
+        let bundle = plain_bundle(60.0);
+        let context = StylePlanningContext::new("seq-1", "src-asset");
+
+        let result = StylePlanner::plan_from_profile(profile("calm-longform"), &bundle, &context)
+            .expect("plan generates");
+
+        let cuts = split_times(&result.plan);
+        assert!(cuts.len() >= 2, "expected several cuts, got {cuts:?}");
+
+        let mut lengths = Vec::new();
+        let mut previous = 0.0;
+        for cut in &cuts {
+            lengths.push(cut - previous);
+            previous = *cut;
+        }
+
+        // A variance-carrying profile must not produce a metronome.
+        let shortest = lengths.iter().cloned().fold(f64::MAX, f64::min);
+        let longest = lengths.iter().cloned().fold(f64::MIN, f64::max);
+        assert!(
+            longest - shortest > 0.5,
+            "calm-longform declares 2s of swing but produced {lengths:?}"
+        );
+    }
+
+    #[test]
+    fn a_boundary_respecting_profile_snaps_cuts_onto_detected_shots() {
+        // Shot changes every 5s; the profile's own 2.5s grid lands half its
+        // cuts between them, so those have to move onto the real changes.
+        let bundle = make_test_bundle(vec![5.0; 6], vec![]);
+        let context = StylePlanningContext::new("seq-1", "src-asset");
+
+        let result = StylePlanner::plan_from_profile(profile("dynamic-social"), &bundle, &context)
+            .expect("plan generates");
+
+        let boundaries: Vec<f64> = (1..6).map(|index| index as f64 * 5.0).collect();
+        let snapped = split_times(&result.plan)
+            .into_iter()
+            .filter(|cut| {
+                boundaries
+                    .iter()
+                    .any(|boundary| (boundary - cut).abs() < 0.01)
+            })
+            .count();
+
+        assert!(
+            snapped > 0,
+            "a boundary-respecting profile must land cuts on detected shot changes"
+        );
+    }
+
+    #[test]
+    fn a_boundary_respecting_profile_says_so_when_there_are_no_shots() {
+        let bundle = plain_bundle(40.0);
+        let context = StylePlanningContext::new("seq-1", "src-asset");
+
+        let result =
+            StylePlanner::plan_from_profile(profile("steady-documentary"), &bundle, &context)
+                .expect("plan generates");
+
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("analysis") && warning.contains("shots")),
+            "the warning must name the command that fixes it: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn a_hard_cut_profile_emits_no_transition_steps() {
+        let bundle = plain_bundle(30.0);
+        let context = StylePlanningContext::new("seq-1", "src-asset");
+
+        for profile_id in ["shorts-hook-fast", "music-montage"] {
+            let result = StylePlanner::plan_from_profile(profile(profile_id), &bundle, &context)
+                .expect("plan generates");
+            assert!(
+                transition_steps(&result.plan).is_empty(),
+                "profile '{profile_id}' must cut hard"
+            );
+        }
+    }
+
+    #[test]
+    fn transitions_land_every_n_boundaries_on_the_outgoing_clip() {
+        let bundle = plain_bundle(60.0);
+        let context = StylePlanningContext::new("seq-1", "src-asset");
+
+        let spec = profile("calm-longform");
+        let (recipe, every_n) = spec
+            .active_transition()
+            .expect("profile places transitions");
+
+        let result =
+            StylePlanner::plan_from_profile(spec, &bundle, &context).expect("plan generates");
+        let cut_count = split_times(&result.plan).len();
+        let transitions = transition_steps(&result.plan);
+
+        assert_eq!(
+            transitions.len(),
+            cut_count.div_ceil(every_n),
+            "expected one transition every {every_n} of {cut_count} cuts"
+        );
+
+        for step in &transitions {
+            assert_eq!(step.params["recipe"].as_str(), Some(recipe));
+            assert!(
+                step.params["clipId"]["$fromStep"].is_string(),
+                "a transition must reference the clip a previous step created: {}",
+                step.params
+            );
+        }
+
+        // Boundary 0's outgoing clip is the inserted clip itself: `SplitClip`
+        // leaves the original id on the left fragment.
+        assert_eq!(
+            transitions[0].params["clipId"]["$fromStep"].as_str(),
+            Some("step-1"),
+        );
+    }
+
+    #[test]
+    fn every_transition_step_waits_for_the_split_that_closes_its_boundary() {
+        let bundle = plain_bundle(60.0);
+        let context = StylePlanningContext::new("seq-1", "src-asset");
+
+        let result = StylePlanner::plan_from_profile(profile("dynamic-social"), &bundle, &context)
+            .expect("plan generates");
+
+        let step_ids: std::collections::HashSet<&str> = result
+            .plan
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect();
+
+        for step in transition_steps(&result.plan) {
+            assert_eq!(step.depends_on.len(), 1, "step '{}'", step.id);
+            let dependency = &step.depends_on[0];
+            assert!(
+                step_ids.contains(dependency.as_str()),
+                "step '{}' depends on unknown step '{dependency}'",
+                step.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_shorter_than_one_shot_plans_nothing_and_says_why() {
+        let bundle = plain_bundle(2.0);
+        let context = StylePlanningContext::new("seq-1", "src-asset");
+
+        let result = StylePlanner::plan_from_profile(profile("calm-longform"), &bundle, &context)
+            .expect("plan generates");
+
+        assert!(result.plan.steps.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("shorter")),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn planning_without_a_source_duration_is_rejected() {
+        let bundle = plain_bundle(0.0);
+        let context = StylePlanningContext::new("seq-1", "src-asset");
+
+        let error = StylePlanner::plan_from_profile(profile("dynamic-social"), &bundle, &context)
+            .expect_err("a zero-length source cannot be cut");
+
+        assert!(format!("{error}").contains("analysis"), "{error}");
+    }
+
+    #[test]
+    fn a_mismatched_bundle_asset_is_rejected() {
+        let bundle = plain_bundle(30.0);
+        let context = StylePlanningContext::new("seq-1", "other-asset");
+
+        StylePlanner::plan_from_profile(profile("dynamic-social"), &bundle, &context)
+            .expect_err("bundle and context must agree on the asset");
     }
 }

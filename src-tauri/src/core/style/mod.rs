@@ -12,6 +12,8 @@
 //!   that pass `CaptionSafeAreaRule` on both landscape and vertical canvases.
 //! - [`transition_recipes`] — transition [`EffectType`] plus the parameters the
 //!   FFmpeg filter builder actually reads.
+//! - [`pacing_profiles`] — target shot length, variance, and transition cadence:
+//!   the four decisions an automated cut has to make, answered as one name.
 //! - [`text_presets`] — typed [`TextClipData`](crate::core::text::TextClipData)
 //!   overlays: typography, anchor, shadow, outline, starter copy, and a
 //!   suggested duration.
@@ -39,6 +41,7 @@
 //! is the entry point for that case.
 
 pub mod caption_packs;
+pub mod pacing_profiles;
 pub mod text_presets;
 pub mod transition_recipes;
 
@@ -55,6 +58,10 @@ use crate::core::text::{TextClipData, TextOutline, TextShadow, TextStyle};
 pub use caption_packs::{
     caption_pack_ids, list_caption_packs, resolve_caption_pack, CaptionPackDescriptor,
     CaptionPackSpec, CAPTION_PACKS,
+};
+pub use pacing_profiles::{
+    list_pacing_profiles, pacing_profile_ids, resolve_pacing_profile, PacingProfileDescriptor,
+    PacingProfileSpec, PACING_PROFILES,
 };
 pub use text_presets::{
     list_text_presets, resolve_text_preset, text_preset_ids, text_preset_keys, TextPresetCategory,
