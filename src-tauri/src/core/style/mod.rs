@@ -12,6 +12,9 @@
 //!   that pass `CaptionSafeAreaRule` on both landscape and vertical canvases.
 //! - [`transition_recipes`] — transition [`EffectType`] plus the parameters the
 //!   FFmpeg filter builder actually reads.
+//! - [`text_presets`] — typed [`TextClipData`](crate::core::text::TextClipData)
+//!   overlays: typography, anchor, shadow, outline, starter copy, and a
+//!   suggested duration.
 //!
 //! # Layering
 //!
@@ -36,6 +39,7 @@
 //! is the entry point for that case.
 
 pub mod caption_packs;
+pub mod text_presets;
 pub mod transition_recipes;
 
 #[cfg(test)]
@@ -46,15 +50,27 @@ use std::collections::HashMap;
 use serde_json::{Map, Value};
 
 use crate::core::effects::{EffectType, ParamValue};
+use crate::core::text::TextClipData;
 
 pub use caption_packs::{
     caption_pack_ids, list_caption_packs, resolve_caption_pack, CaptionPackDescriptor,
     CaptionPackSpec, CAPTION_PACKS,
 };
+pub use text_presets::{
+    list_text_presets, resolve_text_preset, text_preset_ids, text_preset_keys, TextPresetCategory,
+    TextPresetDescriptor, TextPresetSpec, TEXT_PRESETS,
+};
 pub use transition_recipes::{
     list_transition_recipes, resolve_transition_recipe, transition_recipe_ids, RecipeParam,
     TransitionRecipeDescriptor, TransitionRecipeSpec, TRANSITION_RECIPES,
 };
+
+/// The preset id that means "no preset", accepted everywhere a preset is named.
+///
+/// The CLI has always defaulted `--preset` to this word and the agent tool enums
+/// advertise it, so the payload boundary accepts it too rather than rejecting a
+/// spelling every other surface teaches.
+pub const NO_TEXT_PRESET: &str = "default";
 
 /// Normalizes a pack or recipe identifier for matching.
 ///
@@ -215,6 +231,71 @@ pub fn resolve_effect_recipe(
         effect_type: Some(recipe.effect_type.clone()),
         params: merged,
     })
+}
+
+/// Resolves a text preset against caller-supplied text clip data.
+///
+/// The preset is the base layer; `text_data` overrides it field by field, and
+/// nested objects (`style`, `position`, `shadow`, `outline`) merge key by key
+/// rather than replacing wholesale — `{"style":{"fontSize":64}}` on top of
+/// `quote` is the quote preset at 64pt, not a style with one field. An explicit
+/// `null` clears an optional layer, so `{"shadow":null}` drops the preset's
+/// shadow.
+///
+/// Without a preset this is just the strict `TextClipData` parse the payload
+/// always did, so `text_data` stays required in that case.
+///
+/// Returns an error naming every valid preset id when `preset` is unknown.
+pub fn resolve_text_clip_data(
+    preset: Option<&str>,
+    text_data: Option<Value>,
+) -> Result<TextClipData, String> {
+    let preset_id = preset
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && !normalize_pack_id(id).eq(NO_TEXT_PRESET));
+
+    let Some(preset_id) = preset_id else {
+        let text_data = text_data
+            .filter(|value| !value.is_null())
+            .ok_or_else(|| "textData is required unless a preset is named".to_string())?;
+        return serde_json::from_value(text_data)
+            .map_err(|error| format!("Invalid textData: {error}"));
+    };
+
+    let preset = resolve_text_preset(preset_id)?;
+
+    let mut base = serde_json::to_value(preset.default_clip_data())
+        .map_err(|error| format!("Failed to serialize text preset: {error}"))?;
+    merge_json_deep(&mut base, text_data.filter(|value| !value.is_null()));
+
+    serde_json::from_value(base)
+        .map_err(|error| format!("Invalid textData for preset '{}': {error}", preset.id))
+}
+
+/// Merges `overrides` onto `base` recursively, key by key.
+///
+/// Objects merge; everything else replaces, so an explicit `null` clears the
+/// key it names and a scalar wins outright.
+fn merge_json_deep(base: &mut Value, overrides: Option<Value>) {
+    let Some(overrides) = overrides else {
+        return;
+    };
+
+    match (base, overrides) {
+        (Value::Object(base_object), Value::Object(override_object)) => {
+            for (key, value) in override_object {
+                match base_object.get_mut(&key) {
+                    Some(existing) if existing.is_object() && value.is_object() => {
+                        merge_json_deep(existing, Some(value));
+                    }
+                    _ => {
+                        base_object.insert(key, value);
+                    }
+                }
+            }
+        }
+        (base, overrides) => *base = overrides,
+    }
 }
 
 /// Renders an effect type for an error message.
@@ -579,6 +660,69 @@ mod tests {
             Some("wipe-down"),
             first.effect_type.clone(),
             first.params.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn absent_text_preset_parses_the_given_clip_data_unchanged() {
+        let text_data = serde_json::json!({
+            "content": "Hand assembled",
+            "style": { "fontFamily": "Arial", "fontSize": 30, "color": "#FFFFFF" },
+            "position": { "x": 0.2, "y": 0.7 },
+        });
+
+        let resolved = resolve_text_clip_data(None, Some(text_data)).expect("resolves");
+
+        assert_eq!(resolved.content, "Hand assembled");
+        assert_eq!(resolved.style.font_size, 30);
+        assert_eq!(resolved.position.x, 0.2);
+    }
+
+    #[test]
+    fn the_no_preset_sentinel_is_accepted_in_every_spelling() {
+        let text_data = serde_json::json!({
+            "content": "Plain",
+            "style": { "fontFamily": "Arial", "fontSize": 30, "color": "#FFFFFF" },
+            "position": { "x": 0.5, "y": 0.5 },
+        });
+
+        for spelling in ["default", "DEFAULT", "  default  "] {
+            let resolved = resolve_text_clip_data(Some(spelling), Some(text_data.clone()))
+                .unwrap_or_else(|error| panic!("'{spelling}' must resolve: {error}"));
+            assert_eq!(resolved.style.font_size, 30);
+        }
+    }
+
+    #[test]
+    fn a_nested_text_override_merges_instead_of_replacing_its_object() {
+        // A partial style has to leave the rest of the preset's typography
+        // intact; replacing the object outright would fail to deserialize and,
+        // worse, would silently drop the look the caller asked for by name.
+        let resolved = resolve_text_clip_data(
+            Some("tech-style"),
+            Some(serde_json::json!({ "style": { "color": "#FF00FF" } })),
+        )
+        .expect("resolves");
+
+        assert_eq!(resolved.style.color, "#FF00FF");
+        assert_eq!(resolved.style.font_family, "Courier New");
+        assert_eq!(resolved.style.font_size, 36);
+    }
+
+    #[test]
+    fn resolution_is_idempotent_for_text_presets() {
+        let first = resolve_text_clip_data(
+            Some("credits-block"),
+            Some(serde_json::json!({ "content": "Directed by" })),
+        )
+        .unwrap();
+
+        let second = resolve_text_clip_data(
+            Some("credits-block"),
+            Some(serde_json::to_value(&first).unwrap()),
         )
         .unwrap();
 

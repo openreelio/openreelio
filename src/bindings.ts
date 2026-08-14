@@ -3148,6 +3148,11 @@ trackingSourceId?: string | null }
  * Creates a new clip with a virtual text asset and applies a TextOverlay
  * effect containing the text styling data.
  * 
+ * A curated text preset id may stand in for most of `textData`; explicit
+ * fields override the preset key by key. The preset is resolved during
+ * deserialization, so what reaches the op log is the concrete `TextClipData`
+ * the preset produced and never the id — replay does not consult the registry.
+ * 
  * # Example
  * 
  * ```json
@@ -3166,6 +3171,22 @@ trackingSourceId?: string | null }
  * }
  * }
  * ```
+ * 
+ * The same clip from a preset, where only the copy is the caller's business:
+ * 
+ * ```json
+ * {
+ * "sequenceId": "seq_001",
+ * "trackId": "video_001",
+ * "timelineIn": 5.0,
+ * "duration": 3.0,
+ * "preset": "quote",
+ * "textData": { "content": "Hello World" }
+ * }
+ * ```
+ * 
+ * Unknown fields are rejected by the wire shape this deserializes from, and
+ * `timelineStart` is accepted there as an alias for `timelineIn`.
  */
 export type AddTextClipPayload = { sequenceId: string; trackId: string; 
 /**
@@ -3177,7 +3198,18 @@ timelineIn: number;
  */
 duration: number; 
 /**
+ * Curated text preset id or alias, resolved into `text_data` on parse.
+ * 
+ * Always `None` after deserialization: the preset has been expanded into
+ * concrete values by then, and keeping the id would put a registry lookup
+ * between the op log and the clip it describes.
+ */
+preset?: string | null; 
+/**
  * Text content and styling data
+ * 
+ * Required unless `preset` names a preset, in which case it carries only
+ * the fields that override the preset.
  */
 textData: TextClipData }
 /**
