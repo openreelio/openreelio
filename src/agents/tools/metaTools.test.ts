@@ -223,9 +223,8 @@ describe('metaTools', () => {
 
     const visible = getVisibleMetaToolNames();
 
-    expect(visible).toEqual(['query', 'edit', 'audio', 'effects', 'text']);
+    expect(visible).toEqual(['query', 'edit', 'audio', 'effects', 'text', 'execute_plan']);
     expect(visible).not.toContain('generate');
-    expect(visible).not.toContain('execute_plan');
   });
 
   it('exposes the generate meta-tool when video generation is enabled', () => {
@@ -235,11 +234,31 @@ describe('metaTools', () => {
       const visible = getVisibleMetaToolNames();
 
       expect(visible).toContain('generate');
-      // Legacy compatibility tools stay hidden regardless of the flag.
-      expect(visible).not.toContain('execute_plan');
+      expect(visible).toContain('execute_plan');
     } finally {
       resetFeatureFlags();
     }
+  });
+
+  it('offers execute_plan as a batch surface the LLM can see', () => {
+    resetFeatureFlags();
+
+    expect(getVisibleMetaToolNames()).toContain('execute_plan');
+  });
+
+  it('refuses to run a plan without the atomic backend path', async () => {
+    const executePlan = globalToolRegistry.get('execute_plan');
+    expect(executePlan).toBeDefined();
+
+    const result = await executePlan!.handler(
+      {
+        steps: [{ id: 'step-1', toolName: 'split_clip', params: { clipId: 'clip-1' } }],
+      },
+      {},
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('USE_BACKEND_TOOLS');
   });
 
   it('forwards execution context from generate meta-tool to the underlying action', async () => {

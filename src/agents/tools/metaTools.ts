@@ -879,82 +879,18 @@ const META_TOOLS: ToolDefinition[] = [
       },
       required: ['steps'],
     },
-    handler: async (args) => {
-      const steps = args.steps as Array<{
-        id: string;
-        toolName: string;
-        params: Record<string, unknown>;
-        dependsOn?: string[];
-      }>;
-
-      if (!Array.isArray(steps) || steps.length === 0) {
-        return { success: false, error: 'steps must be a non-empty array' };
-      }
-
-      const results: Array<{ stepId: string; success: boolean; result?: unknown; error?: string }> =
-        [];
-      const completed = new Set<string>();
-
-      for (const step of steps) {
-        // Check dependencies
-        if (step.dependsOn) {
-          for (const dep of step.dependsOn) {
-            if (!completed.has(dep)) {
-              return {
-                success: false,
-                error: `Step '${step.id}' depends on '${dep}' which has not completed`,
-                result: { completedSteps: results },
-              };
-            }
-          }
-        }
-
-        if (step.toolName === 'execute_plan') {
-          return {
-            success: false,
-            error: `Step '${step.id}': execute_plan cannot call itself`,
-            result: { completedSteps: results },
-          };
-        }
-
-        const toolDef = globalToolRegistry.get(step.toolName);
-        if (!toolDef) {
-          return {
-            success: false,
-            error: `Step '${step.id}': unknown tool '${step.toolName}'`,
-            result: { completedSteps: results },
-          };
-        }
-
-        try {
-          const stepResult = await globalToolRegistry.execute(step.toolName, step.params, {});
-          results.push({ stepId: step.id, ...stepResult });
-          if (!stepResult.success) {
-            return {
-              success: false,
-              error: `Step '${step.id}' (${step.toolName}) failed: ${stepResult.error}`,
-              result: { completedSteps: results },
-            };
-          }
-          completed.add(step.id);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          return {
-            success: false,
-            error: `Step '${step.id}' (${step.toolName}) threw: ${msg}`,
-            result: { completedSteps: results },
-          };
-        }
-      }
-
-      return {
-        success: true,
-        result: {
-          stepsExecuted: results.length,
-          stepResults: results,
-        },
-      };
-    },
+    // The real implementation is the BackendToolExecutor intercept, which
+    // promotes the steps into a single atomic backend plan. This handler is
+    // only reached when that intercept is not in the chain, and a sequential
+    // best-effort loop here would silently apply half a plan with no rollback —
+    // the exact failure execute_plan exists to prevent. So it refuses.
+    handler: async () => ({
+      success: false,
+      error:
+        'execute_plan requires the backend tool path for atomic execution with rollback. ' +
+        'Enable the USE_BACKEND_TOOLS feature flag, or issue the steps as individual tool calls ' +
+        'knowing they are not atomic.',
+    }),
   },
 ];
 
@@ -983,7 +919,6 @@ export function unregisterMetaTools(): void {
 
 /** Pre-computed meta-tool names (static after module load). */
 const META_TOOL_NAMES: readonly string[] = META_TOOLS.map((t) => t.name);
-const LEGACY_META_TOOL_NAMES = new Set(['execute_plan']);
 
 /**
  * Meta-tools gated behind feature flags. These remain registered for direct
@@ -991,8 +926,19 @@ const LEGACY_META_TOOL_NAMES = new Set(['execute_plan']);
  */
 const FLAG_GATED_META_TOOL_NAMES = new Set(['generate']);
 const VISIBLE_META_TOOL_NAMES: readonly string[] = META_TOOL_NAMES.filter(
-  (name) => !LEGACY_META_TOOL_NAMES.has(name) && !FLAG_GATED_META_TOOL_NAMES.has(name),
+  (name) => !FLAG_GATED_META_TOOL_NAMES.has(name),
 );
+
+/**
+ * Meta-tools that dispatch through an `action` argument.
+ *
+ * `execute_plan` is a meta-tool but is not action-dispatching: it carries
+ * `steps`, so callers that resolve a meta-call to the tool it really runs must
+ * skip it rather than read a nonexistent action.
+ */
+const ACTION_DISPATCHING_META_TOOL_NAMES: readonly string[] = META_TOOLS.filter((tool) =>
+  Object.prototype.hasOwnProperty.call(tool.parameters.properties ?? {}, 'action'),
+).map((tool) => tool.name);
 
 /**
  * Get the names of all meta-tools.
@@ -1002,20 +948,23 @@ export function getMetaToolNames(): readonly string[] {
 }
 
 /**
+ * Get the meta-tools whose real target is named by their `action` argument.
+ */
+export function getActionDispatchingMetaToolNames(): readonly string[] {
+  return ACTION_DISPATCHING_META_TOOL_NAMES;
+}
+
+/**
  * Get the meta-tools that should be visible to the default runtime prompt
- * surface. Legacy compatibility tools remain registered but hidden. Speculative
- * meta-tools (e.g. `generate`) are only advertised when their feature flag is on
- * so the LLM does not see capabilities that are pinned off for release.
+ * surface. Speculative meta-tools (e.g. `generate`) are only advertised when
+ * their feature flag is on so the LLM does not see capabilities that are pinned
+ * off for release.
  */
 export function getVisibleMetaToolNames(): readonly string[] {
   if (isVideoGenerationEnabled()) {
     // `generate` is the only video-generation-gated meta-tool today; re-add it
-    // in flag-declaration order so the visible surface stays stable.
-    return META_TOOL_NAMES.filter((name) => !LEGACY_META_TOOL_NAMES.has(name));
+    // in declaration order so the visible surface stays stable.
+    return META_TOOL_NAMES;
   }
   return VISIBLE_META_TOOL_NAMES;
-}
-
-export function isLegacyMetaToolName(name: string): boolean {
-  return LEGACY_META_TOOL_NAMES.has(name);
 }

@@ -83,11 +83,18 @@ function createFrontendExecutor(tools: ToolInfo[]): IToolExecutor {
 describe('BackendToolExecutor visibility', () => {
   beforeEach(() => {
     mockIsMetaToolsEnabled.mockReturnValue(true);
-    mockGetVisibleMetaToolNames.mockReturnValue(['query', 'edit', 'audio', 'effects', 'text']);
+    mockGetVisibleMetaToolNames.mockReturnValue([
+      'query',
+      'edit',
+      'audio',
+      'effects',
+      'text',
+      'execute_plan',
+    ]);
     mockGetWorkspaceToolNames.mockReturnValue(['list_workspace_documents']);
   });
 
-  it('hides execute_plan from the default meta-tool surface', () => {
+  it('shows execute_plan and hides individual tools on the default meta-tool surface', () => {
     const frontend = createFrontendExecutor([
       createToolInfo('query', 'analysis'),
       createToolInfo('edit', 'timeline'),
@@ -99,7 +106,7 @@ describe('BackendToolExecutor visibility', () => {
     const backend = new BackendToolExecutor(frontend);
     const visibleNames = backend.getAvailableTools().map((tool) => tool.name);
 
-    expect(visibleNames).toEqual(['query', 'edit', 'list_workspace_documents']);
+    expect(visibleNames).toEqual(['query', 'edit', 'execute_plan', 'list_workspace_documents']);
   });
 
   it('keeps category-specific tool reads unfiltered', () => {
