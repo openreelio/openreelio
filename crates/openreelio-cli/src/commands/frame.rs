@@ -2,7 +2,11 @@
 //!
 //! Gives agents a way to *see* the project: single stills from a source asset
 //! or a timeline position, batches of stills, and contact sheets that map grid
-//! cells back to timeline timecodes.
+//! cells back to timecodes.
+//!
+//! With `--file` the same selectors read an already rendered video instead of
+//! the timeline. That is the judging path: it inspects the artifact that was
+//! actually produced, in the file's own timebase, without re-rendering anything.
 
 use crate::ffmpeg_env::ensure_ffmpeg;
 use crate::output;
@@ -92,6 +96,10 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub out: PathBuf,
 
+    /// Rendered video file to extract from instead of the project timeline
+    #[arg(long, conflicts_with_all = ["asset", "source_time", "sequence", "mode"])]
+    pub file: Option<PathBuf>,
+
     /// Asset ID to extract from (requires --source-time)
     #[arg(long, requires = "source_time", conflicts_with_all = ["time", "times", "grid"])]
     pub asset: Option<String>,
@@ -112,9 +120,9 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub sequence: Option<String>,
 
-    /// Timeline extraction mode: fast (topmost clip only) or composite (full render)
-    #[arg(long, default_value = "fast")]
-    pub mode: String,
+    /// Timeline extraction mode: fast (default, topmost clip only) or composite (full render)
+    #[arg(long)]
+    pub mode: Option<String>,
 
     /// Maximum output width in pixels (aspect ratio preserved, never upscaled)
     #[arg(long)]
@@ -172,6 +180,18 @@ enum TimelineMode {
 }
 
 impl TimelineMode {
+    /// Resolves `--mode`, defaulting to the cheap topmost-clip path.
+    ///
+    /// The default lives here rather than in clap so an explicitly passed
+    /// `--mode` stays distinguishable from an absent one, which is what lets
+    /// `--file` reject it as irrelevant.
+    fn resolve(raw: Option<&str>) -> anyhow::Result<Self> {
+        match raw {
+            Some(value) => Self::parse(value),
+            None => Ok(Self::Fast),
+        }
+    }
+
     fn parse(raw: &str) -> anyhow::Result<Self> {
         match raw.trim().to_lowercase().as_str() {
             "fast" => Ok(Self::Fast),
@@ -361,7 +381,7 @@ fn resolve_selection(args: &ExtractArgs) -> anyhow::Result<Selection> {
 fn extract(args: ExtractArgs) -> anyhow::Result<()> {
     let selection = resolve_selection(&args)?;
     let format = resolve_image_format(args.format.as_deref(), &args.out)?;
-    let mode = TimelineMode::parse(&args.mode)?;
+    let mode = TimelineMode::resolve(args.mode.as_deref())?;
     if let Some(max_width) = args.max_width {
         if max_width == 0 {
             return Err(anyhow::anyhow!(
@@ -371,13 +391,22 @@ fn extract(args: ExtractArgs) -> anyhow::Result<()> {
     }
 
     let ffmpeg_info = ensure_ffmpeg()?;
-    let project = super::load_project(&args.path)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| anyhow::anyhow!("Failed to create Tokio runtime: {error}"))?;
     let runner = FFmpegRunner::new(ffmpeg_info);
+
+    // A rendered file is self-contained, so the judge path never opens the
+    // project: it costs an ops replay it has no use for, and it keeps sheeting a
+    // finished render independent of whatever the project is doing meanwhile.
+    if let Some(file) = args.file.clone() {
+        let result = runtime.block_on(run_file_mode(&runner, &file, &args, format, &selection))?;
+        return output::print_json_pretty(&result);
+    }
+
+    let project = super::load_project(&args.path)?;
 
     let result = match selection {
         Selection::AssetTime {
@@ -414,6 +443,239 @@ fn extract(args: ExtractArgs) -> anyhow::Result<()> {
     };
 
     output::print_json_pretty(&result)
+}
+
+/// A rendered file used as the extraction source, with the facts needed to
+/// validate requests against it.
+struct FileSource {
+    path: PathBuf,
+    duration_sec: f64,
+}
+
+impl FileSource {
+    /// Probes `file` and rejects anything a still cannot be taken from.
+    async fn probe(runner: &FFmpegRunner, file: &Path) -> anyhow::Result<Self> {
+        if !file.exists() {
+            return Err(anyhow::anyhow!(
+                "Render file '{}' not found",
+                file.display()
+            ));
+        }
+
+        let info = runner
+            .probe(file)
+            .await
+            .map_err(|error| anyhow::anyhow!("Failed to probe '{}': {}", file.display(), error))?;
+        if info.video.is_none() {
+            return Err(anyhow::anyhow!(
+                "'{}' has no video stream, so there is no frame to extract",
+                file.display()
+            ));
+        }
+        if !(info.duration_sec > 0.0) {
+            return Err(anyhow::anyhow!(
+                "'{}' reports no duration, so there is no frame to extract",
+                file.display()
+            ));
+        }
+
+        Ok(Self {
+            path: file.to_path_buf(),
+            duration_sec: info.duration_sec,
+        })
+    }
+
+    /// Rejects requested times the file has no frame at.
+    ///
+    /// The message names the file's real duration: a judge working from a
+    /// partial render needs to see that the range it asked for does not exist
+    /// rather than a decoder error.
+    fn ensure_times_inside(&self, times: &[f64]) -> anyhow::Result<()> {
+        if let Some(before) = times.iter().find(|time| **time < 0.0) {
+            return Err(anyhow::anyhow!(
+                "Requested time {:.3}s is before the start of '{}'",
+                before,
+                self.path.display()
+            ));
+        }
+        if let Some(past_end) = times.iter().find(|time| **time >= self.duration_sec) {
+            return Err(anyhow::anyhow!(
+                "Requested time {:.3}s is at or past the end of '{}' ({:.3}s). Ask for a time inside the file.",
+                past_end,
+                self.path.display(),
+                self.duration_sec
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Fast-seeks to `time_sec` and writes the frame, reporting its size.
+    async fn extract(
+        &self,
+        runner: &FFmpegRunner,
+        time_sec: f64,
+        output_path: &Path,
+        max_width: u32,
+    ) -> anyhow::Result<(u32, u32)> {
+        runner
+            .extract_frame_with_options(
+                &self.path,
+                time_sec,
+                output_path,
+                &FrameExtractOptions {
+                    overwrite: true,
+                    max_width: Some(max_width),
+                    quality: None,
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("Frame extraction failed: {}", error))?;
+
+        Ok(probed_image_dimensions(runner, output_path)
+            .await
+            .unwrap_or((0, 0)))
+    }
+
+    fn describe(&self) -> serde_json::Value {
+        serde_json::json!({
+            "path": self.path.display().to_string(),
+            "durationSec": self.duration_sec,
+        })
+    }
+}
+
+/// Extracts stills or a contact sheet from a rendered file rather than the
+/// project timeline.
+///
+/// This is the cheap judging path: the frames come from the artifact that was
+/// actually produced, so no per-cell timeline render is involved and what the
+/// judge sees is exactly what `verify --file` measured. All times are in the
+/// file's own timebase.
+async fn run_file_mode(
+    runner: &FFmpegRunner,
+    file: &Path,
+    args: &ExtractArgs,
+    format: ImageFormat,
+    selection: &Selection,
+) -> anyhow::Result<serde_json::Value> {
+    let source = FileSource::probe(runner, file).await?;
+    let max_width = args.max_width.unwrap_or(DEFAULT_MAX_WIDTH);
+
+    match selection {
+        Selection::AssetTime { .. } => Err(anyhow::anyhow!(
+            "--file reads a rendered video, so it cannot be combined with --asset"
+        )),
+        Selection::SingleTime(time) => {
+            source.ensure_times_inside(std::slice::from_ref(time))?;
+            let output_path = resolve_single_output_path(&args.out, *time, format)?;
+            let (width, height) = source
+                .extract(runner, *time, &output_path, max_width)
+                .await?;
+
+            Ok(file_frames_payload(
+                &source,
+                vec![FileFrameEntry {
+                    index: 0,
+                    file_sec: *time,
+                    path: output_path.display().to_string(),
+                    width,
+                    height,
+                }],
+            ))
+        }
+        Selection::BatchTimes(times) => {
+            source.ensure_times_inside(times)?;
+            std::fs::create_dir_all(&args.out).map_err(|error| {
+                anyhow::anyhow!(
+                    "Failed to create output directory '{}': {}",
+                    args.out.display(),
+                    error
+                )
+            })?;
+
+            let mut frames = Vec::with_capacity(times.len());
+            for (index, time) in times.iter().enumerate() {
+                let output_path = args.out.join(batch_frame_name(*time, &format));
+                let (width, height) = source
+                    .extract(runner, *time, &output_path, max_width)
+                    .await?;
+                frames.push(FileFrameEntry {
+                    index,
+                    file_sec: *time,
+                    path: output_path.display().to_string(),
+                    width,
+                    height,
+                });
+            }
+
+            Ok(file_frames_payload(&source, frames))
+        }
+        Selection::Grid {
+            columns,
+            rows,
+            times,
+        } => run_file_grid_mode(runner, &source, args, format, *columns, *rows, times).await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_file_grid_mode(
+    runner: &FFmpegRunner,
+    source: &FileSource,
+    args: &ExtractArgs,
+    format: ImageFormat,
+    columns: usize,
+    rows: usize,
+    times: &[f64],
+) -> anyhow::Result<serde_json::Value> {
+    source.ensure_times_inside(times)?;
+    let cell = resolve_cell_size(args);
+    let staging = CellStaging::new(cell, args.label_cells)?;
+    let extract_width = grid_cell_extract_width(args, cell);
+
+    let mut cell_paths = Vec::with_capacity(times.len());
+    let mut cells = Vec::with_capacity(times.len());
+    for (index, time) in times.iter().enumerate() {
+        source
+            .extract(runner, *time, &staging.extract_path(index), extract_width)
+            .await?;
+        cell_paths.push(staging.finish(runner, index, *time).await?);
+        cells.push(FileGridCell {
+            index,
+            row: index / columns,
+            col: index % columns,
+            file_sec: *time,
+        });
+    }
+
+    let sheet =
+        build_contact_sheet(runner, args, &format, &cell_paths, columns, rows, cell).await?;
+
+    Ok(serde_json::json!({
+        "status": "ok",
+        "mode": "file",
+        "source": source.describe(),
+        "sheet": {
+            "path": sheet.path,
+            "cols": sheet.columns,
+            "rows": sheet.rows,
+            "cellWidth": cell.width,
+            "cellHeight": cell.height,
+            "labeled": args.label_cells,
+            "cells": cells,
+        },
+    }))
+}
+
+fn file_frames_payload(source: &FileSource, frames: Vec<FileFrameEntry>) -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "mode": "file",
+        "source": source.describe(),
+        "count": frames.len(),
+        "frames": frames,
+    })
 }
 
 async fn run_asset_mode(
@@ -936,6 +1198,31 @@ struct GridCell {
     timeline_sec: f64,
 }
 
+/// One still extracted from a rendered file, in that file's own timebase.
+///
+/// The time field is deliberately not `timeSec`: a rendered range starts at
+/// zero regardless of where it sat on the timeline, so calling it a timeline
+/// time would be a lie the judge could act on.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileFrameEntry {
+    index: usize,
+    file_sec: f64,
+    path: String,
+    width: u32,
+    height: u32,
+}
+
+/// One contact-sheet cell mapped back to a rendered file's timebase.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileGridCell {
+    index: usize,
+    row: usize,
+    col: usize,
+    file_sec: f64,
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Last timeline position the sequence has any content at.
@@ -1186,12 +1473,13 @@ mod tests {
         ExtractArgs {
             path: PathBuf::from("."),
             out: PathBuf::from("sheet.jpg"),
+            file: None,
             asset: None,
             source_time: None,
             time: None,
             times: None,
             sequence: None,
-            mode: "fast".to_string(),
+            mode: None,
             max_width: None,
             format: None,
             grid: Some(grid.to_string()),

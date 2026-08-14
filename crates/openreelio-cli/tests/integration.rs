@@ -1984,6 +1984,209 @@ fn test_frame_extract_builds_contact_sheet_for_grid() {
     );
 }
 
+/// Build a project with one clip and render it to a proxy file.
+///
+/// Returns the project fixture plus the rendered file, which is what the
+/// `--file` judging path reads. `None` when FFmpeg is unavailable.
+fn create_project_with_rendered_proxy(
+    name: &str,
+    duration_secs: u32,
+) -> Option<(tempfile::TempDir, String, PathBuf)> {
+    let (dir, path, _asset_id) = create_project_with_timeline_clip(name, duration_secs)?;
+
+    let proxy_path = dir.path().join("proxy.mp4");
+    let result = run_cli_ok(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--output",
+        proxy_path.to_str().unwrap(),
+    ]);
+    assert_eq!(result["status"], "ok");
+    if !proxy_path.exists() {
+        return None;
+    }
+
+    Some((dir, path, proxy_path))
+}
+
+#[test]
+fn test_frame_extract_reads_a_rendered_file_in_its_own_timebase() {
+    let Some((dir, path, proxy_path)) = create_project_with_rendered_proxy("frame_file_test", 4)
+    else {
+        return;
+    };
+
+    let still_path = dir.path().join("judge.png");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        proxy_path.to_str().unwrap(),
+        "--time",
+        "1.0",
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["mode"], "file");
+    assert_eq!(
+        result["source"]["path"].as_str().unwrap(),
+        proxy_path.to_string_lossy()
+    );
+    assert!(result["source"]["durationSec"].as_f64().unwrap() > 0.0);
+    assert_eq!(result["frames"][0]["fileSec"], 1.0);
+    assert!(
+        result["frames"][0]["timeSec"].is_null(),
+        "File-mode frames must not claim a timeline time"
+    );
+    assert!(still_path.exists(), "Expected the still to be written");
+    assert_eq!(file_signature(&still_path), PNG_SIGNATURE);
+}
+
+#[test]
+fn test_frame_extract_sheets_a_rendered_file_without_touching_the_timeline() {
+    let Some((dir, path, proxy_path)) =
+        create_project_with_rendered_proxy("frame_file_sheet_test", 4)
+    else {
+        return;
+    };
+
+    let sheet_path = dir.path().join("judge_sheet.jpg");
+    let result = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        proxy_path.to_str().unwrap(),
+        "--grid",
+        "3x2",
+        "--between",
+        "0",
+        "3",
+        "--label-cells",
+        "--out",
+        sheet_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["mode"], "file");
+    assert_eq!(result["sheet"]["cols"], 3);
+    assert_eq!(result["sheet"]["rows"], 2);
+    assert_eq!(result["sheet"]["labeled"], true);
+
+    let cells = result["sheet"]["cells"].as_array().unwrap();
+    assert_eq!(cells.len(), 6);
+    assert!(
+        cells.iter().all(|cell| cell["fileSec"].is_number()),
+        "Sheet cells must map back to file times, got: {cells:?}"
+    );
+    assert!(
+        cells.iter().all(|cell| cell["timelineSec"].is_null()),
+        "File-mode cells must not claim a timeline time"
+    );
+    assert!(sheet_path.exists(), "Expected the sheet to be written");
+}
+
+#[test]
+fn test_frame_extract_names_the_file_duration_when_asked_past_its_end() {
+    let Some((dir, path, proxy_path)) =
+        create_project_with_rendered_proxy("frame_file_range_test", 4)
+    else {
+        return;
+    };
+
+    let still_path = dir.path().join("past_end.png");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        proxy_path.to_str().unwrap(),
+        "--time",
+        "600",
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("past the end") && stderr.contains("proxy.mp4"),
+        "Expected the error to name the file and its end, got: {stderr}"
+    );
+    let duration = ffprobe_duration_secs(&proxy_path).expect("proxy duration");
+    assert!(
+        stderr.contains(&format!("{:.3}s", duration)),
+        "Expected the error to quote the real duration {duration:.3}s, got: {stderr}"
+    );
+    assert!(!still_path.exists());
+}
+
+#[test]
+fn test_frame_extract_rejects_a_file_without_a_video_stream() {
+    let dir = create_temp_project("frame_file_no_video_test");
+    let path = project_path(&dir, "frame_file_no_video_test");
+    if system_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let audio_path = dir.path().join("audio_only.wav");
+    if !create_sample_audio(&audio_path) {
+        return;
+    }
+
+    let still_path = dir.path().join("still.png");
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        audio_path.to_str().unwrap(),
+        "--time",
+        "0.5",
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        stderr.contains("no video stream"),
+        "Expected the error to explain the missing video stream, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_frame_extract_rejects_a_file_combined_with_timeline_sources() {
+    let dir = create_temp_project("frame_file_conflict_test");
+    let path = project_path(&dir, "frame_file_conflict_test");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--file",
+        "render.mp4",
+        "--time",
+        "1.0",
+        "--mode",
+        "composite",
+        "--out",
+        "still.png",
+    ]);
+
+    assert!(
+        stderr.contains("cannot be used with"),
+        "Expected a clap conflict error, got: {stderr}"
+    );
+}
+
 #[test]
 fn test_frame_extract_builds_a_contact_sheet_from_an_explicit_time_list() {
     let Some((dir, path, _)) = create_project_with_timeline_clip("frame_grid_times_test", 4) else {
