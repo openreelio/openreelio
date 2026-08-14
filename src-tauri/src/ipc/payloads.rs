@@ -1556,34 +1556,34 @@ impl CommandPayload {
     fn resolve_curated_packs(&mut self) -> Result<(), String> {
         use crate::core::style::{resolve_caption_layers, resolve_effect_recipe};
 
+        /// Applies a caption pack in place, leaving explicit values on top.
+        fn apply_caption_pack(
+            style_pack: Option<&str>,
+            style: &mut Option<serde_json::Value>,
+            position: &mut Option<serde_json::Value>,
+        ) -> Result<(), String> {
+            let resolved = resolve_caption_layers(style_pack, style.take(), position.take())?;
+            *style = resolved.style;
+            *position = resolved.position;
+            Ok(())
+        }
+
         match self {
-            Self::CreateCaption(payload) => {
-                let resolved = resolve_caption_layers(
-                    payload.style_pack.as_deref(),
-                    payload.style.take(),
-                    payload.position.take(),
-                )?;
-                payload.style = resolved.style;
-                payload.position = resolved.position;
-            }
-            Self::UpdateCaption(payload) => {
-                let resolved = resolve_caption_layers(
-                    payload.style_pack.as_deref(),
-                    payload.style.take(),
-                    payload.position.take(),
-                )?;
-                payload.style = resolved.style;
-                payload.position = resolved.position;
-            }
-            Self::ImportGeneratedCaptions(payload) => {
-                let resolved = resolve_caption_layers(
-                    payload.style_pack.as_deref(),
-                    payload.style.take(),
-                    payload.position.take(),
-                )?;
-                payload.style = resolved.style;
-                payload.position = resolved.position;
-            }
+            Self::CreateCaption(payload) => apply_caption_pack(
+                payload.style_pack.as_deref(),
+                &mut payload.style,
+                &mut payload.position,
+            )?,
+            Self::UpdateCaption(payload) => apply_caption_pack(
+                payload.style_pack.as_deref(),
+                &mut payload.style,
+                &mut payload.position,
+            )?,
+            Self::ImportGeneratedCaptions(payload) => apply_caption_pack(
+                payload.style_pack.as_deref(),
+                &mut payload.style,
+                &mut payload.position,
+            )?,
             Self::AddEffect(payload) => {
                 let resolved = resolve_effect_recipe(
                     payload.recipe.as_deref(),
