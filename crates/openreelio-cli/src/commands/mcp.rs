@@ -1935,6 +1935,39 @@ fn validate_command(arguments: Value) -> Result<Value, ToolError> {
     }
 }
 
+/// Names the steps that are missing a field the plan shape requires.
+///
+/// Deserialization reports the first missing field as one serde message with no
+/// step attribution, which is useless to an agent holding a fifty-step plan.
+/// This is deliberately presence-only: it says which step lacks which key and
+/// stops there, so every judgement about what those keys *contain* still comes
+/// from the shared validator and cannot drift from what `plan execute` accepts.
+fn missing_step_field_errors(plan_value: &Value) -> Vec<String> {
+    let Some(steps) = plan_value.get("steps").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let mut errors = Vec::new();
+    for (index, step) in steps.iter().enumerate() {
+        let Some(fields) = step.as_object() else {
+            errors.push(format!("Step at index {index} must be a JSON object"));
+            continue;
+        };
+
+        let label = match fields.get("id").and_then(Value::as_str) {
+            Some(id) => format!("Step '{id}' (index {index})"),
+            None => format!("Step at index {index}"),
+        };
+        for required in ["id", "commandType", "payload"] {
+            if !fields.contains_key(required) {
+                errors.push(format!("{label} is missing '{required}'"));
+            }
+        }
+    }
+
+    errors
+}
+
 fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
     let plan_value = arguments
         .get("plan")
@@ -1949,15 +1982,17 @@ fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
     // A plan that will not even deserialize is a validation finding, not a
     // protocol error: the caller asked what is wrong with the plan, and an
     // error list answers that better than a JSON-RPC failure does.
-    let edit_plan: plan::EditPlan = match serde_json::from_value(plan_value) {
+    let edit_plan: plan::EditPlan = match serde_json::from_value(plan_value.clone()) {
         Ok(edit_plan) => edit_plan,
         Err(error) => {
+            let mut errors = missing_step_field_errors(&plan_value);
+            errors.push(format!("Plan does not match the expected shape: {error}"));
             return Ok(serde_json::json!({
                 "status": "error",
                 "planId": plan_id,
                 "message": "Plan validation failed",
-                "errors": [format!("Plan does not match the expected shape: {error}")]
-            }))
+                "errors": errors
+            }));
         }
     };
 
@@ -2789,6 +2824,68 @@ mod tests {
             .as_str()
             .expect("text content");
         serde_json::from_str(text).expect("validate result JSON")
+    }
+
+    /// A plan that will not deserialize must still name the step at fault.
+    ///
+    /// Serde reports the first missing field once, with no step attribution; an
+    /// agent holding a long plan cannot act on that.
+    #[test]
+    fn should_name_the_step_that_is_missing_a_required_field() {
+        let result = call_plan_validate(serde_json::json!({
+            "id": "shape-plan",
+            "steps": [
+                {
+                    "id": "step-a",
+                    "commandType": "AddTrack",
+                    "payload": { "sequenceId": "sequence-1", "name": "A", "kind": "video" }
+                },
+                {
+                    "id": "step-b",
+                    "payload": { "sequenceId": "sequence-1", "name": "B", "kind": "video" }
+                }
+            ]
+        }));
+
+        assert_eq!(result["status"], "error");
+        let errors = result["errors"].as_array().expect("errors");
+        assert!(
+            errors.iter().any(|error| {
+                let error = error.as_str().expect("error");
+                error.contains("step-b")
+                    && error.contains("index 1")
+                    && error.contains("commandType")
+            }),
+            "the report must say which step lacks which field: {result}"
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|error| error.as_str().expect("error").contains("step-a")),
+            "the sound step must not be blamed: {result}"
+        );
+    }
+
+    /// A step that is not an object at all is attributed by index.
+    #[test]
+    fn should_report_a_non_object_step_by_index() {
+        let result = call_plan_validate(serde_json::json!({
+            "id": "shape-plan",
+            "steps": ["not-a-step"]
+        }));
+
+        assert_eq!(result["status"], "error");
+        assert!(
+            result["errors"]
+                .as_array()
+                .expect("errors")
+                .iter()
+                .any(|error| error
+                    .as_str()
+                    .expect("error")
+                    .contains("Step at index 0 must be a JSON object")),
+            "{result}"
+        );
     }
 
     #[test]
