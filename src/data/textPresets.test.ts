@@ -246,6 +246,18 @@ describe('textPresets', () => {
       },
     );
 
+    it('should accept the separator spellings the core normalizer accepts', () => {
+      // normalize_pack_id in src-tauri/src/core/style/mod.rs collapses runs of
+      // whitespace or underscores onto one hyphen, exactly as
+      // normalizeTextPresetKey does. Both halves must take the same keys, or a
+      // spelling the app resolves is a hard error on the CLI.
+      ['lower  third', 'lower\tthird', 'lower _ third', 'lower__third', 'Lower  Third'].forEach(
+        (key) => {
+          expect(getPresetByKey(key)?.id, key).toBe('lower-third');
+        },
+      );
+    });
+
     it('should resolve every core alias to the same preset', () => {
       textPresetManifest.forEach((entry) => {
         entry.aliases.forEach((alias) => {

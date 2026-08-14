@@ -944,10 +944,11 @@ pub fn text_preset_keys() -> Vec<&'static str> {
 
 /// Resolves a text preset id, display name, or alias.
 ///
-/// Matching is tolerant of case and of `-`, `_`, or space separators, matching
-/// the TypeScript `normalizeTextPresetKey` contract exactly, so `Lower_Third`,
-/// `lower third`, and `lower-third` are one preset. An unknown id is a hard
-/// error naming every valid id.
+/// Matching is tolerant of case and of `-`, `_`, or whitespace separators, so
+/// `Lower_Third`, `lower third`, and `lower-third` are one preset. Separator
+/// runs collapse, which is what makes this the same acceptance set as the
+/// TypeScript `normalizeTextPresetKey` — see [`normalize_pack_id`](super::normalize_pack_id).
+/// An unknown id is a hard error naming every valid id.
 pub fn resolve_text_preset(id: &str) -> Result<&'static TextPresetSpec, String> {
     let normalized = normalize_pack_id(id);
 
@@ -1019,6 +1020,24 @@ mod tests {
                     .unwrap_or_else(|error| panic!("'{candidate}' must resolve: {error}"));
                 assert_eq!(resolved.id, preset.id);
             }
+        }
+    }
+
+    #[test]
+    fn resolve_collapses_separator_runs_like_the_typescript_normalizer() {
+        // The TypeScript half resolves every one of these through
+        // `.replace(/[\s_]+/g, '-')`. A per-character substitution would turn
+        // the doubled forms into `lower--third` and reject a key the app takes.
+        for candidate in [
+            "lower  third",
+            "lower\tthird",
+            "lower _ third",
+            "lower__third",
+            "Lower \u{00A0}Third",
+        ] {
+            let resolved = resolve_text_preset(candidate)
+                .unwrap_or_else(|error| panic!("'{candidate}' must resolve: {error}"));
+            assert_eq!(resolved.id, "lower-third");
         }
     }
 

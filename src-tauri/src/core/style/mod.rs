@@ -81,13 +81,39 @@ const BOLD_FONT_WEIGHT_THRESHOLD: u16 = 600;
 /// spelling every other surface teaches.
 pub const NO_TEXT_PRESET: &str = "default";
 
-/// Normalizes a pack or recipe identifier for matching.
+/// Normalizes a pack, recipe, or preset identifier for matching.
 ///
-/// Follows the same contract as `ExportPreset::from_legacy_id`: trim, lowercase,
-/// and fold `_` and spaces onto the canonical `-` separator, so `Clean_Minimal`,
-/// `clean minimal`, and `clean-minimal` are one id.
+/// Trim, lowercase, then collapse each run of whitespace or `_` onto a single
+/// canonical `-`, so `Clean_Minimal`, `clean minimal`, and `clean-minimal` are
+/// one id. This is the TypeScript `normalizeTextPresetKey`
+/// (`.trim().toLowerCase().replace(/[\s_]+/g, '-')`) transcribed: the catalog is
+/// shared with the app, so a key one half accepts must not be a key the other
+/// half rejects. Substituting per character instead of per run would turn
+/// `lower  third` into `lower--third` and fail on a spelling the app resolves.
 pub(crate) fn normalize_pack_id(raw: &str) -> String {
-    raw.trim().to_ascii_lowercase().replace(['_', ' '], "-")
+    let lowered = raw.trim().to_lowercase();
+    let mut normalized = String::with_capacity(lowered.len());
+    let mut pending_separator = false;
+
+    for character in lowered.chars() {
+        if character == '_' || character.is_whitespace() {
+            pending_separator = true;
+            continue;
+        }
+        if pending_separator {
+            normalized.push('-');
+            pending_separator = false;
+        }
+        normalized.push(character);
+    }
+
+    // A trailing run is a separator too: `trim` clears trailing whitespace but
+    // not a trailing `_`, and the regex would have replaced it.
+    if pending_separator {
+        normalized.push('-');
+    }
+
+    normalized
 }
 
 /// Caption style JSON keys that mean the same thing to the render path.
