@@ -107,6 +107,16 @@ export interface AgentRunResult {
   trace?: AgentTrace;
 }
 
+/**
+ * Steps a run has spent against `maxStepsPerRun`.
+ *
+ * Mutable and shared with the run's execution contexts, because a batch tool
+ * applies many edits behind a single plan step and has to charge them back.
+ */
+interface RunStepBudget {
+  spent: number;
+}
+
 // =============================================================================
 // AgenticEngine Class
 // =============================================================================
@@ -221,7 +231,7 @@ export class AgenticEngine {
 
     const startTime = Date.now();
     const executionResults: ExecutionResult[] = [];
-    let plannedStepCount = 0;
+    const stepBudget: RunStepBudget = { spent: 0 };
     let toolCallsUsed = 0;
 
     let contextWithTools = await this.hydrateContextWithMemory(agentContext);
@@ -405,7 +415,7 @@ export class AgenticEngine {
 
         plan = this.enforceDestructiveApproval(plan);
 
-        const attemptedStepCount = plannedStepCount + plan.steps.length;
+        const attemptedStepCount = stepBudget.spent + plan.steps.length;
         if (attemptedStepCount > this.config.maxStepsPerRun) {
           const err = new StepBudgetExceededError(this.config.maxStepsPerRun, attemptedStepCount);
           state.error = err;
@@ -423,7 +433,7 @@ export class AgenticEngine {
             trace: tracer?.finalize(false, err.message),
           });
         }
-        plannedStepCount = attemptedStepCount;
+        stepBudget.spent = attemptedStepCount;
 
         state.plan = plan;
         tracer?.endPhase();
@@ -533,12 +543,14 @@ export class AgenticEngine {
         tracer?.startPhase('executing');
 
         const stepById = new Map<string, PlanStep>(plan.steps.map((s) => [s.id, s]));
-        const executionContextForIteration: ExecutionContext = {
-          ...executionContext,
-          expectedStateVersion:
-            state.context.projectStateVersion ?? executionContext.expectedStateVersion,
-          remainingStepBudget: Math.max(0, this.config.maxStepsPerRun - plannedStepCount),
-        };
+        const executionContextForIteration = this.withStepBudget(
+          {
+            ...executionContext,
+            expectedStateVersion:
+              state.context.projectStateVersion ?? executionContext.expectedStateVersion,
+          },
+          stepBudget,
+        );
         const remainingToolCalls = this.config.maxToolCallsPerRun - toolCallsUsed;
 
         if (remainingToolCalls <= 0) {
@@ -1057,12 +1069,14 @@ export class AgenticEngine {
       tracer?.startPhase('executing');
 
       const stepById = new Map<string, PlanStep>(plan.steps.map((step) => [step.id, step]));
-      const executionContextForIteration: ExecutionContext = {
-        ...executionContext,
-        expectedStateVersion:
-          state.context.projectStateVersion ?? executionContext.expectedStateVersion,
-        remainingStepBudget: Math.max(0, this.config.maxStepsPerRun - plan.steps.length),
-      };
+      const executionContextForIteration = this.withStepBudget(
+        {
+          ...executionContext,
+          expectedStateVersion:
+            state.context.projectStateVersion ?? executionContext.expectedStateVersion,
+        },
+        { spent: plan.steps.length },
+      );
       const remainingToolCalls = this.config.maxToolCallsPerRun - toolCallsUsed;
 
       if (remainingToolCalls <= 0) {
@@ -1507,12 +1521,14 @@ export class AgenticEngine {
     tracer?.startPhase('executing');
 
     const stepById = new Map<string, PlanStep>(plan.steps.map((step) => [step.id, step]));
-    const executionContextForIteration: ExecutionContext = {
-      ...executionContext,
-      expectedStateVersion:
-        state.context.projectStateVersion ?? executionContext.expectedStateVersion,
-      remainingStepBudget: Math.max(0, this.config.maxStepsPerRun - plan.steps.length),
-    };
+    const executionContextForIteration = this.withStepBudget(
+      {
+        ...executionContext,
+        expectedStateVersion:
+          state.context.projectStateVersion ?? executionContext.expectedStateVersion,
+      },
+      { spent: plan.steps.length },
+    );
     const remainingToolCalls = this.config.maxToolCallsPerRun - toolCallsUsed;
 
     if (remainingToolCalls <= 0) {
@@ -1808,6 +1824,31 @@ export class AgenticEngine {
         trace: tracer?.finalize(observation.goalAchieved),
       },
     );
+  }
+
+  /**
+   * Attach live per-run step accounting to an execution context.
+   *
+   * `remainingStepBudget` is a getter rather than a snapshot so that a batch
+   * tool charging what it applied immediately shrinks the budget the next call
+   * sees. Frozen as a number it bounded a single call, and N batch calls in one
+   * run were each offered the whole remainder.
+   */
+  private withStepBudget(context: ExecutionContext, budget: RunStepBudget): ExecutionContext {
+    const maxStepsPerRun = this.config.maxStepsPerRun;
+
+    return {
+      ...context,
+      get remainingStepBudget(): number {
+        return Math.max(0, maxStepsPerRun - budget.spent);
+      },
+      chargeStepBudget: (steps: number): void => {
+        if (!Number.isFinite(steps) || steps <= 0) {
+          return;
+        }
+        budget.spent += Math.trunc(steps);
+      },
+    };
   }
 
   private enforceDestructiveApproval(plan: Plan): Plan {

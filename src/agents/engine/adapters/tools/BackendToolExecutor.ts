@@ -878,6 +878,10 @@ export class BackendToolExecutor implements IToolExecutor {
           };
         }
 
+        // The steps really applied, charged in the same unit the budget check
+        // above used. A rolled-back plan applied nothing and is not charged.
+        context.chargeStepBudget?.(planRoute.stepMappings.length);
+
         return {
           success: true,
           data: {

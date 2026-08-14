@@ -1166,6 +1166,102 @@ describe('BackendToolExecutor', () => {
       expect(result.error).toContain('step budget');
       expect(mockInvoke).not.toHaveBeenCalled();
     });
+
+    it('should charge applied steps so a later batch in the same run sees the smaller budget', async () => {
+      // A checked-but-never-charged budget bounds one call, not the run: two
+      // batches of 3 would both pass a 4-step remainder.
+      const maxStepsPerRun = 4;
+      const spent = { steps: 0 };
+      const budgetedContext: ExecutionContext = {
+        ...CONTEXT,
+        get remainingStepBudget(): number {
+          return Math.max(0, maxStepsPerRun - spent.steps);
+        },
+        chargeStepBudget: (steps: number): void => {
+          spent.steps += steps;
+        },
+      };
+      const buildSteps = (prefix: string) =>
+        [1, 2, 3].map((index) => ({
+          id: `${prefix}-${index}`,
+          toolName: 'split_clip',
+          params: { clipId: 'clip-1', splitTime: index },
+        }));
+
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'batch-1',
+        success: true,
+        totalSteps: 3,
+        stepsCompleted: 3,
+        stepResults: buildSteps('first').map((step) => ({
+          stepId: step.id,
+          success: true,
+          data: {},
+          durationMs: 1,
+        })),
+        operationIds: ['op-1'],
+        executionTimeMs: 3,
+      });
+
+      const first = await backend.execute(
+        'execute_plan',
+        { steps: buildSteps('first') },
+        budgetedContext,
+      );
+      const second = await backend.execute(
+        'execute_plan',
+        { steps: buildSteps('second') },
+        budgetedContext,
+      );
+
+      expect(first.success).toBe(true);
+      expect(second.success).toBe(false);
+      expect(second.error).toContain('step budget');
+      expect(second.error).toContain('needs 3 steps but only 1');
+      expect(
+        mockInvoke.mock.calls.filter(([command]) => command === 'execute_agent_plan'),
+      ).toHaveLength(1);
+    });
+
+    it('should not charge a batch the backend rolled back', async () => {
+      const maxStepsPerRun = 4;
+      const spent = { steps: 0 };
+      const budgetedContext: ExecutionContext = {
+        ...CONTEXT,
+        get remainingStepBudget(): number {
+          return Math.max(0, maxStepsPerRun - spent.steps);
+        },
+        chargeStepBudget: (steps: number): void => {
+          spent.steps += steps;
+        },
+      };
+
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'batch-rolled-back',
+        success: false,
+        totalSteps: 3,
+        stepsCompleted: 1,
+        stepResults: [{ stepId: 'roll-1', success: false, error: 'boom', durationMs: 1 }],
+        operationIds: [],
+        errorMessage: 'Step failed',
+        executionTimeMs: 2,
+      });
+
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [1, 2, 3].map((index) => ({
+            id: `roll-${index}`,
+            toolName: 'split_clip',
+            params: { clipId: 'clip-1', splitTime: index },
+          })),
+        },
+        budgetedContext,
+      );
+
+      expect(result.success).toBe(false);
+      expect(spent.steps).toBe(0);
+    });
   });
 
   // ===========================================================================
