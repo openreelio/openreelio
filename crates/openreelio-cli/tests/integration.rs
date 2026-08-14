@@ -2069,6 +2069,273 @@ fn test_plan_validate_cycle() {
         .any(|e| e.as_str().unwrap().contains("Cycle")));
 }
 
+/// Writes a plan file and returns its path.
+fn write_plan(dir: &tempfile::TempDir, name: &str, plan: serde_json::Value) -> String {
+    let plan_file = dir.path().join(name);
+    std::fs::write(&plan_file, plan.to_string()).unwrap();
+    plan_file.to_string_lossy().to_string()
+}
+
+/// One `AddTrack` step, the cheapest step that actually mutates the project.
+fn add_track_step(id: &str, sequence_id: &str, name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "commandType": "AddTrack",
+        "payload": { "sequenceId": sequence_id, "name": name, "kind": "video" },
+        "dependsOn": []
+    })
+}
+
+fn track_names(path: &str) -> Vec<String> {
+    run_cli_ok(&["timeline", "tracks", "--path", path])["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|track| track["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn active_sequence(path: &str) -> String {
+    run_cli_ok(&["project", "info", "--path", path])["activeSequenceId"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// A plan that applies cleanly exits 0 and survives a reopen.
+#[test]
+fn test_plan_execute_applies_and_persists() {
+    let dir = create_temp_project("plan_execute_ok");
+    let path = project_path(&dir, "plan_execute_ok");
+    let sequence_id = active_sequence(&path);
+
+    let plan_file = write_plan(
+        &dir,
+        "ok.json",
+        serde_json::json!({
+            "id": "ok_plan",
+            "steps": [add_track_step("step_1", &sequence_id, "KEPT")]
+        }),
+    );
+
+    let (stdout, stderr, code) =
+        run_cli_exit(&["plan", "execute", "--path", &path, "--file", &plan_file]);
+    assert_eq!(code, 0, "a clean plan must exit 0.\nstderr: {stderr}");
+    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["stepsExecuted"], 1);
+
+    // A separate process, so this reads the project back off disk.
+    assert!(track_names(&path).contains(&"KEPT".to_string()));
+}
+
+/// A step that only fails once it runs must leave nothing behind.
+///
+/// This is the regression that mattered: `CommandExecutor::execute` fsyncs an
+/// op before it returns and `undo` only unwinds memory, so skipping the save
+/// was not enough — the next open folded the applied ops back in as new user
+/// edits and the rollback reverted itself.
+///
+/// The contract asserted here is the reopened state, not the bytes on disk:
+/// the ops log is append-only by design, so a rolled-back plan necessarily
+/// leaves its ops in the file and records them as discarded in the manifest.
+#[test]
+fn test_plan_execute_rolls_back_a_failed_step_durably() {
+    let dir = create_temp_project("plan_execute_rollback");
+    let path = project_path(&dir, "plan_execute_rollback");
+    let sequence_id = active_sequence(&path);
+    let before = track_names(&path);
+
+    // Step 2 parses fine and only fails against real project state, so the
+    // failure lands mid-execution — after step 1 is already durable.
+    let plan_file = write_plan(
+        &dir,
+        "rollback.json",
+        serde_json::json!({
+            "id": "rollback_plan",
+            "steps": [
+                add_track_step("step_1", &sequence_id, "SHOULD NOT SURVIVE"),
+                {
+                    "id": "step_2",
+                    "commandType": "SplitClip",
+                    "payload": {
+                        "sequenceId": sequence_id,
+                        "trackId": "no-such-track",
+                        "clipId": "no-such-clip",
+                        "splitTime": 1.0
+                    },
+                    "dependsOn": ["step_1"]
+                }
+            ]
+        }),
+    );
+
+    let (stdout, stderr, code) =
+        run_cli_exit(&["plan", "execute", "--path", &path, "--file", &plan_file]);
+    assert_eq!(
+        code, 1,
+        "a failed step that rolled back cleanly is exit 1.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(result["status"], "error");
+    assert_eq!(result["failedStep"], "step_2");
+    assert_eq!(result["rolledBack"], 1);
+    assert_eq!(result["rollbackIncomplete"], false);
+    assert!(result["error"].as_str().unwrap().contains("SplitClip"));
+
+    assert_eq!(
+        track_names(&path),
+        before,
+        "the rolled-back track must not come back when the project is reopened"
+    );
+}
+
+/// A cycle is caught before anything is applied, not by the sort mid-flight.
+#[test]
+fn test_plan_execute_rejects_a_cycle_without_mutating() {
+    let dir = create_temp_project("plan_execute_cycle");
+    let path = project_path(&dir, "plan_execute_cycle");
+    let sequence_id = active_sequence(&path);
+    let before = track_names(&path);
+
+    let plan_file = write_plan(
+        &dir,
+        "cycle.json",
+        serde_json::json!({
+            "id": "cycle_plan",
+            "steps": [
+                {
+                    "id": "step_a",
+                    "commandType": "AddTrack",
+                    "payload": { "sequenceId": sequence_id, "name": "A", "kind": "video" },
+                    "dependsOn": ["step_b"]
+                },
+                {
+                    "id": "step_b",
+                    "commandType": "AddTrack",
+                    "payload": { "sequenceId": sequence_id, "name": "B", "kind": "video" },
+                    "dependsOn": ["step_a"]
+                }
+            ]
+        }),
+    );
+
+    let (stdout, _stderr, code) =
+        run_cli_exit(&["plan", "execute", "--path", &path, "--file", &plan_file]);
+    assert_eq!(code, 1, "an invalid plan is exit 1: {stdout}");
+
+    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(result["status"], "error");
+    assert!(result["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| error.as_str().unwrap().contains("Cycle detected")));
+
+    assert_eq!(track_names(&path), before);
+}
+
+/// An unparseable payload is caught up front, so the earlier steps never run.
+#[test]
+fn test_plan_execute_validates_every_payload_before_mutating() {
+    let dir = create_temp_project("plan_execute_prevalidate");
+    let path = project_path(&dir, "plan_execute_prevalidate");
+    let sequence_id = active_sequence(&path);
+    let before = track_names(&path);
+
+    let plan_file = write_plan(
+        &dir,
+        "bad-payload.json",
+        serde_json::json!({
+            "id": "bad_payload_plan",
+            "steps": [
+                add_track_step("step_1", &sequence_id, "MUST NEVER BE CREATED"),
+                {
+                    "id": "step_2",
+                    "commandType": "AddTrack",
+                    "payload": { "sequenceId": sequence_id, "name": "X", "kind": "not-a-kind" },
+                    "dependsOn": ["step_1"]
+                }
+            ]
+        }),
+    );
+
+    let (stdout, _stderr, code) =
+        run_cli_exit(&["plan", "execute", "--path", &path, "--file", &plan_file]);
+    assert_eq!(code, 1, "{stdout}");
+
+    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(result["message"], "Plan validation failed");
+    assert!(result["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| error.as_str().unwrap().contains("step_2")));
+
+    assert_eq!(
+        track_names(&path),
+        before,
+        "step_1 must never run when a later step cannot parse"
+    );
+}
+
+/// The step cap is a backstop against runaway generation.
+#[test]
+fn test_plan_execute_and_validate_reject_an_over_cap_plan() {
+    let dir = create_temp_project("plan_step_cap");
+    let path = project_path(&dir, "plan_step_cap");
+    let sequence_id = active_sequence(&path);
+    let before = track_names(&path);
+
+    let steps: Vec<serde_json::Value> = (0..1001)
+        .map(|index| add_track_step(&format!("step_{index}"), &sequence_id, "T"))
+        .collect();
+    let plan_file = write_plan(
+        &dir,
+        "over-cap.json",
+        serde_json::json!({ "id": "over_cap_plan", "steps": steps }),
+    );
+
+    let cap_error = |result: &serde_json::Value| {
+        result["errors"].as_array().unwrap().iter().any(|error| {
+            let error = error.as_str().unwrap();
+            error.contains("1001 steps") && error.contains("1000")
+        })
+    };
+
+    let validated = run_cli_ok(&["plan", "validate", "--path", &path, "--file", &plan_file]);
+    assert_eq!(validated["status"], "error");
+    assert!(cap_error(&validated), "{validated}");
+
+    let (stdout, _stderr, code) =
+        run_cli_exit(&["plan", "execute", "--path", &path, "--file", &plan_file]);
+    assert_eq!(code, 1, "{stdout}");
+    assert!(cap_error(&serde_json::from_str(&stdout).unwrap()));
+
+    assert_eq!(track_names(&path), before);
+}
+
+/// A plan file the tool cannot even read is a tool failure, not a bad plan.
+#[test]
+fn test_plan_execute_reports_an_unreadable_plan_as_a_tool_failure() {
+    let dir = create_temp_project("plan_missing_file");
+    let path = project_path(&dir, "plan_missing_file");
+    let missing = dir.path().join("does-not-exist.json");
+
+    let (_stdout, stderr, code) = run_cli_exit(&[
+        "plan",
+        "execute",
+        "--path",
+        &path,
+        "--file",
+        missing.to_str().unwrap(),
+    ]);
+
+    assert_eq!(code, 2, "the tool could not run: {stderr}");
+    assert!(stderr.contains("Failed to read plan file"), "{stderr}");
+}
+
 // =============================================================================
 // State Commands
 // =============================================================================
