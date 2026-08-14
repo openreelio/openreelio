@@ -164,7 +164,7 @@
       "annotation_label",
       "tag"
     ],
-    "category": "lower-third",
+    "category": "callout",
     "clip": {
       "content": "Label",
       "opacity": 0.9,

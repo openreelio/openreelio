@@ -409,7 +409,10 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'label',
     name: 'Label',
     description: 'Simple label for annotations',
-    category: 'lower-third',
+    // Anchored top-left, so it is a corner annotation rather than a name plate.
+    // The category drives smart placement, and 'lower-third' relocated it to
+    // the bottom of the frame.
+    category: 'callout',
     style: {
       fontSize: 24,
       fontFamily: 'Arial',

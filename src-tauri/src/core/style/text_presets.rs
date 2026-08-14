@@ -369,7 +369,10 @@ pub const TEXT_PRESETS: &[TextPresetSpec] = &[
         id: "label",
         name: "Label",
         description: "Simple label for annotations",
-        category: TextPresetCategory::LowerThird,
+        // Anchored top-left, so it is a corner annotation rather than a name
+        // plate. Category decides placement, and `lower-third` sent it to the
+        // bottom of the frame — the one place a corner label must not go.
+        category: TextPresetCategory::Callout,
         aliases: &["annotation_label", "tag"],
         default_content: "Label",
         default_duration_sec: 3.0,

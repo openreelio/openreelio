@@ -69,7 +69,6 @@ describe('textPresets', () => {
       const ids = lowerThirds.map((p) => p.id);
       expect(ids).toContain('lower-third');
       expect(ids).toContain('lower-third-minimal');
-      expect(ids).toContain('label');
     });
 
     it('should assign title presets correctly', () => {
@@ -91,6 +90,9 @@ describe('textPresets', () => {
       const ids = callouts.map((p) => p.id);
       expect(ids).toContain('callout');
       expect(ids).toContain('countdown');
+      // `label` is anchored top-left, so smart placement must treat it as a
+      // corner annotation rather than relocating it to the lower third.
+      expect(ids).toContain('label');
     });
 
     it('should assign creative presets correctly', () => {

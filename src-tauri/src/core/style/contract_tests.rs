@@ -1430,8 +1430,13 @@ fn every_text_preset_renders_its_own_typography_into_the_drawtext_filter() {
     let mut filters_by_preset: Vec<(&str, String)> = Vec::new();
 
     for preset in TEXT_PRESETS {
-        let (state, clip) = add_text_clip_with_preset(preset.id, None);
-        let clip_data = preset.default_clip_data();
+        // Every preset renders the same copy. The content is the first field of
+        // the filter body, so leaving each preset its own starter string would
+        // make the pairwise comparison below pass on the text alone and never
+        // exercise the styling it exists to separate.
+        let (state, clip) =
+            add_text_clip_with_preset(preset.id, Some(json!({ "content": TEXT_OVERLAY_CONTENT })));
+        let clip_data = preset.clip_data(TEXT_OVERLAY_CONTENT);
 
         let filter = crate::core::render::export::build_text_clip_drawtext_with_enable(
             &clip,
@@ -1447,6 +1452,13 @@ fn every_text_preset_renders_its_own_typography_into_the_drawtext_filter() {
         assert!(
             filter.contains("enable='between(t,"),
             "preset '{}' filter must be time gated, got: {filter}",
+            preset.id
+        );
+        // Holding the copy constant is what makes the pairwise check below
+        // about styling, so the constant has to actually reach the filter.
+        assert!(
+            filter.contains(&format!("text='{TEXT_OVERLAY_CONTENT}'")),
+            "preset '{}' must render the shared copy, got: {filter}",
             preset.id
         );
 
@@ -1536,7 +1548,9 @@ fn every_text_preset_renders_its_own_typography_into_the_drawtext_filter() {
     }
 
     // Two presets that describe different looks must not compile to the same
-    // filter: identical output would mean the differences never reached it.
+    // filter. With the copy held constant, only styling can separate them, so
+    // a collision here means two catalog entries are one preset wearing two
+    // ids — which the listing surfaces would advertise as a real choice.
     for (index, (id, filter)) in filters_by_preset.iter().enumerate() {
         for (other_id, other_filter) in filters_by_preset.iter().skip(index + 1) {
             assert_ne!(
@@ -1544,6 +1558,85 @@ fn every_text_preset_renders_its_own_typography_into_the_drawtext_filter() {
                 "presets '{id}' and '{other_id}' render identically"
             );
         }
+    }
+}
+
+#[test]
+fn the_repurposed_preset_spellings_stay_pinned_to_their_current_geometry() {
+    // `title`, `lower-third`, and `subtitle` are the three spellings whose
+    // meaning changed when the CLI's inline table gave way to this registry, so
+    // they are the three most likely to be quietly repurposed a second time.
+    // The module doc states "ids are append-only: rename nothing, and add rather
+    // than repurpose"; these numbers are that contract in executable form.
+    // Changing one is a breaking change for every existing script that names it,
+    // so update the docs and the release notes along with this list.
+    struct PinnedGeometry {
+        key: &'static str,
+        id: &'static str,
+        x: f64,
+        y: f64,
+        font_size: u32,
+        bold: bool,
+        alignment: crate::core::text::TextAlignment,
+    }
+
+    let pinned = [
+        PinnedGeometry {
+            key: "title",
+            id: "centered-title",
+            x: 0.5,
+            y: 0.5,
+            font_size: 72,
+            bold: true,
+            alignment: crate::core::text::TextAlignment::Center,
+        },
+        PinnedGeometry {
+            key: "lower-third",
+            id: "lower-third",
+            x: 0.08,
+            y: 0.82,
+            font_size: 42,
+            bold: true,
+            alignment: crate::core::text::TextAlignment::Left,
+        },
+        PinnedGeometry {
+            key: "subtitle",
+            id: "subtitle",
+            x: 0.5,
+            y: 0.9,
+            font_size: 32,
+            bold: false,
+            alignment: crate::core::text::TextAlignment::Center,
+        },
+    ];
+
+    for expected in pinned {
+        let preset = crate::core::style::resolve_text_preset(expected.key)
+            .unwrap_or_else(|error| panic!("'{}' must resolve: {error}", expected.key));
+        assert_eq!(
+            preset.id, expected.id,
+            "'{}' must keep resolving to the same preset",
+            expected.key
+        );
+
+        let clip = preset.default_clip_data();
+        assert_eq!(
+            (clip.position.x, clip.position.y),
+            (expected.x, expected.y),
+            "'{}' moved",
+            expected.key
+        );
+        assert_eq!(
+            clip.style.font_size, expected.font_size,
+            "'{}'",
+            expected.key
+        );
+        assert_eq!(clip.style.bold, expected.bold, "'{}'", expected.key);
+        assert_eq!(
+            clip.style.alignment, expected.alignment,
+            "'{}'",
+            expected.key
+        );
     }
 }
 
