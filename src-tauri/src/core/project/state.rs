@@ -1091,6 +1091,51 @@ impl ProjectState {
         Ok(())
     }
 
+    /// Replays the scalar clip flags carried by a `ClipUpdate` payload.
+    ///
+    /// The executor logs the realized post-execute value for each of these, so
+    /// replay assigns rather than recomputes — `ReverseClip` in particular is a
+    /// toggle, and re-toggling on replay would diverge the moment an op is
+    /// skipped. A missing or null field means "no change", matching the rest of
+    /// `apply_clip_update`.
+    fn apply_replayed_clip_flags(clip: &mut Clip, payload: &serde_json::Value) -> CoreResult<()> {
+        if let Some(value) = payload.get("opacity") {
+            if !value.is_null() {
+                let opacity = value.as_f64().ok_or_else(|| {
+                    CoreError::InvalidCommand("Invalid opacity value (expected number)".to_string())
+                })?;
+                if !opacity.is_finite() {
+                    return Err(CoreError::InvalidCommand(
+                        "Invalid opacity value (expected finite number)".to_string(),
+                    ));
+                }
+                clip.opacity = (opacity as f32).clamp(0.0, 1.0);
+            }
+        }
+
+        if let Some(value) = payload.get("enabled") {
+            if !value.is_null() {
+                clip.enabled = value.as_bool().ok_or_else(|| {
+                    CoreError::InvalidCommand(
+                        "Invalid enabled value (expected boolean)".to_string(),
+                    )
+                })?;
+            }
+        }
+
+        if let Some(value) = payload.get("reverse") {
+            if !value.is_null() {
+                clip.reverse = value.as_bool().ok_or_else(|| {
+                    CoreError::InvalidCommand(
+                        "Invalid reverse value (expected boolean)".to_string(),
+                    )
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn apply_clip_update(&mut self, op: &Operation) -> CoreResult<()> {
         fn sanitize_replayed_audio_settings(
             mut audio: AudioSettings,
@@ -1319,6 +1364,10 @@ impl ProjectState {
                 if let Some(blend_mode) = parsed_blend_mode {
                     clip.blend_mode = blend_mode;
                 }
+
+                // Applied before the full-audio early return below so these
+                // fields replay regardless of which branch the payload takes.
+                Self::apply_replayed_clip_flags(clip, &op.payload)?;
 
                 if has_full_audio_payload {
                     // Full audio payloads are already normalized above.
