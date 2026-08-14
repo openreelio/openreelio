@@ -104,6 +104,20 @@ impl CommandExecutor {
         self
     }
 
+    /// Raises the undo history cap to at least `size` entries.
+    ///
+    /// A transactional caller can only unwind what the undo stack still holds.
+    /// The default cap ([`DEFAULT_MAX_HISTORY_SIZE`]) is sized for a human
+    /// pressing Ctrl+Z, not for a batch: a plan that fails after more than that
+    /// many applied steps has already had its earliest entries evicted, and the
+    /// rollback silently stops short. Callers that execute a known number of
+    /// commands as one unit must size the history to that unit first.
+    ///
+    /// The cap is only ever raised, so this cannot shrink a caller's history.
+    pub fn ensure_history_capacity(&mut self, size: usize) {
+        self.max_history_size = self.max_history_size.max(size);
+    }
+
     /// Executes a command and adds it to history
     pub fn execute(
         &mut self,
@@ -1427,6 +1441,30 @@ impl CommandExecutor {
                     payload.insert("blendMode".to_string(), to_value(&clip.blend_mode)?);
                 }
 
+                // Realized-value snapshots. The command payload alone cannot
+                // reproduce these on replay: `SetClipOpacity` clamps its input,
+                // and `ReverseClip` is a toggle whose payload says nothing at
+                // all about the resulting value. Logging what the clip actually
+                // holds keeps replay idempotent.
+                //
+                // They go under `CLIP_FLAGS_PAYLOAD_KEY` rather than at the
+                // payload root because the root is shared: `SetClipSpeed` also
+                // writes `reverse` there, and replay — which sees only the
+                // `ClipUpdate` op kind — would otherwise apply that command's
+                // reverse without its speed.
+                let clip_flags = match type_name {
+                    "SetClipOpacity" => Some(serde_json::json!({ "opacity": clip.opacity })),
+                    "SetClipEnabled" => Some(serde_json::json!({ "enabled": clip.enabled })),
+                    "ReverseClip" => Some(serde_json::json!({ "reverse": clip.reverse })),
+                    _ => None,
+                };
+                if let Some(clip_flags) = clip_flags {
+                    payload.insert(
+                        crate::core::project::CLIP_FLAGS_PAYLOAD_KEY.to_string(),
+                        clip_flags,
+                    );
+                }
+
                 Ok(serde_json::Value::Object(payload))
             }
 
@@ -2075,7 +2113,10 @@ impl CommandExecutor {
             | "MoveAudioKeyframe"
             | "SetAudioKeyframeValue"
             | "SetAudioFadeIn"
-            | "SetAudioFadeOut" => OpKind::ClipUpdate,
+            | "SetAudioFadeOut"
+            | "SetClipOpacity"
+            | "SetClipEnabled"
+            | "ReverseClip" => OpKind::ClipUpdate,
             "SplitClip" => OpKind::ClipSplit,
             "CreateCompoundClip" => OpKind::CompoundClipCreate,
             "UnnestCompoundClip" => OpKind::CompoundClipUnnest,
@@ -2270,11 +2311,12 @@ mod tests {
         CreateCompoundClipCommand, CreateSequenceCommand, ExtractEditCommand,
         GeneratedCaptionSegment, GroupClipsCommand, ImportAssetCommand,
         ImportGeneratedCaptionsCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
-        LinkClipsCommand, MoveClipCommand, OverwriteEditCommand, RippleDeleteCommand,
-        SetAudioFadeInCommand, SetAudioFadeOutCommand, SetClipBlendModeCommand,
-        SetClipMotionKeyframesCommand, SetMasterVolumeCommand, SetTrackBlendModeCommand,
-        SplitClipCommand, StateChange, TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand,
-        UnnestCompoundClipCommand,
+        LinkClipsCommand, MoveClipCommand, OverwriteEditCommand, ReverseClipCommand,
+        RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
+        SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMotionKeyframesCommand,
+        SetClipOpacityCommand, SetClipSpeedCommand, SetMasterVolumeCommand,
+        SetTrackBlendModeCommand, SplitClipCommand, StateChange, TrimClipCommand,
+        UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
     };
     use crate::core::effects::{EffectType, ParamValue};
     use crate::core::masks::{MaskShape, RectMask};
@@ -3723,6 +3765,58 @@ mod tests {
         assert_eq!(executor.undo_count(), 3);
     }
 
+    /// A batch caller can size the undo stack to the batch it is about to run.
+    ///
+    /// The default cap is sized for interactive undo, so a transaction longer
+    /// than that would have its earliest entries evicted mid-flight and could
+    /// only unwind part of itself.
+    #[test]
+    fn test_executor_history_capacity_can_be_raised_to_cover_a_batch() {
+        let mut executor = CommandExecutor::new().with_max_history(3);
+        let mut state = ProjectState::new("Test");
+        let batch_size = 10;
+
+        executor.ensure_history_capacity(batch_size);
+        for index in 0..batch_size {
+            let asset = Asset::new_video(
+                &format!("video_{index}.mp4"),
+                &format!("/video_{index}.mp4"),
+                VideoInfo::default(),
+            );
+            executor
+                .execute(Box::new(TestAddAssetCommand { asset }), &mut state)
+                .unwrap();
+        }
+
+        assert_eq!(executor.undo_count(), batch_size);
+        for _ in 0..batch_size {
+            executor.undo(&mut state).unwrap();
+        }
+        assert_eq!(executor.undo_count(), 0);
+        assert!(state.assets.is_empty(), "the whole batch must unwind");
+    }
+
+    /// Raising the cap must never shrink a history that is already larger.
+    #[test]
+    fn test_executor_history_capacity_is_never_lowered() {
+        let mut executor = CommandExecutor::new().with_max_history(8);
+        let mut state = ProjectState::new("Test");
+
+        executor.ensure_history_capacity(2);
+        for index in 0..8 {
+            let asset = Asset::new_video(
+                &format!("video_{index}.mp4"),
+                &format!("/video_{index}.mp4"),
+                VideoInfo::default(),
+            );
+            executor
+                .execute(Box::new(TestAddAssetCommand { asset }), &mut state)
+                .unwrap();
+        }
+
+        assert_eq!(executor.undo_count(), 8);
+    }
+
     #[test]
     fn test_executor_clear_history() {
         let mut executor = CommandExecutor::new();
@@ -3818,6 +3912,298 @@ mod tests {
         assert!(state.assets.is_empty());
         assert_eq!(executor.undo_count(), 0);
         assert!(!state.is_dirty);
+    }
+
+    /// The three newly registered clip flags must execute *and* replay.
+    ///
+    /// Registration alone would be a downgrade: the command would start
+    /// appending an op that replay ignores, so the edit would vanish on the
+    /// next reopen instead of failing loudly. Opacity is clamped on execute and
+    /// reverse is a toggle, so both are asserted against the realized value.
+    ///
+    /// Every asserted value differs from the field's default, or a replay that
+    /// did nothing at all would satisfy the assertion.
+    #[test]
+    fn test_executor_persists_clip_flag_updates_as_replayable() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+
+        let insert_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, import_cmd.asset_id(), 0.0)
+                        .with_source_range(0.0, 5.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let clip_id = insert_result.created_ids[0].clone();
+
+        // Out of range on purpose: the log must carry the clamped value, not
+        // the requested one.
+        executor
+            .execute(
+                Box::new(SetClipOpacityCommand::new(
+                    &seq_id, &track_id, &clip_id, 1.5,
+                )),
+                &mut state,
+            )
+            .unwrap();
+        assert_eq!(
+            state.sequences[&seq_id]
+                .get_track(&track_id)
+                .unwrap()
+                .get_clip(&clip_id)
+                .unwrap()
+                .opacity,
+            1.0,
+            "opacity must clamp on execute"
+        );
+
+        // Settle on a value the default (1.0) cannot be mistaken for, so the
+        // replay assertion below can actually fail when replay drops the flag.
+        executor
+            .execute(
+                Box::new(SetClipOpacityCommand::new(
+                    &seq_id, &track_id, &clip_id, 0.5,
+                )),
+                &mut state,
+            )
+            .unwrap();
+        executor
+            .execute(
+                Box::new(SetClipEnabledCommand::new(
+                    &seq_id, &track_id, &clip_id, false,
+                )),
+                &mut state,
+            )
+            .unwrap();
+        executor
+            .execute(
+                Box::new(ReverseClipCommand::new(&seq_id, &track_id, &clip_id)),
+                &mut state,
+            )
+            .unwrap();
+
+        let live_clip = state.sequences[&seq_id]
+            .get_track(&track_id)
+            .unwrap()
+            .get_clip(&clip_id)
+            .unwrap()
+            .clone();
+        assert_eq!(live_clip.opacity, 0.5);
+        assert!(!live_clip.enabled);
+        assert!(live_clip.reverse);
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_clip = replayed.sequences[&seq_id]
+            .get_track(&track_id)
+            .unwrap()
+            .get_clip(&clip_id)
+            .unwrap();
+
+        assert_eq!(replayed_clip.opacity, live_clip.opacity);
+        assert_eq!(replayed_clip.enabled, live_clip.enabled);
+        assert_eq!(replayed_clip.reverse, live_clip.reverse);
+    }
+
+    /// Replay must never apply part of a command it does not replay in full.
+    ///
+    /// `SetClipSpeed` shares the `ClipUpdate` op kind with `ReverseClip` and
+    /// logs its own root-level `reverse`. Replaying that field on its own would
+    /// leave the clip reversed at the wrong speed — a half-applied command,
+    /// strictly worse than the skipped one. Full `SetClipSpeed` replay is a
+    /// separate gap; the invariant here is all-or-nothing.
+    #[test]
+    fn test_replay_does_not_half_apply_a_speed_change_as_a_reverse() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+
+        let insert_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, import_cmd.asset_id(), 0.0)
+                        .with_source_range(0.0, 5.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let clip_id = insert_result.created_ids[0].clone();
+
+        executor
+            .execute(
+                Box::new(SetClipSpeedCommand::new(
+                    &seq_id, &track_id, &clip_id, 2.0, true,
+                )),
+                &mut state,
+            )
+            .unwrap();
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_clip = replayed.sequences[&seq_id]
+            .get_track(&track_id)
+            .unwrap()
+            .get_clip(&clip_id)
+            .unwrap();
+
+        assert_eq!(
+            (replayed_clip.speed, replayed_clip.reverse),
+            (1.0, false),
+            "SetClipSpeed replays neither field or both, never just reverse"
+        );
+    }
+
+    /// Command types whose `Command::type_name()` differs from the payload tag.
+    ///
+    /// Each entry is proved against the real command in
+    /// [`payload_type_aliases_still_build_the_command_they_claim`], so this
+    /// table cannot quietly go stale.
+    const PAYLOAD_TYPE_ALIASES: &[(&str, &str)] = &[("CreateTrack", "AddTrack")];
+
+    /// Supported command types that `CommandExecutor::execute` still refuses.
+    ///
+    /// Registering a command is only half of making it work: the op it appends
+    /// must also replay, and each of these needs more than an op-kind arm.
+    /// `SetTimeRemap`/`ClearTimeRemap` change a derived clip duration that the
+    /// payload does not carry; `RemoveAttributes`, `PasteEffects` and
+    /// `PasteAttributes` touch the effect registry and several clips at once;
+    /// `DetachAudio` and `CreateFreezeFrame` create clips (and possibly a
+    /// track) with runtime-generated ids their `to_json` drops;
+    /// `ApplyAudioDucking` drops its keyframes the same way. Registering them
+    /// without fixing the logged payload would trade a clean rejection for
+    /// silent data loss on the next reopen.
+    ///
+    /// This list may only shrink. Adding to it means shipping a command the
+    /// executor cannot run.
+    const KNOWN_UNREGISTERED_COMMAND_TYPES: &[&str] = &[
+        "ApplyAudioDucking",
+        "ClearTimeRemap",
+        "CreateFreezeFrame",
+        "DetachAudio",
+        "PasteAttributes",
+        "PasteEffects",
+        "RemoveAttributes",
+        "SetTimeRemap",
+    ];
+
+    /// Resolves a payload command type to the `type_name()` it executes under.
+    fn executed_type_name(payload_type: &str) -> &str {
+        PAYLOAD_TYPE_ALIASES
+            .iter()
+            .find(|(payload, _)| *payload == payload_type)
+            .map(|(_, command)| *command)
+            .unwrap_or(payload_type)
+    }
+
+    /// Every advertised command type must be executable.
+    ///
+    /// `CommandPayload::SUPPORTED_COMMAND_TYPES` is what the CLI, MCP and the
+    /// frontend advertise, while `type_name_to_op_kind` is what
+    /// `CommandExecutor::execute` will actually accept — nothing in the type
+    /// system connects the two, so a new variant can ship as callable and fail
+    /// at runtime. This test is that connection.
+    #[test]
+    fn every_supported_command_type_is_registered_with_the_executor() {
+        let unregistered: Vec<&str> = crate::ipc::CommandPayload::SUPPORTED_COMMAND_TYPES
+            .iter()
+            .copied()
+            .filter(|payload_type| {
+                CommandExecutor::type_name_to_op_kind(executed_type_name(payload_type)).is_err()
+            })
+            .filter(|payload_type| !KNOWN_UNREGISTERED_COMMAND_TYPES.contains(payload_type))
+            .collect();
+
+        assert!(
+            unregistered.is_empty(),
+            "these command types parse and build but CommandExecutor::execute will reject them: \
+             {unregistered:?}. Add an arm to type_name_to_op_kind and make sure the op replays."
+        );
+    }
+
+    /// Keeps the known-gap list honest in the other direction.
+    #[test]
+    fn known_unregistered_command_types_are_still_unregistered_and_supported() {
+        for payload_type in KNOWN_UNREGISTERED_COMMAND_TYPES {
+            assert!(
+                crate::ipc::CommandPayload::SUPPORTED_COMMAND_TYPES.contains(payload_type),
+                "'{payload_type}' is no longer a supported command type; drop it from the list"
+            );
+            assert!(
+                CommandExecutor::type_name_to_op_kind(executed_type_name(payload_type)).is_err(),
+                "'{payload_type}' is registered now — remove it from \
+                 KNOWN_UNREGISTERED_COMMAND_TYPES so the list keeps shrinking"
+            );
+        }
+    }
+
+    #[test]
+    fn payload_type_aliases_still_build_the_command_they_claim() {
+        let project_path = std::path::Path::new("/tmp/openreelio-alias-guard");
+
+        for (payload_type, expected_type_name) in PAYLOAD_TYPE_ALIASES {
+            let payload = match *payload_type {
+                "CreateTrack" => serde_json::json!({
+                    "sequenceId": "sequence-1",
+                    "name": "Track",
+                    "kind": "video"
+                }),
+                other => panic!("add a payload fixture for the '{other}' alias"),
+            };
+
+            let command = crate::ipc::CommandPayload::parse(payload_type.to_string(), payload)
+                .unwrap_or_else(|error| panic!("'{payload_type}' must parse: {error}"))
+                .build_command(project_path);
+
+            assert_eq!(
+                &command.type_name(),
+                expected_type_name,
+                "the alias table claims '{payload_type}' executes as '{expected_type_name}'"
+            );
+        }
     }
 
     #[test]

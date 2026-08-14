@@ -524,7 +524,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli text list --path ./project"
             },
             "plan.execute": {
-                "description": "Execute a plan file atomically (rollback on failure)",
+                "description": "Execute a plan file atomically. The whole plan is validated before anything is mutated, so an invalid payload never takes the project through a rollback. Exits 0 when applied and saved, 1 when the plan was rejected or a step failed and the rollback completed cleanly, and 2 when the tool could not run, the rollback was incomplete ('rollbackIncomplete': true, with 'rollbackFailures'), or the plan applied but could not be saved ('appliedNotSaved': true). An 'appliedNotSaved' report means the steps are already durable: re-running the plan would apply it twice. A failure report names 'failedStep' and 'error'. Plans are capped at 1000 steps",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "file": { "type": "string", "required": true, "desc": "Path to plan JSON file" }
@@ -532,7 +532,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "example": "openreelio-cli plan execute --path ./project --file edit_plan.json"
             },
             "plan.validate": {
-                "description": "Validate a plan file without executing",
+                "description": "Validate a plan file without executing. Checks duplicate and missing step ids, dependency cycles, the 1000-step cap, and parses every step payload. Exits 0 with the findings in 'status' and 'errors' whenever the plan file parses; exits nonzero with empty stdout when the tool itself cannot run, such as an unreadable plan file, malformed plan JSON, or a project that will not open",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "file": { "type": "string", "required": true, "desc": "Path to plan JSON file" }

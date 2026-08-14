@@ -808,11 +808,24 @@ fn rollback_steps(
 
     if !completed_operation_ids.is_empty() {
         match project.discard_persisted_operations(&completed_operation_ids) {
-            Ok(()) => {
-                tracing::debug!(
-                    discarded_ops = completed_operation_ids.len(),
-                    "Discarded rolled-back agent plan operations from persisted history"
-                );
+            Ok(still_applied) => {
+                if still_applied.is_empty() {
+                    tracing::debug!(
+                        discarded_ops = completed_operation_ids.len(),
+                        "Discarded rolled-back agent plan operations from persisted history"
+                    );
+                } else {
+                    // Protected operations stay applied and return on the next
+                    // open, so this rollback did not put the project back.
+                    let error_msg = format!(
+                        "Rollback could not discard protected operation(s) [{}]: they stay in the \
+                         project's applied history and will be present on the next open",
+                        still_applied.join(", ")
+                    );
+                    tracing::error!("{}", error_msg);
+                    rollback_errors.push(error_msg);
+                    failed = failed.max(1);
+                }
             }
             Err(e) => {
                 let error_msg =
