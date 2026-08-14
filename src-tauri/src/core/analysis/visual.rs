@@ -45,6 +45,35 @@ pub const CONTACT_SHEET_CELL_WIDTH: usize = 320;
 /// Height of each contact-sheet cell.
 pub const CONTACT_SHEET_CELL_HEIGHT: usize = 180;
 
+/// Pixel geometry of a single contact-sheet cell.
+///
+/// Every keyframe is fitted into this box before tiling, so the cell size is
+/// what decides how much detail survives into the sheet. [`Default`] keeps the
+/// historical 320x180 layout, which is what the analysis pipeline uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContactSheetCellSize {
+    /// Cell width in pixels.
+    pub width: usize,
+    /// Cell height in pixels.
+    pub height: usize,
+}
+
+impl Default for ContactSheetCellSize {
+    fn default() -> Self {
+        Self {
+            width: CONTACT_SHEET_CELL_WIDTH,
+            height: CONTACT_SHEET_CELL_HEIGHT,
+        }
+    }
+}
+
+impl ContactSheetCellSize {
+    /// Builds a cell size from explicit pixel dimensions.
+    pub fn new(width: usize, height: usize) -> Self {
+        Self { width, height }
+    }
+}
+
 /// Minimum shot duration to attempt smarter thumbnail-based selection.
 const SMART_KEYFRAME_MIN_DURATION_SEC: f64 = 1.2;
 
@@ -349,6 +378,28 @@ impl VisualAnalyzer {
         output_path: &Path,
         layout: Option<(usize, usize)>,
     ) -> CoreResult<Option<ContactSheetArtifact>> {
+        self.generate_contact_sheet_with_options(
+            keyframes,
+            output_path,
+            layout,
+            ContactSheetCellSize::default(),
+        )
+        .await
+    }
+
+    /// Generates a contact-sheet image with an explicit grid layout and cell size.
+    ///
+    /// Behaves exactly like [`VisualAnalyzer::generate_contact_sheet_with_layout`]
+    /// but lets the caller pick the pixel box each keyframe is fitted into. A
+    /// larger cell keeps more detail for vision models at the cost of sheet size;
+    /// a smaller one makes a dense overview cheap.
+    pub async fn generate_contact_sheet_with_options(
+        &self,
+        keyframes: &[PathBuf],
+        output_path: &Path,
+        layout: Option<(usize, usize)>,
+        cell: ContactSheetCellSize,
+    ) -> CoreResult<Option<ContactSheetArtifact>> {
         if keyframes.is_empty() {
             return Ok(None);
         }
@@ -359,6 +410,12 @@ impl VisualAnalyzer {
                     "Contact sheet layout requires at least one column and one row".to_string(),
                 ));
             }
+        }
+
+        if cell.width == 0 || cell.height == 0 {
+            return Err(CoreError::AnalysisFailed(
+                "Contact sheet cells require a non-zero width and height".to_string(),
+            ));
         }
 
         // No fast-path cache: the keyframe set may have changed since the file was written
@@ -406,14 +463,7 @@ impl VisualAnalyzer {
 
         let (columns, rows) = layout.unwrap_or_else(|| contact_sheet_layout(frame_count));
         let input_pattern = keyframe_dir.join("%d.jpg");
-        let filter = format!(
-            "scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,tile={cols}x{rows}:nb_frames={count}:padding=4:margin=2:color=black",
-            w = CONTACT_SHEET_CELL_WIDTH,
-            h = CONTACT_SHEET_CELL_HEIGHT,
-            cols = columns,
-            rows = rows,
-            count = frame_count,
-        );
+        let filter = contact_sheet_filter(cell, columns, rows, frame_count);
 
         let mut cmd = Command::new(&self.ffmpeg_path);
         configure_tokio_command(&mut cmd);
@@ -850,6 +900,27 @@ async fn remove_orphan_keyframes(output_dir: &Path, shot_count: usize) {
             );
         }
     }
+}
+
+/// Builds the FFmpeg filter that fits every keyframe into a cell and tiles them.
+///
+/// The keyframes arrive as an image sequence, so a single filter chain scales
+/// each one into the cell box, pads the leftover space, and lays the result out
+/// as `columns x rows`.
+fn contact_sheet_filter(
+    cell: ContactSheetCellSize,
+    columns: usize,
+    rows: usize,
+    frame_count: usize,
+) -> String {
+    format!(
+        "scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,tile={cols}x{rows}:nb_frames={count}:padding=4:margin=2:color=black",
+        w = cell.width,
+        h = cell.height,
+        cols = columns,
+        rows = rows,
+        count = frame_count,
+    )
 }
 
 /// Returns the last `n` lines of a multi-line string.
@@ -1399,6 +1470,56 @@ mod tests {
     // -------------------------------------------------------------------------
     // Utility Tests
     // -------------------------------------------------------------------------
+
+    #[test]
+    fn should_default_contact_sheet_cells_to_the_pinned_size() {
+        let cell = ContactSheetCellSize::default();
+
+        assert_eq!(cell.width, CONTACT_SHEET_CELL_WIDTH);
+        assert_eq!(cell.height, CONTACT_SHEET_CELL_HEIGHT);
+    }
+
+    #[test]
+    fn should_build_the_default_contact_sheet_filter_unchanged() {
+        let filter = contact_sheet_filter(ContactSheetCellSize::default(), 3, 2, 6);
+
+        assert_eq!(
+            filter,
+            "scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,tile=3x2:nb_frames=6:padding=4:margin=2:color=black"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_contact_sheet_cell_with_no_area() {
+        let analyzer = VisualAnalyzer::new(PathBuf::from("ffmpeg"));
+        let keyframes = vec![PathBuf::from("frames/0.jpg")];
+
+        let error = analyzer
+            .generate_contact_sheet_with_options(
+                &keyframes,
+                Path::new("sheet.jpg"),
+                Some((1, 1)),
+                ContactSheetCellSize::new(0, 180),
+            )
+            .await
+            .expect_err("A zero-width cell must be rejected before FFmpeg runs");
+
+        assert!(
+            error.to_string().contains("non-zero width and height"),
+            "Error should name the offending geometry, got: {error}"
+        );
+    }
+
+    #[test]
+    fn should_size_contact_sheet_cells_from_the_requested_geometry() {
+        let filter = contact_sheet_filter(ContactSheetCellSize::new(640, 360), 2, 2, 4);
+
+        assert!(
+            filter.starts_with("scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:"),
+            "Cell geometry should reach both the scale and pad stages, got: {filter}"
+        );
+        assert!(filter.contains("tile=2x2:nb_frames=4"));
+    }
 
     #[test]
     fn should_detect_nonempty_file() {
