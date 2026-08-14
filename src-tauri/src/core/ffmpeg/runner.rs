@@ -462,6 +462,78 @@ impl FFmpegRunner {
         Ok(())
     }
 
+    /// Re-encode a still image through a video filter chain.
+    ///
+    /// FFmpeg cannot write over its own input, so `output` must be a different
+    /// path than `input`. The output extension picks the encoder exactly as
+    /// [`FFmpegRunner::extract_frame_with_options`] does.
+    ///
+    /// # Arguments
+    /// * `input` - Path to the source image
+    /// * `output` - Path to write the filtered image to
+    /// * `filter` - FFmpeg `-vf` filter chain to apply
+    /// * `quality` - MJPEG quality (1-31, lower is better); ignored for PNG
+    pub async fn filter_image(
+        &self,
+        input: &Path,
+        output: &Path,
+        filter: &str,
+        quality: Option<u8>,
+    ) -> FFmpegResult<()> {
+        if !input.exists() {
+            return Err(FFmpegError::InvalidInput(format!(
+                "Input file does not exist: {}",
+                input.display()
+            )));
+        }
+        if input == output {
+            return Err(FFmpegError::InvalidInput(format!(
+                "Filtering an image in place is not possible: {}",
+                input.display()
+            )));
+        }
+
+        if let Some(parent) = output.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                FFmpegError::OutputError(format!("Failed to create output directory: {}", e))
+            })?;
+        }
+
+        let mut args = vec![
+            "-hide_banner".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-nostdin".to_string(),
+            "-i".to_string(),
+            input.to_string_lossy().to_string(),
+            "-frames:v".to_string(),
+            "1".to_string(),
+            "-vf".to_string(),
+            filter.to_string(),
+        ];
+        args.extend(frame_encode_args(output, quality));
+        args.push("-y".to_string());
+        args.push(output.to_string_lossy().to_string());
+
+        let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
+        configure_tokio_command(&mut cmd);
+        let result = cmd
+            .args(&args)
+            .output()
+            .await
+            .map_err(FFmpegError::ProcessError)?;
+
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            return Err(FFmpegError::ExecutionFailed(format!(
+                "Image filtering failed: {}",
+                stderr
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Extract a single frame from a video file with optional tonemapping.
     ///
     /// When `tonemap_filter` is provided, it is applied as a video filter to
@@ -2007,6 +2079,32 @@ mod tests {
         let args = frame_encode_args(Path::new("frame.jpg"), Some(200));
 
         assert_eq!(args, vec!["-q:v", &MAX_FRAME_JPEG_QUALITY.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn should_refuse_to_filter_an_image_onto_itself() {
+        use crate::core::ffmpeg::FFmpegSource;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let image = dir.path().join("cell.jpg");
+        std::fs::write(&image, b"not really a jpeg").expect("write fixture");
+        let runner = FFmpegRunner::new(FFmpegInfo {
+            ffmpeg_path: std::path::PathBuf::from("ffmpeg"),
+            ffprobe_path: std::path::PathBuf::from("ffprobe"),
+            version: "test".to_string(),
+            is_bundled: false,
+            source: FFmpegSource::System,
+        });
+
+        let error = runner
+            .filter_image(&image, &image, "null", None)
+            .await
+            .expect_err("FFmpeg cannot write over its own input");
+
+        assert!(
+            error.to_string().contains("in place"),
+            "Error should explain the in-place restriction, got: {error}"
+        );
     }
 
     // =========================================================================
