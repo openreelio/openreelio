@@ -73,5 +73,6 @@ one audio track. `asset import` returns
 - **Negative numbers need `=`**: write `--target-lufs=-14`, not
   `--target-lufs -14`. (`analysis silence --threshold-db -40` is the one option
   that accepts the spaced form.)
-- **Exit codes**: `0` success, `1` failure. `verify` is the exception — see
-  [Verify](../verify/REFERENCE.md).
+- **Exit codes**: `0` success, `1` failure. `verify` and `plan execute` have
+  richer contracts — see [Verify](../verify/REFERENCE.md) and
+  [Editing](../editing/REFERENCE.md#atomic-batches-plan-execute).

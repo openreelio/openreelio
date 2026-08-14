@@ -83,9 +83,24 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
   `--format` contradicting a `.png`/`.jpg` extension is rejected instead of
   quietly writing somewhere else.
 
-**Contact sheets.** `--grid COLSxROWS --between START END [--count N]` writes one
-sheet and returns `sheet.cells[{index,row,col,timelineSec}]`, mapping every cell
-a vision model comments on back to a timecode. Capped at 100 cells.
+**Contact sheets.** `--grid COLSxROWS` with either `--between START END
+[--count N]` (uniform sampling) or `--times a,b,c` (explicit list, kept in the
+order given) writes one sheet and returns
+`sheet.cells[{index,row,col,timelineSec}]`, mapping every cell a vision model
+comments on back to a timecode. Capped at 100 cells.
+
+- `--label-cells` burns each cell's index and timecode into the image, so the
+  mapping survives without the JSON — use it beyond a 3×3.
+- `--cell-width` / `--cell-height` (64–1024, default 320×180) size the cells.
+  640-wide cells are the floor for reading captions; grid cells are extracted at
+  the cell width, so `--max-width` only matters as an oversampling override.
+
+**From a rendered file.** `--file <RENDER>` extracts stills or sheets from a
+rendered video instead of the project timeline — times are in the file's own
+timebase and cells map back as `fileSec`. This is the cheap way to inspect the
+render you just made (fast seeks, no per-cell timeline renders), and it shows
+exactly the pixels `verify --file` measured. See
+[Judging](../judging/REFERENCE.md) for the loop built on it.
 
 Every timeline time has to be inside the sequence. One at or past the end is
 rejected with the sequence's real duration in the message — the `0 30` above

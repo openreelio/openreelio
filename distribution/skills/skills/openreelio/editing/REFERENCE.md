@@ -65,15 +65,21 @@ An edit plan is:
 ```
 
 Steps run in dependency order, and the whole plan rolls back if any step fails.
+The whole plan is validated before anything mutates; plans are capped at 1000
+steps.
 
 ```bash
-openreelio-cli plan template --template-type split-and-move
+openreelio-cli plan template --type split-and-move
 openreelio-cli plan validate --path ./demo --file plan.json
 openreelio-cli plan execute  --path ./demo --file plan.json
 ```
 
-`plan template` takes `--template-type`, not `--type`. `plan execute` returns
-`{"status","planId","stepsExecuted","stepResults":[…]}`.
+`plan execute` returns `{"status","planId","stepsExecuted","stepResults":[…]}`
+and has its own exit codes: `0` applied and saved, `1` rejected or failed and
+rolled back cleanly, `2` the tool failed, the rollback was incomplete
+(`rollbackIncomplete: true`), or the plan applied but could not be saved
+(`appliedNotSaved: true`). On `appliedNotSaved` the work is already durable —
+do **not** re-run the plan; re-running is a double apply.
 
 Prefer a plan over a sequence of individual commands whenever the steps only make
 sense together — a half-applied multi-step edit is worse than none.
@@ -81,12 +87,22 @@ sense together — a half-applied multi-step edit is worse than none.
 ## Undo and history
 
 ```bash
-openreelio-cli timeline undo --path ./demo
-openreelio-cli timeline redo --path ./demo
-openreelio-cli state ops     --path ./demo --last 20
-openreelio-cli state dump    --path ./demo [--sequence <SEQUENCE_ID>]
+openreelio-cli timeline undo  --path ./demo
+openreelio-cli timeline redo  --path ./demo
+openreelio-cli state ops      --path ./demo --last 20
+openreelio-cli state history  --path ./demo [--last 20]
+openreelio-cli state jump     --path ./demo --index 4
+openreelio-cli state dump     --path ./demo [--sequence <SEQUENCE_ID>]
 openreelio-cli state snapshot --path ./demo
 ```
 
 `state ops` is the cheapest way to see what actually happened; `state dump` is
 the full derived state and can be large.
+
+`state history` lists the persisted edit history as one index space —
+`{appliedCount, redoCount, currentIndex, entries:[{index, opId, commandType,
+timestamp}]}` — where `currentIndex` is the last applied entry (`-1` when
+everything is undone). `state jump --index N` repositions history after entry
+`N` in one step (`--index=-1` undoes everything) and persists the move. Any new
+mutating command after a jump clears the redo branch — to return to an unwound
+state, re-apply its plan JSON rather than counting on redo.
