@@ -62,6 +62,10 @@ fn deserialize_source_effects(source_effects: &[serde_json::Value]) -> CoreResul
 /// - `effect_type`: The type of effect to add
 /// - `params`: Optional initial parameters for the effect
 ///
+/// The effect type is optional on the wire because a transition recipe can
+/// supply it instead; `CommandPayload::parse` resolves the recipe before the
+/// command is built, and executing without either is a validation error.
+///
 /// # Example
 /// ```ignore
 /// let cmd = AddEffectCommand::new("seq-1", "track-1", "clip-1", EffectType::GaussianBlur)
@@ -74,7 +78,8 @@ pub struct AddEffectCommand {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     pub clip_id: ClipId,
-    pub effect_type: EffectType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_type: Option<EffectType>,
     #[serde(default)]
     pub params: std::collections::HashMap<String, ParamValue>,
     #[serde(default)]
@@ -92,6 +97,28 @@ impl AddEffectCommand {
         track_id: impl Into<String>,
         clip_id: impl Into<String>,
         effect_type: EffectType,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.into(),
+            track_id: track_id.into(),
+            clip_id: clip_id.into(),
+            effect_type: Some(effect_type),
+            params: std::collections::HashMap::new(),
+            keyframes: std::collections::HashMap::new(),
+            position: None,
+            created_effect_id: None,
+        }
+    }
+
+    /// Creates the command from an effect type that may still be unresolved.
+    ///
+    /// Used by payload construction, where a transition recipe may have supplied
+    /// the type; executing without a type is rejected with a validation error.
+    pub fn with_optional_type(
+        sequence_id: impl Into<String>,
+        track_id: impl Into<String>,
+        clip_id: impl Into<String>,
+        effect_type: Option<EffectType>,
     ) -> Self {
         Self {
             sequence_id: sequence_id.into(),
@@ -126,6 +153,15 @@ impl AddEffectCommand {
 
 impl Command for AddEffectCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        // A transition recipe is resolved into an explicit effect type before the
+        // command is built, so reaching execute without one means neither was
+        // supplied.
+        let effect_type = self.effect_type.clone().ok_or_else(|| {
+            CoreError::ValidationError(
+                "AddEffect requires effectType, or a recipe that supplies one".to_string(),
+            )
+        })?;
+
         // Validate sequence exists
         let sequence = state
             .sequences
@@ -143,7 +179,7 @@ impl Command for AddEffectCommand {
             .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
 
         // Create the effect
-        let mut effect = Effect::new(self.effect_type.clone());
+        let mut effect = Effect::new(effect_type);
         for (key, value) in &self.params {
             effect.set_param(key, value.clone());
         }

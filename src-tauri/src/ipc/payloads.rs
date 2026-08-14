@@ -651,6 +651,9 @@ pub struct UpdateCaptionPayload {
     // Keep them to avoid rejecting payloads during strict parsing.
     pub style: Option<serde_json::Value>,
     pub position: Option<serde_json::Value>,
+    /// Curated caption pack id, resolved into `style` + `position`.
+    #[serde(default)]
+    pub style_pack: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
@@ -667,6 +670,9 @@ pub struct CreateCaptionPayload {
     // applied by core command logic yet.
     pub style: Option<serde_json::Value>,
     pub position: Option<serde_json::Value>,
+    /// Curated caption pack id, resolved into `style` + `position`.
+    #[serde(default)]
+    pub style_pack: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
@@ -691,6 +697,9 @@ pub struct ImportGeneratedCaptionsPayload {
     pub segments: Vec<GeneratedCaptionSegmentPayload>,
     pub style: Option<serde_json::Value>,
     pub position: Option<serde_json::Value>,
+    /// Curated caption pack id, resolved into `style` + `position`.
+    #[serde(default)]
+    pub style_pack: Option<String>,
     #[serde(default)]
     pub replace_existing: bool,
 }
@@ -709,13 +718,23 @@ pub struct DeleteCaptionPayload {
 // =============================================================================
 
 /// Payload for adding an effect to a clip.
+///
+/// Either `effectType` or `recipe` must be present. A curated transition recipe
+/// (see `core::style::transition_recipes`) supplies the effect type and its
+/// baseline parameters; anything in `params` overrides the recipe key by key.
+/// `CommandPayload::parse` performs that resolution, so a payload that reaches
+/// command construction always carries an explicit effect type.
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AddEffectPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     pub clip_id: ClipId,
-    pub effect_type: EffectType,
+    #[serde(default)]
+    pub effect_type: Option<EffectType>,
+    /// Curated transition recipe id, resolved into `effectType` + `params`.
+    #[serde(default)]
+    pub recipe: Option<String>,
     #[serde(default, alias = "parameters")]
     pub params: HashMap<String, ParamValue>,
     #[serde(default)]
@@ -1517,7 +1536,73 @@ impl CommandPayload {
             "commandType": command_type_trimmed,
             "payload": payload
         });
-        serde_json::from_value(raw_request).map_err(|e| format!("Invalid command payload: {}", e))
+        let mut parsed: Self = serde_json::from_value(raw_request)
+            .map_err(|e| format!("Invalid command payload: {}", e))?;
+        parsed.resolve_curated_packs()?;
+        Ok(parsed)
+    }
+
+    /// Expands curated caption packs and transition recipes into explicit values.
+    ///
+    /// This runs at the single strict-parsing chokepoint every JSON entry point
+    /// shares — GUI IPC, `command execute`, `plan execute`, agent steps — so a
+    /// pack id is resolved once, before the command is built, and the op log
+    /// records the concrete style or effect type it produced alongside the id
+    /// that produced it.
+    ///
+    /// The resolution is idempotent: re-parsing an already-resolved payload
+    /// yields the same values, because the explicit fields it wrote fully cover
+    /// the pack layer underneath.
+    fn resolve_curated_packs(&mut self) -> Result<(), String> {
+        use crate::core::style::{resolve_caption_layers, resolve_effect_recipe};
+
+        match self {
+            Self::CreateCaption(payload) => {
+                let resolved = resolve_caption_layers(
+                    payload.style_pack.as_deref(),
+                    payload.style.take(),
+                    payload.position.take(),
+                )?;
+                payload.style = resolved.style;
+                payload.position = resolved.position;
+            }
+            Self::UpdateCaption(payload) => {
+                let resolved = resolve_caption_layers(
+                    payload.style_pack.as_deref(),
+                    payload.style.take(),
+                    payload.position.take(),
+                )?;
+                payload.style = resolved.style;
+                payload.position = resolved.position;
+            }
+            Self::ImportGeneratedCaptions(payload) => {
+                let resolved = resolve_caption_layers(
+                    payload.style_pack.as_deref(),
+                    payload.style.take(),
+                    payload.position.take(),
+                )?;
+                payload.style = resolved.style;
+                payload.position = resolved.position;
+            }
+            Self::AddEffect(payload) => {
+                let resolved = resolve_effect_recipe(
+                    payload.recipe.as_deref(),
+                    payload.effect_type.take(),
+                    std::mem::take(&mut payload.params),
+                )?;
+                payload.effect_type = resolved.effect_type;
+                payload.params = resolved.params;
+
+                if payload.effect_type.is_none() {
+                    return Err(
+                        "AddEffect requires effectType, or a recipe that supplies one".to_string(),
+                    );
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
     }
 
     /// Converts a validated `CommandPayload` into an executable `Command` trait object.
@@ -1987,8 +2072,14 @@ impl CommandPayload {
                 .with_position(p.position),
             ),
             CommandPayload::AddEffect(p) => {
-                let mut cmd =
-                    AddEffectCommand::new(&p.sequence_id, &p.track_id, &p.clip_id, p.effect_type);
+                // `parse` has already folded any recipe into `effect_type`; an
+                // absent type is rejected there and again at execute.
+                let mut cmd = AddEffectCommand::with_optional_type(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.effect_type,
+                );
                 for (key, value) in p.params {
                     cmd = cmd.with_param(key, value);
                 }

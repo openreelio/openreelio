@@ -29,6 +29,9 @@
 pub mod caption_packs;
 pub mod transition_recipes;
 
+#[cfg(test)]
+mod contract_tests;
+
 use std::collections::HashMap;
 
 use serde_json::{Map, Value};

@@ -1368,8 +1368,12 @@ pub async fn apply_edit_script(
                 Box::new(ReorderTracksCommand::new(&p.sequence_id, p.new_order))
             }
             CommandPayload::AddEffect(p) => {
-                let mut cmd =
-                    AddEffectCommand::new(&p.sequence_id, &p.track_id, &p.clip_id, p.effect_type);
+                let mut cmd = AddEffectCommand::with_optional_type(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.effect_type,
+                );
                 for (key, value) in p.params {
                     cmd = cmd.with_param(key, value);
                 }

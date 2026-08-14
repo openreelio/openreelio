@@ -3277,7 +3277,11 @@ fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
     Some(effect)
 }
 
-fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
+/// Builds the time-gated `drawtext` filter a caption clip renders as.
+///
+/// Exposed to the crate so the curated caption pack contract tests can assert
+/// against the real render seam instead of a re-implementation of it.
+pub(crate) fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
     let effect = build_caption_text_effect(clip)?;
 
     let start = clip.place.timeline_in_sec;
