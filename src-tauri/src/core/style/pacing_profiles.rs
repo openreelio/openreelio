@@ -10,11 +10,24 @@
 //!
 //! - `target_shot_sec` — the mean length of a cut shot.
 //! - `shot_variance_sec` — how far shots swing either side of that mean.
-//! - `transition_recipe` + `transition_every_n` — which curated transition to
-//!   place, and on which cuts. `every_n` counts *boundaries*, so `3` places one
-//!   on the 1st, 4th, 7th cut; `0` (or no recipe) means hard cuts throughout.
 //! - `respect_shot_boundaries` — whether generated cuts snap onto detected shot
 //!   changes in the source rather than landing mid-shot.
+//!
+//! # Transitions are reserved
+//!
+//! `transition_recipe` + `transition_every_n` describe which curated transition
+//! to place and on which cuts (`every_n` counts *boundaries*, so `3` means the
+//! 1st, 4th, and 7th cut; `0` or no recipe means hard cuts). Every shipped
+//! profile sets `transition_recipe: None`, because the renderer does not yet
+//! place two-input transitions: an `xfade` shortens the picture while the audio
+//! stitch keeps every clip at its absolute timeline position, so the rendered
+//! file would drift out of sync and end before the timeline does. The fields
+//! stay in the schema, and [`generate_steps_with_transitions`] still knows how
+//! to emit the `AddEffect` steps, so a profile can start placing transitions the
+//! day the transition engine lands — a shipped profile that quietly rendered a
+//! cut where it advertised a dissolve is worse than one that says it cuts hard.
+//!
+//! [`generate_steps_with_transitions`]: crate::core::analysis::style_planner
 //!
 //! # What a profile does not decide
 //!
@@ -62,8 +75,13 @@ pub struct PacingProfileSpec {
     /// Peak-to-peak swing around the target, in seconds. `0.0` is metronomic.
     pub shot_variance_sec: f64,
     /// Curated transition recipe id, or `None` for hard cuts throughout.
+    ///
+    /// Reserved for the transition engine: every shipped profile sets `None`
+    /// while the renderer still turns two-input transitions into cuts.
     pub transition_recipe: Option<&'static str>,
     /// Place a transition every N cut boundaries; `0` means never.
+    ///
+    /// Reserved alongside [`Self::transition_recipe`].
     pub transition_every_n: usize,
     /// Snap generated cuts onto detected source shot changes where one is near.
     pub respect_shot_boundaries: bool,
@@ -128,6 +146,9 @@ pub struct PacingProfileDescriptor {
 ///
 /// This is both the validator and the listing: `packs list --kind pacing`
 /// prints it and [`resolve_pacing_profile`] matches against it.
+///
+/// Every entry cuts hard. See the module docs for why the transition fields
+/// are reserved rather than used.
 pub const PACING_PROFILES: &[PacingProfileSpec] = &[
     PacingProfileSpec {
         id: "shorts-hook-fast",
@@ -157,44 +178,62 @@ pub const PACING_PROFILES: &[PacingProfileSpec] = &[
     },
     PacingProfileSpec {
         id: "dynamic-social",
-        description: "Two-and-a-half-second shots with a soft dissolve every fourth cut. The \
-                      default for landscape social video that needs energy without feeling \
-                      frantic.",
+        description: "Two-and-a-half-second shots and hard cuts. The default for landscape \
+                      social video that needs energy without feeling frantic.",
         aliases: &["social", "dynamic"],
         tempo: TempoClassification::Moderate,
         target_shot_sec: 2.5,
         shot_variance_sec: 1.0,
-        transition_recipe: Some("dissolve-soft"),
-        transition_every_n: 4,
+        transition_recipe: None,
+        transition_every_n: 0,
         respect_shot_boundaries: true,
     },
     PacingProfileSpec {
         id: "steady-documentary",
-        description: "Four-and-a-half-second shots with a standard dissolve every third cut. \
-                      Long enough to let a subject finish a thought, cut often enough to keep \
-                      an interview moving.",
+        description: "Four-and-a-half-second shots and hard cuts. Long enough to let a subject \
+                      finish a thought, cut often enough to keep an interview moving.",
         aliases: &["documentary", "doc", "steady"],
         tempo: TempoClassification::Moderate,
         target_shot_sec: 4.5,
         shot_variance_sec: 1.5,
-        transition_recipe: Some("dissolve-standard"),
-        transition_every_n: 3,
+        transition_recipe: None,
+        transition_every_n: 0,
         respect_shot_boundaries: true,
     },
     PacingProfileSpec {
         id: "calm-longform",
-        description: "Seven-second shots with a long dissolve every other cut, for landscape, \
-                      ambience, and passage-of-time sequences where the edit should be felt \
-                      rather than noticed.",
+        description: "Seven-second shots and hard cuts, for landscape, ambience, and \
+                      passage-of-time sequences where the edit should be felt rather than \
+                      noticed.",
         aliases: &["calm", "longform", "ambient"],
         tempo: TempoClassification::Slow,
         target_shot_sec: 7.0,
         shot_variance_sec: 2.0,
-        transition_recipe: Some("dissolve-long"),
-        transition_every_n: 2,
+        transition_recipe: None,
+        transition_every_n: 0,
         respect_shot_boundaries: true,
     },
 ];
+
+/// A profile that places transitions, for tests only.
+///
+/// No shipped profile places one while the renderer turns two-input transitions
+/// into cuts, but the planner still has to know how — the `AddEffect` cadence is
+/// the half of the feature that is finished, and it should not rot while the
+/// render half is built. Nothing outside the test build can see this, so it
+/// cannot be resolved by id or listed as a shipped choice.
+#[cfg(test)]
+pub(crate) const TRANSITION_CADENCE_TEST_PROFILE: PacingProfileSpec = PacingProfileSpec {
+    id: "test-transition-cadence",
+    description: "Test-only profile that exercises the transition cadence machinery.",
+    aliases: &[],
+    tempo: TempoClassification::Moderate,
+    target_shot_sec: 2.5,
+    shot_variance_sec: 1.0,
+    transition_recipe: Some("dissolve-soft"),
+    transition_every_n: 4,
+    respect_shot_boundaries: false,
+};
 
 /// Returns every pacing profile descriptor, in table order.
 pub fn list_pacing_profiles() -> Vec<PacingProfileDescriptor> {
@@ -260,7 +299,10 @@ mod tests {
 
     #[test]
     fn every_profile_names_a_transition_recipe_that_exists() {
-        for profile in PACING_PROFILES {
+        for profile in PACING_PROFILES
+            .iter()
+            .chain(std::iter::once(&TRANSITION_CADENCE_TEST_PROFILE))
+        {
             let Some(recipe_id) = profile.transition_recipe else {
                 continue;
             };
@@ -271,6 +313,51 @@ mod tests {
                 profile.id
             );
         }
+    }
+
+    #[test]
+    fn every_shipped_profile_cuts_hard_while_transitions_render_as_cuts() {
+        // The renderer turns a two-input transition into a cut and warns. A
+        // profile that advertised a dissolve would therefore be advertising
+        // something the export cannot deliver, so no shipped profile does until
+        // the transition engine exists.
+        for profile in PACING_PROFILES {
+            assert!(
+                profile.transition_recipe.is_none(),
+                "profile '{}' advertises transition recipe '{:?}', but the renderer does not \
+                 place transitions yet — leave the field None until it does",
+                profile.id,
+                profile.transition_recipe
+            );
+            assert_eq!(
+                profile.transition_every_n, 0,
+                "profile '{}' must not declare a transition cadence it has no recipe for",
+                profile.id
+            );
+            assert!(
+                profile.active_transition().is_none(),
+                "profile '{}' must cut hard",
+                profile.id
+            );
+        }
+    }
+
+    #[test]
+    fn the_test_only_profile_still_exercises_the_transition_cadence() {
+        // The cadence machinery is finished and stays proven; only the shipped
+        // catalogue holds back. If this ever stops reporting a transition, the
+        // planner's `AddEffect` path has gone untested.
+        let (recipe, every_n) = TRANSITION_CADENCE_TEST_PROFILE
+            .active_transition()
+            .expect("the test profile must place transitions");
+        assert_eq!(recipe, "dissolve-soft");
+        assert_eq!(every_n, 4);
+        assert!(
+            !PACING_PROFILES
+                .iter()
+                .any(|profile| profile.id == TRANSITION_CADENCE_TEST_PROFILE.id),
+            "the test-only profile must never be shipped in the catalogue"
+        );
     }
 
     fn resolve_pacing_recipe(profile_id: &str, recipe_id: &str) -> &'static str {
@@ -324,7 +411,10 @@ mod tests {
 
     #[test]
     fn a_profile_without_a_recipe_never_reports_an_active_transition() {
-        for profile in PACING_PROFILES {
+        for profile in PACING_PROFILES
+            .iter()
+            .chain(std::iter::once(&TRANSITION_CADENCE_TEST_PROFILE))
+        {
             if profile.transition_recipe.is_none() || profile.transition_every_n == 0 {
                 assert!(
                     profile.active_transition().is_none(),

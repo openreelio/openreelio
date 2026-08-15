@@ -10,11 +10,14 @@
 //! The same cut machinery also serves a curated
 //! [`PacingProfileSpec`](crate::core::style::PacingProfileSpec) — see
 //! [`StylePlanner::plan_from_profile`] — which is the input to reach for when
-//! there is no reference video, only an idiom to cut in. A profile can also
-//! place curated transitions, which the ESD path still cannot: a reference
-//! ESD's transition inventory records *that* a dissolve happened, never which
-//! curated recipe would reproduce it, so non-cut reference transitions stay a
-//! warning rather than a guess.
+//! there is no reference video, only an idiom to cut in.
+//!
+//! Neither path plans a transition today. The profile path *can* — the
+//! `AddEffect` cadence is implemented and tested — but no shipped profile asks
+//! for one while the renderer turns a two-input transition into a cut. The ESD
+//! path cannot at all: a reference ESD's transition inventory records *that* a
+//! dissolve happened, never which curated recipe would reproduce it, so non-cut
+//! reference transitions stay a warning rather than a guess.
 
 use std::collections::HashSet;
 
@@ -284,17 +287,25 @@ impl StylePlanner {
             )));
         }
 
-        if src_total < profile.target_shot_sec {
+        let shot_durations = Self::profile_shot_durations(profile, src_total);
+        let mut cut_times = Self::compute_scaled_cut_times(&shot_durations, src_total, src_total);
+        let ungrouped_cut_count = cut_times.len();
+
+        // A source that rounds to a single shot produces no splits at all. That
+        // is a legitimate answer, but an empty `cutCount` with no explanation
+        // reads as a broken command, so the reason travels with the plan.
+        if ungrouped_cut_count == 0 {
             warnings.push(format!(
-                "Source is {:.1}s, shorter than the profile's {:.1}s target shot; the plan makes no cuts",
+                "Source is {:.1}s, shorter than 1.5x the profile's {:.1}s target shot, so it \
+                 rounds to a single shot; no cuts planned. The plan still creates the track and \
+                 places the clip",
                 src_total, profile.target_shot_sec
             ));
         }
 
-        let shot_durations = Self::profile_shot_durations(profile, src_total);
-        let mut cut_times = Self::compute_scaled_cut_times(&shot_durations, src_total, src_total);
-
         if profile.respect_shot_boundaries {
+            let boundaries = Self::interior_shot_boundaries(source_shots, src_total);
+
             if source_shots.is_empty() {
                 warnings.push(format!(
                     "Profile '{}' respects shot boundaries, but no shot detection results are \
@@ -302,10 +313,20 @@ impl StylePlanner {
                      shots` first to align them with the footage",
                     profile.id
                 ));
+            } else if boundaries.is_empty() {
+                // Shot detection ran and found one shot spanning the whole
+                // source, so there is nothing to snap onto. Without this the
+                // profile's headline behaviour is a silent no-op.
+                warnings.push(format!(
+                    "Profile '{}' respects shot boundaries, but shot detection found a single \
+                     shot covering the whole source; there is nothing to snap onto and cuts fall \
+                     on the profile's own grid",
+                    profile.id
+                ));
             } else {
                 let snapped = Self::snap_cut_times_to_shots(
                     &cut_times,
-                    source_shots,
+                    &boundaries,
                     src_total,
                     profile.target_shot_sec * SHOT_SNAP_FRACTION,
                 );
@@ -321,15 +342,21 @@ impl StylePlanner {
             }
         }
 
+        if ungrouped_cut_count > 0 && cut_times.is_empty() {
+            warnings.push(format!(
+                "All {} planned cuts collided with each other once snapped onto detected shot \
+                 changes; no cuts planned. The plan still creates the track and places the clip",
+                ungrouped_cut_count
+            ));
+        }
+
         let cadence = profile
             .active_transition()
             .map(|(recipe, every_n)| TransitionCadence { recipe, every_n });
 
-        let steps = if cut_times.is_empty() {
-            Vec::new()
-        } else {
-            Self::generate_steps_with_transitions(context, &cut_times, cadence)
-        };
+        // The track and the clip are planned whether or not any cut is: a plan
+        // that places the footage is a usable answer, an empty one is not.
+        let steps = Self::generate_steps_with_transitions(context, &cut_times, cadence);
 
         let compatibility_score = Self::profile_fidelity_score(profile, &cut_times, src_total);
 
@@ -413,6 +440,19 @@ impl StylePlanner {
         durations
     }
 
+    /// Returns the detected shot changes that fall inside the source.
+    ///
+    /// A shot's end at the very end of the source is not a boundary anything can
+    /// be cut on, so a bundle with one shot yields no boundaries at all — which
+    /// is the case worth reporting rather than silently ignoring.
+    fn interior_shot_boundaries(source_shots: &[ShotResult], src_total: f64) -> Vec<f64> {
+        source_shots
+            .iter()
+            .map(|shot| shot.end_sec)
+            .filter(|time| time.is_finite() && *time > 0.0 && *time < src_total)
+            .collect()
+    }
+
     /// Moves each cut onto the nearest detected shot change within `tolerance`.
     ///
     /// A cut that lands mid-shot reads as an accident; a cut on a shot change
@@ -422,16 +462,10 @@ impl StylePlanner {
     /// rules the ESD path uses.
     fn snap_cut_times_to_shots(
         cut_times: &[f64],
-        source_shots: &[ShotResult],
+        boundaries: &[f64],
         src_total: f64,
         tolerance_sec: f64,
     ) -> SnappedCutTimes {
-        let boundaries: Vec<f64> = source_shots
-            .iter()
-            .map(|shot| shot.end_sec)
-            .filter(|time| time.is_finite() && *time > 0.0 && *time < src_total)
-            .collect();
-
         let mut snapped = Vec::with_capacity(cut_times.len());
         let mut moved_count = 0usize;
         let mut last_cut = None;
@@ -493,8 +527,14 @@ impl StylePlanner {
 
     /// Generates the cut steps, then the transition steps a cadence asks for.
     ///
-    /// Transitions are placed on the *outgoing* clip of a boundary, which is
-    /// what the render stitch reads: `find_transition_effect` looks at the clip
+    /// No shipped profile asks for one yet — the renderer turns a two-input
+    /// transition into a cut and warns, so a profile that planned a dissolve
+    /// would be planning an edit the export cannot deliver. The cadence is kept
+    /// implemented and tested (see the test-only profile in
+    /// [`pacing_profiles`](crate::core::style::pacing_profiles)) so the planner
+    /// half is ready when the transition engine lands.
+    ///
+    /// Transitions are placed on the *outgoing* clip of a boundary — the clip
     /// that ends at the cut, not the one that starts there. Attaching to the
     /// incoming clip would move every transition one cut later.
     ///
@@ -1263,6 +1303,14 @@ mod tests {
         crate::core::style::resolve_pacing_profile(id).expect("profile resolves")
     }
 
+    /// The test-only profile that still places transitions.
+    ///
+    /// No shipped profile does while the renderer turns a two-input transition
+    /// into a cut, but the cadence machinery is finished and stays proven here.
+    fn transition_profile() -> &'static crate::core::style::PacingProfileSpec {
+        &crate::core::style::pacing_profiles::TRANSITION_CADENCE_TEST_PROFILE
+    }
+
     fn plain_bundle(duration_sec: f64) -> AnalysisBundle {
         AnalysisBundle::new(
             "src-asset",
@@ -1395,16 +1443,20 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_cut_profile_emits_no_transition_steps() {
-        let bundle = plain_bundle(30.0);
+    fn every_shipped_profile_emits_no_transition_steps() {
+        // Shipped profiles cut hard while the renderer turns a two-input
+        // transition into a cut. A profile that planned one would be planning
+        // an edit the export cannot deliver.
+        let bundle = plain_bundle(60.0);
         let context = StylePlanningContext::new("seq-1", "src-asset");
 
-        for profile_id in ["shorts-hook-fast", "music-montage"] {
-            let result = StylePlanner::plan_from_profile(profile(profile_id), &bundle, &context)
-                .expect("plan generates");
+        for spec in crate::core::style::PACING_PROFILES {
+            let result =
+                StylePlanner::plan_from_profile(spec, &bundle, &context).expect("plan generates");
             assert!(
                 transition_steps(&result.plan).is_empty(),
-                "profile '{profile_id}' must cut hard"
+                "profile '{}' must cut hard",
+                spec.id
             );
         }
     }
@@ -1414,7 +1466,7 @@ mod tests {
         let bundle = plain_bundle(60.0);
         let context = StylePlanningContext::new("seq-1", "src-asset");
 
-        let spec = profile("calm-longform");
+        let spec = transition_profile();
         let (recipe, every_n) = spec
             .active_transition()
             .expect("profile places transitions");
@@ -1452,8 +1504,14 @@ mod tests {
         let bundle = plain_bundle(60.0);
         let context = StylePlanningContext::new("seq-1", "src-asset");
 
-        let result = StylePlanner::plan_from_profile(profile("dynamic-social"), &bundle, &context)
+        let result = StylePlanner::plan_from_profile(transition_profile(), &bundle, &context)
             .expect("plan generates");
+
+        let transitions = transition_steps(&result.plan);
+        assert!(
+            !transitions.is_empty(),
+            "the test profile must plan transitions"
+        );
 
         let step_ids: std::collections::HashSet<&str> = result
             .plan
@@ -1462,7 +1520,7 @@ mod tests {
             .map(|step| step.id.as_str())
             .collect();
 
-        for step in transition_steps(&result.plan) {
+        for step in transitions {
             assert_eq!(step.depends_on.len(), 1, "step '{}'", step.id);
             let dependency = &step.depends_on[0];
             assert!(
@@ -1474,20 +1532,77 @@ mod tests {
     }
 
     #[test]
-    fn a_source_shorter_than_one_shot_plans_nothing_and_says_why() {
+    fn a_source_shorter_than_one_shot_still_places_the_clip_and_says_why_it_did_not_cut() {
         let bundle = plain_bundle(2.0);
         let context = StylePlanningContext::new("seq-1", "src-asset");
 
         let result = StylePlanner::plan_from_profile(profile("calm-longform"), &bundle, &context)
             .expect("plan generates");
 
-        assert!(result.plan.steps.is_empty());
+        assert!(
+            split_times(&result.plan).is_empty(),
+            "a 2s source cannot be cut to 7s shots"
+        );
+        let tool_names: Vec<&str> = result
+            .plan
+            .steps
+            .iter()
+            .map(|step| step.tool_name.as_str())
+            .collect();
+        assert_eq!(
+            tool_names,
+            vec!["AddTrack", "InsertClip"],
+            "an uncut plan must still place the footage"
+        );
         assert!(
             result
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("shorter")),
+                .any(|warning| warning.contains("1.5x") && warning.contains("no cuts planned")),
             "{:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn a_source_between_one_and_one_and_a_half_target_shots_says_why_it_did_not_cut() {
+        // The gap that used to return `status: ok` with an empty plan and no
+        // explanation: longer than one target shot, too short to round to two.
+        let bundle = plain_bundle(5.4);
+        let context = StylePlanningContext::new("seq-1", "src-asset");
+
+        let result =
+            StylePlanner::plan_from_profile(profile("steady-documentary"), &bundle, &context)
+                .expect("plan generates");
+
+        assert!(split_times(&result.plan).is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("1.5x") && warning.contains("no cuts planned")),
+            "a silent zero-cut plan must explain itself: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn a_single_detected_shot_is_reported_rather_than_silently_ignored() {
+        // Shot detection ran and found one shot spanning the source, so
+        // `respectShotBoundaries` has nothing to snap onto.
+        let bundle = make_test_bundle(vec![40.0], vec![]);
+        let context = StylePlanningContext::new("seq-1", "src-asset");
+
+        let result =
+            StylePlanner::plan_from_profile(profile("steady-documentary"), &bundle, &context)
+                .expect("plan generates");
+
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("single shot")),
+            "a no-op snap must say so: {:?}",
             result.warnings
         );
     }
