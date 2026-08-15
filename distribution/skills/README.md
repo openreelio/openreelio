@@ -60,8 +60,11 @@ These are structural requirements, not style preferences.
 exits instead of serving.
 
 The server is **read-only by default**. The read tools are always registered,
-including `openreelio.verify`, so deterministic QC is available without any
-write grant. Mutating tools (`openreelio.media.insert`,
+including `openreelio.verify` and `openreelio.frame.extract`, so deterministic
+QC and the judge loop are both available without any write grant —
+`frame.extract` returns stills and contact sheets inline as MCP `image` blocks,
+so a vision-capable host can look at a render without a file-reading tool.
+Mutating tools (`openreelio.media.insert`,
 `openreelio.plan.apply`) appear only when the operator adds `--allow-write` — a
 local-trust switch that drops the per-call approval requirement — or when the
 host supplies `OPENREELIO_MCP_APPROVAL_TOKEN` for a single call. Editing through

@@ -695,10 +695,10 @@ openreelio-cli mcp --stdio --project ./demo     # serves JSON-RPC on stdio
 openreelio-cli mcp --stdio --project ./demo --allow-write
 ```
 
-**Read-only by default.** Fourteen tools are advertised: `host.context`,
+**Read-only by default.** Fifteen tools are advertised: `host.context`,
 `project.info`, `selection.read`, `diagnostics.read`, `timeline.snapshot`,
 `assets.list`, `annotation.read`, `command.schema`, `command.validate`,
-`plan.validate`, `preview.describe`, `transcription.status`,
+`plan.validate`, `preview.describe`, `frame.extract`, `transcription.status`,
 `transcription.generate` and `verify` — each prefixed `openreelio.`.
 
 **`--allow-write` is a local-trust switch.** It adds `openreelio.media.insert`
@@ -715,6 +715,12 @@ scoped with `OPENREELIO_MCP_APPROVAL_PROJECT_ID` or
 `OPENREELIO_MCP_APPROVAL_PLAN_ID` is rejected outside that scope. Discovery and
 `host.context` report the same policy object, so the two can never disagree.
 
+`filesystemAccess` describes the project — its state and command log — not every
+byte under the directory. `frame.extract` writes the images it returns into
+`.openreelio/cache/frames/` even on a read-only server, so the policy discloses
+that separately as `"cacheWrites": "frame-extract"`. That cache is derived data
+and safe to delete.
+
 **The project directory is the whole filesystem scope.** Every path a client
 sends resolves inside it: a relative path is joined onto the project root, and
 absolute paths outside it, `..` escapes, UNC/network paths, and URLs are
@@ -725,6 +731,32 @@ rejected before they reach the filesystem or FFmpeg.
 the same report document the CLI prints — so an MCP client gets the fix loop
 without shelling out. `file` must be inside the project directory, so render
 into the project before verifying.
+
+**`openreelio.frame.extract`** is the judge loop over MCP: it answers with the
+picture itself, as an MCP `image` content block, so a vision model can look at
+the edit without a Bash or file-reading tool. It accepts
+`{time?, times?[], grid?, between?[start,end], file?, sequenceId?, mode?,
+cellWidth?, cellHeight?, labelCells?, maxWidth?}` — the same selectors as
+[`frame extract`](#5-the-perception-loop).
+
+```jsonc
+// tools/call → openreelio.frame.extract
+{ "file": "render.mp4", "grid": "4x3", "between": [0, 90], "labelCells": true }
+```
+
+The reply is one `image` block per still — or exactly one for a contact sheet,
+however many cells it holds — followed by the usual `text` block carrying the
+CLI's JSON, including `sheet.cells[]` mapping every cell back to a timecode.
+Notes that matter:
+
+- **The caller never picks an output path.** Images are written into
+  `.openreelio/cache/frames/<timestamp>/` and the written path is reported.
+- **`file` is confined to the project directory**, like `verify`'s — render into
+  the project before judging it.
+- **Responses are bounded**: a grid is at most 100 cells and `times` at most 12
+  stills. Ask for a sheet rather than a long batch; it costs one image.
+- Images come back as JPEG. Every other tool's reply is unchanged — a lone
+  `text` block.
 
 ## 9. Environment variables
 
