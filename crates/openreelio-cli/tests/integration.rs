@@ -6931,3 +6931,197 @@ fn test_command_execute_resolves_a_text_preset_into_concrete_values() {
         "the op log must carry the values"
     );
 }
+
+// ── MCP server over stdio ───────────────────────────────────────────────────
+
+/// Drives the MCP server over stdio and returns one parsed response per request.
+///
+/// The transport is newline-delimited JSON-RPC with no framing headers, and the
+/// server reads until stdin closes — so the requests go in, stdin is dropped,
+/// and the process is left to exit on its own.
+fn run_mcp_stdio(project_path: &str, requests: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(cli_bin())
+        .args(["mcp", "--stdio", "--project", project_path])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn the MCP server");
+
+    {
+        let stdin = child.stdin.as_mut().expect("MCP server stdin");
+        for request in requests {
+            writeln!(
+                stdin,
+                "{}",
+                serde_json::to_string(request).expect("request JSON")
+            )
+            .expect("Failed to write an MCP request");
+        }
+    }
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("MCP server output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                panic!(
+                    "MCP server wrote a non-JSON line: {error}\nline: {line}\nstderr: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            })
+        })
+        .collect()
+}
+
+fn mcp_request(id: u32, method: &str, params: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    })
+}
+
+#[test]
+fn test_mcp_frame_extract_returns_a_contact_sheet_inline_over_stdio() {
+    let Some((dir, path, _asset_id)) = create_project_with_timeline_clip("mcp_frame_sheet_test", 4)
+    else {
+        return;
+    };
+
+    // The judge path reads a rendered file, and the MCP server confines that
+    // path to the project — so the render has to land inside it.
+    let render_path = dir.path().join("mcp_frame_sheet_test").join("render.mp4");
+    let rendered = run_cli_ok(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--proxy",
+        "--output",
+        render_path.to_str().unwrap(),
+    ]);
+    assert_eq!(rendered["status"], "ok");
+    if !render_path.exists() {
+        return;
+    }
+
+    let responses = run_mcp_stdio(
+        &path,
+        &[
+            mcp_request(1, "tools/list", serde_json::json!({})),
+            mcp_request(
+                2,
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.frame.extract",
+                    "arguments": {
+                        "file": "render.mp4",
+                        "grid": "2x2",
+                        "between": [0.0, 3.0],
+                        "labelCells": true
+                    }
+                }),
+            ),
+        ],
+    );
+    assert_eq!(responses.len(), 2, "one response per request");
+
+    // The tool is advertised without any write grant.
+    let tools = responses[0]["result"]["tools"]
+        .as_array()
+        .expect("tools array");
+    assert!(tools
+        .iter()
+        .any(|tool| tool["name"] == "openreelio.frame.extract"));
+
+    let content = responses[1]["result"]["content"]
+        .as_array()
+        .unwrap_or_else(|| panic!("frame extract failed: {}", responses[1]));
+    assert_eq!(
+        content.len(),
+        2,
+        "a sheet returns one image block plus its metadata"
+    );
+
+    // An MCP-connected vision agent gets the picture itself, not a path it has
+    // no tool to read.
+    assert_eq!(content[0]["type"], "image");
+    assert_eq!(content[0]["mimeType"], "image/jpeg");
+    assert!(
+        content[0]["data"].as_str().expect("image data").len() > 1000,
+        "the sheet must carry real image bytes"
+    );
+
+    assert_eq!(content[1]["type"], "text");
+    let payload: serde_json::Value =
+        serde_json::from_str(content[1]["text"].as_str().expect("text block"))
+            .expect("frame extract payload");
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["mode"], "file");
+    assert_eq!(payload["sheet"]["cols"], 2);
+    assert_eq!(payload["sheet"]["rows"], 2);
+    assert_eq!(
+        payload["sheet"]["cells"]
+            .as_array()
+            .expect("cells array")
+            .len(),
+        4
+    );
+
+    // The sheet is written into the project's own cache, and the path is
+    // reported rather than chosen by the caller.
+    let sheet_path = PathBuf::from(payload["sheet"]["path"].as_str().expect("sheet path"));
+    assert!(sheet_path.exists(), "the reported sheet must exist");
+    assert!(
+        sheet_path.starts_with(
+            dir.path()
+                .join("mcp_frame_sheet_test")
+                .join(".openreelio")
+                .join("cache")
+                .join("frames")
+        ),
+        "the sheet must live in the project frame cache, got {}",
+        sheet_path.display()
+    );
+}
+
+#[test]
+fn test_mcp_frame_extract_refuses_a_render_outside_the_project() {
+    let dir = create_temp_project("mcp_frame_scope_test");
+    let path = project_path(&dir, "mcp_frame_scope_test");
+    let outside = dir.path().join("outside_render.mp4");
+    std::fs::write(&outside, b"fake render bytes").expect("outside render fixture");
+
+    let responses = run_mcp_stdio(
+        &path,
+        &[mcp_request(
+            1,
+            "tools/call",
+            serde_json::json!({
+                "name": "openreelio.frame.extract",
+                "arguments": { "time": 0.5, "file": outside.to_str().unwrap() }
+            }),
+        )],
+    );
+
+    // A path outside the project is refused before FFmpeg is ever spawned, so a
+    // read-only server cannot be used to probe the disk.
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["error"]["code"], -32001);
+    let message = responses[0]["error"]["message"]
+        .as_str()
+        .expect("error message");
+    assert!(
+        message.contains("project directory"),
+        "the refusal must say what the scope is: {message}"
+    );
+}

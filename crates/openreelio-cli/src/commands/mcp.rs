@@ -35,9 +35,13 @@
 //! workflow of editing a project that references footage on another drive.
 
 use crate::{
+    commands::frame::{
+        self, DEFAULT_MAX_WIDTH, MAX_CELL_SIZE_PX, MAX_GRID_CELLS, MIN_CELL_SIZE_PX,
+    },
     commands::{help_json, plan, transcription, verify},
     output,
 };
+use base64::Engine as _;
 use clap::Args;
 use openreelio_core::commands::{get_text_data, is_text_clip, InsertMediaCommand};
 use openreelio_core::ipc::CommandPayload;
@@ -57,6 +61,14 @@ const VERIFY_MEASURE_TIMEOUT_SEC: u64 = 600;
 /// Severity threshold `openreelio.verify` applies when the caller names none,
 /// matching the `verify --fail-on` default.
 const DEFAULT_VERIFY_FAIL_ON: &str = "error";
+
+/// Largest number of individual stills `openreelio.frame.extract` returns.
+///
+/// Every still is inlined as base64 into one JSON-RPC response and from there
+/// into the caller's model context, so an unbounded batch produces a reply no
+/// client can carry. A contact sheet is the cheap way to see more moments than
+/// this at once — it costs one image however many cells it holds.
+const MAX_INLINE_FRAME_STILLS: usize = 12;
 
 #[derive(Args)]
 pub struct McpAction {
@@ -170,7 +182,8 @@ fn build_policy(state: &McpServerState) -> Value {
         "mode": mode,
         "approvalMode": mode,
         "mutations": if state.mutations_enabled() { "enabled" } else { "disabled" },
-        "rawMediaAccess": if state.project.is_some() { "transcription-generate" } else { "none" },
+        "rawMediaAccess": if state.project.is_some() { "transcription-generate,frame-extract" } else { "none" },
+        "cacheWrites": if state.project.is_some() { "frame-extract" } else { "none" },
         "filesystemAccess": filesystem_access(state)
     })
 }
@@ -186,11 +199,18 @@ fn policy_mode(state: &McpServerState) -> &'static str {
     }
 }
 
-/// Names what the server may do to the project directory.
+/// Names what the server may do to the *project* — its state and command log.
 ///
 /// Mutating tools write the project through the command log, so a server that
 /// advertises them must not report read-only access. Reads never reach outside
 /// the project directory in any mode (see [`confine_to_project`]).
+///
+/// `project-readonly` is a claim about project state, not about every byte under
+/// the directory: `openreelio.frame.extract` writes the stills it returns into
+/// `.openreelio/cache/frames/`, which is derived data the project reconstructs
+/// and the operator can delete. That write is disclosed separately as
+/// `cacheWrites` rather than folded in here, because a client deciding whether
+/// to trust the server with an edit is asking about the command log.
 fn filesystem_access(state: &McpServerState) -> &'static str {
     if state.project.is_none() {
         "none"
@@ -438,13 +458,10 @@ fn handle_jsonrpc_request(state: &McpServerState, request: Value) -> Value {
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
             match call_tool(state, name, arguments) {
-                Ok(value) => jsonrpc_result(
+                Ok(output) => jsonrpc_result(
                     id,
                     serde_json::json!({
-                        "content": [{
-                            "type": "text",
-                            "text": serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string())
-                        }],
+                        "content": output.into_content(),
                         "isError": false
                     }),
                 ),
@@ -476,6 +493,67 @@ fn jsonrpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
             "message": message.into(),
         },
     })
+}
+
+/// One successful tool result on the way to the wire.
+///
+/// Every tool returns a JSON document, and that document is always the last
+/// content block, so a client that only reads text keeps working. A tool that
+/// produces pictures — today only `openreelio.frame.extract` — attaches them as
+/// MCP `image` blocks in front of it, which is what lets a vision model judge a
+/// render without a filesystem tool to read the file back with.
+///
+/// A tool that attaches no image serialises exactly as it did before images
+/// existed; see `should_keep_text_only_tool_results_unchanged`.
+#[derive(Debug)]
+struct ToolOutput {
+    value: Value,
+    images: Vec<ToolImage>,
+}
+
+/// One inline image content block.
+#[derive(Debug)]
+struct ToolImage {
+    /// Base64-encoded image bytes, as the MCP `image` block carries them.
+    data: String,
+    mime_type: String,
+}
+
+impl ToolOutput {
+    fn with_images(value: Value, images: Vec<ToolImage>) -> Self {
+        Self { value, images }
+    }
+
+    /// Renders the result as MCP content blocks: images first, JSON last.
+    fn into_content(self) -> Vec<Value> {
+        let mut content: Vec<Value> = self
+            .images
+            .into_iter()
+            .map(|image| {
+                serde_json::json!({
+                    "type": "image",
+                    "data": image.data,
+                    "mimeType": image.mime_type,
+                })
+            })
+            .collect();
+
+        content.push(serde_json::json!({
+            "type": "text",
+            "text": serde_json::to_string_pretty(&self.value).unwrap_or_else(|_| "{}".to_string())
+        }));
+
+        content
+    }
+}
+
+impl From<Value> for ToolOutput {
+    fn from(value: Value) -> Self {
+        Self {
+            value,
+            images: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -661,6 +739,76 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
             }),
         ),
         tool(
+            "openreelio.frame.extract",
+            "OpenReelio frame extract",
+            "See the edit: extract stills from the timeline, or from a rendered video with 'file', and get them back as inline images plus JSON metadata. Pass 'grid' with 'between' or 'times' for a contact sheet whose cells[] maps every cell back to a timecode — that is the cheapest way to judge pacing and continuity across a whole cut. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. 'file' must be inside the project directory, so render there before judging.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "time": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "Single timeline time in seconds, or a time inside the file when 'file' is given."
+                    },
+                    "times": {
+                        "type": "array",
+                        "items": { "type": "number", "minimum": 0 },
+                        "description": format!(
+                            "Times in seconds. Without 'grid' each one returns its own still, capped at {MAX_INLINE_FRAME_STILLS}; with 'grid' the list becomes the sheet's cells, in the order given."
+                        )
+                    },
+                    "grid": {
+                        "type": "string",
+                        "description": format!(
+                            "Contact sheet layout as COLSxROWS (e.g. '4x3'), at most {MAX_GRID_CELLS} cells. Requires exactly one of 'between' or 'times'."
+                        )
+                    },
+                    "between": {
+                        "type": "array",
+                        "items": { "type": "number", "minimum": 0 },
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "description": "Start and end seconds sampled evenly across the grid. Only with 'grid'."
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Rendered video to read instead of the timeline, in the file's own timebase. Must be inside the project directory; a relative path resolves against the project root and anything outside it is rejected. Cannot be combined with sequenceId or mode."
+                    },
+                    "sequenceId": {
+                        "type": "string",
+                        "description": "Sequence to read. Defaults to the active sequence."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["fast", "composite"],
+                        "description": "Timeline extraction mode: fast (default) reads the topmost clip only; composite renders the full stack including effects and text."
+                    },
+                    "cellWidth": {
+                        "type": "integer",
+                        "minimum": MIN_CELL_SIZE_PX,
+                        "maximum": MAX_CELL_SIZE_PX,
+                        "description": "Contact sheet cell width in pixels (default 320). Only with 'grid'; alone it derives the height at 16:9."
+                    },
+                    "cellHeight": {
+                        "type": "integer",
+                        "minimum": MIN_CELL_SIZE_PX,
+                        "maximum": MAX_CELL_SIZE_PX,
+                        "description": "Contact sheet cell height in pixels (default 180). Only with 'grid'; alone it derives the width at 16:9."
+                    },
+                    "labelCells": {
+                        "type": "boolean",
+                        "description": "Burn each cell's index and timecode into the sheet, so a judgement can name the cell it is about. Only with 'grid'."
+                    },
+                    "maxWidth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": format!("Maximum still width in pixels, aspect preserved and never upscaled. Defaults to {DEFAULT_MAX_WIDTH}.")
+                    }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool(
             "openreelio.preview.describe",
             "OpenReelio preview state",
             "Read non-sensitive preview state.",
@@ -835,8 +983,18 @@ fn read_resource(state: &McpServerState, uri: &str) -> Result<Vec<Value>, ToolEr
     })])
 }
 
-fn call_tool(state: &McpServerState, name: &str, arguments: Value) -> Result<Value, ToolError> {
-    match name {
+fn call_tool(
+    state: &McpServerState,
+    name: &str,
+    arguments: Value,
+) -> Result<ToolOutput, ToolError> {
+    // `openreelio.frame.extract` is the one tool that answers with pictures; the
+    // rest hand back a JSON document that becomes a lone text block.
+    if name == "openreelio.frame.extract" {
+        return run_frame_extract_tool(state, arguments);
+    }
+
+    let value = match name {
         "openreelio.host.context" => Ok(build_host_context(state)),
         "openreelio.project.info" => build_project_info(state),
         "openreelio.selection.read" => Ok(build_selection()),
@@ -859,7 +1017,9 @@ fn call_tool(state: &McpServerState, name: &str, arguments: Value) -> Result<Val
         other => Err(ToolError::UnknownTool(format!(
             "Tool '{other}' is not available"
         ))),
-    }
+    }?;
+
+    Ok(ToolOutput::from(value))
 }
 
 fn generate_transcription(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
@@ -1602,6 +1762,56 @@ fn optional_string_array_argument(
         .map(Some)
 }
 
+fn optional_non_negative_number_array(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<Vec<f64>>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let items = value.as_array().ok_or_else(|| {
+        ToolError::InvalidArguments(format!("{key} must be an array of numbers when provided"))
+    })?;
+
+    items
+        .iter()
+        .map(|item| {
+            item.as_f64()
+                .filter(|number| number.is_finite() && *number >= 0.0)
+                .ok_or_else(|| {
+                    ToolError::InvalidArguments(format!(
+                        "{key} must contain only finite non-negative numbers"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<f64>, ToolError>>()
+        .map(Some)
+}
+
+/// Reads a pixel dimension: a whole number of at least one pixel.
+fn optional_pixel_argument(arguments: &Value, key: &str) -> Result<Option<u32>, ToolError> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    value
+        .as_u64()
+        .filter(|pixels| *pixels >= 1)
+        .and_then(|pixels| u32::try_from(pixels).ok())
+        .map(Some)
+        .ok_or_else(|| {
+            ToolError::InvalidArguments(format!(
+                "{key} must be a whole number of pixels of at least 1"
+            ))
+        })
+}
+
 fn optional_bool_argument(arguments: &Value, key: &str) -> Result<Option<bool>, ToolError> {
     let Some(value) = arguments.get(key) else {
         return Ok(None);
@@ -1839,6 +2049,365 @@ fn run_verify_tool(state: &McpServerState, arguments: Value) -> Result<Value, To
     let (report, _exit_code) =
         verify::run_verify(args).map_err(|error| ToolError::Execution(error.to_string()))?;
     Ok(report)
+}
+
+// ── Frame extraction ────────────────────────────────────────────────────────
+
+/// A parsed, range-checked `openreelio.frame.extract` request.
+///
+/// Parsing is separated from execution because the CLI's argument rules live in
+/// clap, which this surface never runs through: every constraint `frame extract`
+/// gets from `#[arg(conflicts_with = ...)]` has to be restated here, or the tool
+/// would accept combinations the extraction then silently ignores.
+struct FrameExtractRequest {
+    time: Option<f64>,
+    times: Option<Vec<f64>>,
+    grid: Option<String>,
+    between: Option<Vec<f64>>,
+    file: Option<String>,
+    sequence_id: Option<String>,
+    mode: Option<String>,
+    cell_width: Option<u32>,
+    cell_height: Option<u32>,
+    label_cells: bool,
+    max_width: Option<u32>,
+}
+
+impl FrameExtractRequest {
+    fn parse(arguments: &Value) -> Result<Self, ToolError> {
+        let request = Self {
+            time: optional_non_negative_number(arguments, "time")?,
+            times: optional_non_negative_number_array(arguments, "times")?,
+            grid: optional_string_argument(arguments, "grid")?,
+            between: optional_non_negative_number_array(arguments, "between")?,
+            file: optional_string_argument(arguments, "file")?,
+            sequence_id: optional_string_argument(arguments, "sequenceId")?,
+            mode: optional_string_argument(arguments, "mode")?,
+            cell_width: optional_pixel_argument(arguments, "cellWidth")?,
+            cell_height: optional_pixel_argument(arguments, "cellHeight")?,
+            label_cells: optional_bool_argument(arguments, "labelCells")?.unwrap_or(false),
+            max_width: optional_pixel_argument(arguments, "maxWidth")?,
+        };
+
+        request.validate()?;
+        Ok(request)
+    }
+
+    fn is_grid(&self) -> bool {
+        self.grid.is_some()
+    }
+
+    fn validate(&self) -> Result<(), ToolError> {
+        if self.time.is_none() && self.times.is_none() && !self.is_grid() {
+            return Err(ToolError::InvalidArguments(
+                "Nothing to extract: pass time, times, or grid".to_string(),
+            ));
+        }
+        if self.time.is_some() && (self.times.is_some() || self.is_grid()) {
+            return Err(ToolError::InvalidArguments(
+                "time extracts one still and cannot be combined with times or grid".to_string(),
+            ));
+        }
+        if let Some(mode) = self.mode.as_deref() {
+            if !matches!(mode, "fast" | "composite") {
+                return Err(ToolError::InvalidArguments(format!(
+                    "mode must be 'fast' or 'composite' (got '{mode}')"
+                )));
+            }
+        }
+        if self.file.is_some() {
+            // A rendered file is read in its own timebase and never opens the
+            // project, so neither of these could mean anything.
+            if self.sequence_id.is_some() || self.mode.is_some() {
+                return Err(ToolError::InvalidArguments(
+                    "file reads a rendered video, so it cannot be combined with sequenceId or mode"
+                        .to_string(),
+                ));
+            }
+        }
+
+        self.validate_cell_geometry()?;
+        self.validate_selection_size()
+    }
+
+    /// Rejects sheet-only arguments on a request that builds no sheet, and cell
+    /// dimensions the tiler cannot fill.
+    fn validate_cell_geometry(&self) -> Result<(), ToolError> {
+        if self.is_grid() {
+            for (key, value) in [
+                ("cellWidth", self.cell_width),
+                ("cellHeight", self.cell_height),
+            ] {
+                let Some(value) = value else {
+                    continue;
+                };
+                if !(MIN_CELL_SIZE_PX..=MAX_CELL_SIZE_PX).contains(&value) {
+                    return Err(ToolError::InvalidArguments(format!(
+                        "{key} must be between {MIN_CELL_SIZE_PX} and {MAX_CELL_SIZE_PX} pixels (got {value})"
+                    )));
+                }
+            }
+            return Ok(());
+        }
+
+        let sheet_only = [
+            ("between", self.between.is_some()),
+            ("cellWidth", self.cell_width.is_some()),
+            ("cellHeight", self.cell_height.is_some()),
+            ("labelCells", self.label_cells),
+        ]
+        .into_iter()
+        .filter_map(|(name, used)| used.then_some(name))
+        .collect::<Vec<_>>();
+
+        if sheet_only.is_empty() {
+            return Ok(());
+        }
+
+        Err(ToolError::InvalidArguments(format!(
+            "{} only applies to a contact sheet and needs grid",
+            sheet_only.join(", ")
+        )))
+    }
+
+    /// Bounds how much picture one response carries.
+    fn validate_selection_size(&self) -> Result<(), ToolError> {
+        let Some(grid) = self.grid.as_deref() else {
+            if let Some(times) = self.times.as_deref() {
+                if times.is_empty() {
+                    return Err(ToolError::InvalidArguments(
+                        "times requires at least one value".to_string(),
+                    ));
+                }
+                if times.len() > MAX_INLINE_FRAME_STILLS {
+                    return Err(ToolError::InvalidArguments(format!(
+                        "times asks for {} stills, more than the maximum of {MAX_INLINE_FRAME_STILLS}. Ask for fewer, or use grid for a contact sheet.",
+                        times.len()
+                    )));
+                }
+            }
+            return Ok(());
+        };
+
+        let (columns, rows) = frame::parse_grid_spec(grid)
+            .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
+        let capacity = columns.saturating_mul(rows);
+        if capacity > MAX_GRID_CELLS {
+            return Err(ToolError::InvalidArguments(format!(
+                "grid {columns}x{rows} needs {capacity} cells, more than the maximum of {MAX_GRID_CELLS}"
+            )));
+        }
+
+        // The sheet's own source: exactly one, because a sampled range and an
+        // explicit list describe different sheets.
+        match (self.between.as_deref(), self.times.as_deref()) {
+            (Some(between), None) => {
+                if between.len() != 2 {
+                    return Err(ToolError::InvalidArguments(
+                        "between takes exactly two values: [start, end]".to_string(),
+                    ));
+                }
+            }
+            (None, Some(times)) => {
+                if times.is_empty() {
+                    return Err(ToolError::InvalidArguments(
+                        "times requires at least one value".to_string(),
+                    ));
+                }
+                if times.len() > capacity {
+                    return Err(ToolError::InvalidArguments(format!(
+                        "times lists {} cells, more than the {columns}x{rows} grid holds ({capacity})",
+                        times.len()
+                    )));
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Err(ToolError::InvalidArguments(
+                    "grid takes either between or times, not both".to_string(),
+                ))
+            }
+            (None, None) => {
+                return Err(ToolError::InvalidArguments(
+                    "grid requires between [start, end] or times".to_string(),
+                ))
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Builds the CLI-side arguments, with the paths the server chose.
+    fn into_extract_args(
+        self,
+        project_path: PathBuf,
+        out: PathBuf,
+        file: Option<PathBuf>,
+        sequence_id: Option<String>,
+    ) -> frame::ExtractArgs {
+        frame::ExtractArgs {
+            path: project_path,
+            out,
+            file,
+            asset: None,
+            source_time: None,
+            time: self.time,
+            times: self.times,
+            sequence: sequence_id,
+            mode: self.mode,
+            max_width: self.max_width,
+            // The images travel inline, so they are encoded for a vision model
+            // rather than for archival: JPEG keeps one response a size a client
+            // can actually carry.
+            format: Some("jpeg".to_string()),
+            grid: self.grid,
+            between: self.between,
+            count: None,
+            cell_width: self.cell_width,
+            cell_height: self.cell_height,
+            label_cells: self.label_cells,
+        }
+    }
+}
+
+fn run_frame_extract_tool(
+    state: &McpServerState,
+    arguments: Value,
+) -> Result<ToolOutput, ToolError> {
+    let Some(project_path) = state.project.as_ref() else {
+        return Err(ToolError::InvalidArguments(
+            "openreelio.frame.extract requires mcp --project <project-path>".to_string(),
+        ));
+    };
+
+    let request = FrameExtractRequest::parse(&arguments)?;
+
+    // A rendered file is a client-supplied path handed to FFmpeg, so it is
+    // confined like every other one. Timeline extraction instead opens the media
+    // the sequence's clips point at, which arrives as project state and is
+    // confined there — the same split `openreelio.transcription.generate` makes.
+    let (file, sequence_id) = match request.file.as_deref() {
+        Some(requested) => (
+            Some(confine_to_project(project_path, "file", requested)?),
+            None,
+        ),
+        None => {
+            let project = super::load_project(project_path).map_err(|error| {
+                ToolError::Execution(format!(
+                    "Failed to open project '{}': {error}",
+                    project_path.display()
+                ))
+            })?;
+            let sequence_id = super::resolve_sequence_id(&project, request.sequence_id.clone())
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            confine_sequence_media(&project, &sequence_id)?;
+            (None, Some(sequence_id))
+        }
+    };
+
+    let out = frame_output_path(project_path, &request)?;
+    let args = request.into_extract_args(project_path.clone(), out, file, sequence_id);
+
+    // `frame::run_extract` resolves FFmpeg through `ensure_ffmpeg`, so a machine
+    // without it fails here with a message naming that, rather than hanging.
+    let payload =
+        frame::run_extract(args).map_err(|error| ToolError::Execution(error.to_string()))?;
+    let images = inline_frame_images(&payload)?;
+
+    Ok(ToolOutput::with_images(payload, images))
+}
+
+/// Chooses where this extraction writes, inside the project's own cache.
+///
+/// The caller never names an output path: an MCP argument that decided where
+/// bytes land would make a read-only server an arbitrary-write primitive. A
+/// timestamped directory under `.openreelio/cache/frames/` keeps concurrent
+/// judgements from overwriting each other's evidence, and puts every image in a
+/// place that is safe to delete.
+fn frame_output_path(
+    project_path: &Path,
+    request: &FrameExtractRequest,
+) -> Result<PathBuf, ToolError> {
+    let directory = project_path
+        .join(".openreelio")
+        .join("cache")
+        .join("frames")
+        .join(chrono::Utc::now().format("%Y%m%dT%H%M%S%6fZ").to_string());
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        ToolError::Execution(format!(
+            "Failed to create the frame cache directory '{}': {error}",
+            directory.display()
+        ))
+    })?;
+
+    if request.is_grid() {
+        return Ok(directory.join("sheet.jpg"));
+    }
+    if request.times.is_some() {
+        // A batch writes one file per time, so the extraction is handed the
+        // directory and names the stills itself.
+        return Ok(directory);
+    }
+
+    Ok(directory.join("frame.jpg"))
+}
+
+/// Reads back the images an extraction wrote and encodes them for the wire.
+///
+/// The paths come from the payload rather than from the request, so the blocks
+/// can never describe a file the extraction did not actually produce.
+fn inline_frame_images(payload: &Value) -> Result<Vec<ToolImage>, ToolError> {
+    let paths: Vec<PathBuf> = match payload.pointer("/sheet/path").and_then(Value::as_str) {
+        Some(sheet) => vec![PathBuf::from(sheet)],
+        None => payload
+            .get("frames")
+            .and_then(Value::as_array)
+            .map(|frames| {
+                frames
+                    .iter()
+                    .filter_map(|frame| frame.get("path").and_then(Value::as_str))
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+
+    paths.iter().map(|path| encode_inline_image(path)).collect()
+}
+
+fn encode_inline_image(path: &Path) -> Result<ToolImage, ToolError> {
+    let mime_type = image_mime_type(path)?;
+    let bytes = std::fs::read(path).map_err(|error| {
+        ToolError::Execution(format!(
+            "Failed to read the extracted frame '{}': {error}",
+            path.display()
+        ))
+    })?;
+
+    Ok(ToolImage {
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        mime_type,
+    })
+}
+
+/// Names the image type from what was actually written.
+///
+/// Derived from the file rather than assumed, so the block's `mimeType` cannot
+/// drift from its `data` if the extraction's output format ever changes.
+fn image_mime_type(path: &Path) -> Result<String, ToolError> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_lowercase)
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => Ok("image/jpeg".to_string()),
+        Some("png") => Ok("image/png".to_string()),
+        Some("tif" | "tiff") => Ok("image/tiff".to_string()),
+        _ => Err(ToolError::Execution(format!(
+            "Extracted frame '{}' has no recognised image type",
+            path.display()
+        ))),
+    }
 }
 
 fn apply_media_insert(state: &McpServerState, arguments: Value) -> Result<Value, ToolError> {
@@ -3358,7 +3927,8 @@ mod tests {
                 "mode": "allow-write-local",
                 "approvalMode": "allow-write-local",
                 "mutations": "enabled",
-                "rawMediaAccess": "transcription-generate",
+                "rawMediaAccess": "transcription-generate,frame-extract",
+                "cacheWrites": "frame-extract",
                 "filesystemAccess": "project-write"
             })
         );
@@ -3373,6 +3943,7 @@ mod tests {
                 "approvalMode": "read-only",
                 "mutations": "disabled",
                 "rawMediaAccess": "none",
+                "cacheWrites": "none",
                 "filesystemAccess": "none"
             })
         );
@@ -3403,6 +3974,10 @@ mod tests {
         assert_eq!(context["policy"]["filesystemAccess"], "project-readonly");
         assert_eq!(context["policy"]["mode"], "read-only");
         assert_eq!(context["policy"]["mutations"], "disabled");
+        // `openreelio.frame.extract` writes the stills it returns into the
+        // project's cache even here, so the policy discloses it rather than
+        // letting "project-readonly" read as "writes nothing".
+        assert_eq!(context["policy"]["cacheWrites"], "frame-extract");
     }
 
     #[test]
@@ -3615,6 +4190,300 @@ mod tests {
             .as_array()
             .expect("checks array")
             .is_empty());
+    }
+
+    // ── openreelio.frame.extract ────────────────────────────────────────────
+
+    /// Resolves FFmpeg exactly as the tool does, or `None` on a machine without
+    /// it, so the image tests skip rather than fail there.
+    fn ffmpeg_for_tests() -> Option<PathBuf> {
+        crate::ffmpeg_env::ensure_ffmpeg()
+            .ok()
+            .map(|info| info.ffmpeg_path)
+    }
+
+    /// Builds a project whose single clip is backed by a real decodable video
+    /// living inside the project directory.
+    ///
+    /// In-project media is not a convenience here: `confine_sequence_media`
+    /// rejects anything else, so a fixture with outside media could only ever
+    /// test the rejection.
+    fn project_with_real_media(temp_dir: &tempfile::TempDir, name: &str) -> Option<PathBuf> {
+        let ffmpeg = ffmpeg_for_tests()?;
+        let media_path = temp_dir.path().join(name).join("clip.mp4");
+        let (project_path, _, _) = project_with_media_asset(temp_dir, name, &media_path);
+
+        // The helper leaves a placeholder at the asset's path; replace it with
+        // something FFmpeg can actually decode a frame out of.
+        let status = std::process::Command::new(ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x240:d=6",
+                "-c:v",
+                "mpeg4",
+            ])
+            .arg(&media_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        if !status.success() {
+            eprintln!("Skipping frame extract test: ffmpeg could not write the fixture");
+            return None;
+        }
+
+        Some(project_path)
+    }
+
+    fn frame_extract_state(project_path: PathBuf) -> McpServerState {
+        McpServerState {
+            project: Some(project_path),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn should_always_advertise_the_frame_extract_tool() {
+        for state in [
+            McpServerState::default(),
+            McpServerState {
+                allow_write: true,
+                ..Default::default()
+            },
+        ] {
+            let response =
+                handle_jsonrpc_request(&state, request("tools/list", serde_json::json!({})));
+            let tools = response["result"]["tools"].as_array().expect("tools array");
+            assert!(
+                tools
+                    .iter()
+                    .any(|tool| tool["name"] == "openreelio.frame.extract"),
+                "seeing the edit is a read, so frame extraction must not need a write grant"
+            );
+        }
+    }
+
+    #[test]
+    fn should_keep_text_only_tool_results_unchanged() {
+        let state = McpServerState::default();
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({ "name": "openreelio.preview.describe", "arguments": {} }),
+            ),
+        );
+
+        // Image blocks must be additive: a tool that produces none serialises
+        // exactly as it did before they existed.
+        let content = response["result"]["content"]
+            .as_array()
+            .expect("content array");
+        assert_eq!(content.len(), 1, "text-only results carry one block");
+        assert_eq!(content[0]["type"], "text");
+        assert!(content[0].get("data").is_none());
+        assert!(content[0].get("mimeType").is_none());
+        assert_eq!(
+            content[0]["text"].as_str().expect("text block"),
+            serde_json::to_string_pretty(&build_preview_state()).expect("pretty JSON")
+        );
+        assert_eq!(response["result"]["isError"], false);
+    }
+
+    #[test]
+    fn should_refuse_to_read_a_render_outside_the_project() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "frame_scope_project");
+        let outside = temp_dir.path().join("outside_render.mp4");
+        std::fs::write(&outside, b"fake render bytes").expect("outside render");
+
+        let state = frame_extract_state(project_path);
+        for requested in ["../outside_render.mp4", &outside.to_string_lossy()] {
+            let error = run_frame_extract_tool(
+                &state,
+                serde_json::json!({ "time": 0.5, "file": requested }),
+            )
+            .expect_err("a render outside the project must be refused");
+            assert!(
+                matches!(error, ToolError::PermissionDenied(_)),
+                "expected a confinement refusal, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_refuse_a_contact_sheet_larger_than_the_cell_cap() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "frame_cap_project");
+        let state = frame_extract_state(project_path);
+
+        let error = run_frame_extract_tool(
+            &state,
+            serde_json::json!({ "grid": "12x12", "between": [0.0, 4.0] }),
+        )
+        .expect_err("a grid past the cell cap must be refused");
+        let ToolError::InvalidArguments(message) = error else {
+            panic!("expected an argument refusal");
+        };
+        assert!(
+            message.contains("144") && message.contains(&MAX_GRID_CELLS.to_string()),
+            "the refusal must name what was asked for and the cap: {message}"
+        );
+    }
+
+    #[test]
+    fn should_refuse_more_stills_than_one_response_can_carry() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "frame_stills_cap_project");
+        let state = frame_extract_state(project_path);
+
+        let times: Vec<f64> = (0..=MAX_INLINE_FRAME_STILLS)
+            .map(|index| index as f64 * 0.1)
+            .collect();
+        let error = run_frame_extract_tool(&state, serde_json::json!({ "times": times }))
+            .expect_err("an unbounded batch must be refused");
+        let ToolError::InvalidArguments(message) = error else {
+            panic!("expected an argument refusal");
+        };
+        assert!(
+            message.contains(&MAX_INLINE_FRAME_STILLS.to_string()),
+            "the refusal must name the cap: {message}"
+        );
+    }
+
+    #[test]
+    fn should_refuse_sheet_arguments_without_a_grid() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "frame_sheet_flags_project");
+        let state = frame_extract_state(project_path);
+
+        let error = run_frame_extract_tool(
+            &state,
+            serde_json::json!({ "time": 1.0, "labelCells": true }),
+        )
+        .expect_err("sheet-only arguments must be refused without a grid");
+        assert!(matches!(error, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn should_return_one_inline_image_per_still() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let Some(project_path) = project_with_real_media(&temp_dir, "frame_still_project") else {
+            return;
+        };
+        let state = frame_extract_state(project_path.clone());
+
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.frame.extract",
+                    "arguments": { "time": 1.0 }
+                }),
+            ),
+        );
+
+        let content = response["result"]["content"]
+            .as_array()
+            .unwrap_or_else(|| panic!("frame extract failed: {response}"));
+        assert_eq!(content.len(), 2, "one image block plus the metadata block");
+        assert_image_block(&content[0], "image/jpeg");
+
+        let payload: Value =
+            serde_json::from_str(content[1]["text"].as_str().expect("text block")).expect("JSON");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["count"], 1);
+
+        // The still lands in the project's own cache, and the path is reported
+        // so the caller can point other tools at it.
+        let written = PathBuf::from(payload["frames"][0]["path"].as_str().expect("frame path"));
+        assert!(written.exists(), "the reported path must exist");
+        assert!(
+            written.starts_with(
+                project_path
+                    .join(".openreelio")
+                    .join("cache")
+                    .join("frames")
+            ),
+            "frames must be written into the project frame cache, got {}",
+            written.display()
+        );
+    }
+
+    #[test]
+    fn should_return_a_contact_sheet_as_one_image_with_cell_metadata() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let Some(project_path) = project_with_real_media(&temp_dir, "frame_sheet_project") else {
+            return;
+        };
+        let state = frame_extract_state(project_path);
+
+        let response = handle_jsonrpc_request(
+            &state,
+            request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "openreelio.frame.extract",
+                    "arguments": {
+                        "grid": "2x2",
+                        "times": [0.0, 1.0, 2.0, 3.0],
+                        "labelCells": true
+                    }
+                }),
+            ),
+        );
+
+        let content = response["result"]["content"]
+            .as_array()
+            .unwrap_or_else(|| panic!("frame extract failed: {response}"));
+        assert_eq!(
+            content.len(),
+            2,
+            "a sheet is one image however many cells it holds"
+        );
+        assert_image_block(&content[0], "image/jpeg");
+
+        let payload: Value =
+            serde_json::from_str(content[1]["text"].as_str().expect("text block")).expect("JSON");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["sheet"]["cols"], 2);
+        assert_eq!(payload["sheet"]["rows"], 2);
+        assert_eq!(payload["sheet"]["labeled"], true);
+
+        // The cell map is what makes the image judgeable: every cell has to name
+        // the timecode it shows and its place in the layout.
+        let cells = payload["sheet"]["cells"]
+            .as_array()
+            .expect("cells array")
+            .clone();
+        assert_eq!(cells.len(), 4);
+        for (index, cell) in cells.iter().enumerate() {
+            assert_eq!(cell["index"], index);
+            assert_eq!(cell["row"], index / 2);
+            assert_eq!(cell["col"], index % 2);
+            assert_eq!(cell["timelineSec"], index as f64);
+        }
+    }
+
+    /// Asserts a content block is a usable MCP image.
+    fn assert_image_block(block: &Value, expected_mime_type: &str) {
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["mimeType"], expected_mime_type);
+
+        let encoded = block["data"].as_str().expect("image data");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("image data must be valid base64");
+        assert!(!bytes.is_empty(), "an empty image is not an image");
+        assert_eq!(
+            &bytes[..3],
+            &[0xFF, 0xD8, 0xFF],
+            "the bytes must actually be the JPEG the mimeType claims"
+        );
     }
 
     #[test]
@@ -3892,7 +4761,11 @@ mod tests {
             .collect();
 
         // Tools that spawn FFmpeg. Each is covered by a confinement test above.
-        let ffmpeg_backed = ["openreelio.verify", "openreelio.transcription.generate"];
+        let ffmpeg_backed = [
+            "openreelio.verify",
+            "openreelio.transcription.generate",
+            "openreelio.frame.extract",
+        ];
         // Everything else reads or writes project state only; none of them opens
         // a media file, so none of them can be used as a read primitive.
         let state_only = [
@@ -3953,6 +4826,20 @@ mod tests {
         let error =
             generate_transcription(&media_state, serde_json::json!({ "assetId": asset_id }))
                 .expect_err("transcription must confine its media path");
+        assert!(matches!(error, ToolError::PermissionDenied(_)));
+
+        // 3b. `openreelio.frame.extract` reaches FFmpeg through *both* kinds of
+        //     path, so both are confined: `file` as a tool argument, and the
+        //     sequence's own media as project state.
+        let error = run_frame_extract_tool(
+            &verify_state,
+            serde_json::json!({ "time": 0.0, "file": "../outside.mp4" }),
+        )
+        .expect_err("frame extract must confine its file argument");
+        assert!(matches!(error, ToolError::PermissionDenied(_)));
+
+        let error = run_frame_extract_tool(&media_state, serde_json::json!({ "time": 0.0 }))
+            .expect_err("frame extract must confine the sequence's media");
         assert!(matches!(error, ToolError::PermissionDenied(_)));
 
         // 4. Documented exception: plan payload paths are NOT confined to the

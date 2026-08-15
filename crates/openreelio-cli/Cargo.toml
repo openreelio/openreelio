@@ -30,6 +30,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "signal", "macro
 # Scratch directories for composited frame renders and contact-sheet cells
 tempfile = "3"
 
+# Inline image content blocks on the MCP wire
+base64 = "0.22"
+
 # Error handling
 anyhow = "1"
 
