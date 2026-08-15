@@ -30,13 +30,13 @@ use std::path::{Path, PathBuf};
 
 /// Default maximum still width. 1280px keeps frames readable for vision models
 /// while staying well under typical image-token limits.
-const DEFAULT_MAX_WIDTH: u32 = 1280;
+pub const DEFAULT_MAX_WIDTH: u32 = 1280;
 
 /// Largest contact sheet accepted, in cells.
 ///
 /// Every cell costs one FFmpeg extraction, so an unbounded grid would turn a
 /// single command into thousands of process spawns.
-const MAX_GRID_CELLS: usize = 100;
+pub const MAX_GRID_CELLS: usize = 100;
 
 /// Shortest composited window that FFmpeg can still render.
 ///
@@ -48,13 +48,13 @@ const MIN_COMPOSITE_WINDOW_SEC: f64 = 0.05;
 ///
 /// Below this a cell carries no usable detail for a vision model, so a smaller
 /// request is a mistake rather than an economy.
-const MIN_CELL_SIZE_PX: u32 = 64;
+pub const MIN_CELL_SIZE_PX: u32 = 64;
 
 /// Largest accepted contact-sheet cell dimension.
 ///
 /// A full grid of 1024px cells is already a very large image; anything beyond
 /// it should be extracted as individual stills instead.
-const MAX_CELL_SIZE_PX: u32 = 1024;
+pub const MAX_CELL_SIZE_PX: u32 = 1024;
 
 /// Share of a cell's height given to the burnt-in label's type size.
 ///
@@ -424,9 +424,20 @@ fn resolve_selection(args: &ExtractArgs) -> anyhow::Result<Selection> {
 // ── Execution ───────────────────────────────────────────────────────────
 
 fn extract(args: ExtractArgs) -> anyhow::Result<()> {
+    output::print_json_pretty(&run_extract(args)?)
+}
+
+/// Runs one extraction and returns the payload the CLI would have printed.
+///
+/// Split from [`extract`] so the MCP server can serve the same extraction —
+/// same validation, same FFmpeg resolution, same result shape — without going
+/// through stdout. Every guard the CLI relies on lives here rather than in the
+/// clap layer, because clap validates only the CLI's own callers.
+pub fn run_extract(args: ExtractArgs) -> anyhow::Result<serde_json::Value> {
     let selection = resolve_selection(&args)?;
     let format = resolve_image_format(args.format.as_deref(), &args.out)?;
     let mode = TimelineMode::resolve(args.mode.as_deref())?;
+    ensure_cell_size_in_range(&args)?;
     if let Some(max_width) = args.max_width {
         if max_width == 0 {
             return Err(anyhow::anyhow!(
@@ -447,13 +458,12 @@ fn extract(args: ExtractArgs) -> anyhow::Result<()> {
     // project: it costs an ops replay it has no use for, and it keeps sheeting a
     // finished render independent of whatever the project is doing meanwhile.
     if let Some(file) = args.file.clone() {
-        let result = runtime.block_on(run_file_mode(&runner, &file, &args, format, &selection))?;
-        return output::print_json_pretty(&result);
+        return runtime.block_on(run_file_mode(&runner, &file, &args, format, &selection));
     }
 
     let project = super::load_project(&args.path)?;
 
-    let result = match selection {
+    match selection {
         Selection::AssetTime {
             asset_id,
             source_time,
@@ -465,7 +475,7 @@ fn extract(args: ExtractArgs) -> anyhow::Result<()> {
             &args.out,
             format,
             args.max_width,
-        ))?,
+        )),
         Selection::SingleTime(time) => runtime.block_on(run_timeline_mode(
             &project,
             &runner,
@@ -474,20 +484,45 @@ fn extract(args: ExtractArgs) -> anyhow::Result<()> {
             mode,
             &[time],
             false,
-        ))?,
+        )),
         Selection::BatchTimes(times) => runtime.block_on(run_timeline_mode(
             &project, &runner, &args, format, mode, &times, true,
-        ))?,
+        )),
         Selection::Grid {
             columns,
             rows,
             times,
         } => runtime.block_on(run_grid_mode(
             &project, &runner, &args, format, mode, columns, rows, &times,
-        ))?,
-    };
+        )),
+    }
+}
 
-    output::print_json_pretty(&result)
+/// Rejects contact-sheet cell dimensions outside the supported range.
+///
+/// clap enforces the same range for the CLI, but the range must hold for every
+/// caller of [`run_extract`]: a cell FFmpeg's tiler cannot fill is a broken
+/// sheet regardless of which surface asked for it.
+fn ensure_cell_size_in_range(args: &ExtractArgs) -> anyhow::Result<()> {
+    for (label, value) in [
+        ("cell-width", args.cell_width),
+        ("cell-height", args.cell_height),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        if !(MIN_CELL_SIZE_PX..=MAX_CELL_SIZE_PX).contains(&value) {
+            return Err(anyhow::anyhow!(
+                "Invalid value for --{}: {} is outside the supported range of {}-{}",
+                label,
+                value,
+                MIN_CELL_SIZE_PX,
+                MAX_CELL_SIZE_PX
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// A rendered file used as the extraction source, with the facts needed to
@@ -1524,7 +1559,7 @@ fn grid_cell_extract_width(args: &ExtractArgs, cell: ContactSheetCellSize) -> u3
 }
 
 /// Parses a `COLSxROWS` grid specification.
-fn parse_grid_spec(raw: &str) -> anyhow::Result<(usize, usize)> {
+pub fn parse_grid_spec(raw: &str) -> anyhow::Result<(usize, usize)> {
     let normalized = raw.trim().to_lowercase();
     let (columns, rows) = normalized.split_once('x').ok_or_else(|| {
         anyhow::anyhow!("Invalid value for --grid: expected COLSxROWS (e.g. 3x2)")
