@@ -393,8 +393,8 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
   effects and overlays appear. Range renders decode from zero, so it costs more.
   It works anywhere inside the timeline, including over a gap — a gap has no
   picture, so a black frame is the correct answer, not an error.
-- `--max-width` caps the output (default 1280 px, aspect preserved, never
-  upscaled).
+- `--max-width` caps the output (1–3840 px, default 1280 px, aspect
+  preserved, never upscaled).
 - `--format png|jpeg` is optional: the format follows the `--out` extension, so
   `--out sheet.jpg` writes JPEG at exactly that path. Use `--format` for
   extensionless paths and `--times` directories (which default to PNG). A
@@ -403,7 +403,9 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
 - `--grid COLSxROWS` with `--between START END [--count N]` (uniform sampling)
   or `--times a,b,c` (explicit list, kept in order) writes one contact sheet
   and returns `sheet.cells[{index,row,col,timelineSec}]`, which maps every cell
-  a vision model comments on back to a timecode. Grids are capped at 100 cells.
+  a vision model comments on back to a timecode. Grids are capped at 100 cells,
+  and the finished sheet at 8000 px on either edge — an oversized combination is
+  rejected before the first cell is extracted, not after the whole grid.
 - `--label-cells` burns each cell's **requested** index and timecode into the
   image (not the decoded frame's PTS); `--cell-width` / `--cell-height`
   (64–1024, default 320×180) size the cells — 640×360 is the floor for reading
@@ -719,7 +721,8 @@ scoped with `OPENREELIO_MCP_APPROVAL_PROJECT_ID` or
 byte under the directory. `frame.extract` writes the images it returns into
 `.openreelio/cache/frames/` even on a read-only server, so the policy discloses
 that separately as `"cacheWrites": "frame-extract"`. That cache is derived data
-and safe to delete.
+and safe to delete; it bounds itself to its 16 newest entries, and an extraction
+that fails removes the entry it created.
 
 **The project directory is the whole filesystem scope.** Every path a client
 sends resolves inside it: a relative path is joined onto the project root, and
@@ -753,8 +756,11 @@ Notes that matter:
   `.openreelio/cache/frames/<timestamp>/` and the written path is reported.
 - **`file` is confined to the project directory**, like `verify`'s — render into
   the project before judging it.
-- **Responses are bounded**: a grid is at most 100 cells and `times` at most 12
-  stills. Ask for a sheet rather than a long batch; it costs one image.
+- **Responses are bounded in cells _and_ in pixels**: a grid holds at most 100
+  cells, `times` at most 12 stills, `cellWidth`/`cellHeight` are 64–1024 px, a
+  finished sheet is at most 8000 px on either edge, and `maxWidth` is at most
+  3840 px. Anything past those is an argument error raised before a single frame
+  is extracted. Ask for a sheet rather than a long batch; it costs one image.
 - Images come back as JPEG. Every other tool's reply is unchanged — a lone
   `text` block.
 

@@ -114,9 +114,14 @@ Two differences from the CLI form:
   there, so write candidate renders under the project rather than to a scratch
   path outside it.
 - There is no `out`: images land in `.openreelio/cache/frames/<timestamp>/` and
-  the written path comes back in the JSON. A grid is capped at 100 cells and a
-  `times` batch at 12 stills, so prefer a sheet — it costs one image whatever
-  its cell count.
+  the written path comes back in the JSON. The cache keeps only its 16 newest
+  entries and drops the entry an extraction failed in, so a long judge loop does
+  not accumulate inside the project.
+- The caps are on cells **and** on pixels: at most 100 cells, at most 12 stills
+  in a `times` batch, cells of 64–1024 px, a finished sheet no larger than
+  8000 px on either edge, and `maxWidth` at most 3840 px. Anything past those is
+  refused as an argument error before a frame is extracted. Prefer a sheet — it
+  costs one image whatever its cell count.
 
 The Bash + Read path above remains correct for CLI agents; nothing about the
 rubric or the offsets changes.

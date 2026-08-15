@@ -36,7 +36,8 @@
 
 use crate::{
     commands::frame::{
-        self, DEFAULT_MAX_WIDTH, MAX_CELL_SIZE_PX, MAX_GRID_CELLS, MIN_CELL_SIZE_PX,
+        self, DEFAULT_MAX_WIDTH, MAX_CELL_SIZE_PX, MAX_GRID_CELLS, MAX_SHEET_DIMENSION_PX,
+        MAX_STILL_WIDTH_PX, MIN_CELL_SIZE_PX, MIN_STILL_WIDTH_PX,
     },
     commands::{help_json, plan, transcription, verify},
     output,
@@ -69,6 +70,19 @@ const DEFAULT_VERIFY_FAIL_ON: &str = "error";
 /// client can carry. A contact sheet is the cheap way to see more moments than
 /// this at once — it costs one image however many cells it holds.
 const MAX_INLINE_FRAME_STILLS: usize = 12;
+
+/// Newest frame-cache entries kept after a successful extraction.
+///
+/// Sixteen covers the recent history of a judge loop — the last few sheets and
+/// still batches an agent may want to point another tool at — without letting a
+/// long session leave the whole cut on disk inside the user's project.
+const MAX_CACHED_FRAME_DIRECTORIES: usize = 16;
+
+/// Name format for a frame-cache entry.
+///
+/// Microsecond precision keeps concurrent judgements from colliding, and the
+/// fixed width is what makes a lexicographic sort an age sort during pruning.
+const FRAME_CACHE_STAMP: &str = "%Y%m%dT%H%M%S%6fZ";
 
 #[derive(Args)]
 pub struct McpAction {
@@ -210,7 +224,9 @@ fn policy_mode(state: &McpServerState) -> &'static str {
 /// `.openreelio/cache/frames/`, which is derived data the project reconstructs
 /// and the operator can delete. That write is disclosed separately as
 /// `cacheWrites` rather than folded in here, because a client deciding whether
-/// to trust the server with an edit is asking about the command log.
+/// to trust the server with an edit is asking about the command log. The cache
+/// bounds itself — see [`prune_frame_cache`] — so the disclosure is of a fixed
+/// footprint rather than of unbounded growth.
 fn filesystem_access(state: &McpServerState) -> &'static str {
     if state.project.is_none() {
         "none"
@@ -741,7 +757,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
         tool(
             "openreelio.frame.extract",
             "OpenReelio frame extract",
-            "See the edit: extract stills from the timeline, or from a rendered video with 'file', and get them back as inline images plus JSON metadata. Pass 'grid' with 'between' or 'times' for a contact sheet whose cells[] maps every cell back to a timecode — that is the cheapest way to judge pacing and continuity across a whole cut. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. 'file' must be inside the project directory, so render there before judging.",
+            &format!("See the edit: extract stills from the timeline, or from a rendered video with 'file', and get them back as inline images plus JSON metadata. Pass 'grid' with 'between' or 'times' for a contact sheet whose cells[] maps every cell back to a timecode — that is the cheapest way to judge pacing and continuity across a whole cut. Images are written into the project's own cache (.openreelio/cache/frames/) and their paths are reported; the caller does not choose where. The cache keeps only its {MAX_CACHED_FRAME_DIRECTORIES} newest entries, so use a reported path before it ages out. 'file' must be inside the project directory, so render there before judging."),
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -760,7 +776,7 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
                     "grid": {
                         "type": "string",
                         "description": format!(
-                            "Contact sheet layout as COLSxROWS (e.g. '4x3'), at most {MAX_GRID_CELLS} cells. Requires exactly one of 'between' or 'times'."
+                            "Contact sheet layout as COLSxROWS (e.g. '4x3'), at most {MAX_GRID_CELLS} cells, and at most {MAX_SHEET_DIMENSION_PX}px on either finished edge. Requires exactly one of 'between' or 'times'."
                         )
                     },
                     "between": {
@@ -801,8 +817,9 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
                     },
                     "maxWidth": {
                         "type": "integer",
-                        "minimum": 1,
-                        "description": format!("Maximum still width in pixels, aspect preserved and never upscaled. Defaults to {DEFAULT_MAX_WIDTH}.")
+                        "minimum": MIN_STILL_WIDTH_PX,
+                        "maximum": MAX_STILL_WIDTH_PX,
+                        "description": format!("Maximum still width in pixels, {MIN_STILL_WIDTH_PX}-{MAX_STILL_WIDTH_PX}, aspect preserved and never upscaled. Defaults to {DEFAULT_MAX_WIDTH}.")
                     }
                 },
                 "additionalProperties": false
@@ -2127,7 +2144,26 @@ impl FrameExtractRequest {
         }
 
         self.validate_cell_geometry()?;
+        self.validate_still_width()?;
         self.validate_selection_size()
+    }
+
+    /// Bounds the pixels one still carries.
+    ///
+    /// The count caps alone say nothing about size: the images travel inline as
+    /// base64, so an unbounded width lets a handful of stills become a response
+    /// no host can read back.
+    fn validate_still_width(&self) -> Result<(), ToolError> {
+        let Some(max_width) = self.max_width else {
+            return Ok(());
+        };
+        if !(MIN_STILL_WIDTH_PX..=MAX_STILL_WIDTH_PX).contains(&max_width) {
+            return Err(ToolError::InvalidArguments(format!(
+                "maxWidth must be between {MIN_STILL_WIDTH_PX} and {MAX_STILL_WIDTH_PX} pixels (got {max_width})"
+            )));
+        }
+
+        Ok(())
     }
 
     /// Rejects sheet-only arguments on a request that builds no sheet, and cell
@@ -2200,13 +2236,14 @@ impl FrameExtractRequest {
 
         // The sheet's own source: exactly one, because a sampled range and an
         // explicit list describe different sheets.
-        match (self.between.as_deref(), self.times.as_deref()) {
+        let filled_rows = match (self.between.as_deref(), self.times.as_deref()) {
             (Some(between), None) => {
                 if between.len() != 2 {
                     return Err(ToolError::InvalidArguments(
                         "between takes exactly two values: [start, end]".to_string(),
                     ));
                 }
+                rows
             }
             (None, Some(times)) => {
                 if times.is_empty() {
@@ -2220,6 +2257,10 @@ impl FrameExtractRequest {
                         times.len()
                     )));
                 }
+                // A short list leaves whole rows unfilled, and the extraction
+                // drops them rather than tiling black — so the sheet that gets
+                // measured is the one that will actually be built.
+                times.len().div_ceil(columns)
             }
             (Some(_), Some(_)) => {
                 return Err(ToolError::InvalidArguments(
@@ -2231,9 +2272,19 @@ impl FrameExtractRequest {
                     "grid requires between [start, end] or times".to_string(),
                 ))
             }
-        }
+        };
 
-        Ok(())
+        // The cell cap and the cell-count cap bound different terms; only their
+        // product is the image the caller gets back. `run_extract` applies the
+        // same guard, so the CLI is bounded too — restating it here is what
+        // makes the refusal an argument error instead of an execution failure.
+        frame::ensure_sheet_dimensions_in_range(
+            columns,
+            filled_rows,
+            self.cell_width,
+            self.cell_height,
+        )
+        .map_err(|error| ToolError::InvalidArguments(error.to_string()))
     }
 
     /// Builds the CLI-side arguments, with the paths the server chose.
@@ -2285,9 +2336,10 @@ fn run_frame_extract_tool(
     // confined like every other one. Timeline extraction instead opens the media
     // the sequence's clips point at, which arrives as project state and is
     // confined there — the same split `openreelio.transcription.generate` makes.
-    let (file, sequence_id) = match request.file.as_deref() {
+    let (file, project, sequence_id) = match request.file.as_deref() {
         Some(requested) => (
             Some(confine_to_project(project_path, "file", requested)?),
+            None,
             None,
         ),
         None => {
@@ -2300,38 +2352,72 @@ fn run_frame_extract_tool(
             let sequence_id = super::resolve_sequence_id(&project, request.sequence_id.clone())
                 .map_err(|error| ToolError::Execution(error.to_string()))?;
             confine_sequence_media(&project, &sequence_id)?;
-            (None, Some(sequence_id))
+            (None, Some(project), Some(sequence_id))
         }
     };
 
-    let out = frame_output_path(project_path, &request)?;
+    // Created only once every argument, path, and media check has passed, so a
+    // rejected request leaves no directory behind at all.
+    let directory = create_frame_cache_directory(project_path)?;
+    let out = frame_output_path(&directory, &request);
     let args = request.into_extract_args(project_path.clone(), out, file, sequence_id);
 
+    match extract_inline_frames(args, project.as_ref()) {
+        Ok(output) => {
+            prune_frame_cache(project_path);
+            Ok(output)
+        }
+        Err(error) => {
+            // Nothing usable came back, so this call's directory is residue:
+            // FFmpeg and the sequence-bounds check both run after the mkdir, and
+            // an empty entry per failed probe is how the cache grows fastest.
+            discard_frame_cache_directory(&directory);
+            Err(error)
+        }
+    }
+}
+
+/// Runs the extraction and reads its images back for the wire.
+///
+/// `project` is the snapshot `confine_sequence_media` approved. Handing it to
+/// the extraction is what keeps the check and the read on the same state: a
+/// second `load_project` would replay `ops.jsonl` again and could resolve clip
+/// media the confinement never saw.
+fn extract_inline_frames(
+    args: frame::ExtractArgs,
+    project: Option<&openreelio_core::ActiveProject>,
+) -> Result<ToolOutput, ToolError> {
     // `frame::run_extract` resolves FFmpeg through `ensure_ffmpeg`, so a machine
     // without it fails here with a message naming that, rather than hanging.
-    let payload =
-        frame::run_extract(args).map_err(|error| ToolError::Execution(error.to_string()))?;
+    let payload = match project {
+        Some(project) => frame::run_extract_with_project(args, project),
+        None => frame::run_extract(args),
+    }
+    .map_err(|error| ToolError::Execution(error.to_string()))?;
     let images = inline_frame_images(&payload)?;
 
     Ok(ToolOutput::with_images(payload, images))
 }
 
-/// Chooses where this extraction writes, inside the project's own cache.
+/// Root of the frame cache for a project.
+fn frame_cache_root(project_path: &Path) -> PathBuf {
+    project_path
+        .join(".openreelio")
+        .join("cache")
+        .join("frames")
+}
+
+/// Creates the directory this extraction writes into, inside the project's own
+/// cache.
 ///
 /// The caller never names an output path: an MCP argument that decided where
 /// bytes land would make a read-only server an arbitrary-write primitive. A
 /// timestamped directory under `.openreelio/cache/frames/` keeps concurrent
 /// judgements from overwriting each other's evidence, and puts every image in a
 /// place that is safe to delete.
-fn frame_output_path(
-    project_path: &Path,
-    request: &FrameExtractRequest,
-) -> Result<PathBuf, ToolError> {
-    let directory = project_path
-        .join(".openreelio")
-        .join("cache")
-        .join("frames")
-        .join(chrono::Utc::now().format("%Y%m%dT%H%M%S%6fZ").to_string());
+fn create_frame_cache_directory(project_path: &Path) -> Result<PathBuf, ToolError> {
+    let directory = frame_cache_root(project_path)
+        .join(chrono::Utc::now().format(FRAME_CACHE_STAMP).to_string());
     std::fs::create_dir_all(&directory).map_err(|error| {
         ToolError::Execution(format!(
             "Failed to create the frame cache directory '{}': {error}",
@@ -2339,16 +2425,62 @@ fn frame_output_path(
         ))
     })?;
 
+    Ok(directory)
+}
+
+/// Chooses what this extraction writes inside its cache directory.
+fn frame_output_path(directory: &Path, request: &FrameExtractRequest) -> PathBuf {
     if request.is_grid() {
-        return Ok(directory.join("sheet.jpg"));
+        return directory.join("sheet.jpg");
     }
     if request.times.is_some() {
         // A batch writes one file per time, so the extraction is handed the
         // directory and names the stills itself.
-        return Ok(directory);
+        return directory.to_path_buf();
     }
 
-    Ok(directory.join("frame.jpg"))
+    directory.join("frame.jpg")
+}
+
+/// Removes a cache directory whose extraction produced nothing usable.
+///
+/// Recursive because a failure can land mid-batch: the directory was created
+/// microseconds earlier for this call alone, so whatever is in it belongs to the
+/// extraction that just failed. Best-effort — a leftover directory is not worth
+/// replacing the real error with a housekeeping one.
+fn discard_frame_cache_directory(directory: &Path) {
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// Keeps the frame cache to its most recent [`MAX_CACHED_FRAME_DIRECTORIES`]
+/// entries.
+///
+/// The images are already inline in the response, so the on-disk copy exists
+/// only for a follow-up call that wants the path. Without a bound, a judge loop
+/// deposits every frame it ever looked at into the user's project directory.
+/// Best-effort: an extraction whose images are already in hand must not fail
+/// because the cache could not be tidied.
+fn prune_frame_cache(project_path: &Path) {
+    let Ok(entries) = std::fs::read_dir(frame_cache_root(project_path)) else {
+        return;
+    };
+
+    let mut directories: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .map(|entry| entry.path())
+        .collect();
+    if directories.len() <= MAX_CACHED_FRAME_DIRECTORIES {
+        return;
+    }
+
+    // Entry names are fixed-width UTC timestamps, so sorting them by name sorts
+    // them by age.
+    directories.sort();
+    let stale = directories.len() - MAX_CACHED_FRAME_DIRECTORIES;
+    for directory in directories.into_iter().take(stale) {
+        let _ = std::fs::remove_dir_all(directory);
+    }
 }
 
 /// Reads back the images an extraction wrote and encodes them for the wire.
@@ -4467,6 +4599,360 @@ mod tests {
             assert_eq!(cell["col"], index % 2);
             assert_eq!(cell["timelineSec"], index as f64);
         }
+    }
+
+    #[test]
+    fn should_carry_every_sheet_selector_through_to_the_extraction_arguments() {
+        let request = FrameExtractRequest::parse(&serde_json::json!({
+            "grid": "2x2",
+            "times": [0.0, 1.0, 2.0, 3.0],
+            "mode": "composite",
+            "maxWidth": 1920,
+            "cellWidth": 512,
+            "cellHeight": 288,
+            "labelCells": true,
+            "sequenceId": "seq-requested"
+        }))
+        .expect("a fully specified sheet request parses");
+        assert_eq!(request.sequence_id.as_deref(), Some("seq-requested"));
+
+        let args = request.into_extract_args(
+            PathBuf::from("project"),
+            PathBuf::from("project/sheet.jpg"),
+            None,
+            Some("seq-resolved".to_string()),
+        );
+
+        // Every one of these decides what FFmpeg is actually asked for, and the
+        // mapping is written out by hand — a transposed pair would still compile.
+        assert_eq!(args.grid.as_deref(), Some("2x2"));
+        assert_eq!(args.times, Some(vec![0.0, 1.0, 2.0, 3.0]));
+        assert_eq!(args.mode.as_deref(), Some("composite"));
+        assert_eq!(args.max_width, Some(1920));
+        assert_eq!(args.cell_width, Some(512));
+        assert_eq!(args.cell_height, Some(288));
+        assert!(args.label_cells);
+        // The server resolves the sequence itself, so the extraction gets the
+        // resolved id rather than whatever the client typed.
+        assert_eq!(args.sequence.as_deref(), Some("seq-resolved"));
+        assert_eq!(args.format.as_deref(), Some("jpeg"));
+        assert_eq!(args.out, PathBuf::from("project/sheet.jpg"));
+    }
+
+    #[test]
+    fn should_carry_a_composite_still_request_through_to_the_extraction_arguments() {
+        let request = FrameExtractRequest::parse(&serde_json::json!({
+            "time": 4.2,
+            "mode": "composite",
+            "maxWidth": 640
+        }))
+        .expect("a composite still request parses");
+
+        let args = request.into_extract_args(
+            PathBuf::from("project"),
+            PathBuf::from("project/frame.jpg"),
+            None,
+            Some("seq-resolved".to_string()),
+        );
+
+        // A lost `mode` degrades silently to fast, which returns a topmost-clip
+        // frame with no effects or text — a wrong answer rather than an error.
+        assert_eq!(args.mode.as_deref(), Some("composite"));
+        assert_eq!(args.time, Some(4.2));
+        assert_eq!(args.max_width, Some(640));
+        assert!(args.grid.is_none());
+        assert!(args.cell_width.is_none());
+        assert!(args.cell_height.is_none());
+    }
+
+    #[test]
+    fn should_refuse_a_still_wider_than_one_response_can_carry() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "frame_width_cap_project");
+        let state = frame_extract_state(project_path);
+
+        let error = run_frame_extract_tool(
+            &state,
+            serde_json::json!({ "time": 1.0, "maxWidth": MAX_STILL_WIDTH_PX + 1 }),
+        )
+        .expect_err("an unbounded still width must be refused");
+        let ToolError::InvalidArguments(message) = error else {
+            panic!("expected an argument refusal");
+        };
+        assert!(
+            message.contains(&MAX_STILL_WIDTH_PX.to_string()),
+            "the refusal must name the cap: {message}"
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_contact_sheet_no_vision_host_would_accept() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "frame_sheet_pixel_cap_project");
+        let state = frame_extract_state(project_path);
+
+        // Both limbs are inside every advertised cap — 64 cells is under 100 and
+        // 1024px cells are the documented maximum — yet the sheet is 8192px wide.
+        let error = run_frame_extract_tool(
+            &state,
+            serde_json::json!({
+                "grid": "8x8",
+                "between": [0.0, 4.0],
+                "cellWidth": MAX_CELL_SIZE_PX
+            }),
+        )
+        .expect_err("a sheet past the pixel cap must be refused");
+        let ToolError::InvalidArguments(message) = error else {
+            panic!("expected an argument refusal, not an execution failure");
+        };
+        assert!(
+            message.contains("8192") && message.contains(&MAX_SHEET_DIMENSION_PX.to_string()),
+            "the refusal must name the computed size and the limit: {message}"
+        );
+    }
+
+    #[test]
+    fn should_measure_the_sheet_the_extraction_will_actually_build() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "frame_sheet_rows_project");
+        let state = frame_extract_state(project_path);
+
+        // A 1x10 column of 1024px cells is 10240px tall on paper, but the
+        // extraction drops rows no sample reaches, so four times build a 4-row
+        // sheet that fits. Measuring the requested rows would refuse a legal
+        // sheet.
+        let request = FrameExtractRequest::parse(&serde_json::json!({
+            "grid": "1x10",
+            "times": [0.0, 1.0, 2.0, 3.0],
+            "cellHeight": MAX_CELL_SIZE_PX
+        }));
+        assert!(
+            request.is_ok(),
+            "a short time list shrinks the sheet: {:?}",
+            request.err()
+        );
+
+        let error = run_frame_extract_tool(
+            &state,
+            serde_json::json!({
+                "grid": "1x10",
+                "between": [0.0, 4.0],
+                "cellHeight": MAX_CELL_SIZE_PX
+            }),
+        )
+        .expect_err("a full column of maximum cells must be refused");
+        assert!(matches!(error, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn should_not_leave_a_cache_directory_behind_when_the_extraction_fails() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "frame_cache_failure_project");
+        let state = frame_extract_state(project_path.clone());
+
+        // The bytes are not a video, so the extraction fails inside FFmpeg —
+        // after the cache directory has already been created for it.
+        let error = run_frame_extract_tool(
+            &state,
+            serde_json::json!({ "time": 0.5, "file": "render.mp4" }),
+        )
+        .expect_err("a fake render cannot be extracted from");
+        assert!(matches!(error, ToolError::Execution(_)));
+
+        let cache_root = frame_cache_root(&project_path);
+        let leftovers = std::fs::read_dir(&cache_root)
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(0);
+        assert_eq!(
+            leftovers,
+            0,
+            "a failed extraction must not leave an entry in {}",
+            cache_root.display()
+        );
+    }
+
+    #[test]
+    fn should_not_create_a_cache_directory_for_a_rejected_request() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let (project_path, _) = project_with_file(&temp_dir, "frame_cache_rejected_project");
+        let state = frame_extract_state(project_path.clone());
+
+        run_frame_extract_tool(
+            &state,
+            serde_json::json!({ "grid": "12x12", "between": [0.0, 4.0] }),
+        )
+        .expect_err("a grid past the cell cap must be refused");
+
+        assert!(
+            !frame_cache_root(&project_path).exists(),
+            "a refused request must not touch the cache at all"
+        );
+    }
+
+    #[test]
+    fn should_keep_only_the_newest_frame_cache_entries() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let project_path = temp_dir.path().join("frame_prune_project");
+        let cache_root = frame_cache_root(&project_path);
+
+        // Names are fixed-width UTC stamps, so the ordering under test is the
+        // one real entries get.
+        let stamps: Vec<String> = (0..MAX_CACHED_FRAME_DIRECTORIES + 4)
+            .map(|index| format!("20260816T120000{index:06}Z"))
+            .collect();
+        for stamp in &stamps {
+            let entry = cache_root.join(stamp);
+            std::fs::create_dir_all(&entry).expect("cache entry");
+            std::fs::write(entry.join("sheet.jpg"), b"sheet bytes").expect("cache image");
+        }
+
+        prune_frame_cache(&project_path);
+
+        let mut remaining: Vec<String> = std::fs::read_dir(&cache_root)
+            .expect("cache root")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        remaining.sort();
+        assert_eq!(remaining.len(), MAX_CACHED_FRAME_DIRECTORIES);
+        assert_eq!(
+            remaining,
+            stamps[stamps.len() - MAX_CACHED_FRAME_DIRECTORIES..].to_vec(),
+            "pruning must keep the newest entries, not an arbitrary set"
+        );
+    }
+
+    #[test]
+    fn should_tolerate_pruning_a_cache_that_does_not_exist_yet() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        // The first extraction on a project prunes before anything was cached,
+        // and housekeeping must never be able to fail a successful call.
+        prune_frame_cache(&temp_dir.path().join("never_extracted_project"));
+    }
+
+    #[test]
+    fn should_size_the_contact_sheet_from_the_requested_cell_size() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let Some(project_path) = project_with_real_media(&temp_dir, "frame_cell_size_project")
+        else {
+            return;
+        };
+        let state = frame_extract_state(project_path);
+
+        let sheet = |arguments: Value| -> (usize, usize) {
+            let response = handle_jsonrpc_request(
+                &state,
+                request(
+                    "tools/call",
+                    serde_json::json!({
+                        "name": "openreelio.frame.extract",
+                        "arguments": arguments
+                    }),
+                ),
+            );
+            let content = response["result"]["content"]
+                .as_array()
+                .unwrap_or_else(|| panic!("frame extract failed: {response}"));
+            assert_image_block(&content[0], "image/jpeg");
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(content[0]["data"].as_str().expect("image data"))
+                .expect("image data must be valid base64");
+            jpeg_dimensions(&bytes)
+        };
+
+        let (default_width, default_height) = sheet(serde_json::json!({
+            "grid": "2x2",
+            "times": [0.0, 1.0, 2.0, 3.0]
+        }));
+        let (custom_width, custom_height) = sheet(serde_json::json!({
+            "grid": "2x2",
+            "times": [0.0, 1.0, 2.0, 3.0],
+            "cellWidth": 200,
+            "cellHeight": 120
+        }));
+
+        // The cell size has to reach the tiler, not just the JSON: a sheet built
+        // at the default geometry would report the requested cells and return
+        // the wrong picture.
+        assert!(
+            custom_width < default_width && custom_height < default_height,
+            "a smaller cell must produce a smaller sheet: {custom_width}x{custom_height} \
+             vs default {default_width}x{default_height}"
+        );
+        // Two columns of 200px plus the tiler's padding and margin.
+        assert!(
+            (400..=464).contains(&custom_width) && (240..=304).contains(&custom_height),
+            "the sheet must be two 200x120 cells wide and tall, got {custom_width}x{custom_height}"
+        );
+    }
+
+    #[test]
+    fn should_extract_from_the_project_snapshot_the_confinement_approved() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let Some(project_path) = project_with_real_media(&temp_dir, "frame_shared_project") else {
+            return;
+        };
+        let project = super::super::load_project(&project_path).expect("project opens");
+
+        let out = temp_dir.path().join("shared_snapshot_frame.jpg");
+        let args = frame::ExtractArgs {
+            // Deliberately bogus: `load_project` cannot resolve it, so an
+            // extraction that re-opened the project would fail here. Succeeding
+            // is the proof that `confine_sequence_media` and FFmpeg read one
+            // snapshot rather than two replays of the log.
+            path: temp_dir.path().join("this_directory_does_not_exist"),
+            out: out.clone(),
+            file: None,
+            asset: None,
+            source_time: None,
+            time: Some(1.0),
+            times: None,
+            sequence: None,
+            mode: None,
+            max_width: None,
+            format: Some("jpeg".to_string()),
+            grid: None,
+            between: None,
+            count: None,
+            cell_width: None,
+            cell_height: None,
+            label_cells: false,
+        };
+
+        frame::run_extract_with_project(args, &project)
+            .expect("the handed project must be the one extracted from");
+        assert!(out.exists(), "the still must have been written");
+    }
+
+    /// Reads a JPEG's pixel dimensions from its first frame header.
+    ///
+    /// Inlined rather than pulled in as a decoding dependency the crate does not
+    /// otherwise need: the assertion only asks how large the sheet is.
+    fn jpeg_dimensions(bytes: &[u8]) -> (usize, usize) {
+        let mut index = 2; // Past the SOI marker.
+        while index + 9 < bytes.len() {
+            assert_eq!(bytes[index], 0xFF, "expected a JPEG marker at byte {index}");
+            // A marker may be preceded by any number of 0xFF fill bytes.
+            let mut marker_at = index + 1;
+            while bytes[marker_at] == 0xFF {
+                marker_at += 1;
+            }
+            let marker = bytes[marker_at];
+            let length = usize::from(u16::from_be_bytes([
+                bytes[marker_at + 1],
+                bytes[marker_at + 2],
+            ]));
+
+            // SOF0..SOF15 carry the dimensions; DHT, JPG and DAC share the range.
+            if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+                let height = u16::from_be_bytes([bytes[marker_at + 4], bytes[marker_at + 5]]);
+                let width = u16::from_be_bytes([bytes[marker_at + 6], bytes[marker_at + 7]]);
+                return (usize::from(width), usize::from(height));
+            }
+            index = marker_at + 1 + length;
+        }
+
+        panic!("no frame header in the JPEG");
     }
 
     /// Asserts a content block is a usable MCP image.
