@@ -75,8 +75,8 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
   and overlays appear. Range renders decode from zero, so it costs more. It works
   anywhere inside the timeline, including over a gap — a gap has no picture, so a
   black frame is the answer, not an error.
-- `--max-width` caps output size (default 1280 px, aspect preserved, never
-  upscaled).
+- `--max-width` caps output size (1–3840 px, default 1280 px, aspect preserved,
+  never upscaled).
 - `--format png|jpeg` is optional: the format follows the `--out` extension, so
   `--out sheet.jpg` writes JPEG at exactly that path. Reach for `--format` on
   extensionless paths and `--times` directories, which default to PNG. A
@@ -87,7 +87,9 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
 [--count N]` (uniform sampling) or `--times a,b,c` (explicit list, kept in the
 order given) writes one sheet and returns
 `sheet.cells[{index,row,col,timelineSec}]`, mapping every cell a vision model
-comments on back to a timecode. Capped at 100 cells.
+comments on back to a timecode. Capped at 100 cells, and at 8000 px on either
+finished edge — an oversized combination is rejected before any cell is
+extracted.
 
 - `--label-cells` burns each cell's index and *requested* timecode into the
   image, so the mapping survives without the JSON — use it beyond a 3×3.

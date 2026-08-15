@@ -117,6 +117,11 @@ openreelio-cli mcp --project ./demo --stdio --allow-write   # also expose mutati
 it only with a locally trusted client; every mutation still goes through the
 command log and stays undoable.
 
+The read tools cover the whole perception loop, so a vision-capable host closes
+it without shelling out: `openreelio.frame.extract` returns stills and contact
+sheets **inline** as MCP `image` blocks, and `openreelio.verify` returns the
+deterministic QC report. Both are available without any write grant.
+
 MCP registry identifier:
 
 ```text

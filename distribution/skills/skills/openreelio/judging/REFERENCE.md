@@ -96,6 +96,36 @@ Passing one dimension alone derives the other at 16:9, so `--cell-width 640` is
 already a 640×360 cell — cells are fitted with `force_original_aspect_ratio`, so
 a 640×180 cell would only add black bars around the same 320×180 picture.
 
+### Over MCP
+
+An MCP-connected agent does not need Bash and a file-reading tool for any of
+this: `openreelio.frame.extract` takes the same selectors and returns the sheet
+**inline** as an MCP `image` block, followed by the usual JSON metadata. It is a
+read tool, available without `--allow-write`.
+
+```jsonc
+// tools/call → openreelio.frame.extract
+{ "file": "judge/a.mp4", "grid": "4x3", "between": [0, 90], "labelCells": true }
+```
+
+Two differences from the CLI form:
+
+- The render must be **inside the project directory** — `file` is confined
+  there, so write candidate renders under the project rather than to a scratch
+  path outside it.
+- There is no `out`: images land in `.openreelio/cache/frames/<timestamp>/` and
+  the written path comes back in the JSON. The cache keeps only its 16 newest
+  entries and drops the entry an extraction failed in, so a long judge loop does
+  not accumulate inside the project.
+- The caps are on cells **and** on pixels: at most 100 cells, at most 12 stills
+  in a `times` batch, cells of 64–1024 px, a finished sheet no larger than
+  8000 px on either edge, and `maxWidth` at most 3840 px. Anything past those is
+  refused as an argument error before a frame is extracted. Prefer a sheet — it
+  costs one image whatever its cell count.
+
+The Bash + Read path above remains correct for CLI agents; nothing about the
+rubric or the offsets changes.
+
 ## The rubric
 
 Score each dimension 1–5, in this order. The first two rows are deterministic —

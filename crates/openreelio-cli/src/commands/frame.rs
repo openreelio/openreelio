@@ -30,13 +30,24 @@ use std::path::{Path, PathBuf};
 
 /// Default maximum still width. 1280px keeps frames readable for vision models
 /// while staying well under typical image-token limits.
-const DEFAULT_MAX_WIDTH: u32 = 1280;
+pub const DEFAULT_MAX_WIDTH: u32 = 1280;
+
+/// Smallest accepted still width, in pixels.
+pub const MIN_STILL_WIDTH_PX: u32 = 1;
+
+/// Largest accepted still width, in pixels.
+///
+/// 4K is enough to judge fine detail in UHD footage, and it is a ceiling rather
+/// than a target: extraction never upscales, so a larger request only buys
+/// native-resolution pixels. Bounding it is what keeps a batch of stills a size
+/// an MCP host can carry in one response, since the images travel inline.
+pub const MAX_STILL_WIDTH_PX: u32 = 3840;
 
 /// Largest contact sheet accepted, in cells.
 ///
 /// Every cell costs one FFmpeg extraction, so an unbounded grid would turn a
 /// single command into thousands of process spawns.
-const MAX_GRID_CELLS: usize = 100;
+pub const MAX_GRID_CELLS: usize = 100;
 
 /// Shortest composited window that FFmpeg can still render.
 ///
@@ -48,13 +59,22 @@ const MIN_COMPOSITE_WINDOW_SEC: f64 = 0.05;
 ///
 /// Below this a cell carries no usable detail for a vision model, so a smaller
 /// request is a mistake rather than an economy.
-const MIN_CELL_SIZE_PX: u32 = 64;
+pub const MIN_CELL_SIZE_PX: u32 = 64;
 
 /// Largest accepted contact-sheet cell dimension.
 ///
 /// A full grid of 1024px cells is already a very large image; anything beyond
 /// it should be extracted as individual stills instead.
-const MAX_CELL_SIZE_PX: u32 = 1024;
+pub const MAX_CELL_SIZE_PX: u32 = 1024;
+
+/// Largest accepted contact-sheet edge, in pixels.
+///
+/// The cell cap and the cell-count cap bound different terms, and a sheet is
+/// only useful if the vision model it is built for accepts it: mainstream image
+/// APIs refuse anything past 8000px on a side, well before mjpeg's own 65500px
+/// ceiling. Checking the product rejects an unrenderable sheet before a single
+/// cell is extracted, instead of after the whole grid has been paid for.
+pub const MAX_SHEET_DIMENSION_PX: u32 = 8000;
 
 /// Share of a cell's height given to the burnt-in label's type size.
 ///
@@ -124,8 +144,8 @@ pub struct ExtractArgs {
     #[arg(long)]
     pub mode: Option<String>,
 
-    /// Maximum output width in pixels (aspect ratio preserved, never upscaled)
-    #[arg(long)]
+    /// Maximum output width in pixels, 1-3840 (aspect ratio preserved, never upscaled)
+    #[arg(long, value_parser = still_width_parser())]
     pub max_width: Option<u32>,
 
     /// Output image format: png or jpeg (defaults to the --out extension, else png)
@@ -160,6 +180,11 @@ pub struct ExtractArgs {
 /// Value parser enforcing the accepted contact-sheet cell dimension range.
 fn cell_size_parser() -> clap::builder::RangedI64ValueParser<u32> {
     clap::value_parser!(u32).range(i64::from(MIN_CELL_SIZE_PX)..=i64::from(MAX_CELL_SIZE_PX))
+}
+
+/// Value parser enforcing the accepted still width range.
+fn still_width_parser() -> clap::builder::RangedI64ValueParser<u32> {
+    clap::value_parser!(u32).range(i64::from(MIN_STILL_WIDTH_PX)..=i64::from(MAX_STILL_WIDTH_PX))
 }
 
 pub fn execute(action: FrameAction) -> anyhow::Result<()> {
@@ -424,16 +449,43 @@ fn resolve_selection(args: &ExtractArgs) -> anyhow::Result<Selection> {
 // ── Execution ───────────────────────────────────────────────────────────
 
 fn extract(args: ExtractArgs) -> anyhow::Result<()> {
+    output::print_json_pretty(&run_extract(args)?)
+}
+
+/// Runs one extraction and returns the payload the CLI would have printed.
+///
+/// Split from [`extract`] so the MCP server can serve the same extraction —
+/// same validation, same FFmpeg resolution, same result shape — without going
+/// through stdout. Every guard the CLI relies on lives here rather than in the
+/// clap layer, because clap validates only the CLI's own callers.
+pub fn run_extract(args: ExtractArgs) -> anyhow::Result<serde_json::Value> {
+    extract_with_project(args, None)
+}
+
+/// Runs one extraction against a project the caller has already opened.
+///
+/// The MCP server confines the sequence's media against its own snapshot before
+/// extracting. Re-opening the project here would replay `ops.jsonl` a second
+/// time and extract from a snapshot the confinement never saw, so the caller
+/// hands the checked project in and both halves read the same state — and a tool
+/// built to be called in a judge loop pays for one replay instead of two.
+pub fn run_extract_with_project(
+    args: ExtractArgs,
+    project: &ActiveProject,
+) -> anyhow::Result<serde_json::Value> {
+    extract_with_project(args, Some(project))
+}
+
+fn extract_with_project(
+    args: ExtractArgs,
+    project: Option<&ActiveProject>,
+) -> anyhow::Result<serde_json::Value> {
     let selection = resolve_selection(&args)?;
     let format = resolve_image_format(args.format.as_deref(), &args.out)?;
     let mode = TimelineMode::resolve(args.mode.as_deref())?;
-    if let Some(max_width) = args.max_width {
-        if max_width == 0 {
-            return Err(anyhow::anyhow!(
-                "Invalid value for --max-width: must be >= 1"
-            ));
-        }
-    }
+    ensure_cell_size_in_range(&args)?;
+    ensure_max_width_in_range(&args)?;
+    ensure_sheet_fits(&args, &selection)?;
 
     let ffmpeg_info = ensure_ffmpeg()?;
 
@@ -447,47 +499,149 @@ fn extract(args: ExtractArgs) -> anyhow::Result<()> {
     // project: it costs an ops replay it has no use for, and it keeps sheeting a
     // finished render independent of whatever the project is doing meanwhile.
     if let Some(file) = args.file.clone() {
-        let result = runtime.block_on(run_file_mode(&runner, &file, &args, format, &selection))?;
-        return output::print_json_pretty(&result);
+        return runtime.block_on(run_file_mode(&runner, &file, &args, format, &selection));
     }
 
-    let project = super::load_project(&args.path)?;
+    let opened;
+    let project = match project {
+        Some(project) => project,
+        None => {
+            opened = super::load_project(&args.path)?;
+            &opened
+        }
+    };
 
-    let result = match selection {
+    match selection {
         Selection::AssetTime {
             asset_id,
             source_time,
         } => runtime.block_on(run_asset_mode(
-            &project,
+            project,
             &runner,
             &asset_id,
             source_time,
             &args.out,
             format,
             args.max_width,
-        ))?,
+        )),
         Selection::SingleTime(time) => runtime.block_on(run_timeline_mode(
-            &project,
+            project,
             &runner,
             &args,
             format,
             mode,
             &[time],
             false,
-        ))?,
+        )),
         Selection::BatchTimes(times) => runtime.block_on(run_timeline_mode(
-            &project, &runner, &args, format, mode, &times, true,
-        ))?,
+            project, &runner, &args, format, mode, &times, true,
+        )),
         Selection::Grid {
             columns,
             rows,
             times,
         } => runtime.block_on(run_grid_mode(
-            &project, &runner, &args, format, mode, columns, rows, &times,
-        ))?,
+            project, &runner, &args, format, mode, columns, rows, &times,
+        )),
+    }
+}
+
+/// Rejects contact-sheet cell dimensions outside the supported range.
+///
+/// clap enforces the same range for the CLI, but the range must hold for every
+/// caller of [`run_extract`]: a cell FFmpeg's tiler cannot fill is a broken
+/// sheet regardless of which surface asked for it.
+fn ensure_cell_size_in_range(args: &ExtractArgs) -> anyhow::Result<()> {
+    for (label, value) in [
+        ("cell-width", args.cell_width),
+        ("cell-height", args.cell_height),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        if !(MIN_CELL_SIZE_PX..=MAX_CELL_SIZE_PX).contains(&value) {
+            return Err(anyhow::anyhow!(
+                "Invalid value for --{}: {} is outside the supported range of {}-{}",
+                label,
+                value,
+                MIN_CELL_SIZE_PX,
+                MAX_CELL_SIZE_PX
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Rejects a still width outside the supported range.
+///
+/// clap enforces the same range for the CLI, but every caller of
+/// [`run_extract`] needs it: the width decides how many pixels one response
+/// carries, and the MCP surface inlines those pixels as base64.
+fn ensure_max_width_in_range(args: &ExtractArgs) -> anyhow::Result<()> {
+    let Some(max_width) = args.max_width else {
+        return Ok(());
+    };
+    if !(MIN_STILL_WIDTH_PX..=MAX_STILL_WIDTH_PX).contains(&max_width) {
+        return Err(anyhow::anyhow!(
+            "Invalid value for --max-width: {} is outside the supported range of {}-{}",
+            max_width,
+            MIN_STILL_WIDTH_PX,
+            MAX_STILL_WIDTH_PX
+        ));
+    }
+
+    Ok(())
+}
+
+/// Rejects a contact sheet whose finished pixel dimensions exceed the cap.
+///
+/// The cell cap bounds one cell and the grid cap bounds the count; only their
+/// product describes the image that is actually produced. Checking it here —
+/// before `ensure_ffmpeg` and before the first cell is extracted — turns a sheet
+/// no encoder or vision API would accept into an argument error rather than a
+/// failure paid for at full extraction cost.
+fn ensure_sheet_fits(args: &ExtractArgs, selection: &Selection) -> anyhow::Result<()> {
+    let Selection::Grid { columns, rows, .. } = selection else {
+        return Ok(());
     };
 
-    output::print_json_pretty(&result)
+    ensure_sheet_dimensions_in_range(*columns, *rows, args.cell_width, args.cell_height)
+}
+
+/// Rejects contact-sheet geometry whose finished image exceeds
+/// [`MAX_SHEET_DIMENSION_PX`] on either edge.
+///
+/// Shared with the MCP surface so both reject the same geometry, in the same
+/// terms, before anything is extracted.
+pub fn ensure_sheet_dimensions_in_range(
+    columns: usize,
+    rows: usize,
+    cell_width: Option<u32>,
+    cell_height: Option<u32>,
+) -> anyhow::Result<()> {
+    let cell = cell_size(cell_width, cell_height);
+    let limit = MAX_SHEET_DIMENSION_PX as usize;
+
+    for (edge, count, size) in [
+        ("width", columns, cell.width),
+        ("height", rows, cell.height),
+    ] {
+        let total = count.saturating_mul(size);
+        if total > limit {
+            return Err(anyhow::anyhow!(
+                "Contact sheet {} of {}px ({} cells of {}px) exceeds the maximum of {}px; \
+                 ask for fewer cells or a smaller cell size",
+                edge,
+                total,
+                count,
+                size,
+                MAX_SHEET_DIMENSION_PX
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// A rendered file used as the extraction source, with the facts needed to
@@ -1483,8 +1637,16 @@ fn resolve_image_format(explicit: Option<&str>, out: &Path) -> anyhow::Result<Im
 /// black bars, at twice the pixel cost. Passing both keeps exactly what was
 /// asked for, including a deliberately non-16:9 cell.
 fn resolve_cell_size(args: &ExtractArgs) -> ContactSheetCellSize {
+    cell_size(args.cell_width, args.cell_height)
+}
+
+/// Derives the cell geometry a sheet will actually be tiled at.
+///
+/// Split from [`resolve_cell_size`] so the pixel-dimension guard can measure the
+/// same cell the tiler will use, including a derived partner dimension.
+fn cell_size(cell_width: Option<u32>, cell_height: Option<u32>) -> ContactSheetCellSize {
     let default = ContactSheetCellSize::default();
-    let (width, height) = match (args.cell_width, args.cell_height) {
+    let (width, height) = match (cell_width, cell_height) {
         (Some(width), Some(height)) => (width as usize, height as usize),
         (Some(width), None) => (
             width as usize,
@@ -1524,7 +1686,7 @@ fn grid_cell_extract_width(args: &ExtractArgs, cell: ContactSheetCellSize) -> u3
 }
 
 /// Parses a `COLSxROWS` grid specification.
-fn parse_grid_spec(raw: &str) -> anyhow::Result<(usize, usize)> {
+pub fn parse_grid_spec(raw: &str) -> anyhow::Result<(usize, usize)> {
     let normalized = raw.trim().to_lowercase();
     let (columns, rows) = normalized.split_once('x').ok_or_else(|| {
         anyhow::anyhow!("Invalid value for --grid: expected COLSxROWS (e.g. 3x2)")
@@ -1836,6 +1998,57 @@ mod tests {
                 && message.contains("--label-cells")
                 && message.contains("--grid"),
             "Error should name the ignored flags and the flag they need, got: {message}"
+        );
+    }
+
+    #[test]
+    fn ensure_sheet_dimensions_in_range_should_reject_a_sheet_past_the_pixel_cap() {
+        // 64 cells is inside the cell-count cap and 1024px is the documented
+        // maximum cell, yet the product is a sheet no vision API accepts.
+        let error = ensure_sheet_dimensions_in_range(8, 8, Some(MAX_CELL_SIZE_PX), None)
+            .expect_err("Eight 1024px columns exceed the sheet cap");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("8192") && message.contains(&MAX_SHEET_DIMENSION_PX.to_string()),
+            "Error should name the computed size and the limit, got: {message}"
+        );
+    }
+
+    #[test]
+    fn ensure_sheet_dimensions_in_range_should_measure_the_derived_cell_dimension() {
+        // Only `cell_height` is given, so the width the tiler uses is derived —
+        // measuring the requested dimension alone would miss the overflow.
+        let error = ensure_sheet_dimensions_in_range(10, 1, None, Some(MAX_CELL_SIZE_PX))
+            .expect_err("A derived 1024px width over ten columns exceeds the cap");
+        assert!(error.to_string().contains("width"));
+
+        assert!(
+            ensure_sheet_dimensions_in_range(7, 7, Some(MAX_CELL_SIZE_PX), None).is_ok(),
+            "A sheet inside the cap must still be accepted"
+        );
+    }
+
+    #[test]
+    fn ensure_max_width_in_range_should_bound_both_ends() {
+        let mut args = grid_args("2x2", None);
+
+        args.max_width = None;
+        assert!(ensure_max_width_in_range(&args).is_ok());
+
+        args.max_width = Some(0);
+        assert!(ensure_max_width_in_range(&args).is_err());
+
+        args.max_width = Some(MAX_STILL_WIDTH_PX);
+        assert!(ensure_max_width_in_range(&args).is_ok());
+
+        args.max_width = Some(MAX_STILL_WIDTH_PX + 1);
+        let message = ensure_max_width_in_range(&args)
+            .expect_err("An unbounded width is what makes a response unreadable")
+            .to_string();
+        assert!(
+            message.contains(&MAX_STILL_WIDTH_PX.to_string()),
+            "Error should name the cap, got: {message}"
         );
     }
 
