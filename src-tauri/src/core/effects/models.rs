@@ -345,6 +345,21 @@ impl EffectType {
         }
     }
 
+    /// Returns true if this effect renders as an FFmpeg `xfade`.
+    ///
+    /// `xfade` takes *two* video inputs, so these effects cannot go through a
+    /// clip's single-input filter chain — FFmpeg rejects the whole graph. They
+    /// are consumed at the timeline stitch instead, where the outgoing and
+    /// incoming streams are both in hand.
+    ///
+    /// This is deliberately narrower than
+    /// [`EffectCategory::Transition`](EffectCategory::Transition), which also
+    /// covers `Fade` and `Zoom` — both single-input filters that belong in the
+    /// clip chain and would break the stitch for the same reason in reverse.
+    pub fn is_two_input_transition(&self) -> bool {
+        matches!(self, Self::CrossDissolve | Self::Wipe | Self::Slide)
+    }
+
     /// Returns true if this is an audio effect
     pub fn is_audio(&self) -> bool {
         matches!(self.category(), EffectCategory::Audio)
@@ -1208,6 +1223,110 @@ mod tests {
             EffectType::Custom("my_effect".to_string()).category(),
             EffectCategory::Custom
         );
+    }
+
+    /// Pins exactly which effect types render as a two-input `xfade`.
+    ///
+    /// The match is deliberately exhaustive: a new variant stops this test from
+    /// compiling until someone decides which side of the line it falls on.
+    /// Getting that wrong is not a cosmetic error — a two-input filter admitted
+    /// to a clip's single-input chain makes FFmpeg reject the whole graph, and a
+    /// single-input filter kept out of it silently disappears from the render.
+    #[test]
+    fn two_input_transitions_are_exactly_the_xfade_backed_effects() {
+        fn expected(effect_type: &EffectType) -> bool {
+            match effect_type {
+                // Two-input: rendered by `xfade`, which needs the outgoing and
+                // incoming streams at once.
+                EffectType::CrossDissolve | EffectType::Wipe | EffectType::Slide => true,
+
+                // Single-input, including the Transition-category effects that
+                // are ordinary one-input filters.
+                EffectType::Fade
+                | EffectType::Zoom
+                | EffectType::Brightness
+                | EffectType::Contrast
+                | EffectType::Saturation
+                | EffectType::Hue
+                | EffectType::ColorBalance
+                | EffectType::ColorWheels
+                | EffectType::Gamma
+                | EffectType::Levels
+                | EffectType::Curves
+                | EffectType::TemperatureTint
+                | EffectType::Lut
+                | EffectType::Crop
+                | EffectType::Flip
+                | EffectType::Mirror
+                | EffectType::Rotate
+                | EffectType::GaussianBlur
+                | EffectType::BoxBlur
+                | EffectType::MotionBlur
+                | EffectType::RadialBlur
+                | EffectType::Sharpen
+                | EffectType::UnsharpMask
+                | EffectType::Vignette
+                | EffectType::Glow
+                | EffectType::FilmGrain
+                | EffectType::ChromaticAberration
+                | EffectType::Noise
+                | EffectType::Pixelate
+                | EffectType::Posterize
+                | EffectType::Volume
+                | EffectType::Gain
+                | EffectType::EqBand
+                | EffectType::Compressor
+                | EffectType::Limiter
+                | EffectType::NoiseReduction
+                | EffectType::Reverb
+                | EffectType::Delay
+                | EffectType::TextOverlay
+                | EffectType::Subtitle
+                | EffectType::ChromaKey
+                | EffectType::LumaKey
+                | EffectType::BlendMode
+                | EffectType::Opacity
+                | EffectType::HSLQualifier
+                | EffectType::LoudnessNormalize
+                | EffectType::Stabilize
+                | EffectType::BackgroundRemoval
+                | EffectType::AutoReframe
+                | EffectType::FaceBlur
+                | EffectType::ObjectTracking
+                | EffectType::Custom(_) => false,
+            }
+        }
+
+        for effect_type in [
+            EffectType::CrossDissolve,
+            EffectType::Wipe,
+            EffectType::Slide,
+            EffectType::Fade,
+            EffectType::Zoom,
+            EffectType::Brightness,
+            EffectType::GaussianBlur,
+            EffectType::Volume,
+            EffectType::TextOverlay,
+            EffectType::Custom("my_effect".to_string()),
+        ] {
+            assert_eq!(
+                effect_type.is_two_input_transition(),
+                expected(&effect_type),
+                "{effect_type:?} is on the wrong side of the two-input line"
+            );
+        }
+    }
+
+    #[test]
+    fn a_two_input_transition_is_always_a_transition_category_effect() {
+        for effect_type in [
+            EffectType::CrossDissolve,
+            EffectType::Wipe,
+            EffectType::Slide,
+        ] {
+            assert!(effect_type.is_two_input_transition());
+            assert_eq!(effect_type.category(), EffectCategory::Transition);
+        }
     }
 
     #[test]

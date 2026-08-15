@@ -11,13 +11,17 @@
 //! Recipe parameters are restricted to keys the filter builder consumes:
 //!
 //! - `duration` (seconds) — every family
-//! - `offset` (seconds) — `xfade`-backed families (cross dissolve, wipe, slide)
 //! - `direction` (`left`/`right`/`up`/`down`) — wipe and slide
 //! - `fade_in` (bool) — fade
 //!
 //! A recipe never sets a parameter it cannot know. `fade-out` therefore ships
 //! without `start_time`, which only the target clip's duration can supply;
 //! `AddEffectCommand::execute` computes it there, before the op is logged.
+//!
+//! The `xfade` families skip `offset` for the same reason one step further out:
+//! `offset` is a position in the *accumulated* render stream, which depends on
+//! gaps and on every earlier transition. Only the render plan can know it, so
+//! the stitch derives it — see `append_timeline_video_output`.
 //!
 //! # Admission
 //!
@@ -130,10 +134,7 @@ pub const TRANSITION_RECIPES: &[TransitionRecipeSpec] = &[
                       montage cut.",
         aliases: &["soft-dissolve"],
         effect_type: EffectType::CrossDissolve,
-        params: &[
-            ("duration", RecipeParam::Float(0.5)),
-            ("offset", RecipeParam::Float(0.0)),
-        ],
+        params: &[("duration", RecipeParam::Float(0.5))],
     },
     TransitionRecipeSpec {
         id: "dissolve-standard",
@@ -141,20 +142,14 @@ pub const TRANSITION_RECIPES: &[TransitionRecipeSpec] = &[
                       handoff rather than a cut.",
         aliases: &["dissolve", "crossfade", "cross-dissolve"],
         effect_type: EffectType::CrossDissolve,
-        params: &[
-            ("duration", RecipeParam::Float(1.0)),
-            ("offset", RecipeParam::Float(0.0)),
-        ],
+        params: &[("duration", RecipeParam::Float(1.0))],
     },
     TransitionRecipeSpec {
         id: "dissolve-long",
         description: "Two-second cross dissolve for a deliberate passage-of-time feel.",
         aliases: &["long-dissolve", "slow-dissolve"],
         effect_type: EffectType::CrossDissolve,
-        params: &[
-            ("duration", RecipeParam::Float(2.0)),
-            ("offset", RecipeParam::Float(0.0)),
-        ],
+        params: &[("duration", RecipeParam::Float(2.0))],
     },
     TransitionRecipeSpec {
         id: "fade-in",
@@ -186,7 +181,6 @@ pub const TRANSITION_RECIPES: &[TransitionRecipeSpec] = &[
         params: &[
             ("direction", RecipeParam::Str("left")),
             ("duration", RecipeParam::Float(0.7)),
-            ("offset", RecipeParam::Float(0.0)),
         ],
     },
     TransitionRecipeSpec {
@@ -197,7 +191,6 @@ pub const TRANSITION_RECIPES: &[TransitionRecipeSpec] = &[
         params: &[
             ("direction", RecipeParam::Str("right")),
             ("duration", RecipeParam::Float(0.7)),
-            ("offset", RecipeParam::Float(0.0)),
         ],
     },
     TransitionRecipeSpec {
@@ -208,7 +201,6 @@ pub const TRANSITION_RECIPES: &[TransitionRecipeSpec] = &[
         params: &[
             ("direction", RecipeParam::Str("up")),
             ("duration", RecipeParam::Float(0.7)),
-            ("offset", RecipeParam::Float(0.0)),
         ],
     },
     TransitionRecipeSpec {
@@ -219,7 +211,6 @@ pub const TRANSITION_RECIPES: &[TransitionRecipeSpec] = &[
         params: &[
             ("direction", RecipeParam::Str("down")),
             ("duration", RecipeParam::Float(0.7)),
-            ("offset", RecipeParam::Float(0.0)),
         ],
     },
     TransitionRecipeSpec {
@@ -231,7 +222,6 @@ pub const TRANSITION_RECIPES: &[TransitionRecipeSpec] = &[
         params: &[
             ("direction", RecipeParam::Str("left")),
             ("duration", RecipeParam::Float(0.5)),
-            ("offset", RecipeParam::Float(0.0)),
         ],
     },
     TransitionRecipeSpec {
@@ -242,7 +232,6 @@ pub const TRANSITION_RECIPES: &[TransitionRecipeSpec] = &[
         params: &[
             ("direction", RecipeParam::Str("right")),
             ("duration", RecipeParam::Float(0.5)),
-            ("offset", RecipeParam::Float(0.0)),
         ],
     },
 ];
@@ -333,6 +322,21 @@ mod tests {
             assert!(
                 duration > 0.0 && duration <= 5.0,
                 "recipe '{}' duration {duration} is out of range",
+                recipe.id
+            );
+        }
+    }
+
+    #[test]
+    fn no_recipe_declares_an_offset_it_cannot_know() {
+        // `offset` is a position in the accumulated render stream, shifted by
+        // gaps and by every earlier transition. A recipe that names it pins the
+        // transition to the head of the finished video and drops the shot it
+        // was supposed to leave.
+        for recipe in TRANSITION_RECIPES {
+            assert!(
+                !recipe.params().contains_key("offset"),
+                "recipe '{}' must leave offset to the render stitch",
                 recipe.id
             );
         }

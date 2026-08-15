@@ -3107,6 +3107,620 @@ fn test_plan_execute_reports_an_unreadable_plan_as_a_tool_failure() {
 }
 
 // =============================================================================
+// Pacing Profile Plans
+// =============================================================================
+
+/// Writes a cached analysis bundle by hand.
+///
+/// Deliberately FFmpeg-free: a pacing plan needs the source duration and the
+/// shot boundaries, not the toolchain that measured them, so the whole
+/// from-profile loop stays runnable on a machine with no media stack.
+fn write_analysis_bundle(project_path: &str, asset_id: &str, shot_boundaries: &[(f64, f64)]) {
+    let bundle_dir = std::path::Path::new(project_path)
+        .join(".openreelio")
+        .join("analysis")
+        .join(asset_id);
+    std::fs::create_dir_all(&bundle_dir).unwrap();
+
+    let duration_sec = shot_boundaries
+        .last()
+        .map(|(_, end)| *end)
+        .unwrap_or_default();
+    let shots: Vec<serde_json::Value> = shot_boundaries
+        .iter()
+        .map(|(start, end)| {
+            serde_json::json!({ "startSec": start, "endSec": end, "confidence": 0.9 })
+        })
+        .collect();
+
+    let bundle = serde_json::json!({
+        "schemaVersion": 2,
+        "assetId": asset_id,
+        "shots": shots,
+        "transcript": null,
+        "audioProfile": null,
+        "segments": null,
+        "frameAnalysis": null,
+        "metadata": { "durationSec": duration_sec, "hasAudio": false },
+        "analyzedAt": "2026-01-01T00:00:00Z",
+    });
+
+    std::fs::write(bundle_dir.join("bundle.json"), bundle.to_string()).unwrap();
+}
+
+/// A project holding one imported (but unplaced) dummy asset with a bundle.
+///
+/// The dummy asset has no probeable duration, so the timeline gives it the
+/// 10s default — which is what the bundle declares too, so the plan's cuts
+/// land inside the clip the plan itself inserts.
+fn create_project_with_analysis(name: &str) -> (tempfile::TempDir, String, String) {
+    let dir = create_temp_project(name);
+    let path = project_path(&dir, name);
+
+    let dummy_file = dir.path().join("clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    write_analysis_bundle(
+        &path,
+        &asset_id,
+        &[(0.0, 2.0), (2.0, 5.0), (5.0, 7.0), (7.0, 10.0)],
+    );
+
+    (dir, path, asset_id)
+}
+
+#[test]
+fn test_plan_from_profile_builds_a_plan_that_validates_executes_and_verifies() {
+    let (dir, path, asset_id) = create_project_with_analysis("pacing_roundtrip");
+
+    let plan_file = dir.path().join("pacing.json");
+    let built = run_cli_ok(&[
+        "plan",
+        "from-profile",
+        "--path",
+        &path,
+        "--profile",
+        "dynamic-social",
+        "--asset",
+        &asset_id,
+        "--out",
+        plan_file.to_str().unwrap(),
+    ]);
+
+    assert_eq!(built["status"], "ok", "{built}");
+    assert_eq!(built["profile"], "dynamic-social");
+    assert!(
+        built["cutCount"].as_u64().unwrap() > 0,
+        "a 10s source at a 2.5s target must be cut: {built}"
+    );
+    assert_eq!(
+        built["transitionCount"], 0,
+        "shipped profiles cut hard: {built}"
+    );
+    assert!(built["transitionRecipe"].is_null(), "{built}");
+    assert!(
+        plan_file.exists(),
+        "--out must write the plan file it advertises"
+    );
+
+    // With `--out` the plan is on disk; a second inline copy would only spend
+    // the caller's context. The summary plus the path is the contract.
+    assert!(
+        built["plan"].is_null(),
+        "--out must not inline the plan as well: {built}"
+    );
+    assert_eq!(
+        built["outputPath"],
+        plan_file.to_str().unwrap(),
+        "the summary has to say where the plan went: {built}"
+    );
+
+    // The plan is a spec first: nothing has been mutated yet.
+    let tracks_before = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    assert_eq!(tracks_before["count"], 2, "from-profile must not execute");
+
+    let validated = run_cli_ok(&[
+        "plan",
+        "validate",
+        "--path",
+        &path,
+        "--file",
+        plan_file.to_str().unwrap(),
+    ]);
+    assert_eq!(validated["status"], "ok", "{validated}");
+
+    let (stdout, stderr, code) = run_cli_exit(&[
+        "plan",
+        "execute",
+        "--path",
+        &path,
+        "--file",
+        plan_file.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "plan must execute: {stdout} {stderr}");
+    let executed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(executed["status"], "ok", "{executed}");
+    assert_eq!(
+        executed["stepsExecuted"].as_u64().unwrap(),
+        built["stepCount"].as_u64().unwrap()
+    );
+
+    let verified = run_cli_ok(&["verify", "--path", &path, "--structural-only"]);
+    assert_eq!(
+        verified["passed"], true,
+        "a generated cut must leave no gaps or orphans: {verified}"
+    );
+}
+
+/// Feature: transition recipes on a generated cut
+/// Scenario: an AddEffect step lands the named recipe on the clip it names,
+/// at a boundary past the first
+///
+/// No shipped profile plans a transition while the renderer turns one into a
+/// cut, so the plan gets the `AddEffect` step appended by hand — which is what
+/// an agent editing a generated plan would do, and what a profile will emit
+/// again once the transition engine exists. What is under test is the handoff:
+/// a `$fromStep` reference resolving to the *right* clip, carrying the *right*
+/// effect type, at a boundary that is not the trivial first one.
+#[test]
+fn test_a_plan_places_a_transition_recipe_on_the_clip_it_names() {
+    let (dir, path, asset_id) = create_project_with_analysis("pacing_transition");
+
+    let plan_file = dir.path().join("pacing.json");
+    run_cli_ok(&[
+        "plan",
+        "from-profile",
+        "--path",
+        &path,
+        "--profile",
+        "dynamic-social",
+        "--asset",
+        &asset_id,
+        "--out",
+        plan_file.to_str().unwrap(),
+    ]);
+
+    let mut plan: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&plan_file).unwrap()).unwrap();
+    let cut_times: Vec<f64> = plan["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|step| step["commandType"] == "SplitClip")
+        .map(|step| step["payload"]["splitTime"].as_f64().unwrap())
+        .collect();
+    assert!(
+        cut_times.len() >= 2,
+        "the fixture needs a boundary past the first: {cut_times:?}"
+    );
+
+    // Boundary 1's outgoing clip is what the split closing boundary 0 left
+    // behind — step-2's created id — and the effect must wait for the split
+    // that closes boundary 1, step-3.
+    let sequence_id = plan["steps"][0]["payload"]["sequenceId"].clone();
+    plan["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "step-transition",
+            "commandType": "AddEffect",
+            "payload": {
+                "sequenceId": sequence_id,
+                "trackId": { "$fromStep": "step-0", "$path": "createdIds.0" },
+                "clipId": { "$fromStep": "step-2", "$path": "createdIds.0" },
+                "recipe": "dissolve-standard",
+            },
+            "dependsOn": ["step-3"],
+        }));
+    std::fs::write(&plan_file, plan.to_string()).unwrap();
+
+    let validated = run_cli_ok(&[
+        "plan",
+        "validate",
+        "--path",
+        &path,
+        "--file",
+        plan_file.to_str().unwrap(),
+    ]);
+    assert_eq!(validated["status"], "ok", "{validated}");
+    let deferred: Vec<&str> = validated["stepsWithReferences"]
+        .as_array()
+        .expect("stepsWithReferences")
+        .iter()
+        .filter_map(|id| id.as_str())
+        .collect();
+    assert!(
+        deferred.contains(&"step-transition"),
+        "a step whose payload defers to execute must say so: {validated}"
+    );
+
+    run_cli_ok(&[
+        "plan",
+        "execute",
+        "--path",
+        &path,
+        "--file",
+        plan_file.to_str().unwrap(),
+    ]);
+
+    // The clip the effect was aimed at is the one spanning cut 0 to cut 1.
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let expected_clip = clips["clips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|clip| (clip["timelineInSec"].as_f64().unwrap() - cut_times[0]).abs() < 0.01)
+        .and_then(|clip| clip["id"].as_str())
+        .unwrap_or_else(|| panic!("no clip starts at the first cut {}: {clips}", cut_times[0]))
+        .to_string();
+
+    let graph = run_cli_ok(&["render", "graph", "--path", &path]);
+    let effect_ids: Vec<String> = graph["visualLayers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|layer| layer["clipId"].as_str() == Some(expected_clip.as_str()))
+        .flat_map(|layer| layer["effects"].as_array().cloned().unwrap_or_default())
+        .filter_map(|id| id.as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        effect_ids.len(),
+        1,
+        "the recipe belongs on the clip the step named, and only there: {graph}"
+    );
+
+    // The recipe has to resolve to the effect type it advertises, not merely to
+    // *some* effect: the ops log is where that is recorded.
+    let ops = run_cli_ok(&["state", "ops", "--path", &path, "--last", "1"]);
+    let effect = &ops["ops"][0]["payload"]["effect"];
+    assert_eq!(effect["effectType"], "cross_dissolve", "{ops}");
+    assert_eq!(effect["id"], effect_ids[0], "{ops}");
+    assert_eq!(
+        ops["ops"][0]["payload"]["clipId"], expected_clip,
+        "the effect must land on the outgoing clip of the second boundary: {ops}"
+    );
+}
+
+#[test]
+fn test_plan_from_profile_never_plans_a_transition() {
+    let (dir, path, asset_id) = create_project_with_analysis("pacing_hard_cuts");
+    let plan_file = dir.path().join("pacing.json");
+
+    // The whole catalogue, so a profile cannot start advertising a transition
+    // the renderer would silently turn back into a cut.
+    let profiles = run_cli_ok(&["packs", "list", "--kind", "pacing"]);
+    let profile_ids: Vec<String> = profiles["packs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|pack| pack["id"].as_str().map(str::to_string))
+        .collect();
+    assert!(!profile_ids.is_empty());
+
+    for profile_id in profile_ids {
+        let built = run_cli_ok(&[
+            "plan",
+            "from-profile",
+            "--path",
+            &path,
+            "--profile",
+            &profile_id,
+            "--asset",
+            &asset_id,
+            "--out",
+            plan_file.to_str().unwrap(),
+        ]);
+
+        assert_eq!(built["transitionCount"], 0, "{profile_id}: {built}");
+        assert!(built["transitionRecipe"].is_null(), "{profile_id}: {built}");
+    }
+}
+
+/// Feature: pacing plans that cannot cut
+/// Scenario: a source between 1x and 1.5x the target shot says why it did not
+#[test]
+fn test_plan_from_profile_explains_a_plan_that_makes_no_cuts() {
+    let dir = create_temp_project("pacing_no_cuts");
+    let path = project_path(&dir, "pacing_no_cuts");
+
+    let dummy_file = dir.path().join("clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    // 5.4s against calm-longform's 7s target: long enough to place, too short
+    // to round to two shots.
+    write_analysis_bundle(&path, &asset_id, &[(0.0, 5.4)]);
+
+    let built = run_cli_ok(&[
+        "plan",
+        "from-profile",
+        "--path",
+        &path,
+        "--profile",
+        "calm-longform",
+        "--asset",
+        &asset_id,
+    ]);
+
+    assert_eq!(built["status"], "ok", "{built}");
+    assert_eq!(built["cutCount"], 0, "{built}");
+    assert_eq!(
+        built["stepCount"], 2,
+        "an uncut plan still places the footage: {built}"
+    );
+    let warnings = built["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings
+            .iter()
+            .filter_map(|warning| warning.as_str())
+            .any(|warning| warning.contains("1.5x") && warning.contains("no cuts planned")),
+        "a zero-cut plan must explain itself rather than look broken: {built}"
+    );
+}
+
+#[test]
+fn test_plan_from_profile_requires_a_cached_analysis_bundle() {
+    let dir = create_temp_project("pacing_no_bundle");
+    let path = project_path(&dir, "pacing_no_bundle");
+    let dummy_file = dir.path().join("clip.mp4");
+    std::fs::write(&dummy_file, b"dummy video").unwrap();
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        dummy_file.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "plan",
+        "from-profile",
+        "--path",
+        &path,
+        "--profile",
+        "dynamic-social",
+        "--asset",
+        &asset_id,
+    ]);
+
+    assert!(
+        stderr.contains("analysis run"),
+        "the error must name the command that fixes it: {stderr}"
+    );
+}
+
+#[test]
+fn test_plan_from_profile_rejects_an_unknown_profile() {
+    let (_dir, path, asset_id) = create_project_with_analysis("pacing_unknown");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "plan",
+        "from-profile",
+        "--path",
+        &path,
+        "--profile",
+        "no-such-profile",
+        "--asset",
+        &asset_id,
+    ]);
+
+    assert!(
+        stderr.contains("dynamic-social") && stderr.contains("calm-longform"),
+        "the error must list the valid profiles: {stderr}"
+    );
+}
+
+#[test]
+fn test_plan_from_profile_rejects_an_asset_that_is_not_in_the_project() {
+    let (_dir, path, _asset_id) = create_project_with_analysis("pacing_missing_asset");
+
+    let (_stdout, stderr) = run_cli_err(&[
+        "plan",
+        "from-profile",
+        "--path",
+        &path,
+        "--profile",
+        "dynamic-social",
+        "--asset",
+        "not-an-asset",
+    ]);
+
+    assert!(stderr.contains("not in this project"), "{stderr}");
+}
+
+// =============================================================================
+// Transition Rendering
+// =============================================================================
+
+/// Feature: rendering a clip that carries a transition effect
+/// Scenario: the boundary renders as a cut, the file is still exactly as long
+/// as the timeline, and the render says what it did not do
+///
+/// The A/V case specifically. A transition that overlapped the picture would
+/// shorten the video stream while the audio stitch kept every clip at its
+/// absolute timeline position, so the file would both drift out of sync and end
+/// before `Sequence::output_duration()` — which is the length `verify` measures
+/// against. Silent fixtures cannot see either failure, so this one has sound.
+#[test]
+fn test_render_with_a_transition_effect_matches_the_timeline_length_and_warns() {
+    if system_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_transition_av");
+    let path = project_path(&dir, "render_transition_av");
+
+    let source_path = dir.path().join("av_source.mp4");
+    if !create_sample_video_with_scene_change_and_audio(&source_path) {
+        return;
+    }
+
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        &path,
+        "--file",
+        source_path.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let info = run_cli_ok(&["timeline", "info", "--path", &path]);
+    let sequence_id = info["sequenceId"].as_str().unwrap().to_string();
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", &path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    // `asset import` records no probed duration, so the timeline gives the clip
+    // its 10s default. Trimming both clips to the fixture's real 4s keeps the
+    // rendered length a statement about the stitch rather than about a clip
+    // that outruns its source.
+    const FIXTURE_SEC: f64 = 4.0;
+    for index in 0..2 {
+        let inserted = run_cli_ok(&[
+            "timeline",
+            "insert",
+            "--path",
+            &path,
+            "--asset",
+            &asset_id,
+            "--track",
+            &track_id,
+            "--at",
+            &(index as f64 * FIXTURE_SEC).to_string(),
+        ]);
+        let clip_id = inserted["createdIds"][0].as_str().unwrap().to_string();
+        run_cli_ok(&[
+            "timeline",
+            "trim",
+            "--path",
+            &path,
+            "--track",
+            &track_id,
+            "--clip",
+            &clip_id,
+            "--source-in",
+            "0",
+            "--source-out",
+            &FIXTURE_SEC.to_string(),
+        ]);
+    }
+
+    let clips = run_cli_ok(&["timeline", "clips", "--path", &path]);
+    let clips = clips["clips"].as_array().unwrap();
+    assert_eq!(clips.len(), 2, "two back-to-back clips: {clips:?}");
+    let timeline_end_sec: f64 = clips
+        .iter()
+        .map(|clip| clip["timelineInSec"].as_f64().unwrap() + clip["durationSec"].as_f64().unwrap())
+        .fold(0.0, f64::max);
+    let outgoing_clip = clips
+        .iter()
+        .find(|clip| clip["timelineInSec"].as_f64() == Some(0.0))
+        .and_then(|clip| clip["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    // A dissolve on the clip that ends at the cut: the exact shape that used to
+    // be stitched with `xfade`.
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "AddEffect",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": outgoing_clip,
+            "recipe": "dissolve-standard",
+        })
+        .to_string(),
+    ]);
+
+    let output_path = dir.path().join("transition-render.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "a transition-carrying render must still succeed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let rendered: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    // Truthful degradation: the export says what it did instead.
+    let warnings: Vec<&str> = rendered["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(|warning| warning.as_str())
+        .collect();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("not yet rendered") && warning.contains("cut")),
+        "an unrendered transition must be reported: {warnings:?}"
+    );
+
+    // The invariant the overlap broke: the file is exactly as long as the
+    // timeline says it is.
+    let rendered_duration = rendered["durationSec"].as_f64().unwrap();
+    assert!(
+        (rendered_duration - timeline_end_sec).abs() < 0.2,
+        "rendered {rendered_duration}s must match the {timeline_end_sec}s timeline: {rendered}"
+    );
+
+    let (verify_stdout, verify_stderr, verify_code) = run_cli_exit(&[
+        "verify",
+        "--path",
+        &path,
+        "--file",
+        output_path.to_str().unwrap(),
+    ]);
+    assert_ne!(
+        verify_code, 2,
+        "verify itself must run.\nstdout: {verify_stdout}\nstderr: {verify_stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&verify_stdout).unwrap();
+    let duration_check = find_check(&report, "render.duration_mismatch");
+    assert_eq!(
+        duration_check["status"], "passed",
+        "the render must not disagree with the timeline it came from: {duration_check}"
+    );
+}
+
+// =============================================================================
 // State Commands
 // =============================================================================
 
@@ -5772,6 +6386,13 @@ fn test_packs_list_returns_every_registry() {
                 assert!(pack["clip"]["style"].is_object(), "{pack}");
                 assert!(pack["clip"]["position"].is_object(), "{pack}");
             }
+            Some("pacing") => {
+                assert!(pack["tempo"].is_string(), "{pack}");
+                assert!(pack["targetShotSec"].is_number(), "{pack}");
+                assert!(pack["shotVarianceSec"].is_number(), "{pack}");
+                assert!(pack["transitionEveryN"].is_number(), "{pack}");
+                assert!(pack["respectShotBoundaries"].is_boolean(), "{pack}");
+            }
             other => panic!("unexpected pack kind {other:?}"),
         }
     }
@@ -5824,9 +6445,49 @@ fn test_packs_list_filters_by_kind() {
         .iter()
         .any(|alias| alias == "pull_quote"));
 
+    let pacing = run_cli_ok(&["packs", "list", "--kind", "pacing"]);
+    assert_eq!(pacing["kind"], "pacing");
+    let pacing_packs = pacing["packs"].as_array().expect("packs");
+    assert_eq!(
+        pacing["count"].as_u64().unwrap() as usize,
+        pacing_packs.len()
+    );
+    assert!(pacing_packs.iter().all(|pack| pack["kind"] == "pacing"));
+
+    let pacing_ids: Vec<&str> = pacing_packs
+        .iter()
+        .filter_map(|pack| pack["id"].as_str())
+        .collect();
+    for id in ["shorts-hook-fast", "dynamic-social", "calm-longform"] {
+        assert!(pacing_ids.contains(&id), "{pacing_ids:?}");
+    }
+
+    // Everything an agent needs to pick a profile without running it first.
+    let social = pacing_packs
+        .iter()
+        .find(|pack| pack["id"] == "dynamic-social")
+        .expect("dynamic-social profile");
+    assert_eq!(social["tempo"], "moderate");
+    assert_eq!(social["targetShotSec"], 2.5);
+
+    // Every shipped profile cuts hard while the renderer turns a two-input
+    // transition into a cut. Listing a recipe here would advertise an edit the
+    // export cannot deliver.
+    for pack in pacing_packs {
+        assert!(
+            pack["transitionRecipe"].is_null(),
+            "profile '{}' must not advertise a transition the render cannot place: {pack}",
+            pack["id"]
+        );
+        assert_eq!(pack["transitionEveryN"], 0, "{pack}");
+    }
+
     let (_stdout, stderr) = run_cli_err(&["packs", "list", "--kind", "nonsense"]);
     assert!(
-        stderr.contains("caption") && stderr.contains("transition") && stderr.contains("text"),
+        stderr.contains("caption")
+            && stderr.contains("transition")
+            && stderr.contains("text")
+            && stderr.contains("pacing"),
         "clap must list the valid kinds, got: {stderr}"
     );
 }

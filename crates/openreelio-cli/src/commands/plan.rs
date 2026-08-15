@@ -59,6 +59,34 @@ pub enum PlanAction {
         file: PathBuf,
     },
 
+    /// Build a plan that cuts an asset to a curated pacing profile
+    FromProfile {
+        /// Project directory path
+        #[arg(long)]
+        path: PathBuf,
+
+        /// Pacing profile id (see `packs list --kind pacing`)
+        #[arg(long)]
+        profile: String,
+
+        /// Asset to cut; must already have a cached analysis bundle
+        #[arg(long)]
+        asset: String,
+
+        /// Sequence ID (defaults to active)
+        #[arg(long)]
+        sequence: Option<String>,
+
+        /// Name for the track the plan creates
+        #[arg(long)]
+        track_name: Option<String>,
+
+        /// Write the plan JSON to this file; stdout then carries the summary
+        /// and `outputPath` rather than a second copy of the plan
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
     /// Generate a plan template
     Template {
         /// Template type (e.g., split-and-move, multi-trim)
@@ -117,23 +145,44 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
 
             let _project = super::load_project(&path)?;
 
-            let errors = validate_edit_plan(&plan);
+            let validation = validate_edit_plan(&plan);
 
-            if errors.is_empty() {
+            if validation.errors.is_empty() {
                 output::print_json(&serde_json::json!({
                     "status": "ok",
                     "message": "Plan is valid",
                     "planId": plan.id,
                     "stepCount": plan.steps.len(),
+                    // Named rather than counted: these steps carry a value that
+                    // does not exist yet, so their payloads are only fully
+                    // checked once `plan execute` resolves the reference.
+                    "stepsWithReferences": validation.steps_with_references,
                 }))
             } else {
                 output::print_json(&serde_json::json!({
                     "status": "error",
                     "message": "Plan validation failed",
-                    "errors": errors,
+                    "errors": validation.errors,
+                    "stepsWithReferences": validation.steps_with_references,
                 }))
             }
         }
+
+        PlanAction::FromProfile {
+            path,
+            profile,
+            asset,
+            sequence,
+            track_name,
+            out,
+        } => run_from_profile(
+            &path,
+            &profile,
+            &asset,
+            sequence,
+            track_name,
+            out.as_deref(),
+        ),
 
         PlanAction::Template { template_type } => {
             let template = match template_type.as_str() {
@@ -194,6 +243,141 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
     }
 }
 
+/// Builds a plan that cuts one asset to a curated pacing profile.
+///
+/// Deliberately does not execute. A pacing profile is a taste decision, and the
+/// point of writing it down as a plan is that it can be read, edited, and
+/// diffed before it changes anything — `plan validate` then `plan execute` are
+/// the next two steps, and both take the file this writes.
+fn run_from_profile(
+    path: &PathBuf,
+    profile_id: &str,
+    asset_id: &str,
+    sequence: Option<String>,
+    track_name: Option<String>,
+    out: Option<&Path>,
+) -> anyhow::Result<()> {
+    use openreelio_core::analysis::style_planner::{StylePlanner, StylePlanningContext};
+    use openreelio_core::analysis::AnalysisJobRunner;
+    use openreelio_core::style::resolve_pacing_profile;
+
+    let project_dir = std::fs::canonicalize(path)
+        .map_err(|e| anyhow::anyhow!("Project path '{}' not found: {}", path.display(), e))?;
+    let project = super::load_project(&project_dir)?;
+    let sequence_id = super::resolve_sequence_id(&project, sequence)?;
+
+    let profile = resolve_pacing_profile(profile_id).map_err(|error| anyhow::anyhow!(error))?;
+
+    if !project.state.assets.contains_key(asset_id) {
+        return Err(anyhow::anyhow!(
+            "Asset '{}' is not in this project. List them with `openreelio-cli asset list --path {}`",
+            asset_id,
+            path.display()
+        ));
+    }
+
+    let bundle = AnalysisJobRunner::new(&project_dir)
+        .load_bundle_optional(asset_id)
+        .map_err(|error| anyhow::anyhow!("Failed to read the analysis bundle: {}", error))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No cached analysis for asset '{}'. A pacing plan needs the source duration, and \
+                 shot boundaries if the profile respects them: run `openreelio-cli analysis run \
+                 --path {} --id {}` first",
+                asset_id,
+                path.display(),
+                asset_id
+            )
+        })?;
+
+    let mut context = StylePlanningContext::new(&sequence_id, asset_id);
+    if let Some(track_name) = track_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        context = context.with_track_name(track_name);
+    } else {
+        context = context.with_track_name(format!("Pacing: {}", profile.id));
+    }
+
+    let planned = StylePlanner::plan_from_profile(profile, &bundle, &context)
+        .map_err(|error| anyhow::anyhow!("Failed to plan from profile: {}", error))?;
+
+    let plan = edit_plan_from_agent_plan(&planned.plan);
+    let validation = validate_edit_plan(&plan);
+
+    if let Some(out) = out {
+        let serialized = serde_json::to_string_pretty(&plan)
+            .map_err(|error| anyhow::anyhow!("Failed to serialize plan: {}", error))?;
+        std::fs::write(out, serialized).map_err(|error| {
+            anyhow::anyhow!("Failed to write plan to '{}': {}", out.display(), error)
+        })?;
+    }
+
+    let cut_count = plan
+        .steps
+        .iter()
+        .filter(|step| step.command_type == "SplitClip")
+        .count();
+    let transition_count = plan
+        .steps
+        .iter()
+        .filter(|step| step.command_type == "AddEffect")
+        .count();
+
+    // With `--out` the plan is already on disk, so inlining it too spends the
+    // caller's context on a second copy of a file it can read when it needs to.
+    // The summary is what a review decides on; `outputPath` is where the detail
+    // lives. Without `--out` there is nowhere else to get it, so it stays inline.
+    let inline_plan = match out {
+        Some(_) => serde_json::Value::Null,
+        None => serde_json::to_value(&plan)
+            .map_err(|error| anyhow::anyhow!("Failed to serialize plan: {}", error))?,
+    };
+
+    output::print_json_pretty(&serde_json::json!({
+        "status": if validation.errors.is_empty() { "ok" } else { "error" },
+        "planId": plan.id,
+        "profile": profile.id,
+        "assetId": asset_id,
+        "sequenceId": sequence_id,
+        "stepCount": plan.steps.len(),
+        "cutCount": cut_count,
+        "transitionCount": transition_count,
+        "transitionRecipe": profile.transition_recipe,
+        "fidelityScore": planned.compatibility_score,
+        "warnings": planned.warnings,
+        "errors": validation.errors,
+        "stepsWithReferences": validation.steps_with_references,
+        "outputPath": out.map(|out| out.display().to_string()),
+        "plan": inline_plan,
+    }))
+}
+
+/// Converts a planner [`AgentPlan`] into the plan-file shape.
+///
+/// The two differ only in what the step's command is called: the planner
+/// carries it as `toolName`, the plan file as `commandType`. No translation
+/// table is needed because `CommandPayload` accepts both the camelCase and
+/// PascalCase spelling of every variant through its serde aliases, and the
+/// planner already emits the PascalCase one.
+fn edit_plan_from_agent_plan(plan: &openreelio_core::ai::AgentPlan) -> EditPlan {
+    EditPlan {
+        id: plan.id.clone(),
+        steps: plan
+            .steps
+            .iter()
+            .map(|step| PlanStep {
+                id: step.id.clone(),
+                command_type: step.tool_name.clone(),
+                payload: step.params.clone(),
+                depends_on: step.depends_on.clone(),
+            })
+            .collect(),
+    }
+}
+
 /// Reads and deserializes a plan file.
 fn read_plan(file: &Path) -> anyhow::Result<EditPlan> {
     let plan_content = std::fs::read_to_string(file)
@@ -217,13 +401,14 @@ fn run_execute(path: &PathBuf, file: &Path) -> anyhow::Result<i32> {
     // Nothing is mutated until the whole plan is known to be sound. A payload
     // that only fails when its step is reached takes the project through a
     // rollback it never needed to risk.
-    let validation_errors = validate_edit_plan(&plan);
-    if !validation_errors.is_empty() {
+    let validation = validate_edit_plan(&plan);
+    if !validation.errors.is_empty() {
         output::print_json(&serde_json::json!({
             "status": "error",
             "message": "Plan validation failed",
             "planId": plan.id,
-            "errors": validation_errors,
+            "errors": validation.errors,
+            "stepsWithReferences": validation.steps_with_references,
         }))?;
         return Ok(EXIT_PLAN_FAILED);
     }
@@ -289,9 +474,150 @@ fn flush_stdout() {
     let _ = std::io::stdout().flush();
 }
 
-pub(crate) fn validate_edit_plan(plan: &EditPlan) -> Vec<String> {
+/// Stand-in value a `$fromStep` reference takes while a plan is validated.
+///
+/// The real value does not exist until the referenced step runs, but the rest
+/// of the payload still has to be checked before anything is mutated. A
+/// placeholder of the right JSON type lets `CommandPayload::parse` reject a
+/// misspelled field or a missing one, and only leaves the referenced value
+/// itself unchecked — which is exactly the part that cannot be known yet.
+const STEP_REFERENCE_PLACEHOLDER: &str = "$fromStep";
+
+/// The numeric stand-in tried when the string one is the wrong type.
+///
+/// An integer rather than a float: serde widens `1` into an `f64` field but
+/// refuses to narrow `1.0` into an integer one, so this stands in for both.
+const STEP_REFERENCE_NUMERIC_PLACEHOLDER: i64 = 1;
+
+/// What validating a plan found, before anything has been mutated.
+pub(crate) struct PlanValidation {
+    /// Everything that makes the plan unrunnable. Empty means valid.
+    pub errors: Vec<String>,
+    /// Ids of steps whose payload carries at least one `$fromStep` reference.
+    ///
+    /// Those steps are only *partly* checked here: the referenced value does
+    /// not exist until the step it names runs, so its type and content are
+    /// settled at execute time. Reporting them keeps `validate` honest about
+    /// what it did and did not check.
+    pub steps_with_references: Vec<String>,
+}
+
+/// Collects the step ids a payload references through `$fromStep`.
+fn collect_step_references(payload: &serde_json::Value, found: &mut Vec<String>) {
+    match payload {
+        serde_json::Value::Object(map) => {
+            if let (Some(from_step), Some(_)) = (map.get("$fromStep"), map.get("$path")) {
+                if let Some(step_id) = from_step.as_str() {
+                    found.push(step_id.to_string());
+                }
+                return;
+            }
+            for value in map.values() {
+                collect_step_references(value, found);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_step_references(item, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Replaces every `$fromStep` reference with `placeholder`.
+fn substitute_step_references(
+    payload: &serde_json::Value,
+    placeholder: &serde_json::Value,
+) -> serde_json::Value {
+    match payload {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("$fromStep") && map.contains_key("$path") {
+                return placeholder.clone();
+            }
+            serde_json::Value::Object(
+                map.iter()
+                    .map(|(key, value)| {
+                        (key.clone(), substitute_step_references(value, placeholder))
+                    })
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| substitute_step_references(item, placeholder))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Type-checks one step's payload with its `$fromStep` references stubbed out.
+///
+/// Which JSON type a placeholder needs depends on the field it lands in:
+/// `clipId` wants a string, `splitTime` a number. Substituting only strings
+/// meant a reference into a numeric field passed `validate` and then failed at
+/// `execute`, turning a pre-flight check into a rollback. Rather than guess the
+/// field's type, try both stand-ins — if either parses, the only thing left
+/// unchecked is the referenced value itself, which is the part that genuinely
+/// cannot be known until the step it names has run.
+fn type_check_step_payload(step: &PlanStep, has_references: bool) -> Result<(), String> {
+    let string_error = match openreelio_core::ipc::CommandPayload::parse(
+        step.command_type.clone(),
+        substitute_step_references(
+            &step.payload,
+            &serde_json::Value::String(STEP_REFERENCE_PLACEHOLDER.to_string()),
+        ),
+    ) {
+        Ok(_) => return Ok(()),
+        Err(error) => error.to_string(),
+    };
+
+    if !has_references {
+        return Err(string_error);
+    }
+
+    match openreelio_core::ipc::CommandPayload::parse(
+        step.command_type.clone(),
+        substitute_step_references(
+            &step.payload,
+            &serde_json::Value::from(STEP_REFERENCE_NUMERIC_PLACEHOLDER),
+        ),
+    ) {
+        Ok(_) => Ok(()),
+        Err(numeric_error) => Err(format!(
+            "{string_error} (also rejected with a numeric placeholder: {numeric_error})"
+        )),
+    }
+}
+
+/// Returns every step id reachable from `step_id` through `dependsOn`.
+fn dependency_closure<'a>(step_id: &str, steps: &'a [PlanStep]) -> HashSet<&'a str> {
+    let by_id: HashMap<&str, &PlanStep> = steps.iter().map(|s| (s.id.as_str(), s)).collect();
+    let mut closure = HashSet::new();
+    let mut pending: Vec<&str> = by_id
+        .get(step_id)
+        .map(|step| step.depends_on.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+
+    while let Some(current) = pending.pop() {
+        let Some(step) = by_id.get(current) else {
+            continue;
+        };
+        if !closure.insert(step.id.as_str()) {
+            continue;
+        }
+        pending.extend(step.depends_on.iter().map(String::as_str));
+    }
+
+    closure
+}
+
+pub(crate) fn validate_edit_plan(plan: &EditPlan) -> PlanValidation {
     let mut step_ids = HashSet::new();
     let mut errors = Vec::new();
+    let mut steps_with_references = Vec::new();
 
     if plan.id.trim().is_empty() {
         errors.push("plan.id is required".to_string());
@@ -327,10 +653,32 @@ pub(crate) fn validate_edit_plan(plan: &EditPlan) -> Vec<String> {
             }
         }
 
-        if let Err(error) = openreelio_core::ipc::CommandPayload::parse(
-            step.command_type.clone(),
-            step.payload.clone(),
-        ) {
+        // A `$fromStep` value only exists once the step it names has run, so
+        // the reference has to be ordered behind that step. `dependsOn` is the
+        // only thing that orders anything here: without the edge, the
+        // topological sort is free to run the reader first.
+        let mut references = Vec::new();
+        collect_step_references(&step.payload, &mut references);
+        if !references.is_empty() {
+            steps_with_references.push(step.id.clone());
+
+            let reachable = dependency_closure(&step.id, &plan.steps);
+            for reference in &references {
+                if !step_ids.contains(reference.as_str()) {
+                    errors.push(format!(
+                        "Step '{}' references '{}' which does not exist",
+                        step.id, reference
+                    ));
+                } else if !reachable.contains(reference.as_str()) {
+                    errors.push(format!(
+                        "Step '{}' references '{}' without depending on it, so it may run first",
+                        step.id, reference
+                    ));
+                }
+            }
+        }
+
+        if let Err(error) = type_check_step_payload(step, !references.is_empty()) {
             errors.push(format!(
                 "Step '{}' has invalid command payload for '{}': {}",
                 step.id, step.command_type, error
@@ -342,7 +690,10 @@ pub(crate) fn validate_edit_plan(plan: &EditPlan) -> Vec<String> {
         errors.push(cycle_err.to_string());
     }
 
-    errors
+    PlanValidation {
+        errors,
+        steps_with_references,
+    }
 }
 
 pub(crate) fn apply_edit_plan(
@@ -359,9 +710,15 @@ pub(crate) fn apply_edit_plan(
     // and could not undo them.
     project.executor.ensure_history_capacity(plan.steps.len());
 
+    // `$fromStep` reads out of this as the plan runs. A step's ids are not
+    // knowable until it has executed, which is the whole reason a plan that
+    // creates a track and then fills it has to be one plan rather than three
+    // round trips through `timeline tracks`.
+    let mut step_results: HashMap<String, openreelio_core::ai::StepResult> = HashMap::new();
+
     let sorted_steps = topological_sort(&plan.steps)?;
     for step in sorted_steps {
-        match execute_step(project, step) {
+        match execute_step(project, step, &step_results) {
             Ok(result) => {
                 results.push(serde_json::json!({
                     "stepId": step.id,
@@ -370,6 +727,21 @@ pub(crate) fn apply_edit_plan(
                     "createdIds": result.created_ids,
                     "deletedIds": result.deleted_ids,
                 }));
+                step_results.insert(
+                    step.id.clone(),
+                    openreelio_core::ai::StepResult {
+                        step_id: step.id.clone(),
+                        success: true,
+                        data: Some(serde_json::json!({
+                            "opId": result.op_id,
+                            "createdIds": result.created_ids,
+                            "deletedIds": result.deleted_ids,
+                        })),
+                        error: None,
+                        duration_ms: 0,
+                        operation_id: Some(result.op_id.clone()),
+                    },
+                );
                 applied_op_ids.push(result.op_id);
                 succeeded += 1;
             }
@@ -440,12 +812,18 @@ pub(crate) fn apply_edit_plan(
 fn execute_step(
     project: &mut openreelio_core::ActiveProject,
     step: &PlanStep,
+    step_results: &HashMap<String, openreelio_core::ai::StepResult>,
 ) -> anyhow::Result<openreelio_core::commands::CommandResult> {
-    let typed_payload = openreelio_core::ipc::CommandPayload::parse(
-        step.command_type.clone(),
-        step.payload.clone(),
-    )
-    .map_err(|error| anyhow::anyhow!("Invalid command '{}': {}", step.command_type, error))?;
+    let resolved_payload =
+        openreelio_core::ai::resolve_step_references(&step.payload, step_results).map_err(
+            |error| anyhow::anyhow!("Cannot resolve references in step '{}': {}", step.id, error),
+        )?;
+
+    let typed_payload =
+        openreelio_core::ipc::CommandPayload::parse(step.command_type.clone(), resolved_payload)
+            .map_err(|error| {
+                anyhow::anyhow!("Invalid command '{}': {}", step.command_type, error)
+            })?;
     let cmd = typed_payload.build_command(&project.path);
 
     project
@@ -526,9 +904,170 @@ mod tests {
         }
     }
 
+    /// Validation errors alone, for the tests that only care about those.
+    fn validate_edit_plan_errors(plan: &EditPlan) -> Vec<String> {
+        validate_edit_plan(plan).errors
+    }
+
+    /// A `SplitClip` step whose split time comes from another step's result.
+    ///
+    /// The reference lands in a *numeric* field, which is the shape that used
+    /// to pass validation with a string placeholder and then fail at execute.
+    fn step_referencing_split_time(id: &str, referenced: &str, depends_on: &[&str]) -> PlanStep {
+        PlanStep {
+            id: id.to_string(),
+            command_type: "SplitClip".to_string(),
+            payload: serde_json::json!({
+                "sequenceId": "sequence-1",
+                "trackId": "track-1",
+                "clipId": "clip-1",
+                "splitTime": { "$fromStep": referenced, "$path": "metrics.cutSec" },
+            }),
+            depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
+        }
+    }
+
+    /// An `InsertClip` step whose track comes from another step's result.
+    fn step_referencing_track(id: &str, referenced: &str, depends_on: &[&str]) -> PlanStep {
+        PlanStep {
+            id: id.to_string(),
+            command_type: "InsertClip".to_string(),
+            payload: serde_json::json!({
+                "sequenceId": "sequence-1",
+                "trackId": { "$fromStep": referenced, "$path": "createdIds.0" },
+                "assetId": "asset-1",
+                "timelineStart": 0.0,
+            }),
+            depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
+        }
+    }
+
     #[test]
     fn should_accept_a_sound_plan() {
-        assert!(validate_edit_plan(&plan(vec![step("a", &[]), step("b", &["a"])])).is_empty());
+        assert!(
+            validate_edit_plan_errors(&plan(vec![step("a", &[]), step("b", &["a"])])).is_empty()
+        );
+    }
+
+    #[test]
+    fn should_accept_a_reference_to_a_step_it_depends_on() {
+        let errors = validate_edit_plan_errors(&plan(vec![
+            step("a", &[]),
+            step_referencing_track("b", "a", &["a"]),
+        ]));
+
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn should_accept_a_reference_reached_through_the_dependency_chain() {
+        // `c` never names `a` directly, but `b` does, so `a` still runs first.
+        let errors = validate_edit_plan_errors(&plan(vec![
+            step("a", &[]),
+            step("b", &["a"]),
+            step_referencing_track("c", "a", &["b"]),
+        ]));
+
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn should_reject_a_reference_to_a_step_that_does_not_exist() {
+        let errors =
+            validate_edit_plan_errors(&plan(vec![step_referencing_track("b", "ghost", &[])]));
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("ghost") && error.contains("does not exist")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn should_reject_a_reference_the_plan_does_not_order() {
+        // Both steps exist, but nothing forces `a` to run before `b`.
+        let errors = validate_edit_plan_errors(&plan(vec![
+            step("a", &[]),
+            step_referencing_track("b", "a", &[]),
+        ]));
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("without depending on it")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn should_still_type_check_a_payload_that_carries_references() {
+        let mut broken = step_referencing_track("b", "a", &["a"]);
+        broken.payload["nonsenseField"] = serde_json::json!(true);
+
+        let errors = validate_edit_plan_errors(&plan(vec![step("a", &[]), broken]));
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("invalid command payload")),
+            "a reference must not shield the rest of the payload: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn should_accept_a_reference_that_lands_in_a_numeric_field() {
+        // A string placeholder cannot stand in for `splitTime`. Rejecting the
+        // plan here would have turned a pre-flight check into an execute-time
+        // rollback for a plan that is actually sound.
+        let errors = validate_edit_plan_errors(&plan(vec![
+            step("a", &[]),
+            step_referencing_split_time("b", "a", &["a"]),
+        ]));
+
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn should_still_reject_a_numeric_reference_step_with_a_bad_field() {
+        let mut broken = step_referencing_split_time("b", "a", &["a"]);
+        broken.payload["nonsenseField"] = serde_json::json!(true);
+
+        let errors = validate_edit_plan_errors(&plan(vec![step("a", &[]), broken]));
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("invalid command payload")),
+            "trying both placeholder types must not stop type checking: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn should_report_which_steps_defer_checking_to_execute() {
+        let validation = validate_edit_plan(&plan(vec![
+            step("a", &[]),
+            step_referencing_track("b", "a", &["a"]),
+            step_referencing_split_time("c", "a", &["a"]),
+        ]));
+
+        assert!(validation.errors.is_empty(), "{:?}", validation.errors);
+        assert_eq!(
+            validation.steps_with_references,
+            vec!["b".to_string(), "c".to_string()],
+            "a caller has to know which payloads were only partly checked"
+        );
+    }
+
+    #[test]
+    fn should_report_no_deferred_steps_for_a_plan_without_references() {
+        let validation = validate_edit_plan(&plan(vec![step("a", &[]), step("b", &["a"])]));
+
+        assert!(
+            validation.steps_with_references.is_empty(),
+            "a fully checked plan must not claim otherwise: {:?}",
+            validation.steps_with_references
+        );
     }
 
     #[test]
@@ -537,7 +1076,7 @@ mod tests {
             .map(|index| step(&format!("step-{index}"), &[]))
             .collect();
 
-        let errors = validate_edit_plan(&plan(steps));
+        let errors = validate_edit_plan_errors(&plan(steps));
 
         assert!(
             errors.iter().any(
@@ -554,7 +1093,7 @@ mod tests {
             .map(|index| step(&format!("step-{index}"), &[]))
             .collect();
 
-        assert!(validate_edit_plan(&plan(steps)).is_empty());
+        assert!(validate_edit_plan_errors(&plan(steps)).is_empty());
     }
 
     #[test]
@@ -562,7 +1101,7 @@ mod tests {
         let mut candidate = plan(vec![step("", &[])]);
         candidate.id = "  ".to_string();
 
-        let errors = validate_edit_plan(&candidate);
+        let errors = validate_edit_plan_errors(&candidate);
 
         assert!(errors.iter().any(|error| error == "plan.id is required"));
         assert!(errors
@@ -572,7 +1111,7 @@ mod tests {
 
     #[test]
     fn should_report_cycles_duplicates_and_missing_dependencies() {
-        let errors = validate_edit_plan(&plan(vec![
+        let errors = validate_edit_plan_errors(&plan(vec![
             step("a", &["b"]),
             step("b", &["a"]),
             step("b", &[]),
@@ -593,7 +1132,7 @@ mod tests {
         let mut broken = step("a", &[]);
         broken.payload = serde_json::json!({ "sequenceId": "sequence-1", "kind": "not-a-kind" });
 
-        let errors = validate_edit_plan(&plan(vec![broken]));
+        let errors = validate_edit_plan_errors(&plan(vec![broken]));
 
         assert!(errors
             .iter()

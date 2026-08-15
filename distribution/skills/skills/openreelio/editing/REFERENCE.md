@@ -75,6 +75,24 @@ a contradictory `effectType` is rejected rather than silently resolved.
 the target clip's duration — so pass `params.start_time` only to put the fade
 somewhere else in the clip.
 
+### What actually renders today
+
+| Recipe family | Rendered by `render start` |
+| ------------- | -------------------------- |
+| `fade-in`, `fade-out` | **Yes.** Single-input filters in the clip's own chain. |
+| `dissolve-*`, `wipe-*`, `slide-*` | **Not yet.** Stored, validated, and kept on the clip, but the boundary renders as a hard cut and the render reports a warning naming the clip and the effect. |
+
+A two-input transition needs the outgoing and incoming pictures at once, and
+overlapping them shortens the video stream while every clip's audio stays at its
+absolute timeline position — the render would drift out of sync and end before
+the timeline does. Rendering one correctly needs a transition engine that
+crossfades and retimes audio alongside the picture; until that exists the render
+degrades loudly rather than shipping a file that disagrees with its timeline.
+
+Adding a dissolve is therefore neither an error nor a loss — it just does not
+show up in the render yet. If a cut has to *look* soft today, put `fade-out` on
+the outgoing clip and `fade-in` on the incoming one.
+
 ## Atomic batches: `plan execute`
 
 An edit plan is:
@@ -108,6 +126,98 @@ do **not** re-run the plan; re-running is a double apply.
 
 Prefer a plan over a sequence of individual commands whenever the steps only make
 sense together — a half-applied multi-step edit is worse than none.
+
+## Pacing profiles: `plan from-profile`
+
+A curated pacing profile is one name for the decisions an automated cut has to
+make — mean shot length, how far shots swing either side of it, and whether cuts
+land on detected shot changes. `plan from-profile` turns that name into an edit
+plan over one asset.
+
+Every shipped profile cuts hard. `transitionRecipe` and `transitionEveryN` stay
+in the schema, reserved for the transition engine, but no profile sets them while
+the renderer turns a dissolve into a cut: a profile that advertised one would be
+advertising an edit the export cannot deliver.
+
+```bash
+openreelio-cli packs list --kind pacing
+```
+
+| Profile | Target shot | Variance | Tempo | Snaps to shot changes |
+| ------- | ----------- | -------- | ----- | --------------------- |
+| `shorts-hook-fast` | 1.8 s | 0.6 s | fast | yes |
+| `music-montage` | 1.5 s | 0.2 s | fast | no |
+| `dynamic-social` | 2.5 s | 1.0 s | moderate | yes |
+| `steady-documentary` | 4.5 s | 1.5 s | moderate | yes |
+| `calm-longform` | 7.0 s | 2.0 s | slow | yes |
+
+Each listed entry carries `id`, `aliases`, `tempo`, `targetShotSec`,
+`shotVarianceSec`, `transitionRecipe` (always `null` today), `transitionEveryN`
+(always `0`), and `respectShotBoundaries`. Ids resolve case- and
+separator-insensitively and accept the aliases (`shorts`, `montage`, `social`,
+`doc`, `calm`, …).
+
+Run analysis first. The plan needs the source duration, and shot boundaries are
+what let cuts land on real shot changes rather than on the profile's own grid.
+With no cached bundle the command fails and names `analysis run`.
+
+```bash
+openreelio-cli analysis run      --path ./demo --id <ASSET_ID> --shots
+openreelio-cli plan from-profile --path ./demo --profile dynamic-social \
+  --asset <ASSET_ID> [--sequence <SEQUENCE_ID>] [--track-name "Cut"] --out plan.json
+openreelio-cli plan validate     --path ./demo --file plan.json
+openreelio-cli plan execute      --path ./demo --file plan.json
+openreelio-cli verify            --path ./demo --structural-only
+```
+
+`from-profile` mutates nothing. It prints one JSON object — `status`, `planId`,
+`profile`, `assetId`, `sequenceId`, `stepCount`, `cutCount`, `transitionCount`,
+`transitionRecipe`, `fidelityScore`, `warnings`, `errors`, `stepsWithReferences`,
+`outputPath`, and `plan`. With `--out` the plan goes to that file and `plan` is
+`null` on stdout — the summary plus the path, not a second copy of a file you can
+read; without `--out` the plan is inlined instead. `--track-name` defaults to
+`Pacing: <profile>`.
+
+A source too short to cut is not a failure: the plan still creates the track and
+places the clip, `cutCount` is `0`, and `warnings` says why — a source under 1.5x
+the target shot rounds to a single shot. Read `warnings` before drawing any
+conclusion from a low `cutCount`.
+
+The plan file is ordinary JSON: read it, move a split time, drop a step, then
+validate. It builds its own video track (`AddTrack`), inserts the asset
+(`InsertClip`) and splits it (`SplitClip` per cut). Steps reference ids that
+earlier steps create —
+`{"$fromStep": "step-0", "$path": "createdIds.0"}` — so the plan has to run whole
+through `plan execute`, not step by step through `command execute`.
+`plan validate` rejects a reference whose target step is not ordered behind it
+via `dependsOn`, and lists every step carrying one under `stepsWithReferences`:
+those payloads are only fully checked once the reference resolves at execute.
+
+Then render and look: `render start --proxy`, a `frame extract --grid` contact
+sheet, and the pointwise rubric in [Judging](../judging/REFERENCE.md). A profile
+is also a natural axis for best-of-N — two profiles are two candidates.
+
+## What a pacing profile does not decide
+
+A profile decides pace. Nothing else.
+
+- **No transitions.** Every shipped profile cuts hard, and a dissolve added by
+  hand still renders as a cut with a warning until the transition engine lands.
+- **No beat sync.** The analysis bundle carries BPM as a single average scalar,
+  not a beat grid. `music-montage` is metronomic, not beat-locked. Cutting on the
+  beat needs analysis that does not exist yet.
+- **No content awareness beyond shot boundaries.** The planner does not know what
+  is in frame, whether a sentence finished, or whether a face is mid-blink.
+  `respectShotBoundaries` snapping — a cut moves at most half a target shot to
+  reach a detected shot change — is the whole of it, and it does nothing without
+  cached shot detection.
+- **No randomness.** Shot lengths alternate deterministically, half a variance
+  either side of the target, then scale to fill the source. The same profile on
+  the same source always yields the same plan. That is what makes reviewing the
+  plan worth doing; it is not a claim of variety.
+- **`fidelityScore` is not a quality score.** It measures how close the mean
+  generated shot is to the profile's target and says nothing about whether the
+  edit is any good. That judgement is the judging loop's job.
 
 ## Undo and history
 

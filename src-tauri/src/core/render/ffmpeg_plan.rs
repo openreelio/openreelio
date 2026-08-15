@@ -9,7 +9,7 @@ use std::{collections::HashMap, path::Path};
 
 use crate::core::{
     assets::Asset,
-    effects::{Effect, IntoFFmpegFilter},
+    effects::Effect,
     fs::validate_local_input_path,
     timeline::{Sequence, TrackKind},
 };
@@ -22,11 +22,10 @@ use super::{
         asset_has_playable_audio, build_audio_trim_filter, build_video_trim_filter,
         clip_audio_is_suppressed_by_companion, collect_audio_companion_keys,
         collect_caption_drawtext_filters, collect_enabled_clips_sorted,
-        collect_overlay_text_drawtext_filters, find_transition_effect,
-        generated_text_visual_end_sec, hdr_metadata_for_asset, is_text_clip,
-        output_video_dimensions, output_video_fps, output_video_pixel_format, AssetAudioInfo,
-        ExportEngine, ExportError, ExportSettings, VideoCodec, VideoTimelineSegment,
-        TIMELINE_EPSILON_SEC,
+        collect_overlay_text_drawtext_filters, generated_text_visual_end_sec,
+        hdr_metadata_for_asset, is_text_clip, output_video_dimensions, output_video_fps,
+        output_video_pixel_format, AssetAudioInfo, ExportEngine, ExportError, ExportSettings,
+        VideoCodec, VideoTimelineSegment, TIMELINE_EPSILON_SEC,
     },
     RenderPlan,
 };
@@ -200,13 +199,11 @@ pub(super) fn build_sequence_ffmpeg_args(
                         output_pixel_format,
                     );
 
-                    video_segments.push(VideoTimelineSegment {
-                        stream_label: format!("[{}]", normalized_video_label),
-                        start_sec: clip.place.timeline_in_sec,
-                        end_sec: clip.place.timeline_out_sec(),
-                        transition_filter: find_transition_effect(clip, ctx.effects)
-                            .map(|effect| effect.to_filter_body()),
-                    });
+                    video_segments.push(VideoTimelineSegment::new(
+                        format!("[{}]", normalized_video_label),
+                        clip.place.timeline_in_sec,
+                        clip.place.timeline_out_sec(),
+                    ));
                 }
 
                 if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
@@ -304,12 +301,11 @@ pub(super) fn build_sequence_ffmpeg_args(
                 output_fps,
                 output_pixel_format,
             );
-            video_segments.push(VideoTimelineSegment {
-                stream_label: format!("[{}]", blank_label),
-                start_sec: 0.0,
-                end_sec: generated_visual_end_sec,
-                transition_filter: None,
-            });
+            video_segments.push(VideoTimelineSegment::new(
+                format!("[{}]", blank_label),
+                0.0,
+                generated_visual_end_sec,
+            ));
         }
     }
 

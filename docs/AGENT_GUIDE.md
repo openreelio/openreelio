@@ -87,7 +87,7 @@ it into a context window. Fetch help per verb instead
 (`openreelio-cli verify --help`, `openreelio-cli frame extract --help`), use
 `openreelio-cli command schema` for the 79 backend command types, and
 `openreelio-cli packs list` for the curated caption styles, transition recipes,
-and text presets (`--kind caption|transition|text`).
+text presets, and pacing profiles (`--kind caption|transition|text|pacing`).
 
 ### Self-diagnosis
 
@@ -187,6 +187,25 @@ and a recipe paired with a contradictory `effectType` is rejected. `fade-out`
 is anchored on the clip's tail when the command executes; pass
 `params.start_time` only to put the fade somewhere else in the clip.
 
+### Transitions render as cuts
+
+Recipes are stored, validated, and preserved on the clip. What they are not,
+yet, is *rendered*:
+
+| Recipe family | Rendered by `render start` |
+|---------------|----------------------------|
+| `fade-in`, `fade-out` | **Yes** — single-input filters in the clip's own chain |
+| `dissolve-*`, `wipe-*`, `slide-*` | **Not yet** — the boundary renders as a hard cut and the render reports a warning naming the clip and the effect |
+
+A two-input transition needs the outgoing and incoming pictures at once, and
+overlapping them shortens the video stream while every clip's audio stays at its
+absolute timeline position: the file would drift out of sync and end before
+`Sequence::output_duration()`, which is the length `verify` measures against.
+Doing it properly needs a transition engine that crossfades and retimes audio
+alongside the picture. Until that exists the render degrades loudly rather than
+shipping a file that disagrees with its own timeline. For a soft-looking cut
+today, put `fade-out` on the outgoing clip and `fade-in` on the incoming one.
+
 ### Atomic batches: `plan execute`
 
 An edit plan is `{"id": "...", "steps": [{"id","commandType","payload","dependsOn"}]}`.
@@ -205,6 +224,91 @@ failed and rolled back cleanly, `2` the tool failed, the rollback was
 incomplete (`rollbackIncomplete: true`), or the plan applied but could not be
 saved (`appliedNotSaved: true` — the work is already durable; do **not** re-run
 the plan).
+
+### Pacing profiles: `plan from-profile`
+
+A curated pacing profile names the decisions an automated cut has to make — mean
+shot length, how far shots swing either side of it, and whether cuts land on
+detected shot changes — so `dynamic-social` replaces guesses with one checked id.
+`packs list --kind pacing` prints the registry.
+
+| Profile | Target shot | Variance | Tempo | Snaps to shot changes |
+|---------|-------------|----------|-------|-----------------------|
+| `shorts-hook-fast` | 1.8 s | 0.6 s | fast | yes |
+| `music-montage` | 1.5 s | 0.2 s | fast | no |
+| `dynamic-social` | 2.5 s | 1.0 s | moderate | yes |
+| `steady-documentary` | 4.5 s | 1.5 s | moderate | yes |
+| `calm-longform` | 7.0 s | 2.0 s | slow | yes |
+
+Every shipped profile cuts hard. `transitionRecipe` (`null`) and
+`transitionEveryN` (`0`) stay in the schema, reserved for the transition engine,
+but no profile sets them while the renderer turns a dissolve into a cut — see
+[Transitions render as cuts](#transitions-render-as-cuts). Ids resolve case- and
+separator-insensitively and accept aliases (`shorts`, `montage`, `social`, `doc`,
+`calm`, …).
+
+Analysis is a precondition, not a nicety: the plan needs the source duration, and
+shot boundaries are what let cuts land on real shot changes. Without a cached
+bundle the command fails and names `analysis run`.
+
+```bash
+openreelio-cli analysis run      --path ./demo --id <ASSET_ID> --shots
+openreelio-cli plan from-profile --path ./demo --profile dynamic-social \
+  --asset <ASSET_ID> [--sequence <SEQUENCE_ID>] [--track-name "Cut"] --out plan.json
+openreelio-cli plan validate     --path ./demo --file plan.json
+openreelio-cli plan execute      --path ./demo --file plan.json
+openreelio-cli verify            --path ./demo --structural-only
+openreelio-cli render start      --path ./demo --proxy --output ./proxy.mp4 --progress
+```
+
+`from-profile` mutates nothing. It prints one JSON object — `status`, `planId`,
+`profile`, `assetId`, `sequenceId`, `stepCount`, `cutCount`, `transitionCount`,
+`transitionRecipe`, `fidelityScore`, `warnings`, `errors`, `stepsWithReferences`,
+`outputPath`, and `plan`. With `--out` the plan is written to that file and
+`plan` is `null` on stdout — the summary plus the path rather than a second copy;
+without `--out` the plan is inlined. `--track-name` defaults to
+`Pacing: <profile>`. Review the file, then validate and execute it; after the
+proxy render, score it with a contact sheet against the rubric in the skill's
+`judging/REFERENCE.md`. Two profiles are two candidates, so a profile is a
+natural axis for best-of-N.
+
+A source too short to cut is not a failure: the plan still creates the track and
+places the clip, `cutCount` is `0`, and `warnings` says why — a source under 1.5x
+the target shot rounds to a single shot, and a `respectShotBoundaries` profile
+whose bundle holds a single shot has nothing to snap onto. Read `warnings` before
+drawing any conclusion from a low `cutCount`.
+
+The plan creates its own video track (`AddTrack`), inserts the asset
+(`InsertClip`) and splits it (`SplitClip` per cut). Steps reference ids earlier
+steps create, as `{"$fromStep": "step-0", "$path": "createdIds.0"}`, so run it
+whole through `plan execute` rather than replaying steps by hand — and
+`plan validate` rejects a reference whose target step is not ordered behind it
+via `dependsOn`, listing every step carrying one under `stepsWithReferences`.
+A reference is type-checked with a stand-in of either JSON type, so one pointing
+into a numeric field (`splitTime`) validates as readily as one into a string
+field (`clipId`); only the referenced value itself waits for execute.
+
+### What a pacing profile does not decide
+
+A profile decides pace. Nothing else.
+
+- **No transitions.** Every shipped profile cuts hard, and a dissolve added by
+  hand renders as a cut with a warning until the transition engine lands.
+- **No beat sync.** The analysis bundle carries BPM as a single average scalar,
+  not a beat grid. `music-montage` is metronomic, not beat-locked; cutting on the
+  beat needs analysis that does not exist yet.
+- **No content awareness beyond shot boundaries.** The planner does not know what
+  is in frame, whether a sentence finished, or whether a face is mid-blink.
+  `respectShotBoundaries` snapping — a cut moves at most half a target shot to
+  reach a detected shot change — is the whole of it, and it does nothing without
+  cached shot detection.
+- **No randomness.** Shot lengths alternate deterministically, half a variance
+  either side of the target, then scale to fill the source, so the same profile
+  on the same source always yields the same plan. That makes the plan reviewable;
+  it is not a claim of variety.
+- **`fidelityScore` is not a quality score.** It measures how close the mean
+  generated shot is to the profile's target, and says nothing about whether the
+  edit is any good. That judgement belongs to the judging loop.
 
 ### Undo and history
 
