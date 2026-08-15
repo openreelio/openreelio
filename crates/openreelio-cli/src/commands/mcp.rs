@@ -2073,13 +2073,14 @@ fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
 
     // Everything structural lives in the shared validator, so this surface
     // cannot drift from what `plan execute` will actually accept.
-    let errors = plan::validate_edit_plan(&edit_plan);
+    let validation = plan::validate_edit_plan(&edit_plan);
 
-    Ok(if errors.is_empty() {
+    Ok(if validation.errors.is_empty() {
         serde_json::json!({
             "status": "ok",
             "planId": edit_plan.id,
             "stepCount": edit_plan.steps.len(),
+            "stepsWithReferences": validation.steps_with_references,
             "message": "Plan is valid"
         })
     } else {
@@ -2087,7 +2088,8 @@ fn validate_plan(arguments: Value) -> Result<Value, ToolError> {
             "status": "error",
             "planId": edit_plan.id,
             "message": "Plan validation failed",
-            "errors": errors
+            "errors": validation.errors,
+            "stepsWithReferences": validation.steps_with_references
         })
     })
 }
@@ -2116,13 +2118,14 @@ fn apply_plan(state: &McpServerState, arguments: Value) -> Result<Value, ToolErr
     let edit_plan: plan::EditPlan = serde_json::from_value(plan_value)
         .map_err(|error| ToolError::InvalidArguments(format!("Invalid plan JSON: {error}")))?;
 
-    let validation_errors = plan::validate_edit_plan(&edit_plan);
-    if !validation_errors.is_empty() {
+    let validation = plan::validate_edit_plan(&edit_plan);
+    if !validation.errors.is_empty() {
         return Ok(serde_json::json!({
             "status": "error",
             "message": "Plan validation failed",
             "planId": edit_plan.id,
-            "errors": validation_errors,
+            "errors": validation.errors,
+            "stepsWithReferences": validation.steps_with_references,
         }));
     }
 

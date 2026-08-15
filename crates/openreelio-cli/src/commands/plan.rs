@@ -81,7 +81,8 @@ pub enum PlanAction {
         #[arg(long)]
         track_name: Option<String>,
 
-        /// Write the plan JSON to this file as well as stdout
+        /// Write the plan JSON to this file; stdout then carries the summary
+        /// and `outputPath` rather than a second copy of the plan
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -144,20 +145,25 @@ pub fn execute(action: PlanAction) -> anyhow::Result<()> {
 
             let _project = super::load_project(&path)?;
 
-            let errors = validate_edit_plan(&plan);
+            let validation = validate_edit_plan(&plan);
 
-            if errors.is_empty() {
+            if validation.errors.is_empty() {
                 output::print_json(&serde_json::json!({
                     "status": "ok",
                     "message": "Plan is valid",
                     "planId": plan.id,
                     "stepCount": plan.steps.len(),
+                    // Named rather than counted: these steps carry a value that
+                    // does not exist yet, so their payloads are only fully
+                    // checked once `plan execute` resolves the reference.
+                    "stepsWithReferences": validation.steps_with_references,
                 }))
             } else {
                 output::print_json(&serde_json::json!({
                     "status": "error",
                     "message": "Plan validation failed",
-                    "errors": errors,
+                    "errors": validation.errors,
+                    "stepsWithReferences": validation.steps_with_references,
                 }))
             }
         }
@@ -299,7 +305,7 @@ fn run_from_profile(
         .map_err(|error| anyhow::anyhow!("Failed to plan from profile: {}", error))?;
 
     let plan = edit_plan_from_agent_plan(&planned.plan);
-    let errors = validate_edit_plan(&plan);
+    let validation = validate_edit_plan(&plan);
 
     if let Some(out) = out {
         let serialized = serde_json::to_string_pretty(&plan)
@@ -320,8 +326,18 @@ fn run_from_profile(
         .filter(|step| step.command_type == "AddEffect")
         .count();
 
+    // With `--out` the plan is already on disk, so inlining it too spends the
+    // caller's context on a second copy of a file it can read when it needs to.
+    // The summary is what a review decides on; `outputPath` is where the detail
+    // lives. Without `--out` there is nowhere else to get it, so it stays inline.
+    let inline_plan = match out {
+        Some(_) => serde_json::Value::Null,
+        None => serde_json::to_value(&plan)
+            .map_err(|error| anyhow::anyhow!("Failed to serialize plan: {}", error))?,
+    };
+
     output::print_json_pretty(&serde_json::json!({
-        "status": if errors.is_empty() { "ok" } else { "error" },
+        "status": if validation.errors.is_empty() { "ok" } else { "error" },
         "planId": plan.id,
         "profile": profile.id,
         "assetId": asset_id,
@@ -332,9 +348,10 @@ fn run_from_profile(
         "transitionRecipe": profile.transition_recipe,
         "fidelityScore": planned.compatibility_score,
         "warnings": planned.warnings,
-        "errors": errors,
+        "errors": validation.errors,
+        "stepsWithReferences": validation.steps_with_references,
         "outputPath": out.map(|out| out.display().to_string()),
-        "plan": plan,
+        "plan": inline_plan,
     }))
 }
 
@@ -384,13 +401,14 @@ fn run_execute(path: &PathBuf, file: &Path) -> anyhow::Result<i32> {
     // Nothing is mutated until the whole plan is known to be sound. A payload
     // that only fails when its step is reached takes the project through a
     // rollback it never needed to risk.
-    let validation_errors = validate_edit_plan(&plan);
-    if !validation_errors.is_empty() {
+    let validation = validate_edit_plan(&plan);
+    if !validation.errors.is_empty() {
         output::print_json(&serde_json::json!({
             "status": "error",
             "message": "Plan validation failed",
             "planId": plan.id,
-            "errors": validation_errors,
+            "errors": validation.errors,
+            "stepsWithReferences": validation.steps_with_references,
         }))?;
         return Ok(EXIT_PLAN_FAILED);
     }
@@ -465,6 +483,25 @@ fn flush_stdout() {
 /// itself unchecked — which is exactly the part that cannot be known yet.
 const STEP_REFERENCE_PLACEHOLDER: &str = "$fromStep";
 
+/// The numeric stand-in tried when the string one is the wrong type.
+///
+/// An integer rather than a float: serde widens `1` into an `f64` field but
+/// refuses to narrow `1.0` into an integer one, so this stands in for both.
+const STEP_REFERENCE_NUMERIC_PLACEHOLDER: i64 = 1;
+
+/// What validating a plan found, before anything has been mutated.
+pub(crate) struct PlanValidation {
+    /// Everything that makes the plan unrunnable. Empty means valid.
+    pub errors: Vec<String>,
+    /// Ids of steps whose payload carries at least one `$fromStep` reference.
+    ///
+    /// Those steps are only *partly* checked here: the referenced value does
+    /// not exist until the step it names runs, so its type and content are
+    /// settled at execute time. Reporting them keeps `validate` honest about
+    /// what it did and did not check.
+    pub steps_with_references: Vec<String>,
+}
+
 /// Collects the step ids a payload references through `$fromStep`.
 fn collect_step_references(payload: &serde_json::Value, found: &mut Vec<String>) {
     match payload {
@@ -488,23 +525,70 @@ fn collect_step_references(payload: &serde_json::Value, found: &mut Vec<String>)
     }
 }
 
-/// Replaces every `$fromStep` reference with [`STEP_REFERENCE_PLACEHOLDER`].
-fn substitute_step_references(payload: &serde_json::Value) -> serde_json::Value {
+/// Replaces every `$fromStep` reference with `placeholder`.
+fn substitute_step_references(
+    payload: &serde_json::Value,
+    placeholder: &serde_json::Value,
+) -> serde_json::Value {
     match payload {
         serde_json::Value::Object(map) => {
             if map.contains_key("$fromStep") && map.contains_key("$path") {
-                return serde_json::Value::String(STEP_REFERENCE_PLACEHOLDER.to_string());
+                return placeholder.clone();
             }
             serde_json::Value::Object(
                 map.iter()
-                    .map(|(key, value)| (key.clone(), substitute_step_references(value)))
+                    .map(|(key, value)| {
+                        (key.clone(), substitute_step_references(value, placeholder))
+                    })
                     .collect(),
             )
         }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(substitute_step_references).collect())
-        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| substitute_step_references(item, placeholder))
+                .collect(),
+        ),
         other => other.clone(),
+    }
+}
+
+/// Type-checks one step's payload with its `$fromStep` references stubbed out.
+///
+/// Which JSON type a placeholder needs depends on the field it lands in:
+/// `clipId` wants a string, `splitTime` a number. Substituting only strings
+/// meant a reference into a numeric field passed `validate` and then failed at
+/// `execute`, turning a pre-flight check into a rollback. Rather than guess the
+/// field's type, try both stand-ins — if either parses, the only thing left
+/// unchecked is the referenced value itself, which is the part that genuinely
+/// cannot be known until the step it names has run.
+fn type_check_step_payload(step: &PlanStep, has_references: bool) -> Result<(), String> {
+    let string_error = match openreelio_core::ipc::CommandPayload::parse(
+        step.command_type.clone(),
+        substitute_step_references(
+            &step.payload,
+            &serde_json::Value::String(STEP_REFERENCE_PLACEHOLDER.to_string()),
+        ),
+    ) {
+        Ok(_) => return Ok(()),
+        Err(error) => error.to_string(),
+    };
+
+    if !has_references {
+        return Err(string_error);
+    }
+
+    match openreelio_core::ipc::CommandPayload::parse(
+        step.command_type.clone(),
+        substitute_step_references(
+            &step.payload,
+            &serde_json::Value::from(STEP_REFERENCE_NUMERIC_PLACEHOLDER),
+        ),
+    ) {
+        Ok(_) => Ok(()),
+        Err(numeric_error) => Err(format!(
+            "{string_error} (also rejected with a numeric placeholder: {numeric_error})"
+        )),
     }
 }
 
@@ -530,9 +614,10 @@ fn dependency_closure<'a>(step_id: &str, steps: &'a [PlanStep]) -> HashSet<&'a s
     closure
 }
 
-pub(crate) fn validate_edit_plan(plan: &EditPlan) -> Vec<String> {
+pub(crate) fn validate_edit_plan(plan: &EditPlan) -> PlanValidation {
     let mut step_ids = HashSet::new();
     let mut errors = Vec::new();
+    let mut steps_with_references = Vec::new();
 
     if plan.id.trim().is_empty() {
         errors.push("plan.id is required".to_string());
@@ -575,6 +660,8 @@ pub(crate) fn validate_edit_plan(plan: &EditPlan) -> Vec<String> {
         let mut references = Vec::new();
         collect_step_references(&step.payload, &mut references);
         if !references.is_empty() {
+            steps_with_references.push(step.id.clone());
+
             let reachable = dependency_closure(&step.id, &plan.steps);
             for reference in &references {
                 if !step_ids.contains(reference.as_str()) {
@@ -591,10 +678,7 @@ pub(crate) fn validate_edit_plan(plan: &EditPlan) -> Vec<String> {
             }
         }
 
-        if let Err(error) = openreelio_core::ipc::CommandPayload::parse(
-            step.command_type.clone(),
-            substitute_step_references(&step.payload),
-        ) {
+        if let Err(error) = type_check_step_payload(step, !references.is_empty()) {
             errors.push(format!(
                 "Step '{}' has invalid command payload for '{}': {}",
                 step.id, step.command_type, error
@@ -606,7 +690,10 @@ pub(crate) fn validate_edit_plan(plan: &EditPlan) -> Vec<String> {
         errors.push(cycle_err.to_string());
     }
 
-    errors
+    PlanValidation {
+        errors,
+        steps_with_references,
+    }
 }
 
 pub(crate) fn apply_edit_plan(
@@ -817,6 +904,29 @@ mod tests {
         }
     }
 
+    /// Validation errors alone, for the tests that only care about those.
+    fn validate_edit_plan_errors(plan: &EditPlan) -> Vec<String> {
+        validate_edit_plan(plan).errors
+    }
+
+    /// A `SplitClip` step whose split time comes from another step's result.
+    ///
+    /// The reference lands in a *numeric* field, which is the shape that used
+    /// to pass validation with a string placeholder and then fail at execute.
+    fn step_referencing_split_time(id: &str, referenced: &str, depends_on: &[&str]) -> PlanStep {
+        PlanStep {
+            id: id.to_string(),
+            command_type: "SplitClip".to_string(),
+            payload: serde_json::json!({
+                "sequenceId": "sequence-1",
+                "trackId": "track-1",
+                "clipId": "clip-1",
+                "splitTime": { "$fromStep": referenced, "$path": "metrics.cutSec" },
+            }),
+            depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
+        }
+    }
+
     /// An `InsertClip` step whose track comes from another step's result.
     fn step_referencing_track(id: &str, referenced: &str, depends_on: &[&str]) -> PlanStep {
         PlanStep {
@@ -834,12 +944,14 @@ mod tests {
 
     #[test]
     fn should_accept_a_sound_plan() {
-        assert!(validate_edit_plan(&plan(vec![step("a", &[]), step("b", &["a"])])).is_empty());
+        assert!(
+            validate_edit_plan_errors(&plan(vec![step("a", &[]), step("b", &["a"])])).is_empty()
+        );
     }
 
     #[test]
     fn should_accept_a_reference_to_a_step_it_depends_on() {
-        let errors = validate_edit_plan(&plan(vec![
+        let errors = validate_edit_plan_errors(&plan(vec![
             step("a", &[]),
             step_referencing_track("b", "a", &["a"]),
         ]));
@@ -850,7 +962,7 @@ mod tests {
     #[test]
     fn should_accept_a_reference_reached_through_the_dependency_chain() {
         // `c` never names `a` directly, but `b` does, so `a` still runs first.
-        let errors = validate_edit_plan(&plan(vec![
+        let errors = validate_edit_plan_errors(&plan(vec![
             step("a", &[]),
             step("b", &["a"]),
             step_referencing_track("c", "a", &["b"]),
@@ -861,7 +973,8 @@ mod tests {
 
     #[test]
     fn should_reject_a_reference_to_a_step_that_does_not_exist() {
-        let errors = validate_edit_plan(&plan(vec![step_referencing_track("b", "ghost", &[])]));
+        let errors =
+            validate_edit_plan_errors(&plan(vec![step_referencing_track("b", "ghost", &[])]));
 
         assert!(
             errors
@@ -874,7 +987,7 @@ mod tests {
     #[test]
     fn should_reject_a_reference_the_plan_does_not_order() {
         // Both steps exist, but nothing forces `a` to run before `b`.
-        let errors = validate_edit_plan(&plan(vec![
+        let errors = validate_edit_plan_errors(&plan(vec![
             step("a", &[]),
             step_referencing_track("b", "a", &[]),
         ]));
@@ -892,7 +1005,7 @@ mod tests {
         let mut broken = step_referencing_track("b", "a", &["a"]);
         broken.payload["nonsenseField"] = serde_json::json!(true);
 
-        let errors = validate_edit_plan(&plan(vec![step("a", &[]), broken]));
+        let errors = validate_edit_plan_errors(&plan(vec![step("a", &[]), broken]));
 
         assert!(
             errors
@@ -903,12 +1016,67 @@ mod tests {
     }
 
     #[test]
+    fn should_accept_a_reference_that_lands_in_a_numeric_field() {
+        // A string placeholder cannot stand in for `splitTime`. Rejecting the
+        // plan here would have turned a pre-flight check into an execute-time
+        // rollback for a plan that is actually sound.
+        let errors = validate_edit_plan_errors(&plan(vec![
+            step("a", &[]),
+            step_referencing_split_time("b", "a", &["a"]),
+        ]));
+
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn should_still_reject_a_numeric_reference_step_with_a_bad_field() {
+        let mut broken = step_referencing_split_time("b", "a", &["a"]);
+        broken.payload["nonsenseField"] = serde_json::json!(true);
+
+        let errors = validate_edit_plan_errors(&plan(vec![step("a", &[]), broken]));
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("invalid command payload")),
+            "trying both placeholder types must not stop type checking: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn should_report_which_steps_defer_checking_to_execute() {
+        let validation = validate_edit_plan(&plan(vec![
+            step("a", &[]),
+            step_referencing_track("b", "a", &["a"]),
+            step_referencing_split_time("c", "a", &["a"]),
+        ]));
+
+        assert!(validation.errors.is_empty(), "{:?}", validation.errors);
+        assert_eq!(
+            validation.steps_with_references,
+            vec!["b".to_string(), "c".to_string()],
+            "a caller has to know which payloads were only partly checked"
+        );
+    }
+
+    #[test]
+    fn should_report_no_deferred_steps_for_a_plan_without_references() {
+        let validation = validate_edit_plan(&plan(vec![step("a", &[]), step("b", &["a"])]));
+
+        assert!(
+            validation.steps_with_references.is_empty(),
+            "a fully checked plan must not claim otherwise: {:?}",
+            validation.steps_with_references
+        );
+    }
+
+    #[test]
     fn should_reject_a_plan_over_the_step_cap() {
         let steps = (0..=MAX_PLAN_STEPS)
             .map(|index| step(&format!("step-{index}"), &[]))
             .collect();
 
-        let errors = validate_edit_plan(&plan(steps));
+        let errors = validate_edit_plan_errors(&plan(steps));
 
         assert!(
             errors.iter().any(
@@ -925,7 +1093,7 @@ mod tests {
             .map(|index| step(&format!("step-{index}"), &[]))
             .collect();
 
-        assert!(validate_edit_plan(&plan(steps)).is_empty());
+        assert!(validate_edit_plan_errors(&plan(steps)).is_empty());
     }
 
     #[test]
@@ -933,7 +1101,7 @@ mod tests {
         let mut candidate = plan(vec![step("", &[])]);
         candidate.id = "  ".to_string();
 
-        let errors = validate_edit_plan(&candidate);
+        let errors = validate_edit_plan_errors(&candidate);
 
         assert!(errors.iter().any(|error| error == "plan.id is required"));
         assert!(errors
@@ -943,7 +1111,7 @@ mod tests {
 
     #[test]
     fn should_report_cycles_duplicates_and_missing_dependencies() {
-        let errors = validate_edit_plan(&plan(vec![
+        let errors = validate_edit_plan_errors(&plan(vec![
             step("a", &["b"]),
             step("b", &["a"]),
             step("b", &[]),
@@ -964,7 +1132,7 @@ mod tests {
         let mut broken = step("a", &[]);
         broken.payload = serde_json::json!({ "sequenceId": "sequence-1", "kind": "not-a-kind" });
 
-        let errors = validate_edit_plan(&plan(vec![broken]));
+        let errors = validate_edit_plan_errors(&plan(vec![broken]));
 
         assert!(errors
             .iter()
