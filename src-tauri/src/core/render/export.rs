@@ -2575,73 +2575,30 @@ pub(super) fn apply_audio_mix_settings(
 
 pub(super) const TIMELINE_EPSILON_SEC: f64 = 0.001;
 
-/// Default transition length when an effect declares none, in seconds.
-const DEFAULT_TRANSITION_DURATION_SEC: f64 = 1.0;
-
-/// A boundary transition, still missing the one value only the stitch knows.
+/// One stretch of picture on the timeline, ready to be concatenated.
 ///
-/// `xfade` measures `offset` from the start of its **first** input, and at the
-/// stitch that input is the accumulated stream of everything rendered so far —
-/// not the outgoing clip, and not the timeline. Two things move that position
-/// away from the clip's own timeline time: black filler inserted for gaps, and
-/// every earlier `xfade`, each of which shortens the accumulated stream by its
-/// own duration. Neither is knowable when the effect is added to a clip, so the
-/// effect travels here unresolved and
-/// [`append_timeline_video_output`] stamps `duration` and `offset` on a clone
-/// once the fold reaches the boundary.
-#[derive(Clone, Debug)]
-pub(super) struct SegmentTransition {
-    /// The effect that produced the transition, minus its final placement.
-    effect: Effect,
-    /// Transition length the effect asked for, before clamping to its neighbours.
-    requested_duration_sec: f64,
-}
-
-impl SegmentTransition {
-    /// Captures a boundary transition from the effect carried by a clip.
-    fn from_effect(effect: &Effect) -> Self {
-        let requested_duration_sec = effect
-            .get_param("duration")
-            .and_then(ParamValue::as_float)
-            .filter(|duration| duration.is_finite() && *duration > 0.0)
-            .unwrap_or(DEFAULT_TRANSITION_DURATION_SEC);
-
-        Self {
-            effect: effect.clone(),
-            requested_duration_sec,
-        }
-    }
-
-    /// Renders the filter body with its placement resolved.
-    fn filter_body(&self, duration_sec: f64, offset_sec: f64) -> String {
-        let mut placed = self.effect.clone();
-        placed.set_param("duration", ParamValue::Float(duration_sec));
-        placed.set_param("offset", ParamValue::Float(offset_sec));
-        placed.to_filter_body()
-    }
-}
-
+/// Boundaries between segments are hard cuts. Two-input transitions (`xfade`)
+/// are deliberately *not* stitched here: overlapping the picture shortens the
+/// video stream by the transition length while the audio stitch still places
+/// every clip at its absolute timeline position, so the two tracks drift apart
+/// by the sum of the transitions and the rendered file stops matching
+/// [`Sequence::output_duration`]. Rendering a transition correctly needs an
+/// engine that crossfades and retimes audio alongside the picture; until that
+/// exists the boundary renders as a cut and the export reports a warning.
 #[derive(Clone, Debug)]
 pub(super) struct VideoTimelineSegment {
     pub stream_label: String,
     pub start_sec: f64,
     pub end_sec: f64,
-    pub transition: Option<SegmentTransition>,
 }
 
 impl VideoTimelineSegment {
-    /// Builds a segment carrying whichever boundary transition its clip declares.
-    pub(super) fn new(
-        stream_label: impl Into<String>,
-        start_sec: f64,
-        end_sec: f64,
-        transition_effect: Option<&Effect>,
-    ) -> Self {
+    /// Builds a segment for one stretch of picture on the timeline.
+    pub(super) fn new(stream_label: impl Into<String>, start_sec: f64, end_sec: f64) -> Self {
         Self {
             stream_label: stream_label.into(),
             start_sec,
             end_sec,
-            transition: transition_effect.map(SegmentTransition::from_effect),
         }
     }
 }
@@ -2649,8 +2606,6 @@ impl VideoTimelineSegment {
 #[derive(Clone, Debug)]
 struct VideoConcatPart {
     stream_label: String,
-    duration_sec: f64,
-    transition: Option<SegmentTransition>,
 }
 
 pub(super) fn output_video_dimensions(
@@ -2770,16 +2725,11 @@ pub(super) fn append_timeline_video_output(
         let end = segment.end_sec.max(start);
 
         if start > cursor + TIMELINE_EPSILON_SEC {
-            if let Some(previous) = parts.last_mut() {
-                previous.transition = None;
-            }
-
             let gap_label = format!("vgap{}", gap_index);
-            let gap_duration_sec = start - cursor;
             append_black_video_gap(
                 filter_complex,
                 &gap_label,
-                gap_duration_sec,
+                start - cursor,
                 width,
                 height,
                 fps,
@@ -2787,8 +2737,6 @@ pub(super) fn append_timeline_video_output(
             );
             parts.push(VideoConcatPart {
                 stream_label: format!("[{}]", gap_label),
-                duration_sec: gap_duration_sec,
-                transition: None,
             });
             gap_index += 1;
             cursor = start;
@@ -2796,23 +2744,16 @@ pub(super) fn append_timeline_video_output(
 
         parts.push(VideoConcatPart {
             stream_label: segment.stream_label.clone(),
-            duration_sec: (end - start).max(0.0),
-            transition: segment.transition.clone(),
         });
         cursor = cursor.max(end);
     }
 
     if timeline_end_sec.is_finite() && timeline_end_sec > cursor + TIMELINE_EPSILON_SEC {
-        if let Some(previous) = parts.last_mut() {
-            previous.transition = None;
-        }
-
         let gap_label = format!("vgap{}", gap_index);
-        let tail_duration_sec = timeline_end_sec - cursor;
         append_black_video_gap(
             filter_complex,
             &gap_label,
-            tail_duration_sec,
+            timeline_end_sec - cursor,
             width,
             height,
             fps,
@@ -2820,8 +2761,6 @@ pub(super) fn append_timeline_video_output(
         );
         parts.push(VideoConcatPart {
             stream_label: format!("[{}]", gap_label),
-            duration_sec: tail_duration_sec,
-            transition: None,
         });
     }
 
@@ -2831,54 +2770,21 @@ pub(super) fn append_timeline_video_output(
     }
 
     let mut current_stream = parts[0].stream_label.clone();
-    // Length of the stream `current_stream` names. `concat` adds the next part
-    // whole; `xfade` overlaps it, so the accumulated length grows by less than
-    // the part is long. Both cases have to be tracked or every later offset is
-    // wrong by the sum of the transitions before it.
-    let mut accumulated_sec = parts[0].duration_sec;
 
     for i in 0..parts.len() - 1 {
-        let next_stream = parts[i + 1].stream_label.clone();
-        let next_duration_sec = parts[i + 1].duration_sec;
+        let next_stream = &parts[i + 1].stream_label;
         let output_label = if i == parts.len() - 2 {
             "[outv]".to_string()
         } else {
             format!("[vseq{}]", i)
         };
 
-        // A transition cannot outlast either shot it joins: `xfade` would run
-        // past the end of the outgoing stream, or consume the whole incoming
-        // one. Clamping to the shorter neighbour keeps a long recipe usable on
-        // a short clip instead of failing the render.
-        let placed_transition = parts[i].transition.as_ref().and_then(|transition| {
-            let duration_sec = transition
-                .requested_duration_sec
-                .min(parts[i].duration_sec)
-                .min(next_duration_sec);
-
-            (duration_sec.is_finite() && duration_sec > TIMELINE_EPSILON_SEC).then(|| {
-                let offset_sec = (accumulated_sec - duration_sec).max(0.0);
-                (transition.filter_body(duration_sec, offset_sec), offset_sec)
-            })
-        });
-
-        match placed_transition {
-            Some((filter_body, offset_sec)) => {
-                filter_complex.push_str(&format!(
-                    "{}{}{}{}",
-                    current_stream, next_stream, filter_body, output_label
-                ));
-                // `xfade` outputs `offset + len(second input)`.
-                accumulated_sec = offset_sec + next_duration_sec;
-            }
-            None => {
-                filter_complex.push_str(&format!(
-                    "{}{}concat=n=2:v=1:a=0{}",
-                    current_stream, next_stream, output_label
-                ));
-                accumulated_sec += next_duration_sec;
-            }
-        }
+        // Every boundary is a straight concat, so the finished video is exactly
+        // as long as the timeline says it is.
+        filter_complex.push_str(&format!(
+            "{}{}concat=n=2:v=1:a=0{}",
+            current_stream, next_stream, output_label
+        ));
 
         if i < parts.len() - 2 {
             filter_complex.push(';');
@@ -3207,22 +3113,6 @@ fn font_weight_implies_bold(value: &Value) -> Option<bool> {
     }
 
     parse_json_number(value).map(|weight| weight >= 600.0)
-}
-
-/// Returns the boundary transition a clip hands to the timeline stitch.
-///
-/// Only `xfade`-backed effects qualify. `Fade` and `Zoom` share the
-/// [`EffectCategory::Transition`] label but are single-input filters that the
-/// clip's own chain renders; handing one to the stitch would splice a one-input
-/// filter between two streams and break the graph.
-pub(super) fn find_transition_effect<'a>(
-    clip: &Clip,
-    effects: &'a HashMap<String, Effect>,
-) -> Option<&'a Effect> {
-    clip.effects
-        .iter()
-        .filter_map(|effect_id| effects.get(effect_id))
-        .find(|effect| effect.enabled && effect.effect_type.is_two_input_transition())
 }
 
 fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
@@ -5054,6 +4944,21 @@ fn validate_clip_effect_contract(
 
         let capability = effect_capability(&effect.effect_type);
         let label = effect_type_label(&effect.effect_type);
+
+        // The effect is stored, validated, and round-trips through the project;
+        // what it is not is rendered. Overlapping two clips with `xfade` would
+        // shorten the picture while the audio stitch keeps every clip at its
+        // absolute timeline position, so a render that looked right would be
+        // out of sync and shorter than `Sequence::output_duration()`. Rendering
+        // it needs a transition engine that retimes audio too. Until then the
+        // boundary is a cut, and the caller is told so rather than shipped a
+        // file that quietly disagrees with the timeline.
+        if effect.effect_type.is_two_input_transition() {
+            validation.add_warning(format!(
+                "Transition effect '{}' on clip '{}' on track '{}' is not yet rendered; the boundary renders as a cut",
+                label, clip.id, track.name
+            ));
+        }
 
         if !capability.export.is_supported() {
             let reason = capability
@@ -9645,127 +9550,51 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Transition Export Tests (E2E)
+    // Transition Export Tests
+    //
+    // Two-input transitions (`xfade`) are stored on clips and validated, but the
+    // renderer does not place them: overlapping the picture shortens the video
+    // stream while the audio stitch keeps every clip at its absolute timeline
+    // position, so the file would drift out of sync and end early. These tests
+    // pin the descoped behaviour — the boundary is a cut, the audio keeps its
+    // timeline positions, and the export says so in a warning.
     // -------------------------------------------------------------------------
 
-    #[test]
-    fn test_export_with_transition_applies_xfade() {
-        use crate::core::assets::VideoInfo;
-        use crate::core::effects::{EffectType, ParamValue};
-        use crate::core::timeline::{Clip, SequenceFormat, Track};
-
-        // Create sequence with two consecutive clips
-        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
-        let mut track = Track::new_video("Video 1");
-
-        // First clip: 0-5 seconds with a dissolve transition effect
-        let mut clip1 = Clip::new("asset1")
-            .with_source_range(0.0, 5.0)
-            .place_at(0.0);
-        let transition_effect_id = "transition_effect_1".to_string();
-        clip1.effects.push(transition_effect_id.clone());
-        track.add_clip(clip1);
-
-        // Second clip: 5-10 seconds
-        let clip2 = Clip::new("asset2")
-            .with_source_range(0.0, 5.0)
-            .place_at(5.0);
-        track.add_clip(clip2);
-
-        sequence.add_track(track);
-
-        // Create assets
-        let video1_path = create_temp_media_file("video1.mp4");
-        let mut asset1 = Asset::new_video("video1.mp4", &video1_path, VideoInfo::default())
-            .with_duration(10.0)
-            .with_file_size(10_000_000);
-        asset1.id = "asset1".to_string();
-
-        let video2_path = create_temp_media_file("video2.mp4");
-        let mut asset2 = Asset::new_video("video2.mp4", &video2_path, VideoInfo::default())
-            .with_duration(10.0)
-            .with_file_size(10_000_000);
-        asset2.id = "asset2".to_string();
-
-        let mut assets = std::collections::HashMap::new();
-        assets.insert("asset1".to_string(), asset1);
-        assets.insert("asset2".to_string(), asset2);
-
-        // Create dissolve transition effect
-        let mut transition_effect = Effect::new(EffectType::CrossDissolve);
-        transition_effect.id = transition_effect_id.clone();
-        transition_effect
-            .params
-            .insert("duration".to_string(), ParamValue::Float(1.0));
-        transition_effect
-            .params
-            .insert("offset".to_string(), ParamValue::Float(0.0));
-        transition_effect.enabled = true;
-
-        let mut effects = std::collections::HashMap::new();
-        effects.insert(transition_effect_id, transition_effect);
-
-        let audio_info_map = std::collections::HashMap::new();
-        let settings = ExportSettings::default();
-
-        // Build args
-        let result = build_complex_filter_args_with_audio_info(
-            &sequence,
-            &assets,
-            &effects,
-            &audio_info_map,
-            &settings,
-        );
-
-        assert!(result.is_ok(), "Build should succeed");
-        let args = result.unwrap();
-        let args_str = args.join(" ");
-
-        // Verify xfade filter is present (transition effect applied)
-        assert!(
-            args_str.contains("xfade"),
-            "Export with transition should include xfade filter. Got: {}",
-            args_str
-        );
-        assert!(
-            args_str.contains("dissolve"),
-            "Dissolve transition should specify dissolve type. Got: {}",
-            args_str
-        );
-    }
-
     /// Builds a single-video-track sequence of back-to-back clips and returns
-    /// the assets/effects maps needed to render it.
+    /// the assets/effects/audio maps needed to render it.
     ///
-    /// `clips` is `(duration_sec, transition)` where `transition` is the effect
-    /// carried by that clip — the renderer reads a transition off the *outgoing*
-    /// clip of a boundary.
+    /// `clips` is `(duration_sec, effect)` where `effect` is carried by that
+    /// clip. `with_audio` gives every asset an audio stream, which is what makes
+    /// the audio half of the stitch observable.
     #[allow(clippy::type_complexity)]
     fn build_transition_fixture(
         clips: &[(f64, Option<Effect>)],
+        with_audio: bool,
     ) -> (
         Sequence,
         std::collections::HashMap<String, Asset>,
         std::collections::HashMap<String, Effect>,
+        std::collections::HashMap<String, AssetAudioInfo>,
     ) {
-        use crate::core::assets::VideoInfo;
+        use crate::core::assets::{AudioInfo, VideoInfo};
         use crate::core::timeline::{Clip, SequenceFormat, Track};
 
         let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
         let mut track = Track::new_video("Video 1");
         let mut assets = std::collections::HashMap::new();
         let mut effects = std::collections::HashMap::new();
+        let mut audio_info = std::collections::HashMap::new();
         let mut timeline_start = 0.0_f64;
 
-        for (index, (duration_sec, transition)) in clips.iter().enumerate() {
+        for (index, (duration_sec, effect)) in clips.iter().enumerate() {
             let asset_id = format!("asset{index}");
             let mut clip = Clip::new(&asset_id)
                 .with_source_range(0.0, *duration_sec)
                 .place_at(timeline_start);
 
-            if let Some(transition) = transition {
-                clip.effects.push(transition.id.clone());
-                effects.insert(transition.id.clone(), transition.clone());
+            if let Some(effect) = effect {
+                clip.effects.push(effect.id.clone());
+                effects.insert(effect.id.clone(), effect.clone());
             }
 
             track.add_clip(clip);
@@ -9776,16 +9605,25 @@ mod tests {
                     .with_duration(*duration_sec)
                     .with_file_size(10_000_000);
             asset.id = asset_id.clone();
-            assets.insert(asset_id, asset);
+            if with_audio {
+                asset = asset.with_audio_info(AudioInfo::default());
+            }
+            assets.insert(asset_id.clone(), asset);
+            audio_info.insert(
+                asset_id,
+                AssetAudioInfo {
+                    has_audio: with_audio,
+                },
+            );
 
             timeline_start += duration_sec;
         }
 
         sequence.add_track(track);
-        (sequence, assets, effects)
+        (sequence, assets, effects, audio_info)
     }
 
-    /// Builds an enabled transition effect with the given parameters.
+    /// Builds an enabled effect with the given parameters.
     fn transition_effect(
         id: &str,
         effect_type: crate::core::effects::EffectType,
@@ -9800,171 +9638,120 @@ mod tests {
         effect
     }
 
-    /// Extracts every `xfade=...` clause from a built argument list, in order.
-    fn xfade_clauses(args: &[String]) -> Vec<String> {
-        let joined = args.join(" ");
-        let mut clauses = Vec::new();
-        let mut rest = joined.as_str();
-
-        while let Some(start) = rest.find("xfade=") {
-            let tail = &rest[start..];
-            let end = tail.find(['[', ';', ' ']).unwrap_or(tail.len());
-            clauses.push(tail[..end].to_string());
-            rest = &tail[end..];
-        }
-
-        clauses
-    }
-
-    fn build_fixture_args(clips: &[(f64, Option<Effect>)]) -> Vec<String> {
-        let (sequence, assets, effects) = build_transition_fixture(clips);
-        let audio_info_map = std::collections::HashMap::new();
-        let settings = ExportSettings::default();
+    fn build_fixture_args(clips: &[(f64, Option<Effect>)], with_audio: bool) -> Vec<String> {
+        let (sequence, assets, effects, audio_info) = build_transition_fixture(clips, with_audio);
 
         build_complex_filter_args_with_audio_info(
             &sequence,
             &assets,
             &effects,
-            &audio_info_map,
-            &settings,
+            &audio_info,
+            &ExportSettings::default(),
         )
         .expect("filter args build")
     }
 
-    // -------------------------------------------------------------------------
-    // xfade offset placement
-    //
-    // `xfade` measures `offset` from the start of its *first* input, which in
-    // the timeline stitch is the accumulated stream of everything rendered so
-    // far — not the incoming clip. Anything other than a derived offset places
-    // the transition at the head of the finished video and discards the
-    // outgoing clip.
-    // -------------------------------------------------------------------------
+    /// Counts the `concat=n=2:v=1:a=0` clauses that stitch the video timeline.
+    fn video_concat_count(args: &[String]) -> usize {
+        args.join(" ").matches("concat=n=2:v=1:a=0").count()
+    }
 
     #[test]
-    fn dissolve_offset_lands_the_transition_on_the_cut() {
+    fn a_two_input_transition_is_kept_out_of_the_rendered_graph() {
         use crate::core::effects::{EffectType, ParamValue};
 
         let dissolve = transition_effect(
             "transition-dissolve",
             EffectType::CrossDissolve,
+            &[("duration", ParamValue::Float(1.0))],
+        );
+
+        let args = build_fixture_args(&[(5.0, Some(dissolve)), (5.0, None)], false);
+        let joined = args.join(" ");
+
+        // Neither in the clip chain (FFmpeg rejects a two-input filter with one
+        // input) nor at the stitch (that shortens the picture only).
+        assert!(
+            !joined.contains("xfade"),
+            "a two-input transition must not reach the graph: {joined}"
+        );
+        assert_eq!(
+            video_concat_count(&args),
+            1,
+            "the boundary must render as a plain concat: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_single_input_transition_effect_stays_in_the_clip_chain() {
+        use crate::core::effects::{EffectType, ParamValue};
+
+        // `Fade` is in the Transition *category* but is a one-input filter, so
+        // the two-input exclusion must not swallow it.
+        let fade = transition_effect(
+            "transition-fade",
+            EffectType::Fade,
             &[
                 ("duration", ParamValue::Float(1.0)),
-                ("offset", ParamValue::Float(0.0)),
+                ("fade_in", ParamValue::Bool(true)),
             ],
         );
 
-        let args = build_fixture_args(&[(5.0, Some(dissolve)), (5.0, None)]);
-        let clauses = xfade_clauses(&args);
+        let args = build_fixture_args(&[(5.0, Some(fade)), (5.0, None), (5.0, None)], false);
+        let joined = args.join(" ");
 
-        assert_eq!(clauses.len(), 1, "expected exactly one xfade: {clauses:?}");
         assert!(
-            clauses[0].contains("transition=dissolve"),
-            "expected a dissolve: {}",
-            clauses[0]
+            joined.contains("fade=t=in"),
+            "a single-input transition must render in the clip chain: {joined}"
         );
-        // The 5s cut with a 1s dissolve: the blend runs 4.0s..5.0s of the
-        // accumulated stream so it ends exactly on the cut.
         assert!(
-            clauses[0].contains("offset=4.0000"),
-            "dissolve must start 1s before the 5s cut, not at the head of the \
-             stitched stream: {}",
-            clauses[0]
+            !joined.contains("xfade"),
+            "fade must not be mistaken for a two-input transition: {joined}"
+        );
+        assert_eq!(
+            video_concat_count(&args),
+            2,
+            "three parts stitch through two concats: {joined}"
         );
     }
 
     #[test]
-    fn wipe_offset_lands_the_transition_on_the_cut() {
-        use crate::core::effects::{EffectType, ParamValue};
-
-        let wipe = transition_effect(
-            "transition-wipe",
-            EffectType::Wipe,
-            &[
-                ("direction", ParamValue::String("left".to_string())),
-                ("duration", ParamValue::Float(0.7)),
-                ("offset", ParamValue::Float(0.0)),
-            ],
-        );
-
-        let args = build_fixture_args(&[(5.0, Some(wipe)), (5.0, None)]);
-        let clauses = xfade_clauses(&args);
-
-        assert_eq!(clauses.len(), 1, "expected exactly one xfade: {clauses:?}");
-        assert!(
-            clauses[0].contains("transition=wipeleft"),
-            "expected a left wipe: {}",
-            clauses[0]
-        );
-        assert!(
-            clauses[0].contains("offset=4.3000"),
-            "wipe must start 0.7s before the 5s cut: {}",
-            clauses[0]
-        );
-    }
-
-    #[test]
-    fn consecutive_transitions_account_for_the_time_each_one_consumes() {
-        use crate::core::effects::{EffectType, ParamValue};
-
-        let first = transition_effect(
-            "transition-1",
-            EffectType::CrossDissolve,
-            &[("duration", ParamValue::Float(1.0))],
-        );
-        let second = transition_effect(
-            "transition-2",
-            EffectType::CrossDissolve,
-            &[("duration", ParamValue::Float(1.0))],
-        );
-
-        let args = build_fixture_args(&[(5.0, Some(first)), (5.0, Some(second)), (5.0, None)]);
-        let clauses = xfade_clauses(&args);
-
-        assert_eq!(clauses.len(), 2, "expected two xfades: {clauses:?}");
-        assert!(
-            clauses[0].contains("offset=4.0000"),
-            "first dissolve starts 1s before the 5s cut: {}",
-            clauses[0]
-        );
-        // The first xfade shortened the accumulated stream by its own duration,
-        // so the second cut now sits at 9.0s of that stream, not 10.0s.
-        assert!(
-            clauses[1].contains("offset=8.0000"),
-            "second dissolve must account for the second the first one consumed: {}",
-            clauses[1]
-        );
-    }
-
-    #[test]
-    fn a_transition_longer_than_its_clips_is_clamped_to_fit() {
+    fn a_transition_render_with_audio_keeps_timeline_positions_and_full_length() {
         use crate::core::effects::{EffectType, ParamValue};
 
         let dissolve = transition_effect(
-            "transition-long",
+            "transition-dissolve",
             EffectType::CrossDissolve,
-            &[("duration", ParamValue::Float(2.0))],
+            &[("duration", ParamValue::Float(1.0))],
         );
 
-        // The incoming clip is only 0.5s, so a 2s dissolve cannot fit.
-        let args = build_fixture_args(&[(5.0, Some(dissolve)), (0.5, None)]);
-        let clauses = xfade_clauses(&args);
+        let args = build_fixture_args(&[(5.0, Some(dissolve)), (5.0, None)], true);
+        let joined = args.join(" ");
 
-        assert_eq!(clauses.len(), 1, "expected exactly one xfade: {clauses:?}");
+        // The second clip's audio is delayed to its absolute timeline position.
+        // Nothing shortens the picture, so that position is still correct.
         assert!(
-            clauses[0].contains("duration=0.5000"),
-            "duration must clamp to the shorter neighbour: {}",
-            clauses[0]
+            joined.contains("adelay=delays=5000"),
+            "the incoming clip's audio must stay at its timeline position: {joined}"
         );
         assert!(
-            clauses[0].contains("offset=4.5000"),
-            "the clamped dissolve still ends on the 5s cut: {}",
-            clauses[0]
+            !joined.contains("xfade"),
+            "the picture must not be overlapped while the audio is not: {joined}"
+        );
+        assert_eq!(
+            video_concat_count(&args),
+            1,
+            "the video must keep its full length through a plain concat: {joined}"
+        );
+        // The audio pad runs to the timeline end, which the video now matches.
+        assert!(
+            joined.contains("apad=whole_dur=10"),
+            "audio must be padded to the timeline end: {joined}"
         );
     }
 
     #[test]
-    fn a_gap_before_the_incoming_clip_falls_back_to_a_plain_concat() {
+    fn a_gap_between_clips_still_renders_as_black_filler() {
         use crate::core::assets::VideoInfo;
         use crate::core::effects::{EffectType, ParamValue};
         use crate::core::timeline::{Clip, SequenceFormat, Track};
@@ -10013,11 +9800,57 @@ mod tests {
             &ExportSettings::default(),
         )
         .expect("filter args build");
+        let joined = args.join(" ");
 
         assert!(
-            xfade_clauses(&args).is_empty(),
-            "a transition across a gap has no cut to land on: {}",
-            args.join(" ")
+            joined.contains("color=c=black"),
+            "the hole must render as black filler: {joined}"
+        );
+        assert_eq!(
+            video_concat_count(&args),
+            2,
+            "clip, filler, and clip stitch through two concats: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_clip_carrying_a_transition_effect_warns_that_the_boundary_is_a_cut() {
+        use crate::core::effects::{EffectType, ParamValue};
+
+        let dissolve = transition_effect(
+            "transition-dissolve",
+            EffectType::CrossDissolve,
+            &[("duration", ParamValue::Float(1.0))],
+        );
+
+        let (sequence, assets, effects, _audio_info) =
+            build_transition_fixture(&[(5.0, Some(dissolve)), (5.0, None)], true);
+
+        let validation =
+            validate_export_settings(&sequence, &assets, &effects, &ExportSettings::default());
+
+        assert!(
+            validation.is_valid,
+            "a transition must not block the export: {:?}",
+            validation.errors
+        );
+        let warning = validation
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("not yet rendered"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "an unrendered transition must be reported: {:?}",
+                    validation.warnings
+                )
+            });
+        assert!(
+            warning.contains("Cross Dissolve"),
+            "the warning must name the effect: {warning}"
+        );
+        assert!(
+            warning.contains("renders as a cut"),
+            "the warning must say what happens instead: {warning}"
         );
     }
 

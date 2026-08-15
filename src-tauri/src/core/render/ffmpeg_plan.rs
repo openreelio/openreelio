@@ -22,11 +22,10 @@ use super::{
         asset_has_playable_audio, build_audio_trim_filter, build_video_trim_filter,
         clip_audio_is_suppressed_by_companion, collect_audio_companion_keys,
         collect_caption_drawtext_filters, collect_enabled_clips_sorted,
-        collect_overlay_text_drawtext_filters, find_transition_effect,
-        generated_text_visual_end_sec, hdr_metadata_for_asset, is_text_clip,
-        output_video_dimensions, output_video_fps, output_video_pixel_format, AssetAudioInfo,
-        ExportEngine, ExportError, ExportSettings, VideoCodec, VideoTimelineSegment,
-        TIMELINE_EPSILON_SEC,
+        collect_overlay_text_drawtext_filters, generated_text_visual_end_sec,
+        hdr_metadata_for_asset, is_text_clip, output_video_dimensions, output_video_fps,
+        output_video_pixel_format, AssetAudioInfo, ExportEngine, ExportError, ExportSettings,
+        VideoCodec, VideoTimelineSegment, TIMELINE_EPSILON_SEC,
     },
     RenderPlan,
 };
@@ -204,7 +203,6 @@ pub(super) fn build_sequence_ffmpeg_args(
                         format!("[{}]", normalized_video_label),
                         clip.place.timeline_in_sec,
                         clip.place.timeline_out_sec(),
-                        find_transition_effect(clip, ctx.effects),
                     ));
                 }
 
@@ -307,7 +305,6 @@ pub(super) fn build_sequence_ffmpeg_args(
                 format!("[{}]", blank_label),
                 0.0,
                 generated_visual_end_sec,
-                None,
             ));
         }
     }
