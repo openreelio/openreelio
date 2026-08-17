@@ -107,7 +107,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 async-trait = "0.1"
 
 # Loopback MCP server for the Claude Code headless runtime (GUI-only).
-axum = { version = "0.7", optional = true }
+axum = { version = "0.8", optional = true }
 
 # Audio processing for transcription
 hound = "3.5"
