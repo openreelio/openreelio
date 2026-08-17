@@ -142,7 +142,7 @@ trash = "5"
 tempfile = "3"
 
 # FFmpeg bundler and AI providers (optional)
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json", "multipart"], optional = true }
 sha2 = { version = "0.10", optional = true }
 zip = { version = "2.2", optional = true }
