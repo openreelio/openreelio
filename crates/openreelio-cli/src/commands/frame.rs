@@ -18,9 +18,10 @@ use openreelio_core::assets::Asset;
 use openreelio_core::effects::{Effect, EffectType, IntoFFmpegFilter, ParamValue};
 use openreelio_core::ffmpeg::{FFmpegRunner, FrameExtractOptions};
 use openreelio_core::render::{
-    build_render_graph, build_render_plan, clip_source_time_at, probed_image_dimensions,
-    scaled_frame_dimensions, validate_export_settings, ExportEngine, ExportSettings,
-    FrameExportSettings, ImageFormat,
+    build_render_graph, build_render_plan, clip_needs_transform_composition, clip_source_time_at,
+    probed_image_dimensions, scaled_frame_dimensions, source_dimensions_from_audio_info,
+    validate_export_settings_with_dimensions, ExportEngine, ExportSettings, FrameExportSettings,
+    ImageFormat, SourceDimensionMap,
 };
 use openreelio_core::timeline::Sequence;
 use openreelio_core::ActiveProject;
@@ -1018,7 +1019,7 @@ async fn run_timeline_mode(
 ) -> anyhow::Result<serde_json::Value> {
     let (sequence_id, sequence) = resolve_sequence(project, args.sequence.clone())?;
     ensure_times_inside_sequence(sequence, times)?;
-    let context = TimelineFrameContext {
+    let mut context = TimelineFrameContext {
         engine: ExportEngine::new(runner.clone()),
         runner,
         project,
@@ -1027,7 +1028,10 @@ async fn run_timeline_mode(
         format: format.clone(),
         max_width: args.max_width.unwrap_or(DEFAULT_MAX_WIDTH),
         mode,
+        source_dimensions: SourceDimensionMap::new(),
+        validated: false,
     };
+    context.measure_sources().await;
 
     if batch {
         std::fs::create_dir_all(&args.out).map_err(|error| {
@@ -1071,7 +1075,7 @@ async fn run_grid_mode(
     let (sequence_id, sequence) = resolve_sequence(project, args.sequence.clone())?;
     ensure_times_inside_sequence(sequence, times)?;
     let cell = resolve_cell_size(args);
-    let context = TimelineFrameContext {
+    let mut context = TimelineFrameContext {
         engine: ExportEngine::new(runner.clone()),
         runner,
         project,
@@ -1082,7 +1086,10 @@ async fn run_grid_mode(
         format: ImageFormat::Jpeg,
         max_width: grid_cell_extract_width(args, cell),
         mode,
+        source_dimensions: SourceDimensionMap::new(),
+        validated: false,
     };
+    context.measure_sources().await;
 
     let staging = CellStaging::new(cell, args.label_cells)?;
 
@@ -1307,6 +1314,18 @@ struct TimelineFrameContext<'a> {
     format: ImageFormat,
     max_width: u32,
     mode: TimelineMode,
+    /// Source sizes measured once for the whole invocation.
+    ///
+    /// Export validation measures every transformed clip's source with FFprobe.
+    /// The composite path validates the render it is about to run, so without a
+    /// shared measurement a 4x4 contact sheet over five assets meant 160 FFprobe
+    /// spawns instead of five.
+    source_dimensions: SourceDimensionMap,
+    /// Whether the composite path has already validated this invocation.
+    ///
+    /// Nothing validation inspects changes between frames of the same sequence,
+    /// so it runs on the first composited frame and is trusted afterwards.
+    validated: bool,
 }
 
 impl TimelineFrameContext<'_> {
@@ -1318,19 +1337,35 @@ impl TimelineFrameContext<'_> {
         &self.project.state.effects
     }
 
+    /// Measures every asset once so per-frame validation spawns no probes.
+    async fn measure_sources(&mut self) {
+        let audio_info = self
+            .engine
+            .probe_assets_for_audio(self.sequence, self.assets())
+            .await;
+        self.source_dimensions = source_dimensions_from_audio_info(&audio_info);
+    }
+
     /// Extracts one timeline still, falling back to a composited render when
-    /// fast mode cannot serve the requested time (title cards, gaps).
+    /// fast mode cannot serve the requested time (title cards, gaps) or cannot
+    /// show what the timeline actually says (transformed clips).
     async fn extract(
-        &self,
+        &mut self,
         index: usize,
         time_sec: f64,
         output_path: &Path,
     ) -> anyhow::Result<FrameEntry> {
         if self.mode == TimelineMode::Fast {
-            if let Some((clip, _)) =
-                self.engine
-                    .find_topmost_clip_at_time(self.sequence, self.assets(), time_sec)
-            {
+            // Fast mode reads the topmost clip's source file directly, so a clip
+            // that is moved, scaled, rotated or faded would come back looking
+            // untouched — an agent checking its own transform edit would see no
+            // change. Compositing is the only way to show it.
+            let fast_clip = self
+                .engine
+                .find_topmost_clip_at_time(self.sequence, self.assets(), time_sec)
+                .filter(|(clip, _)| !clip_needs_transform_composition(clip));
+
+            if let Some((clip, _)) = fast_clip {
                 let settings = FrameExportSettings {
                     time_sec,
                     format: self.format.clone(),
@@ -1380,7 +1415,7 @@ impl TimelineFrameContext<'_> {
     /// Range renders decode from timeline zero, so the cost grows with
     /// `time_sec` — this is the accurate but slow path.
     async fn render_composite(
-        &self,
+        &mut self,
         time_sec: f64,
         output_path: &Path,
     ) -> anyhow::Result<(u32, u32)> {
@@ -1405,13 +1440,21 @@ impl TimelineFrameContext<'_> {
         settings.width = Some(width);
         settings.height = Some(height);
 
-        let validation =
-            validate_export_settings(self.sequence, self.assets(), self.effects(), &settings);
-        if !validation.is_valid {
-            return Err(anyhow::anyhow!(
-                "Composite render validation failed: {}",
-                validation.errors.join("; ")
-            ));
+        if !self.validated {
+            let validation = validate_export_settings_with_dimensions(
+                self.sequence,
+                self.assets(),
+                self.effects(),
+                &settings,
+                Some(&self.source_dimensions),
+            );
+            if !validation.is_valid {
+                return Err(anyhow::anyhow!(
+                    "Composite render validation failed: {}",
+                    validation.errors.join("; ")
+                ));
+            }
+            self.validated = true;
         }
 
         let graph = build_render_graph(&self.project.state, self.sequence_id)
