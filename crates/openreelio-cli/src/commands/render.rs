@@ -181,6 +181,10 @@ fn start_render(args: StartArgs) -> anyhow::Result<()> {
     let graph = build_render_graph(&project.state, &seq_id)
         .map_err(|error| anyhow::anyhow!("Failed to build render graph: {}", error))?;
 
+    // Validation measures transformed clips with FFprobe, so the resolved
+    // binaries have to be registered before it runs — see `ffmpeg_env`.
+    let ffmpeg_info = ensure_ffmpeg()?;
+
     let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
     if !validation.is_valid {
         return Err(anyhow::anyhow!(
@@ -197,7 +201,6 @@ fn start_render(args: StartArgs) -> anyhow::Result<()> {
     }
     let plan_hash = render_plan.plan_hash.clone();
 
-    let ffmpeg_info = ensure_ffmpeg()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

@@ -29,6 +29,13 @@ pub struct MediaMetadata {
     pub audio: Option<AudioInfo>,
     /// Format name (e.g., "mov,mp4,m4a,3gp,3g2,mj2")
     pub format: String,
+    /// Display-matrix rotation of the primary video stream, in degrees.
+    ///
+    /// `video.width`/`video.height` stay the *coded* size; FFmpeg auto-rotates on
+    /// decode, so a quarter turn here means the frames it produces are
+    /// `height x width`. See [`crate::core::ffmpeg::display_dimensions`].
+    #[serde(default)]
+    pub rotation_deg: f64,
 }
 
 impl Default for MediaMetadata {
@@ -39,6 +46,7 @@ impl Default for MediaMetadata {
             video: None,
             audio: None,
             format: String::new(),
+            rotation_deg: 0.0,
         }
     }
 }
@@ -70,6 +78,10 @@ struct FFprobeStream {
     color_primaries: Option<String>,
     #[allow(dead_code)]
     pix_fmt: Option<String>,
+    /// Per-stream side data; carries the display matrix on rotated recordings.
+    side_data_list: Option<Vec<serde_json::Value>>,
+    /// Stream tags; older remuxes only leave `rotate` behind.
+    tags: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +162,7 @@ impl MetadataExtractor {
             for stream in streams {
                 match stream.codec_type.as_str() {
                     "video" if metadata.video.is_none() => {
+                        metadata.rotation_deg = Self::parse_display_rotation(&stream);
                         metadata.video = Some(Self::parse_video_stream(&stream));
                     }
                     "audio" if metadata.audio.is_none() => {
@@ -193,6 +206,28 @@ impl MetadataExtractor {
             is_hdr,
             color_transfer: stream.color_transfer.clone(),
         }
+    }
+
+    /// Read the display-matrix rotation a video stream advertises.
+    ///
+    /// The two shapes FFprobe emits are reassembled into the JSON object the
+    /// shared parser reads, so the sync and async probe paths cannot disagree
+    /// about what a rotated recording means.
+    fn parse_display_rotation(stream: &FFprobeStream) -> f64 {
+        let mut probe_shape = serde_json::Map::new();
+        if let Some(side_data_list) = stream.side_data_list.clone() {
+            probe_shape.insert(
+                "side_data_list".to_string(),
+                serde_json::Value::Array(side_data_list),
+            );
+        }
+        if let Some(tags) = stream.tags.clone() {
+            probe_shape.insert("tags".to_string(), tags);
+        }
+
+        crate::core::ffmpeg::rotation::rotation_from_probe_stream(&serde_json::Value::Object(
+            probe_shape,
+        ))
     }
 
     /// Parse audio stream info
@@ -257,6 +292,75 @@ mod tests {
     fn test_ffprobe_availability_check() {
         // This just tests that the function runs without panicking
         let _is_available = MetadataExtractor::is_available();
+    }
+
+    // -------------------------------------------------------------------------
+    // Display Rotation Tests
+    // -------------------------------------------------------------------------
+
+    /// Feature: Portrait phone footage
+    /// Scenario: a display matrix is read alongside the coded dimensions
+    ///
+    /// A phone records portrait as a landscape-coded stream plus a quarter-turn
+    /// display matrix. FFmpeg auto-rotates on decode, so anything sizing a
+    /// picture off the coded width and height alone stretches the clip.
+    #[test]
+    fn should_parse_the_display_matrix_rotation_of_a_portrait_recording() {
+        let json = r#"{
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "r_frame_rate": "30/1",
+                    "side_data_list": [
+                        {
+                            "side_data_type": "Display Matrix",
+                            "displaymatrix": "00000000: 0 65536 0",
+                            "rotation": -90
+                        }
+                    ]
+                }
+            ],
+            "format": { "duration": "4.0", "size": "1000", "format_name": "mov,mp4" }
+        }"#;
+
+        let metadata = MetadataExtractor::parse_ffprobe_output(json).expect("parse");
+
+        let video = metadata.video.expect("video stream");
+        assert_eq!((video.width, video.height), (1920, 1080));
+        assert_eq!(metadata.rotation_deg, -90.0);
+        assert_eq!(
+            crate::core::ffmpeg::display_dimensions(
+                video.width,
+                video.height,
+                metadata.rotation_deg
+            ),
+            (1080, 1920)
+        );
+    }
+
+    /// Feature: Portrait phone footage
+    /// Scenario: an unrotated recording reports no turn
+    #[test]
+    fn should_report_no_rotation_for_an_ordinary_recording() {
+        let json = r#"{
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1280,
+                    "height": 720,
+                    "r_frame_rate": "30/1"
+                }
+            ],
+            "format": { "duration": "4.0", "size": "1000", "format_name": "mov,mp4" }
+        }"#;
+
+        let metadata = MetadataExtractor::parse_ffprobe_output(json).expect("parse");
+
+        assert_eq!(metadata.rotation_deg, 0.0);
     }
 
     // -------------------------------------------------------------------------

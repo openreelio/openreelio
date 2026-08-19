@@ -1673,7 +1673,8 @@ fn build_command_schema() -> Value {
             },
             "SetClipTransform": {
                 "required": ["sequenceId", "trackId", "clipId", "transform"],
-                "transformShape": "transform includes position{x,y}, scale{x,y}, rotationDeg, and anchor{x,y}; text clips use this for preview drag/resize/rotate parity."
+                "transformShape": "transform includes position{x,y}, scale{x,y}, rotationDeg, and anchor{x,y}; text clips use this for preview drag/resize/rotate parity.",
+                "note": "Renders in the final export for every visual clip, not just in the preview: position, scale, rotationDeg and anchor are all composited onto the canvas. SetClipOpacity likewise renders. Motion keyframes (SetClipMotionKeyframes) still render static at the clip's base transform and the render reports a warning saying so."
             }
         },
         "mediaWorkflows": {
@@ -1691,7 +1692,7 @@ fn build_command_schema() -> Value {
                 "CreateTrack(kind=\"video\" or \"overlay\") when there is no unlocked non-overlapping text track above the media.",
                 "AddTextClip with a preset id, or with a complete TextClipData for content, typography, color, background, shadow, outline, position, rotation, and opacity when no preset fits.",
                 "Prefer preset plus a content override over hand-assembled typography; see presetCatalog under payloadHints.AddTextClip for what each id is for.",
-                "SetClipTransform for exact preview drag/resize/rotate parity using normalized position, scale, rotationDeg, and anchor."
+                "SetClipTransform for exact drag/resize/rotate placement using normalized position, scale, rotationDeg, and anchor; it renders in the final export as well as in the preview."
             ],
             "timedSubtitles": [
                 "Call openreelio.transcription.status first and explain missing model installation before attempting automatic subtitles.",

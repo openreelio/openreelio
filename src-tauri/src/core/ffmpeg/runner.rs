@@ -225,6 +225,13 @@ pub struct VideoStreamInfo {
     /// FFprobe color transfer string (e.g. `smpte2084`, `arib-std-b67`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color_transfer: Option<String>,
+    /// Display-matrix rotation in degrees, folded into `(-180, 180]`.
+    ///
+    /// `width` and `height` are the *coded* size. FFmpeg auto-rotates on decode,
+    /// so a quarter turn here means the frames downstream are `height x width`;
+    /// [`crate::core::ffmpeg::display_dimensions`] applies the swap.
+    #[serde(default)]
+    pub rotation_deg: f64,
 }
 
 /// Audio stream information.
@@ -2097,6 +2104,8 @@ fn parse_video_stream(stream: &serde_json::Value) -> FFmpegResult<VideoStreamInf
         Some("smpte2084") | Some("arib-std-b67") | Some("hlg") | Some("pq")
     );
 
+    let rotation_deg = crate::core::ffmpeg::rotation::rotation_from_probe_stream(stream);
+
     Ok(VideoStreamInfo {
         width,
         height,
@@ -2106,6 +2115,7 @@ fn parse_video_stream(stream: &serde_json::Value) -> FFmpegResult<VideoStreamInf
         bitrate,
         is_hdr,
         color_transfer,
+        rotation_deg,
     })
 }
 

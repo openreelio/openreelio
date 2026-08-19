@@ -22,12 +22,14 @@ use crate::core::{
     ffmpeg::FFmpegRunner,
     fs::validate_local_input_path,
     render::hdr::{build_tonemap_filter, HdrMetadata, TonemapMode, TonemapParams},
+    render::transform_layout::ClipTransformLayout,
     render::{
         build_ffmpeg_invocation_for_render_plan, build_ffmpeg_invocation_from_args,
         execute_ffmpeg_invocation, execute_ffmpeg_output, RenderPlan,
     },
     timeline::{
-        BlendMode, Canvas, Clip, Sequence, SlowMotionInterpolation, TimelineClock, Track, TrackKind,
+        BlendMode, Canvas, Clip, Sequence, SlowMotionInterpolation, TimelineClock, Track,
+        TrackKind, Transform,
     },
 };
 
@@ -155,22 +157,6 @@ pub(super) fn clip_audio_is_suppressed_by_companion(
     track.kind != TrackKind::Audio
         && asset.kind == AssetKind::Video
         && audio_companion_keys.contains(&create_audio_companion_key(clip))
-}
-
-fn clip_has_identity_transform(clip: &Clip) -> bool {
-    (clip.transform.position.x - 0.5).abs() < 0.0001
-        && (clip.transform.position.y - 0.5).abs() < 0.0001
-        && (clip.transform.scale.x - 1.0).abs() < 0.0001
-        && (clip.transform.scale.y - 1.0).abs() < 0.0001
-        && clip.transform.rotation_deg.abs() < 0.0001
-        && (clip.transform.anchor.x - 0.5).abs() < 0.0001
-        && (clip.transform.anchor.y - 0.5).abs() < 0.0001
-}
-
-fn clip_uses_unsupported_visual_composition(clip: &Clip) -> bool {
-    !is_text_clip(clip)
-        && !clip.is_adjustment_layer()
-        && (!clip_has_identity_transform(clip) || (clip.opacity - 1.0).abs() > 0.0001)
 }
 
 fn has_layered_visual_overlap(sequence: &Sequence) -> bool {
@@ -2038,6 +2024,13 @@ pub enum ExportError {
 pub struct AssetAudioInfo {
     /// Whether the asset has an audio stream
     pub has_audio: bool,
+    /// Pixel dimensions of the asset's video stream as the decoder emits them.
+    ///
+    /// The same probe that answers "does this have audio" already measured the
+    /// picture, so carrying it here spares the filtergraph builder an FFprobe run
+    /// per transformed asset. `None` means the probe found no video stream, or
+    /// fell back to metadata that cannot vouch for a size.
+    pub source_dimensions: Option<(u32, u32)>,
 }
 
 impl AssetAudioInfo {
@@ -2045,6 +2038,17 @@ impl AssetAudioInfo {
     pub fn from_media_info(media_info: &crate::core::ffmpeg::MediaInfo) -> Self {
         Self {
             has_audio: media_info.audio.is_some(),
+            source_dimensions: media_info
+                .video
+                .as_ref()
+                .map(|video| {
+                    crate::core::ffmpeg::display_dimensions(
+                        video.width,
+                        video.height,
+                        video.rotation_deg,
+                    )
+                })
+                .filter(|(width, height)| *width > 0 && *height > 0),
         }
     }
 
@@ -2054,6 +2058,7 @@ impl AssetAudioInfo {
     pub fn from_asset(asset: &Asset) -> Self {
         Self {
             has_audio: asset.audio.is_some(),
+            source_dimensions: stored_asset_source_dimensions(asset),
         }
     }
 }
@@ -2668,6 +2673,513 @@ pub(super) fn append_video_stream_normalization(
         pixel_format,
         output_label
     ));
+}
+
+/// Tolerance for treating a transform component as untouched.
+const TRANSFORM_EPSILON: f64 = 0.0001;
+
+/// Whether a clip is placed on the canvas untouched.
+///
+/// An identity clip is letterboxed into the canvas and nothing else, which is
+/// exactly what [`append_video_stream_normalization`] already does, so it keeps
+/// the cheaper graph and needs no source dimensions.
+fn clip_has_identity_transform(clip: &Clip) -> bool {
+    (clip.transform.position.x - 0.5).abs() < TRANSFORM_EPSILON
+        && (clip.transform.position.y - 0.5).abs() < TRANSFORM_EPSILON
+        && (clip.transform.scale.x - 1.0).abs() < TRANSFORM_EPSILON
+        && (clip.transform.scale.y - 1.0).abs() < TRANSFORM_EPSILON
+        && clip.transform.rotation_deg.abs() < TRANSFORM_EPSILON
+        && (clip.transform.anchor.x - 0.5).abs() < TRANSFORM_EPSILON
+        && (clip.transform.anchor.y - 0.5).abs() < TRANSFORM_EPSILON
+}
+
+/// Whether a clip has to be composited onto the canvas rather than simply fitted.
+///
+/// Text clips and adjustment layers carry a transform too, but they are drawn by
+/// the ASS/drawtext overlay path and the grading path respectively, so neither
+/// takes part in this composite.
+pub fn clip_needs_transform_composition(clip: &Clip) -> bool {
+    !is_text_clip(clip)
+        && !clip.is_adjustment_layer()
+        && (!clip_has_identity_transform(clip)
+            || (f64::from(clip.opacity) - 1.0).abs() > TRANSFORM_EPSILON)
+}
+
+/// Pixel dimensions of the media a clip decodes, cached for one export run.
+///
+/// Keyed by asset id. A `None` entry records that the asset was already looked at
+/// and could not be measured, so a broken file is probed once rather than once
+/// per clip that uses it.
+pub(super) type SourceDimensionCache = HashMap<String, Option<(u32, u32)>>;
+
+/// Source dimensions an earlier probe already measured, keyed by asset id.
+///
+/// Passing one of these into [`validate_export_settings_with_dimensions`] is what
+/// keeps validation from spawning its own FFprobe per transformed asset.
+pub type SourceDimensionMap = HashMap<String, (u32, u32)>;
+
+/// Everything the export's asset probe learned about picture sizes.
+pub fn source_dimensions_from_audio_info(
+    audio_info: &HashMap<String, AssetAudioInfo>,
+) -> SourceDimensionMap {
+    audio_info
+        .iter()
+        .filter_map(|(asset_id, info)| {
+            info.source_dimensions
+                .map(|dimensions| (asset_id.clone(), dimensions))
+        })
+        .collect()
+}
+
+/// Turns an already-measured dimension map into a cache the resolver can read.
+///
+/// Only measured assets are seeded. An asset the probe could not size is left
+/// out entirely rather than seeded as `None`, so the resolver still gets its
+/// chance to measure it before the export gives up on the clip.
+pub(super) fn seed_source_dimension_cache(
+    audio_info: &HashMap<String, AssetAudioInfo>,
+) -> SourceDimensionCache {
+    audio_info
+        .iter()
+        .filter_map(|(asset_id, info)| {
+            info.source_dimensions
+                .map(|dimensions| (asset_id.clone(), Some(dimensions)))
+        })
+        .collect()
+}
+
+/// Whether a clip's motion keyframes would show anything the static render will not.
+///
+/// Motion is stored, round-trips through the project and animates in the
+/// preview, but the export composites the clip once at its base transform. That
+/// is only worth telling the caller about when the keyframes actually move the
+/// clip: a lone keyframe, or a run of identical ones, describes exactly the
+/// picture the export already produces, and warning about it trains callers to
+/// ignore the warning that matters.
+pub(super) fn clip_motion_differs_from_base_transform(clip: &Clip) -> bool {
+    let mut keyframes = clip.motion_keyframes.iter();
+    let Some(first) = keyframes.next() else {
+        return false;
+    };
+
+    if !transforms_match(&first.transform, &clip.transform) {
+        return true;
+    }
+
+    keyframes.any(|keyframe| !transforms_match(&keyframe.transform, &first.transform))
+}
+
+fn transforms_match(left: &Transform, right: &Transform) -> bool {
+    (left.position.x - right.position.x).abs() < TRANSFORM_EPSILON
+        && (left.position.y - right.position.y).abs() < TRANSFORM_EPSILON
+        && (left.scale.x - right.scale.x).abs() < TRANSFORM_EPSILON
+        && (left.scale.y - right.scale.y).abs() < TRANSFORM_EPSILON
+        && (left.rotation_deg - right.rotation_deg).abs() < TRANSFORM_EPSILON
+        && (left.anchor.x - right.anchor.x).abs() < TRANSFORM_EPSILON
+        && (left.anchor.y - right.anchor.y).abs() < TRANSFORM_EPSILON
+}
+
+/// The error text for a clip whose effect chain resizes unpredictably.
+pub(super) fn unmeasurable_effect_message(effect_label: &str, clip_id: &str) -> String {
+    format!(
+        "Effect '{}' on clip '{}' changes the picture size in a way the export cannot measure, \
+         so the clip's transform cannot be placed",
+        effect_label, clip_id
+    )
+}
+
+/// Measures the media an asset points at.
+///
+/// FFprobe comes first because it reports what will actually be decoded. The
+/// stored `Asset::video` metadata is only a fallback: `ImportAssetCommand::new`
+/// files every video away as a placeholder `VideoInfo::default()` (1920x1080)
+/// unless the caller enriched it, so trusting it first would silently letterbox
+/// or stretch anything imported headlessly.
+///
+/// Returns `None` when neither source can name the dimensions.
+pub(super) fn resolve_asset_source_dimensions(
+    asset: &Asset,
+    cache: &mut SourceDimensionCache,
+) -> Option<(u32, u32)> {
+    if let Some(cached) = cache.get(&asset.id) {
+        return *cached;
+    }
+
+    let probed = match crate::core::assets::MetadataExtractor::extract(&asset.uri) {
+        Ok(metadata) => metadata.video.as_ref().map(|video| {
+            crate::core::ffmpeg::display_dimensions(
+                video.width,
+                video.height,
+                metadata.rotation_deg,
+            )
+        }),
+        Err(error) => {
+            // Silently trusting the stored metadata here is what let a broken
+            // file render at the 1920x1080 placeholder size, so the failure has
+            // to be visible even when the fallback below rescues the export.
+            tracing::warn!(
+                asset_id = %asset.id,
+                error = %error,
+                "Could not probe asset for its source dimensions"
+            );
+            None
+        }
+    };
+
+    let resolved = probed
+        .or_else(|| stored_asset_source_dimensions(asset))
+        .filter(|(width, height)| *width > 0 && *height > 0);
+
+    cache.insert(asset.id.clone(), resolved);
+    resolved
+}
+
+/// The dimensions an asset's *stored* metadata can vouch for.
+///
+/// `ImportAssetCommand::new` files unenriched video away as a whole
+/// `VideoInfo::default()`, which is a non-zero 1920x1080 and therefore passes
+/// every "did we get a size" check while meaning "nobody looked". Recognising
+/// that exact placeholder shape is what turns a failed probe into the loud
+/// "Could not determine source dimensions" error instead of a stretched render.
+fn stored_asset_source_dimensions(asset: &Asset) -> Option<(u32, u32)> {
+    let video = asset.video.as_ref()?;
+    if *video == crate::core::assets::VideoInfo::default() {
+        return None;
+    }
+    Some((video.width, video.height))
+}
+
+/// The picture size the transform stage actually receives.
+///
+/// The transform emits an absolute `scale=W:H`, so it has to be sized against
+/// the frame that reaches it — not against the file on disk. A `Crop` earlier in
+/// the clip's chain hands the transform a smaller picture, and `Zoom` hands it a
+/// fixed 1280x720 (`zoompan`'s `s=hd720`); sizing off the probed dimensions in
+/// either case stretches the clip, even when the only transform is opacity.
+///
+/// Returns the label of the offending effect when its output size cannot be read
+/// off the filter it emits. Guessing there would render silently wrong, so the
+/// caller turns it into a validation error naming the clip.
+pub(super) fn effective_source_dimensions(
+    probed_dimensions: (u32, u32),
+    graph: &FilterGraph,
+) -> Result<(u32, u32), String> {
+    let mut dimensions = probed_dimensions;
+
+    for effect in graph.video_effects() {
+        // A masked effect is drawn back over the untouched frame by
+        // `apply_effect_through_mask_group`, so the group outputs the size it
+        // was handed no matter what the effect body does.
+        if effect.masks.has_enabled_masks() {
+            continue;
+        }
+
+        let body = effect.build_filter_params();
+        for segment in split_filter_chain(&body) {
+            match filter_segment_dimensions(segment) {
+                SegmentDimensions::Unchanged => {}
+                SegmentDimensions::Fixed(width, height) if width > 0 && height > 0 => {
+                    dimensions = (width, height);
+                }
+                _ => return Err(effect_type_label(&effect.effect_type)),
+            }
+        }
+    }
+
+    Ok(dimensions)
+}
+
+/// How one FFmpeg filter changes the frame size flowing through it.
+enum SegmentDimensions {
+    /// The filter leaves the frame size alone.
+    Unchanged,
+    /// The filter outputs this size.
+    Fixed(u32, u32),
+    /// The filter resizes, but not to a size this can read off the string.
+    Unknown,
+}
+
+/// Splits a filter chain body into its individual filters.
+///
+/// Commas separate filters, except inside the quoted expressions FFmpeg accepts
+/// as parameter values — `crop=608:1080:'if(lt(t,1),0,120)':0` is one filter, not
+/// three.
+fn split_filter_chain(body: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut depth = 0_i32;
+
+    for (index, character) in body.char_indices() {
+        match character {
+            '\'' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth = depth.saturating_sub(1),
+            ',' if !quoted && depth == 0 => {
+                segments.push(body[start..index].trim());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    segments.push(body[start..].trim());
+
+    segments
+        .into_iter()
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+/// Splits one filter's arguments on `:`, respecting quoted expressions.
+fn split_filter_arguments(arguments: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut depth = 0_i32;
+
+    for (index, character) in arguments.char_indices() {
+        match character {
+            '\'' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth = depth.saturating_sub(1),
+            ':' if !quoted && depth == 0 => {
+                parts.push(arguments[start..index].trim());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(arguments[start..].trim());
+    parts
+}
+
+/// Reads the output size of a single filter.
+///
+/// Every arm here was checked against `Effect::build_filter_params`: of the
+/// filters that builder can emit, only `crop` (`Crop`, `AutoReframe`) and
+/// `zoompan` (`Zoom`) resize. `scale`/`pad`/`transpose` never come out of it
+/// today and are listed so a future effect that emits one is caught loudly by
+/// [`effective_source_dimensions`] rather than mis-sizing a transform.
+fn filter_segment_dimensions(segment: &str) -> SegmentDimensions {
+    let (name, arguments) = match segment.split_once('=') {
+        Some((name, arguments)) => (name.trim(), arguments),
+        None => (segment.trim(), ""),
+    };
+
+    let arguments = split_filter_arguments(arguments);
+
+    match name {
+        "crop" | "scale" | "pad" => {
+            match sized_arguments(&arguments, ("w", "width"), ("h", "height")) {
+                Some((width, height)) => SegmentDimensions::Fixed(width, height),
+                None => SegmentDimensions::Unknown,
+            }
+        }
+        "zoompan" => match named_argument(&arguments, "s") {
+            // `zoompan` defaults to `hd720` when no size is given, which is what
+            // the builder relies on when it does pass one.
+            None => SegmentDimensions::Fixed(1280, 720),
+            Some(size) => match parse_frame_size(size) {
+                Some((width, height)) => SegmentDimensions::Fixed(width, height),
+                None => SegmentDimensions::Unknown,
+            },
+        },
+        "rotate" => {
+            // `rotate` keeps the input size unless it is told otherwise.
+            let output_width = named_argument(&arguments, "ow");
+            let output_height = named_argument(&arguments, "oh");
+            match (output_width, output_height) {
+                (None, None) => SegmentDimensions::Unchanged,
+                (Some(width), Some(height)) => {
+                    match (width.parse::<u32>().ok(), height.parse::<u32>().ok()) {
+                        (Some(width), Some(height)) => SegmentDimensions::Fixed(width, height),
+                        _ => SegmentDimensions::Unknown,
+                    }
+                }
+                _ => SegmentDimensions::Unknown,
+            }
+        }
+        "scale2ref" | "tile" | "transpose" | "hstack" | "vstack" | "xstack" => {
+            SegmentDimensions::Unknown
+        }
+        _ => SegmentDimensions::Unchanged,
+    }
+}
+
+/// Reads a filter's width and height, whether they were given by name or position.
+fn sized_arguments(
+    arguments: &[&str],
+    width_names: (&str, &str),
+    height_names: (&str, &str),
+) -> Option<(u32, u32)> {
+    let width = named_argument(arguments, width_names.0)
+        .or_else(|| named_argument(arguments, width_names.1))
+        .or_else(|| positional_argument(arguments, 0));
+    let height = named_argument(arguments, height_names.0)
+        .or_else(|| named_argument(arguments, height_names.1))
+        .or_else(|| positional_argument(arguments, 1));
+
+    Some((width?.parse().ok()?, height?.parse().ok()?))
+}
+
+fn named_argument<'a>(arguments: &[&'a str], name: &str) -> Option<&'a str> {
+    arguments.iter().find_map(|argument| {
+        argument
+            .split_once('=')
+            .filter(|(key, _)| key.trim() == name)
+            .map(|(_, value)| value.trim())
+    })
+}
+
+fn positional_argument<'a>(arguments: &[&'a str], index: usize) -> Option<&'a str> {
+    let argument = arguments.get(index)?.trim();
+    if argument.contains('=') {
+        return None;
+    }
+    Some(argument)
+}
+
+/// Parses an FFmpeg frame size, either `WxH` or one of the standard abbreviations.
+fn parse_frame_size(size: &str) -> Option<(u32, u32)> {
+    let size = size.trim().trim_matches('\'');
+    if let Some((width, height)) = size.split_once('x') {
+        return Some((width.trim().parse().ok()?, height.trim().parse().ok()?));
+    }
+
+    match size {
+        "hd480" => Some((852, 480)),
+        "hd720" => Some((1280, 720)),
+        "hd1080" => Some((1920, 1080)),
+        "2k" => Some((2048, 1080)),
+        "4k" => Some((4096, 2160)),
+        _ => None,
+    }
+}
+
+/// Emits the filter chain that places one transformed clip on the output canvas.
+///
+/// The chain is `scale` -> optional `rotate` -> optional alpha -> `overlay` onto
+/// a black canvas of the clip's own timeline duration. It ends in the same shape
+/// [`append_video_stream_normalization`] produces — `setsar=1,fps=,format=` on a
+/// full-canvas frame — so the downstream concat cannot tell the two apart.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_video_transform_composition(
+    filter_complex: &mut String,
+    input_label: &str,
+    output_label: &str,
+    layout: &ClipTransformLayout,
+    duration_sec: f64,
+    width: u32,
+    height: u32,
+    fps: f64,
+    pixel_format: &str,
+) {
+    let staged_label = format!("{}_tx", output_label);
+    let canvas_label = format!("{}_bg", output_label);
+    let (alpha_format, overlay_format) = transform_composition_formats(pixel_format);
+
+    filter_complex.push_str(&format!(
+        "[{}]scale={}:{},setsar=1",
+        input_label, layout.scaled_width, layout.scaled_height
+    ));
+
+    // A rotated frame needs somewhere transparent for its corners to land in, and
+    // a translucent one needs an alpha channel to attenuate. Rotation has to fill
+    // with a YUV-alpha format because `rotate` writes its `c=black@0` corners in
+    // the working format; plain opacity is cheaper in RGBA, which is the format
+    // `colorchannelmixer` works in natively — asking for `yuva` there makes
+    // FFmpeg insert a yuva -> argb -> yuva round trip on every frame.
+    let staged_alpha_format = if layout.is_rotated() {
+        Some(alpha_format)
+    } else if layout.is_translucent() {
+        Some(opacity_only_alpha_format(alpha_format))
+    } else {
+        None
+    };
+    if let Some(staged_alpha_format) = staged_alpha_format {
+        filter_complex.push_str(&format!(",format={}", staged_alpha_format));
+    }
+
+    if layout.is_rotated() {
+        filter_complex.push_str(&format!(
+            ",rotate={}:ow={}:oh={}:c=black@0",
+            format_speed_number(layout.rotation_rad),
+            layout.bounding_width,
+            layout.bounding_height
+        ));
+    }
+
+    if layout.is_translucent() {
+        filter_complex.push_str(&format!(
+            ",colorchannelmixer=aa={}",
+            format_speed_number(layout.opacity)
+        ));
+    }
+
+    filter_complex.push_str(&format!("[{}];", staged_label));
+
+    // The canvas has to last at least one frame or the segment renders empty.
+    let minimum_duration_sec = if fps.is_finite() && fps > 0.0 {
+        1.0 / fps
+    } else {
+        TIMELINE_EPSILON_SEC
+    };
+    let slot_duration_sec = duration_sec.max(minimum_duration_sec);
+    append_black_video_gap(
+        filter_complex,
+        &canvas_label,
+        slot_duration_sec,
+        width,
+        height,
+        fps,
+        pixel_format,
+    );
+
+    // No `shortest=1`: it ends the composite at whichever input runs out first,
+    // which is the *overlay* whenever the clip's stream is shorter than its slot.
+    // A 25 fps source in a 30 fps canvas loses the tail frames that way, and a
+    // one-frame still produces no video stream at all. The canvas is the main
+    // input and already carries the slot's length, `eof_action` defaults to
+    // `repeat` so a short overlay holds its last frame, and the explicit `trim`
+    // afterwards pins the segment to exactly the slot for long streams too.
+    filter_complex.push_str(&format!(
+        "[{}][{}]overlay=x={}:y={}:format={},setsar=1,fps={},trim=duration={},setpts=PTS-STARTPTS,format={}[{}];",
+        canvas_label,
+        staged_label,
+        layout.overlay_x,
+        layout.overlay_y,
+        overlay_format,
+        format_speed_number(fps),
+        format_speed_number(slot_duration_sec),
+        pixel_format,
+        output_label
+    ));
+}
+
+/// The alpha-carrying format to stage an opacity-only clip in.
+///
+/// `colorchannelmixer` works in RGB, so an 8-bit clip is cheaper to attenuate in
+/// `rgba` than in `yuva420p` — the latter makes FFmpeg auto-insert a conversion
+/// to `argb` and back. A 10-bit export has no 8-bit-free RGBA equivalent in the
+/// graph's working depth, so it keeps its planar YUV-alpha format.
+fn opacity_only_alpha_format(alpha_format: &'static str) -> &'static str {
+    match alpha_format {
+        "yuva420p" => "rgba",
+        other => other,
+    }
+}
+
+/// The working format and `overlay` mode that keep a composite at the output's
+/// bit depth.
+///
+/// `overlay` defaults to 8-bit `yuv420`, so a 10-bit export whose clip happened
+/// to be transformed would quietly lose two bits per channel on the way through.
+fn transform_composition_formats(pixel_format: &str) -> (&'static str, &'static str) {
+    match pixel_format {
+        "yuv422p10le" => ("yuva422p10le", "yuv422p10"),
+        "yuv420p10le" => ("yuva420p10le", "yuv420p10"),
+        _ => ("yuva420p", "yuv420"),
+    }
 }
 
 pub(super) fn append_black_video_gap(
@@ -4013,6 +4525,22 @@ impl ExportEngine {
         width: Option<u32>,
         height: Option<u32>,
     ) -> FilterGraph {
+        build_clip_filter_graph(clip, effects, width, height)
+    }
+}
+
+/// Builds the effect chain for one clip.
+///
+/// Free-standing because validation has to walk the same chain the render will
+/// emit — to work out what size the picture is by the time the transform stage
+/// sees it — and validation has no `ExportEngine` to hand.
+pub(super) fn build_clip_filter_graph(
+    clip: &Clip,
+    effects: &std::collections::HashMap<String, Effect>,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> FilterGraph {
+    {
         use crate::core::effects::EffectType;
 
         let mut graph = FilterGraph::new();
@@ -4061,7 +4589,9 @@ impl ExportEngine {
 
         graph
     }
+}
 
+impl ExportEngine {
     /// Build FFmpeg complex filter with audio stream awareness
     ///
     /// This method properly handles clips without audio streams by:
@@ -5119,15 +5649,46 @@ fn validate_caption_track_qc(
     }
 }
 
-/// Validate export settings before starting export
+/// Validate export settings before starting export.
+///
+/// This can spawn FFprobe (see [`validate_export_settings_with_dimensions`]), so
+/// callers on an async runtime must run it on a blocking thread.
 pub fn validate_export_settings(
     sequence: &Sequence,
     assets: &std::collections::HashMap<String, Asset>,
     effects: &std::collections::HashMap<String, Effect>,
     settings: &ExportSettings,
 ) -> ExportValidation {
+    validate_export_settings_with_dimensions(sequence, assets, effects, settings, None)
+}
+
+/// Validate export settings, reusing source dimensions someone already measured.
+///
+/// Placing a transformed clip needs the source's real pixel size. Without
+/// `known_source_dimensions` this measures the sources itself, which spawns a
+/// synchronous FFprobe per transformed asset — pass
+/// [`source_dimensions_from_audio_info`] when the export has already probed.
+pub fn validate_export_settings_with_dimensions(
+    sequence: &Sequence,
+    assets: &std::collections::HashMap<String, Asset>,
+    effects: &std::collections::HashMap<String, Effect>,
+    settings: &ExportSettings,
+    known_source_dimensions: Option<&SourceDimensionMap>,
+) -> ExportValidation {
     let mut validation = ExportValidation::valid();
     let timeline_clock = TimelineClock::new(sequence.format.fps.clone());
+    let (canvas_width, canvas_height) = output_video_dimensions(sequence, settings);
+    // Seeded from whatever the caller already measured, then filled in by the
+    // same resolver the filtergraph builder uses, so validation and the render
+    // cannot disagree about how big a source is.
+    let mut source_dimensions: SourceDimensionCache = known_source_dimensions
+        .map(|known| {
+            known
+                .iter()
+                .map(|(asset_id, dimensions)| (asset_id.clone(), Some(*dimensions)))
+                .collect()
+        })
+        .unwrap_or_default();
 
     for error in validate_export_settings_options(settings) {
         validation.add_error(error);
@@ -5213,10 +5774,18 @@ pub fn validate_export_settings(
                 ));
             }
 
-            if track.kind == TrackKind::Video && clip_uses_unsupported_visual_composition(clip) {
-                validation.add_error(format!(
-                    "Clip '{}' uses transform or opacity settings that final render export does not support yet",
-                    clip.id
+            // Motion is stored, round-trips through the project, and animates in
+            // the preview; what it is not is rendered. The export composites the
+            // clip once, at its base transform, so the caller is told what the
+            // file will actually show rather than left to discover it.
+            if track.kind == TrackKind::Video
+                && clip_motion_differs_from_base_transform(clip)
+                && !clip.is_adjustment_layer()
+                && !is_text_clip(clip)
+            {
+                validation.add_warning(format!(
+                    "Motion keyframes on clip '{}' on track '{}' are not yet rendered; the clip renders with its base transform",
+                    clip.id, track.name
                 ));
             }
 
@@ -5256,6 +5825,35 @@ pub fn validate_export_settings(
                     "Invalid asset path for asset '{}': {}",
                     asset.id, err
                 ));
+            }
+
+            // Placing a transformed clip needs the source's real pixel size. An
+            // identity clip is only fitted to the canvas, so it never pays for
+            // this and never fails on it.
+            if track.kind == TrackKind::Video && clip_needs_transform_composition(clip) {
+                match resolve_asset_source_dimensions(asset, &mut source_dimensions) {
+                    None => validation.add_error(format!(
+                        "Could not determine source dimensions of asset '{}' needed to place transformed clip '{}'",
+                        asset.id, clip.id
+                    )),
+                    Some(probed_dimensions) => {
+                        // The clip's own effects can resize the picture before
+                        // the transform sees it. Failing loudly beats scaling
+                        // against a size that is no longer true.
+                        let graph = build_clip_filter_graph(
+                            clip,
+                            effects,
+                            Some(canvas_width),
+                            Some(canvas_height),
+                        );
+                        if let Err(effect_label) =
+                            effective_source_dimensions(probed_dimensions, &graph)
+                        {
+                            validation
+                                .add_error(unmeasurable_effect_message(&effect_label, &clip.id));
+                        }
+                    }
+                }
             }
 
             validate_clip_asset_qc(&mut validation, clip, track, asset, sequence, settings);
@@ -5390,6 +5988,7 @@ pub fn detect_timeline_gaps(sequence: &Sequence) -> Vec<TimelineGap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::timeline::Transform;
 
     fn create_temp_media_file(filename: &str) -> String {
         let dir = std::env::temp_dir().join("openreelio-test-media");
@@ -5601,7 +6200,10 @@ mod tests {
         let mut audio_info = HashMap::new();
         audio_info.insert(
             "video_asset".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
         let settings = ExportSettings::default();
         let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
@@ -6474,8 +7076,14 @@ mod tests {
             .any(|error| error.to_lowercase().contains("blend mode export")));
     }
 
+    /// Feature: Transformed clips in the final render
+    /// Scenario: a moved, translucent clip exports instead of being refused
+    ///
+    /// The preview has always let a clip be moved and faded. Export used to
+    /// reject exactly those clips, so a project that looked finished could not
+    /// be rendered at all. The composite path renders them now.
     #[test]
-    fn test_validation_rejects_clip_transform_or_opacity_that_export_cannot_render() {
+    fn test_validation_accepts_a_clip_the_export_now_composites() {
         use crate::core::assets::VideoInfo;
         use crate::core::timeline::{Clip, SequenceFormat, Track};
         use crate::core::Point2D;
@@ -6496,6 +7104,61 @@ mod tests {
         let mut video_asset = Asset::new_video(
             "validation_transform.mp4",
             &video_path,
+            VideoInfo {
+                width: 1280,
+                height: 720,
+                ..VideoInfo::default()
+            },
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            validation.is_valid,
+            "a transformed, translucent clip must export. Got: {:?}",
+            validation.errors
+        );
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: an unmeasurable source is refused instead of guessed at
+    ///
+    /// The import placeholder is a non-zero 1920x1080, so a transformed clip
+    /// whose file cannot be probed used to be placed as though it were exactly
+    /// 1080p — right-looking on 1080p footage, silently stretched on anything
+    /// else. Refusing is the only honest answer.
+    #[test]
+    fn test_validation_refuses_a_transformed_clip_with_no_measurable_source() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+        use crate::core::Point2D;
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.transform.position = Point2D::new(0.25, 0.75);
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        // An empty file FFprobe cannot read, carrying the untouched import
+        // placeholder as its only stored metadata.
+        let video_path = create_temp_media_file("validation_unmeasurable.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_unmeasurable.mp4",
+            &video_path,
             VideoInfo::default(),
         )
         .with_duration(3.0)
@@ -6514,9 +7177,136 @@ mod tests {
             validation
                 .errors
                 .iter()
-                .any(|error| error.to_lowercase().contains("transform or opacity")),
-            "Expected unsupported transform/opacity validation error. Got: {:?}",
+                .any(|error| error.contains("Could not determine source dimensions")),
+            "an unmeasurable transformed clip must be refused. Got: {:?}",
             validation.errors
+        );
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: caller-supplied measurements spare validation its own probes
+    #[test]
+    fn test_validation_uses_pre_resolved_source_dimensions() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+        use crate::core::Point2D;
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.transform.position = Point2D::new(0.25, 0.75);
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_preresolved.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_preresolved.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let known: SourceDimensionMap = [("video_asset".to_string(), (1080_u32, 1920_u32))]
+            .into_iter()
+            .collect();
+
+        let validation = validate_export_settings_with_dimensions(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+            Some(&known),
+        );
+
+        assert!(
+            validation.is_valid,
+            "an already-measured source needs no probe of its own. Got: {:?}",
+            validation.errors
+        );
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: keyframed motion renders static, and says so
+    ///
+    /// The preview animates `motion_keyframes`; the export composites the clip
+    /// once. Silently rendering the base transform would hand back a file that
+    /// disagrees with what the editor just watched.
+    #[test]
+    fn test_validation_warns_that_motion_keyframes_render_static() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track, TransformKeyframe};
+        use crate::core::Point2D;
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.id = "moving-clip".to_string();
+        clip.motion_keyframes = vec![
+            TransformKeyframe {
+                time_offset: 0.0,
+                transform: Transform::default(),
+                interpolation: Default::default(),
+            },
+            TransformKeyframe {
+                time_offset: 3.0,
+                transform: Transform {
+                    position: Point2D::new(0.75, 0.5),
+                    ..Transform::default()
+                },
+                interpolation: Default::default(),
+            },
+        ];
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_motion.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset =
+            Asset::new_video("validation_motion.mp4", &video_path, VideoInfo::default())
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            validation.is_valid,
+            "keyframed motion must not block the export: {:?}",
+            validation.errors
+        );
+        let warning = validation
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("Motion keyframes"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "keyframed motion must be reported: {:?}",
+                    validation.warnings
+                )
+            });
+        assert!(
+            warning.contains("moving-clip"),
+            "the warning must name the clip: {warning}"
+        );
+        assert!(
+            warning.contains("base transform"),
+            "the warning must say what happens instead: {warning}"
         );
     }
 
@@ -7421,7 +8211,10 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "video_asset".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let proxy_args = build_complex_filter_args_with_audio_info(
@@ -7698,6 +8491,7 @@ mod tests {
                 bitrate: Some(8_000_000),
                 is_hdr: false,
                 color_transfer: None,
+                rotation_deg: 0.0,
             }),
             audio: Some(AudioStreamInfo {
                 sample_rate: 48000,
@@ -7728,6 +8522,7 @@ mod tests {
                 bitrate: Some(8_000_000),
                 is_hdr: false,
                 color_transfer: None,
+                rotation_deg: 0.0,
             }),
             audio: None, // No audio stream
             format: "mp4".to_string(),
@@ -7771,7 +8566,10 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "silent_asset".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let effects = std::collections::HashMap::new();
@@ -7841,7 +8639,10 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "audio_asset".to_string(),
-            AssetAudioInfo { has_audio: true },
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let effects = std::collections::HashMap::new();
@@ -7892,7 +8693,10 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "audio_asset".to_string(),
-            AssetAudioInfo { has_audio: true },
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
@@ -7978,9 +8782,18 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "broken_video".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
-        audio_info_map.insert("voiceover".to_string(), AssetAudioInfo { has_audio: true });
+        audio_info_map.insert(
+            "voiceover".to_string(),
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
+        );
 
         let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
             ffmpeg_path: PathBuf::from("/usr/bin/ffmpeg"),
@@ -8068,10 +8881,19 @@ mod tests {
         assets.insert(silent_video.id.clone(), silent_video);
 
         let mut audio_info_map = std::collections::HashMap::new();
-        audio_info_map.insert("voiceover".to_string(), AssetAudioInfo { has_audio: true });
+        audio_info_map.insert(
+            "voiceover".to_string(),
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
+        );
         audio_info_map.insert(
             "silent_video".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
@@ -8134,9 +8956,21 @@ mod tests {
 
         let mut assets = std::collections::HashMap::new();
         let mut audio_info_map = std::collections::HashMap::new();
-        audio_info_map.insert("voiceover".to_string(), AssetAudioInfo { has_audio: true });
+        audio_info_map.insert(
+            "voiceover".to_string(),
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
+        );
         if let Some(asset) = tail_asset {
-            audio_info_map.insert(asset.id.clone(), AssetAudioInfo { has_audio: true });
+            audio_info_map.insert(
+                asset.id.clone(),
+                AssetAudioInfo {
+                    has_audio: true,
+                    ..AssetAudioInfo::default()
+                },
+            );
             assets.insert(asset.id.clone(), asset);
         }
         assets.insert(voiceover.id.clone(), voiceover);
@@ -8338,11 +9172,17 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "visible_video".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
         audio_info_map.insert(
             "hidden_video".to_string(),
-            AssetAudioInfo { has_audio: true },
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let args = build_complex_filter_args_with_audio_info(
@@ -8399,7 +9239,10 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "video_asset".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let effects = std::collections::HashMap::new();
@@ -8528,7 +9371,10 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "video_asset".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let effects = std::collections::HashMap::new();
@@ -8618,7 +9464,10 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "video_asset".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let mut text_effect = Effect::new(EffectType::TextOverlay);
@@ -8710,7 +9559,10 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "video_asset".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let mut text_effect = Effect::new(EffectType::TextOverlay);
@@ -8777,7 +9629,10 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "video_asset".to_string(),
-            AssetAudioInfo { has_audio: true },
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let args = build_complex_filter_args_with_audio_info(
@@ -8839,8 +9694,20 @@ mod tests {
         assets.insert(asset2.id.clone(), asset2);
 
         let mut audio_info = HashMap::new();
-        audio_info.insert("asset1".to_string(), AssetAudioInfo { has_audio: true });
-        audio_info.insert("asset2".to_string(), AssetAudioInfo { has_audio: true });
+        audio_info.insert(
+            "asset1".to_string(),
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
+        );
+        audio_info.insert(
+            "asset2".to_string(),
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
+        );
 
         let args = build_complex_filter_args_with_audio_info(
             &sequence,
@@ -8980,6 +9847,411 @@ mod tests {
             .expect("filter_complex argument")
     }
 
+    /// A 1080p sequence holding one 720p clip for three seconds.
+    ///
+    /// The source is deliberately smaller than the canvas so the "fit the source
+    /// into the canvas first" half of the placement contract is exercised rather
+    /// than cancelling out at 1:1.
+    fn sequence_with_one_transformed_clip(
+        transform: Transform,
+        opacity: f32,
+    ) -> (Sequence, std::collections::HashMap<String, Asset>) {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat};
+
+        let mut sequence = Sequence::new("Transform", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.transform = transform;
+        clip.opacity = opacity;
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("transform_source.mp4");
+        let mut video_asset = Asset::new_video(
+            "transform_source.mp4",
+            &video_path,
+            VideoInfo {
+                width: 1280,
+                height: 720,
+                ..VideoInfo::default()
+            },
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert(video_asset.id.clone(), video_asset);
+
+        (sequence, assets)
+    }
+
+    fn build_transform_filter_complex(transform: Transform, opacity: f32) -> String {
+        let (sequence, assets) = sequence_with_one_transformed_clip(transform, opacity);
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings::default(),
+        )
+        .expect("a transformed clip should build a filtergraph");
+        filter_complex_of(&args).to_string()
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: a 10-bit export composites at 10 bits
+    ///
+    /// `overlay` defaults to 8-bit `yuv420`. Leaving it there would mean a clip
+    /// quietly lost two bits per channel for no reason other than having been
+    /// moved, which is the kind of loss nobody would think to look for.
+    #[test]
+    fn test_build_filter_keeps_a_ten_bit_export_at_ten_bits() {
+        let (sequence, assets) = sequence_with_one_transformed_clip(Transform::default(), 0.5);
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings {
+                bit_depth: Some(10),
+                ..ExportSettings::default()
+            },
+        )
+        .expect("a ten-bit transformed clip should build a filtergraph");
+        let filter_complex = filter_complex_of(&args);
+
+        assert!(
+            filter_complex.contains("format=yuva420p10le,colorchannelmixer=aa=0.5"),
+            "the alpha stage must keep the output's bit depth. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("format=yuv420p10,setsar=1,fps=30,trim=duration=3,"),
+            "the composite must not downconvert the canvas. Got: {filter_complex}"
+        );
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: a scaled, repositioned clip is composited onto the canvas
+    ///
+    /// 1280x720 fits a 1920x1080 canvas at 1.5x, halved by the clip scale to
+    /// 960x540. Its centre lands at (0.3 * 1920, 0.75 * 1080) = (576, 810), so
+    /// the frame's top-left corner is (96, 540).
+    #[test]
+    fn test_build_filter_composites_a_scaled_and_moved_clip() {
+        use crate::core::Point2D;
+
+        let filter_complex = build_transform_filter_complex(
+            Transform {
+                scale: Point2D::new(0.5, 0.5),
+                position: Point2D::new(0.3, 0.75),
+                ..Transform::default()
+            },
+            1.0,
+        );
+
+        assert!(
+            filter_complex.contains("scale=960:540,setsar=1[vnorm0_tx];"),
+            "the clip must be scaled to its transformed size. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex
+                .contains("color=c=black:s=1920x1080:r=30:d=3,format=yuv420p[vnorm0_bg];"),
+            "the composite needs a canvas as long as the clip. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains(
+                "[vnorm0_bg][vnorm0_tx]overlay=x=96:y=540:format=yuv420,setsar=1,fps=30,trim=duration=3,setpts=PTS-STARTPTS,format=yuv420p[vnorm0];"
+            ),
+            "the clip must be placed at the transformed corner. Got: {filter_complex}"
+        );
+        assert!(
+            !filter_complex.contains("colorchannelmixer"),
+            "a fully opaque clip must not pay for an alpha filter. Got: {filter_complex}"
+        );
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: a faded clip keeps its framing and gains an alpha stage
+    #[test]
+    fn test_build_filter_renders_clip_opacity() {
+        let filter_complex = build_transform_filter_complex(Transform::default(), 0.5);
+
+        assert!(
+            filter_complex.contains(
+                "scale=1920:1080,setsar=1,format=rgba,colorchannelmixer=aa=0.5[vnorm0_tx];"
+            ),
+            "a faded clip must be attenuated before compositing. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("overlay=x=0:y=0:format=yuv420,"),
+            "an untransformed faded clip still fills the canvas. Got: {filter_complex}"
+        );
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: a rotated clip gets a box big enough for its own corners
+    ///
+    /// A 960x540 frame turned a quarter turn sweeps a 540x960 box. Rotating
+    /// about the centre anchor leaves the picture centred, so the box's corner
+    /// is (960 - 270, 540 - 480).
+    #[test]
+    fn test_build_filter_rotates_a_clip_into_a_bounding_box() {
+        use crate::core::Point2D;
+
+        let filter_complex = build_transform_filter_complex(
+            Transform {
+                scale: Point2D::new(0.5, 0.5),
+                rotation_deg: 90.0,
+                ..Transform::default()
+            },
+            1.0,
+        );
+
+        assert!(
+            filter_complex.contains(
+                "scale=960:540,setsar=1,format=yuva420p,rotate=1.570796:ow=540:oh=960:c=black@0[vnorm0_tx];"
+            ),
+            "the rotation must be given a box that fits the turned frame. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("overlay=x=690:y=60:format=yuv420,"),
+            "the rotated frame must stay centred on its anchor. Got: {filter_complex}"
+        );
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: an untouched clip keeps the cheaper letterbox graph
+    ///
+    /// The composite path costs an extra canvas source and an overlay per clip.
+    /// Nothing about an identity clip needs either, and the whole existing corpus
+    /// of graph-shape tests is written against the fit-and-pad chain.
+    #[test]
+    fn test_build_filter_leaves_an_identity_clip_on_the_normalization_path() {
+        let filter_complex = build_transform_filter_complex(Transform::default(), 1.0);
+
+        assert!(
+            filter_complex.contains(
+                "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[vnorm0];"
+            ),
+            "an identity clip must still be fitted and padded. Got: {filter_complex}"
+        );
+        assert!(
+            !filter_complex.contains("overlay="),
+            "an identity clip must not be composited. Got: {filter_complex}"
+        );
+    }
+
+    /// Builds a one-effect graph the dimension walker can be pointed at.
+    fn graph_with_effect(effect: Effect) -> FilterGraph {
+        let mut graph = FilterGraph::new();
+        graph.add_effect(effect);
+        graph.sort_by_order();
+        graph
+    }
+
+    /// Feature: Effect-aware transform placement
+    /// Scenario: a crop resizes the picture the transform is measured against
+    ///
+    /// The transform emits an absolute `scale=W:H`. Measuring it against the
+    /// file on disk while the effect chain hands it a cropped frame stretches
+    /// the clip by exactly the crop ratio.
+    #[test]
+    fn test_effective_source_dimensions_follows_a_crop() {
+        let mut crop = Effect::new(EffectType::Crop);
+        crop.set_param("width", ParamValue::Float(640.0));
+        crop.set_param("height", ParamValue::Float(360.0));
+        crop.set_param("x", ParamValue::Float(0.0));
+        crop.set_param("y", ParamValue::Float(0.0));
+
+        let dimensions = effective_source_dimensions((1920, 1080), &graph_with_effect(crop))
+            .expect("a crop's output size is written into the filter");
+
+        assert_eq!(dimensions, (640, 360));
+    }
+
+    /// Feature: Effect-aware transform placement
+    /// Scenario: a zoom hands the transform a fixed 1280x720 frame
+    ///
+    /// `zoompan` is emitted with `s=hd720`, so the picture reaching the
+    /// transform is 720p no matter how big the source was — this bites even a
+    /// clip whose only "transform" is an opacity change.
+    #[test]
+    fn test_effective_source_dimensions_follows_a_zoom() {
+        let mut zoom = Effect::new(EffectType::Zoom);
+        zoom.set_param("zoom_type", ParamValue::String("in".to_string()));
+        zoom.set_param("duration", ParamValue::Float(2.0));
+        zoom.set_param("zoom_factor", ParamValue::Float(1.5));
+
+        let dimensions = effective_source_dimensions((3840, 2160), &graph_with_effect(zoom))
+            .expect("zoompan states its output size");
+
+        assert_eq!(dimensions, (1280, 720));
+    }
+
+    /// Feature: Effect-aware transform placement
+    /// Scenario: effects that do not resize leave the measurement alone
+    #[test]
+    fn test_effective_source_dimensions_ignores_non_resizing_effects() {
+        let mut brightness = Effect::new(EffectType::Brightness);
+        brightness.set_param("value", ParamValue::Float(0.2));
+
+        let dimensions =
+            effective_source_dimensions((1280, 720), &graph_with_effect(brightness)).unwrap();
+
+        assert_eq!(dimensions, (1280, 720));
+    }
+
+    /// Feature: Effect-aware transform placement
+    /// Scenario: a crop that cannot be measured is refused rather than guessed
+    ///
+    /// `AutoReframe` without analysis data emits `null`, but a crop whose size
+    /// is an expression would be unreadable. Placing the clip anyway would put
+    /// it silently in the wrong place and at the wrong size.
+    #[test]
+    fn test_effective_source_dimensions_refuses_an_unreadable_resize() {
+        let unreadable = "crop=iw/2:ih/2:0:0";
+
+        assert!(matches!(
+            filter_segment_dimensions(unreadable),
+            SegmentDimensions::Unknown
+        ));
+    }
+
+    /// Feature: Effect-aware transform placement
+    /// Scenario: a masked effect composites back at the original size
+    ///
+    /// `apply_effect_through_mask_group` overlays the corrected picture onto the
+    /// untouched one, so the group always outputs what it was handed.
+    #[test]
+    fn test_effective_source_dimensions_ignores_a_masked_crop() {
+        use crate::core::masks::{Mask, MaskShape, RectMask};
+
+        let mut crop = Effect::new(EffectType::Crop);
+        crop.set_param("width", ParamValue::Float(640.0));
+        crop.set_param("height", ParamValue::Float(360.0));
+        crop.masks
+            .masks
+            .push(Mask::new(MaskShape::Rectangle(RectMask::default())));
+
+        let dimensions =
+            effective_source_dimensions((1920, 1080), &graph_with_effect(crop)).unwrap();
+
+        assert_eq!(dimensions, (1920, 1080));
+    }
+
+    /// Feature: Source measurement
+    /// Scenario: an unprobeable asset with placeholder metadata is unresolvable
+    ///
+    /// `ImportAssetCommand::new` files unenriched video away as a whole
+    /// `VideoInfo::default()`, which is a non-zero 1920x1080. Trusting it would
+    /// turn "nobody measured this" into "it is exactly 1080p".
+    #[test]
+    fn test_resolve_source_dimensions_rejects_the_import_placeholder() {
+        use crate::core::assets::VideoInfo;
+
+        let missing_path = std::env::temp_dir().join("openreelio-does-not-exist.mp4");
+        let mut asset = Asset::new_video(
+            "placeholder.mp4",
+            missing_path.to_string_lossy().as_ref(),
+            VideoInfo::default(),
+        );
+        asset.id = "placeholder_asset".to_string();
+
+        let mut cache = SourceDimensionCache::new();
+        assert_eq!(resolve_asset_source_dimensions(&asset, &mut cache), None);
+    }
+
+    /// Feature: Source measurement
+    /// Scenario: enriched metadata still rescues an unprobeable asset
+    #[test]
+    fn test_resolve_source_dimensions_falls_back_to_measured_metadata() {
+        use crate::core::assets::VideoInfo;
+
+        let missing_path = std::env::temp_dir().join("openreelio-does-not-exist.mp4");
+        let mut asset = Asset::new_video(
+            "measured.mp4",
+            missing_path.to_string_lossy().as_ref(),
+            VideoInfo {
+                width: 1080,
+                height: 1920,
+                ..VideoInfo::default()
+            },
+        );
+        asset.id = "measured_asset".to_string();
+
+        let mut cache = SourceDimensionCache::new();
+        assert_eq!(
+            resolve_asset_source_dimensions(&asset, &mut cache),
+            Some((1080, 1920))
+        );
+    }
+
+    /// Feature: Truthful degradation
+    /// Scenario: motion that matches the base transform is not worth a warning
+    ///
+    /// The export composites the clip once at its base transform. Keyframes that
+    /// describe exactly that picture change nothing, and warning about them
+    /// teaches callers to ignore the warning that matters.
+    #[test]
+    fn test_motion_warning_only_fires_when_the_keyframes_move_the_clip() {
+        use crate::core::timeline::{Clip, KeyframeInterpolation, TransformKeyframe};
+        use crate::core::Point2D;
+
+        let base = Transform {
+            position: Point2D::new(0.25, 0.5),
+            ..Transform::default()
+        };
+        let keyframe_at = |time_offset: f64, transform: Transform| TransformKeyframe {
+            time_offset,
+            transform,
+            interpolation: KeyframeInterpolation::Linear,
+        };
+
+        let mut clip = Clip::new("asset").with_source_range(0.0, 2.0).place_at(0.0);
+        clip.transform = base.clone();
+        assert!(!clip_motion_differs_from_base_transform(&clip));
+
+        clip.motion_keyframes = vec![keyframe_at(0.0, base.clone())];
+        assert!(
+            !clip_motion_differs_from_base_transform(&clip),
+            "a lone keyframe equal to the base renders exactly as the export already does"
+        );
+
+        clip.motion_keyframes = vec![
+            keyframe_at(0.0, base.clone()),
+            keyframe_at(1.0, base.clone()),
+        ];
+        assert!(
+            !clip_motion_differs_from_base_transform(&clip),
+            "keyframes that never differ describe a static clip"
+        );
+
+        clip.motion_keyframes = vec![
+            keyframe_at(0.0, base.clone()),
+            keyframe_at(
+                1.0,
+                Transform {
+                    position: Point2D::new(0.75, 0.5),
+                    ..Transform::default()
+                },
+            ),
+        ];
+        assert!(
+            clip_motion_differs_from_base_transform(&clip),
+            "motion the export will not render must be reported"
+        );
+
+        clip.motion_keyframes = vec![keyframe_at(0.0, Transform::default())];
+        assert!(
+            clip_motion_differs_from_base_transform(&clip),
+            "a single keyframe that disagrees with the base is still a difference"
+        );
+    }
+
     /// Feature: Render output length
     /// Scenario: a tail clip that emits no stream still holds the render open
     ///
@@ -9045,7 +10317,10 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "hidden_asset".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let args = build_complex_filter_args_with_audio_info(
@@ -9187,7 +10462,13 @@ mod tests {
         assets.insert(asset.id.clone(), asset);
 
         let mut audio_info = HashMap::new();
-        audio_info.insert("asset1".to_string(), AssetAudioInfo { has_audio: true });
+        audio_info.insert(
+            "asset1".to_string(),
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
+        );
 
         let args = build_complex_filter_args_with_audio_info(
             &sequence,
@@ -9248,7 +10529,10 @@ mod tests {
         let mut audio_info = HashMap::new();
         audio_info.insert(
             "shared_asset".to_string(),
-            AssetAudioInfo { has_audio: true },
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let args = build_complex_filter_args_with_audio_info(
@@ -9326,7 +10610,10 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "video_asset".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let effects = std::collections::HashMap::new();
@@ -9432,7 +10719,10 @@ mod tests {
         let mut audio_info_map = std::collections::HashMap::new();
         audio_info_map.insert(
             "normal_asset".to_string(),
-            AssetAudioInfo { has_audio: true },
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let effects = std::collections::HashMap::new();
@@ -9518,10 +10808,19 @@ mod tests {
 
         // Create audio info map
         let mut audio_info_map = std::collections::HashMap::new();
-        audio_info_map.insert("with_audio".to_string(), AssetAudioInfo { has_audio: true });
+        audio_info_map.insert(
+            "with_audio".to_string(),
+            AssetAudioInfo {
+                has_audio: true,
+                ..AssetAudioInfo::default()
+            },
+        );
         audio_info_map.insert(
             "without_audio".to_string(),
-            AssetAudioInfo { has_audio: false },
+            AssetAudioInfo {
+                has_audio: false,
+                ..AssetAudioInfo::default()
+            },
         );
 
         let effects = std::collections::HashMap::new();
@@ -9613,6 +10912,7 @@ mod tests {
                 asset_id,
                 AssetAudioInfo {
                     has_audio: with_audio,
+                    ..AssetAudioInfo::default()
                 },
             );
 

@@ -23,6 +23,7 @@ mod commands;
 mod detection;
 pub mod installer;
 mod resolver;
+pub mod rotation;
 mod runner;
 mod state;
 
@@ -36,6 +37,7 @@ pub use resolver::{
     resolve_and_register, resolve_ffmpeg, resolved_ffmpeg_path, resolved_ffprobe_path,
     set_resolved_paths, FFmpegResolveOptions, ResolvedFFmpeg, FFMPEG_PATH_ENV, FFPROBE_PATH_ENV,
 };
+pub use rotation::{display_dimensions, normalize_rotation_deg, rotation_swaps_dimensions};
 pub use runner::{
     capture_filter_stderr, AudioStreamInfo, FFmpegProgress, FFmpegRunner, FilterCapture,
     FilterMode, FrameExtractOptions, MediaInfo, RenderSettings, VideoStreamInfo, WaveformData,

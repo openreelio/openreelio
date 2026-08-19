@@ -85,10 +85,30 @@ fn project_path(dir: &tempfile::TempDir, name: &str) -> String {
     dir.path().join(name).to_string_lossy().to_string()
 }
 
-fn system_ffmpeg_path() -> Option<PathBuf> {
-    openreelio_core::ffmpeg::detect_system_ffmpeg()
-        .ok()
-        .map(|info| info.ffmpeg_path)
+/// The FFmpeg the CLI under test would actually use.
+///
+/// Resolving PATH alone made every render test skip itself on any machine — CI
+/// included — where FFmpeg is bundled next to the binary or installed through
+/// the in-app manager rather than being on PATH. Those runs reported green
+/// while executing nothing. This mirrors `ffmpeg_env::resolve_options`: the
+/// executable's own directory is the only resource root, then the managed
+/// install, then dev-mode binaries, then PATH.
+fn available_ffmpeg_path() -> Option<PathBuf> {
+    let resource_roots = cli_bin()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .into_iter()
+        .collect();
+
+    openreelio_core::ffmpeg::resolve_ffmpeg(&openreelio_core::ffmpeg::FFmpegResolveOptions {
+        resource_roots,
+        // The CLI is launched with the overrides cleared, so the tests resolve
+        // without them too.
+        use_env: false,
+        ..Default::default()
+    })
+    .ok()
+    .map(|info| info.ffmpeg_path)
 }
 
 /// Run a CLI command from `cwd` with extra environment variables applied.
@@ -215,7 +235,7 @@ fn create_sample_video(path: &std::path::Path) -> bool {
 }
 
 fn create_sample_video_with_duration(path: &std::path::Path, duration_secs: u32) -> bool {
-    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
         return false;
     };
 
@@ -270,7 +290,7 @@ fn preferred_video_encoder(ffmpeg_path: &std::path::Path) -> Option<&'static str
 /// Shot detection needs an unambiguous scene change; a single flat colour
 /// source produces none.
 fn create_sample_video_with_scene_change(path: &std::path::Path) -> bool {
-    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
         return false;
     };
     let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
@@ -315,7 +335,7 @@ fn create_sample_video_with_scene_change(path: &std::path::Path) -> bool {
 /// Silence detection and audio profiling need a real audio stream; the plain
 /// colour fixture is video-only.
 fn create_sample_video_with_audio(path: &std::path::Path) -> bool {
-    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
         return false;
     };
     let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
@@ -361,7 +381,7 @@ fn create_sample_video_with_audio(path: &std::path::Path) -> bool {
 /// Generates a 4-second audio-only WAV fixture, for tests that need a clip an
 /// audio track will accept.
 fn create_sample_audio(path: &std::path::Path) -> bool {
-    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
         return false;
     };
 
@@ -392,7 +412,7 @@ fn create_sample_audio(path: &std::path::Path) -> bool {
 /// rendered proxy stays well under the true-peak ceiling `verify` enforces;
 /// a full-scale sine would be a clipped, not a healthy, render.
 fn create_sample_video_with_scene_change_and_audio(path: &std::path::Path) -> bool {
-    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
         return false;
     };
     let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
@@ -444,16 +464,90 @@ fn create_sample_video_with_scene_change_and_audio(path: &std::path::Path) -> bo
     status.success()
 }
 
-fn system_ffprobe_path() -> Option<PathBuf> {
-    openreelio_core::ffmpeg::detect_system_ffmpeg()
-        .ok()
-        .map(|info| info.ffprobe_path)
+/// The FFprobe that ships with the FFmpeg the CLI under test would use.
+///
+/// Resolved the same way as [`available_ffmpeg_path`] so the measurement tools
+/// are available wherever the CLI itself can render.
+fn available_ffprobe_path() -> Option<PathBuf> {
+    let resource_roots = cli_bin()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .into_iter()
+        .collect();
+
+    openreelio_core::ffmpeg::resolve_ffmpeg(&openreelio_core::ffmpeg::FFmpegResolveOptions {
+        resource_roots,
+        use_env: false,
+        ..Default::default()
+    })
+    .ok()
+    .map(|info| info.ffprobe_path)
+}
+
+/// Reads the nominal frame rate of a rendered file's video stream.
+fn ffprobe_video_fps(path: &std::path::Path) -> Option<f64> {
+    let ffprobe_path = available_ffprobe_path()?;
+    let output = Command::new(ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.trim();
+    match text.split_once('/') {
+        Some((numerator, denominator)) => {
+            let numerator: f64 = numerator.trim().parse().ok()?;
+            let denominator: f64 = denominator.trim().parse().ok()?;
+            (denominator > 0.0).then_some(numerator / denominator)
+        }
+        None => text.parse().ok(),
+    }
+}
+
+/// Counts the video frames a rendered file actually contains.
+///
+/// Decoded frame-by-frame rather than derived from the container duration: a
+/// composite that silently dropped its tail still reports a plausible duration,
+/// and only the frame count catches it.
+fn ffprobe_video_frame_count(path: &std::path::Path) -> Option<u64> {
+    let ffprobe_path = available_ffprobe_path()?;
+    let output = Command::new(ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 /// Probe the total duration (in seconds) of a media file via ffprobe.
 /// Returns `None` if ffprobe is unavailable or the output cannot be parsed.
 fn ffprobe_duration_secs(path: &std::path::Path) -> Option<f64> {
-    let ffprobe_path = system_ffprobe_path()?;
+    let ffprobe_path = available_ffprobe_path()?;
     let output = Command::new(ffprobe_path)
         .args([
             "-v",
@@ -477,7 +571,7 @@ fn ffprobe_duration_secs(path: &std::path::Path) -> Option<f64> {
 /// This is deliberately not `format=duration`: the container duration is the
 /// maximum across all streams, so it says nothing about where the pictures stop.
 fn ffprobe_video_duration_secs(path: &std::path::Path) -> Option<f64> {
-    let ffprobe_path = system_ffprobe_path()?;
+    let ffprobe_path = available_ffprobe_path()?;
     let output = Command::new(ffprobe_path)
         .args([
             "-v",
@@ -501,7 +595,7 @@ fn ffprobe_video_duration_secs(path: &std::path::Path) -> Option<f64> {
 /// Probe the height (in pixels) of the first video stream via ffprobe.
 /// Returns `None` if ffprobe is unavailable or the output cannot be parsed.
 fn ffprobe_video_height(path: &std::path::Path) -> Option<u32> {
-    let ffprobe_path = system_ffprobe_path()?;
+    let ffprobe_path = available_ffprobe_path()?;
     let output = Command::new(ffprobe_path)
         .args([
             "-v",
@@ -528,7 +622,7 @@ fn ffprobe_video_height(path: &std::path::Path) -> Option<u32> {
 /// stream. Returns `None` if ffprobe is unavailable or the output cannot be
 /// parsed.
 fn ffprobe_image_size(path: &std::path::Path) -> Option<(u32, u32)> {
-    let ffprobe_path = system_ffprobe_path()?;
+    let ffprobe_path = available_ffprobe_path()?;
     let output = Command::new(ffprobe_path)
         .args([
             "-v",
@@ -1234,7 +1328,7 @@ fn test_render_start_invalid_preset() {
 
 #[test]
 fn test_ffmpeg_info_reports_resolved_binaries() {
-    if system_ffmpeg_path().is_none() {
+    if available_ffmpeg_path().is_none() {
         return;
     }
 
@@ -1264,7 +1358,7 @@ fn test_ffmpeg_info_reports_resolved_binaries() {
 
 #[test]
 fn test_render_start_exports_video_when_ffmpeg_is_available() {
-    if system_ffmpeg_path().is_none() {
+    if available_ffmpeg_path().is_none() {
         return;
     }
 
@@ -1323,6 +1417,706 @@ fn test_render_start_exports_video_when_ffmpeg_is_available() {
     );
 }
 
+/// Generates a flat clip of one colour at an explicit frame size.
+///
+/// The size is a parameter because a transformed clip's placement depends on the
+/// source's aspect ratio: a 16:9 source in a 16:9 canvas needs no letterbox
+/// arithmetic, while a 4:3 one does, and only the second shape can tell a
+/// correctly measured source from a wrongly assumed one.
+fn create_solid_colour_video(
+    path: &std::path::Path,
+    colour: &str,
+    size: &str,
+    duration_secs: u32,
+) -> bool {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        return false;
+    };
+    let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
+        eprintln!("Skipping transform render test: ffmpeg lacks a supported video encoder");
+        return false;
+    };
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!("color=c={colour}:s={size}:r=25:d={duration_secs}"),
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p"]);
+    }
+
+    let status = command
+        .arg(path)
+        .status()
+        .expect("Failed to generate solid colour fixture with ffmpeg");
+    if !status.success() {
+        eprintln!("Skipping transform render test: ffmpeg could not generate the fixture");
+    }
+    status.success()
+}
+
+/// Reads one RGB pixel out of a rendered file.
+///
+/// Returns `None` when ffmpeg is unavailable or produced no pixel, so callers
+/// can skip rather than fail on a machine without a usable ffmpeg.
+fn sample_rendered_pixel(
+    path: &std::path::Path,
+    at_sec: f64,
+    x: u32,
+    y: u32,
+) -> Option<(u8, u8, u8)> {
+    let ffmpeg_path = available_ffmpeg_path()?;
+    let output = Command::new(ffmpeg_path)
+        .args(["-v", "error", "-ss", &at_sec.to_string(), "-i"])
+        .arg(path)
+        .args([
+            // The conversion has to come first: cropping a single pixel out of a
+            // subsampled plane asks for a zero-width chroma plane and fails.
+            "-vf",
+            &format!("format=rgb24,crop=w=1:h=1:x={x}:y={y}"),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() < 3 {
+        return None;
+    }
+    Some((output.stdout[0], output.stdout[1], output.stdout[2]))
+}
+
+/// Imports a fixture, places it on the first video track and trims it to the
+/// fixture's real length, returning `(sequence_id, track_id, clip_id)`.
+///
+/// `asset import` records no probed duration, so the timeline hands the clip its
+/// 10s default; trimming keeps the rendered length a statement about the edit
+/// rather than about a clip that outruns its source.
+fn place_trimmed_clip(path: &str, source_path: &std::path::Path, duration_sec: f64) -> String {
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        path,
+        "--file",
+        source_path.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let clip_id = inserted["createdIds"][0].as_str().unwrap().to_string();
+
+    run_cli_ok(&[
+        "timeline",
+        "trim",
+        "--path",
+        path,
+        "--track",
+        &track_id,
+        "--clip",
+        &clip_id,
+        "--source-in",
+        "0",
+        "--source-out",
+        &duration_sec.to_string(),
+    ]);
+
+    track_id + "|" + &clip_id
+}
+
+/// Feature: Transformed clips in the final render
+/// Scenario: a scaled, repositioned clip lands where the preview puts it
+///
+/// Half scale with the anchor pinned at a quarter of the canvas both ways puts
+/// the picture in the top-left quadrant exactly. Export used to refuse this
+/// clip outright, so the assertions here are about pixels, not exit codes:
+/// source colour inside the quadrant, black outside it, and a file exactly as
+/// long as the timeline.
+#[test]
+fn test_render_transform_places_a_scaled_clip_in_the_top_left_quadrant() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_transform_place");
+    let path = project_path(&dir, "render_transform_place");
+
+    const FIXTURE_SEC: f64 = 2.0;
+    let source_path = dir.path().join("transform_source.mp4");
+    if !create_solid_colour_video(&source_path, "red", "640x360", FIXTURE_SEC as u32) {
+        return;
+    }
+
+    let ids = place_trimmed_clip(&path, &source_path, FIXTURE_SEC);
+    let (track_id, clip_id) = ids.split_once('|').unwrap();
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "SetClipTransform",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "transform": {
+                "position": { "x": 0.25, "y": 0.25 },
+                "scale": { "x": 0.5, "y": 0.5 },
+                "rotationDeg": 0.0,
+                "anchor": { "x": 0.5, "y": 0.5 },
+            },
+        })
+        .to_string(),
+    ]);
+
+    let output_path = dir.path().join("transform-render.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "a transformed clip must render.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let Some((width, height)) = ffprobe_image_size(&output_path) else {
+        return;
+    };
+    assert_eq!(
+        width * 9,
+        height * 16,
+        "the fixture and the canvas must share an aspect ratio for this placement to be exact"
+    );
+
+    // The clip spans the top-left quadrant, so the quadrant boundary runs
+    // through the canvas centre. Sampling at an eighth and seven-eighths keeps
+    // both probes three-quarters of a quadrant away from that edge, where a
+    // one-pixel placement error cannot flip the answer.
+    let inside = sample_rendered_pixel(&output_path, 1.0, width / 8, height / 8)
+        .expect("a pixel inside the placed quadrant");
+    assert!(
+        inside.0 > 150 && inside.1 < 80 && inside.2 < 80,
+        "the placed quadrant must show the source colour, got {inside:?}"
+    );
+
+    let outside = sample_rendered_pixel(&output_path, 1.0, width * 7 / 8, height * 7 / 8)
+        .expect("a pixel outside the placed quadrant");
+    assert!(
+        outside.0 < 40 && outside.1 < 40 && outside.2 < 40,
+        "the canvas outside the placed clip must stay black, got {outside:?}"
+    );
+
+    // Frame count, not duration: the composite used to end at whichever input
+    // ran out first, which drops tail frames while leaving the container
+    // duration looking right.
+    if let (Some(frames), Some(fps)) = (
+        ffprobe_video_frame_count(&output_path),
+        ffprobe_video_fps(&output_path),
+    ) {
+        let expected = (FIXTURE_SEC * fps).round() as u64;
+        assert_eq!(
+            frames, expected,
+            "the composite must emit every frame of the clip's slot at {fps} fps"
+        );
+    }
+}
+
+/// Feature: Transformed clips in the final render
+/// Scenario: a half-opacity clip renders at half brightness
+///
+/// White at 50% over the black canvas is mid grey. Anything else means the
+/// alpha stage was dropped or applied twice.
+#[test]
+fn test_render_transform_renders_clip_opacity_over_black() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_transform_opacity");
+    let path = project_path(&dir, "render_transform_opacity");
+
+    const FIXTURE_SEC: f64 = 2.0;
+    let source_path = dir.path().join("opacity_source.mp4");
+    if !create_solid_colour_video(&source_path, "white", "640x360", FIXTURE_SEC as u32) {
+        return;
+    }
+
+    let ids = place_trimmed_clip(&path, &source_path, FIXTURE_SEC);
+    let (track_id, clip_id) = ids.split_once('|').unwrap();
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "SetClipOpacity",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "opacity": 0.5,
+        })
+        .to_string(),
+    ]);
+
+    let output_path = dir.path().join("opacity-render.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "a translucent clip must render.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let Some((width, height)) = ffprobe_image_size(&output_path) else {
+        return;
+    };
+    let centre = sample_rendered_pixel(&output_path, 1.0, width / 2, height / 2)
+        .expect("a pixel at the canvas centre");
+    for channel in [centre.0, centre.1, centre.2] {
+        assert!(
+            (118..=138).contains(&channel),
+            "white at half opacity over black must render 128 +/- 10, got {centre:?}"
+        );
+    }
+}
+
+/// Feature: Transformed clips in the final render
+/// Scenario: placement follows the source's measured shape, not its stored one
+///
+/// `asset import` files every video away as a placeholder 1920x1080, so a 4:3
+/// source that is only trusted rather than measured would be placed as if it
+/// were 16:9 — 960x540 spanning x 480..1440 instead of 720x540 spanning
+/// x 600..1320. The two sample points below sit inside exactly one of those.
+#[test]
+fn test_render_transform_places_a_clip_by_its_measured_aspect_ratio() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_transform_aspect");
+    let path = project_path(&dir, "render_transform_aspect");
+
+    const FIXTURE_SEC: f64 = 2.0;
+    let source_path = dir.path().join("aspect_source.mp4");
+    if !create_solid_colour_video(&source_path, "green", "480x360", FIXTURE_SEC as u32) {
+        return;
+    }
+
+    let ids = place_trimmed_clip(&path, &source_path, FIXTURE_SEC);
+    let (track_id, clip_id) = ids.split_once('|').unwrap();
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "SetClipTransform",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "transform": {
+                "position": { "x": 0.5, "y": 0.5 },
+                "scale": { "x": 0.5, "y": 0.5 },
+                "rotationDeg": 0.0,
+                "anchor": { "x": 0.5, "y": 0.5 },
+            },
+        })
+        .to_string(),
+    ]);
+
+    let output_path = dir.path().join("aspect-render.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "a transformed 4:3 clip must render.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let Some((width, height)) = ffprobe_image_size(&output_path) else {
+        return;
+    };
+    if (width, height) != (1920, 1080) {
+        // The sample points below are hand-computed against a 1080p canvas.
+        return;
+    }
+
+    let centre =
+        sample_rendered_pixel(&output_path, 1.0, 960, 540).expect("a pixel at the canvas centre");
+    assert!(
+        centre.1 > 100 && centre.0 < 90,
+        "the clip must cover the canvas centre, got {centre:?}"
+    );
+
+    for (x, y) in [(520_u32, 540_u32), (1380, 540)] {
+        let pixel = sample_rendered_pixel(&output_path, 1.0, x, y)
+            .unwrap_or_else(|| panic!("a pixel at ({x}, {y})"));
+        assert!(
+            pixel.0 < 40 && pixel.1 < 40 && pixel.2 < 40,
+            "a 4:3 source scaled by half spans x 600..1320, so ({x}, {y}) must be black, \
+             got {pixel:?}"
+        );
+    }
+}
+
+/// Creates a single-frame PNG still of one colour.
+///
+/// Stills are the shape that broke hardest: a one-frame overlay input ended the
+/// composite immediately, so a transformed still produced a file with no video
+/// stream at all.
+fn create_solid_colour_still(path: &std::path::Path, colour: &str, size: &str) -> bool {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        return false;
+    };
+
+    let status = Command::new(ffmpeg_path)
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("color=c={colour}:s={size}"),
+            "-frames:v",
+            "1",
+        ])
+        .arg(path)
+        .status()
+        .expect("Failed to generate still fixture with ffmpeg");
+    if !status.success() {
+        eprintln!("Skipping transform render test: ffmpeg could not generate the still fixture");
+    }
+    status.success()
+}
+
+/// Feature: Transformed clips in the final render
+/// Scenario: a one-frame source fills its whole slot
+///
+/// The composite used to end with whichever input ran out first. A still has
+/// exactly one frame, so a transformed still rendered a file with no video
+/// stream at all, and a 25 fps clip in a 30 fps canvas lost its tail frames.
+/// Holding the last frame for the length of the slot is what both cases need.
+#[test]
+fn test_render_transform_fills_the_slot_from_a_single_frame_source() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_transform_still");
+    let path = project_path(&dir, "render_transform_still");
+
+    const SLOT_SEC: f64 = 2.0;
+    let source_path = dir.path().join("still_source.png");
+    if !create_solid_colour_still(&source_path, "blue", "640x360") {
+        return;
+    }
+
+    let ids = place_trimmed_clip(&path, &source_path, SLOT_SEC);
+    let (track_id, clip_id) = ids.split_once('|').unwrap();
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "SetClipTransform",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "transform": {
+                "position": { "x": 0.5, "y": 0.5 },
+                "scale": { "x": 0.5, "y": 0.5 },
+                "rotationDeg": 0.0,
+                "anchor": { "x": 0.5, "y": 0.5 },
+            },
+        })
+        .to_string(),
+    ]);
+
+    let output_path = dir.path().join("still-render.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "a transformed still must render.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let size = ffprobe_image_size(&output_path);
+    assert!(
+        size.is_some(),
+        "a transformed still must still produce a video stream"
+    );
+
+    let (Some(frames), Some(fps)) = (
+        ffprobe_video_frame_count(&output_path),
+        ffprobe_video_fps(&output_path),
+    ) else {
+        return;
+    };
+    let expected = (SLOT_SEC * fps).round() as u64;
+    assert_eq!(
+        frames, expected,
+        "a one-frame source must be held for its whole {SLOT_SEC}s slot at {fps} fps"
+    );
+
+    // And what it holds is the picture, not black.
+    if let Some((width, height)) = size {
+        let centre = sample_rendered_pixel(&output_path, SLOT_SEC * 0.75, width / 2, height / 2)
+            .expect("a pixel near the end of the slot");
+        assert!(
+            centre.2 > 120 && centre.0 < 90,
+            "the held frame must still show the source, got {centre:?}"
+        );
+    }
+}
+
+/// Feature: Truthful degradation
+/// Scenario: motion keyframes are reported as unrendered
+///
+/// Motion animates in the preview and does not animate in the export. Saying so
+/// is the difference between a known limitation and a silent one.
+#[test]
+fn test_render_reports_motion_keyframes_as_unrendered() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_motion_warning");
+    let path = project_path(&dir, "render_motion_warning");
+
+    const FIXTURE_SEC: f64 = 2.0;
+    let source_path = dir.path().join("motion_source.mp4");
+    if !create_solid_colour_video(&source_path, "red", "640x360", FIXTURE_SEC as u32) {
+        return;
+    }
+
+    let ids = place_trimmed_clip(&path, &source_path, FIXTURE_SEC);
+    let (track_id, clip_id) = ids.split_once('|').unwrap();
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Two keyframes that actually move the clip. A lone keyframe equal to the
+    // base transform describes exactly the picture the export already produces
+    // and must not warn.
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "SetClipMotionKeyframes",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "keyframes": [
+                {
+                    "timeOffset": 0.0,
+                    "transform": {
+                        "position": { "x": 0.25, "y": 0.5 },
+                        "scale": { "x": 1.0, "y": 1.0 },
+                        "rotationDeg": 0.0,
+                        "anchor": { "x": 0.5, "y": 0.5 },
+                    },
+                },
+                {
+                    "timeOffset": 1.0,
+                    "transform": {
+                        "position": { "x": 0.75, "y": 0.5 },
+                        "scale": { "x": 1.0, "y": 1.0 },
+                        "rotationDeg": 0.0,
+                        "anchor": { "x": 0.5, "y": 0.5 },
+                    },
+                },
+            ],
+        })
+        .to_string(),
+    ]);
+
+    let output_path = dir.path().join("motion-render.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "a clip with motion keyframes must still render.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let rendered: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let warnings: Vec<&str> = rendered["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(|warning| warning.as_str())
+        .collect();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("Motion keyframes")
+                && warning.contains("not yet rendered")),
+        "unrendered motion must be reported: {warnings:?}"
+    );
+}
+
+/// Feature: Perception matches the render
+/// Scenario: fast frame extraction composites a transformed clip
+///
+/// Fast mode reads the topmost clip's source file straight off disk. For a
+/// transformed clip that shows the untransformed picture, so an agent checking
+/// its own transform edit would see no change at all.
+#[test]
+fn test_frame_extract_fast_falls_back_to_composite_for_a_transformed_clip() {
+    if available_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("frame_fast_transform");
+    let path = project_path(&dir, "frame_fast_transform");
+
+    const FIXTURE_SEC: f64 = 2.0;
+    let source_path = dir.path().join("fast_transform_source.mp4");
+    if !create_solid_colour_video(&source_path, "red", "640x360", FIXTURE_SEC as u32) {
+        return;
+    }
+
+    let ids = place_trimmed_clip(&path, &source_path, FIXTURE_SEC);
+    let (track_id, clip_id) = ids.split_once('|').unwrap();
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "SetClipTransform",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "transform": {
+                "position": { "x": 0.25, "y": 0.25 },
+                "scale": { "x": 0.5, "y": 0.5 },
+                "rotationDeg": 0.0,
+                "anchor": { "x": 0.5, "y": 0.5 },
+            },
+        })
+        .to_string(),
+    ]);
+
+    let still_path = dir.path().join("fast-frame.png");
+    let extracted = run_cli_ok(&[
+        "frame",
+        "extract",
+        "--path",
+        &path,
+        "--time",
+        "1.0",
+        "--mode",
+        "fast",
+        "--out",
+        still_path.to_str().unwrap(),
+    ]);
+
+    let frame = &extracted["frames"][0];
+    assert_eq!(
+        frame["fellBackToComposite"], true,
+        "fast mode must report that it composited instead: {extracted}"
+    );
+
+    let Some((width, height)) = ffprobe_image_size(&still_path) else {
+        return;
+    };
+    let outside = sample_rendered_pixel(&still_path, 0.0, width * 7 / 8, height * 7 / 8)
+        .expect("a pixel outside the placed quadrant");
+    assert!(
+        outside.0 < 40 && outside.1 < 40 && outside.2 < 40,
+        "the extracted still must show the transform, not the raw source, got {outside:?}"
+    );
+}
+
 #[test]
 fn test_render_start_rejects_proxy_combined_with_preset() {
     let dir = create_temp_project("render_proxy_conflict");
@@ -1361,7 +2155,7 @@ fn test_render_start_rejects_inverted_range() {
 
 #[test]
 fn test_render_start_proxy_renders_480p_range_with_progress() {
-    if system_ffmpeg_path().is_none() {
+    if available_ffmpeg_path().is_none() {
         return;
     }
 
@@ -1469,7 +2263,7 @@ fn create_project_with_timeline_clip(
     name: &str,
     duration_secs: u32,
 ) -> Option<(tempfile::TempDir, String, String)> {
-    system_ffmpeg_path()?;
+    available_ffmpeg_path()?;
 
     let dir = create_temp_project(name);
     let path = project_path(&dir, name);
@@ -2164,7 +2958,7 @@ fn create_video_with_longer_audio(
     video_secs: u32,
     audio_secs: u32,
 ) -> bool {
-    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
         return false;
     };
     let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
@@ -2362,7 +3156,7 @@ fn test_frame_extract_rejects_contact_sheet_flags_without_a_grid() {
 fn test_frame_extract_rejects_a_file_without_a_video_stream() {
     let dir = create_temp_project("frame_file_no_video_test");
     let path = project_path(&dir, "frame_file_no_video_test");
-    if system_ffmpeg_path().is_none() {
+    if available_ffmpeg_path().is_none() {
         return;
     }
 
@@ -3562,7 +4356,7 @@ fn test_plan_from_profile_rejects_an_asset_that_is_not_in_the_project() {
 /// against. Silent fixtures cannot see either failure, so this one has sound.
 #[test]
 fn test_render_with_a_transition_effect_matches_the_timeline_length_and_warns() {
-    if system_ffmpeg_path().is_none() {
+    if available_ffmpeg_path().is_none() {
         return;
     }
 
@@ -4618,7 +5412,7 @@ fn test_version_flag() {
 #[test]
 fn test_core_flow_create_import_edit_caption_render_end_to_end() {
     // Skip cleanly if FFmpeg is genuinely unavailable in this environment.
-    if system_ffmpeg_path().is_none() {
+    if available_ffmpeg_path().is_none() {
         eprintln!("Skipping core-flow E2E test: ffmpeg not found");
         return;
     }
@@ -4746,7 +5540,7 @@ fn create_project_with_media(
     file_name: &str,
     build_media: impl Fn(&std::path::Path) -> bool,
 ) -> Option<(tempfile::TempDir, String, String)> {
-    system_ffmpeg_path()?;
+    available_ffmpeg_path()?;
 
     let dir = create_temp_project(name);
     let path = project_path(&dir, name);
@@ -5761,7 +6555,7 @@ const BROKEN_RENDER_SECONDS: u32 = 10;
 /// Returning rather than failing keeps these guards skippable on a machine
 /// without a media toolchain, exactly like the render tests above.
 fn synthesize_media(path: &std::path::Path, args: &[&str], encode_video: bool) -> bool {
-    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
         eprintln!("Skipping broken-render test: ffmpeg unavailable");
         return false;
     };

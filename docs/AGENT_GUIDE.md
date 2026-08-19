@@ -206,6 +206,35 @@ alongside the picture. Until that exists the render degrades loudly rather than
 shipping a file that disagrees with its own timeline. For a soft-looking cut
 today, put `fade-out` on the outgoing clip and `fade-in` on the incoming one.
 
+### Framing a clip: transform and opacity
+
+`SetClipTransform` places a clip on the canvas and `SetClipOpacity` fades it.
+Both render in the final export, not just in the preview:
+
+```bash
+openreelio-cli command execute --path ./demo --type SetClipTransform   --payload '{"sequenceId":"…","trackId":"…","clipId":"…","transform":{
+    "position":{"x":0.25,"y":0.25},"scale":{"x":0.5,"y":0.5},
+    "rotationDeg":0,"anchor":{"x":0.5,"y":0.5}}}'
+```
+
+`position` is where the *anchor* lands on the canvas as a fraction of it;
+`anchor` is the point of the picture pinned there, and rotation turns about it.
+`scale` multiplies the letterbox fit, so `{1, 1}` means "fitted to the canvas".
+Placement is measured against the source's real pixel size, so a 4:3 clip in a
+16:9 sequence keeps its shape.
+
+Three limits remain, and the export is explicit about each:
+
+| Feature | Rendered by `render start` |
+|---------|----------------------------|
+| Clip transform and opacity | **Yes** — composited at the clip's base values |
+| Motion keyframes (`SetClipMotionKeyframes`) | **Not yet** — the clip renders static at its base transform and the result carries a `warnings` entry naming it |
+| Simultaneous layered video clips (picture-in-picture), blend modes | **Not yet** — validation refuses the render rather than dropping a layer |
+
+Motion is stored, round-trips through the project and animates in the preview;
+only the render is static. A clip whose keyframes all match its base transform
+is not warned about, because that is exactly the picture the export produces.
+
 ### Atomic batches: `plan execute`
 
 An edit plan is `{"id": "...", "steps": [{"id","commandType","payload","dependsOn"}]}`.
@@ -387,8 +416,12 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
 
 - `--mode fast` (default) renders the topmost file-backed clip only: no
   effects, text or compositing. Cheap, and right for "what footage is here". It
-  auto-falls back to composite when there is no such clip (a title card, for
-  example) and reports `fellBackToComposite: true`.
+  auto-falls back to composite, reporting `fellBackToComposite: true`, whenever
+  fast mode cannot answer honestly: when there is no file-backed clip at that
+  time (a title card, for example), and when the topmost clip carries a
+  transform or a non-default opacity — the whole point of which is that the
+  picture is no longer the source file. Checking your own `SetClipTransform`
+  edit therefore shows the transform, at composite cost.
 - `--mode composite` renders a minimal window through the full stack, so
   effects and overlays appear. Range renders decode from zero, so it costs more.
   It works anywhere inside the timeline, including over a gap — a gap has no
