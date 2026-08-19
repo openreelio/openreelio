@@ -1323,6 +1323,395 @@ fn test_render_start_exports_video_when_ffmpeg_is_available() {
     );
 }
 
+/// Generates a flat clip of one colour at an explicit frame size.
+///
+/// The size is a parameter because a transformed clip's placement depends on the
+/// source's aspect ratio: a 16:9 source in a 16:9 canvas needs no letterbox
+/// arithmetic, while a 4:3 one does, and only the second shape can tell a
+/// correctly measured source from a wrongly assumed one.
+fn create_solid_colour_video(
+    path: &std::path::Path,
+    colour: &str,
+    size: &str,
+    duration_secs: u32,
+) -> bool {
+    let Some(ffmpeg_path) = system_ffmpeg_path() else {
+        return false;
+    };
+    let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
+        eprintln!("Skipping transform render test: ffmpeg lacks a supported video encoder");
+        return false;
+    };
+
+    let mut command = Command::new(ffmpeg_path);
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!("color=c={colour}:s={size}:r=25:d={duration_secs}"),
+        "-c:v",
+        video_encoder,
+    ]);
+    if video_encoder == "libx264" {
+        command.args(["-pix_fmt", "yuv420p"]);
+    }
+
+    let status = command
+        .arg(path)
+        .status()
+        .expect("Failed to generate solid colour fixture with ffmpeg");
+    if !status.success() {
+        eprintln!("Skipping transform render test: ffmpeg could not generate the fixture");
+    }
+    status.success()
+}
+
+/// Reads one RGB pixel out of a rendered file.
+///
+/// Returns `None` when ffmpeg is unavailable or produced no pixel, so callers
+/// can skip rather than fail on a machine without a usable ffmpeg.
+fn sample_rendered_pixel(
+    path: &std::path::Path,
+    at_sec: f64,
+    x: u32,
+    y: u32,
+) -> Option<(u8, u8, u8)> {
+    let ffmpeg_path = system_ffmpeg_path()?;
+    let output = Command::new(ffmpeg_path)
+        .args(["-v", "error", "-ss", &at_sec.to_string(), "-i"])
+        .arg(path)
+        .args([
+            // The conversion has to come first: cropping a single pixel out of a
+            // subsampled plane asks for a zero-width chroma plane and fails.
+            "-vf",
+            &format!("format=rgb24,crop=w=1:h=1:x={x}:y={y}"),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() < 3 {
+        return None;
+    }
+    Some((output.stdout[0], output.stdout[1], output.stdout[2]))
+}
+
+/// Imports a fixture, places it on the first video track and trims it to the
+/// fixture's real length, returning `(sequence_id, track_id, clip_id)`.
+///
+/// `asset import` records no probed duration, so the timeline hands the clip its
+/// 10s default; trimming keeps the rendered length a statement about the edit
+/// rather than about a clip that outruns its source.
+fn place_trimmed_clip(path: &str, source_path: &std::path::Path, duration_sec: f64) -> String {
+    let import = run_cli_ok(&[
+        "asset",
+        "import",
+        "--path",
+        path,
+        "--file",
+        source_path.to_str().unwrap(),
+    ]);
+    let asset_id = import["createdIds"][0].as_str().unwrap().to_string();
+
+    let tracks = run_cli_ok(&["timeline", "tracks", "--path", path]);
+    let track_id = tracks["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|track| track["kind"] == "Video")
+        .and_then(|track| track["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    let inserted = run_cli_ok(&[
+        "timeline", "insert", "--path", path, "--asset", &asset_id, "--track", &track_id, "--at",
+        "0.0",
+    ]);
+    let clip_id = inserted["createdIds"][0].as_str().unwrap().to_string();
+
+    run_cli_ok(&[
+        "timeline",
+        "trim",
+        "--path",
+        path,
+        "--track",
+        &track_id,
+        "--clip",
+        &clip_id,
+        "--source-in",
+        "0",
+        "--source-out",
+        &duration_sec.to_string(),
+    ]);
+
+    track_id + "|" + &clip_id
+}
+
+/// Feature: Transformed clips in the final render
+/// Scenario: a scaled, repositioned clip lands where the preview puts it
+///
+/// Half scale with the anchor pinned at a quarter of the canvas both ways puts
+/// the picture in the top-left quadrant exactly. Export used to refuse this
+/// clip outright, so the assertions here are about pixels, not exit codes:
+/// source colour inside the quadrant, black outside it, and a file exactly as
+/// long as the timeline.
+#[test]
+fn test_render_transform_places_a_scaled_clip_in_the_top_left_quadrant() {
+    if system_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_transform_place");
+    let path = project_path(&dir, "render_transform_place");
+
+    const FIXTURE_SEC: f64 = 2.0;
+    let source_path = dir.path().join("transform_source.mp4");
+    if !create_solid_colour_video(&source_path, "red", "640x360", FIXTURE_SEC as u32) {
+        return;
+    }
+
+    let ids = place_trimmed_clip(&path, &source_path, FIXTURE_SEC);
+    let (track_id, clip_id) = ids.split_once('|').unwrap();
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "SetClipTransform",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "transform": {
+                "position": { "x": 0.25, "y": 0.25 },
+                "scale": { "x": 0.5, "y": 0.5 },
+                "rotationDeg": 0.0,
+                "anchor": { "x": 0.5, "y": 0.5 },
+            },
+        })
+        .to_string(),
+    ]);
+
+    let output_path = dir.path().join("transform-render.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "a transformed clip must render.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let Some((width, height)) = ffprobe_image_size(&output_path) else {
+        return;
+    };
+    assert_eq!(
+        width * 9,
+        height * 16,
+        "the fixture and the canvas must share an aspect ratio for this placement to be exact"
+    );
+
+    let inside = sample_rendered_pixel(&output_path, 1.0, width / 4, height / 4)
+        .expect("a pixel inside the placed quadrant");
+    assert!(
+        inside.0 > 150 && inside.1 < 80 && inside.2 < 80,
+        "the placed quadrant must show the source colour, got {inside:?}"
+    );
+
+    let outside = sample_rendered_pixel(&output_path, 1.0, width * 3 / 4, height * 3 / 4)
+        .expect("a pixel outside the placed quadrant");
+    assert!(
+        outside.0 < 40 && outside.1 < 40 && outside.2 < 40,
+        "the canvas outside the placed clip must stay black, got {outside:?}"
+    );
+
+    if let Some(rendered_duration) = ffprobe_duration_secs(&output_path) {
+        assert!(
+            (rendered_duration - FIXTURE_SEC).abs() < 0.2,
+            "the composite must not change the timeline length: {rendered_duration} vs {FIXTURE_SEC}"
+        );
+    }
+}
+
+/// Feature: Transformed clips in the final render
+/// Scenario: a half-opacity clip renders at half brightness
+///
+/// White at 50% over the black canvas is mid grey. Anything else means the
+/// alpha stage was dropped or applied twice.
+#[test]
+fn test_render_transform_renders_clip_opacity_over_black() {
+    if system_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_transform_opacity");
+    let path = project_path(&dir, "render_transform_opacity");
+
+    const FIXTURE_SEC: f64 = 2.0;
+    let source_path = dir.path().join("opacity_source.mp4");
+    if !create_solid_colour_video(&source_path, "white", "640x360", FIXTURE_SEC as u32) {
+        return;
+    }
+
+    let ids = place_trimmed_clip(&path, &source_path, FIXTURE_SEC);
+    let (track_id, clip_id) = ids.split_once('|').unwrap();
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "SetClipOpacity",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "opacity": 0.5,
+        })
+        .to_string(),
+    ]);
+
+    let output_path = dir.path().join("opacity-render.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "a translucent clip must render.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let Some((width, height)) = ffprobe_image_size(&output_path) else {
+        return;
+    };
+    let centre = sample_rendered_pixel(&output_path, 1.0, width / 2, height / 2)
+        .expect("a pixel at the canvas centre");
+    for channel in [centre.0, centre.1, centre.2] {
+        assert!(
+            (95..=160).contains(&channel),
+            "white at half opacity over black must render mid grey, got {centre:?}"
+        );
+    }
+}
+
+/// Feature: Transformed clips in the final render
+/// Scenario: placement follows the source's measured shape, not its stored one
+///
+/// `asset import` files every video away as a placeholder 1920x1080, so a 4:3
+/// source that is only trusted rather than measured would be placed as if it
+/// were 16:9 — 960x540 spanning x 480..1440 instead of 720x540 spanning
+/// x 600..1320. The two sample points below sit inside exactly one of those.
+#[test]
+fn test_render_transform_places_a_clip_by_its_measured_aspect_ratio() {
+    if system_ffmpeg_path().is_none() {
+        return;
+    }
+
+    let dir = create_temp_project("render_transform_aspect");
+    let path = project_path(&dir, "render_transform_aspect");
+
+    const FIXTURE_SEC: f64 = 2.0;
+    let source_path = dir.path().join("aspect_source.mp4");
+    if !create_solid_colour_video(&source_path, "green", "480x360", FIXTURE_SEC as u32) {
+        return;
+    }
+
+    let ids = place_trimmed_clip(&path, &source_path, FIXTURE_SEC);
+    let (track_id, clip_id) = ids.split_once('|').unwrap();
+    let sequence_id = run_cli_ok(&["timeline", "info", "--path", &path])["sequenceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    run_cli_ok(&[
+        "command",
+        "execute",
+        "--path",
+        &path,
+        "--type",
+        "SetClipTransform",
+        "--payload",
+        &serde_json::json!({
+            "sequenceId": sequence_id,
+            "trackId": track_id,
+            "clipId": clip_id,
+            "transform": {
+                "position": { "x": 0.5, "y": 0.5 },
+                "scale": { "x": 0.5, "y": 0.5 },
+                "rotationDeg": 0.0,
+                "anchor": { "x": 0.5, "y": 0.5 },
+            },
+        })
+        .to_string(),
+    ]);
+
+    let output_path = dir.path().join("aspect-render.mp4");
+    let (stdout, stderr, success) = run_cli(&[
+        "render",
+        "start",
+        "--path",
+        &path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    assert!(
+        success,
+        "a transformed 4:3 clip must render.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let Some((width, height)) = ffprobe_image_size(&output_path) else {
+        return;
+    };
+    if (width, height) != (1920, 1080) {
+        // The sample points below are hand-computed against a 1080p canvas.
+        return;
+    }
+
+    let centre =
+        sample_rendered_pixel(&output_path, 1.0, 960, 540).expect("a pixel at the canvas centre");
+    assert!(
+        centre.1 > 100 && centre.0 < 90,
+        "the clip must cover the canvas centre, got {centre:?}"
+    );
+
+    for (x, y) in [(520_u32, 540_u32), (1380, 540)] {
+        let pixel = sample_rendered_pixel(&output_path, 1.0, x, y)
+            .unwrap_or_else(|| panic!("a pixel at ({x}, {y})"));
+        assert!(
+            pixel.0 < 40 && pixel.1 < 40 && pixel.2 < 40,
+            "a 4:3 source scaled by half spans x 600..1320, so ({x}, {y}) must be black, \
+             got {pixel:?}"
+        );
+    }
+}
+
 #[test]
 fn test_render_start_rejects_proxy_combined_with_preset() {
     let dir = create_temp_project("render_proxy_conflict");
