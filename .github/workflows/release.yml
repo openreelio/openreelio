@@ -350,7 +350,9 @@ jobs:
                sudo timeout 600 apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf; then
               exit 0
             fi
-            echo "apt attempt ${attempt} failed or timed out; retrying"
+            echo "apt attempt ${attempt} failed or timed out; switching to archive.ubuntu.com and retrying"
+            sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt 2>/dev/null || true
+            sudo find /etc/apt -name '*.list' -o -name '*.sources' | xargs -r sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g'
             sleep 15
           done
           exit 1
