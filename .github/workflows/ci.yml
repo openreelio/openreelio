@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 
 on:
   push:
@@ -181,9 +181,19 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
+        timeout-minutes: 20
+        # Mirror outages make apt hang until the 6h job timeout; bound each
+        # attempt and retry so a stalled mirror fails fast instead.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf clang libclang-dev
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get update && \
+               sudo timeout 600 apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf clang libclang-dev; then
+              exit 0
+            fi
+            echo "apt attempt ${attempt} failed or timed out; retrying"
+            sleep 15
+          done
+          exit 1
 
       - name: Create dist directory for Tauri
         run: mkdir -p dist
@@ -242,9 +252,19 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
+        timeout-minutes: 20
+        # Mirror outages make apt hang until the 6h job timeout; bound each
+        # attempt and retry so a stalled mirror fails fast instead.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get update && \
+               sudo timeout 600 apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf; then
+              exit 0
+            fi
+            echo "apt attempt ${attempt} failed or timed out; retrying"
+            sleep 15
+          done
+          exit 1
 
       - name: Install frontend dependencies
         run: npm ci
@@ -313,9 +333,19 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
+        timeout-minutes: 20
+        # Mirror outages make apt hang until the 6h job timeout; bound each
+        # attempt and retry so a stalled mirror fails fast instead.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get update && \
+               sudo timeout 600 apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf; then
+              exit 0
+            fi
+            echo "apt attempt ${attempt} failed or timed out; retrying"
+            sleep 15
+          done
+          exit 1
 
       - name: Create dist directory for Tauri
         run: mkdir -p dist
