@@ -3534,30 +3534,94 @@ fn parse_caption_color(value: &Value) -> Option<(String, Option<f64>)> {
     ))
 }
 
-fn vertical_position_to_y(vertical: &str, margin_percent: f64) -> f64 {
-    let margin = (if margin_percent.is_finite() {
+/// Vertical band a preset caption sits in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptionVertical {
+    Top,
+    Center,
+    Bottom,
+}
+
+impl CaptionVertical {
+    /// Anything unrecognized falls to the bottom, which is where an
+    /// unannotated caption has always rendered.
+    fn parse(raw: &str) -> Self {
+        match raw {
+            "top" => Self::Top,
+            "center" | "middle" => Self::Center,
+            _ => Self::Bottom,
+        }
+    }
+}
+
+fn normalized_caption_margin_percent(margin_percent: f64) -> f64 {
+    (if margin_percent.is_finite() {
         margin_percent
     } else {
         5.0
     })
     .clamp(0.0, 50.0)
-        / 100.0;
+}
+
+fn vertical_position_to_y(vertical: CaptionVertical, margin_percent: f64) -> f64 {
+    let margin = normalized_caption_margin_percent(margin_percent) / 100.0;
 
     match vertical {
-        "top" => margin,
-        "center" | "middle" => 0.5,
-        _ => 1.0 - margin,
+        CaptionVertical::Top => margin,
+        CaptionVertical::Center => 0.5,
+        CaptionVertical::Bottom => 1.0 - margin,
     }
 }
 
-fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> (f64, f64) {
-    let mut x = 0.5;
-    let mut y = 0.9;
+/// How a caption clip is anchored on the canvas.
+///
+/// The distinction survives all the way into the ASS script: a preset anchor
+/// becomes margins, which libass is free to wrap inside, while a custom anchor
+/// becomes `\pos`, which disables margins entirely.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CaptionAnchor {
+    /// One of the vertical presets, held off its edge by a margin.
+    Preset {
+        vertical: CaptionVertical,
+        margin_percent: f64,
+    },
+    /// An explicit point, as a fraction of the canvas.
+    Custom { x: f64, y: f64 },
+}
+
+/// Side margin a preset caption reserves on each edge, as a canvas percentage.
+///
+/// Leaves an 80% wrap box, and doubles as the horizontal anchor for a
+/// left- or right-aligned caption so the export lands where the preview draws
+/// it (`resolveCaptionAnchor` in `src/utils/captionStyle.ts`).
+const CAPTION_SIDE_MARGIN_PERCENT: f64 = 10.0;
+
+/// Horizontal anchor a preset caption uses for the given alignment.
+///
+/// Left-aligned text grows right from the left margin, right-aligned text grows
+/// left from the right margin, and centered text straddles the middle.
+fn caption_preset_anchor_x(alignment: &str) -> f64 {
+    match alignment {
+        "left" => CAPTION_SIDE_MARGIN_PERCENT / 100.0,
+        "right" => 1.0 - CAPTION_SIDE_MARGIN_PERCENT / 100.0,
+        _ => 0.5,
+    }
+}
+
+fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> CaptionAnchor {
+    // No stored position renders where a caption always has: along the bottom,
+    // a tenth of the canvas clear of the edge.
+    let mut anchor = CaptionAnchor::Preset {
+        vertical: CaptionVertical::Bottom,
+        margin_percent: CAPTION_SIDE_MARGIN_PERCENT,
+    };
 
     if let Some(position_value) = position {
         if let Some(preset) = position_value.as_str() {
-            y = vertical_position_to_y(preset, 5.0);
-            return (x, y);
+            return CaptionAnchor::Preset {
+                vertical: CaptionVertical::parse(preset),
+                margin_percent: 5.0,
+            };
         }
 
         if let Some(position_object) = position_value.as_object() {
@@ -3573,9 +3637,14 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> (f
                     get_json_field(position_object, &["marginPercent", "margin_percent"])
                         .and_then(parse_json_number)
                         .unwrap_or(5.0);
-                return (x, vertical_position_to_y(vertical, margin_percent));
+                return CaptionAnchor::Preset {
+                    vertical: CaptionVertical::parse(vertical),
+                    margin_percent,
+                };
             }
 
+            let mut x = 0.5;
+            let mut y = 0.9;
             if let Some(custom_x) = get_json_field(position_object, &["xPercent", "x_percent", "x"])
                 .and_then(parse_json_number)
             {
@@ -3586,6 +3655,7 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> (f
             {
                 y = normalize_caption_axis(custom_y);
             }
+            anchor = CaptionAnchor::Custom { x, y };
         }
     }
 
@@ -3595,19 +3665,45 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> (f
                 .and_then(Value::as_str)
         {
             let mapped = match vertical_align {
-                "top" => Some("top"),
-                "middle" | "center" => Some("center"),
-                "bottom" => Some("bottom"),
+                "top" => Some(CaptionVertical::Top),
+                "middle" | "center" => Some(CaptionVertical::Center),
+                "bottom" => Some(CaptionVertical::Bottom),
                 _ => None,
             };
 
+            // The style's vertical alignment overrides only the vertical axis,
+            // so a custom anchor keeps the x its author chose.
             if let Some(vertical) = mapped {
-                y = vertical_position_to_y(vertical, 10.0);
+                anchor = match anchor {
+                    CaptionAnchor::Custom { x, .. } => CaptionAnchor::Custom {
+                        x,
+                        y: vertical_position_to_y(vertical, 10.0),
+                    },
+                    CaptionAnchor::Preset { .. } => CaptionAnchor::Preset {
+                        vertical,
+                        margin_percent: 10.0,
+                    },
+                };
             }
         }
     }
 
-    (x, y)
+    anchor
+}
+
+/// Resolves an anchor to the fractional canvas position the `drawtext`
+/// fallback draws at.
+fn caption_anchor_position(anchor: CaptionAnchor, alignment: &str) -> (f64, f64) {
+    match anchor {
+        CaptionAnchor::Preset {
+            vertical,
+            margin_percent,
+        } => (
+            caption_preset_anchor_x(alignment),
+            vertical_position_to_y(vertical, margin_percent),
+        ),
+        CaptionAnchor::Custom { x, y } => (x, y),
+    }
 }
 
 fn font_weight_implies_bold(value: &Value) -> Option<bool> {
@@ -3757,6 +3853,32 @@ fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
             effect.set_param("italic", ParamValue::Bool(italic));
         }
 
+        // The ASS style carries Underline, Spacing and \blur, so a caption can
+        // reach the same typography a text clip already does. `drawtext` has no
+        // equivalent for any of the three and ignores these params, so the
+        // fallback path is unchanged.
+        if let Some(underline) = get_json_field(style, &["underline"]).and_then(parse_json_bool) {
+            effect.set_param("underline", ParamValue::Bool(underline));
+        }
+
+        if let Some(letter_spacing) =
+            get_json_field(style, &["letterSpacing", "letter_spacing"]).and_then(parse_json_number)
+        {
+            effect.set_param(
+                "letter_spacing",
+                ParamValue::Int(letter_spacing.clamp(-100.0, 200.0).round() as i64),
+            );
+        }
+
+        if let Some(shadow_blur) =
+            get_json_field(style, &["shadowBlur", "shadow_blur"]).and_then(parse_json_number)
+        {
+            effect.set_param(
+                "shadow_blur",
+                ParamValue::Int(shadow_blur.clamp(0.0, 500.0).round() as i64),
+            );
+        }
+
         let bold = get_json_field(style, &["bold"])
             .and_then(parse_json_bool)
             .or_else(|| {
@@ -3783,8 +3905,9 @@ fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
         }
     }
 
-    let (x, y) =
+    let anchor =
         resolve_caption_anchor(clip.caption_position.as_ref(), clip.caption_style.as_ref());
+    let (x, y) = caption_anchor_position(anchor, &caption_effect_alignment(&effect));
     effect.set_param("x", ParamValue::Float(x));
     effect.set_param("y", ParamValue::Float(y));
     let text_opacity = effect.get_float("opacity").unwrap_or(1.0);
@@ -4077,17 +4200,174 @@ fn escape_filtergraph_value(raw: &str) -> String {
         .replace('\'', r"\'")
 }
 
-fn ass_alignment_from_effect(effect: &Effect) -> i32 {
-    match effect
+/// Reads the horizontal alignment an effect stores, normalized.
+fn caption_effect_alignment(effect: &Effect) -> String {
+    effect
         .get_param("alignment")
         .and_then(ParamValue::as_str)
         .unwrap_or("center")
         .to_ascii_lowercase()
-        .as_str()
-    {
+}
+
+/// Numpad alignment for a `\pos`-anchored block.
+///
+/// Always the middle row, so the block centers vertically on the point it is
+/// positioned at - which is what both the preview and the `drawtext` fallback
+/// do with the same coordinates.
+fn ass_alignment_from_effect(effect: &Effect) -> i32 {
+    match caption_effect_alignment(effect).as_str() {
         "left" => 4,
         "right" => 6,
         _ => 5,
+    }
+}
+
+/// Full numpad alignment for a margin-anchored block.
+///
+/// Rows 1-3 sit on the bottom margin, 4-6 center vertically, 7-9 hang from the
+/// top margin; the column follows the text's own alignment.
+fn ass_numpad_alignment(vertical: CaptionVertical, alignment: &str) -> i32 {
+    let column = match alignment {
+        "left" => 1,
+        "right" => 3,
+        _ => 2,
+    };
+    let row_base = match vertical {
+        CaptionVertical::Bottom => 0,
+        CaptionVertical::Center => 3,
+        CaptionVertical::Top => 6,
+    };
+
+    row_base + column
+}
+
+/// Vertical resolution every ASS script this exporter writes is authored in.
+///
+/// libass scales a script from its `PlayRes` onto the frame, so pinning the
+/// height makes a font size mean the same thing at every export resolution:
+/// `fontSize: 48` is "48px at 1080p", exactly as the preview reads it
+/// (`fontSize * canvasHeight / 1080` in `src/utils/textRenderer.ts`). While
+/// `PlayRes` tracked the output size, the same caption came out half as tall
+/// relative to the frame on a 4K export as on a 1080p one.
+const ASS_PLAY_RES_Y: u32 = 1080;
+
+/// Rounds to an even number so a `PlayRes` never lands on a half pixel.
+fn round_to_even(value: f64) -> u32 {
+    if !value.is_finite() {
+        return 2;
+    }
+
+    ((value / 2.0).round() * 2.0).clamp(2.0, 100_000.0) as u32
+}
+
+/// Returns the `PlayResX`/`PlayResY` an ASS script for this canvas is authored in.
+fn ass_play_resolution(canvas: &Canvas) -> (u32, u32) {
+    let aspect = if canvas.is_valid() {
+        canvas.aspect_ratio()
+    } else {
+        16.0 / 9.0
+    };
+
+    (
+        round_to_even(f64::from(ASS_PLAY_RES_Y) * aspect),
+        ASS_PLAY_RES_Y,
+    )
+}
+
+/// Where a burned-in text block sits, and whether libass may wrap it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AssTextAnchor {
+    /// Placed by `\pos`. libass ignores margins on a positioned event, so the
+    /// block only wraps where it meets the frame edge.
+    Absolute { x: f64, y: f64, alignment: i32 },
+    /// Placed by margins, which leaves libass free to wrap the line inside the
+    /// box those margins describe.
+    Margins {
+        alignment: i32,
+        margin_l: i32,
+        margin_r: i32,
+        margin_v: i32,
+    },
+}
+
+impl AssTextAnchor {
+    fn alignment(self) -> i32 {
+        match self {
+            Self::Absolute { alignment, .. } | Self::Margins { alignment, .. } => alignment,
+        }
+    }
+
+    /// Margins as the `MarginL,MarginR,MarginV` columns of a style or event.
+    fn margin_columns(self) -> (i32, i32, i32) {
+        match self {
+            Self::Absolute { .. } => (0, 0, 0),
+            Self::Margins {
+                margin_l,
+                margin_r,
+                margin_v,
+                ..
+            } => (margin_l, margin_r, margin_v),
+        }
+    }
+
+    /// The `\pos` override this anchor needs, if any.
+    fn position_override(self) -> String {
+        match self {
+            Self::Absolute { x, y, .. } => format!("\\pos({x:.2},{y:.2})"),
+            Self::Margins { .. } => String::new(),
+        }
+    }
+}
+
+/// Resolves the anchor an ASS event for `clip` uses.
+///
+/// Preset captions become margin anchors so libass can wrap them; everything
+/// else keeps the exact placement it had. Text clips in particular are driven
+/// by a clip transform whose whole point is an exact position, and custom
+/// caption positions name a point the author picked - neither survives being
+/// re-expressed as a margin, so both accept wrapping only at the frame edge.
+fn ass_text_anchor(
+    clip: &Clip,
+    track_kind: &TrackKind,
+    effect: &Effect,
+    play_res_x: u32,
+    play_res_y: u32,
+) -> AssTextAnchor {
+    let absolute = AssTextAnchor::Absolute {
+        x: effect_float_param(effect, "x", 0.5).clamp(0.0, 1.0) * f64::from(play_res_x),
+        y: effect_float_param(effect, "y", 0.5).clamp(0.0, 1.0) * f64::from(play_res_y),
+        alignment: ass_alignment_from_effect(effect),
+    };
+
+    if *track_kind != TrackKind::Caption {
+        return absolute;
+    }
+
+    let anchor =
+        resolve_caption_anchor(clip.caption_position.as_ref(), clip.caption_style.as_ref());
+    let CaptionAnchor::Preset {
+        vertical,
+        margin_percent,
+    } = anchor
+    else {
+        return absolute;
+    };
+
+    let alignment = caption_effect_alignment(effect);
+    let side_margin = (CAPTION_SIDE_MARGIN_PERCENT / 100.0 * f64::from(play_res_x)).round() as i32;
+    let margin_v = match vertical {
+        // libass ignores MarginV for the middle row, so naming one would only
+        // mislead whoever reads the script.
+        CaptionVertical::Center => 0,
+        _ => (normalized_caption_margin_percent(margin_percent) / 100.0 * f64::from(play_res_y))
+            .round() as i32,
+    };
+
+    AssTextAnchor::Margins {
+        alignment: ass_numpad_alignment(vertical, &alignment),
+        margin_l: side_margin,
+        margin_r: side_margin,
+        margin_v,
     }
 }
 
@@ -4123,22 +4403,31 @@ fn ass_color_param(effect: &Effect, name: &str, fallback: &str, opacity: f64) ->
         .map(|value| AssColor::from_hex(value, fallback, opacity))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Everything about an ASS event that the clip's own effect does not decide.
+struct AssEventContext<'a> {
+    style_name: &'a str,
+    layer: i32,
+    /// Font family after bundled/system resolution, so a family that resolves
+    /// nowhere is named explicitly rather than left to libass to guess at.
+    font_family: &'a str,
+    anchor: AssTextAnchor,
+}
+
 fn append_ass_text_style_and_event(
     styles: &mut String,
     events: &mut String,
-    style_name: &str,
-    layer: i32,
+    context: &AssEventContext<'_>,
     clip: &Clip,
     effect: &Effect,
-    output_width: u32,
-    output_height: u32,
 ) {
+    let AssEventContext {
+        style_name,
+        layer,
+        font_family,
+        anchor,
+    } = *context;
     let opacity = effect_float_param(effect, "opacity", 1.0).clamp(0.0, 1.0);
-    let font_family = ass_sanitize_style_field(
-        &effect_string_param(effect, "font_family", "Arial"),
-        "Arial",
-    );
+    let font_family = ass_sanitize_style_field(font_family, "Arial");
     let font_size = effect_float_param(effect, "font_size", 48.0).clamp(1.0, 500.0);
     let font_weight = effect_int_param(effect, "font_weight", 400).clamp(100, 900);
     let bold = effect_bool_param(effect, "bold", false) || font_weight >= 600;
@@ -4207,10 +4496,11 @@ fn append_ass_text_style_and_event(
     let back_color = background_color
         .or(shadow_color)
         .unwrap_or_else(AssColor::transparent_black);
-    let alignment = ass_alignment_from_effect(effect);
+    let alignment = anchor.alignment();
+    let (margin_l, margin_r, margin_v) = anchor.margin_columns();
 
     styles.push_str(&format!(
-        "Style: {style_name},{font_family},{font_size:.2},{},{},{},{},{},{},{},0,{scale_x_percent:.2},{scale_y_percent:.2},{letter_spacing},0,{border_style},{style_outline_width:.2},{shadow_size:.2},{alignment},0,0,0,1\n",
+        "Style: {style_name},{font_family},{font_size:.2},{},{},{},{},{},{},{},0,{scale_x_percent:.2},{scale_y_percent:.2},{letter_spacing},0,{border_style},{style_outline_width:.2},{shadow_size:.2},{alignment},{margin_l},{margin_r},{margin_v},1\n",
         primary.ass_value(),
         primary.ass_value(),
         outline_color.ass_value(),
@@ -4220,45 +4510,128 @@ fn append_ass_text_style_and_event(
         if underline { -1 } else { 0 },
     ));
 
-    let x = effect_float_param(effect, "x", 0.5).clamp(0.0, 1.0) * output_width as f64;
-    let y = effect_float_param(effect, "y", 0.5).clamp(0.0, 1.0) * output_height as f64;
     let rotation = effect_float_param(effect, "rotation", 0.0);
     let shadow_blur = effect_int_param(effect, "shadow_blur", 0).clamp(0, 500);
-    let line_height = effect_float_param(effect, "line_height", 1.2).clamp(0.5, 5.0);
-    let raw_text = effect_string_param(effect, "text", "Title");
-    let normalized_text = raw_text.replace("\r\n", "\n").replace('\r', "\n");
-    let text_lines: Vec<String> = normalized_text.split('\n').map(ass_escape_text).collect();
+    // One event per clip, with the line breaks the author wrote carried as
+    // `\N`. Splitting the block into a positioned event per line made libass
+    // draw a `BorderStyle: 3` background box around each line instead of around
+    // the block, and left every line immune to wrapping.
+    let text = ass_escape_text(&effect_string_param(effect, "text", "Title"));
     let event_border_width = style_outline_width;
     let start = ass_timecode(clip.place.timeline_in_sec);
     let end = ass_timecode(clip.place.timeline_out_sec());
-    let line_count = text_lines.len().max(1);
-    let line_center = (line_count.saturating_sub(1) as f64) / 2.0;
-    let line_step = font_size * line_height;
-    let rotation_radians = rotation.to_radians();
+    let position = anchor.position_override();
 
-    for (index, text) in text_lines.iter().enumerate() {
-        let line_offset = (index as f64 - line_center) * line_step;
-        let line_x = x - line_offset * rotation_radians.sin();
-        let line_y = y + line_offset * rotation_radians.cos();
+    events.push_str(&format!(
+        "Dialogue: {layer},{start},{end},{style_name},,{margin_l},{margin_r},{margin_v},,{{{position}\\an{alignment}\\frz{rotation:.2}\\b{font_weight}\\bord{event_border_width:.2}\\xshad{shadow_x}\\yshad{shadow_y}\\blur{shadow_blur}\\fsp{letter_spacing}}}{text}\n",
+    ));
+}
 
-        events.push_str(&format!(
-            "Dialogue: {layer},{start},{end},{style_name},,0,0,0,,{{\\pos({line_x:.2},{line_y:.2})\\an{alignment}\\frz{rotation:.2}\\b{font_weight}\\bord{event_border_width:.2}\\xshad{shadow_x}\\yshad{shadow_y}\\blur{shadow_blur}\\fsp{letter_spacing}}}{text}\n",
-        ));
+/// How a requested font family was satisfied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FontResolution {
+    /// Compiled into the binary. The script embeds it, so the burn-in looks the
+    /// same on a machine that has never seen the family.
+    Bundled(&'static str),
+    /// Installed on this host. libass resolves it through the system provider.
+    System,
+    /// Available nowhere. libass would silently pick some fallback and never
+    /// say which, so the script names a bundled family instead.
+    Substituted(&'static str),
+}
+
+/// Resolves the family a text style asks for against bundled, then system fonts.
+///
+/// Shared by the script builder and export validation so the warning a caller
+/// sees and the font that actually renders can never disagree.
+pub(crate) fn resolve_text_font_family(requested: &str) -> FontResolution {
+    if let Some(font) = crate::core::text::bundled_fonts::resolve_bundled(requested) {
+        return FontResolution::Bundled(font.family);
+    }
+
+    let requested = requested.trim();
+    let installed = crate::core::text::fonts::list_system_font_families()
+        .iter()
+        .any(|family| family.eq_ignore_ascii_case(requested));
+
+    if installed {
+        FontResolution::System
+    } else {
+        FontResolution::Substituted(crate::core::text::bundled_fonts::DEFAULT_BUNDLED_FAMILY)
+    }
+}
+
+/// Ceiling on the bytes one script may carry in its `[Fonts]` section.
+///
+/// A script is written to a temp file and parsed in full before the first
+/// frame, so an unbounded section would be paid for on every export. The cap is
+/// far above what the bundled families need; it exists so a future family list
+/// cannot quietly turn into a multi-hundred-megabyte script.
+const MAX_EMBEDDED_FONT_BYTES: usize = 20 * 1024 * 1024;
+
+/// Accumulates the `[Fonts]` section of a script.
+#[derive(Default)]
+struct AssFontEmbedder {
+    body: String,
+    embedded: Vec<&'static str>,
+    total_bytes: usize,
+}
+
+impl AssFontEmbedder {
+    /// Embeds every weight of `family`, once, if it is bundled and fits.
+    fn embed_family(&mut self, family: &str) {
+        for font in crate::core::text::bundled_fonts::bundled_family_faces(family) {
+            if self.embedded.contains(&font.file_name) {
+                continue;
+            }
+
+            if self.total_bytes + font.bytes.len() > MAX_EMBEDDED_FONT_BYTES {
+                tracing::warn!(
+                    "Skipping embedded font '{}' ({} bytes): the ASS script would exceed the {} byte embed cap",
+                    font.file_name,
+                    font.bytes.len(),
+                    MAX_EMBEDDED_FONT_BYTES
+                );
+                continue;
+            }
+
+            self.body
+                .push_str(&crate::core::text::ass_embed::encode_attached_font(
+                    font.file_name,
+                    font.bytes,
+                ));
+            self.embedded.push(font.file_name);
+            self.total_bytes += font.bytes.len();
+        }
+    }
+
+    /// Renders the section, or nothing when no font was embedded.
+    fn into_section(self) -> String {
+        if self.body.is_empty() {
+            String::new()
+        } else {
+            format!("[Fonts]\n{}\n", self.body)
+        }
     }
 }
 
 /// Builds the ASS script the libass export path burns text overlays with.
+///
+/// The script is authored in a fixed 1080-tall coordinate space (see
+/// [`ASS_PLAY_RES_Y`]) whose aspect follows the sequence canvas, not the export
+/// resolution, so the same project burns identical-looking text at every output
+/// size.
 ///
 /// Exposed to the crate so the curated text preset contract tests can assert a
 /// resolved style reaches the second render path as well as `drawtext`.
 pub(crate) fn build_ass_text_overlay_script(
     sequence: &Sequence,
     effects: &HashMap<String, Effect>,
-    output_width: u32,
-    output_height: u32,
 ) -> Result<Option<String>, ExportError> {
+    let (play_res_x, play_res_y) = ass_play_resolution(&sequence.format.canvas);
     let mut styles = String::new();
     let mut events = String::new();
+    let mut fonts = AssFontEmbedder::default();
     let mut event_count = 0usize;
 
     for (track_index, track) in sequence.tracks.iter().enumerate() {
@@ -4293,17 +4666,30 @@ pub(crate) fn build_ass_text_overlay_script(
                 continue;
             }
 
+            let requested_family = ass_sanitize_style_field(
+                &effect_string_param(&effect, "font_family", "Arial"),
+                "Arial",
+            );
+            let font_family = match resolve_text_font_family(&requested_family) {
+                FontResolution::Bundled(family) | FontResolution::Substituted(family) => {
+                    fonts.embed_family(family);
+                    family.to_string()
+                }
+                FontResolution::System => requested_family,
+            };
+
             let style_name = format!("OpenReelioText{event_count}");
-            let layer = (track_index as i32 * 1000) + clip_index as i32;
             append_ass_text_style_and_event(
                 &mut styles,
                 &mut events,
-                &style_name,
-                layer,
+                &AssEventContext {
+                    style_name: &style_name,
+                    layer: (track_index as i32 * 1000) + clip_index as i32,
+                    font_family: &font_family,
+                    anchor: ass_text_anchor(clip, &track.kind, &effect, play_res_x, play_res_y),
+                },
                 clip,
                 &effect,
-                output_width,
-                output_height,
             );
             event_count += 1;
         }
@@ -4313,8 +4699,11 @@ pub(crate) fn build_ass_text_overlay_script(
         return Ok(None);
     }
 
+    // `WrapStyle: 0` is what makes a caption wrap at all; the margins on a
+    // preset caption's event give libass the box to wrap it inside.
     Ok(Some(format!(
-        "[Script Info]\nScriptType: v4.00+\nWrapStyle: 2\nScaledBorderAndShadow: yes\nYCbCr Matrix: TV.709\nPlayResX: {output_width}\nPlayResY: {output_height}\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n{styles}\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n{events}"
+        "[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\nYCbCr Matrix: TV.709\nPlayResX: {play_res_x}\nPlayResY: {play_res_y}\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n{styles}\n{}[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n{events}",
+        fonts.into_section()
     )))
 }
 
@@ -4322,15 +4711,17 @@ pub(super) fn append_ass_text_overlay(
     filter_complex: &mut String,
     base_video_label: &str,
     ass_path: &Path,
-    output_width: u32,
-    output_height: u32,
+    canvas_width: u32,
+    canvas_height: u32,
 ) -> String {
     let output_label = "[txtass0]";
     let path_text = ass_path.to_string_lossy();
     let escaped_path = escape_filtergraph_value(path_text.as_ref());
-    let fonts_dir_option = crate::core::text::fonts::system_font_directories()
-        .into_iter()
-        .next()
+    // The filter takes a single directory, and libass reads it in addition to
+    // the host's own font provider. Taking whichever path happened to sort
+    // first meant a per-user font folder could shadow the system one; naming
+    // the platform's primary folder makes the choice deterministic.
+    let fonts_dir_option = crate::core::text::fonts::primary_system_font_directory()
         .map(|directory| {
             let directory_text = directory.to_string_lossy();
             format!(
@@ -4339,9 +4730,14 @@ pub(super) fn append_ass_text_overlay(
             )
         })
         .unwrap_or_default();
+    // `original_size` names the video the script was composed for; the filter
+    // turns it into a libass pixel aspect of frame-AR over original-AR. The
+    // script is composed for the sequence canvas, so passing the canvas is a
+    // no-op whenever the export keeps its aspect - and correctly un-stretches
+    // the glyphs when an export overrides width and height to a different one.
     filter_complex.push(';');
     filter_complex.push_str(&format!(
-        "{base_video_label}subtitles=filename='{escaped_path}'{fonts_dir_option}:original_size={output_width}x{output_height}{output_label}"
+        "{base_video_label}subtitles=filename='{escaped_path}'{fonts_dir_option}:original_size={canvas_width}x{canvas_height}{output_label}"
     ));
     output_label.to_string()
 }
@@ -4768,12 +5164,9 @@ impl ExportEngine {
         // This prevents FFmpeg from failing when clips don't have audio
         let audio_info = self.probe_assets_for_audio(sequence, assets).await;
 
-        let (output_width, output_height) = output_video_dimensions(sequence, settings);
         let mut ass_text_overlay_dir: Option<tempfile::TempDir> = None;
         let mut ass_text_overlay_path: Option<PathBuf> = None;
-        if let Some(ass_script) =
-            build_ass_text_overlay_script(sequence, effects, output_width, output_height)?
-        {
+        if let Some(ass_script) = build_ass_text_overlay_script(sequence, effects)? {
             if self.ffmpeg_supports_filter("subtitles").await {
                 let temp_dir = tempfile::Builder::new()
                     .prefix("openreelio-text-overlays-")
@@ -5597,6 +5990,75 @@ fn validate_clip_asset_qc(
     }
 }
 
+/// Line height the ASS burn-in path is allowed to silently ignore.
+///
+/// 1.2 is both the typographic default and roughly what libass derives from
+/// font metrics, so a style at or near it loses nothing by being dropped.
+const ASS_DEFAULT_LINE_HEIGHT: f64 = 1.2;
+
+/// How far a stored line height may sit from the default before it is worth
+/// telling the caller it will not survive the render.
+const ASS_LINE_HEIGHT_WARNING_TOLERANCE: f64 = 0.15;
+
+/// Warns about text styling the libass burn-in path cannot reproduce.
+///
+/// The ASS path is the one an export actually takes whenever FFmpeg has the
+/// `subtitles` filter, and it has two blind spots the `drawtext` fallback does
+/// not: ASS has no line-spacing control at all, and libass substitutes a
+/// missing font without saying so. Both are reported here rather than
+/// discovered in the finished file.
+fn validate_text_render_fidelity(
+    validation: &mut ExportValidation,
+    sequence: &Sequence,
+    effects: &std::collections::HashMap<String, Effect>,
+) {
+    for track in &sequence.tracks {
+        if !track_included_in_media_collection(track) {
+            continue;
+        }
+
+        for clip in &track.clips {
+            if !clip.enabled {
+                continue;
+            }
+
+            let effect = match track.kind {
+                TrackKind::Caption => build_caption_text_effect(clip),
+                TrackKind::Video | TrackKind::Overlay if is_text_clip(clip) => {
+                    // A clip missing its effect is already an error from the
+                    // main validation walk; there is nothing to add here.
+                    build_text_clip_effect_with_transform(clip, effects).ok()
+                }
+                _ => None,
+            };
+            let Some(effect) = effect else {
+                continue;
+            };
+
+            let line_height = effect_float_param(&effect, "line_height", ASS_DEFAULT_LINE_HEIGHT);
+            if (line_height - ASS_DEFAULT_LINE_HEIGHT).abs() > ASS_LINE_HEIGHT_WARNING_TOLERANCE {
+                validation.add_warning(format!(
+                    "Line height {line_height:.2} on clip '{}' on track '{}' is not honored by the libass burn-in path; the clip renders with font-default line spacing",
+                    clip.id, track.name
+                ));
+            }
+
+            let requested_family = ass_sanitize_style_field(
+                &effect_string_param(&effect, "font_family", "Arial"),
+                "Arial",
+            );
+            if let FontResolution::Substituted(replacement) =
+                resolve_text_font_family(&requested_family)
+            {
+                validation.add_warning(format!(
+                    "Font '{requested_family}' on clip '{}' on track '{}' is neither bundled nor installed; the clip renders in '{replacement}'",
+                    clip.id, track.name
+                ));
+            }
+        }
+    }
+}
+
 fn validate_caption_track_qc(
     validation: &mut ExportValidation,
     clock: &TimelineClock,
@@ -5742,6 +6204,8 @@ pub fn validate_export_settings_with_dimensions(
         }
         return validation;
     }
+
+    validate_text_render_fidelity(&mut validation, sequence, effects);
 
     // Check all clip assets exist (except virtual text clips) and are safe to read.
     for track in &sequence.tracks {
@@ -6039,19 +6503,314 @@ mod tests {
         let mut effects = HashMap::new();
         effects.insert(effect_id, effect);
 
-        let script = build_ass_text_overlay_script(&sequence, &effects, 1920, 1080)
+        let script = build_ass_text_overlay_script(&sequence, &effects)
             .expect("script result")
             .expect("script exists");
 
         assert!(script.contains("PlayResX: 1920"));
+        assert!(script.contains("PlayResY: 1080"));
         assert!(script.contains("Style: OpenReelioText0,Inter,96.00,&H40CCBBAA"));
         assert!(script.contains(",133.33,66.67,"));
-        assert_eq!(script.matches("Dialogue:").count(), 2);
-        assert!(script.contains("Dialogue: 0,0:00:01.25,0:00:04.75,OpenReelioText0"));
-        assert!(script.contains(r"\an5\frz15.00\b700"));
+        // A rotated, multi-line text block is one event carrying `\N`, so the
+        // rotation applies to the block rather than to each line separately.
+        assert_eq!(script.matches("Dialogue:").count(), 1);
+        assert!(script.contains("Dialogue: 0,0:00:01.25,0:00:04.75,OpenReelioText0,,0,0,0,,"));
+        assert!(script.contains(r"\pos(480.00,810.00)\an5\frz15.00\b700"));
         assert!(script.contains(r"\xshad8\yshad4"));
-        assert!(script.contains(r"Hello"));
-        assert!(script.contains(r"World \{safe\}"));
+        assert!(script.contains(r"Hello\NWorld \{safe\}"));
+    }
+
+    #[test]
+    fn ass_script_wraps_text_rather_than_clipping_it() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        let mut clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        clip.label = Some("Wrap me".to_string());
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+            .expect("script result")
+            .expect("script exists");
+
+        assert!(
+            script.contains("WrapStyle: 0"),
+            "WrapStyle 2 disables wrapping entirely. Got: {script}"
+        );
+    }
+
+    #[test]
+    fn ass_play_resolution_is_pinned_to_1080_regardless_of_export_size() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // 4K and vertical canvases both author the script in a 1080-tall space,
+        // so `fontSize: 48` means the same fraction of the frame everywhere.
+        for (canvas_width, canvas_height, expected_play_res_x) in [
+            (3840u32, 2160u32, 1920u32),
+            (1080, 1920, 608),
+            (1920, 1080, 1920),
+        ] {
+            let mut sequence = Sequence::new(
+                "Test",
+                SequenceFormat::new(canvas_width, canvas_height, 30, 1, 48000),
+            );
+            let mut track = Track::new_caption("Captions");
+            let mut clip = Clip::new("caption-asset")
+                .with_source_range(0.0, 2.0)
+                .place_at(0.0);
+            clip.label = Some("Scaled".to_string());
+            clip.caption_style = Some(serde_json::json!({ "fontSize": 48 }));
+            clip.caption_position = Some(serde_json::json!({
+                "type": "custom",
+                "xPercent": 50,
+                "yPercent": 50
+            }));
+            track.add_clip(clip);
+            sequence.add_track(track);
+
+            let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+                .expect("script result")
+                .expect("script exists");
+
+            assert!(
+                script.contains(&format!("PlayResX: {expected_play_res_x}")),
+                "{canvas_width}x{canvas_height} should author at PlayResX {expected_play_res_x}. Got: {script}"
+            );
+            assert!(
+                script.contains("PlayResY: 1080"),
+                "{canvas_width}x{canvas_height} should author at PlayResY 1080. Got: {script}"
+            );
+            // The font size stays nominal and `\pos` lands in PlayRes space,
+            // never in output pixels.
+            assert!(
+                script.contains(",48.00,"),
+                "font size must stay in PlayRes space. Got: {script}"
+            );
+            let expected_x = f64::from(expected_play_res_x) * 0.5;
+            assert!(
+                script.contains(&format!("\\pos({expected_x:.2},540.00)")),
+                "position must be in PlayRes space. Got: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn preset_caption_anchors_on_margins_so_libass_can_wrap_it() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // 10% of PlayResX (1920) on each side leaves the 80% wrap box; 8% of
+        // PlayResY (1080) is the preset's own margin.
+        for (alignment, expected_alignment) in [("left", 1), ("center", 2), ("right", 3)] {
+            let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+            let mut track = Track::new_caption("Captions");
+            let mut clip = Clip::new("caption-asset")
+                .with_source_range(0.0, 2.0)
+                .place_at(0.0);
+            clip.label = Some("Anchored".to_string());
+            clip.caption_style = Some(serde_json::json!({ "alignment": alignment }));
+            clip.caption_position = Some(serde_json::json!({
+                "type": "preset",
+                "vertical": "bottom",
+                "marginPercent": 8
+            }));
+            track.add_clip(clip);
+            sequence.add_track(track);
+
+            let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+                .expect("script result")
+                .expect("script exists");
+
+            assert!(
+                !script.contains("\\pos("),
+                "`\\pos` disables margins, so a wrapped caption must not carry one. Got: {script}"
+            );
+            assert!(
+                script.contains(&format!(
+                    "Dialogue: 0,0:00:00.00,0:00:02.00,OpenReelioText0,,192,192,86,,{{\\an{expected_alignment}"
+                )),
+                "{alignment} caption should carry margins and \\an{expected_alignment}. Got: {script}"
+            );
+            assert!(
+                script.contains(&format!(",{expected_alignment},192,192,86,1\n")),
+                "the style should carry the same anchor as the event. Got: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn preset_caption_vertical_selects_the_numpad_row() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        for (vertical, expected_alignment, expected_margin_v) in
+            [("top", 8, 86), ("center", 5, 0), ("bottom", 2, 86)]
+        {
+            let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+            let mut track = Track::new_caption("Captions");
+            let mut clip = Clip::new("caption-asset")
+                .with_source_range(0.0, 2.0)
+                .place_at(0.0);
+            clip.label = Some("Row".to_string());
+            clip.caption_position = Some(serde_json::json!({
+                "type": "preset",
+                "vertical": vertical,
+                "marginPercent": 8
+            }));
+            track.add_clip(clip);
+            sequence.add_track(track);
+
+            let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+                .expect("script result")
+                .expect("script exists");
+
+            assert!(
+                script.contains(&format!(
+                    ",,192,192,{expected_margin_v},,{{\\an{expected_alignment}"
+                )),
+                "{vertical} should map to \\an{expected_alignment}. Got: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_and_preview_agree_on_the_horizontal_anchor_of_a_preset_caption() {
+        // Mirrors `resolveCaptionAnchor` in src/utils/captionStyle.ts, pinned by
+        // captionStyle.test.ts: alignment picks 10 / 50 / 90 percent.
+        for (alignment, expected_x) in [("left", 0.10), ("center", 0.50), ("right", 0.90)] {
+            let anchor = CaptionAnchor::Preset {
+                vertical: CaptionVertical::Bottom,
+                margin_percent: 5.0,
+            };
+            let (x, y) = caption_anchor_position(anchor, alignment);
+            assert!(
+                (x - expected_x).abs() < 1e-9,
+                "{alignment} should anchor at {expected_x}, got {x}"
+            );
+            assert!((y - 0.95).abs() < 1e-9);
+        }
+
+        // A custom position keeps the coordinates its author chose.
+        let (x, y) = caption_anchor_position(CaptionAnchor::Custom { x: 0.8, y: 0.9 }, "left");
+        assert!((x - 0.8).abs() < 1e-9 && (y - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bundled_font_is_embedded_in_the_script_that_uses_it() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        for (index, family) in ["bebasneue", "Bebas Neue"].iter().enumerate() {
+            let mut clip = Clip::new("caption-asset")
+                .with_source_range(0.0, 2.0)
+                .place_at(index as f64 * 2.0);
+            clip.label = Some("Bundled".to_string());
+            clip.caption_style = Some(serde_json::json!({ "fontFamily": family }));
+            track.add_clip(clip);
+        }
+        sequence.add_track(track);
+
+        let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+            .expect("script result")
+            .expect("script exists");
+
+        assert!(script.contains("[Fonts]\n"));
+        assert_eq!(
+            script.matches("fontname: BebasNeue-Regular_0.ttf").count(),
+            1,
+            "a family used twice must still be embedded once. Got: {script}"
+        );
+        // Both spellings normalize to the family the embedded font declares.
+        assert_eq!(
+            script.matches("Bebas Neue,").count(),
+            2,
+            "both clips should name the canonical family. Got: {script}"
+        );
+    }
+
+    #[test]
+    fn a_font_available_nowhere_is_substituted_and_reported() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let missing = "Definitely Not An Installed Family";
+        assert_eq!(
+            resolve_text_font_family(missing),
+            FontResolution::Substituted("TikTok Sans"),
+        );
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        let mut clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        clip.id = "missing-font-caption".to_string();
+        clip.label = Some("Substituted".to_string());
+        clip.caption_style = Some(serde_json::json!({ "fontFamily": missing }));
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+            .expect("script result")
+            .expect("script exists");
+        assert!(
+            script.contains("Style: OpenReelioText0,TikTok Sans,"),
+            "a missing family must be replaced explicitly, not left to libass. Got: {script}"
+        );
+        assert!(script.contains("fontname: TikTokSans-Regular_0.ttf"));
+
+        let mut validation = ExportValidation::valid();
+        validate_text_render_fidelity(&mut validation, &sequence, &HashMap::new());
+        assert!(
+            validation.warnings.iter().any(|warning| {
+                warning.contains("missing-font-caption")
+                    && warning.contains(missing)
+                    && warning.contains("TikTok Sans")
+            }),
+            "the substitution must be reported. Got: {:?}",
+            validation.warnings
+        );
+    }
+
+    #[test]
+    fn a_custom_line_height_is_reported_as_unrenderable() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        for (clip_id, line_height) in [
+            ("default-spacing", 1.2),
+            ("within-tolerance", 1.3),
+            ("wide-spacing", 1.8),
+        ] {
+            let mut clip = Clip::new("caption-asset")
+                .with_source_range(0.0, 2.0)
+                .place_at(0.0);
+            clip.id = clip_id.to_string();
+            clip.label = Some("Spaced".to_string());
+            clip.caption_style = Some(serde_json::json!({ "lineHeight": line_height }));
+            track.add_clip(clip);
+        }
+        sequence.add_track(track);
+
+        let mut validation = ExportValidation::valid();
+        validate_text_render_fidelity(&mut validation, &sequence, &HashMap::new());
+
+        let spacing_warnings: Vec<&String> = validation
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains("Line height"))
+            .collect();
+        assert_eq!(
+            spacing_warnings.len(),
+            1,
+            "only a line height that visibly deviates should warn. Got: {:?}",
+            validation.warnings
+        );
+        assert!(spacing_warnings[0].contains("wide-spacing"));
+        assert!(validation.is_valid, "the warning must not block the export");
     }
 
     #[test]
@@ -6079,7 +6838,7 @@ mod tests {
         let mut effects = HashMap::new();
         effects.insert(effect_id, effect);
 
-        let script = build_ass_text_overlay_script(&sequence, &effects, 1920, 1080)
+        let script = build_ass_text_overlay_script(&sequence, &effects)
             .expect("script result")
             .expect("script exists");
 
@@ -6155,13 +6914,19 @@ mod tests {
         caption_track.add_clip(caption_clip);
         sequence.add_track(caption_track);
 
-        let script = build_ass_text_overlay_script(&sequence, &HashMap::new(), 1920, 1080)
+        let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
             .expect("script result")
             .expect("script exists");
 
         assert!(script.contains("Style: OpenReelioText0,Arial,42.00,&H3320F0FF"));
         assert!(script.contains("Dialogue: 0,0:00:00.50,0:00:02.50,OpenReelioText0"));
+        // A custom position is an exact point, so it keeps `\pos` - now in the
+        // 1080-tall PlayRes space rather than in output pixels.
         assert!(script.contains(r"\pos(1536.00,972.00)\an6"));
+        assert!(
+            script.contains(",6,0,0,0,1\n"),
+            "a positioned caption carries no margins. Got: {script}"
+        );
         assert!(script.contains("Caption line"));
     }
 
@@ -10640,8 +11405,8 @@ mod tests {
             args_str
         );
         assert!(
-            args_str.contains("x=(w*0.5000)"),
-            "Expected left alignment x expression. Got: {}",
+            args_str.contains("x=(w*0.1000)"),
+            "Expected left alignment to anchor on the 10% left margin, matching the preview. Got: {}",
             args_str
         );
         assert!(

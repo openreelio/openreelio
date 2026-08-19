@@ -408,8 +408,8 @@ pub(super) fn build_sequence_ffmpeg_args(
             &mut filter_complex,
             "[outv]",
             ass_path,
-            output_width,
-            output_height,
+            ctx.sequence.format.canvas.width,
+            ctx.sequence.format.canvas.height,
         )
     } else {
         let text_overlay_video_label =

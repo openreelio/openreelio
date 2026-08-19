@@ -1030,7 +1030,7 @@ fn ass_script_for(state: &ProjectState) -> String {
         .clone()
         .expect("the fixture sets an active sequence");
     let sequence = state.sequences.get(&sequence_id).expect("sequence exists");
-    crate::core::render::export::build_ass_text_overlay_script(sequence, &state.effects, 1920, 1080)
+    crate::core::render::export::build_ass_text_overlay_script(sequence, &state.effects)
         .expect("the ASS script must build")
         .expect("a text overlay must produce an ASS script")
 }
