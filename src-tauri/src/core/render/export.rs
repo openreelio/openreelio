@@ -6063,9 +6063,9 @@ const ASS_LINE_HEIGHT_WARNING_TOLERANCE: f64 = 0.15;
 ///
 /// The ASS path is the one an export actually takes whenever FFmpeg has the
 /// `subtitles` filter, and it has two blind spots the `drawtext` fallback does
-/// not: ASS has no line-spacing control at all, and libass substitutes a
-/// missing font without saying so. Both are reported here rather than
-/// discovered in the finished file.
+/// not: ASS has no line-spacing control at all, so libass follows the font's own
+/// metrics, and a missing font is substituted without saying so. Both are
+/// reported here rather than discovered in the finished file.
 fn validate_text_render_fidelity(
     validation: &mut ExportValidation,
     sequence: &Sequence,
@@ -6097,7 +6097,7 @@ fn validate_text_render_fidelity(
             let line_height = effect_float_param(&effect, "line_height", ASS_DEFAULT_LINE_HEIGHT);
             if (line_height - ASS_DEFAULT_LINE_HEIGHT).abs() > ASS_LINE_HEIGHT_WARNING_TOLERANCE {
                 validation.add_warning(format!(
-                    "Line height {line_height:.2} on clip '{}' on track '{}' is not honored by the libass burn-in path; the clip renders with font-default line spacing",
+                    "Line height {line_height:.2} on clip '{}' on track '{}' is honored only by the drawtext fallback; the libass burn-in path an export normally takes follows the font's own line metrics",
                     clip.id, track.name
                 ));
             }
@@ -6110,7 +6110,7 @@ fn validate_text_render_fidelity(
                 resolve_text_font_family(&requested_family)
             {
                 validation.add_warning(format!(
-                    "Font '{requested_family}' on clip '{}' on track '{}' is neither bundled nor installed; the clip renders in '{replacement}'",
+                    "Font '{requested_family}' on clip '{}' on track '{}' is neither bundled nor installed; the clip renders in the bundled '{replacement}' instead",
                     clip.id, track.name
                 ));
             }

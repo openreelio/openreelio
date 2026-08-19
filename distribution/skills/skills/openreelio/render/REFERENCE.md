@@ -61,14 +61,19 @@ Per-clip framing renders. `SetClipTransform` (position, scale, rotation, anchor)
 and `SetClipOpacity` are composited onto the canvas in the final export, exactly
 where the preview draws them.
 
-Three things still do not, and the render says so rather than pretending:
+Some things still do not, and the render says so rather than pretending:
 
 | Feature | In `render start` |
 | ------- | ----------------- |
 | Clip transform and opacity | **Yes.** Composited at the clip's base values. |
 | Motion keyframes (`SetClipMotionKeyframes`) | **No.** The clip renders static at its base transform; the result carries a `warnings` entry naming the clip. |
+| `lineHeight` on text and captions | **No.** Text is burned in by libass, which has no line-spacing control and follows the font's own metrics; the result carries a `warnings` entry naming the clip. Only the `drawtext` fallback honors it. |
 | Simultaneous layered video clips (picture-in-picture) | **No.** Validation refuses the render. |
 | Blend modes | **No.** Validation refuses the render. |
+
+A font that is neither bundled nor installed on the machine is reported the same
+way: the render substitutes a bundled family and names it in `warnings` rather
+than letting libass pick something silently.
 
 `frame extract --mode fast` shows the *composited* picture for a transformed
 clip — it detects the transform and falls back to composite mode rather than
