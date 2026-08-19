@@ -1868,6 +1868,15 @@ impl FilterGraph {
         self.effects.iter().any(|e| e.is_audio())
     }
 
+    /// The video effects this graph emits, in the order they are applied.
+    ///
+    /// Callers that need to know what the picture looks like *after* the effect
+    /// chain — its size, for instance — have to walk the same list, in the same
+    /// order, that [`FilterGraph::to_video_filter_complex`] emits.
+    pub fn video_effects(&self) -> impl Iterator<Item = &Effect> {
+        self.effects.iter().filter(|effect| effect.is_video())
+    }
+
     /// Generates the FFmpeg filter_complex string for video effects
     ///
     /// # Arguments

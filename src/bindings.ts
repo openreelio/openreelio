@@ -9457,7 +9457,15 @@ isHdr?: boolean;
 /**
  * FFprobe color transfer string (e.g. `smpte2084`, `arib-std-b67`).
  */
-colorTransfer?: string | null }
+colorTransfer?: string | null; 
+/**
+ * Display-matrix rotation in degrees, folded into `(-180, 180]`.
+ * 
+ * `width` and `height` are the *coded* size. FFmpeg auto-rotates on decode,
+ * so a quarter turn here means the frames downstream are `height x width`;
+ * [`crate::core::ffmpeg::display_dimensions`] applies the swap.
+ */
+rotationDeg?: number }
 /**
  * A visual clip layer in compositor order.
  */

@@ -49,12 +49,20 @@ const MAX_SCALE: f64 = 100.0;
 /// Video filters and encoders want even dimensions at every stage of the graph.
 const DIMENSION_ALIGNMENT: f64 = 2.0;
 
-/// Ceiling on any intermediate frame dimension.
+/// Hard ceiling on any intermediate frame dimension.
 ///
-/// A 100x scale on a 4K canvas would otherwise ask FFmpeg to allocate a frame
-/// hundreds of thousands of pixels wide. Anything beyond this is already far
-/// outside the canvas, so clamping costs no visible picture.
+/// This is FFmpeg's own limit; the canvas-relative cap below bites long before
+/// it does, so this only backstops arithmetic that went somewhere unexpected.
 const MAX_DIMENSION: f64 = 32_766.0;
+
+/// How much larger than the canvas diagonal a scaled frame is allowed to get.
+///
+/// Once a frame is this big, every extra pixel is off-canvas no matter where the
+/// anchor puts it: the canvas diagonal bounds the distance from any on-screen
+/// point to any canvas corner, so a frame twice that across already covers the
+/// canvas from any placement the layout can produce. Letting the scale run free
+/// instead costs real memory — `scale=17` on 1080p is already ~900 MB a frame.
+const MAX_CANVAS_DIAGONAL_MULTIPLE: f64 = 2.0;
 
 /// Below this the rotation is a no-op and the graph omits the `rotate` filter.
 const ROTATION_EPSILON_RAD: f64 = 1e-9;
@@ -145,8 +153,18 @@ pub(super) fn compute_clip_transform_layout(
     let scale_x = sanitize_scale(transform.scale.x, "scale.x");
     let scale_y = sanitize_scale(transform.scale.y, "scale.y");
 
-    let scaled_width = align_dimension(source_width * base_scale * scale_x);
-    let scaled_height = align_dimension(source_height * base_scale * scale_y);
+    // Both axes shrink by the same factor when the frame is too big to render,
+    // because clamping them independently would silently restretch the picture:
+    // a 100x scale on 16:9 would come out square.
+    let ideal_width = source_width * base_scale * scale_x;
+    let ideal_height = source_height * base_scale * scale_y;
+    let shrink = uniform_shrink(
+        ideal_width,
+        ideal_height,
+        frame_dimension_limit(canvas_width, canvas_height),
+    );
+    let scaled_width = align_dimension(ideal_width * shrink);
+    let scaled_height = align_dimension(ideal_height * shrink);
 
     let rotation_deg = sanitize_finite(transform.rotation_deg, 0.0, "rotation");
     let rotation_rad = rotation_deg.to_radians();
@@ -179,10 +197,16 @@ pub(super) fn compute_clip_transform_layout(
 
     // `rotate` keeps the input centre at the output centre, and `overlay` places
     // by top-left corner, so the corner is the picture centre less half the box.
+    //
+    // The corner is snapped to an even pixel because `overlay` in a chroma-
+    // subsampled format floors both offsets to the subsampling grid anyway
+    // (x=101 lands at 100, x=-51 at -52). Rounding here makes the number the
+    // graph carries the number FFmpeg acts on, so the placement error is a
+    // symmetric half-pixel instead of a one-sided whole one.
     let centre_x = position_x * canvas_width + rotated_x;
     let centre_y = position_y * canvas_height + rotated_y;
-    let overlay_x = round_to_i32(centre_x - f64::from(bounding_width) / 2.0);
-    let overlay_y = round_to_i32(centre_y - f64::from(bounding_height) / 2.0);
+    let overlay_x = round_to_even_i32(centre_x - f64::from(bounding_width) / 2.0);
+    let overlay_y = round_to_even_i32(centre_y - f64::from(bounding_height) / 2.0);
 
     ClipTransformLayout {
         scaled_width,
@@ -269,14 +293,37 @@ fn align_with(value: f64, round: fn(f64) -> f64) -> u32 {
     aligned.clamp(DIMENSION_ALIGNMENT, MAX_DIMENSION) as u32
 }
 
-fn round_to_i32(value: f64) -> i32 {
+/// The largest a scaled frame may get before the extra pixels are all off-canvas.
+fn frame_dimension_limit(canvas_width: f64, canvas_height: f64) -> f64 {
+    let diagonal = canvas_width.hypot(canvas_height);
+    if !diagonal.is_finite() || diagonal <= 0.0 {
+        return MAX_DIMENSION;
+    }
+    (diagonal * MAX_CANVAS_DIAGONAL_MULTIPLE).clamp(DIMENSION_ALIGNMENT, MAX_DIMENSION)
+}
+
+/// The single factor that brings both axes inside `limit` without reshaping them.
+fn uniform_shrink(width: f64, height: f64, limit: f64) -> f64 {
+    let mut factor = 1.0_f64;
+    for extent in [width, height] {
+        if extent.is_finite() && extent > limit {
+            factor = factor.min(limit / extent);
+        }
+    }
+    if factor.is_finite() && factor > 0.0 {
+        factor
+    } else {
+        1.0
+    }
+}
+
+fn round_to_even_i32(value: f64) -> i32 {
     if !value.is_finite() {
         warn_fallback("overlay offset", value);
         return 0;
     }
-    value
-        .round()
-        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+    let even = (value / DIMENSION_ALIGNMENT).round() * DIMENSION_ALIGNMENT;
+    even.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
 }
 
 #[cfg(test)]
@@ -434,8 +481,9 @@ mod tests {
         assert_eq!(result.bounding_width, 1062);
         assert_eq!(result.bounding_height, 1062);
         // Rotation about the centre anchor keeps the centre at the canvas centre.
-        assert_eq!(result.overlay_x, 960 - 531);
-        assert_eq!(result.overlay_y, 540 - 531);
+        // The ideal corner is (429, 9); both snap up to the next even pixel.
+        assert_eq!(result.overlay_x, 430);
+        assert_eq!(result.overlay_y, 10);
     }
 
     /// Feature: Transform layout
@@ -456,8 +504,9 @@ mod tests {
         assert_eq!(result.scaled_height, 270);
         assert_eq!(result.bounding_width, 270);
         assert_eq!(result.bounding_height, 960);
-        // Centre anchor, so the picture centre sits at (0.25 * 1920, 540).
-        assert_eq!(result.overlay_x, 480 - 135);
+        // Centre anchor, so the picture centre sits at (0.25 * 1920, 540). The
+        // ideal corner x is 345, which snaps up to the next even pixel.
+        assert_eq!(result.overlay_x, 346);
         assert_eq!(result.overlay_y, 540 - 480);
     }
 
@@ -498,9 +547,12 @@ mod tests {
     }
 
     /// Feature: Transform layout
-    /// Scenario: an absurd scale is clamped instead of allocating a huge frame
+    /// Scenario: an absurd scale is clamped without reshaping the picture
+    ///
+    /// Clamping each axis at its own ceiling used to turn a 16:9 source square,
+    /// so a 100x zoom rendered stretched as well as enormous.
     #[test]
-    fn should_clamp_dimensions_that_would_exceed_the_renderable_size() {
+    fn should_clamp_dimensions_uniformly_when_the_scale_is_absurd() {
         let transform = Transform {
             scale: Point2D::new(1000.0, 1000.0),
             ..Transform::default()
@@ -508,9 +560,79 @@ mod tests {
 
         let result = layout(transform, 1.0);
 
-        // Scale clamps to 100x, and 1920 * 100 clamps again at the frame ceiling.
-        assert_eq!(result.scaled_width, 32_766);
-        assert_eq!(result.scaled_height, 32_766);
+        // Scale clamps to 100x -> 192000x108000, then one shrink factor brings the
+        // long axis down to twice the canvas diagonal (2 * hypot(1920, 1080)).
+        assert_eq!(result.scaled_width, 4406);
+        assert_eq!(result.scaled_height, 2478);
+
+        let source_aspect = f64::from(SOURCE_W) / f64::from(SOURCE_H);
+        let clamped_aspect = f64::from(result.scaled_width) / f64::from(result.scaled_height);
+        assert!(
+            (clamped_aspect - source_aspect).abs() < 0.01,
+            "clamping must preserve the aspect ratio: {clamped_aspect} vs {source_aspect}"
+        );
+    }
+
+    /// Feature: Transform layout
+    /// Scenario: a clamped frame is still placed where the anchor says it should be
+    ///
+    /// The overlay corner is derived from the post-clamp size, so the visible
+    /// region a viewer sees is the one the anchor and position asked for.
+    #[test]
+    fn should_place_a_clamped_frame_from_its_post_clamp_size() {
+        let transform = Transform {
+            scale: Point2D::new(1000.0, 1000.0),
+            anchor: Point2D::new(0.0, 0.0),
+            position: Point2D::new(0.5, 0.5),
+            ..Transform::default()
+        };
+
+        let result = layout(transform, 1.0);
+
+        // Anchor at the top-left corner, position at the canvas centre: the corner
+        // is pinned to (960, 540) and the rest of the frame runs down and right.
+        assert_eq!(result.scaled_width, 4406);
+        assert_eq!(result.scaled_height, 2478);
+        assert_eq!(result.overlay_x, 960);
+        assert_eq!(result.overlay_y, 540);
+    }
+
+    /// Feature: Transform layout
+    /// Scenario: overlay offsets land on the grid `overlay` actually snaps to
+    ///
+    /// `overlay` floors x and y to the chroma subsampling grid in yuv420, so an
+    /// odd number in the graph is a number FFmpeg silently changes.
+    #[test]
+    fn should_emit_even_overlay_offsets() {
+        for (position_x, position_y) in [
+            (0.0, 0.0),
+            (0.137, 0.911),
+            (0.5, 0.5),
+            (0.333, 0.666),
+            (1.0, 1.0),
+        ] {
+            let transform = Transform {
+                position: Point2D::new(position_x, position_y),
+                scale: Point2D::new(0.3137, 0.7123),
+                rotation_deg: 37.0,
+                ..Transform::default()
+            };
+
+            let result = layout(transform, 1.0);
+
+            assert_eq!(
+                result.overlay_x % 2,
+                0,
+                "overlay_x {} is odd at position {position_x}",
+                result.overlay_x
+            );
+            assert_eq!(
+                result.overlay_y % 2,
+                0,
+                "overlay_y {} is odd at position {position_y}",
+                result.overlay_y
+            );
+        }
     }
 
     /// Feature: Transform layout

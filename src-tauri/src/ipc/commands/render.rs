@@ -16,6 +16,30 @@ use crate::core::{
 };
 use crate::AppState;
 
+/// Runs export validation without blocking the async runtime.
+///
+/// Validation measures every transformed clip's source with a synchronous
+/// FFprobe. Calling it inline would park a Tauri runtime worker on a child
+/// process for as long as the probe takes, which is exactly the blocking the
+/// worker-separation rule exists to prevent.
+async fn validate_export_settings_off_runtime(
+    sequence: &crate::core::timeline::Sequence,
+    assets: &std::collections::HashMap<String, crate::core::assets::Asset>,
+    effects: &std::collections::HashMap<String, crate::core::effects::Effect>,
+    settings: &crate::core::render::ExportSettings,
+) -> Result<crate::core::render::ExportValidation, String> {
+    let sequence = sequence.clone();
+    let assets = assets.clone();
+    let effects = effects.clone();
+    let settings = settings.clone();
+
+    tokio::task::spawn_blocking(move || {
+        crate::core::render::validate_export_settings(&sequence, &assets, &effects, &settings)
+    })
+    .await
+    .map_err(|error| format!("Export validation task failed: {}", error))
+}
+
 // =============================================================================
 // DTOs
 // =============================================================================
@@ -335,7 +359,7 @@ pub async fn start_render(
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
     app_handle: tauri::AppHandle,
 ) -> Result<RenderStartResult, String> {
-    use crate::core::render::{validate_export_settings, ExportEngine, ExportProgress};
+    use crate::core::render::{ExportEngine, ExportProgress};
     use tauri::Emitter;
 
     // Get sequence/assets/effects + project path from project state
@@ -414,7 +438,8 @@ pub async fn start_render(
         .await?;
 
     // Validate export settings before starting
-    let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
+    let validation =
+        validate_export_settings_off_runtime(&sequence, &assets, &effects, &settings).await?;
     if !validation.is_valid {
         let error_msg = validation.errors.join("; ");
         return Err(format!("Export validation failed: {}", error_msg));
@@ -594,7 +619,7 @@ pub async fn render_range(
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
     app_handle: tauri::AppHandle,
 ) -> Result<RenderStartResult, String> {
-    use crate::core::render::{validate_export_settings, ExportEngine, ExportProgress};
+    use crate::core::render::{ExportEngine, ExportProgress};
     use tauri::Emitter;
 
     // Validate range
@@ -669,12 +694,20 @@ pub async fn render_range(
     resolve_export_hardware_preferences(&app_handle, &ffmpeg.info().ffmpeg_path, &mut settings)
         .await?;
 
-    let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
+    let validation =
+        validate_export_settings_off_runtime(&sequence, &assets, &effects, &settings).await?;
     if !validation.is_valid {
         return Err(format!(
             "Export validation failed: {}",
             validation.errors.join("; ")
         ));
+    }
+
+    // Same warnings `start_render` logs: motion keyframes and the rest describe
+    // ways the file will differ from the preview, and a range export differs the
+    // same way.
+    for warning in &validation.warnings {
+        tracing::warn!("Range export warning: {}", warning);
     }
 
     let render_plan =
@@ -834,9 +867,7 @@ pub async fn batch_render(
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
     app_handle: tauri::AppHandle,
 ) -> Result<BatchRenderStartResult, String> {
-    use crate::core::render::{
-        validate_export_settings, ExportEngine, ExportProgress, ExportSettings,
-    };
+    use crate::core::render::{ExportEngine, ExportProgress, ExportSettings};
     use tauri::Emitter;
 
     if items.is_empty() {
@@ -906,7 +937,8 @@ pub async fn batch_render(
             item.out_point,
         )?;
 
-        let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
+        let validation =
+            validate_export_settings_off_runtime(&sequence, &assets, &effects, &settings).await?;
         if !validation.is_valid {
             return Err(format!(
                 "Batch item {} validation failed: {}",
@@ -2787,12 +2819,21 @@ pub async fn render_preview_cache(
                 Some(*end_sec),
             );
 
-            let validation = crate::core::render::validate_export_settings(
+            let validation = match validate_export_settings_off_runtime(
                 &fresh_sequence,
                 &fresh_assets,
                 &fresh_effects,
                 &seg_settings,
-            );
+            )
+            .await
+            {
+                Ok(validation) => validation,
+                Err(error) => {
+                    tracing::warn!("Preview cache segment {} validation failed: {error}", idx);
+                    let _ = app_handle.emit("render-cache-error", error);
+                    break;
+                }
+            };
             if !validation.is_valid {
                 let error = format!(
                     "Preview cache segment {} validation failed: {}",
