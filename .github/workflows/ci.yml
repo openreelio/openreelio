@@ -392,7 +392,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Ensure healthy apt mirror
+        # playwright --with-deps drives apt; a dead Azure mirror hangs it for
+        # the full 6h job timeout, so swap to archive.ubuntu.com up front.
+        run: |
+          if ! timeout 20 curl -fsI http://azure.archive.ubuntu.com/ubuntu/dists/noble/InRelease >/dev/null; then
+            echo "azure mirror unhealthy; switching to archive.ubuntu.com"
+            sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt 2>/dev/null || true
+            sudo find /etc/apt -name '*.list' -o -name '*.sources' | xargs -r sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g'
+          fi
+
       - name: Install Playwright browsers
+        timeout-minutes: 20
         run: npx playwright install --with-deps chromium
 
       - name: Generate test fixtures
