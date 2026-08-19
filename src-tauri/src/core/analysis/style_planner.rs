@@ -14,7 +14,8 @@
 //!
 //! Neither path plans a transition today. The profile path *can* — the
 //! `AddEffect` cadence is implemented and tested — but no shipped profile asks
-//! for one while the renderer turns a two-input transition into a cut. The ESD
+//! for one while a profile cannot tell which of the cuts it places left the
+//! source media a blend has to be paid for with. The ESD
 //! path cannot at all: a reference ESD's transition inventory records *that* a
 //! dissolve happened, never which curated recipe would reproduce it, so non-cut
 //! reference transitions stay a warning rather than a guess.
@@ -527,12 +528,14 @@ impl StylePlanner {
 
     /// Generates the cut steps, then the transition steps a cadence asks for.
     ///
-    /// No shipped profile asks for one yet — the renderer turns a two-input
-    /// transition into a cut and warns, so a profile that planned a dissolve
-    /// would be planning an edit the export cannot deliver. The cadence is kept
-    /// implemented and tested (see the test-only profile in
+    /// No shipped profile asks for one yet. The renderer blends a two-input
+    /// transition where both clips still hold unused source media, but a pacing
+    /// profile places cuts by target shot length and cannot tell which of them
+    /// left that media behind, so a profile that planned a dissolve would be
+    /// planning an edit the export could only sometimes deliver. The cadence is
+    /// kept implemented and tested (see the test-only profile in
     /// [`pacing_profiles`](crate::core::style::pacing_profiles)) so the planner
-    /// half is ready when the transition engine lands.
+    /// half is ready once a profile can also choose eligible boundaries.
     ///
     /// Transitions are placed on the *outgoing* clip of a boundary — the clip
     /// that ends at the cut, not the one that starts there. Attaching to the

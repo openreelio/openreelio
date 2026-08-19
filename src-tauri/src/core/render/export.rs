@@ -5317,7 +5317,7 @@ pub(super) fn build_clip_filter_graph(
                 }
 
                 // `xfade` needs the outgoing *and* incoming streams, so it is
-                // stitched at the clip boundary by `append_timeline_video_output`.
+                // stitched at the clip boundary by `stitch_transition_groups`.
                 // Letting it into the single-input clip chain emits a two-input
                 // filter with one input, which FFmpeg rejects outright — the
                 // export fails rather than merely looking wrong.

@@ -18,14 +18,15 @@
 //! `transition_recipe` + `transition_every_n` describe which curated transition
 //! to place and on which cuts (`every_n` counts *boundaries*, so `3` means the
 //! 1st, 4th, and 7th cut; `0` or no recipe means hard cuts). Every shipped
-//! profile sets `transition_recipe: None`, because the renderer does not yet
-//! place two-input transitions: an `xfade` shortens the picture while the audio
-//! stitch keeps every clip at its absolute timeline position, so the rendered
-//! file would drift out of sync and end before the timeline does. The fields
-//! stay in the schema, and [`generate_steps_with_transitions`] still knows how
-//! to emit the `AddEffect` steps, so a profile can start placing transitions the
-//! day the transition engine lands — a shipped profile that quietly rendered a
+//! profile sets `transition_recipe: None`. The renderer does place two-input
+//! transitions now, but only where both clips still hold unused source media to
+//! blend with, and a profile decides *pace* — it places cuts wherever the target
+//! shot length falls, with no idea whether the shots either side of one kept the
+//! handles a blend is paid for with. A shipped profile that quietly rendered a
 //! cut where it advertised a dissolve is worse than one that says it cuts hard.
+//! The fields stay in the schema, and [`generate_steps_with_transitions`] still
+//! knows how to emit the `AddEffect` steps, so a profile can start placing
+//! transitions once it also decides which boundaries can afford one.
 //!
 //! [`generate_steps_with_transitions`]: crate::core::analysis::style_planner
 //!
@@ -76,8 +77,9 @@ pub struct PacingProfileSpec {
     pub shot_variance_sec: f64,
     /// Curated transition recipe id, or `None` for hard cuts throughout.
     ///
-    /// Reserved for the transition engine: every shipped profile sets `None`
-    /// while the renderer still turns two-input transitions into cuts.
+    /// Still reserved: the renderer blends a two-input transition where both
+    /// clips kept unused source media, and a profile places cuts by pace alone,
+    /// so every shipped profile sets `None`.
     pub transition_recipe: Option<&'static str>,
     /// Place a transition every N cut boundaries; `0` means never.
     ///
@@ -316,16 +318,17 @@ mod tests {
     }
 
     #[test]
-    fn every_shipped_profile_cuts_hard_while_transitions_render_as_cuts() {
-        // The renderer turns a two-input transition into a cut and warns. A
-        // profile that advertised a dissolve would therefore be advertising
-        // something the export cannot deliver, so no shipped profile does until
-        // the transition engine exists.
+    fn every_shipped_profile_cuts_hard_until_it_can_choose_eligible_boundaries() {
+        // The renderer blends a two-input transition only where both clips kept
+        // unused source media to reach into. A profile places cuts by target
+        // shot length and knows nothing about that, so one advertising a
+        // dissolve would be advertising an edit the export could only sometimes
+        // deliver.
         for profile in PACING_PROFILES {
             assert!(
                 profile.transition_recipe.is_none(),
-                "profile '{}' advertises transition recipe '{:?}', but the renderer does not \
-                 place transitions yet — leave the field None until it does",
+                "profile '{}' advertises transition recipe '{:?}', but a profile cannot yet tell \
+                 which of its cuts can afford one — leave the field None until it can",
                 profile.id,
                 profile.transition_recipe
             );

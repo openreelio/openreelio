@@ -19,9 +19,10 @@
 //! `AddEffectCommand::execute` computes it there, before the op is logged.
 //!
 //! The `xfade` families skip `offset` for the same reason one step further out:
-//! `offset` is a position in the *accumulated* render stream, which depends on
-//! gaps and on every earlier transition. Only the render plan can know it, so
-//! the stitch derives it — see `append_timeline_video_output`.
+//! `offset` is a position in the render stream feeding the blend, which depends
+//! on how far the clips before it reach into their source. Only the render plan
+//! can know it, so the stitch derives it — see
+//! [`stitch_transition_groups`](crate::core::render::transition_stitch).
 //!
 //! # Admission
 //!

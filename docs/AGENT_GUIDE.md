@@ -189,22 +189,42 @@ is anchored on the clip's tail when the command executes; pass
 
 ### Transitions render as cuts
 
-Recipes are stored, validated, and preserved on the clip. What they are not,
-yet, is *rendered*:
+A transition is rendered when it can be, and reported as a cut when it cannot:
 
 | Recipe family | Rendered by `render start` |
 |---------------|----------------------------|
 | `fade-in`, `fade-out` | **Yes** — single-input filters in the clip's own chain |
-| `dissolve-*`, `wipe-*`, `slide-*` | **Not yet** — the boundary renders as a hard cut and the render reports a warning naming the clip and the effect |
+| `dissolve-*`, `wipe-*`, `slide-*` | **Yes, given handles** — the boundary blends, the picture and the sound crossfade together, and the file stays exactly as long as the timeline. Without handles the boundary renders as a hard cut and the render reports a warning naming the clip, the effect and the reason |
 
 A two-input transition needs the outgoing and incoming pictures at once, and
-overlapping them shortens the video stream while every clip's audio stays at its
-absolute timeline position: the file would drift out of sync and end before
-`Sequence::output_duration()`, which is the length `verify` measures against.
-Doing it properly needs a transition engine that crossfades and retimes audio
-alongside the picture. Until that exists the render degrades loudly rather than
-shipping a file that disagrees with its own timeline. For a soft-looking cut
-today, put `fade-out` on the outgoing clip and `fade-in` on the incoming one.
+overlapping them the naive way shortens the video stream while every clip's
+audio stays at its absolute timeline position: the file would drift out of sync
+and end before `Sequence::output_duration()`, which is the length `verify`
+measures against. So the blend is not paid for out of the timeline. Both clips
+reach into source media the edit is not using instead — **handles**: the
+outgoing clip plays half the transition past its out point, the incoming clip
+starts half of it early, and the overlap consumes exactly what they added. Not a
+frame of the timeline moves.
+
+That means a transition needs **half its length of unused source media on each
+side**. A one-second dissolve needs half a second past the outgoing clip's out
+point and half a second before the incoming clip's in point. Clips trimmed from
+longer sources have this; a clip using every frame of its source does not.
+
+The render degrades to a cut, with a warning naming the reason, when:
+
+- no clip starts where the carrier ends on the same track (a gap, or the last
+  clip on the track) — there is nothing to blend into;
+- either side is short of handle — the warning says which, and by how much;
+- the asset's length was never measured, so the outgoing handle cannot be
+  proven to exist — import or re-probe the asset;
+- the transition is not shorter than both shots it joins;
+- either clip is frozen, reversed or time-remapped, so its render window has no
+  well-defined reach into source.
+
+An eligible transition produces **no warning at all** — the render matches what
+the timeline shows. For a soft-looking cut where handles are impossible, put
+`fade-out` on the outgoing clip and `fade-in` on the incoming one.
 
 ### Framing a clip: transform and opacity
 
@@ -270,11 +290,12 @@ detected shot changes — so `dynamic-social` replaces guesses with one checked 
 | `calm-longform` | 7.0 s | 2.0 s | slow | yes |
 
 Every shipped profile cuts hard. `transitionRecipe` (`null`) and
-`transitionEveryN` (`0`) stay in the schema, reserved for the transition engine,
-but no profile sets them while the renderer turns a dissolve into a cut — see
-[Transitions render as cuts](#transitions-render-as-cuts). Ids resolve case- and
-separator-insensitively and accept aliases (`shorts`, `montage`, `social`, `doc`,
-`calm`, …).
+`transitionEveryN` (`0`) stay in the schema, still reserved: a planned cut lands
+wherever the pace asks, which is no guarantee that both sides of it have the
+handles a blend needs — see
+[Transitions render as cuts](#transitions-render-as-cuts). Turning them on is a
+separate piece of work. Ids resolve case- and separator-insensitively and accept
+aliases (`shorts`, `montage`, `social`, `doc`, `calm`, …).
 
 Analysis is a precondition, not a nicety: the plan needs the source duration, and
 shot boundaries are what let cuts land on real shot changes. Without a cached
@@ -321,8 +342,9 @@ field (`clipId`); only the referenced value itself waits for execute.
 
 A profile decides pace. Nothing else.
 
-- **No transitions.** Every shipped profile cuts hard, and a dissolve added by
-  hand renders as a cut with a warning until the transition engine lands.
+- **No transitions.** Every shipped profile cuts hard. A dissolve added by hand
+  does render, given handles on both sides of the boundary — the planner just
+  does not place one for you.
 - **No beat sync.** The analysis bundle carries BPM as a single average scalar,
   not a beat grid. `music-montage` is metronomic, not beat-locked; cutting on the
   beat needs analysis that does not exist yet.

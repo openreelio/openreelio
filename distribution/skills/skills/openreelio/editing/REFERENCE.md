@@ -110,18 +110,29 @@ somewhere else in the clip.
 | Recipe family | Rendered by `render start` |
 | ------------- | -------------------------- |
 | `fade-in`, `fade-out` | **Yes.** Single-input filters in the clip's own chain. |
-| `dissolve-*`, `wipe-*`, `slide-*` | **Not yet.** Stored, validated, and kept on the clip, but the boundary renders as a hard cut and the render reports a warning naming the clip and the effect. |
+| `dissolve-*`, `wipe-*`, `slide-*` | **Yes, when both clips have handles.** The picture and the sound crossfade together and the file stays exactly as long as the timeline. Otherwise the boundary renders as a hard cut and the render reports a warning naming the clip, the effect and the reason. |
 
 A two-input transition needs the outgoing and incoming pictures at once, and
-overlapping them shortens the video stream while every clip's audio stays at its
-absolute timeline position — the render would drift out of sync and end before
-the timeline does. Rendering one correctly needs a transition engine that
-crossfades and retimes audio alongside the picture; until that exists the render
-degrades loudly rather than shipping a file that disagrees with its timeline.
+overlapping them the naive way shortens the video stream while every clip's
+audio stays at its absolute timeline position — the render would drift out of
+sync and end before the timeline does. So the blend costs the timeline nothing.
+Both clips reach into source media the edit is not using instead: the outgoing
+clip plays half the transition past its out point, the incoming clip starts half
+of it early, and the overlap consumes exactly what they added.
 
-Adding a dissolve is therefore neither an error nor a loss — it just does not
-show up in the render yet. If a cut has to *look* soft today, put `fade-out` on
-the outgoing clip and `fade-in` on the incoming one.
+**A transition therefore needs half its length of unused source on each side.**
+For a one-second dissolve that is half a second past the outgoing clip's out
+point and half a second before the incoming clip's in point. Clips trimmed out
+of longer sources have it; a clip using every frame of its source does not — so
+trim before you dissolve.
+
+The render falls back to a cut, saying why, when there is no clip starting where
+the carrier ends on the same track, when either side is short of handle, when
+the asset's length was never measured, when the transition is not shorter than
+both shots it joins, or when either clip is frozen, reversed or time-remapped.
+An eligible transition produces no warning at all. Where handles are impossible,
+`fade-out` on the outgoing clip plus `fade-in` on the incoming one still gives a
+soft-looking cut.
 
 ## Atomic batches: `plan execute`
 
@@ -165,9 +176,11 @@ land on detected shot changes. `plan from-profile` turns that name into an edit
 plan over one asset.
 
 Every shipped profile cuts hard. `transitionRecipe` and `transitionEveryN` stay
-in the schema, reserved for the transition engine, but no profile sets them while
-the renderer turns a dissolve into a cut: a profile that advertised one would be
-advertising an edit the export cannot deliver.
+in the schema, still reserved: a profile places cuts wherever the pace asks, and
+nothing about that guarantees both sides of each one keep the handles a blend is
+paid for with. A profile that advertised a dissolve would be advertising an edit
+the export could only sometimes deliver. Placing them deliberately, on
+boundaries that have the source to spare, is a separate piece of work.
 
 ```bash
 openreelio-cli packs list --kind pacing
@@ -231,8 +244,9 @@ is also a natural axis for best-of-N — two profiles are two candidates.
 
 A profile decides pace. Nothing else.
 
-- **No transitions.** Every shipped profile cuts hard, and a dissolve added by
-  hand still renders as a cut with a warning until the transition engine lands.
+- **No transitions.** Every shipped profile cuts hard. A dissolve added by hand
+  does render, given handles on both sides of the boundary — the planner just
+  does not place one for you.
 - **No beat sync.** The analysis bundle carries BPM as a single average scalar,
   not a beat grid. `music-montage` is metronomic, not beat-locked. Cutting on the
   beat needs analysis that does not exist yet.
