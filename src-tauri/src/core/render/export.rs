@@ -14,6 +14,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::core::{
     assets::{Asset, AssetKind},
+    captions::CAPTION_SIDE_MARGIN_PERCENT,
     commands::TEXT_ASSET_PREFIX,
     effects::{
         effect_capability, effect_type_label, Effect, EffectType, FilterGraph, IntoFFmpegFilter,
@@ -3589,13 +3590,6 @@ enum CaptionAnchor {
     Custom { x: f64, y: f64 },
 }
 
-/// Side margin a preset caption reserves on each edge, as a canvas percentage.
-///
-/// Leaves an 80% wrap box, and doubles as the horizontal anchor for a
-/// left- or right-aligned caption so the export lands where the preview draws
-/// it (`resolveCaptionAnchor` in `src/utils/captionStyle.ts`).
-const CAPTION_SIDE_MARGIN_PERCENT: f64 = 10.0;
-
 /// Vertical margin a caption with no stored position is held off the bottom by.
 ///
 /// Numerically the same as the side margin today, but the two answer different
@@ -3709,6 +3703,25 @@ fn caption_anchor_position(anchor: CaptionAnchor, alignment: &str) -> (f64, f64)
             vertical_position_to_y(vertical, margin_percent),
         ),
         CaptionAnchor::Custom { x, y } => (x, y),
+    }
+}
+
+/// Which edge of the text block the resolved y names, for the `drawtext` path.
+///
+/// A preset margin is a gap to the block's near edge - "10% from the bottom"
+/// means the bottom of the last line sits a tenth of the canvas above the
+/// bottom edge, and the block grows toward the middle of the frame from there.
+/// That is what libass does with the event margins the ASS path writes, and
+/// what the preview draws, so the fallback has to say the same thing. A custom
+/// position names a point the author picked and stays centered on it.
+fn caption_vertical_anchor_edge(anchor: CaptionAnchor) -> &'static str {
+    match anchor {
+        CaptionAnchor::Preset { vertical, .. } => match vertical {
+            CaptionVertical::Top => "top",
+            CaptionVertical::Center => "center",
+            CaptionVertical::Bottom => "bottom",
+        },
+        CaptionAnchor::Custom { .. } => "center",
     }
 }
 
@@ -3952,6 +3965,10 @@ fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
     let (x, y) = caption_anchor_position(anchor, &caption_effect_alignment(&effect));
     effect.set_param("x", ParamValue::Float(x));
     effect.set_param("y", ParamValue::Float(y));
+    effect.set_param(
+        "vertical_anchor",
+        ParamValue::String(caption_vertical_anchor_edge(anchor).to_string()),
+    );
     let text_opacity = effect.get_float("opacity").unwrap_or(1.0);
     effect.set_param(
         "opacity",
@@ -11572,9 +11589,12 @@ mod tests {
             "Expected RGBA color to map to FFmpeg fontcolor with opacity. Got: {}",
             args_str
         );
+        // A preset margin is a gap to the block's bottom edge, so the block
+        // sits entirely above the 95% line rather than straddling it - the same
+        // placement the ASS event margins and the preview produce.
         assert!(
-            args_str.contains("y=(h*0.9500)-(text_h/2)"),
-            "Expected preset bottom position to map to y=0.95. Got: {}",
+            args_str.contains("y=(h*0.9500)-text_h"),
+            "Expected the bottom preset to anchor the block's bottom edge on the margin. Got: {}",
             args_str
         );
         assert!(

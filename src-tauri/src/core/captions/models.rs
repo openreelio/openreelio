@@ -27,6 +27,21 @@ pub type CaptionTrackId = String;
 // Caption Positioning
 // =============================================================================
 
+/// Side margin a preset caption reserves on each canvas edge, as a percentage.
+///
+/// One number with three consumers that have to agree. The burn-in writes it as
+/// the ASS event's `MarginL`/`MarginR`, which is the box libass wraps inside;
+/// the `drawtext` fallback anchors a left- or right-aligned caption on it; and
+/// the QC safe-area rule measures overflow against it. Each of them used to
+/// carry its own copy, which is how the estimate and the renderer drifted apart.
+///
+/// The preview holds the same number in `CAPTION_SIDE_MARGIN_PERCENT`
+/// (`src/utils/captionStyle.ts`); the two must move together.
+pub const CAPTION_SIDE_MARGIN_PERCENT: f64 = 10.0;
+
+/// Width of the box a preset caption wraps inside, as a canvas percentage.
+pub const CAPTION_WRAP_BOX_WIDTH_PERCENT: f64 = 100.0 - 2.0 * CAPTION_SIDE_MARGIN_PERCENT;
+
 /// Vertical position of caption on screen
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

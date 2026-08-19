@@ -27,11 +27,13 @@ import {
   getTextFontWeightNumber,
 } from '@/utils/textRenderer';
 import {
+  captionAnchorTranslate,
   captionColorToRgba as captionColorToCssRgba,
   getCaptionFontWeightNumber,
   normalizeCaptionPosition as normalizeCaptionPositionValue,
   normalizeCaptionStyle as normalizeCaptionStyleValue,
   resolveCaptionAnchor as resolveCaptionAnchorValue,
+  type CaptionAnchor,
 } from '@/utils/captionStyle';
 import {
   getClipTimelineEndSec,
@@ -211,13 +213,7 @@ function normalizeCaptionPosition(position: CaptionPosition | undefined): Captio
   return normalizeCaptionPositionValue(position);
 }
 
-function resolveCaptionAnchor(
-  style: CaptionStyle,
-  position: CaptionPosition,
-): {
-  xPercent: number;
-  yPercent: number;
-} {
+function resolveCaptionAnchor(style: CaptionStyle, position: CaptionPosition): CaptionAnchor {
   return resolveCaptionAnchorValue(style, position);
 }
 
@@ -847,8 +843,19 @@ export function ProxyPreviewPlayer({
       }
 
       const anchor = resolveCaptionAnchor(style, currentPosition);
+      // The drag commits a custom position, which is centered on its point. A
+      // preset anchor names an edge instead, so the grab point is corrected to
+      // the block's center first - otherwise the caption would jump half its
+      // own height the moment the drag turned it into a custom position.
+      const blockHeight = event.currentTarget.getBoundingClientRect().height;
+      const edgeToCenter =
+        anchor.verticalAnchor === 'top'
+          ? blockHeight / 2
+          : anchor.verticalAnchor === 'bottom'
+            ? -blockHeight / 2
+            : 0;
       const anchorX = rect.left + (anchor.xPercent / 100) * rect.width;
-      const anchorY = rect.top + (anchor.yPercent / 100) * rect.height;
+      const anchorY = rect.top + (anchor.yPercent / 100) * rect.height + edgeToCenter;
       const offsetX = event.clientX - anchorX;
       const offsetY = event.clientY - anchorY;
 
@@ -1605,9 +1612,10 @@ export function ProxyPreviewPlayer({
                 ? captionDraftPosition
                 : resolveCaptionPositionForClip(caption.clip, caption.trackKind);
             const anchor = resolveCaptionAnchor(style, resolvedPosition);
-
-            const translateX =
-              style.alignment === 'left' ? '0%' : style.alignment === 'right' ? '-100%' : '-50%';
+            // A preset anchor names an edge of the block, not its center, so
+            // the block hangs inward from the margin line exactly as the
+            // burn-in's ASS event margins place it.
+            const translate = captionAnchorTranslate(style, anchor);
 
             const isSelected = selectedCaptionId === caption.clip.id;
             const isEditableSelected = isSelected;
@@ -1634,7 +1642,7 @@ export function ProxyPreviewPlayer({
                 style={{
                   left: `${anchor.xPercent}%`,
                   top: `${anchor.yPercent}%`,
-                  transform: `translate(${translateX}, -50%)`,
+                  transform: `translate(${translate.x}, ${translate.y})`,
                   color: toRgba(style.color),
                   fontFamily: style.fontFamily,
                   fontSize: `${captionFontSize}px`,

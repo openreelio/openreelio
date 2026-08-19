@@ -11,6 +11,7 @@ use super::context::QCContext;
 use super::violation::{merged_span_duration_sec, QCViolation, Severity, ViolationFix};
 use crate::core::captions::{
     CaptionPosition, CaptionStyle, CustomPosition, TextAlignment, VerticalPosition,
+    CAPTION_SIDE_MARGIN_PERCENT, CAPTION_WRAP_BOX_WIDTH_PERCENT,
 };
 use crate::core::project::ProjectState;
 use crate::core::timeline::{Clip, Sequence, Track};
@@ -1463,14 +1464,18 @@ impl QCRule for AudioClippingRule {
 /// partially written blob degrades to the caption defaults instead of failing
 /// the whole check.
 ///
-/// Both anchoring modes are measured against the canvas, not just compared to a
-/// margin: a preset anchor places the *center* of the text block on its margin
-/// line, so a large enough font pushes the block past the edge the margin was
-/// supposed to protect - and an over-long caption now reaches that edge sooner,
-/// because the burn-in wraps it into several lines rather than running it off
-/// the side. Horizontal extent is modelled for custom anchors, where the caller
-/// chose x and the renderer honors alignment; a preset anchor is anchored
-/// inside the wrap box, so it has no horizontal failure mode left to report.
+/// Both anchoring modes are measured against the canvas rather than merely
+/// compared to a margin, because the margin alone does not say where the block
+/// ends up. A preset anchor holds the block's near *edge* on its margin line
+/// and grows inward, so the margin protects the edge it names and the failure
+/// mode is a tall block reaching across the frame toward the opposite one. A
+/// custom anchor centers the block on the point the author chose, so a large
+/// enough font overruns the edge in both directions.
+///
+/// Horizontal extent is modelled for both, but they wrap differently: a preset
+/// caption wraps inside [`CAPTION_WRAP_BOX_WIDTH_PERCENT`], a custom one at the
+/// frame edge, and text with no break opportunity at all - CJK, a bare URL -
+/// does not wrap anywhere and simply bleeds off the side.
 #[derive(Debug, Default)]
 pub struct CaptionSafeAreaRule;
 
@@ -1499,22 +1504,16 @@ impl CaptionSafeAreaRule {
 
     /// Maximum estimated text-box width as a percentage of canvas width
     ///
-    /// A cap only so a pathological font size cannot produce a nonsense span in
-    /// the violation message; it is far above the safe band, so it never hides
-    /// an overflow.
+    /// Keeps a pathological font size from putting a nonsense span in the
+    /// violation message. It is not free: because the line count is derived
+    /// from the same width, a caption more than five canvases wide is reported
+    /// with fewer lines - and so less height - than it would really have. That
+    /// understates an already-reported breach rather than hiding one, since a
+    /// block that long has breached the band several lines earlier.
     const MAX_TEXT_BOX_WIDTH_PERCENT: f64 = 500.0;
 
     /// Line height as a multiple of the font size (typographic default)
     const LINE_HEIGHT_FACTOR: f64 = 1.2;
-
-    /// Width of the box libass wraps a caption inside, as a canvas percentage.
-    ///
-    /// Mirrors the export's `CAPTION_SIDE_MARGIN_PERCENT`: the burn-in reserves
-    /// a tenth of the canvas on each side of a preset caption. A caption placed
-    /// at a custom point wraps at the frame edge instead, so measuring it
-    /// against the narrower box over-counts its lines - which errs toward
-    /// reporting, not toward silence.
-    const WRAP_BOX_WIDTH_PERCENT: f64 = 100.0 - 2.0 * 10.0;
 
     /// Reads the caption font size in pixels from the clip's style JSON.
     fn font_size_px(style: Option<&serde_json::Value>) -> f64 {
@@ -1545,32 +1544,40 @@ impl CaptionSafeAreaRule {
     /// same text occupies twice the width on a 1080-wide vertical canvas that
     /// it does on a 1920-wide landscape one.
     ///
-    /// The primary render path is libass, which wraps a preset caption inside
-    /// [`WRAP_BOX_WIDTH_PERCENT`](Self::WRAP_BOX_WIDTH_PERCENT) of the canvas,
-    /// so an over-long caption does not run off the side - it grows downward
-    /// instead, one wrapped line at a time. The estimate follows that: width
-    /// caps at the wrap box, and the height it saves there comes back as
-    /// lines. The `drawtext` fallback still does not wrap, so measuring the box
-    /// this way is the conservative choice for it too - a caption that breaches
-    /// the safe area under `drawtext` breaches it vertically here.
-    fn estimate_text_box_percent(clip: &Clip, canvas_width: u32, canvas_height: u32) -> (f64, f64) {
-        let char_count = clip
-            .label
-            .as_ref()
-            .map(|label| label.chars().count())
-            .unwrap_or(0) as f64;
+    /// `wrap_box_width_percent` is how wide the renderer lets the text run
+    /// before breaking it: [`CAPTION_WRAP_BOX_WIDTH_PERCENT`] for a preset
+    /// caption, whose ASS event carries side margins, and the full frame for a
+    /// custom one, which is positioned with `\pos` and so has no margins to
+    /// wrap inside. Text that fits nowhere is not turned into extra lines
+    /// unless it *can* break: libass needs a break opportunity, so a run
+    /// without one - unspaced CJK, a bare URL - stays on one line and runs off
+    /// the side, which is a horizontal breach and is reported as one.
+    fn estimate_text_box_percent(
+        clip: &Clip,
+        canvas_width: u32,
+        canvas_height: u32,
+        wrap_box_width_percent: f64,
+    ) -> (f64, f64) {
+        let label = clip.label.as_deref().unwrap_or_default();
+        let char_count = label.chars().count() as f64;
 
         let font_size = Self::font_size_px(clip.caption_style.as_ref());
 
         let canvas_width = if canvas_width > 0 { canvas_width } else { 1 };
         let unwrapped_width_percent =
-            (char_count * font_size * Self::GLYPH_ADVANCE_FACTOR / f64::from(canvas_width) * 100.0)
-                .min(Self::MAX_TEXT_BOX_WIDTH_PERCENT);
-        let width_percent = unwrapped_width_percent.min(Self::WRAP_BOX_WIDTH_PERCENT);
+            char_count * font_size * Self::GLYPH_ADVANCE_FACTOR / f64::from(canvas_width) * 100.0;
 
-        let line_count = (unwrapped_width_percent / Self::WRAP_BOX_WIDTH_PERCENT)
-            .ceil()
-            .max(1.0);
+        let (width_percent, line_count) = if label.chars().any(char::is_whitespace) {
+            let bounded = unwrapped_width_percent.min(Self::MAX_TEXT_BOX_WIDTH_PERCENT);
+            (
+                bounded.min(wrap_box_width_percent),
+                (bounded / wrap_box_width_percent).ceil().max(1.0),
+            )
+        } else {
+            // Deliberately uncapped: the whole point of this branch is that the
+            // width is the breach, so clamping it would clamp away the finding.
+            (unwrapped_width_percent, 1.0)
+        };
 
         let canvas_height = if canvas_height > 0 { canvas_height } else { 1 };
         let height_percent =
@@ -1621,15 +1628,41 @@ impl CaptionSafeAreaRule {
         }
     }
 
-    /// Returns the vertical center of a preset anchor, as a canvas percentage.
+    /// Returns the vertical span a preset caption occupies, as (top, bottom).
     ///
-    /// The renderer centers the text block on the margin line, which is why the
-    /// block can breach an edge the margin itself clears.
-    fn preset_center_y_percent(vertical: &VerticalPosition, margin_percent: f64) -> f64 {
+    /// A preset margin is a gap to the block's near *edge*, not to its center:
+    /// "10% from the bottom" puts the bottom of the last line a tenth of the
+    /// canvas above the bottom edge, and the block grows upward from there.
+    /// So the margin always protects the edge it names, and what a large font
+    /// or a wrapped caption threatens is the *opposite* edge.
+    fn preset_vertical_span(
+        vertical: &VerticalPosition,
+        margin_percent: f64,
+        box_height_percent: f64,
+    ) -> (f64, f64) {
         match vertical {
-            VerticalPosition::Top => margin_percent,
-            VerticalPosition::Center => 50.0,
-            VerticalPosition::Bottom => 100.0 - margin_percent,
+            VerticalPosition::Top => (margin_percent, margin_percent + box_height_percent),
+            VerticalPosition::Center => (
+                50.0 - box_height_percent / 2.0,
+                50.0 + box_height_percent / 2.0,
+            ),
+            VerticalPosition::Bottom => (
+                100.0 - margin_percent - box_height_percent,
+                100.0 - margin_percent,
+            ),
+        }
+    }
+
+    /// Returns the horizontal anchor a preset caption uses for `alignment`.
+    ///
+    /// Mirrors `caption_preset_anchor_x` on the render side: a left- or
+    /// right-aligned preset caption sits on its side margin rather than in the
+    /// middle of the frame.
+    fn preset_anchor_x_percent(alignment: &TextAlignment) -> f64 {
+        match alignment {
+            TextAlignment::Left => CAPTION_SIDE_MARGIN_PERCENT,
+            TextAlignment::Right => 100.0 - CAPTION_SIDE_MARGIN_PERCENT,
+            TextAlignment::Center => 50.0,
         }
     }
 
@@ -1700,13 +1733,12 @@ impl QCRule for CaptionSafeAreaRule {
                         vertical,
                         margin_percent,
                     } => {
-                        // Center-anchored captions sit mid-canvas, where an edge
-                        // margin has no meaning.
-                        if *vertical == VerticalPosition::Center {
-                            continue;
-                        }
+                        // The middle row sits mid-canvas, where an edge margin
+                        // has no meaning; it is still measured below for a
+                        // block tall enough to reach an edge on its own.
+                        let margin_is_meaningful = *vertical != VerticalPosition::Center;
 
-                        if *margin_percent < action_safe_margin {
+                        if margin_is_meaningful && *margin_percent < action_safe_margin {
                             (
                                 severity,
                                 "Caption positioned outside the action-safe area".to_string(),
@@ -1719,7 +1751,7 @@ impl QCRule for CaptionSafeAreaRule {
                                     margin_percent: title_safe_margin,
                                 },
                             )
-                        } else if *margin_percent < title_safe_margin {
+                        } else if margin_is_meaningful && *margin_percent < title_safe_margin {
                             (
                                 Severity::Info,
                                 "Caption positioned outside the title-safe area".to_string(),
@@ -1733,26 +1765,39 @@ impl QCRule for CaptionSafeAreaRule {
                                 },
                             )
                         } else {
-                            // The margin clears both bands, but it only places
-                            // the *center* of the text block: the renderer
-                            // draws a block of `font_size * line_height` around
-                            // that line, so a large enough font still breaches
-                            // the edge the margin was chosen to protect.
+                            // The margin clears both bands, and because it is a
+                            // gap to the block's near edge that edge is safe by
+                            // construction. What is not is the far one: the
+                            // block grows inward, one wrapped line at a time,
+                            // until a large enough font or a long enough
+                            // caption reaches across the frame. Text with no
+                            // break opportunity does not wrap at all and runs
+                            // off the side instead, so both axes are measured.
                             if context.canvas_height == 0 {
                                 continue;
                             }
 
-                            let (_, box_height) = Self::estimate_text_box_percent(
+                            let (box_width, box_height) = Self::estimate_text_box_percent(
                                 clip,
                                 context.canvas_width,
                                 context.canvas_height,
+                                CAPTION_WRAP_BOX_WIDTH_PERCENT,
                             );
-                            let center_y = Self::preset_center_y_percent(vertical, *margin_percent);
-                            let top = center_y - box_height / 2.0;
-                            let bottom = center_y + box_height / 2.0;
+                            let alignment = Self::alignment(clip.caption_style.as_ref());
+                            let (left, right) = Self::horizontal_span(
+                                Self::preset_anchor_x_percent(&alignment),
+                                box_width,
+                                &alignment,
+                            );
+                            let (top, bottom) =
+                                Self::preset_vertical_span(vertical, *margin_percent, box_height);
                             let upper_bound = 100.0 - action_safe_margin;
 
-                            if top >= action_safe_margin && bottom <= upper_bound {
+                            if left >= action_safe_margin
+                                && right <= upper_bound
+                                && top >= action_safe_margin
+                                && bottom <= upper_bound
+                            {
                                 continue;
                             }
 
@@ -1760,27 +1805,37 @@ impl QCRule for CaptionSafeAreaRule {
                                 severity,
                                 "Caption text extends outside the action-safe area".to_string(),
                                 format!(
-                                    "Estimated text block spans y {:.1}%-{:.1}% at {:.0}px on a {}px-tall canvas, outside the {:.1}%-{:.1}% safe band (block size is an approximation)",
+                                    "Estimated text block spans x {:.1}%-{:.1}%, y {:.1}%-{:.1}% at {:.0}px on a {}x{}px canvas, outside the {:.1}%-{:.1}% safe band (block size is an approximation)",
+                                    left,
+                                    right,
                                     top,
                                     bottom,
                                     Self::font_size_px(clip.caption_style.as_ref()),
+                                    context.canvas_width,
                                     context.canvas_height,
                                     action_safe_margin,
                                     upper_bound
                                 ),
+                                // Nothing a margin can do makes a block taller
+                                // than the safe band fit, so the suggestion
+                                // centers it: the margin that leaves the block
+                                // sitting on the action-safe line.
                                 CaptionPosition::Preset {
                                     vertical: vertical.clone(),
-                                    margin_percent: (title_safe_margin + box_height / 2.0)
-                                        .min(45.0),
+                                    margin_percent: title_safe_margin.min(45.0),
                                 },
                             )
                         }
                     }
                     CaptionPosition::Custom(custom) => {
+                        // A custom caption is positioned with `\pos`, which
+                        // disables the event margins, so libass wraps it only
+                        // where it meets the frame edge.
                         let (box_width, box_height) = Self::estimate_text_box_percent(
                             clip,
                             context.canvas_width,
                             context.canvas_height,
+                            100.0,
                         );
                         let alignment = Self::alignment(clip.caption_style.as_ref());
 
@@ -2833,10 +2888,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_caption_safe_area_rule_should_grow_a_wrapped_caption_downward_not_sideways() {
-        // A caption far too long for one line used to be a horizontal problem.
-        // The burn-in wraps it now, so the same text is a vertical one: the
-        // block gains lines until it reaches the bottom edge.
+    async fn test_caption_safe_area_rule_should_grow_a_wrapped_caption_inward_from_its_margin() {
+        // A preset margin is a gap to the block's near edge, so a caption that
+        // wraps grows *away* from the edge the margin protects. The estimate
+        // used to center the block on the margin line instead, which pushed
+        // half of every wrapped block past that edge and reported a breach that
+        // the renderer never produces.
         let long_caption = "This caption is far too long to fit on a single line of video and \
                             keeps going well past the point where any reasonable reader would \
                             have stopped following it";
@@ -2855,14 +2912,117 @@ mod tests {
             &sequence.tracks[0].clips[0],
             1920,
             1080,
+            CAPTION_WRAP_BOX_WIDTH_PERCENT,
         );
         assert!(
-            box_width <= 80.0,
+            box_width <= CAPTION_WRAP_BOX_WIDTH_PERCENT,
             "a wrapped caption cannot be wider than its wrap box, got {box_width}"
         );
+
+        // Height is line count times line height, not one line stretched.
+        let single_line_height = 48.0 * 1.2 / 1080.0 * 100.0;
+        let line_count = (box_height / single_line_height).round();
         assert!(
-            box_height > 48.0 * 1.2 / 1080.0 * 100.0 * 1.5,
-            "a wrapped caption must be taller than a single line, got {box_height}"
+            line_count >= 3.0,
+            "this caption must wrap into at least three lines, got {line_count}"
+        );
+        assert!(
+            (box_height - line_count * single_line_height).abs() < 1e-9,
+            "height must be a whole number of lines, got {box_height}"
+        );
+
+        // The margin names the bottom of the block; the block grows upward.
+        let (top, bottom) =
+            CaptionSafeAreaRule::preset_vertical_span(&VerticalPosition::Bottom, 10.0, box_height);
+        assert!(
+            (bottom - 90.0).abs() < 1e-9,
+            "the margin must place the block's bottom edge, got {bottom}"
+        );
+        assert!(
+            (top - (90.0 - box_height)).abs() < 1e-9,
+            "the block must grow inward from that edge, got {top}"
+        );
+
+        // And so a caption this size does not breach anything.
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence);
+        let violations = CaptionSafeAreaRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+        assert!(
+            violations.is_empty(),
+            "a wrapped caption that stays inside the frame is not a breach: {:?}",
+            violations
+                .iter()
+                .map(|violation| violation.details.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_caption_safe_area_rule_should_report_a_block_that_grows_across_the_frame() {
+        // The failure mode a bottom-anchored block really has: enough lines at
+        // a large enough size and it reaches the *opposite* edge.
+        let sequence = sequence_with_caption(
+            "This caption is far too long to fit on a single line of video and keeps going",
+            Some(serde_json::json!({
+                "type": "preset",
+                "vertical": "bottom",
+                "marginPercent": 10.0
+            })),
+            Some(serde_json::json!({ "fontSize": 200 })),
+        );
+
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence);
+        let violations = CaptionSafeAreaRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        let details = violations[0].details.as_deref().expect("details");
+        assert!(
+            details.contains("spans x") && details.contains("y "),
+            "both axes must be reported: {details}"
+        );
+        assert!(
+            details.contains("-"),
+            "the breach must be a negative top edge: {details}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_caption_safe_area_rule_should_report_an_unbreakable_run_that_bleeds_off_the_side()
+    {
+        // libass needs a break opportunity. A run without one - unspaced CJK, a
+        // bare URL - does not wrap at the box, it runs past it, so the wrap box
+        // must not be allowed to hide the width.
+        let url = "https://example.com/watch/a-very-long-permalink-slug-that-never-breaks-anywhere";
+        let sequence = sequence_with_caption(
+            url,
+            Some(serde_json::json!({
+                "type": "preset",
+                "vertical": "bottom",
+                "marginPercent": 10.0
+            })),
+            Some(serde_json::json!({ "fontSize": 96 })),
+        );
+
+        let (box_width, box_height) = CaptionSafeAreaRule::estimate_text_box_percent(
+            &sequence.tracks[0].clips[0],
+            1920,
+            1080,
+            CAPTION_WRAP_BOX_WIDTH_PERCENT,
+        );
+        assert!(
+            box_width > CAPTION_WRAP_BOX_WIDTH_PERCENT,
+            "an unbreakable run must be measured past the wrap box, got {box_width}"
+        );
+        assert!(
+            (box_height - 96.0 * 1.2 / 1080.0 * 100.0).abs() < 1e-9,
+            "an unbreakable run stays on one line, got {box_height}"
         );
 
         let state = ProjectState::new("QC Test");
@@ -2875,39 +3035,13 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert!(
             violations[0]
-                .message
-                .contains("outside the action-safe area"),
-            "{}",
-            violations[0].message
-        );
-        assert!(
-            violations[0]
                 .details
                 .as_deref()
-                .is_some_and(|details| details.contains("spans y")),
-            "the breach must be reported on the vertical axis: {:?}",
+                .is_some_and(|details| details.contains("spans x")),
+            "the breach must be reported on the horizontal axis: {:?}",
             violations[0].details
         );
-
-        // The same text at a size that still wraps into one line stays clear.
-        let short_sequence = sequence_with_caption(
-            "Short caption",
-            Some(position),
-            Some(serde_json::json!({ "fontSize": 48 })),
-        );
-        let short_context = QCContext::from_sequence(&short_sequence);
-        assert!(CaptionSafeAreaRule::new()
-            .check(
-                &short_sequence,
-                &state,
-                &RuleConfig::default(),
-                &short_context
-            )
-            .await
-            .expect("rule runs")
-            .is_empty());
     }
-
     #[tokio::test]
     async fn test_caption_safe_area_rule_should_measure_a_left_aligned_custom_anchor_from_its_edge()
     {
