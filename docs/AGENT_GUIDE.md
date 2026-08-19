@@ -708,6 +708,31 @@ Preset ids are append-only from here — see the stability note in
 `src-tauri/src/core/style/text_presets.rs`, which a contract test now enforces
 for these three.
 
+### How text is burned in
+
+Both captions and text clips reach the render through libass, which decides four
+things you cannot see until you inspect the output file.
+
+- **Preset captions wrap; custom-positioned ones barely do.** A preset position
+  reserves 10% of the canvas on each side and lets the line wrap inside the
+  remaining 80%, growing downward. A `custom` position places the text exactly
+  and can only wrap at the frame edge. Prefer a preset whenever the text length
+  is not under your control — generated or transcribed captions especially.
+- **`fontSize` is resolution-independent.** It means pixels at 1080p; the script
+  is authored 1080 tall with the canvas aspect regardless of export resolution,
+  so a project looks the same at 1080p and 4K.
+- **`lineHeight` is dropped.** ASS has no line-spacing control. A clip whose
+  `lineHeight` deviates from the 1.2 default is reported as a render warning and
+  renders with the font's own spacing.
+- **Eight font families ship with the binary** and are embedded into the script,
+  so they render the same on any machine: `TikTok Sans`, `Montserrat`, `Anton`,
+  `Archivo Black`, `Bebas Neue`, `Poppins`, `Bangers`, `Luckiest Guy`. Any other
+  family is resolved against the host's installed fonts; one found in neither is
+  replaced with `TikTok Sans` and reported, rather than silently substituted.
+
+Render warnings come back from `render start` and from export validation, so an
+agent can read them before shipping the file.
+
 Speech-to-text is local (Whisper); `--import` writes the result straight into a
 caption track.
 

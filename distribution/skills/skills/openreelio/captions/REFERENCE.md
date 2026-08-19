@@ -166,6 +166,49 @@ mattered, e.g. `--preset title --y 0.15`, or
 `--preset lower-third --x 0.5 --y 0.8 --align center --font-size 36 --style-json '{"bold":false}'`.
 Preset ids are append-only from here on.
 
+## Burn-in behavior
+
+Captions and text clips are burned into the render by libass, from an ASS script
+the exporter writes. A few things follow from that, and none of them are visible
+until you look at the finished file.
+
+**Captions wrap.** A caption at a preset position is anchored by margins that
+reserve 10% of the canvas on each side, so an over-long line wraps inside the
+remaining 80% and grows downward rather than running off the frame. Alignment
+picks which edge it grows from: `left` anchors on the left margin, `right` on
+the right, `center` straddles the middle — the same anchors the preview draws.
+
+**Custom positions wrap only at the frame edge.** A caption placed with
+`--position-json '{"type":"custom",…}'` is positioned exactly, and a positioned
+event has no margins to wrap inside. Use a preset position when the text length
+is not under your control.
+
+**Font size is resolution-independent.** `fontSize` means "pixels at 1080p": the
+script is authored 1080 tall with the sequence canvas's aspect regardless of the
+export resolution, so the same project burns identical-looking text at 1080p and
+at 4K.
+
+**`lineHeight` is not honored.** ASS has no line-spacing control; libass spaces
+lines from the font's own metrics. A caption or text clip whose `lineHeight`
+deviates from the 1.2 default draws a render warning naming the clip, and
+renders with font-default spacing.
+
+**Fonts are bundled.** These families are compiled into the binary and embedded
+into the script, so they render identically on a machine that has never
+installed them:
+
+`TikTok Sans`, `Montserrat`, `Anton`, `Archivo Black`, `Bebas Neue`, `Poppins`,
+`Bangers`, `Luckiest Guy`
+
+Caption styles now also carry `underline`, `letterSpacing` and `shadowBlur`
+into the burn-in; the `drawtext` fallback has no equivalent for any of them and
+ignores them as before.
+
+A family that is not bundled is resolved against the host's installed fonts. One
+that is available in neither is replaced with `TikTok Sans` and reported as a
+render warning — libass would otherwise substitute silently, and the same
+project would render in a different typeface on every machine.
+
 ## Transcription
 
 Speech-to-text runs locally with Whisper. Check readiness first; the model is a
