@@ -3596,6 +3596,12 @@ enum CaptionAnchor {
 /// it (`resolveCaptionAnchor` in `src/utils/captionStyle.ts`).
 const CAPTION_SIDE_MARGIN_PERCENT: f64 = 10.0;
 
+/// Vertical margin a caption with no stored position is held off the bottom by.
+///
+/// Numerically the same as the side margin today, but the two answer different
+/// questions and are free to diverge.
+const CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT: f64 = 10.0;
+
 /// Horizontal anchor a preset caption uses for the given alignment.
 ///
 /// Left-aligned text grows right from the left margin, right-aligned text grows
@@ -3613,7 +3619,7 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> Ca
     // a tenth of the canvas clear of the edge.
     let mut anchor = CaptionAnchor::Preset {
         vertical: CaptionVertical::Bottom,
-        margin_percent: CAPTION_SIDE_MARGIN_PERCENT,
+        margin_percent: CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
     };
 
     if let Some(position_value) = position {
