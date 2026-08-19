@@ -404,13 +404,7 @@ pub(super) fn build_sequence_ffmpeg_args(
     }
 
     let final_video_label = if let Some(ass_path) = ctx.ass_text_overlay_path {
-        append_ass_text_overlay(
-            &mut filter_complex,
-            "[outv]",
-            ass_path,
-            ctx.sequence.format.canvas.width,
-            ctx.sequence.format.canvas.height,
-        )
+        append_ass_text_overlay(&mut filter_complex, "[outv]", ass_path)
     } else {
         let text_overlay_video_label =
             append_text_clip_overlays(&mut filter_complex, "[outv]", &overlay_text_filters);

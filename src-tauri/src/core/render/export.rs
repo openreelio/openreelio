@@ -4719,8 +4719,6 @@ pub(super) fn append_ass_text_overlay(
     filter_complex: &mut String,
     base_video_label: &str,
     ass_path: &Path,
-    canvas_width: u32,
-    canvas_height: u32,
 ) -> String {
     let output_label = "[txtass0]";
     let path_text = ass_path.to_string_lossy();
@@ -4738,14 +4736,18 @@ pub(super) fn append_ass_text_overlay(
             )
         })
         .unwrap_or_default();
-    // `original_size` names the video the script was composed for; the filter
-    // turns it into a libass pixel aspect of frame-AR over original-AR. The
-    // script is composed for the sequence canvas, so passing the canvas is a
-    // no-op whenever the export keeps its aspect - and correctly un-stretches
-    // the glyphs when an export overrides width and height to a different one.
+    // `original_size` is deliberately absent. The filter turns it into a libass
+    // pixel aspect of frame-AR over original-AR, i.e. it exists to un-stretch a
+    // script authored for one aspect and then anamorphically squeezed into
+    // another. This pipeline never squeezes: normalization letterboxes every
+    // source into the output dimensions, so the pixel aspect is always 1 and
+    // the script's own `PlayRes` aspect is the only thing libass needs. Naming
+    // the canvas here distorted glyphs by frame-AR/canvas-AR whenever an export
+    // preset overrode the output to a different aspect than the sequence canvas
+    // (a vertical canvas exported through a 16:9 preset stretched 3.16x).
     filter_complex.push(';');
     filter_complex.push_str(&format!(
-        "{base_video_label}subtitles=filename='{escaped_path}'{fonts_dir_option}:original_size={canvas_width}x{canvas_height}{output_label}"
+        "{base_video_label}subtitles=filename='{escaped_path}'{fonts_dir_option}{output_label}"
     ));
     output_label.to_string()
 }
@@ -7045,8 +7047,35 @@ mod tests {
             .expect("filter complex");
 
         assert!(filter.contains("subtitles=filename='/tmp/openreelio\\:text\\,overlay.ass'"));
-        assert!(filter.contains("original_size=1920x1080[txtass0]"));
+        assert!(filter.contains("[txtass0]"));
+        // Normalization letterboxes into the output size, so the pixel aspect
+        // is always 1 and `original_size` would only ever distort the glyphs.
+        assert!(
+            !filter.contains("original_size"),
+            "the subtitles filter must not set a pixel aspect. Got: {filter}"
+        );
         assert!(!filter.contains("drawtext="));
+    }
+
+    #[test]
+    fn test_ass_subtitles_filter_never_sets_a_pixel_aspect() {
+        // A vertical sequence exported through a 16:9 preset used to hand
+        // libass `original_size=1080x1920` against a 1920x1080 frame, which is
+        // a pixel aspect of 3.16 - every glyph came out stretched. The pipeline
+        // letterboxes rather than squeezes, so there is no aspect to correct.
+        let mut filter_complex = String::from("[0:v]null[outv]");
+        let label = append_ass_text_overlay(
+            &mut filter_complex,
+            "[outv]",
+            &PathBuf::from("/tmp/vertical.ass"),
+        );
+
+        assert_eq!(label, "[txtass0]");
+        assert!(
+            !filter_complex.contains("original_size"),
+            "got: {filter_complex}"
+        );
+        assert!(filter_complex.contains("subtitles=filename='/tmp/vertical.ass'"));
     }
 
     // -------------------------------------------------------------------------
