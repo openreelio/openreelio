@@ -138,7 +138,7 @@ Based on industry research comparing OpenReelio to DaVinci Resolve, Premiere Pro
 
 | Task | Status | Tests | Description |
 |------|--------|-------|-------------|
-| **FFmpeg Transition Filters** | ✅ CODE EXISTS | 38 | `build_cross_dissolve_filter()` etc. - **BUT NOT CALLED** |
+| **FFmpeg Transition Filters** | ✅ COMPLETE | 38 | `build_cross_dissolve_filter()` etc. - wired into the render by the transition stitch |
 | **Effect Commands** | ✅ COMPLETE | 19 | `AddEffectCommand`, `RemoveEffectCommand`, `UpdateEffectCommand` |
 | **EffectsBrowser** | ✅ COMPLETE | 28 | 45+ effects, 8 categories, search functionality |
 | **TransitionPicker** | ✅ COMPLETE | 28 | Duration, direction, zoom type configuration |

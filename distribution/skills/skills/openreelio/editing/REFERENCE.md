@@ -126,13 +126,50 @@ point and half a second before the incoming clip's in point. Clips trimmed out
 of longer sources have it; a clip using every frame of its source does not — so
 trim before you dissolve.
 
-The render falls back to a cut, saying why, when there is no clip starting where
-the carrier ends on the same track, when either side is short of handle, when
-the asset's length was never measured, when the transition is not shorter than
-both shots it joins, or when either clip is frozen, reversed or time-remapped.
+The render falls back to a cut, naming the clip, the effect and the reason, when:
+
+1. the effect is not on a video track — there is no picture to blend;
+2. its track is hidden;
+3. the clip carrying it is disabled;
+4. it is on an adjustment layer, which grades what is beneath it rather than
+   contributing a picture;
+5. it is on a text clip, which is drawn over the finished picture;
+6. no clip starts where the carrier ends on the same track — a gap, or the last
+   clip on the track;
+7. the clip that does start there contributes no picture either, for any of
+   reasons 1-5;
+8. the clip already carries another two-input transition — a clip has one out
+   point, so the first wins and later ones are refused by name;
+9. the `duration` is not positive, or exceeds the **10 s** cap the engine will
+   place (a guard against milliseconds arriving where seconds were meant);
+10. the duration is **not shorter than both** shots it joins;
+11. either clip is frozen, reversed or time-remapped, so its render window has
+    no defined reach into source;
+12. the outgoing asset's length was never measured, so the handle cannot be
+    proven — re-import the asset or run `analysis run`;
+13. either side is short of handle — the warning says which side, how much it
+    has, and how much was needed.
+
+A transition that *does* render can still draw a warning: a blend across a
+**razor split**, where the outgoing clip's out point is the incoming clip's in
+point in the same source, mixes every frame with itself and cannot be seen. It
+renders, and the render says it will be invisible. Trim material at the boundary
+first.
+
+**Audio on a separate track is not crossfaded.** Only the sound travelling with
+the two blended clips is faded. Detached audio, a music bed or a separate
+narration take keeps whatever fades it was authored with, so a hard edit there
+is still heard as a hard edit under a dissolving picture — author
+`fade_in_sec`/`fade_out_sec` on those clips to match.
+
 An eligible transition produces no warning at all. Where handles are impossible,
 `fade-out` on the outgoing clip plus `fade-in` on the incoming one still gives a
 soft-looking cut.
+
+`verify` reports the same refusals as the structural check
+`transition.no_handles`, with no rendered file needed: it asks the same planner
+the render asks, and carries a `RemoveEffect` fix for each transition that will
+not survive.
 
 ## Atomic batches: `plan execute`
 
@@ -176,11 +213,15 @@ land on detected shot changes. `plan from-profile` turns that name into an edit
 plan over one asset.
 
 Every shipped profile cuts hard. `transitionRecipe` and `transitionEveryN` stay
-in the schema, still reserved: a profile places cuts wherever the pace asks, and
-nothing about that guarantees both sides of each one keep the handles a blend is
-paid for with. A profile that advertised a dissolve would be advertising an edit
-the export could only sometimes deliver. Placing them deliberately, on
-boundaries that have the source to spare, is a separate piece of work.
+in the schema, still reserved — but not for want of handles. A profile cuts one
+asset into many clips, so every boundary it makes is a razor split: both sides
+have all the unused source media a blend could want, and the renderer would
+blend each one happily. Both sides are also the *same* footage at the *same*
+frame, so the blend mixes every frame with itself and renders identically to the
+cut it replaced. A profile that advertised a dissolve would be advertising an
+effect the file cannot show. Producing boundaries with material to blend
+between — different shots, or clips trimmed back at the cut — is a separate
+piece of work.
 
 ```bash
 openreelio-cli packs list --kind pacing

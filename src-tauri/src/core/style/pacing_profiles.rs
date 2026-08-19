@@ -18,15 +18,26 @@
 //! `transition_recipe` + `transition_every_n` describe which curated transition
 //! to place and on which cuts (`every_n` counts *boundaries*, so `3` means the
 //! 1st, 4th, and 7th cut; `0` or no recipe means hard cuts). Every shipped
-//! profile sets `transition_recipe: None`. The renderer does place two-input
-//! transitions now, but only where both clips still hold unused source media to
-//! blend with, and a profile decides *pace* — it places cuts wherever the target
-//! shot length falls, with no idea whether the shots either side of one kept the
-//! handles a blend is paid for with. A shipped profile that quietly rendered a
-//! cut where it advertised a dissolve is worse than one that says it cuts hard.
-//! The fields stay in the schema, and [`generate_steps_with_transitions`] still
-//! knows how to emit the `AddEffect` steps, so a profile can start placing
-//! transitions once it also decides which boundaries can afford one.
+//! profile sets `transition_recipe: None`.
+//!
+//! Handles are not what stops them. A profile cuts *one asset* into many clips,
+//! so every boundary it makes is a razor split: the outgoing clip's out point is
+//! the incoming clip's in point in the same source, and there is always unused
+//! media on both sides. The renderer would blend every one of them happily.
+//!
+//! The blend would simply be invisible. Both sides are the same footage at the
+//! same frame, so every frame of the dissolve mixes a frame with itself and the
+//! output is bit-identical to the hard cut it replaced — measurably so: a
+//! dissolve across a split renders at infinite PSNR against the cut. Shipping a
+//! profile that advertised a dissolve would mean advertising an effect the file
+//! cannot show, and paying encode time for it.
+//!
+//! What a profile would need before it can place one is material to blend
+//! *between*: either boundaries drawn between different shots, or clips trimmed
+//! back at the boundary so the two sides no longer overlap in the source. The
+//! fields stay in the schema, and [`generate_steps_with_transitions`] still
+//! knows how to emit the `AddEffect` steps, so the planner half is ready when
+//! that work happens.
 //!
 //! [`generate_steps_with_transitions`]: crate::core::analysis::style_planner
 //!
@@ -77,9 +88,9 @@ pub struct PacingProfileSpec {
     pub shot_variance_sec: f64,
     /// Curated transition recipe id, or `None` for hard cuts throughout.
     ///
-    /// Still reserved: the renderer blends a two-input transition where both
-    /// clips kept unused source media, and a profile places cuts by pace alone,
-    /// so every shipped profile sets `None`.
+    /// Still reserved: a profile cuts one asset, so every boundary it makes is
+    /// a razor split that would blend the same footage into itself — visible
+    /// nowhere. Every shipped profile sets `None`.
     pub transition_recipe: Option<&'static str>,
     /// Place a transition every N cut boundaries; `0` means never.
     ///
@@ -319,16 +330,18 @@ mod tests {
 
     #[test]
     fn every_shipped_profile_cuts_hard_until_it_can_choose_eligible_boundaries() {
-        // The renderer blends a two-input transition only where both clips kept
-        // unused source media to reach into. A profile places cuts by target
-        // shot length and knows nothing about that, so one advertising a
-        // dissolve would be advertising an edit the export could only sometimes
-        // deliver.
+        // Not for want of handles: a profile cuts one asset, so both sides of
+        // every boundary it makes have all the unused media they could want.
+        // The problem is that both sides are the *same* media at the same
+        // frame, so the blend mixes each frame with itself and renders
+        // bit-identically to the cut it replaced. Advertising a dissolve there
+        // would advertise an effect the file cannot show.
         for profile in PACING_PROFILES {
             assert!(
                 profile.transition_recipe.is_none(),
-                "profile '{}' advertises transition recipe '{:?}', but a profile cannot yet tell \
-                 which of its cuts can afford one — leave the field None until it can",
+                "profile '{}' advertises transition recipe '{:?}', but every boundary a profile \
+                 makes is a razor split, and a blend across one is invisible — leave the field \
+                 None until a profile can also produce boundaries with material to blend between",
                 profile.id,
                 profile.transition_recipe
             );

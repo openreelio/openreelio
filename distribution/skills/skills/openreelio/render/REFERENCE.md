@@ -68,6 +68,8 @@ Some things still do not, and the render says so rather than pretending:
 | Clip transform and opacity | **Yes.** Composited at the clip's base values. |
 | Motion keyframes (`SetClipMotionKeyframes`) | **No.** The clip renders static at its base transform; the result carries a `warnings` entry naming the clip. |
 | `lineHeight` on text and captions | **No.** Text is burned in by libass, which has no line-spacing control and follows the font's own metrics; the result carries a `warnings` entry naming the clip. Only the `drawtext` fallback honors it. |
+| Two-input transitions (`dissolve-*`, `wipe-*`, `slide-*`) | **Yes, given unused source media on both sides of the cut.** The picture and the sound crossfade together and the file stays exactly as long as the timeline. A boundary that cannot be blended renders as a hard cut and the result carries a `warnings` entry naming the clip, the effect and the reason — see the editing reference for the full list of reasons. |
+| Audio on a separate track under a blended boundary | **Not crossfaded.** Only the sound travelling with the two blended clips is faded; detached audio, a music bed or a separate narration take keeps whatever fades it was authored with, so a hard edit there is heard under a dissolving picture. |
 | Simultaneous layered video clips (picture-in-picture) | **No.** Validation refuses the render. |
 | Blend modes | **No.** Validation refuses the render. |
 

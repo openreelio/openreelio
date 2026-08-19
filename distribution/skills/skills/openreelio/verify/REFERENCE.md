@@ -35,8 +35,18 @@ Exit `2` is never "the video is bad" — it means the verdict is unknown.
 **structural** — `sequence.empty`, `timeline.gap`, `clip.orphan`,
 `clip.missing_asset`, `clip.aspect_ratio`, `audio.silent_clip`,
 `caption.overlap`, `caption.reading_rate`, `caption.out_of_bounds`,
-`caption.safe_area`, `shot.length_stats`, `shot.cut_rhythm`, plus opt-in
-`asset.license` and `sequence.duration`.
+`caption.safe_area`, `shot.length_stats`, `shot.cut_rhythm`,
+`transition.no_handles`, plus opt-in `asset.license` and `sequence.duration`.
+
+`transition.no_handles` (warning) reports every stored dissolve, wipe or slide
+the render will degrade to a hard cut, and why — a boundary that is not a
+boundary, a clip with no unused source media to blend from, a transition longer
+than the shots it joins, a second transition on a clip that already has one. It
+needs no rendered file: it asks the same planner the export asks, so the finding
+and the file cannot disagree. Each violation carries a `RemoveEffect` fix that
+makes the project say what the render will show; repairing the edit instead —
+trimming the clips back to free a handle, or shortening the transition — is left
+to the caller, because the material to do it with is a judgement call.
 
 **rendered** (require `--file`) — `render.duration_mismatch`,
 `render.missing_video`, `render.resolution_mismatch`, `render.black_frames`,

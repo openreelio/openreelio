@@ -4377,12 +4377,12 @@ fn test_plan_from_profile_builds_a_plan_that_validates_executes_and_verifies() {
 /// Scenario: an AddEffect step lands the named recipe on the clip it names,
 /// at a boundary past the first
 ///
-/// No shipped profile plans a transition while the renderer turns one into a
-/// cut, so the plan gets the `AddEffect` step appended by hand — which is what
-/// an agent editing a generated plan would do, and what a profile will emit
-/// again once the transition engine exists. What is under test is the handoff:
-/// a `$fromStep` reference resolving to the *right* clip, carrying the *right*
-/// effect type, at a boundary that is not the trivial first one.
+/// No shipped profile plans a transition — every boundary a profile makes is a
+/// razor split, and a blend across one is invisible — so the plan gets the
+/// `AddEffect` step appended by hand, which is what an agent editing a generated
+/// plan would do. What is under test is the handoff: a `$fromStep` reference
+/// resolving to the *right* clip, carrying the *right* effect type, at a
+/// boundary that is not the trivial first one.
 #[test]
 fn test_a_plan_places_a_transition_recipe_on_the_clip_it_names() {
     let (dir, path, asset_id) = create_project_with_analysis("pacing_transition");
@@ -7925,13 +7925,15 @@ fn test_packs_list_filters_by_kind() {
     assert_eq!(social["tempo"], "moderate");
     assert_eq!(social["targetShotSec"], 2.5);
 
-    // Every shipped profile cuts hard while the renderer turns a two-input
-    // transition into a cut. Listing a recipe here would advertise an edit the
-    // export cannot deliver.
+    // Every shipped profile cuts hard. The renderer does place transitions, but
+    // a profile cuts one asset, so every boundary it makes is a razor split and
+    // a blend across one mixes the same footage into itself — invisible, and
+    // paid for in encode time. Listing a recipe here would advertise an effect
+    // the file cannot show.
     for pack in pacing_packs {
         assert!(
             pack["transitionRecipe"].is_null(),
-            "profile '{}' must not advertise a transition the render cannot place: {pack}",
+            "profile '{}' must not advertise a transition that would render invisibly: {pack}",
             pack["id"]
         );
         assert_eq!(pack["transitionEveryN"], 0, "{pack}");

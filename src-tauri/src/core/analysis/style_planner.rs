@@ -14,11 +14,13 @@
 //!
 //! Neither path plans a transition today. The profile path *can* — the
 //! `AddEffect` cadence is implemented and tested — but no shipped profile asks
-//! for one while a profile cannot tell which of the cuts it places left the
-//! source media a blend has to be paid for with. The ESD
-//! path cannot at all: a reference ESD's transition inventory records *that* a
-//! dissolve happened, never which curated recipe would reproduce it, so non-cut
-//! reference transitions stay a warning rather than a guess.
+//! for one, because a profile cuts a single asset and every boundary it makes is
+//! a razor split. Blending across one mixes the same footage into itself, which
+//! renders bit-identically to the cut it replaced; the handles are there, the
+//! visible effect is not. The ESD path cannot at all: a reference ESD's
+//! transition inventory records *that* a dissolve happened, never which curated
+//! recipe would reproduce it, so non-cut reference transitions stay a warning
+//! rather than a guess.
 
 use std::collections::HashSet;
 
@@ -528,14 +530,15 @@ impl StylePlanner {
 
     /// Generates the cut steps, then the transition steps a cadence asks for.
     ///
-    /// No shipped profile asks for one yet. The renderer blends a two-input
-    /// transition where both clips still hold unused source media, but a pacing
-    /// profile places cuts by target shot length and cannot tell which of them
-    /// left that media behind, so a profile that planned a dissolve would be
-    /// planning an edit the export could only sometimes deliver. The cadence is
-    /// kept implemented and tested (see the test-only profile in
+    /// No shipped profile asks for one yet, and handles are not the reason: a
+    /// profile cuts one asset, so both sides of every boundary it makes have all
+    /// the unused media a blend could want. They are also the *same* media at
+    /// the same frame, so the blend mixes each frame with itself and renders
+    /// bit-identically to the cut it replaced. The cadence is kept implemented
+    /// and tested (see the test-only profile in
     /// [`pacing_profiles`](crate::core::style::pacing_profiles)) so the planner
-    /// half is ready once a profile can also choose eligible boundaries.
+    /// half is ready once a profile can also produce boundaries with material to
+    /// blend between.
     ///
     /// Transitions are placed on the *outgoing* clip of a boundary — the clip
     /// that ends at the cut, not the one that starts there. Attaching to the
