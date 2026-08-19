@@ -69,8 +69,12 @@ openreelio-cli frame extract --path ./demo --grid 3x2 --between 0 30 --out sheet
   directory.
 - `--mode fast` (default) renders the topmost file-backed clip only — no
   effects, text, or compositing. Cheap, and right for "what footage is here". It
-  auto-falls back to composite when there is no such clip (a title card, say) and
-  reports `fellBackToComposite: true`.
+  auto-falls back to composite, reporting `fellBackToComposite: true`, whenever
+  fast mode cannot answer honestly: when there is no file-backed clip at that
+  time (a title card, say), and when the topmost clip carries a transform or a
+  non-default opacity, whose whole point is that the picture is no longer the
+  source file. So a still used to check your own `SetClipTransform` edit shows
+  the transform, at composite cost.
 - `--mode composite` renders a minimal window through the full stack, so effects
   and overlays appear. Range renders decode from zero, so it costs more. It works
   anywhere inside the timeline, including over a gap — a gap has no picture, so a

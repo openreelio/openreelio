@@ -2060,13 +2060,15 @@ impl QCRule for LicenseRule {
 
 /// Rule that checks if all clips match the sequence aspect ratio
 ///
-/// Reports the mismatch and stops there. The export pipeline already fits every
-/// source into the canvas with `force_original_aspect_ratio=decrease` plus a
-/// pad, so a mismatch shows as bars rather than as broken output — and the only
-/// command that could override that framing, `SetClipTransform`, puts the clip
-/// on a non-identity transform, which the final export path rejects outright.
-/// Suggesting it would turn a cosmetic warning into a render that will not
-/// start, so this rule deliberately carries no fix.
+/// Reports the mismatch and stops there. The export pipeline fits every source
+/// into the canvas with `force_original_aspect_ratio=decrease` plus a pad, so a
+/// mismatch shows as bars rather than as broken output.
+///
+/// A reframe fix is possible in principle — the export now composites
+/// `SetClipTransform`, so a scale-and-crop suggestion would render — but
+/// choosing *which* part of a mismatched frame to keep is a judgement about the
+/// picture, not arithmetic this rule can do. No such fix is implemented yet, so
+/// the rule reports and leaves the framing decision to the caller.
 #[derive(Debug, Default)]
 pub struct AspectRatioRule;
 
@@ -2937,7 +2939,7 @@ mod tests {
         assert_eq!(rule.default_severity(), Severity::Warning);
         assert!(
             !rule.supports_auto_fix(),
-            "no single command reframes a clip without breaking export"
+            "reframing is a judgement about the picture; no auto-fix is implemented yet"
         );
     }
 
@@ -2965,7 +2967,7 @@ mod tests {
         assert_eq!(violations[0].severity, Severity::Warning);
         assert!(
             !violations[0].auto_fixable,
-            "SetClipTransform puts the clip on a transform the export path rejects"
+            "reframing is a judgement about the picture; no auto-fix is implemented yet"
         );
         assert!(violations[0].suggested_fix.is_none());
         assert_eq!(violations[0].metrics["trackId"], sequence.tracks[0].id);

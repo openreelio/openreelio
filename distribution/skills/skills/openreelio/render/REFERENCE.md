@@ -55,6 +55,25 @@ The result on stdout:
  "planHash":"c2b33fc72122ba67","warnings":[]}
 ```
 
+## What the render puts on screen
+
+Per-clip framing renders. `SetClipTransform` (position, scale, rotation, anchor)
+and `SetClipOpacity` are composited onto the canvas in the final export, exactly
+where the preview draws them.
+
+Three things still do not, and the render says so rather than pretending:
+
+| Feature | In `render start` |
+| ------- | ----------------- |
+| Clip transform and opacity | **Yes.** Composited at the clip's base values. |
+| Motion keyframes (`SetClipMotionKeyframes`) | **No.** The clip renders static at its base transform; the result carries a `warnings` entry naming the clip. |
+| Simultaneous layered video clips (picture-in-picture) | **No.** Validation refuses the render. |
+| Blend modes | **No.** Validation refuses the render. |
+
+`frame extract --mode fast` shows the *composited* picture for a transformed
+clip — it detects the transform and falls back to composite mode rather than
+handing back the untouched source file. See the perception reference.
+
 ## Inspect without encoding
 
 ```bash

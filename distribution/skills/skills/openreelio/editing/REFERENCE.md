@@ -50,6 +50,36 @@ Payloads are camelCase JSON objects matching the IPC payload format. Use
 `command validate` runs the same strict parser without touching the project —
 check before you execute.
 
+## Framing a clip: transform and opacity
+
+`SetClipTransform` places a clip on the canvas with normalized coordinates, and
+`SetClipOpacity` fades it. Both render in the final export, not just the preview:
+
+```bash
+openreelio-cli command execute --path ./demo --type SetClipTransform \
+  --payload '{"sequenceId":"…","trackId":"…","clipId":"…","transform":{
+    "position":{"x":0.25,"y":0.25},"scale":{"x":0.5,"y":0.5},
+    "rotationDeg":0,"anchor":{"x":0.5,"y":0.5}}}'
+
+openreelio-cli command execute --path ./demo --type SetClipOpacity \
+  --payload '{"sequenceId":"…","trackId":"…","clipId":"…","opacity":0.5}'
+```
+
+- `position` is where the **anchor** lands on the canvas, as a fraction of it —
+  `{0.5, 0.5}` is the centre. `anchor` is the point of the picture that gets
+  pinned there, also normalized, and rotation turns about it.
+- `scale` multiplies the letterbox fit, so `{1, 1}` is "fitted to the canvas"
+  and `{0.5, 0.5}` is a quarter of its area.
+- The placement is measured against the source's real pixel size, so a 4:3 clip
+  in a 16:9 sequence keeps its shape.
+
+Two limits still apply. **Motion keyframes**
+(`SetClipMotionKeyframes`) animate in the preview but render static at the
+clip's base transform, and `render start` reports a warning saying so.
+**Simultaneous layered clips** — two visible video clips overlapping in time,
+which is what picture-in-picture needs — and **blend modes** are still rejected
+by export validation. A transform is for framing one clip at a time.
+
 ## Transitions
 
 Transitions are effects — there is no `AddTransition` command. `AddEffect`
