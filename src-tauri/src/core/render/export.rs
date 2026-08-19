@@ -3729,6 +3729,33 @@ fn font_weight_implies_bold(value: &Value) -> Option<bool> {
     parse_json_number(value).map(|weight| weight >= 600.0)
 }
 
+/// Numeric CSS weight a caption style's `fontWeight` names, clamped to the
+/// 100-900 range libass understands.
+///
+/// Accepts the keyword spellings the editor and imported projects both use, so
+/// `"bold"` and `700` reach libass as the same `\b700`.
+fn caption_font_weight(value: &Value) -> Option<i64> {
+    let clamp = |weight: f64| (weight.round() as i64).clamp(100, 900);
+
+    if let Some(raw) = value.as_str() {
+        let normalized = raw.trim().to_ascii_lowercase();
+        return match normalized.as_str() {
+            "thin" => Some(100),
+            "extralight" | "ultralight" => Some(200),
+            "light" => Some(300),
+            "normal" | "regular" => Some(400),
+            "medium" => Some(500),
+            "semibold" | "demibold" => Some(600),
+            "bold" => Some(700),
+            "extrabold" | "ultrabold" => Some(800),
+            "black" | "heavy" => Some(900),
+            _ => normalized.parse::<f64>().ok().map(clamp),
+        };
+    }
+
+    parse_json_number(value).map(clamp)
+}
+
 fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
     let text = clip.label.as_deref()?.trim();
     if text.is_empty() {
@@ -3885,15 +3912,24 @@ fn build_caption_text_effect(clip: &Clip) -> Option<Effect> {
             );
         }
 
+        let font_weight_field = get_json_field(style, &["fontWeight", "font_weight"]);
         let bold = get_json_field(style, &["bold"])
             .and_then(parse_json_bool)
-            .or_else(|| {
-                get_json_field(style, &["fontWeight", "font_weight"])
-                    .and_then(font_weight_implies_bold)
-            });
+            .or_else(|| font_weight_field.and_then(font_weight_implies_bold));
         if let Some(bold) = bold {
             effect.set_param("bold", ParamValue::Bool(bold));
         }
+
+        // libass reads a literal `\b<weight>` as an absolute weight and lets it
+        // beat the style's `Bold` column, so an event that always emitted
+        // `\b400` cancelled its own `Bold: -1` and no caption ever came out
+        // bold. Name the weight the style implies instead of leaving the
+        // default in place. The `drawtext` fallback derives the same bold flag
+        // from this param, so the two renderers stay in step.
+        let font_weight = font_weight_field
+            .and_then(caption_font_weight)
+            .unwrap_or(if bold.unwrap_or(false) { 700 } else { 400 });
+        effect.set_param("font_weight", ParamValue::Int(font_weight));
 
         if let Some(line_height) =
             get_json_field(style, &["lineHeight", "line_height"]).and_then(parse_json_number)
@@ -6932,6 +6968,69 @@ mod tests {
             filter.contains("fontcolor=0xFFFFFF:"),
             "opaque text must not gain an alpha suffix, got: {filter}"
         );
+    }
+
+    #[test]
+    fn test_bold_caption_emits_a_bold_weight_override() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // `\b<weight>` is an absolute weight in libass and outranks the style's
+        // `Bold` column, so an event that always said `\b400` rendered regular
+        // however loudly the style claimed bold.
+        for style in [
+            serde_json::json!({ "fontFamily": "Poppins", "bold": true }),
+            serde_json::json!({ "fontFamily": "Poppins", "fontWeight": 700 }),
+            serde_json::json!({ "fontFamily": "Poppins", "fontWeight": "bold" }),
+        ] {
+            let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+            let mut caption_track = Track::new_caption("Captions");
+            let mut caption_clip = Clip::new("caption-asset")
+                .with_source_range(0.0, 2.0)
+                .place_at(0.0);
+            caption_clip.label = Some("Bold caption".to_string());
+            caption_clip.caption_style = Some(style.clone());
+            caption_track.add_clip(caption_clip);
+            sequence.add_track(caption_track);
+
+            let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+                .expect("script result")
+                .expect("script exists");
+
+            assert!(
+                script.contains(r"\b700"),
+                "a bold caption must override to weight 700 for {style}. Got: {script}"
+            );
+            assert!(
+                !script.contains(r"\b400"),
+                "the default weight must not survive for {style}. Got: {script}"
+            );
+            assert!(
+                script.contains(",-1,0,0,0,"),
+                "the style must still declare Bold. Got: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_regular_caption_keeps_the_default_weight() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut caption_track = Track::new_caption("Captions");
+        let mut caption_clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        caption_clip.label = Some("Regular caption".to_string());
+        caption_clip.caption_style = Some(serde_json::json!({ "fontFamily": "Poppins" }));
+        caption_track.add_clip(caption_clip);
+        sequence.add_track(caption_track);
+
+        let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+            .expect("script result")
+            .expect("script exists");
+
+        assert!(script.contains(r"\b400"), "got: {script}");
+        assert!(!script.contains(r"\b700"), "got: {script}");
     }
 
     #[test]
