@@ -6855,6 +6855,47 @@ mod tests {
     }
 
     #[test]
+    fn caption_typography_reaches_the_ass_style_fields_that_can_carry_it() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // Text clips already mapped underline, letter spacing and shadow blur;
+        // a caption dropped all three even though the ASS style has a column
+        // for each. `drawtext` has no equivalent, so the fallback is unchanged.
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        let mut clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        clip.label = Some("Typography".to_string());
+        clip.caption_style = Some(serde_json::json!({
+            "underline": true,
+            "letterSpacing": 6,
+            "shadowBlur": 4,
+            "shadowColor": "#000000",
+        }));
+        track.add_clip(clip.clone());
+        sequence.add_track(track);
+
+        let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+            .expect("script result")
+            .expect("script exists");
+        assert!(
+            script.contains(",0,-1,0,100.00,100.00,6,"),
+            "underline and spacing must reach the style. Got: {script}"
+        );
+        assert!(
+            script.contains(r"\blur4\fsp6"),
+            "shadow blur and spacing must reach the event. Got: {script}"
+        );
+
+        let filter = build_caption_drawtext_with_enable(&clip).expect("drawtext filter");
+        assert!(
+            !filter.contains("blur") && !filter.contains("spacing"),
+            "the drawtext fallback must be unchanged. Got: {filter}"
+        );
+    }
+
+    #[test]
     fn test_caption_decoration_alpha_reaches_the_drawtext_filter() {
         use crate::core::timeline::Clip;
 
