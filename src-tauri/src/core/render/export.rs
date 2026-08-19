@@ -3600,7 +3600,10 @@ const CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT: f64 = 10.0;
 ///
 /// Left-aligned text grows right from the left margin, right-aligned text grows
 /// left from the right margin, and centered text straddles the middle.
-fn caption_preset_anchor_x(alignment: &str) -> f64 {
+///
+/// Exposed to the crate so the curated caption pack contract tests assert
+/// against this rule rather than against a copy of it.
+pub(crate) fn caption_preset_anchor_x(alignment: &str) -> f64 {
     match alignment {
         "left" => CAPTION_SIDE_MARGIN_PERCENT / 100.0,
         "right" => 1.0 - CAPTION_SIDE_MARGIN_PERCENT / 100.0,
@@ -3643,19 +3646,24 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> Ca
                 };
             }
 
-            let mut x = 0.5;
-            let mut y = 0.9;
-            if let Some(custom_x) = get_json_field(position_object, &["xPercent", "x_percent", "x"])
-                .and_then(parse_json_number)
-            {
-                x = normalize_caption_axis(custom_x);
+            // A custom anchor has to name at least one coordinate. An empty
+            // object, or a `type: "custom"` with nothing in it, is a caller
+            // saying "no opinion" - and turning that into a point would cost
+            // the caption everything the default gives it, since the burn-in
+            // expresses a point as `\pos` and loses wrapping, margins and the
+            // alignment-driven anchor along with it. `resolve_caption_position_
+            // percent` in `graph.rs` reads it the same way.
+            let custom_x = get_json_field(position_object, &["xPercent", "x_percent", "x"])
+                .and_then(parse_json_number);
+            let custom_y = get_json_field(position_object, &["yPercent", "y_percent", "y"])
+                .and_then(parse_json_number);
+
+            if custom_x.is_some() || custom_y.is_some() {
+                anchor = CaptionAnchor::Custom {
+                    x: custom_x.map(normalize_caption_axis).unwrap_or(0.5),
+                    y: custom_y.map(normalize_caption_axis).unwrap_or(0.9),
+                };
             }
-            if let Some(custom_y) = get_json_field(position_object, &["yPercent", "y_percent", "y"])
-                .and_then(parse_json_number)
-            {
-                y = normalize_caption_axis(custom_y);
-            }
-            anchor = CaptionAnchor::Custom { x, y };
         }
     }
 
@@ -4336,8 +4344,11 @@ fn ass_play_resolution(canvas: &Canvas) -> (u32, u32) {
 /// Where a burned-in text block sits, and whether libass may wrap it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum AssTextAnchor {
-    /// Placed by `\pos`. libass ignores margins on a positioned event, so the
-    /// block only wraps where it meets the frame edge.
+    /// Placed by `\pos`, which fixes where the block sits but does not stop
+    /// libass deriving its wrap width from MarginL/MarginR. Writing both as
+    /// zero is what leaves the block wrapping only at the frame edge, which is
+    /// what an exact placement wants: a box narrower than the frame would
+    /// re-flow text the author positioned by hand.
     Absolute { x: f64, y: f64, alignment: i32 },
     /// Placed by margins, which leaves libass free to wrap the line inside the
     /// box those margins describe.
@@ -4764,6 +4775,31 @@ pub fn build_ass_text_overlay_script(
     )))
 }
 
+/// Reads the filter names an FFmpeg binary reports, or `None` if it cannot run.
+///
+/// Kept apart from the caller so a failed probe is distinguishable from a
+/// binary that genuinely has no filters, and so the cache can hold only the
+/// answers worth keeping.
+async fn probe_ffmpeg_filters(ffmpeg_path: &Path) -> Option<HashSet<String>> {
+    let args = vec!["-hide_banner".to_string(), "-filters".to_string()];
+    let output = execute_ffmpeg_output(ffmpeg_path, &args).await.ok()?;
+
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    Some(
+        text.lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                // The table's first column is the capability flags; the name
+                // is the second.
+                let _flags = parts.next()?;
+                parts.next().map(str::to_string)
+            })
+            .collect(),
+    )
+}
+
 pub(super) fn append_ass_text_overlay(
     filter_complex: &mut String,
     base_video_label: &str,
@@ -4882,21 +4918,33 @@ impl ExportEngine {
     }
 
     async fn ffmpeg_supports_filter(&self, filter_name: &str) -> bool {
-        let args = vec!["-hide_banner".to_string(), "-filters".to_string()];
-        let Ok(output) =
-            execute_ffmpeg_output(self.ffmpeg.info().ffmpeg_path.as_path(), &args).await
-        else {
+        let ffmpeg_path = self.ffmpeg.info().ffmpeg_path.clone();
+
+        // Cached per binary for the life of the process. Which filters an
+        // FFmpeg has cannot change while it is running, and the question is
+        // asked far more often than it looks: a contact sheet asks once per
+        // cell, so a 4x4 sheet used to spawn sixteen `ffmpeg -filters`
+        // processes and parse sixteen copies of the same several-hundred-line
+        // table before drawing anything.
+        static FILTER_TABLES: std::sync::OnceLock<
+            tokio::sync::Mutex<HashMap<PathBuf, HashSet<String>>>,
+        > = std::sync::OnceLock::new();
+        let tables = FILTER_TABLES.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+
+        let mut tables = tables.lock().await;
+        if let Some(cached) = tables.get(&ffmpeg_path) {
+            return cached.contains(filter_name);
+        }
+
+        // Only a successful probe is remembered. Caching a failure would turn
+        // one transient spawn error into an export that silently takes the
+        // `drawtext` fallback for the rest of the session.
+        let Some(filters) = probe_ffmpeg_filters(&ffmpeg_path).await else {
             return false;
         };
-
-        let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-
-        text.lines().any(|line| {
-            let mut parts = line.split_whitespace();
-            let _flags = parts.next();
-            parts.next().is_some_and(|name| name == filter_name)
-        })
+        let supported = filters.contains(filter_name);
+        tables.insert(ffmpeg_path, filters);
+        supported
     }
 
     /// Build FFmpeg arguments for simple single-clip export
@@ -6985,6 +7033,43 @@ mod tests {
             filter.contains("fontcolor=0xFFFFFF:"),
             "opaque text must not gain an alpha suffix, got: {filter}"
         );
+    }
+
+    #[test]
+    fn test_a_caption_position_that_names_no_point_keeps_the_preset_default() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // A position blob with no coordinates in it used to resolve to the
+        // custom point (0.5, 0.9), which the burn-in writes as `\pos` - and a
+        // positioned event has no margins, so the caption lost wrapping and its
+        // alignment-driven anchor to a value nobody chose.
+        for position in [
+            serde_json::json!({}),
+            serde_json::json!({ "type": "custom" }),
+        ] {
+            let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+            let mut caption_track = Track::new_caption("Captions");
+            let mut caption_clip = Clip::new("caption-asset")
+                .with_source_range(0.0, 2.0)
+                .place_at(0.0);
+            caption_clip.label = Some("Defaulted".to_string());
+            caption_clip.caption_position = Some(position.clone());
+            caption_track.add_clip(caption_clip);
+            sequence.add_track(caption_track);
+
+            let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+                .expect("script result")
+                .expect("script exists");
+
+            assert!(
+                !script.contains("\\pos("),
+                "{position} must not pin the caption. Got: {script}"
+            );
+            assert!(
+                script.contains(",2,192,192,108,"),
+                "{position} must keep the default bottom margins. Got: {script}"
+            );
+        }
     }
 
     #[test]

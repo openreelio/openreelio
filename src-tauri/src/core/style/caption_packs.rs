@@ -333,10 +333,10 @@ pub const CAPTION_PACKS: &[CaptionPackSpec] = &[
         }),
         shadow_offset: 2.0,
         alignment: TextAlignment::Left,
-        // The only non-centered pack, so the only one that cannot use a preset:
-        // `drawtext` puts a left-aligned run's left edge on the anchor, and a
-        // preset anchor is always x = 50%. 10% from the left is the title-safe
-        // edge, which is where a name plate belongs.
+        // A name plate belongs on the title-safe left edge, and it is placed
+        // there explicitly rather than through the bottom preset because a
+        // preset would also let the burn-in wrap and re-flow it - a lower third
+        // is a fixed slab, not a subtitle.
         anchor: PackAnchor::Custom {
             x_percent: 10.0,
             y_percent: 84.0,

@@ -24,6 +24,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { formatDuration, formatFileSize } from '@/utils/formatters';
+import { BUNDLED_TEXT_FONT_FAMILIES } from '@/utils/textFonts';
 import {
   captionColorToHex,
   getCaptionFontWeightNumber,
@@ -1809,7 +1810,16 @@ type CaptionStyleField = keyof Pick<
   'color' | 'backgroundColor' | 'outlineColor' | 'shadowColor'
 >;
 
+/**
+ * Families offered for a caption, bundled ones first.
+ *
+ * The bundled families are the ones the export embeds in its subtitle script,
+ * so they render identically on a machine that has never had them installed.
+ * Leaving them out of the picker meant the only way to reach the typefaces the
+ * curated caption packs are built from was to type their names.
+ */
 const CAPTION_FONT_FAMILIES = [
+  ...BUNDLED_TEXT_FONT_FAMILIES,
   'Arial',
   'Helvetica',
   'Verdana',

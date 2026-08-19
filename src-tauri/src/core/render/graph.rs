@@ -715,8 +715,11 @@ fn resolve_caption_position_percent(
                 return (x, vertical_position_to_y_percent(&vertical, margin_percent));
             }
 
-            if position_type.eq_ignore_ascii_case("custom")
-                || json_value(position_object, &["xPercent", "x_percent", "x"]).is_some()
+            // A coordinate is what makes an anchor custom. A bare
+            // `type: "custom"` names no point, so it falls through to the
+            // default preset rather than pinning the caption at one - which is
+            // what the burn-in does with the same blob.
+            if json_value(position_object, &["xPercent", "x_percent", "x"]).is_some()
                 || json_value(position_object, &["yPercent", "y_percent", "y"]).is_some()
             {
                 if let Some(custom_x) =
