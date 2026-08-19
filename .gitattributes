@@ -1,0 +1,9 @@
+# Font files and their upstream license texts are byte-for-byte copies of what
+# the copyright holders published. Git must not normalize their line endings or
+# flag their whitespace, or the licenses would no longer match the originals.
+src-tauri/fonts/** -text -whitespace
+src-tauri/fonts/**/*.ttf binary
+
+# Not itself a vendored file, but it quotes those license texts in full, so it
+# is held to the same rule for the same reason.
+THIRD_PARTY_NOTICES.md -text -whitespace

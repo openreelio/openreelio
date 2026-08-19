@@ -20,8 +20,8 @@ use openreelio_core::ffmpeg::{FFmpegRunner, FrameExtractOptions};
 use openreelio_core::render::{
     build_render_graph, build_render_plan, clip_needs_transform_composition, clip_source_time_at,
     probed_image_dimensions, scaled_frame_dimensions, source_dimensions_from_audio_info,
-    validate_export_settings_with_dimensions, ExportEngine, ExportSettings, FrameExportSettings,
-    ImageFormat, SourceDimensionMap,
+    validate_export_settings_with_dimensions, ExportEngine, ExportSettings, ExportValidation,
+    FrameExportSettings, ImageFormat, SourceDimensionMap,
 };
 use openreelio_core::timeline::Sequence;
 use openreelio_core::ActiveProject;
@@ -934,6 +934,10 @@ async fn run_file_grid_mode(
             "labeled": args.label_cells,
             "cells": cells,
         },
+        // A rendered file carries no project styling to drop, so this is
+        // always empty - it is present so every `frame extract` payload has
+        // the same shape and a caller never has to branch on the mode.
+        "warnings": Vec::<String>::new(),
     }))
 }
 
@@ -944,6 +948,8 @@ fn file_frames_payload(source: &FileSource, frames: Vec<FileFrameEntry>) -> serd
         "source": source.describe(),
         "count": frames.len(),
         "frames": frames,
+        // Always empty: see `run_file_grid_mode`.
+        "warnings": Vec::<String>::new(),
     })
 }
 
@@ -1005,6 +1011,9 @@ async fn run_asset_mode(
         "mode": "asset",
         "frames": [frame],
         "count": 1,
+        // A single asset is extracted from its own media, with no sequence to
+        // validate; the field is present for a uniform payload shape.
+        "warnings": Vec::<String>::new(),
     }))
 }
 
@@ -1029,7 +1038,7 @@ async fn run_timeline_mode(
         max_width: args.max_width.unwrap_or(DEFAULT_MAX_WIDTH),
         mode,
         source_dimensions: SourceDimensionMap::new(),
-        validated: false,
+        validation: None,
     };
     context.measure_sources().await;
 
@@ -1058,6 +1067,7 @@ async fn run_timeline_mode(
         "mode": mode.label(),
         "frames": frames,
         "count": frames.len(),
+        "warnings": context.warnings(),
     }))
 }
 
@@ -1087,7 +1097,7 @@ async fn run_grid_mode(
         max_width: grid_cell_extract_width(args, cell),
         mode,
         source_dimensions: SourceDimensionMap::new(),
-        validated: false,
+        validation: None,
     };
     context.measure_sources().await;
 
@@ -1123,6 +1133,7 @@ async fn run_grid_mode(
             "labeled": args.label_cells,
             "cells": cells,
         },
+        "warnings": context.warnings(),
     }))
 }
 
@@ -1321,11 +1332,15 @@ struct TimelineFrameContext<'a> {
     /// shared measurement a 4x4 contact sheet over five assets meant 160 FFprobe
     /// spawns instead of five.
     source_dimensions: SourceDimensionMap,
-    /// Whether the composite path has already validated this invocation.
+    /// Export validation for this sequence, run once for the whole invocation.
     ///
     /// Nothing validation inspects changes between frames of the same sequence,
-    /// so it runs on the first composited frame and is trusted afterwards.
-    validated: bool,
+    /// so running it per frame would only repeat the answer. Its warnings ride
+    /// out with the payload: a still is rendered through the same path an
+    /// export is, so styling the render drops - a line height libass ignores, a
+    /// font nothing on the machine can supply - is missing from the picture an
+    /// agent is about to judge, and nothing else would say so.
+    validation: Option<ExportValidation>,
 }
 
 impl TimelineFrameContext<'_> {
@@ -1337,13 +1352,44 @@ impl TimelineFrameContext<'_> {
         &self.project.state.effects
     }
 
-    /// Measures every asset once so per-frame validation spawns no probes.
+    /// Measures every asset once, then validates the sequence against it.
+    ///
+    /// Both are per-invocation, not per-frame: without the shared measurement a
+    /// 4x4 contact sheet over five assets meant 160 FFprobe spawns instead of
+    /// five, and the validation that consumes it answers the same for every
+    /// frame of one sequence.
     async fn measure_sources(&mut self) {
         let audio_info = self
             .engine
             .probe_assets_for_audio(self.sequence, self.assets())
             .await;
         self.source_dimensions = source_dimensions_from_audio_info(&audio_info);
+
+        // Validated at the canvas size the stills are cut down from, with no
+        // time window: nothing this reports varies across the frames of one
+        // sequence, so a representative range is the whole range.
+        let canvas = &self.sequence.format.canvas;
+        let (width, height) =
+            scaled_frame_dimensions(canvas.width, canvas.height, Some(self.max_width));
+        let mut settings = ExportSettings::preview(PathBuf::from("frame-extract.mp4"), None, None);
+        settings.width = Some(width);
+        settings.height = Some(height);
+
+        self.validation = Some(validate_export_settings_with_dimensions(
+            self.sequence,
+            self.assets(),
+            self.effects(),
+            &settings,
+            Some(&self.source_dimensions),
+        ));
+    }
+
+    /// Warnings the caller should see alongside the stills.
+    fn warnings(&self) -> Vec<String> {
+        self.validation
+            .as_ref()
+            .map(|validation| validation.warnings.clone())
+            .unwrap_or_default()
     }
 
     /// Extracts one timeline still, falling back to a composited render when
@@ -1440,21 +1486,17 @@ impl TimelineFrameContext<'_> {
         settings.width = Some(width);
         settings.height = Some(height);
 
-        if !self.validated {
-            let validation = validate_export_settings_with_dimensions(
-                self.sequence,
-                self.assets(),
-                self.effects(),
-                &settings,
-                Some(&self.source_dimensions),
-            );
+        // The compositing path is the one an invalid sequence would actually
+        // break, so the stored verdict is only enforced here - a fast-mode
+        // still of one untouched clip is unaffected by, say, a layered overlap
+        // elsewhere on the timeline and is still worth handing back.
+        if let Some(validation) = self.validation.as_ref() {
             if !validation.is_valid {
                 return Err(anyhow::anyhow!(
                     "Composite render validation failed: {}",
                     validation.errors.join("; ")
                 ));
             }
-            self.validated = true;
         }
 
         let graph = build_render_graph(&self.project.state, self.sequence_id)

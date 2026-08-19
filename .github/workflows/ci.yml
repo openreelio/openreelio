@@ -217,6 +217,35 @@ jobs:
         working-directory: src-tauri
         run: cargo test --locked --features dev-full --verbose
 
+      # The CLI end-to-end suite burns captions in with real libass and renders
+      # real files, so it needs a real FFmpeg. Ubuntu's build links libass,
+      # which is what the burn-in tests probe for.
+      - name: Install FFmpeg for the CLI end-to-end suite
+        timeout-minutes: 20
+        # Same shape as the Linux dependency step above: mirror outages make apt
+        # hang until the job timeout, so bound each attempt and retry.
+        run: |
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get update && \
+               sudo timeout 600 apt-get install -y ffmpeg; then
+              exit 0
+            fi
+            echo "apt attempt ${attempt} failed or timed out; switching to archive.ubuntu.com and retrying"
+            sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt 2>/dev/null || true
+            sudo find /etc/apt -name '*.list' -o -name '*.sources' | xargs -r sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g'
+            sleep 15
+          done
+          exit 1
+
+      # `REQUIRE_FFMPEG_TESTS` turns the suite's quiet skips into failures.
+      # Without it a broken FFmpeg install would let every render test skip
+      # itself and the job would still report green - which is how this suite
+      # went unexercised in the first place.
+      - name: Run CLI end-to-end tests
+        env:
+          REQUIRE_FFMPEG_TESTS: '1'
+        run: cargo test --locked -p openreelio-cli
+
   # ==========================================================================
   # Build Check
   # ==========================================================================

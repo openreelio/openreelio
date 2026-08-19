@@ -267,36 +267,90 @@ export function parseCaptionPositionValue(value: unknown): CaptionPosition | nul
   return null;
 }
 
-export function resolveCaptionAnchor(
-  style: CaptionStyle,
-  position: CaptionPosition,
-): {
+/**
+ * Side margin a preset caption reserves on each canvas edge, as a percentage.
+ *
+ * Kept in step with `CAPTION_SIDE_MARGIN_PERCENT` in
+ * `src-tauri/src/core/captions/models.rs`, which the burn-in writes as the ASS
+ * event's MarginL/MarginR and the QC safe-area rule measures against.
+ */
+export const CAPTION_SIDE_MARGIN_PERCENT = 10;
+
+/** Which edge of the caption block the resolved anchor point names. */
+export type CaptionVerticalAnchor = 'top' | 'center' | 'bottom';
+
+/** A resolved caption anchor: a point, and which edge of the block it marks. */
+export interface CaptionAnchor {
   xPercent: number;
   yPercent: number;
-} {
+  /**
+   * The edge of the block `yPercent` names. Preset positions anchor an edge so
+   * the block grows toward the middle of the frame; custom positions stay
+   * centered on the point their author picked.
+   */
+  verticalAnchor: CaptionVerticalAnchor;
+}
+
+/**
+ * Resolves where a caption is drawn, and how its block hangs off that point.
+ *
+ * A preset margin is a gap to the block's near *edge*, not to its center:
+ * "10% from the bottom" puts the bottom of the last line a tenth of the frame
+ * above the bottom edge, and the block grows upward from there. That is what
+ * libass does with the event margins the burn-in writes, so the preview has to
+ * agree or a wrapped caption sits half a block lower on export than on screen.
+ *
+ * A custom position names a point the author placed by hand. The burn-in
+ * expresses it as `\pos`, which centers the block on it, so it stays centered
+ * here too.
+ */
+export function resolveCaptionAnchor(style: CaptionStyle, position: CaptionPosition): CaptionAnchor {
   let xPercent = 50;
   if (style.alignment === 'left') {
-    xPercent = 10;
+    xPercent = CAPTION_SIDE_MARGIN_PERCENT;
   } else if (style.alignment === 'right') {
-    xPercent = 90;
+    xPercent = 100 - CAPTION_SIDE_MARGIN_PERCENT;
   }
 
   let yPercent = 90;
+  let verticalAnchor: CaptionVerticalAnchor = 'bottom';
   if (position.type === 'custom') {
     xPercent = position.xPercent;
     yPercent = position.yPercent;
+    verticalAnchor = 'center';
   } else if (position.vertical === 'top') {
     yPercent = position.marginPercent;
+    verticalAnchor = 'top';
   } else if (position.vertical === 'center') {
     yPercent = 50;
+    verticalAnchor = 'center';
   } else {
     yPercent = 100 - position.marginPercent;
+    verticalAnchor = 'bottom';
   }
 
   return {
     xPercent: readNumber(xPercent, 50, 0, 100),
     yPercent: readNumber(yPercent, 90, 0, 100),
+    verticalAnchor,
   };
+}
+
+/**
+ * CSS `translate` percentages that hang a caption block off its anchor point.
+ *
+ * Returned as strings because that is what the DOM overlay needs; the canvas
+ * renderer derives the same offsets numerically.
+ */
+export function captionAnchorTranslate(
+  style: CaptionStyle,
+  anchor: CaptionAnchor,
+): { x: string; y: string } {
+  const x = style.alignment === 'left' ? '0%' : style.alignment === 'right' ? '-100%' : '-50%';
+  const y =
+    anchor.verticalAnchor === 'top' ? '0%' : anchor.verticalAnchor === 'bottom' ? '-100%' : '-50%';
+
+  return { x, y };
 }
 
 export function buildCaptionCssTextShadow(style: CaptionStyle): string | undefined {

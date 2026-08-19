@@ -708,6 +708,46 @@ Preset ids are append-only from here — see the stability note in
 `src-tauri/src/core/style/text_presets.rs`, which a contract test now enforces
 for these three.
 
+### How text is burned in
+
+Both captions and text clips reach the render through libass, which decides five
+things you cannot see until you inspect the output file.
+
+- **Only preset caption positions wrap.** A caption at a preset position wraps
+  inside a box 10% clear of each canvas edge. A caption at a `custom` position
+  and *every* text clip are placed exactly, and break only where they meet the
+  frame edge — long text runs nearly the full width rather than re-flowing.
+  Prefer a preset caption whenever the text length is not under your control:
+  generated or transcribed captions especially.
+- **A preset margin is a gap to the block's near edge.** "10% from the bottom"
+  puts the bottom of the last line a tenth of the frame above the bottom edge,
+  and extra wrapped lines grow *upward*, toward the middle. The margin you ask
+  for is the margin you get, however tall the block turns out to be. A custom
+  position is the opposite: it marks the block's centre, so a tall caption
+  overruns it in both directions.
+- **`fontSize` is resolution-independent.** It means pixels at 1080p; the script
+  is authored 1080 tall with the canvas aspect regardless of export resolution,
+  so a project looks the same at 1080p and 4K. This changed: exports used to
+  author the script at the output size, which made the same `fontSize` render
+  smaller relative to the frame the larger the export got, and disagree with the
+  preview on any canvas that was not 1080 tall. A pre-existing project whose
+  canvas is not 1080 tall will burn text at a different size than it did before
+  — the new size is the one the preview has always shown.
+- **`lineHeight` is dropped.** ASS has no line-spacing control, so libass spaces
+  lines from the font's own metrics. A clip whose `lineHeight` deviates from the
+  1.2 default is reported as a render warning. Only the `drawtext` fallback,
+  which an export takes when FFmpeg has no `subtitles` filter, honors it.
+- **Eight font families ship with the binary** and are embedded into the script,
+  so they burn identically on a machine that has never installed them:
+  `TikTok Sans`, `Montserrat`, `Anton`, `Archivo Black`, `Bebas Neue`,
+  `Poppins`, `Bangers`, `Luckiest Guy`. Any other family is resolved against the
+  host's installed fonts, and is only as reproducible as that host. A family
+  found in neither is replaced with `TikTok Sans` — itself bundled, so the
+  fallback is deterministic too — and reported rather than silently substituted.
+
+Render warnings come back from `render start` and from export validation, so an
+agent can read them before shipping the file.
+
 Speech-to-text is local (Whisper); `--import` writes the result straight into a
 caption track.
 

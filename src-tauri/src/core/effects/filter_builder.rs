@@ -1599,6 +1599,8 @@ impl Effect {
     /// - `alignment`: Text alignment ("left", "center", "right") (default: "center")
     /// - `x`: Normalized X position 0.0-1.0 (default: 0.5 = center)
     /// - `y`: Normalized Y position 0.0-1.0 (default: 0.5 = center)
+    /// - `vertical_anchor`: Which edge of the text block `y` marks -
+    ///   `"top"`, `"bottom"` or `"center"` (default: `"center"`)
     /// - `background_color`: Background box color as hex (optional)
     /// - `background_opacity`: Box alpha 0.0-1.0, composed with `opacity` (default: 1.0)
     /// - `shadow_color`: Shadow color as hex (optional)
@@ -1664,8 +1666,23 @@ impl Effect {
             _ => format!("(w*{:.4})-(text_w/2)", x_norm), // center (default)
         };
 
-        // Y expression: y = (h * y_norm) - (text_h / 2) for vertical centering
-        let y_expr = format!("(h*{:.4})-(text_h/2)", y_norm);
+        // Y expression. `vertical_anchor` names which edge of the text block
+        // `y` marks, because a preset caption margin is a gap to the block's
+        // near edge rather than to its center: "10% from the bottom" puts the
+        // bottom of the last line a tenth of the frame above the bottom edge
+        // and grows the block inward. libass reads the ASS event margins that
+        // way, and the preview draws it that way, so the fallback matches.
+        // A custom position names a point the author picked, and stays centered
+        // on it - which is also the default for a text clip.
+        let y_expr = match self
+            .get_param("vertical_anchor")
+            .and_then(|value| value.as_str())
+            .unwrap_or("center")
+        {
+            "top" => format!("(h*{:.4})", y_norm),
+            "bottom" => format!("(h*{:.4})-text_h", y_norm),
+            _ => format!("(h*{:.4})-(text_h/2)", y_norm),
+        };
 
         // Bold/italic are best expressed via fontconfig style (when available).
         // Avoid using non-standard drawtext options like `fontweight`/`fontstyle`.

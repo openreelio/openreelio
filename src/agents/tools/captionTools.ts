@@ -1213,8 +1213,9 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           description:
             'Caption position preset. "bottom" places the caption in the standard subtitle safe area ' +
             '(5% margin from the bottom edge), "top" uses a 5% margin from the top edge, and "center" ' +
-            'is vertically centered. The resolved point is the CENTER of the caption box, so the text ' +
-            'stays inside the safe margin. Use xPercent and yPercent for custom placement instead.',
+            'is vertically centered. A preset margin is a gap to the nearest EDGE of the caption box, ' +
+            'so the box always clears the margin and a caption that wraps onto more lines grows toward ' +
+            'the middle of the frame. Use xPercent and yPercent for custom placement instead.',
           enum: ['top', 'center', 'bottom'],
         },
         xPercent: {
@@ -1226,8 +1227,9 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         yPercent: {
           type: 'number',
           description:
-            'Custom caption Y position in percent (0-100, origin top-left). This marks the vertical ' +
-            'center of the caption box. Preview and exported render use the same center anchor.',
+            'Custom caption Y position in percent (0-100, origin top-left). Unlike a preset, this marks ' +
+            'the vertical CENTER of the caption box, so a tall or wrapped caption overruns it in both ' +
+            'directions. Preview and exported render use the same center anchor.',
         },
       },
       required: ['sequenceId', 'captionId'],
@@ -2060,9 +2062,10 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           type: ['string', 'object'],
           description:
             'Optional caption position applied to every imported caption: preset (top, center, bottom) or ' +
-            '{ type: "custom", xPercent, yPercent }. Percentages are 0-100 with origin at the top-left; the ' +
-            'resolved point is the center of the caption box. The "bottom" preset uses the 5% subtitle safe ' +
-            'area. Omit to use the track default.',
+            '{ type: "custom", xPercent, yPercent }. Percentages are 0-100 with origin at the top-left. A ' +
+            'preset margin is a gap to the nearest edge of the caption box, so the box grows toward the ' +
+            'middle of the frame; a custom point is the center of the box. The "bottom" preset uses the 5% ' +
+            'subtitle safe area. Omit to use the track default.',
         },
       },
       required: ['sequenceId', 'segments'],

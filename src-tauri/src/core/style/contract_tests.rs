@@ -327,9 +327,19 @@ fn ffmpeg_color(color: &crate::core::captions::Color) -> String {
 
 /// The `x=` expression a pack's anchor and alignment must produce.
 fn expected_x_expression(pack: &crate::core::style::CaptionPackSpec) -> String {
-    let (x_norm, alignment) = match pack.position() {
-        CaptionPosition::Preset { .. } => (0.5, pack.style().alignment),
-        CaptionPosition::Custom(custom) => (custom.x_percent / 100.0, pack.style().alignment),
+    let alignment = pack.style().alignment;
+    let x_norm = match pack.position() {
+        // Not 0.5: a preset anchor follows the alignment, so a left- or
+        // right-aligned preset sits on its side margin. Hard-coding the
+        // centre here only passed because no pack used a non-centered preset.
+        CaptionPosition::Preset { .. } => {
+            crate::core::render::export::caption_preset_anchor_x(match alignment {
+                crate::core::captions::TextAlignment::Left => "left",
+                crate::core::captions::TextAlignment::Right => "right",
+                crate::core::captions::TextAlignment::Center => "center",
+            })
+        }
+        CaptionPosition::Custom(custom) => custom.x_percent / 100.0,
     };
 
     match alignment {
@@ -1030,7 +1040,7 @@ fn ass_script_for(state: &ProjectState) -> String {
         .clone()
         .expect("the fixture sets an active sequence");
     let sequence = state.sequences.get(&sequence_id).expect("sequence exists");
-    crate::core::render::export::build_ass_text_overlay_script(sequence, &state.effects, 1920, 1080)
+    crate::core::render::export::build_ass_text_overlay_script(sequence, &state.effects)
         .expect("the ASS script must build")
         .expect("a text overlay must produce an ASS script")
 }

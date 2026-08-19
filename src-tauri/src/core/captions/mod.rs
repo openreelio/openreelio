@@ -46,7 +46,8 @@ pub mod whisper;
 // Re-export models
 pub use models::{
     Caption, CaptionId, CaptionPosition, CaptionStyle, CaptionTrack, CaptionTrackId, Color,
-    CustomPosition, FontWeight, TextAlignment, VerticalPosition,
+    CustomPosition, FontWeight, TextAlignment, VerticalPosition, CAPTION_SIDE_MARGIN_PERCENT,
+    CAPTION_WRAP_BOX_WIDTH_PERCENT,
 };
 
 // Re-export format functions

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CAPTION_SIDE_MARGIN_PERCENT,
+  captionAnchorTranslate,
   getCaptionFontWeightNumber,
   normalizeCaptionPosition,
   normalizeCaptionStyle,
@@ -56,38 +58,45 @@ describe('captionStyle utilities', () => {
   });
 
   describe('resolveCaptionAnchor', () => {
-    // The canonical anchor convention shared by preview and export: the resolved
-    // (xPercent, yPercent) is the CENTER of the caption box. The preview applies
-    // CSS translate(-50%) on the matching axis and the Rust render path applies
-    // y = (h * yPercent) - (text_h / 2) (drawtext) / ASS \an5 (subtitle), so both
-    // paths place the same center point at the same screen coordinate.
+    // The canonical anchor convention shared by preview and export. A PRESET
+    // position anchors an *edge* of the caption block on its margin line and
+    // lets the block grow toward the middle of the frame: "10% from the bottom"
+    // is a gap to the bottom of the last line. That is what libass does with
+    // the MarginV the burn-in writes, what the drawtext fallback's
+    // y = (h * Y) - text_h reproduces, and what the preview's
+    // translateY(-100%) draws. A CUSTOM position names a point its author
+    // placed by hand, which the burn-in expresses as \pos and every surface
+    // centers the block on.
     const centerStyle = normalizeCaptionStyle({ alignment: 'center' });
 
-    it('anchors the preset bottom caption inside the 5% subtitle safe area', () => {
+    it('anchors the bottom of a preset bottom caption on its margin line', () => {
       const anchor = resolveCaptionAnchor(
         centerStyle,
         normalizeCaptionPosition({ type: 'preset', vertical: 'bottom', marginPercent: 5 }),
       );
 
-      expect(anchor).toEqual({ xPercent: 50, yPercent: 95 });
+      expect(anchor).toEqual({ xPercent: 50, yPercent: 95, verticalAnchor: 'bottom' });
+      expect(captionAnchorTranslate(centerStyle, anchor).y).toBe('-100%');
     });
 
-    it('anchors the preset top caption at the 5% top margin', () => {
+    it('anchors the top of a preset top caption on its margin line', () => {
       const anchor = resolveCaptionAnchor(
         centerStyle,
         normalizeCaptionPosition({ type: 'preset', vertical: 'top', marginPercent: 5 }),
       );
 
-      expect(anchor).toEqual({ xPercent: 50, yPercent: 5 });
+      expect(anchor).toEqual({ xPercent: 50, yPercent: 5, verticalAnchor: 'top' });
+      expect(captionAnchorTranslate(centerStyle, anchor).y).toBe('0%');
     });
 
-    it('anchors the preset center caption at the vertical midpoint', () => {
+    it('centers the preset center caption on the vertical midpoint', () => {
       const anchor = resolveCaptionAnchor(
         centerStyle,
         normalizeCaptionPosition({ type: 'preset', vertical: 'center', marginPercent: 5 }),
       );
 
-      expect(anchor).toEqual({ xPercent: 50, yPercent: 50 });
+      expect(anchor).toEqual({ xPercent: 50, yPercent: 50, verticalAnchor: 'center' });
+      expect(captionAnchorTranslate(centerStyle, anchor).y).toBe('-50%');
     });
 
     it('passes through custom xy as the box center', () => {
@@ -96,7 +105,8 @@ describe('captionStyle utilities', () => {
         normalizeCaptionPosition({ type: 'custom', xPercent: 25, yPercent: 80 }),
       );
 
-      expect(anchor).toEqual({ xPercent: 25, yPercent: 80 });
+      expect(anchor).toEqual({ xPercent: 25, yPercent: 80, verticalAnchor: 'center' });
+      expect(captionAnchorTranslate(centerStyle, anchor).y).toBe('-50%');
     });
 
     it('derives horizontal anchor from alignment for preset positions', () => {
@@ -106,12 +116,13 @@ describe('captionStyle utilities', () => {
         marginPercent: 5,
       });
 
-      expect(
-        resolveCaptionAnchor(normalizeCaptionStyle({ alignment: 'left' }), bottom).xPercent,
-      ).toBe(10);
-      expect(
-        resolveCaptionAnchor(normalizeCaptionStyle({ alignment: 'right' }), bottom).xPercent,
-      ).toBe(90);
+      const left = normalizeCaptionStyle({ alignment: 'left' });
+      const right = normalizeCaptionStyle({ alignment: 'right' });
+
+      expect(resolveCaptionAnchor(left, bottom).xPercent).toBe(CAPTION_SIDE_MARGIN_PERCENT);
+      expect(resolveCaptionAnchor(right, bottom).xPercent).toBe(100 - CAPTION_SIDE_MARGIN_PERCENT);
+      expect(captionAnchorTranslate(left, resolveCaptionAnchor(left, bottom)).x).toBe('0%');
+      expect(captionAnchorTranslate(right, resolveCaptionAnchor(right, bottom)).x).toBe('-100%');
     });
   });
 });

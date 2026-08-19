@@ -57,12 +57,12 @@ function createVideoTrack(id: string, clip: Clip): Track {
   };
 }
 
-function createCaptionTrack(id: string, clip: Clip): Track {
+function createCaptionTrack(id: string, ...clips: Clip[]): Track {
   return {
     id,
     name: id,
     kind: 'caption',
-    clips: [clip],
+    clips,
     blendMode: 'normal',
     muted: false,
     visible: true,
@@ -639,6 +639,41 @@ describe('ProxyPreviewPlayer', () => {
         position: { x: 0.5, y: 0.5 },
       });
     });
+  });
+
+  it('hangs a preset caption block inward from its margin line', () => {
+    const bottomClip = createClip('caption-bottom', 'caption-asset');
+    bottomClip.label = 'Bottom caption';
+    bottomClip.captionPosition = { type: 'preset', vertical: 'bottom', marginPercent: 10 };
+
+    const topClip = createClip('caption-top', 'caption-asset');
+    topClip.label = 'Top caption';
+    topClip.captionPosition = { type: 'preset', vertical: 'top', marginPercent: 10 };
+
+    const customClip = createClip('caption-custom', 'caption-asset');
+    customClip.label = 'Custom caption';
+    customClip.captionPosition = { type: 'custom', xPercent: 50, yPercent: 80 };
+
+    const sequence = {
+      ...createSequence(),
+      tracks: [createCaptionTrack('caption-track', bottomClip, topClip, customClip)],
+    };
+
+    render(<ProxyPreviewPlayer sequence={sequence} assets={new Map()} showControls />);
+
+    // A preset margin is a gap to the block's near edge, so the block is
+    // pushed fully inside it; a custom point stays the block's centre.
+    const bottom = screen.getByTestId('proxy-caption-caption-bottom');
+    expect(bottom.style.top).toBe('90%');
+    expect(bottom.style.transform).toBe('translate(-50%, -100%)');
+
+    const top = screen.getByTestId('proxy-caption-caption-top');
+    expect(top.style.top).toBe('10%');
+    expect(top.style.transform).toBe('translate(-50%, 0%)');
+
+    const custom = screen.getByTestId('proxy-caption-caption-custom');
+    expect(custom.style.top).toBe('80%');
+    expect(custom.style.transform).toBe('translate(-50%, -50%)');
   });
 
   it('commits caption preview drag as a single UpdateCaption on pointer up', async () => {

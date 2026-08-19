@@ -100,15 +100,45 @@ fn available_ffmpeg_path() -> Option<PathBuf> {
         .into_iter()
         .collect();
 
-    openreelio_core::ffmpeg::resolve_ffmpeg(&openreelio_core::ffmpeg::FFmpegResolveOptions {
-        resource_roots,
-        // The CLI is launched with the overrides cleared, so the tests resolve
-        // without them too.
-        use_env: false,
-        ..Default::default()
+    let resolved =
+        openreelio_core::ffmpeg::resolve_ffmpeg(&openreelio_core::ffmpeg::FFmpegResolveOptions {
+            resource_roots,
+            // The CLI is launched with the overrides cleared, so the tests resolve
+            // without them too.
+            use_env: false,
+            ..Default::default()
+        })
+        .ok()
+        .map(|info| info.ffmpeg_path);
+
+    if resolved.is_none() {
+        skip_without_ffmpeg("no FFmpeg could be resolved for the CLI under test");
+    }
+
+    resolved
+}
+
+/// Whether a missing FFmpeg must fail the run rather than quietly skip it.
+///
+/// A render test that skips itself still reports green, which is how the CLI
+/// e2e suite could sit unexercised in CI. The workflow sets
+/// `REQUIRE_FFMPEG_TESTS=1` on the job that installs FFmpeg, so a broken
+/// install shows up as a failure there while a developer without FFmpeg on
+/// their machine keeps the quiet skip.
+fn ffmpeg_tests_are_required() -> bool {
+    std::env::var("REQUIRE_FFMPEG_TESTS").is_ok_and(|value| {
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
     })
-    .ok()
-    .map(|info| info.ffmpeg_path)
+}
+
+/// Records a skip, or fails when FFmpeg was supposed to be available.
+#[track_caller]
+fn skip_without_ffmpeg(reason: &str) {
+    assert!(
+        !ffmpeg_tests_are_required(),
+        "REQUIRE_FFMPEG_TESTS is set, so this test must run, but {reason}"
+    );
+    eprintln!("Skipping test: {reason}");
 }
 
 /// Run a CLI command from `cwd` with extra environment variables applied.
@@ -7917,5 +7947,379 @@ fn test_mcp_frame_extract_refuses_a_render_outside_the_project() {
     assert!(
         message.contains("project directory"),
         "the refusal must say what the scope is: {message}"
+    );
+}
+
+// ============================================================================
+// Burned-in caption typography (libass)
+// ============================================================================
+
+/// Builds a single-caption vertical sequence and returns the ASS script for it.
+///
+/// Goes through the real `build_ass_text_overlay_script`, so what libass reads
+/// below is the artifact an export writes, not a fixture shaped to pass.
+fn vertical_caption_ass_script(text: &str, font_family: &str, font_size: u32) -> String {
+    vertical_caption_ass_script_with_style(
+        text,
+        serde_json::json!({ "fontFamily": font_family, "fontSize": font_size }),
+    )
+}
+
+/// Builds the ASS script for a single bottom-preset caption carrying `style`.
+fn vertical_caption_ass_script_with_style(text: &str, style: serde_json::Value) -> String {
+    use openreelio_core::timeline::{Clip, Sequence, SequenceFormat, Track};
+
+    let mut sequence = Sequence::new("Burn-in", SequenceFormat::shorts_1080());
+    let mut track = Track::new_caption("Captions");
+    let mut clip = Clip::new("caption-asset")
+        .with_source_range(0.0, 2.0)
+        .place_at(0.0);
+    clip.label = Some(text.to_string());
+    clip.caption_style = Some(style);
+    clip.caption_position = Some(serde_json::json!({
+        "type": "preset",
+        "vertical": "bottom",
+        "marginPercent": 10
+    }));
+    track.add_clip(clip);
+    sequence.add_track(track);
+
+    openreelio_core::render::build_ass_text_overlay_script(
+        &sequence,
+        &std::collections::HashMap::new(),
+    )
+    .expect("script builds")
+    .expect("a caption produces a script")
+}
+
+/// Renders `script` over black and returns the frame as 8-bit grayscale.
+///
+/// The script is written into the directory FFmpeg runs in so the filtergraph
+/// can name it without escaping a Windows drive letter.
+fn render_ass_over_black(
+    ffmpeg_path: &std::path::Path,
+    script: &str,
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("overlay.ass"), script).expect("write script");
+
+    let output = Command::new(ffmpeg_path)
+        .current_dir(dir.path())
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("color=c=black:s={width}x{height}:d=2"),
+            "-vf",
+            "subtitles=overlay.ass",
+            "-ss",
+            "1",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "-",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        eprintln!(
+            "ffmpeg could not burn in the ASS script: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+
+    let expected = (width * height) as usize;
+    if output.stdout.len() < expected {
+        return None;
+    }
+    Some(output.stdout[..expected].to_vec())
+}
+
+/// Threshold above which a grayscale sample counts as text rather than backing.
+const CAPTION_INK_THRESHOLD: u8 = 96;
+
+/// Row ranges carrying text, grouped into the bands they form.
+///
+/// A wrapped caption produces one band per line with a gap of empty rows
+/// between them; an unwrapped one produces a single band.
+fn text_row_bands(frame: &[u8], width: u32, height: u32) -> Vec<(u32, u32)> {
+    let mut bands: Vec<(u32, u32)> = Vec::new();
+
+    for row in 0..height {
+        let start = (row * width) as usize;
+        let has_ink = frame[start..start + width as usize]
+            .iter()
+            .any(|value| *value > CAPTION_INK_THRESHOLD);
+
+        match (has_ink, bands.last_mut()) {
+            (true, Some(band)) if band.1 + 1 == row => band.1 = row,
+            (true, _) => bands.push((row, row)),
+            (false, _) => {}
+        }
+    }
+
+    bands
+}
+
+/// Horizontal extent of every inked pixel, as (leftmost, rightmost) column.
+fn text_column_extent(frame: &[u8], width: u32, height: u32) -> Option<(u32, u32)> {
+    let mut extent: Option<(u32, u32)> = None;
+
+    for row in 0..height {
+        for column in 0..width {
+            if frame[(row * width + column) as usize] > CAPTION_INK_THRESHOLD {
+                extent = Some(match extent {
+                    Some((left, right)) => (left.min(column), right.max(column)),
+                    None => (column, column),
+                });
+            }
+        }
+    }
+
+    extent
+}
+
+/// Feature: Caption burn-in
+/// Scenario: a caption too long for one line wraps inside the safe box
+///
+/// Given a vertical sequence and a caption far wider than the canvas
+/// When the export's ASS script is burned in by libass
+/// Then the text occupies several lines and none of it leaves the wrap box
+///
+/// This is the assertion the unit tests cannot make: `WrapStyle: 0` and event
+/// margins are only worth writing if the renderer that reads them wraps.
+#[test]
+fn test_burned_in_caption_wraps_inside_the_safe_box() {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        return;
+    };
+
+    let (width, height) = (1080u32, 1920u32);
+    let script = vertical_caption_ass_script(
+        "This caption is much too long to fit on one line of a vertical video",
+        "Bebas Neue",
+        64,
+    );
+    assert!(script.contains("WrapStyle: 0"));
+    assert!(
+        !script.contains("\\pos("),
+        "a wrapped caption must not be positioned"
+    );
+
+    let Some(frame) = render_ass_over_black(&ffmpeg_path, &script, width, height) else {
+        skip_without_ffmpeg("ffmpeg could not burn the ASS overlay in");
+        return;
+    };
+
+    let bands = text_row_bands(&frame, width, height);
+    assert!(
+        bands.len() >= 2,
+        "an over-long caption must wrap into several lines, got bands {bands:?}"
+    );
+
+    let (left, right) = text_column_extent(&frame, width, height).expect("text renders");
+    // The wrap box is 80% of the canvas. Outline and antialiasing bleed a few
+    // pixels, so the bound is checked generously rather than exactly.
+    assert!(
+        left >= 80 && right <= width - 80,
+        "wrapped text must stay inside the safe box, got columns {left}..{right}"
+    );
+
+    // Bottom preset at a 10% margin: the block sits low in the frame, clear of
+    // the very edge.
+    let (first_band_top, last_band_bottom) = (bands[0].0, bands[bands.len() - 1].1);
+    assert!(
+        first_band_top > height / 2 && last_band_bottom < height - 80,
+        "a bottom caption must sit above the bottom margin, got rows {first_band_top}..{last_band_bottom}"
+    );
+}
+
+/// Feature: Caption burn-in
+/// Scenario: a bundled font renders without being installed on the host
+///
+/// Given a caption in a family the script carries in its `[Fonts]` section
+/// When the same caption is burned in with that section removed and the family
+///      renamed to one no host can have
+/// Then the two frames differ, because the first used the embedded face
+///
+/// A script that embeds a font it cannot actually deliver would still render -
+/// libass substitutes silently - so the only honest check is against a render
+/// guaranteed to have no font of its own.
+#[test]
+fn test_bundled_font_is_delivered_through_the_ass_fonts_section() {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        return;
+    };
+
+    let (width, height) = (1080u32, 1920u32);
+    // Luckiest Guy carries unmistakably heavy glyphs, so using it rather than a
+    // fallback sans shows up in the pixels instead of merely being plausible.
+    let embedded = vertical_caption_ass_script("HANDLED", "Luckiest Guy", 120);
+    assert!(
+        embedded.contains("[Fonts]\nfontname: LuckiestGuy-Regular_0.ttf"),
+        "the script must carry the font it names"
+    );
+
+    let fonts_section_start = embedded.find("[Fonts]\n").expect("fonts section");
+    let fonts_section_end = embedded.find("[Events]\n").expect("events section");
+    let without_font = format!(
+        "{}{}",
+        &embedded[..fonts_section_start],
+        &embedded[fonts_section_end..]
+    )
+    .replace("Luckiest Guy", "OpenReelio Absent Family");
+
+    let Some(with_embed) = render_ass_over_black(&ffmpeg_path, &embedded, width, height) else {
+        skip_without_ffmpeg("ffmpeg could not burn the ASS overlay in");
+        return;
+    };
+    let without_embed = render_ass_over_black(&ffmpeg_path, &without_font, width, height)
+        .expect("the control render must succeed once the first one did");
+
+    assert!(
+        !text_row_bands(&with_embed, width, height).is_empty(),
+        "the embedded font must actually draw glyphs"
+    );
+
+    let differing = with_embed
+        .iter()
+        .zip(&without_embed)
+        .filter(|(embedded, fallback)| embedded.abs_diff(**fallback) > 32)
+        .count();
+    assert!(
+        differing > 1000,
+        "the embedded face must render differently from a host fallback, only {differing} pixels differed"
+    );
+}
+
+/// Strips the `[Fonts]` section and renames the family to one no host can have.
+///
+/// The control this produces is guaranteed to render in whatever fallback the
+/// host font provider offers, which is the only way to prove the first render
+/// used the embedded face rather than merely looking plausible.
+fn ass_script_without_embedded_font(script: &str, family: &str) -> String {
+    let fonts_section_start = script.find("[Fonts]\n").expect("fonts section");
+    let fonts_section_end = script.find("[Events]\n").expect("events section");
+
+    format!(
+        "{}{}",
+        &script[..fonts_section_start],
+        &script[fonts_section_end..]
+    )
+    .replace(family, "OpenReelio Absent Family")
+}
+
+/// Counts samples that differ by more than antialiasing noise between two frames.
+fn differing_sample_count(left: &[u8], right: &[u8]) -> usize {
+    left.iter()
+        .zip(right)
+        .filter(|(left, right)| left.abs_diff(**right) > 32)
+        .count()
+}
+
+/// Feature: Caption burn-in
+/// Scenario: a bundled family is reachable at both weights by the name the exporter writes
+///
+/// Given a caption in a bundled family, once regular and once bold
+/// When each is burned in with its `[Fonts]` section intact, and again with
+///      that section stripped and the family renamed to one no host can have
+/// Then both weights differ from their control, and from each other
+///
+/// This is the check no structural assertion can make. The bundled TikTok Sans
+/// statics carried their family in `name` ID 16, which libass never reads, so
+/// every caption in that family silently rendered in the host's fallback while
+/// the registry, the embed and the emitted script all looked correct. The bold
+/// half covers the other end of the same failure: an event that emits `\b400`
+/// overrides the style's `Bold` column, and a bold face whose `OS/2`/`head`
+/// bold bits are unset can never be selected even once the weight is right.
+#[test]
+fn test_bundled_family_renders_at_both_weights_through_the_embedded_faces() {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        return;
+    };
+
+    let (width, height) = (1080u32, 1920u32);
+    let family = "TikTok Sans";
+
+    let regular = vertical_caption_ass_script_with_style(
+        "WEIGHT",
+        serde_json::json!({ "fontFamily": family, "fontSize": 140 }),
+    );
+    let bold = vertical_caption_ass_script_with_style(
+        "WEIGHT",
+        serde_json::json!({ "fontFamily": family, "fontSize": 140, "bold": true }),
+    );
+
+    // The emitter has to name the weight, or libass reads the default `\b400`
+    // as an absolute weight and the style's `Bold` column never takes effect.
+    assert!(regular.contains(r"\b400"), "got: {regular}");
+    assert!(bold.contains(r"\b700"), "got: {bold}");
+    assert!(!bold.contains(r"\b400"), "got: {bold}");
+    for script in [&regular, &bold] {
+        assert!(
+            script.contains("[Fonts]\nfontname: TikTokSans-Regular_0.ttf"),
+            "the script must carry the faces it names, got: {script}"
+        );
+        assert!(
+            script.contains("fontname: TikTokSans-Bold_0.ttf"),
+            "the script must carry every weight of the family, got: {script}"
+        );
+    }
+
+    let renders: Vec<Option<Vec<u8>>> = [&regular, &bold]
+        .iter()
+        .map(|script| render_ass_over_black(&ffmpeg_path, script, width, height))
+        .collect();
+    let [Some(regular_frame), Some(bold_frame)] = renders.as_slice() else {
+        skip_without_ffmpeg("ffmpeg could not burn the ASS overlay in");
+        return;
+    };
+
+    let regular_control = render_ass_over_black(
+        &ffmpeg_path,
+        &ass_script_without_embedded_font(&regular, family),
+        width,
+        height,
+    )
+    .expect("the control render must succeed once the first one did");
+    let bold_control = render_ass_over_black(
+        &ffmpeg_path,
+        &ass_script_without_embedded_font(&bold, family),
+        width,
+        height,
+    )
+    .expect("the control render must succeed once the first one did");
+
+    for (label, frame) in [("regular", regular_frame), ("bold", bold_frame)] {
+        assert!(
+            !text_row_bands(frame, width, height).is_empty(),
+            "the {label} weight must draw glyphs at all"
+        );
+    }
+
+    for (label, frame, control) in [
+        ("regular", regular_frame, &regular_control),
+        ("bold", bold_frame, &bold_control),
+    ] {
+        let differing = differing_sample_count(frame, control);
+        assert!(
+            differing > 1000,
+            "the embedded {label} face must render differently from a host fallback, only {differing} samples differed"
+        );
+    }
+
+    let weights_differ = differing_sample_count(regular_frame, bold_frame);
+    assert!(
+        weights_differ > 1000,
+        "the bold weight must render differently from the regular one, only {weights_differ} samples differed"
     );
 }

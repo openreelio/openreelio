@@ -38,6 +38,7 @@ import {
   getCaptionFontWeightNumber,
   normalizeCaptionPosition as normalizeCaptionPositionValue,
   normalizeCaptionStyle as normalizeCaptionStyleValue,
+  resolveCaptionAnchor,
 } from '@/utils/captionStyle';
 import { SeekBar } from './SeekBar';
 import { TextPlacementOverlay, type TextPlacementCommitPayload } from './TextPlacementOverlay';
@@ -1126,29 +1127,24 @@ function renderCaptionClipToCanvas(
   const lineHeight = fontSizePx * (style.lineHeight ?? 1.2);
   const letterSpacing = style.letterSpacing ?? 0;
 
-  let xPercent = 50;
-  if (style.alignment === 'left') {
-    xPercent = 10;
-  } else if (style.alignment === 'right') {
-    xPercent = 90;
-  }
+  // The shared resolver rather than a copy of it: this renderer and the DOM
+  // overlay drew captions from two hand-kept transcriptions of the same rule,
+  // which is how they drifted apart from each other and from the burn-in.
+  const anchor = resolveCaptionAnchor(style, position);
 
-  let yPercent = 90;
-  if (position.type === 'custom') {
-    xPercent = position.xPercent;
-    yPercent = position.yPercent;
-  } else if (position.vertical === 'top') {
-    yPercent = position.marginPercent;
-  } else if (position.vertical === 'center') {
-    yPercent = 50;
-  } else {
-    yPercent = 100 - position.marginPercent;
-  }
-
-  const textX = (xPercent / 100) * canvasWidth;
-  const textY = (yPercent / 100) * canvasHeight;
+  const textX = (anchor.xPercent / 100) * canvasWidth;
+  const textY = (anchor.yPercent / 100) * canvasHeight;
   const totalHeight = lineHeight * lines.length;
-  const firstLineY = textY - totalHeight / 2 + lineHeight / 2;
+  // `anchor.verticalAnchor` names which edge of the block `textY` marks: a
+  // preset margin is a gap to the near edge and the block grows inward from
+  // there, while a custom point keeps the block centered on it.
+  const blockTop =
+    anchor.verticalAnchor === 'top'
+      ? textY
+      : anchor.verticalAnchor === 'bottom'
+        ? textY - totalHeight
+        : textY - totalHeight / 2;
+  const firstLineY = blockTop + lineHeight / 2;
 
   ctx.save();
   ctx.globalAlpha = clip.opacity * (style.opacity ?? 1);
