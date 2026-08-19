@@ -54,6 +54,34 @@ pub fn system_font_directories() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Returns the platform's primary font folder, falling back to any that exists.
+///
+/// Callers that can only name one directory - the FFmpeg `subtitles` filter's
+/// `fontsdir` among them - need a deterministic choice rather than whichever
+/// path happens to sort first.
+pub fn primary_system_font_directory() -> Option<PathBuf> {
+    let directories = system_font_directories();
+
+    #[cfg(target_os = "windows")]
+    let preferred = std::env::var("WINDIR")
+        .ok()
+        .map(|windir| PathBuf::from(windir).join("Fonts"));
+
+    #[cfg(target_os = "macos")]
+    let preferred = Some(PathBuf::from("/System/Library/Fonts"));
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let preferred = Some(PathBuf::from("/usr/share/fonts"));
+
+    if let Some(preferred) = preferred {
+        if directories.contains(&preferred) {
+            return Some(preferred);
+        }
+    }
+
+    directories.into_iter().next()
+}
+
 fn scan_system_font_families() -> Vec<String> {
     let mut families = BTreeSet::new();
     let mut scanned_files = 0usize;
@@ -166,6 +194,15 @@ fn is_supported_font_path(path: &Path) -> bool {
         extension.to_ascii_lowercase().as_str(),
         "ttf" | "otf" | "ttc" | "otc"
     )
+}
+
+/// Returns the family names declared by an in-memory TrueType/OpenType font.
+///
+/// Exposed so the bundled font registry can index a compiled-in font by the
+/// names it actually answers to, rather than only by the name this codebase
+/// happens to label it with.
+pub fn font_family_names(bytes: &[u8]) -> Vec<String> {
+    parse_font_families(bytes)
 }
 
 fn parse_font_families(bytes: &[u8]) -> Vec<String> {

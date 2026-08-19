@@ -1,0 +1,6 @@
+# Vendored third-party files are byte-for-byte upstream copies. Git must not
+# normalize their line endings or flag their whitespace, or the license texts
+# would no longer match what the copyright holders published.
+src-tauri/fonts/** -text -whitespace
+src-tauri/fonts/**/*.ttf binary
+THIRD_PARTY_NOTICES.md -whitespace

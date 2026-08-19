@@ -25,6 +25,8 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+pub mod ass_embed;
+pub mod bundled_fonts;
 pub mod fonts;
 
 // =============================================================================
