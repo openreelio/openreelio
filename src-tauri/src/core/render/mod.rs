@@ -17,6 +17,7 @@ pub mod hardware;
 pub mod hdr;
 pub mod plan;
 pub mod smart;
+mod transform_layout;
 
 pub use executor::{
     execute_ffmpeg_invocation, execute_ffmpeg_output, FfmpegExecutionResult, FfmpegOutput,
