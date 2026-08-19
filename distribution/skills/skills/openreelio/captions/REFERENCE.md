@@ -172,26 +172,41 @@ Captions and text clips are burned into the render by libass, from an ASS script
 the exporter writes. A few things follow from that, and none of them are visible
 until you look at the finished file.
 
-**Captions wrap.** A caption at a preset position is anchored by margins that
-reserve 10% of the canvas on each side, so an over-long line wraps inside the
-remaining 80% and grows downward rather than running off the frame. Alignment
-picks which edge it grows from: `left` anchors on the left margin, `right` on
-the right, `center` straddles the middle — the same anchors the preview draws.
+**Only preset caption positions wrap.** A caption at a preset position is
+anchored by margins that reserve 10% of the canvas on each side, so an over-long
+line wraps inside the remaining 80% instead of running off the frame. Alignment
+picks which edge it grows from: `left` anchors on the left margin, `right` on the
+right, `center` straddles the middle — the same anchors the preview draws.
 
-**Custom positions wrap only at the frame edge.** A caption placed with
-`--position-json '{"type":"custom",…}'` is positioned exactly, and a positioned
-event has no margins to wrap inside. Use a preset position when the text length
-is not under your control.
+**Custom positions and text clips do not wrap at that box.** A caption placed
+with `--position-json '{"type":"custom",…}'`, and every text clip, is positioned
+exactly; there is no margin box to wrap inside, so the text breaks only where it
+meets the frame edge. Use a preset position when the text length is not under
+your control.
+
+**A preset margin is a gap to the block's near edge.** "10% from the bottom"
+means the bottom of the last line sits a tenth of the frame above the bottom
+edge; wrapping onto more lines grows the block *upward*, toward the middle of the
+frame, and never eats into the margin you asked for. A custom position works the
+other way: the point you give marks the block's centre, so a tall or wrapped
+caption overruns it above and below.
 
 **Font size is resolution-independent.** `fontSize` means "pixels at 1080p": the
 script is authored 1080 tall with the sequence canvas's aspect regardless of the
 export resolution, so the same project burns identical-looking text at 1080p and
-at 4K.
+at 4K, and at the size the preview shows.
+
+> This is a change. Exports previously authored the script at the output size, so
+> the same `fontSize` rendered smaller relative to the frame the larger the
+> export, and disagreed with the preview on any canvas that was not 1080 tall. A
+> project whose canvas is not 1080 tall will burn its text at a different size
+> than it did before — the new size is the one the preview has always shown.
 
 **`lineHeight` is not honored.** ASS has no line-spacing control; libass spaces
 lines from the font's own metrics. A caption or text clip whose `lineHeight`
-deviates from the 1.2 default draws a render warning naming the clip, and
-renders with font-default spacing.
+deviates from the 1.2 default draws a render warning naming the clip. Only the
+`drawtext` fallback, which an export takes when FFmpeg has no `subtitles`
+filter, honors it.
 
 **Fonts are bundled.** These families are compiled into the binary and embedded
 into the script, so they render identically on a machine that has never
@@ -200,14 +215,15 @@ installed them:
 `TikTok Sans`, `Montserrat`, `Anton`, `Archivo Black`, `Bebas Neue`, `Poppins`,
 `Bangers`, `Luckiest Guy`
 
-Caption styles now also carry `underline`, `letterSpacing` and `shadowBlur`
-into the burn-in; the `drawtext` fallback has no equivalent for any of them and
-ignores them as before.
+Caption styles also carry `underline`, `letterSpacing` and `shadowBlur` into the
+burn-in; the `drawtext` fallback has no equivalent for any of them and ignores
+them as before.
 
-A family that is not bundled is resolved against the host's installed fonts. One
-that is available in neither is replaced with `TikTok Sans` and reported as a
-render warning — libass would otherwise substitute silently, and the same
-project would render in a different typeface on every machine.
+A family that is not bundled is resolved against the host's installed fonts, and
+is only as reproducible as that host. One available in neither is replaced with
+`TikTok Sans` — itself bundled, so the fallback is deterministic too — and
+reported as a render warning. libass would otherwise substitute silently, and the
+same project would render in a different typeface on every machine.
 
 ## Transcription
 
