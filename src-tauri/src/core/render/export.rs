@@ -4622,9 +4622,11 @@ impl AssFontEmbedder {
 /// resolution, so the same project burns identical-looking text at every output
 /// size.
 ///
-/// Exposed to the crate so the curated text preset contract tests can assert a
-/// resolved style reaches the second render path as well as `drawtext`.
-pub(crate) fn build_ass_text_overlay_script(
+/// Exposed so the curated text preset contract tests can assert a resolved
+/// style reaches the second render path as well as `drawtext`, and so the CLI
+/// end-to-end tests can hand the real script to a real libass rather than
+/// asserting against a re-implementation of it.
+pub fn build_ass_text_overlay_script(
     sequence: &Sequence,
     effects: &HashMap<String, Effect>,
 ) -> Result<Option<String>, ExportError> {
