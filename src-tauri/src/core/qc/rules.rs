@@ -1466,10 +1466,11 @@ impl QCRule for AudioClippingRule {
 /// Both anchoring modes are measured against the canvas, not just compared to a
 /// margin: a preset anchor places the *center* of the text block on its margin
 /// line, so a large enough font pushes the block past the edge the margin was
-/// supposed to protect. Horizontal extent is modelled for custom anchors, where
-/// the caller chose x and the renderer honors alignment; a preset anchor is
-/// always horizontally centered, and an over-long line there is a
-/// text-authoring problem this rule cannot fix by moving the caption.
+/// supposed to protect - and an over-long caption now reaches that edge sooner,
+/// because the burn-in wraps it into several lines rather than running it off
+/// the side. Horizontal extent is modelled for custom anchors, where the caller
+/// chose x and the renderer honors alignment; a preset anchor is anchored
+/// inside the wrap box, so it has no horizontal failure mode left to report.
 #[derive(Debug, Default)]
 pub struct CaptionSafeAreaRule;
 
@@ -1506,6 +1507,15 @@ impl CaptionSafeAreaRule {
     /// Line height as a multiple of the font size (typographic default)
     const LINE_HEIGHT_FACTOR: f64 = 1.2;
 
+    /// Width of the box libass wraps a caption inside, as a canvas percentage.
+    ///
+    /// Mirrors the export's `CAPTION_SIDE_MARGIN_PERCENT`: the burn-in reserves
+    /// a tenth of the canvas on each side of a preset caption. A caption placed
+    /// at a custom point wraps at the frame edge instead, so measuring it
+    /// against the narrower box over-counts its lines - which errs toward
+    /// reporting, not toward silence.
+    const WRAP_BOX_WIDTH_PERCENT: f64 = 100.0 - 2.0 * 10.0;
+
     /// Reads the caption font size in pixels from the clip's style JSON.
     fn font_size_px(style: Option<&serde_json::Value>) -> f64 {
         let default_size = f64::from(CaptionStyle::default().font_size);
@@ -1531,9 +1541,18 @@ impl CaptionSafeAreaRule {
     /// Returns the estimated text box size as (width, height) percentages.
     ///
     /// Both axes scale with the font size and the canvas, because that is what
-    /// the renderer does: `drawtext` emits an absolute `fontsize` and does not
-    /// wrap, so the same caption occupies twice the width on a 1080-wide
-    /// vertical canvas that it does on a 1920-wide landscape one.
+    /// the renderer does: a caption is burned in at an absolute size, so the
+    /// same text occupies twice the width on a 1080-wide vertical canvas that
+    /// it does on a 1920-wide landscape one.
+    ///
+    /// The primary render path is libass, which wraps a preset caption inside
+    /// [`WRAP_BOX_WIDTH_PERCENT`](Self::WRAP_BOX_WIDTH_PERCENT) of the canvas,
+    /// so an over-long caption does not run off the side - it grows downward
+    /// instead, one wrapped line at a time. The estimate follows that: width
+    /// caps at the wrap box, and the height it saves there comes back as
+    /// lines. The `drawtext` fallback still does not wrap, so measuring the box
+    /// this way is the conservative choice for it too - a caption that breaches
+    /// the safe area under `drawtext` breaches it vertically here.
     fn estimate_text_box_percent(clip: &Clip, canvas_width: u32, canvas_height: u32) -> (f64, f64) {
         let char_count = clip
             .label
@@ -1544,13 +1563,18 @@ impl CaptionSafeAreaRule {
         let font_size = Self::font_size_px(clip.caption_style.as_ref());
 
         let canvas_width = if canvas_width > 0 { canvas_width } else { 1 };
-        let width_percent =
+        let unwrapped_width_percent =
             (char_count * font_size * Self::GLYPH_ADVANCE_FACTOR / f64::from(canvas_width) * 100.0)
                 .min(Self::MAX_TEXT_BOX_WIDTH_PERCENT);
+        let width_percent = unwrapped_width_percent.min(Self::WRAP_BOX_WIDTH_PERCENT);
+
+        let line_count = (unwrapped_width_percent / Self::WRAP_BOX_WIDTH_PERCENT)
+            .ceil()
+            .max(1.0);
 
         let canvas_height = if canvas_height > 0 { canvas_height } else { 1 };
         let height_percent =
-            font_size * Self::LINE_HEIGHT_FACTOR / f64::from(canvas_height) * 100.0;
+            line_count * font_size * Self::LINE_HEIGHT_FACTOR / f64::from(canvas_height) * 100.0;
 
         (width_percent, height_percent)
     }
@@ -1580,7 +1604,7 @@ impl CaptionSafeAreaRule {
 
     /// Returns the horizontal span a text box of `width_percent` occupies.
     ///
-    /// Matches `build_drawtext_filter`: a left-aligned run starts at the anchor,
+    /// Matches both render paths: a left-aligned run starts at the anchor,
     /// a right-aligned one ends there, and a centered one straddles it.
     fn horizontal_span(
         anchor_percent: f64,
@@ -2806,6 +2830,82 @@ mod tests {
             "{}",
             violations[0].message
         );
+    }
+
+    #[tokio::test]
+    async fn test_caption_safe_area_rule_should_grow_a_wrapped_caption_downward_not_sideways() {
+        // A caption far too long for one line used to be a horizontal problem.
+        // The burn-in wraps it now, so the same text is a vertical one: the
+        // block gains lines until it reaches the bottom edge.
+        let long_caption = "This caption is far too long to fit on a single line of video and \
+                            keeps going well past the point where any reasonable reader would \
+                            have stopped following it";
+        let position = serde_json::json!({
+            "type": "preset",
+            "vertical": "bottom",
+            "marginPercent": 10.0
+        });
+
+        let sequence = sequence_with_caption(
+            long_caption,
+            Some(position.clone()),
+            Some(serde_json::json!({ "fontSize": 48 })),
+        );
+        let (box_width, box_height) = CaptionSafeAreaRule::estimate_text_box_percent(
+            &sequence.tracks[0].clips[0],
+            1920,
+            1080,
+        );
+        assert!(
+            box_width <= 80.0,
+            "a wrapped caption cannot be wider than its wrap box, got {box_width}"
+        );
+        assert!(
+            box_height > 48.0 * 1.2 / 1080.0 * 100.0 * 1.5,
+            "a wrapped caption must be taller than a single line, got {box_height}"
+        );
+
+        let state = ProjectState::new("QC Test");
+        let context = QCContext::from_sequence(&sequence);
+        let violations = CaptionSafeAreaRule::new()
+            .check(&sequence, &state, &RuleConfig::default(), &context)
+            .await
+            .expect("rule runs");
+
+        assert_eq!(violations.len(), 1);
+        assert!(
+            violations[0]
+                .message
+                .contains("outside the action-safe area"),
+            "{}",
+            violations[0].message
+        );
+        assert!(
+            violations[0]
+                .details
+                .as_deref()
+                .is_some_and(|details| details.contains("spans y")),
+            "the breach must be reported on the vertical axis: {:?}",
+            violations[0].details
+        );
+
+        // The same text at a size that still wraps into one line stays clear.
+        let short_sequence = sequence_with_caption(
+            "Short caption",
+            Some(position),
+            Some(serde_json::json!({ "fontSize": 48 })),
+        );
+        let short_context = QCContext::from_sequence(&short_sequence);
+        assert!(CaptionSafeAreaRule::new()
+            .check(
+                &short_sequence,
+                &state,
+                &RuleConfig::default(),
+                &short_context
+            )
+            .await
+            .expect("rule runs")
+            .is_empty());
     }
 
     #[tokio::test]
