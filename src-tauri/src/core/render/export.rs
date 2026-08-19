@@ -22,6 +22,7 @@ use crate::core::{
     ffmpeg::FFmpegRunner,
     fs::validate_local_input_path,
     render::hdr::{build_tonemap_filter, HdrMetadata, TonemapMode, TonemapParams},
+    render::transform_layout::ClipTransformLayout,
     render::{
         build_ffmpeg_invocation_for_render_plan, build_ffmpeg_invocation_from_args,
         execute_ffmpeg_invocation, execute_ffmpeg_output, RenderPlan,
@@ -155,22 +156,6 @@ pub(super) fn clip_audio_is_suppressed_by_companion(
     track.kind != TrackKind::Audio
         && asset.kind == AssetKind::Video
         && audio_companion_keys.contains(&create_audio_companion_key(clip))
-}
-
-fn clip_has_identity_transform(clip: &Clip) -> bool {
-    (clip.transform.position.x - 0.5).abs() < 0.0001
-        && (clip.transform.position.y - 0.5).abs() < 0.0001
-        && (clip.transform.scale.x - 1.0).abs() < 0.0001
-        && (clip.transform.scale.y - 1.0).abs() < 0.0001
-        && clip.transform.rotation_deg.abs() < 0.0001
-        && (clip.transform.anchor.x - 0.5).abs() < 0.0001
-        && (clip.transform.anchor.y - 0.5).abs() < 0.0001
-}
-
-fn clip_uses_unsupported_visual_composition(clip: &Clip) -> bool {
-    !is_text_clip(clip)
-        && !clip.is_adjustment_layer()
-        && (!clip_has_identity_transform(clip) || (clip.opacity - 1.0).abs() > 0.0001)
 }
 
 fn has_layered_visual_overlap(sequence: &Sequence) -> bool {
@@ -2670,6 +2655,151 @@ pub(super) fn append_video_stream_normalization(
     ));
 }
 
+/// Whether a clip is placed on the canvas untouched.
+///
+/// An identity clip is letterboxed into the canvas and nothing else, which is
+/// exactly what [`append_video_stream_normalization`] already does, so it keeps
+/// the cheaper graph and needs no source dimensions.
+pub(super) fn clip_has_identity_transform(clip: &Clip) -> bool {
+    (clip.transform.position.x - 0.5).abs() < TRANSFORM_EPSILON
+        && (clip.transform.position.y - 0.5).abs() < TRANSFORM_EPSILON
+        && (clip.transform.scale.x - 1.0).abs() < TRANSFORM_EPSILON
+        && (clip.transform.scale.y - 1.0).abs() < TRANSFORM_EPSILON
+        && clip.transform.rotation_deg.abs() < TRANSFORM_EPSILON
+        && (clip.transform.anchor.x - 0.5).abs() < TRANSFORM_EPSILON
+        && (clip.transform.anchor.y - 0.5).abs() < TRANSFORM_EPSILON
+}
+
+/// Whether a clip has to be composited onto the canvas rather than simply fitted.
+///
+/// Text clips and adjustment layers carry a transform too, but they are drawn by
+/// the ASS/drawtext overlay path and the grading path respectively, so neither
+/// takes part in this composite.
+pub(super) fn clip_needs_transform_composition(clip: &Clip) -> bool {
+    !is_text_clip(clip)
+        && !clip.is_adjustment_layer()
+        && (!clip_has_identity_transform(clip)
+            || (f64::from(clip.opacity) - 1.0).abs() > TRANSFORM_EPSILON)
+}
+
+/// Tolerance for treating a transform component as untouched.
+const TRANSFORM_EPSILON: f64 = 0.0001;
+
+/// Pixel dimensions of the media a clip decodes, cached for one export run.
+///
+/// Keyed by asset id. A `None` entry records that the asset was already looked at
+/// and could not be measured, so a broken file is probed once rather than once
+/// per clip that uses it.
+pub(super) type SourceDimensionCache = HashMap<String, Option<(u32, u32)>>;
+
+/// Measures the media an asset points at.
+///
+/// FFprobe comes first because it reports what will actually be decoded. The
+/// stored `Asset::video` metadata is only a fallback: `ImportAssetCommand::new`
+/// files every video away as a placeholder `VideoInfo::default()` (1920x1080)
+/// unless the caller enriched it, so trusting it first would silently letterbox
+/// or stretch anything imported headlessly.
+///
+/// Returns `None` when neither source can name the dimensions.
+pub(super) fn resolve_asset_source_dimensions(
+    asset: &Asset,
+    cache: &mut SourceDimensionCache,
+) -> Option<(u32, u32)> {
+    if let Some(cached) = cache.get(&asset.id) {
+        return *cached;
+    }
+
+    let probed = crate::core::assets::MetadataExtractor::extract(&asset.uri)
+        .ok()
+        .and_then(|metadata| metadata.video)
+        .map(|video| (video.width, video.height));
+
+    let resolved = probed
+        .or_else(|| {
+            asset
+                .video
+                .as_ref()
+                .map(|video| (video.width, video.height))
+        })
+        .filter(|(width, height)| *width > 0 && *height > 0);
+
+    cache.insert(asset.id.clone(), resolved);
+    resolved
+}
+
+/// Emits the filter chain that places one transformed clip on the output canvas.
+///
+/// The chain is `scale` -> optional `rotate` -> optional alpha -> `overlay` onto
+/// a black canvas of the clip's own timeline duration. It ends in the same shape
+/// [`append_video_stream_normalization`] produces — `setsar=1,fps=,format=` on a
+/// full-canvas frame — so the downstream concat cannot tell the two apart.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_video_transform_composition(
+    filter_complex: &mut String,
+    input_label: &str,
+    output_label: &str,
+    layout: &ClipTransformLayout,
+    duration_sec: f64,
+    width: u32,
+    height: u32,
+    fps: f64,
+    pixel_format: &str,
+) {
+    let staged_label = format!("{}_tx", output_label);
+    let canvas_label = format!("{}_bg", output_label);
+
+    filter_complex.push_str(&format!(
+        "[{}]scale={}:{},setsar=1",
+        input_label, layout.scaled_width, layout.scaled_height
+    ));
+
+    // A rotated frame needs somewhere transparent for its corners to land in, and
+    // a translucent one needs an alpha channel to attenuate. Either way the pixel
+    // format has to carry alpha before the filter that uses it.
+    if layout.is_rotated() || layout.is_translucent() {
+        filter_complex.push_str(",format=rgba");
+    }
+
+    if layout.is_rotated() {
+        filter_complex.push_str(&format!(
+            ",rotate={}:ow={}:oh={}:c=black@0",
+            format_speed_number(layout.rotation_rad),
+            layout.bounding_width,
+            layout.bounding_height
+        ));
+    }
+
+    if layout.is_translucent() {
+        filter_complex.push_str(&format!(
+            ",colorchannelmixer=aa={}",
+            format_speed_number(layout.opacity)
+        ));
+    }
+
+    filter_complex.push_str(&format!("[{}];", staged_label));
+
+    append_black_video_gap(
+        filter_complex,
+        &canvas_label,
+        duration_sec,
+        width,
+        height,
+        fps,
+        pixel_format,
+    );
+
+    filter_complex.push_str(&format!(
+        "[{}][{}]overlay=x={}:y={}:shortest=1,setsar=1,fps={},format={}[{}];",
+        canvas_label,
+        staged_label,
+        layout.overlay_x,
+        layout.overlay_y,
+        format_speed_number(fps),
+        pixel_format,
+        output_label
+    ));
+}
+
 pub(super) fn append_black_video_gap(
     filter_complex: &mut String,
     output_label: &str,
@@ -5128,6 +5258,9 @@ pub fn validate_export_settings(
 ) -> ExportValidation {
     let mut validation = ExportValidation::valid();
     let timeline_clock = TimelineClock::new(sequence.format.fps.clone());
+    // Shared with the filtergraph builder's resolution so validation and the
+    // render cannot disagree about how big a source is.
+    let mut source_dimensions = SourceDimensionCache::new();
 
     for error in validate_export_settings_options(settings) {
         validation.add_error(error);
@@ -5213,10 +5346,18 @@ pub fn validate_export_settings(
                 ));
             }
 
-            if track.kind == TrackKind::Video && clip_uses_unsupported_visual_composition(clip) {
-                validation.add_error(format!(
-                    "Clip '{}' uses transform or opacity settings that final render export does not support yet",
-                    clip.id
+            // Motion is stored, round-trips through the project, and animates in
+            // the preview; what it is not is rendered. The export composites the
+            // clip once, at its base transform, so the caller is told what the
+            // file will actually show rather than left to discover it.
+            if track.kind == TrackKind::Video
+                && !clip.motion_keyframes.is_empty()
+                && !clip.is_adjustment_layer()
+                && !is_text_clip(clip)
+            {
+                validation.add_warning(format!(
+                    "Motion keyframes on clip '{}' on track '{}' are not yet rendered; the clip renders with its base transform",
+                    clip.id, track.name
                 ));
             }
 
@@ -5255,6 +5396,19 @@ pub fn validate_export_settings(
                 validation.add_error(format!(
                     "Invalid asset path for asset '{}': {}",
                     asset.id, err
+                ));
+            }
+
+            // Placing a transformed clip needs the source's real pixel size. An
+            // identity clip is only fitted to the canvas, so it never pays for
+            // this and never fails on it.
+            if track.kind == TrackKind::Video
+                && clip_needs_transform_composition(clip)
+                && resolve_asset_source_dimensions(asset, &mut source_dimensions).is_none()
+            {
+                validation.add_error(format!(
+                    "Could not determine source dimensions of asset '{}' needed to place transformed clip '{}'",
+                    asset.id, clip.id
                 ));
             }
 
@@ -5390,6 +5544,7 @@ pub fn detect_timeline_gaps(sequence: &Sequence) -> Vec<TimelineGap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::timeline::Transform;
 
     fn create_temp_media_file(filename: &str) -> String {
         let dir = std::env::temp_dir().join("openreelio-test-media");
@@ -6474,8 +6629,14 @@ mod tests {
             .any(|error| error.to_lowercase().contains("blend mode export")));
     }
 
+    /// Feature: Transformed clips in the final render
+    /// Scenario: a moved, translucent clip exports instead of being refused
+    ///
+    /// The preview has always let a clip be moved and faded. Export used to
+    /// reject exactly those clips, so a project that looked finished could not
+    /// be rendered at all. The composite path renders them now.
     #[test]
-    fn test_validation_rejects_clip_transform_or_opacity_that_export_cannot_render() {
+    fn test_validation_accepts_a_clip_the_export_now_composites() {
         use crate::core::assets::VideoInfo;
         use crate::core::timeline::{Clip, SequenceFormat, Track};
         use crate::core::Point2D;
@@ -6511,12 +6672,87 @@ mod tests {
         );
 
         assert!(
-            validation
-                .errors
-                .iter()
-                .any(|error| error.to_lowercase().contains("transform or opacity")),
-            "Expected unsupported transform/opacity validation error. Got: {:?}",
+            validation.is_valid,
+            "a transformed, translucent clip must export. Got: {:?}",
             validation.errors
+        );
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: keyframed motion renders static, and says so
+    ///
+    /// The preview animates `motion_keyframes`; the export composites the clip
+    /// once. Silently rendering the base transform would hand back a file that
+    /// disagrees with what the editor just watched.
+    #[test]
+    fn test_validation_warns_that_motion_keyframes_render_static() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track, TransformKeyframe};
+        use crate::core::Point2D;
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.id = "moving-clip".to_string();
+        clip.motion_keyframes = vec![
+            TransformKeyframe {
+                time_offset: 0.0,
+                transform: Transform::default(),
+                interpolation: Default::default(),
+            },
+            TransformKeyframe {
+                time_offset: 3.0,
+                transform: Transform {
+                    position: Point2D::new(0.75, 0.5),
+                    ..Transform::default()
+                },
+                interpolation: Default::default(),
+            },
+        ];
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_motion.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset =
+            Asset::new_video("validation_motion.mp4", &video_path, VideoInfo::default())
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            validation.is_valid,
+            "keyframed motion must not block the export: {:?}",
+            validation.errors
+        );
+        let warning = validation
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("Motion keyframes"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "keyframed motion must be reported: {:?}",
+                    validation.warnings
+                )
+            });
+        assert!(
+            warning.contains("moving-clip"),
+            "the warning must name the clip: {warning}"
+        );
+        assert!(
+            warning.contains("base transform"),
+            "the warning must say what happens instead: {warning}"
         );
     }
 
@@ -8978,6 +9214,172 @@ mod tests {
         args.windows(2)
             .find_map(|window| (window[0] == "-filter_complex").then_some(window[1].as_str()))
             .expect("filter_complex argument")
+    }
+
+    /// A 1080p sequence holding one 720p clip for three seconds.
+    ///
+    /// The source is deliberately smaller than the canvas so the "fit the source
+    /// into the canvas first" half of the placement contract is exercised rather
+    /// than cancelling out at 1:1.
+    fn sequence_with_one_transformed_clip(
+        transform: Transform,
+        opacity: f32,
+    ) -> (Sequence, std::collections::HashMap<String, Asset>) {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat};
+
+        let mut sequence = Sequence::new("Transform", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.transform = transform;
+        clip.opacity = opacity;
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("transform_source.mp4");
+        let mut video_asset = Asset::new_video(
+            "transform_source.mp4",
+            &video_path,
+            VideoInfo {
+                width: 1280,
+                height: 720,
+                ..VideoInfo::default()
+            },
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert(video_asset.id.clone(), video_asset);
+
+        (sequence, assets)
+    }
+
+    fn build_transform_filter_complex(transform: Transform, opacity: f32) -> String {
+        let (sequence, assets) = sequence_with_one_transformed_clip(transform, opacity);
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings::default(),
+        )
+        .expect("a transformed clip should build a filtergraph");
+        filter_complex_of(&args).to_string()
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: a scaled, repositioned clip is composited onto the canvas
+    ///
+    /// 1280x720 fits a 1920x1080 canvas at 1.5x, halved by the clip scale to
+    /// 960x540. Its centre lands at (0.3 * 1920, 0.75 * 1080) = (576, 810), so
+    /// the frame's top-left corner is (96, 540).
+    #[test]
+    fn test_build_filter_composites_a_scaled_and_moved_clip() {
+        use crate::core::Point2D;
+
+        let filter_complex = build_transform_filter_complex(
+            Transform {
+                scale: Point2D::new(0.5, 0.5),
+                position: Point2D::new(0.3, 0.75),
+                ..Transform::default()
+            },
+            1.0,
+        );
+
+        assert!(
+            filter_complex.contains("scale=960:540,setsar=1[vnorm0_tx];"),
+            "the clip must be scaled to its transformed size. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex
+                .contains("color=c=black:s=1920x1080:r=30:d=3,format=yuv420p[vnorm0_bg];"),
+            "the composite needs a canvas as long as the clip. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains(
+                "[vnorm0_bg][vnorm0_tx]overlay=x=96:y=540:shortest=1,setsar=1,fps=30,format=yuv420p[vnorm0];"
+            ),
+            "the clip must be placed at the transformed corner. Got: {filter_complex}"
+        );
+        assert!(
+            !filter_complex.contains("colorchannelmixer"),
+            "a fully opaque clip must not pay for an alpha filter. Got: {filter_complex}"
+        );
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: a faded clip keeps its framing and gains an alpha stage
+    #[test]
+    fn test_build_filter_renders_clip_opacity() {
+        let filter_complex = build_transform_filter_complex(Transform::default(), 0.5);
+
+        assert!(
+            filter_complex.contains(
+                "scale=1920:1080,setsar=1,format=rgba,colorchannelmixer=aa=0.5[vnorm0_tx];"
+            ),
+            "a faded clip must be attenuated before compositing. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("overlay=x=0:y=0:shortest=1"),
+            "an untransformed faded clip still fills the canvas. Got: {filter_complex}"
+        );
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: a rotated clip gets a box big enough for its own corners
+    ///
+    /// A 960x540 frame turned a quarter turn sweeps a 540x960 box. Rotating
+    /// about the centre anchor leaves the picture centred, so the box's corner
+    /// is (960 - 270, 540 - 480).
+    #[test]
+    fn test_build_filter_rotates_a_clip_into_a_bounding_box() {
+        use crate::core::Point2D;
+
+        let filter_complex = build_transform_filter_complex(
+            Transform {
+                scale: Point2D::new(0.5, 0.5),
+                rotation_deg: 90.0,
+                ..Transform::default()
+            },
+            1.0,
+        );
+
+        assert!(
+            filter_complex.contains(
+                "scale=960:540,setsar=1,format=rgba,rotate=1.570796:ow=540:oh=960:c=black@0[vnorm0_tx];"
+            ),
+            "the rotation must be given a box that fits the turned frame. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("overlay=x=690:y=60:shortest=1"),
+            "the rotated frame must stay centred on its anchor. Got: {filter_complex}"
+        );
+    }
+
+    /// Feature: Transformed clips in the final render
+    /// Scenario: an untouched clip keeps the cheaper letterbox graph
+    ///
+    /// The composite path costs an extra canvas source and an overlay per clip.
+    /// Nothing about an identity clip needs either, and the whole existing corpus
+    /// of graph-shape tests is written against the fit-and-pad chain.
+    #[test]
+    fn test_build_filter_leaves_an_identity_clip_on_the_normalization_path() {
+        let filter_complex = build_transform_filter_complex(Transform::default(), 1.0);
+
+        assert!(
+            filter_complex.contains(
+                "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[vnorm0];"
+            ),
+            "an identity clip must still be fitted and padded. Got: {filter_complex}"
+        );
+        assert!(
+            !filter_complex.contains("overlay="),
+            "an identity clip must not be composited. Got: {filter_complex}"
+        );
     }
 
     /// Feature: Render output length

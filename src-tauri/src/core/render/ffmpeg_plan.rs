@@ -18,15 +18,18 @@ use super::{
     export::{
         append_ass_text_overlay, append_black_video_gap, append_caption_overlays,
         append_master_audio_output, append_output_time_range_args, append_text_clip_overlays,
-        append_timeline_video_output, append_video_stream_normalization, apply_audio_mix_settings,
-        asset_has_playable_audio, build_audio_trim_filter, build_video_trim_filter,
-        clip_audio_is_suppressed_by_companion, collect_audio_companion_keys,
+        append_timeline_video_output, append_video_stream_normalization,
+        append_video_transform_composition, apply_audio_mix_settings, asset_has_playable_audio,
+        build_audio_trim_filter, build_video_trim_filter, clip_audio_is_suppressed_by_companion,
+        clip_needs_transform_composition, collect_audio_companion_keys,
         collect_caption_drawtext_filters, collect_enabled_clips_sorted,
         collect_overlay_text_drawtext_filters, generated_text_visual_end_sec,
         hdr_metadata_for_asset, is_text_clip, output_video_dimensions, output_video_fps,
-        output_video_pixel_format, AssetAudioInfo, ExportEngine, ExportError, ExportSettings,
-        VideoCodec, VideoTimelineSegment, TIMELINE_EPSILON_SEC,
+        output_video_pixel_format, resolve_asset_source_dimensions, AssetAudioInfo, ExportEngine,
+        ExportError, ExportSettings, SourceDimensionCache, VideoCodec, VideoTimelineSegment,
+        TIMELINE_EPSILON_SEC,
     },
+    transform_layout::compute_clip_transform_layout,
     RenderPlan,
 };
 
@@ -92,6 +95,10 @@ pub(super) fn build_sequence_ffmpeg_args(
     let (output_width, output_height) = output_video_dimensions(ctx.sequence, ctx.settings);
     let output_fps = output_video_fps(ctx.sequence, ctx.settings);
     let output_pixel_format = output_video_pixel_format(ctx.settings);
+
+    // Measuring a source costs an FFprobe run, so only transformed clips pay for
+    // it and each asset pays at most once per export.
+    let mut source_dimensions = SourceDimensionCache::new();
 
     let mut adjustment_layer_effects = Vec::new();
     for (clip, _track) in &all_clips {
@@ -189,15 +196,51 @@ pub(super) fn build_sequence_ffmpeg_args(
                         ));
                     }
 
-                    append_video_stream_normalization(
-                        &mut filter_complex,
-                        &video_out_label,
-                        &normalized_video_label,
-                        output_width,
-                        output_height,
-                        output_fps,
-                        output_pixel_format,
-                    );
+                    if clip_needs_transform_composition(clip) {
+                        // A moved, scaled, rotated or translucent clip has to be
+                        // drawn onto the canvas rather than fitted to it. The
+                        // placement follows the source's real pixel dimensions,
+                        // which is also what the preview measures.
+                        let (source_width, source_height) =
+                            resolve_asset_source_dimensions(asset, &mut source_dimensions)
+                                .ok_or_else(|| {
+                                    ExportError::InvalidSettings(format!(
+                                    "Could not determine source dimensions of asset '{}' needed to place transformed clip '{}'",
+                                    asset.id, clip.id
+                                ))
+                                })?;
+
+                        let layout = compute_clip_transform_layout(
+                            source_width,
+                            source_height,
+                            output_width,
+                            output_height,
+                            &clip.transform,
+                            clip.opacity,
+                        );
+
+                        append_video_transform_composition(
+                            &mut filter_complex,
+                            &video_out_label,
+                            &normalized_video_label,
+                            &layout,
+                            clip.place.timeline_out_sec() - clip.place.timeline_in_sec,
+                            output_width,
+                            output_height,
+                            output_fps,
+                            output_pixel_format,
+                        );
+                    } else {
+                        append_video_stream_normalization(
+                            &mut filter_complex,
+                            &video_out_label,
+                            &normalized_video_label,
+                            output_width,
+                            output_height,
+                            output_fps,
+                            output_pixel_format,
+                        );
+                    }
 
                     video_segments.push(VideoTimelineSegment::new(
                         format!("[{}]", normalized_video_label),
