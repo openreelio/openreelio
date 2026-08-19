@@ -44,7 +44,7 @@
 //! Every length in this module is therefore counted in frames and converted to
 //! seconds only when a filter parameter is formatted.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::core::{
     assets::Asset,
@@ -68,7 +68,7 @@ const MAX_TRANSITION_SEC: f64 = 10.0;
 /// and a sub-frame disagreement about a container's duration must not be able
 /// to flip eligibility — and with it whether the warning the caller reads
 /// matches the file it gets.
-const HANDLE_SLACK_FRAMES: f64 = 1.0;
+pub(super) const HANDLE_SLACK_FRAMES: f64 = 1.0;
 
 // =============================================================================
 // Planned transitions
@@ -154,9 +154,18 @@ impl EngineAudioFades {
 
 /// A stored two-input transition the render will not blend, and why.
 #[derive(Clone, Debug)]
-pub(super) struct TransitionRefusal {
+pub(crate) struct TransitionRefusal {
     /// Clip carrying the effect.
     pub clip_id: String,
+    /// The effect that was refused.
+    ///
+    /// Carried so the caller can match a refusal to the exact effect it came
+    /// from. Matching on the label instead reports the same refusal once per
+    /// same-typed effect on the clip, which is precisely the case — two
+    /// dissolves on one clip — where the second one is the thing being refused.
+    pub effect_id: String,
+    /// Track the clip sits on, so a caller can address the effect.
+    pub track_id: String,
     /// Track the clip sits on, for the message.
     pub track_name: String,
     /// Human-readable effect name.
@@ -167,7 +176,7 @@ pub(super) struct TransitionRefusal {
 
 impl TransitionRefusal {
     /// The warning text the export reports for this refusal.
-    pub(super) fn warning(&self) -> String {
+    pub(crate) fn warning(&self) -> String {
         format!(
             "Transition effect '{}' on clip '{}' on track '{}' renders as a cut: {}",
             self.effect_label, self.clip_id, self.track_name, self.reason
@@ -175,14 +184,45 @@ impl TransitionRefusal {
     }
 }
 
+/// A transition the render *will* blend, with something the caller should know.
+///
+/// Distinct from a refusal because the picture does change: the file gets the
+/// blend that was asked for. What an advisory reports is that the blend will not
+/// achieve what the caller presumably wanted, which is not a reason to withhold
+/// it.
+#[derive(Clone, Debug)]
+pub(super) struct TransitionAdvisory {
+    /// Clip carrying the effect.
+    pub clip_id: String,
+    /// The effect the advisory is about.
+    pub effect_id: String,
+    /// Track the clip sits on, for the message.
+    pub track_name: String,
+    /// Human-readable effect name.
+    pub effect_label: String,
+    /// What the caller should know, phrased so they can act on it.
+    pub reason: String,
+}
+
+impl TransitionAdvisory {
+    /// The warning text the export reports for this advisory.
+    pub(super) fn warning(&self) -> String {
+        format!(
+            "Transition effect '{}' on clip '{}' on track '{}' renders, but {}",
+            self.effect_label, self.clip_id, self.track_name, self.reason
+        )
+    }
+}
+
 /// Every renderable transition in a sequence, plus the ones that were refused.
 #[derive(Clone, Debug, Default)]
-pub(super) struct TransitionPlan {
+pub(crate) struct TransitionPlan {
     /// Keyed by the outgoing clip's id.
     by_outgoing: HashMap<String, PlannedTransition>,
     /// Incoming clip id to the transition that ends on it.
     by_incoming: HashMap<String, String>,
     refusals: Vec<TransitionRefusal>,
+    advisories: Vec<TransitionAdvisory>,
 }
 
 impl TransitionPlan {
@@ -232,8 +272,13 @@ impl TransitionPlan {
     }
 
     /// The transitions that will not be rendered, with their reasons.
-    pub(super) fn refusals(&self) -> &[TransitionRefusal] {
+    pub(crate) fn refusals(&self) -> &[TransitionRefusal] {
         &self.refusals
+    }
+
+    /// The transitions that will be rendered but are worth a word to the caller.
+    pub(super) fn advisories(&self) -> &[TransitionAdvisory] {
+        &self.advisories
     }
 
     /// Whether anything at all will be blended.
@@ -246,15 +291,52 @@ impl TransitionPlan {
 // Planning
 // =============================================================================
 
-/// The first enabled two-input transition on a clip, if it carries one.
-fn two_input_transition_on<'a>(
+/// Every enabled two-input transition a clip carries, in the clip's own order.
+///
+/// A clip has exactly one out point, and a two-input transition is a property of
+/// that out point, so at most the first of these can be rendered. The rest are
+/// returned rather than quietly skipped: silently dropping the second one means
+/// a caller who stacks a dissolve and a wipe sees only the dissolve in the file
+/// and no warning saying the wipe went nowhere.
+fn two_input_transitions_on<'a>(
     clip: &Clip,
     effects: &'a HashMap<String, Effect>,
-) -> Option<&'a Effect> {
+) -> Vec<&'a Effect> {
     clip.effects
         .iter()
         .filter_map(|effect_id| effects.get(effect_id))
-        .find(|effect| effect.enabled && effect.effect_type.is_two_input_transition())
+        .filter(|effect| effect.enabled && effect.effect_type.is_two_input_transition())
+        .collect()
+}
+
+/// Why this clip cannot contribute a picture the stitch can blend.
+///
+/// One message per cause rather than one message for all of them: "it is not on
+/// a visible video track" is actively misleading advice for a title, which is on
+/// a perfectly visible video track and simply is not a picture.
+fn picture_refusal_reason(clip: &Clip, track: &Track) -> Option<&'static str> {
+    if !matches!(track.kind, TrackKind::Video) {
+        return Some("it is not on a video track, so there is no picture to blend");
+    }
+    if !track.visible {
+        return Some("its track is hidden, so there is no picture to blend");
+    }
+    if !clip.enabled {
+        return Some("the clip is disabled, so there is no picture to blend");
+    }
+    if clip.is_adjustment_layer() {
+        return Some(
+            "it is an adjustment layer, which grades the clips beneath it rather than \
+             contributing a picture of its own",
+        );
+    }
+    if is_text_clip(clip) {
+        return Some(
+            "it is a text clip, which is drawn over the finished picture rather than \
+             contributing one to blend",
+        );
+    }
+    None
 }
 
 /// Whether a clip's render window can be moved into unused source media at all.
@@ -275,13 +357,19 @@ fn describe_side(is_outgoing: bool) -> &'static str {
     }
 }
 
-/// Whether this clip contributes a picture the stitch can blend.
-fn renders_picture(clip: &Clip, track: &Track) -> bool {
-    matches!(track.kind, TrackKind::Video)
-        && track.visible
-        && clip.enabled
-        && !clip.is_adjustment_layer()
-        && !is_text_clip(clip)
+/// Whether a boundary joins one continuous stretch of footage to itself.
+///
+/// A razor split leaves the outgoing clip's out point exactly where the incoming
+/// clip's in point is, in the same source. Blending across it is correct NLE
+/// semantics — and completely invisible, because every frame of the blend mixes
+/// a frame with itself. It is also exactly what a pacing profile or a style
+/// planner produces when it drops transitions onto an assembly it built by
+/// splitting one take, so it is worth saying out loud rather than leaving the
+/// caller to wonder why their dissolve did nothing.
+fn blends_footage_into_itself(outgoing: &Clip, incoming: &Clip) -> bool {
+    outgoing.asset_id == incoming.asset_id
+        && (outgoing.range.source_out_sec - incoming.range.source_in_sec).abs()
+            <= TIMELINE_EPSILON_SEC
 }
 
 /// A candidate boundary before the cross-clip checks run.
@@ -296,7 +384,7 @@ struct Candidate {
 /// to say it does not know: an outgoing clip whose source length is unknown
 /// cannot be proven to have a handle, so its transition is refused rather than
 /// rendered into a black tail.
-pub(super) fn plan_sequence_transitions(
+pub(crate) fn plan_sequence_transitions(
     sequence: &Sequence,
     assets: &HashMap<String, Asset>,
     effects: &HashMap<String, Effect>,
@@ -322,23 +410,43 @@ pub(super) fn plan_sequence_transitions(
         });
 
         for (index, clip) in clips.iter().enumerate() {
-            let Some(effect) = two_input_transition_on(clip, effects) else {
+            let stored = two_input_transitions_on(clip, effects);
+            let Some((effect, extras)) = stored.split_first() else {
                 continue;
             };
 
+            // A clip has one out point, so it can carry one two-input
+            // transition. Every further one is refused by name rather than
+            // dropped, so a caller who stacked a dissolve and a wipe learns
+            // which of them the file actually got.
+            for extra in extras {
+                plan.refusals.push(TransitionRefusal {
+                    clip_id: clip.id.clone(),
+                    effect_id: extra.id.clone(),
+                    track_id: track.id.clone(),
+                    track_name: track.name.clone(),
+                    effect_label: effect_type_label(&extra.effect_type),
+                    reason: format!(
+                        "another transition ('{}') already occupies this clip's out point, and a \
+                         clip has only one out point to blend across; remove one of them",
+                        effect_type_label(&effect.effect_type)
+                    ),
+                });
+            }
+
             let label = effect_type_label(&effect.effect_type);
+            let effect_id = effect.id.clone();
             let refuse = |reason: String| TransitionRefusal {
                 clip_id: clip.id.clone(),
+                effect_id: effect_id.clone(),
+                track_id: track.id.clone(),
                 track_name: track.name.clone(),
                 effect_label: label.clone(),
                 reason,
             };
 
-            if !renders_picture(clip, track) {
-                plan.refusals.push(refuse(
-                    "it is not on a visible video track, so there is no picture to blend"
-                        .to_string(),
-                ));
+            if let Some(reason) = picture_refusal_reason(clip, track) {
+                plan.refusals.push(refuse(reason.to_string()));
                 continue;
             }
 
@@ -353,9 +461,9 @@ pub(super) fn plan_sequence_transitions(
                 continue;
             };
 
-            if !renders_picture(next, track) {
+            if let Some(reason) = picture_refusal_reason(next, track) {
                 plan.refusals.push(refuse(format!(
-                    "the incoming clip '{}' contributes no picture to blend into",
+                    "the incoming clip '{}' contributes no picture to blend into: {reason}",
                     next.id
                 )));
                 continue;
@@ -462,7 +570,23 @@ pub(super) fn plan_sequence_transitions(
                 continue;
             }
 
-            let mut planned_effect = effect.clone();
+            if blends_footage_into_itself(clip, next) {
+                plan.advisories.push(TransitionAdvisory {
+                    clip_id: clip.id.clone(),
+                    effect_id: effect.id.clone(),
+                    track_name: track.name.clone(),
+                    effect_label: label.clone(),
+                    reason: format!(
+                        "it blends continuous footage into itself — clip '{}' ends where clip \
+                         '{}' begins in the same source, so every frame of the blend mixes a \
+                         frame with itself and nothing will be visible; trim material at the \
+                         boundary first, or remove the transition",
+                        clip.id, next.id
+                    ),
+                });
+            }
+
+            let mut planned_effect = (*effect).clone();
             planned_effect.set_param("duration", ParamValue::Float(duration_sec));
 
             candidates.push(Candidate {
@@ -482,6 +606,7 @@ pub(super) fn plan_sequence_transitions(
 
     admit_candidates(&mut plan, candidates);
     plan.refusals.sort_by(|a, b| a.clip_id.cmp(&b.clip_id));
+    plan.advisories.sort_by(|a, b| a.clip_id.cmp(&b.clip_id));
     plan
 }
 
@@ -517,13 +642,26 @@ fn admit_candidates(plan: &mut TransitionPlan, candidates: Vec<Candidate>) {
             .get(&transition.outgoing_clip_id)
             .copied()
             .unwrap_or(0);
+        // What the fold actually needs is that the outgoing clip's *stream* —
+        // its slot plus both handles — outlasts the blend, so `fold_group`
+        // always has at least one pass-through frame left.
+        //
+        // Comparing `head + tail < slot` instead asserts something stronger than
+        // the code requires, and stronger than the second-valued refusal
+        // (`d < slot` on both sides) can guarantee once every length is rounded
+        // to whole frames: a 1.01s middle clip is 30 slot frames at 30fps and
+        // still owes 15 head and 15 tail, which is not `< 30` even though the
+        // fold has 30 pass-through frames to spare.
+        let stream_frames = outgoing_slot_frames + head_claim + transition.tail_frames;
         debug_assert!(
-            head_claim + transition.tail_frames < outgoing_slot_frames,
-            "clip '{}' cannot give {} head and {} tail frames out of {}",
+            stream_frames > transition.frames,
+            "clip '{}' gives {} head and {} tail frames out of {}, leaving no picture \
+             before a {}-frame blend",
             transition.outgoing_clip_id,
             head_claim,
             transition.tail_frames,
-            outgoing_slot_frames
+            outgoing_slot_frames,
+            transition.frames
         );
 
         plan.by_incoming.insert(
@@ -565,6 +703,7 @@ pub(super) fn stitch_transition_groups(
     let mut stitched: Vec<VideoTimelineSegment> = Vec::with_capacity(ordered.len());
     let mut group_index = 0_usize;
     let mut cursor = 0_usize;
+    let mut folded: HashSet<&str> = HashSet::new();
 
     while cursor < ordered.len() {
         let mut end = cursor;
@@ -579,9 +718,33 @@ pub(super) fn stitch_transition_groups(
         }
 
         let group = &ordered[cursor..=end];
+        for segment in &group[..group.len() - 1] {
+            if let Some(clip_id) = segment.clip_id.as_deref() {
+                folded.insert(clip_id);
+            }
+        }
         stitched.push(fold_group(filter_complex, group, plan, fps, group_index)?);
         group_index += 1;
         cursor = end + 1;
+    }
+
+    // Every planned boundary must have been folded. A plan entry the walk above
+    // never reached is not a cosmetic miss: the trim builders have already
+    // widened that clip's source window and its `adelay` has already been pulled
+    // back by the head handle, so leaving the picture unfolded ships a stream
+    // longer than its timeline slot with the sound shifted against it — and
+    // exits successfully while doing so. Refuse the render instead.
+    if let Some(orphan) = plan
+        .by_outgoing
+        .keys()
+        .find(|clip_id| !folded.contains(clip_id.as_str()))
+    {
+        return Err(ExportError::InvalidSettings(format!(
+            "Transition on clip '{orphan}' was planned but its boundary was never folded, so the \
+             handles it added to the source window would be left baked into the render; the \
+             segment order the stitch saw does not put the two sides of the boundary next to \
+             each other"
+        )));
     }
 
     Ok(stitched)
@@ -598,6 +761,34 @@ fn links(left: &VideoTimelineSegment, right: &VideoTimelineSegment, plan: &Trans
         .is_some_and(|transition| transition.incoming_clip_id == right_id)
 }
 
+/// The exact frame count one clip's stream carries, handles included.
+///
+/// The slot is measured as the difference between its two *cumulative* timeline
+/// boundaries rather than by rounding its own duration. That is what makes the
+/// counts telescope: back-to-back 4.02s clips at 30fps each round to 121 frames
+/// on their own, so a run of them claims one more frame per clip than the
+/// timeline holds, and the last `xfade` in a chain lands on the wrong frame. Cut
+/// at the boundaries instead and every frame is claimed exactly once.
+///
+/// Both handles are already whole multiples of the frame duration, so they add
+/// exactly the frames the planner counted.
+pub(super) fn clip_stream_frames(
+    start_sec: f64,
+    end_sec: f64,
+    handles: ClipHandles,
+    fps: f64,
+) -> u32 {
+    if !fps.is_finite() || fps <= 0.0 {
+        return 1;
+    }
+
+    let slot_frames = (end_sec * fps).round() - (start_sec * fps).round();
+    let head_frames = (handles.head_sec.max(0.0) * fps).round();
+    let tail_frames = (handles.tail_sec.max(0.0) * fps).round();
+
+    (slot_frames + head_frames + tail_frames).max(1.0) as u32
+}
+
 /// The frame count one segment's stream carries, handles included.
 fn segment_frames(segment: &VideoTimelineSegment, plan: &TransitionPlan, fps: f64) -> u32 {
     let handles = segment
@@ -605,8 +796,7 @@ fn segment_frames(segment: &VideoTimelineSegment, plan: &TransitionPlan, fps: f6
         .as_deref()
         .map(|clip_id| plan.handles(clip_id))
         .unwrap_or_default();
-    let span = (segment.end_sec - segment.start_sec).max(0.0) + handles.head_sec + handles.tail_sec;
-    (span * fps).round().max(1.0) as u32
+    clip_stream_frames(segment.start_sec, segment.end_sec, handles, fps)
 }
 
 /// Folds one run of linked segments left to right into a single stream.
@@ -673,9 +863,15 @@ fn fold_group(
 
     // The handles cancel: `xfade` eats exactly as many frames as the two sides
     // added, so the fold lands back on the timeline it started from.
+    //
+    // Measured with the same cut-at-the-boundaries arithmetic every segment used,
+    // because that is the only formulation that telescopes. Rounding the group's
+    // span in one go instead compares against a different number whenever the
+    // group's edges are not on frame boundaries, and reports a defect that is
+    // really just two roundings disagreeing.
     debug_assert_eq!(
         accumulated_frames,
-        ((end_sec - start_sec) * fps).round().max(1.0) as u32,
+        clip_stream_frames(start_sec, end_sec, ClipHandles::default(), fps),
         "a transition group must occupy exactly its timeline span"
     );
 
@@ -967,6 +1163,244 @@ mod tests {
             plan.refusals()[0].reason.contains("unknown"),
             "{:?}",
             plan.refusals()
+        );
+    }
+
+    /// Builds the two folded segments a two-clip group produces.
+    fn segments_for(boundaries: &[(f64, f64)]) -> Vec<VideoTimelineSegment> {
+        boundaries
+            .iter()
+            .enumerate()
+            .map(|(index, (start, end))| {
+                VideoTimelineSegment::new(format!("[v{index}]"), *start, *end)
+                    .with_clip(format!("clip{index}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn should_admit_a_middle_clip_whose_frame_rounding_leaves_it_exactly_full() {
+        // Reproduces a debug-build panic on a legal timeline. A 1.01s middle
+        // clip is 30 slot frames at 30fps and owes 15 head plus 15 tail to its
+        // two 1s dissolves — not `< 30`, but the fold still has 30 pass-through
+        // frames, because its stream is the slot *plus* both handles.
+        let plan = plan_for(vec![
+            with_handles(0.0, 5.0, Some(dissolve(1.0))),
+            with_handles(5.0, 1.01, Some(dissolve(1.0))),
+            with_handles(6.01, 5.0, None),
+        ]);
+
+        assert!(plan.refusals().is_empty(), "{:?}", plan.refusals());
+        assert!(
+            plan.transition_after("clip1").is_some(),
+            "a 1.0s transition fits inside a 1.01s shot"
+        );
+    }
+
+    #[test]
+    fn should_fold_clips_whose_durations_do_not_land_on_frame_boundaries() {
+        // Reproduces a second debug-build panic. 4.02s at 30fps is 120.6 frames:
+        // rounded on its own every clip claims 121, so a two-clip group claimed
+        // 242 frames of a 241-frame timeline. Cutting at the cumulative
+        // boundaries instead gives 121 and 120, which telescope exactly.
+        let plan = plan_for(vec![
+            with_handles(0.0, 4.02, Some(dissolve(1.0))),
+            with_handles(4.02, 4.02, None),
+        ]);
+        assert!(plan.refusals().is_empty(), "{:?}", plan.refusals());
+
+        let segments = segments_for(&[(0.0, 4.02), (4.02, 8.04)]);
+        let mut filter_complex = String::new();
+        let stitched = stitch_transition_groups(&mut filter_complex, segments, &plan, FPS)
+            .expect("the group must fold");
+
+        assert_eq!(stitched.len(), 1, "both clips fold into one segment");
+        assert_eq!(stitched[0].start_sec, 0.0);
+        assert_eq!(stitched[0].end_sec, 8.04);
+    }
+
+    #[test]
+    fn should_count_a_clip_stream_by_cutting_at_its_timeline_boundaries() {
+        // The property the fold depends on: consecutive clips must claim every
+        // frame of the span exactly once, however their own durations round.
+        let head = ClipHandles::default();
+        let first = clip_stream_frames(0.0, 4.02, head, FPS);
+        let second = clip_stream_frames(4.02, 8.04, head, FPS);
+
+        assert_eq!(first + second, clip_stream_frames(0.0, 8.04, head, FPS));
+        assert_eq!(first, 121);
+        assert_eq!(second, 120);
+    }
+
+    #[test]
+    fn should_refuse_the_render_when_a_planned_boundary_is_never_folded() {
+        // A plan entry the stitch cannot reach is not cosmetic: the trim
+        // builders have already widened that clip's source window and its
+        // `adelay` has already moved, so shipping the picture unfolded means a
+        // stream longer than its slot with the sound shifted against it — and a
+        // successful exit code while it happens.
+        let plan = plan_for(vec![
+            with_handles(0.0, 5.0, Some(dissolve(1.0))),
+            with_handles(5.0, 5.0, None),
+        ]);
+        assert!(plan.transition_after("clip0").is_some(), "planned");
+
+        // The two sides are no longer adjacent in the segment list, so the walk
+        // never links them.
+        let segments = vec![
+            VideoTimelineSegment::new("[v0]", 0.0, 5.0).with_clip("clip0"),
+            VideoTimelineSegment::new("[gap]", 5.0, 6.0),
+            VideoTimelineSegment::new("[v1]", 6.0, 11.0).with_clip("clip1"),
+        ];
+
+        let mut filter_complex = String::new();
+        let error = stitch_transition_groups(&mut filter_complex, segments, &plan, FPS)
+            .expect_err("an unfolded plan entry must stop the render");
+
+        let ExportError::InvalidSettings(message) = error else {
+            panic!("the refusal must name the settings that cannot be honoured");
+        };
+        assert!(
+            message.contains("clip0"),
+            "the refusal must name the clip: {message}"
+        );
+    }
+
+    #[test]
+    fn should_refuse_every_two_input_transition_after_the_first_on_one_clip() {
+        // A clip has one out point, so it can blend across one boundary. The
+        // second effect used to be dropped without a word.
+        let mut wipe = Effect::new(EffectType::Wipe);
+        wipe.id = "wipe-extra".to_string();
+        wipe.set_param("duration", ParamValue::Float(1.0));
+        wipe.enabled = true;
+
+        let (mut sequence, assets, mut effects, lengths) = build(vec![
+            with_handles(0.0, 5.0, Some(dissolve(1.0))),
+            with_handles(5.0, 5.0, None),
+        ]);
+        sequence.tracks[0].clips[0].effects.push(wipe.id.clone());
+        effects.insert(wipe.id.clone(), wipe);
+
+        let plan = plan_sequence_transitions(&sequence, &assets, &effects, FPS, |asset| {
+            lengths.get(&asset.id).copied()
+        });
+
+        assert!(
+            plan.transition_after("clip0").is_some(),
+            "the first transition still renders"
+        );
+        let refusals = plan.refusals();
+        assert_eq!(refusals.len(), 1, "exactly one refusal: {refusals:?}");
+        assert_eq!(refusals[0].effect_id, "wipe-extra");
+        assert!(
+            refusals[0].reason.contains("already occupies"),
+            "the refusal must say what took the out point: {}",
+            refusals[0].reason
+        );
+    }
+
+    #[test]
+    fn should_warn_when_a_transition_blends_continuous_footage_into_itself() {
+        // A dissolve across a razor split mixes every frame with itself. It
+        // renders — correctly, by NLE semantics — and is invisible, which is
+        // exactly what a pacing profile produces when it drops transitions onto
+        // an assembly built by splitting one take.
+        let (mut sequence, mut assets, effects, mut lengths) = build(vec![
+            ClipSpec {
+                source_in: 2.0,
+                source_out: 7.0,
+                timeline_in: 0.0,
+                source_length: 14.0,
+                transition: Some(dissolve(1.0)),
+            },
+            ClipSpec {
+                source_in: 7.0,
+                source_out: 12.0,
+                timeline_in: 5.0,
+                source_length: 14.0,
+                transition: None,
+            },
+        ]);
+        // Both clips are cut from the same take, at the same frame.
+        sequence.tracks[0].clips[1].asset_id = "asset0".to_string();
+        assets.remove("asset1");
+        lengths.remove("asset1");
+
+        let plan = plan_sequence_transitions(&sequence, &assets, &effects, FPS, |asset| {
+            lengths.get(&asset.id).copied()
+        });
+
+        assert!(
+            plan.transition_after("clip0").is_some(),
+            "a self-blend still renders: {:?}",
+            plan.refusals()
+        );
+        let advisories = plan.advisories();
+        assert_eq!(advisories.len(), 1, "{advisories:?}");
+        assert!(
+            advisories[0].reason.contains("into itself")
+                && advisories[0].reason.contains("trim material"),
+            "the advisory must say what happened and what to do: {}",
+            advisories[0].reason
+        );
+    }
+
+    #[test]
+    fn should_not_warn_about_a_self_blend_when_the_boundary_is_not_contiguous() {
+        // Same asset on both sides, but the incoming clip starts somewhere else
+        // in the take — that is a real blend between two different pictures.
+        let (mut sequence, mut assets, effects, mut lengths) = build(vec![
+            ClipSpec {
+                source_in: 2.0,
+                source_out: 7.0,
+                timeline_in: 0.0,
+                source_length: 20.0,
+                transition: Some(dissolve(1.0)),
+            },
+            ClipSpec {
+                source_in: 12.0,
+                source_out: 17.0,
+                timeline_in: 5.0,
+                source_length: 20.0,
+                transition: None,
+            },
+        ]);
+        sequence.tracks[0].clips[1].asset_id = "asset0".to_string();
+        assets.remove("asset1");
+        lengths.remove("asset1");
+
+        let plan = plan_sequence_transitions(&sequence, &assets, &effects, FPS, |asset| {
+            lengths.get(&asset.id).copied()
+        });
+
+        assert!(plan.transition_after("clip0").is_some());
+        assert!(
+            plan.advisories().is_empty(),
+            "two different stretches of one take blend visibly: {:?}",
+            plan.advisories()
+        );
+    }
+
+    #[test]
+    fn should_name_the_reason_a_title_cannot_be_blended() {
+        // "It is not on a visible video track" is actively wrong advice for a
+        // title, which is on a perfectly visible video track and simply is not
+        // a picture.
+        let (mut sequence, assets, effects, lengths) = build(vec![
+            with_handles(0.0, 5.0, Some(dissolve(1.0))),
+            with_handles(5.0, 5.0, None),
+        ]);
+        sequence.tracks[0].clips[0].asset_id = "__text__title".to_string();
+
+        let plan = plan_sequence_transitions(&sequence, &assets, &effects, FPS, |asset| {
+            lengths.get(&asset.id).copied()
+        });
+
+        let reason = &plan.refusals()[0].reason;
+        assert!(
+            reason.contains("text clip"),
+            "the refusal must name what the clip really is: {reason}"
         );
     }
 

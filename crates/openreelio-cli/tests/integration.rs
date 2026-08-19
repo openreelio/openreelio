@@ -509,14 +509,15 @@ fn create_solid_tone_source(
     duration_secs: u32,
 ) -> bool {
     let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        skip_without_ffmpeg("no FFmpeg could be resolved to build the transition fixture");
         return false;
     };
     let Some(video_encoder) = preferred_video_encoder(&ffmpeg_path) else {
-        eprintln!("Skipping transition test: ffmpeg lacks a supported video encoder");
+        skip_without_ffmpeg("ffmpeg lacks a supported video encoder for the transition fixture");
         return false;
     };
     if !ffmpeg_supports_encoder(&ffmpeg_path, "aac") {
-        eprintln!("Skipping transition test: ffmpeg lacks the aac encoder");
+        skip_without_ffmpeg("ffmpeg lacks the aac encoder needed by the transition fixture");
         return false;
     }
 
@@ -550,7 +551,7 @@ fn create_solid_tone_source(
         .status()
         .expect("Failed to generate transition fixture with ffmpeg");
     if !status.success() {
-        eprintln!("Skipping transition test: ffmpeg could not generate the transition fixture");
+        skip_without_ffmpeg("ffmpeg could not generate the transition fixture");
     }
     status.success()
 }
@@ -616,14 +617,169 @@ fn measure_audio_mean_volume_db(
         .output()
         .ok()?;
 
-    // `volumedetect` reports on stderr, and prints once per instance — including
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // A failed measurement is not a quiet one. Without this, an ffmpeg that
+    // could not open the file returns `None`, every caller `expect`s it, and the
+    // panic blames a missing reading rather than the run that never happened.
+    assert!(
+        output.status.success(),
+        "measuring {} at {start_sec}s failed: {stderr}",
+        path.display()
+    );
+
+    // `volumedetect` reports on stderr, and prints once per instance - including
     // an empty one when the filter is torn down without frames. The last
     // reading with samples behind it is the measurement.
-    String::from_utf8_lossy(&output.stderr)
+    stderr
         .lines()
         .filter_map(|line| line.split("mean_volume:").nth(1))
-        .filter_map(|value| value.trim().trim_end_matches(" dB").trim().parse().ok())
+        .map(|value| value.trim().trim_end_matches(" dB").trim().to_string())
+        .filter_map(|value| parse_volume_db(&value))
         .next_back()
+}
+
+/// Reads one `volumedetect` level, including the silence it reports as `-inf`.
+///
+/// `-inf dB` is a real measurement - it means the window held nothing at all -
+/// and parsing it as "no reading" hides exactly the failure an audio assertion
+/// is looking for. It is mapped onto a floor far below anything a fixture
+/// produces so a caller can compare it numerically like any other level.
+fn parse_volume_db(raw: &str) -> Option<f64> {
+    const SILENCE_FLOOR_DB: f64 = -120.0;
+
+    if raw.contains("inf") {
+        return Some(if raw.starts_with('-') {
+            SILENCE_FLOOR_DB
+        } else {
+            0.0
+        });
+    }
+    raw.parse().ok()
+}
+
+/// One end of the spectrum, isolated far enough to measure a single tone.
+///
+/// The transition fixtures carry a 440Hz tone on one shot and 880Hz on the
+/// other. A single octave is not much separation, so each filter is a cascade:
+/// four two-pole stages put the far tone around 30dB down, which is deep enough
+/// that it cannot move a reading taken to within a decibel. Whatever the cascade
+/// costs *inside* the passband is a constant, and every assertion using this
+/// compares a level against the same band's own steady state, so it cancels.
+enum ToneBand {
+    /// Keeps the 440Hz tone, rejects the 880Hz one.
+    Low,
+    /// Keeps the 880Hz tone, rejects the 440Hz one.
+    High,
+}
+
+impl ToneBand {
+    fn filter(&self) -> &'static str {
+        match self {
+            Self::Low => {
+                "lowpass=f=550:poles=2,lowpass=f=550:poles=2,lowpass=f=550:poles=2,lowpass=f=550:poles=2"
+            }
+            Self::High => {
+                "highpass=f=700:poles=2,highpass=f=700:poles=2,highpass=f=700:poles=2,highpass=f=700:poles=2"
+            }
+        }
+    }
+}
+
+/// Measures one tone's own level over one window of a rendered file.
+///
+/// Measuring the *mix* cannot see a crossfade at all: two tones fading through
+/// each other at constant power sum to the level they started at, which is the
+/// same reading a hard cut produces and the same reading a fade with the wrong
+/// curve produces. Only each tone's own envelope tells them apart.
+///
+/// The window is cut inside the filtergraph rather than by seeking the input, so
+/// it is sample-exact - the windows this is used with are a tenth of a second
+/// wide, and a keyframe-accurate input seek would miss them.
+fn measure_tone_band_db(
+    path: &std::path::Path,
+    start_sec: f64,
+    end_sec: f64,
+    band: ToneBand,
+) -> Option<f64> {
+    let ffmpeg_path = available_ffmpeg_path()?;
+    let output = Command::new(ffmpeg_path)
+        .args(["-hide_banner", "-i"])
+        .arg(path)
+        .args([
+            "-map",
+            "0:a",
+            "-af",
+            &format!(
+                "atrim=start={start_sec}:end={end_sec},{},volumedetect",
+                band.filter()
+            ),
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .ok()?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "measuring {} over {start_sec}..{end_sec}s failed: {stderr}",
+        path.display()
+    );
+
+    stderr
+        .lines()
+        .filter_map(|line| line.split("mean_volume:").nth(1))
+        .map(|value| value.trim().trim_end_matches(" dB").trim().to_string())
+        .filter_map(|value| parse_volume_db(&value))
+        .next_back()
+}
+
+/// The spread between the darkest and brightest luma in the middle of a frame.
+///
+/// A blend between two *flat* sources must itself be flat: every output pixel is
+/// the same mix of the same two colours. This is what separates a real blend
+/// from FFmpeg's `transition=dissolve`, which is not a blend at all - it picks
+/// one source or the other per pixel by a random threshold, so a half-way
+/// "dissolve" between flat black and flat white is full-range noise whose
+/// *average* is mid-grey. An average-brightness assertion passes on both; only
+/// the spread tells them apart.
+fn sample_rendered_luma_spread(path: &std::path::Path, at_sec: f64) -> Option<u16> {
+    let ffmpeg_path = available_ffmpeg_path()?;
+    let output = Command::new(ffmpeg_path)
+        .args(["-hide_banner", "-i"])
+        .arg(path)
+        .args([
+            "-vf",
+            &format!(
+                "trim=start={at_sec}:end={},crop=w=iw/2:h=ih/2,signalstats,metadata=print",
+                at_sec + 0.02
+            ),
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .ok()?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "measuring the luma spread of {} at {at_sec}s failed: {stderr}",
+        path.display()
+    );
+
+    let read = |key: &str| -> Option<u16> {
+        stderr
+            .lines()
+            .filter_map(|line| line.split(key).nth(1))
+            .filter_map(|value| value.trim().parse::<f64>().ok())
+            .next()
+            .map(|value| value.round() as u16)
+    };
+
+    Some(read("lavfi.signalstats.YMAX=")?.saturating_sub(read("lavfi.signalstats.YMIN=")?))
 }
 
 /// The FFprobe that ships with the FFmpeg the CLI under test would use.
@@ -4700,6 +4856,24 @@ fn test_render_blends_an_adjacent_transition_without_spending_timeline_time() {
         "the cut must be half way between the two shots, measured {at_cut}"
     );
 
+    // ...and it has to be a *blend*, not merely something whose average lands in
+    // the middle. Both shots are flat, so a real blend is flat too: every pixel
+    // is the same mix of the same two colours. FFmpeg's `transition=dissolve`
+    // instead picks one source or the other per pixel at random, which averages
+    // to exactly the same mid-grey while looking like static - the engine
+    // shipped that for a while precisely because the average could not see it.
+    //
+    // Measured: `transition=fade` gives YMIN=YMAX=121 (spread 0) on this
+    // fixture; `transition=dissolve` gives YMIN=0, YMAX=255 (spread 255) with
+    // the same YAVG of 121. The bound is generous enough for codec ringing
+    // around the flat field and nowhere near a noise mode.
+    let spread = sample_rendered_luma_spread(&output_path, cut_sec).expect("spread at the cut");
+    assert!(
+        spread < 40,
+        "the blend must mix the two shots rather than choosing between them per pixel; \
+         luma spread across the middle of the frame measured {spread}"
+    );
+
     let before = sample_rendered_mean_brightness(&output_path, cut_sec - TRANSITION_DISSOLVE_SEC)
         .expect("frame before the blend");
     assert!(
@@ -4732,6 +4906,80 @@ fn test_render_blends_an_adjacent_transition_without_spending_timeline_time() {
         "a constant-power crossfade must not dip or spike: \
          {steady_before} dB before, {across_blend} dB across, {steady_after} dB after"
     );
+
+    // The flat-level check above is necessary and nowhere near sufficient: two
+    // tones fading through each other at constant power sum to the level they
+    // started at, and so does a hard cut, and so does a fade on the wrong curve.
+    // Every one of those passes it. Each tone's *own* envelope is what
+    // distinguishes them, so the two shots carry different frequencies and are
+    // measured apart.
+    //
+    // `qsin` gain is sin(x * pi/2) over the blend, so at a quarter of the way
+    // through, relative to that tone's own steady state:
+    //
+    //   outgoing  20*log10(cos(pi/8)) = -0.69 dB
+    //   incoming  20*log10(sin(pi/8)) = -8.34 dB
+    //
+    // and the two swap at three quarters. The quarter points are deliberate:
+    // measured symmetrically about the midpoint every candidate reads -3 dB,
+    // which is why the earlier version of this test was blind.
+    //
+    // Measured on this fixture, deviation of the *incoming* tone at the quarter
+    // point: qsin -8.3 dB (correct), linear/tri -12.0 dB, hard cut -27.9 dB,
+    // and -28.6 dB when the incoming branch is not pulled back by its head
+    // handle. A one-decibel tolerance admits only the first.
+    const QUARTER_WINDOW_SEC: f64 = 0.1;
+    const FADED_IN_DB: f64 = -0.69;
+    const FADED_DOWN_DB: f64 = -8.34;
+    const TONE_TOLERANCE_DB: f64 = 1.0;
+
+    let blend_start_sec = cut_sec - TRANSITION_DISSOLVE_SEC / 2.0;
+    let quarter_sec = blend_start_sec + TRANSITION_DISSOLVE_SEC / 4.0;
+    let three_quarter_sec = blend_start_sec + TRANSITION_DISSOLVE_SEC * 3.0 / 4.0;
+
+    let tone_at = |start: f64, band: ToneBand, what: &str| -> f64 {
+        measure_tone_band_db(
+            &output_path,
+            start - QUARTER_WINDOW_SEC / 2.0,
+            start + QUARTER_WINDOW_SEC / 2.0,
+            band,
+        )
+        .unwrap_or_else(|| panic!("{what} must be measurable"))
+    };
+
+    let outgoing_steady = tone_at(1.5, ToneBand::Low, "the outgoing tone's steady state");
+    let incoming_steady = tone_at(6.5, ToneBand::High, "the incoming tone's steady state");
+
+    let checks = [
+        (
+            "the outgoing tone a quarter into the blend",
+            tone_at(quarter_sec, ToneBand::Low, "the outgoing tone") - outgoing_steady,
+            FADED_IN_DB,
+        ),
+        (
+            "the incoming tone a quarter into the blend",
+            tone_at(quarter_sec, ToneBand::High, "the incoming tone") - incoming_steady,
+            FADED_DOWN_DB,
+        ),
+        (
+            "the outgoing tone three quarters into the blend",
+            tone_at(three_quarter_sec, ToneBand::Low, "the outgoing tone") - outgoing_steady,
+            FADED_DOWN_DB,
+        ),
+        (
+            "the incoming tone three quarters into the blend",
+            tone_at(three_quarter_sec, ToneBand::High, "the incoming tone") - incoming_steady,
+            FADED_IN_DB,
+        ),
+    ];
+
+    for (what, measured, expected) in checks {
+        assert!(
+            (measured - expected).abs() < TONE_TOLERANCE_DB,
+            "{what} must follow the constant-power curve: expected {expected:.2} dB \
+             below its own steady state, measured {measured:.2} dB"
+        );
+    }
 
     let (verify_stdout, verify_stderr, verify_code) = run_cli_exit(&[
         "verify",
@@ -4819,6 +5067,18 @@ fn test_render_without_handles_degrades_a_transition_to_a_cut_and_says_so() {
         "rendered {rendered_duration}s must match the {timeline_end_sec}s timeline: {rendered}"
     );
 
+    // The warning has to describe the file, not merely accompany it. Both shots
+    // are the same source here, so the frame on the cut must be that source
+    // untouched rather than any mixture: a cut is what was promised, so a cut is
+    // what has to be there.
+    let spread = sample_rendered_luma_spread(&output_path, TRANSITION_SHOT_SEC)
+        .expect("spread at the refused boundary");
+    assert!(
+        spread < 40,
+        "a boundary reported as a cut must not be blended or dithered; luma spread \
+         across the middle of the frame measured {spread}"
+    );
+
     let (verify_stdout, verify_stderr, verify_code) = run_cli_exit(&[
         "verify",
         "--path",
@@ -4844,6 +5104,12 @@ fn test_render_without_handles_degrades_a_transition_to_a_cut_and_says_so() {
 /// A range render trims the finished stream, so a transition whose offset was
 /// measured against the whole timeline rather than against its own group would
 /// show up here as a range that is the wrong length or misses the blend.
+///
+/// A smoke test, deliberately: `--start`/`--end` become output-side `-ss`/`-t`,
+/// so the whole graph - transitions and all - is built and run exactly as it is
+/// for a full render and only the tail of the encode is discarded. What this
+/// covers is that the range plumbing does not disturb the blend, not that the
+/// blend is computed differently inside a range.
 #[test]
 fn test_render_range_across_a_transition_keeps_its_length_and_shows_the_blend() {
     if available_ffmpeg_path().is_none() {
@@ -4888,10 +5154,16 @@ fn test_render_range_across_a_transition_keeps_its_length_and_shows_the_blend() 
         "a range across a transition must render.\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-    let duration = ffprobe_duration_secs(&output_path).expect("range duration");
-    assert!(
-        (duration - (RANGE_END_SEC - RANGE_START_SEC)).abs() < 0.1,
-        "the range must be exactly as long as asked for, got {duration}s"
+    // Counted in decoded frames, not trusted from the container: a container
+    // duration is written by the muxer from timestamps and can round its way
+    // past a missing frame, which is exactly the error a range render makes.
+    let fps = ffprobe_video_fps(&output_path).expect("range fps");
+    let frames = ffprobe_video_frame_count(&output_path).expect("range frame count");
+    assert_eq!(
+        frames,
+        ((RANGE_END_SEC - RANGE_START_SEC) * fps).round() as u64,
+        "a {}s range at {fps}fps must render exactly that many frames",
+        RANGE_END_SEC - RANGE_START_SEC
     );
 
     // The cut sits one second into the range.

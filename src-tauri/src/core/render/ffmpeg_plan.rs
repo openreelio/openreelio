@@ -32,7 +32,9 @@ use super::{
         VideoTimelineSegment, TIMELINE_EPSILON_SEC,
     },
     transform_layout::compute_clip_transform_layout,
-    transition_stitch::{plan_sequence_transitions, stitch_transition_groups},
+    transition_stitch::{
+        clip_stream_frames, plan_sequence_transitions, stitch_transition_groups, ClipHandles,
+    },
     RenderPlan,
 };
 
@@ -118,11 +120,14 @@ pub(super) fn build_sequence_ffmpeg_args(
     let mut adjustment_layer_effects = Vec::new();
     for (clip, _track) in &all_clips {
         if clip.is_adjustment_layer() && !clip.effects.is_empty() {
+            // An adjustment layer never takes part in a transition — the
+            // planner refuses one outright — so it has no handles to anchor to.
             let graph = ctx.engine.build_clip_filter_graph(
                 clip,
                 ctx.effects,
                 Some(output_width),
                 Some(output_height),
+                ClipHandles::default(),
             );
             if graph.has_video_effects() {
                 let start = clip.place.timeline_in_sec;
@@ -167,11 +172,18 @@ pub(super) fn build_sequence_ffmpeg_args(
         args.push("-i".to_string());
         args.push(validated_path.to_string_lossy().to_string());
 
+        // A clip in a transition renders a little more than its slot: the extra
+        // comes out of unused source media, never out of the timeline. The
+        // effect chain needs to know too — its stream now starts before the
+        // clip's in point, so anything anchored in seconds has to move with it.
+        let handles = transition_plan.handles(&clip.id);
+
         let clip_filter_graph = ctx.engine.build_clip_filter_graph(
             clip,
             ctx.effects,
             Some(output_width),
             Some(output_height),
+            handles,
         );
 
         let source_hdr_metadata = hdr_metadata_for_asset(asset);
@@ -179,14 +191,24 @@ pub(super) fn build_sequence_ffmpeg_args(
             .settings
             .build_tonemap_video_filter(&source_hdr_metadata);
 
-        // A clip in a transition renders a little more than its slot: the extra
-        // comes out of unused source media, never out of the timeline.
-        let handles = transition_plan.handles(&clip.id);
         let engine_audio_fades = transition_plan.audio_fades(&clip.id);
-        let segment_duration_sec = clip.place.duration_sec + handles.head_sec + handles.tail_sec;
-        let pinned_frames = transition_plan
-            .touches(&clip.id)
-            .then(|| ((segment_duration_sec * output_fps).round() as i64).max(1) as u32);
+        // The pin has to be the frame count the stitch will assume, and the
+        // stitch derives it from the clip's cumulative timeline boundaries so
+        // that consecutive clips telescope. Rounding this clip's own duration
+        // instead would disagree by a frame on any timeline whose cut points are
+        // not on frame boundaries, and `xfade` would blend at the wrong frame.
+        let pinned_frames = transition_plan.touches(&clip.id).then(|| {
+            clip_stream_frames(
+                clip.place.timeline_in_sec,
+                clip.place.timeline_out_sec(),
+                handles,
+                output_fps,
+            )
+        });
+        let segment_duration_sec = match pinned_frames {
+            Some(frames) => f64::from(frames) / output_fps,
+            None => clip.place.duration_sec + handles.head_sec + handles.tail_sec,
+        };
 
         match track.kind {
             TrackKind::Video => {
@@ -547,11 +569,15 @@ pub(super) fn build_audio_only_ffmpeg_args(
     // crossfades the full render does, or extracting the audio would produce a
     // different edit from the one on screen.
     let mut source_durations = seed_source_duration_cache(ctx.audio_info);
+    // The *output* frame rate, exactly as the video path uses: every transition
+    // length is quantised to whole output frames, so planning the audio against
+    // the sequence rate would give an export with an fps override a different
+    // set of crossfades from the picture it is supposed to accompany.
     let transition_plan = plan_sequence_transitions(
         ctx.sequence,
         ctx.assets,
         ctx.effects,
-        ctx.sequence.format.fps.as_f64(),
+        output_video_fps(ctx.sequence, ctx.settings),
         |asset| resolve_asset_source_duration(asset, &mut source_durations),
     );
 
@@ -588,13 +614,12 @@ pub(super) fn build_audio_only_ffmpeg_args(
         args.push("-i".to_string());
         args.push(validated_path.to_string_lossy().to_string());
 
-        let clip_filter_graph = ctx
-            .engine
-            .build_clip_filter_graph(clip, ctx.effects, None, None);
+        let handles = transition_plan.handles(&clip.id);
+        let clip_filter_graph =
+            ctx.engine
+                .build_clip_filter_graph(clip, ctx.effects, None, None, handles);
         let audio_trim_label = format!("atrim{}", input_index);
         let audio_out_label = format!("a{}", input_index);
-
-        let handles = transition_plan.handles(&clip.id);
         let audio_effects_input = build_audio_trim_filter(
             clip,
             input_index,

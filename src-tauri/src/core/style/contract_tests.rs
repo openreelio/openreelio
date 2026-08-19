@@ -655,7 +655,7 @@ fn add_effect(
 fn every_transition_recipe_builds_the_exact_filter_it_advertises() {
     // Family prefixes are useless as a guard: every wipe direction shares
     // `xfade=transition=wipe`, and all three dissolves share
-    // `xfade=transition=dissolve`. What distinguishes one curated entry from
+    // `xfade=transition=fade`. What distinguishes one curated entry from
     // its sibling is the direction token, the duration, or the fade side, so
     // that is what has to be asserted.
     for recipe in TRANSITION_RECIPES {
@@ -678,9 +678,9 @@ fn every_transition_recipe_builds_the_exact_filter_it_advertises() {
 
         let filter = effect.to_filter_string("in", "out");
         let expected = match recipe.id {
-            "dissolve-soft" => "xfade=transition=dissolve:duration=0.5000",
-            "dissolve-standard" => "xfade=transition=dissolve:duration=1.0000",
-            "dissolve-long" => "xfade=transition=dissolve:duration=2.0000",
+            "dissolve-soft" => "xfade=transition=fade:duration=0.5000",
+            "dissolve-standard" => "xfade=transition=fade:duration=1.0000",
+            "dissolve-long" => "xfade=transition=fade:duration=2.0000",
             "fade-in" => "fade=t=in:st=0:d=1.0000",
             // The fixture clip is 10s, so the tail anchor is 10 - 1.
             "fade-out" => "fade=t=out:st=9.0000:d=1.0000",

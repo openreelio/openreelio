@@ -20,8 +20,8 @@ use openreelio_core::ffmpeg::{FFmpegRunner, FrameExtractOptions};
 use openreelio_core::render::{
     build_render_graph, build_render_plan, clip_needs_transform_composition, clip_source_time_at,
     probed_image_dimensions, scaled_frame_dimensions, source_dimensions_from_audio_info,
-    validate_export_settings_with_dimensions, ExportEngine, ExportSettings, ExportValidation,
-    FrameExportSettings, ImageFormat, SourceDimensionMap,
+    source_durations_from_audio_info, validate_export_settings_with_dimensions, ExportEngine,
+    ExportSettings, ExportValidation, FrameExportSettings, ImageFormat, SourceDimensionMap,
 };
 use openreelio_core::timeline::Sequence;
 use openreelio_core::ActiveProject;
@@ -1364,6 +1364,7 @@ impl TimelineFrameContext<'_> {
             .probe_assets_for_audio(self.sequence, self.assets())
             .await;
         self.source_dimensions = source_dimensions_from_audio_info(&audio_info);
+        let source_durations = source_durations_from_audio_info(&audio_info);
 
         // Validated at the canvas size the stills are cut down from, with no
         // time window: nothing this reports varies across the frames of one
@@ -1381,6 +1382,7 @@ impl TimelineFrameContext<'_> {
             self.effects(),
             &settings,
             Some(&self.source_dimensions),
+            Some(&source_durations),
         ));
     }
 

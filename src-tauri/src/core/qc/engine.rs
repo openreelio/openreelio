@@ -19,6 +19,7 @@ use super::rules::{
 use super::structural::{
     CaptionOutOfBoundsRule, CaptionOverlapRule, CaptionReadingRateRule, ClipOrphanRule,
     EmptySequenceRule, MissingAssetRule, ShotLengthStatsRule, SilentClipRule, TimelineGapRule,
+    TransitionNoHandlesRule,
 };
 use super::violation::{QCViolation, Severity, ViolationFix};
 use crate::core::project::ProjectState;
@@ -391,6 +392,7 @@ impl QCEngine {
         self.register_rule(Arc::new(CaptionReadingRateRule::new()));
         self.register_rule(Arc::new(CaptionOutOfBoundsRule::new()));
         self.register_rule(Arc::new(ShotLengthStatsRule::new()));
+        self.register_rule(Arc::new(TransitionNoHandlesRule::new()));
         self.register_rule(Arc::new(CaptionSafeAreaRule::new()));
         self.register_rule(Arc::new(CutRhythmRule::new()));
         self.register_rule(Arc::new(LicenseRule::new()));
