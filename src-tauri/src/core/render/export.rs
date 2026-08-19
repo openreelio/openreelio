@@ -3126,10 +3126,14 @@ pub(super) fn append_video_transform_composition(
         TIMELINE_EPSILON_SEC
     };
     let slot_duration_sec = duration_sec.max(minimum_duration_sec);
+    // Pad the canvas by one frame beyond the slot: `color` sources land the
+    // final frame on a PTS boundary that older FFmpeg releases (6.x) round the
+    // other way, coming up one frame short. The frame-indexed trim below caps
+    // the segment at the exact count either way.
     append_black_video_gap(
         filter_complex,
         &canvas_label,
-        slot_duration_sec,
+        slot_duration_sec + minimum_duration_sec,
         width,
         height,
         fps,
@@ -3140,18 +3144,20 @@ pub(super) fn append_video_transform_composition(
     // which is the *overlay* whenever the clip's stream is shorter than its slot.
     // A 25 fps source in a 30 fps canvas loses the tail frames that way, and a
     // one-frame still produces no video stream at all. The canvas is the main
-    // input and already carries the slot's length, `eof_action` defaults to
-    // `repeat` so a short overlay holds its last frame, and the explicit `trim`
-    // afterwards pins the segment to exactly the slot for long streams too.
+    // input and outlasts the slot, `eof_action` defaults to `repeat` so a short
+    // overlay holds its last frame, and the frame-indexed `trim` afterwards pins
+    // the segment to exactly the slot's frame count — `trim=duration=` sits on
+    // the same version-dependent PTS rounding the canvas padding works around.
+    let slot_frame_count = ((slot_duration_sec * fps).round() as i64).max(1);
     filter_complex.push_str(&format!(
-        "[{}][{}]overlay=x={}:y={}:format={},setsar=1,fps={},trim=duration={},setpts=PTS-STARTPTS,format={}[{}];",
+        "[{}][{}]overlay=x={}:y={}:format={},setsar=1,fps={},trim=end_frame={},setpts=PTS-STARTPTS,format={}[{}];",
         canvas_label,
         staged_label,
         layout.overlay_x,
         layout.overlay_y,
         overlay_format,
         format_speed_number(fps),
-        format_speed_number(slot_duration_sec),
+        slot_frame_count,
         pixel_format,
         output_label
     ));
@@ -10969,7 +10975,7 @@ mod tests {
             "the alpha stage must keep the output's bit depth. Got: {filter_complex}"
         );
         assert!(
-            filter_complex.contains("format=yuv420p10,setsar=1,fps=30,trim=duration=3,"),
+            filter_complex.contains("format=yuv420p10,setsar=1,fps=30,trim=end_frame=90,"),
             "the composite must not downconvert the canvas. Got: {filter_complex}"
         );
     }
@@ -10999,12 +11005,12 @@ mod tests {
         );
         assert!(
             filter_complex
-                .contains("color=c=black:s=1920x1080:r=30:d=3,format=yuv420p[vnorm0_bg];"),
-            "the composite needs a canvas as long as the clip. Got: {filter_complex}"
+                .contains("color=c=black:s=1920x1080:r=30:d=3.033333,format=yuv420p[vnorm0_bg];"),
+            "the composite needs a canvas one frame longer than the clip. Got: {filter_complex}"
         );
         assert!(
             filter_complex.contains(
-                "[vnorm0_bg][vnorm0_tx]overlay=x=96:y=540:format=yuv420,setsar=1,fps=30,trim=duration=3,setpts=PTS-STARTPTS,format=yuv420p[vnorm0];"
+                "[vnorm0_bg][vnorm0_tx]overlay=x=96:y=540:format=yuv420,setsar=1,fps=30,trim=end_frame=90,setpts=PTS-STARTPTS,format=yuv420p[vnorm0];"
             ),
             "the clip must be placed at the transformed corner. Got: {filter_complex}"
         );
