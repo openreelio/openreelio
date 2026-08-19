@@ -48,19 +48,24 @@ pub fn encode_font_data(bytes: &[u8]) -> String {
     wrap_lines(&encoded)
 }
 
+/// Breaks an encoded body into lines libass will accept.
+///
+/// The encoding only ever emits characters in the 33..=96 range, so every byte
+/// is one ASCII character and slicing at a fixed byte width is a character
+/// boundary by construction. The slice is taken directly rather than through a
+/// lossy conversion so that a future encoder change which broke that invariant
+/// would panic here instead of silently dropping a line's worth of font data.
 fn wrap_lines(encoded: &str) -> String {
     let mut wrapped = String::with_capacity(encoded.len() + encoded.len() / LINE_WIDTH + 1);
 
-    for (index, chunk) in encoded
-        .as_bytes()
-        .chunks(LINE_WIDTH)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
-        .enumerate()
-    {
-        if index > 0 {
+    let mut start = 0;
+    while start < encoded.len() {
+        if start > 0 {
             wrapped.push('\n');
         }
-        wrapped.push_str(chunk);
+        let end = (start + LINE_WIDTH).min(encoded.len());
+        wrapped.push_str(&encoded[start..end]);
+        start = end;
     }
 
     wrapped

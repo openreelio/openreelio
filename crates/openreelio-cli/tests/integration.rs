@@ -100,15 +100,45 @@ fn available_ffmpeg_path() -> Option<PathBuf> {
         .into_iter()
         .collect();
 
-    openreelio_core::ffmpeg::resolve_ffmpeg(&openreelio_core::ffmpeg::FFmpegResolveOptions {
-        resource_roots,
-        // The CLI is launched with the overrides cleared, so the tests resolve
-        // without them too.
-        use_env: false,
-        ..Default::default()
+    let resolved =
+        openreelio_core::ffmpeg::resolve_ffmpeg(&openreelio_core::ffmpeg::FFmpegResolveOptions {
+            resource_roots,
+            // The CLI is launched with the overrides cleared, so the tests resolve
+            // without them too.
+            use_env: false,
+            ..Default::default()
+        })
+        .ok()
+        .map(|info| info.ffmpeg_path);
+
+    if resolved.is_none() {
+        skip_without_ffmpeg("no FFmpeg could be resolved for the CLI under test");
+    }
+
+    resolved
+}
+
+/// Whether a missing FFmpeg must fail the run rather than quietly skip it.
+///
+/// A render test that skips itself still reports green, which is how the CLI
+/// e2e suite could sit unexercised in CI. The workflow sets
+/// `REQUIRE_FFMPEG_TESTS=1` on the job that installs FFmpeg, so a broken
+/// install shows up as a failure there while a developer without FFmpeg on
+/// their machine keeps the quiet skip.
+fn ffmpeg_tests_are_required() -> bool {
+    std::env::var("REQUIRE_FFMPEG_TESTS").is_ok_and(|value| {
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
     })
-    .ok()
-    .map(|info| info.ffmpeg_path)
+}
+
+/// Records a skip, or fails when FFmpeg was supposed to be available.
+#[track_caller]
+fn skip_without_ffmpeg(reason: &str) {
+    assert!(
+        !ffmpeg_tests_are_required(),
+        "REQUIRE_FFMPEG_TESTS is set, so this test must run, but {reason}"
+    );
+    eprintln!("Skipping test: {reason}");
 }
 
 /// Run a CLI command from `cwd` with extra environment variables applied.
@@ -7929,6 +7959,14 @@ fn test_mcp_frame_extract_refuses_a_render_outside_the_project() {
 /// Goes through the real `build_ass_text_overlay_script`, so what libass reads
 /// below is the artifact an export writes, not a fixture shaped to pass.
 fn vertical_caption_ass_script(text: &str, font_family: &str, font_size: u32) -> String {
+    vertical_caption_ass_script_with_style(
+        text,
+        serde_json::json!({ "fontFamily": font_family, "fontSize": font_size }),
+    )
+}
+
+/// Builds the ASS script for a single bottom-preset caption carrying `style`.
+fn vertical_caption_ass_script_with_style(text: &str, style: serde_json::Value) -> String {
     use openreelio_core::timeline::{Clip, Sequence, SequenceFormat, Track};
 
     let mut sequence = Sequence::new("Burn-in", SequenceFormat::shorts_1080());
@@ -7937,10 +7975,7 @@ fn vertical_caption_ass_script(text: &str, font_family: &str, font_size: u32) ->
         .with_source_range(0.0, 2.0)
         .place_at(0.0);
     clip.label = Some(text.to_string());
-    clip.caption_style = Some(serde_json::json!({
-        "fontFamily": font_family,
-        "fontSize": font_size,
-    }));
+    clip.caption_style = Some(style);
     clip.caption_position = Some(serde_json::json!({
         "type": "preset",
         "vertical": "bottom",
@@ -8165,5 +8200,128 @@ fn test_bundled_font_is_delivered_through_the_ass_fonts_section() {
     assert!(
         differing > 1000,
         "the embedded face must render differently from a host fallback, only {differing} pixels differed"
+    );
+}
+
+/// Strips the `[Fonts]` section and renames the family to one no host can have.
+///
+/// The control this produces is guaranteed to render in whatever fallback the
+/// host font provider offers, which is the only way to prove the first render
+/// used the embedded face rather than merely looking plausible.
+fn ass_script_without_embedded_font(script: &str, family: &str) -> String {
+    let fonts_section_start = script.find("[Fonts]\n").expect("fonts section");
+    let fonts_section_end = script.find("[Events]\n").expect("events section");
+
+    format!(
+        "{}{}",
+        &script[..fonts_section_start],
+        &script[fonts_section_end..]
+    )
+    .replace(family, "OpenReelio Absent Family")
+}
+
+/// Counts samples that differ by more than antialiasing noise between two frames.
+fn differing_sample_count(left: &[u8], right: &[u8]) -> usize {
+    left.iter()
+        .zip(right)
+        .filter(|(left, right)| left.abs_diff(**right) > 32)
+        .count()
+}
+
+/// Feature: Caption burn-in
+/// Scenario: a bundled family is reachable at both weights by the name the exporter writes
+///
+/// Given a caption in a bundled family, once regular and once bold
+/// When each is burned in with its `[Fonts]` section intact, and again with
+///      that section stripped and the family renamed to one no host can have
+/// Then both weights differ from their control, and from each other
+///
+/// This is the check no structural assertion can make. The bundled TikTok Sans
+/// statics carried their family in `name` ID 16, which libass never reads, so
+/// every caption in that family silently rendered in the host's fallback while
+/// the registry, the embed and the emitted script all looked correct. The bold
+/// half covers the other end of the same failure: an event that emits `\b400`
+/// overrides the style's `Bold` column, and a bold face whose `OS/2`/`head`
+/// bold bits are unset can never be selected even once the weight is right.
+#[test]
+fn test_bundled_family_renders_at_both_weights_through_the_embedded_faces() {
+    let Some(ffmpeg_path) = available_ffmpeg_path() else {
+        return;
+    };
+
+    let (width, height) = (1080u32, 1920u32);
+    let family = "TikTok Sans";
+
+    let regular = vertical_caption_ass_script_with_style(
+        "WEIGHT",
+        serde_json::json!({ "fontFamily": family, "fontSize": 140 }),
+    );
+    let bold = vertical_caption_ass_script_with_style(
+        "WEIGHT",
+        serde_json::json!({ "fontFamily": family, "fontSize": 140, "bold": true }),
+    );
+
+    // The emitter has to name the weight, or libass reads the default `\b400`
+    // as an absolute weight and the style's `Bold` column never takes effect.
+    assert!(regular.contains(r"\b400"), "got: {regular}");
+    assert!(bold.contains(r"\b700"), "got: {bold}");
+    assert!(!bold.contains(r"\b400"), "got: {bold}");
+    for script in [&regular, &bold] {
+        assert!(
+            script.contains("[Fonts]\nfontname: TikTokSans-Regular_0.ttf"),
+            "the script must carry the faces it names, got: {script}"
+        );
+        assert!(
+            script.contains("fontname: TikTokSans-Bold_0.ttf"),
+            "the script must carry every weight of the family, got: {script}"
+        );
+    }
+
+    let renders: Vec<Option<Vec<u8>>> = [&regular, &bold]
+        .iter()
+        .map(|script| render_ass_over_black(&ffmpeg_path, script, width, height))
+        .collect();
+    let [Some(regular_frame), Some(bold_frame)] = renders.as_slice() else {
+        skip_without_ffmpeg("ffmpeg could not burn in the ASS overlay");
+        return;
+    };
+
+    let regular_control = render_ass_over_black(
+        &ffmpeg_path,
+        &ass_script_without_embedded_font(&regular, family),
+        width,
+        height,
+    )
+    .expect("the control render must succeed once the first one did");
+    let bold_control = render_ass_over_black(
+        &ffmpeg_path,
+        &ass_script_without_embedded_font(&bold, family),
+        width,
+        height,
+    )
+    .expect("the control render must succeed once the first one did");
+
+    for (label, frame) in [("regular", regular_frame), ("bold", bold_frame)] {
+        assert!(
+            !text_row_bands(frame, width, height).is_empty(),
+            "the {label} weight must draw glyphs at all"
+        );
+    }
+
+    for (label, frame, control) in [
+        ("regular", regular_frame, &regular_control),
+        ("bold", bold_frame, &bold_control),
+    ] {
+        let differing = differing_sample_count(frame, control);
+        assert!(
+            differing > 1000,
+            "the embedded {label} face must render differently from a host fallback, only {differing} samples differed"
+        );
+    }
+
+    let weights_differ = differing_sample_count(regular_frame, bold_frame);
+    assert!(
+        weights_differ > 1000,
+        "the bold weight must render differently from the regular one, only {weights_differ} samples differed"
     );
 }

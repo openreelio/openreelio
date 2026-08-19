@@ -4556,11 +4556,7 @@ pub(crate) fn resolve_text_font_family(requested: &str) -> FontResolution {
     }
 
     let requested = requested.trim();
-    let installed = crate::core::text::fonts::list_system_font_families()
-        .iter()
-        .any(|family| family.eq_ignore_ascii_case(requested));
-
-    if installed {
+    if crate::core::text::fonts::system_font_family_installed(requested) {
         FontResolution::System
     } else {
         FontResolution::Substituted(crate::core::text::bundled_fonts::DEFAULT_BUNDLED_FAMILY)

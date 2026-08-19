@@ -10,6 +10,18 @@
 //! consumers need them: the Tauri app has a resource resolver, the
 //! npm-distributed CLI does not.
 //!
+//! Every face here has to be reachable by the name the ASS `Style` line puts in
+//! its `Fontname` column, and libass is strict about where that name may live:
+//! it matches `name` ID 1 (family) and `name` ID 4 (full name) and nothing
+//! else, and it reads boldness from the `OS/2` `fsSelection` and `head`
+//! `macStyle` bits rather than from the subfamily string. Two of the families
+//! ship upstream only as variable fonts, whose default instancing leaves the
+//! family in `name` ID 16 - which looks right and is invisible to libass. The
+//! statics under `src-tauri/fonts/` are therefore rebuilt by
+//! `scripts/instance-bundled-fonts.py`, which pins the design location and then
+//! rewrites exactly those fields. `bundled_faces_are_reachable_by_the_family_
+//! name_the_emitter_writes` is the guard that keeps them that way.
+//!
 //! Every family here is licensed under the SIL Open Font License 1.1, except
 //! Luckiest Guy which is Apache-2.0. See `THIRD_PARTY_NOTICES.md` at the
 //! repository root for the copyright notices and full license texts.
@@ -66,8 +78,8 @@ static BUNDLED_FONTS: &[BundledFont] = &[
     ),
     bundled_font!(
         "Montserrat",
-        "Montserrat-ExtraBold",
-        "montserrat/Montserrat-ExtraBold.ttf"
+        "Montserrat-Bold",
+        "montserrat/Montserrat-Bold.ttf"
     ),
     bundled_font!("Anton", "Anton-Regular", "anton/Anton-Regular.ttf"),
     bundled_font!(
@@ -106,8 +118,8 @@ fn lookup_key(family: &str) -> String {
 /// [`BUNDLED_FONTS`].
 ///
 /// Seeded from the declared family names, then widened with the family names in
-/// each font's own `name` table, so a project that stored the typographic
-/// subfamily name ("TikTok Sans 36pt") still resolves.
+/// each font's own `name` table, so a project that stored a typographic family
+/// name ("Archivo Black Regular") still resolves.
 fn lookup_table() -> &'static HashMap<String, usize> {
     static TABLE: OnceLock<HashMap<String, usize>> = OnceLock::new();
 
@@ -247,21 +259,51 @@ mod tests {
     }
 
     #[test]
-    fn bundled_fonts_declare_the_families_the_caption_presets_use() {
-        let families = bundled_font_families();
-        for expected in [
-            "TikTok Sans",
-            "Montserrat",
-            "Anton",
-            "Archivo Black",
-            "Bebas Neue",
-            "Poppins",
-            "Bangers",
-            "Luckiest Guy",
-        ] {
+    fn bundled_faces_are_reachable_by_the_family_name_the_emitter_writes() {
+        // The ASS `Style` line names `BundledFont::family`, and libass resolves
+        // that string against `name` ID 1 and `name` ID 4 only. A face whose
+        // family lives in `name` ID 16 - which is what an unedited variable-font
+        // instancing run produces - renders in a host fallback while every
+        // structural check still passes.
+        for font in BUNDLED_FONTS {
+            let info = super::super::fonts::font_face_info(font.bytes);
+
             assert!(
-                families.contains(&expected),
-                "{expected} must be compiled in"
+                info.matches_family(font.family),
+                "{} declares family {:?} but answers only to ID 1 {:?} / ID 4 {:?} (ID 16 {:?} is invisible to libass)",
+                font.file_name,
+                font.family,
+                info.family_names,
+                info.full_names,
+                info.typographic_family_names,
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_bold_faces_declare_their_weight_where_libass_reads_it() {
+        // libass picks between the weights of a family by the bold bits and
+        // `usWeightClass`, not by the subfamily string, so a bold face with the
+        // bits unset can never win a `\b700` and the family renders faux-bold
+        // off the regular outlines instead.
+        for font in BUNDLED_FONTS {
+            let info = super::super::fonts::font_face_info(font.bytes);
+            let is_bold_face = font.file_name.ends_with("-Bold");
+
+            assert_eq!(
+                info.declares_bold(),
+                is_bold_face,
+                "{} must {} the OS/2 and head bold bits, got fsSelection={} macStyle={}",
+                font.file_name,
+                if is_bold_face { "set" } else { "clear" },
+                info.fs_selection_bold,
+                info.mac_style_bold,
+            );
+            assert_eq!(
+                info.weight_class,
+                Some(if is_bold_face { 700 } else { 400 }),
+                "{} must declare the weight class its file name promises",
+                font.file_name,
             );
         }
     }
@@ -272,21 +314,17 @@ mod tests {
         // (Montserrat Thin, TikTok Sans Light). Shipping those verbatim would
         // burn hairline captions in, so the compiled bytes must be the static
         // instances instead.
-        for (family, expected_name) in
-            [("TikTok Sans", "TikTok Sans"), ("Montserrat", "Montserrat")]
-        {
-            let font = resolve_bundled(family).expect("bundled family");
-            let names = super::super::fonts::font_family_names(font.bytes);
-            assert!(
-                names.iter().any(|name| name == expected_name),
-                "{family} must expose {expected_name} as a family name, got {names:?}"
-            );
-            assert!(
-                !names.iter().any(|name| name.contains("Thin")
-                    || name.contains("Light")
-                    || name.contains("Variable")),
-                "{family} must not ship a light or variable instance, got {names:?}"
-            );
+        for family in ["TikTok Sans", "Montserrat"] {
+            for font in bundled_family_faces(family) {
+                let names = super::super::fonts::font_family_names(font.bytes);
+                assert!(
+                    !names.iter().any(|name| name.contains("Thin")
+                        || name.contains("Light")
+                        || name.contains("Variable")),
+                    "{} must not ship a light or variable instance, got {names:?}",
+                    font.file_name
+                );
+            }
         }
     }
 }

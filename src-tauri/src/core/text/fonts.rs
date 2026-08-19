@@ -39,11 +39,34 @@ const DEFAULT_FONT_FAMILIES: &[&str] = &[
 
 static SYSTEM_FONT_FAMILY_CACHE: OnceLock<Vec<String>> = OnceLock::new();
 
+/// `OS/2` `fsSelection` bit 5: the face declares itself bold.
+const FS_SELECTION_BOLD: u16 = 1 << 5;
+
+/// `head` `macStyle` bit 0: the face declares itself bold.
+const MAC_STYLE_BOLD: u16 = 1 << 0;
+
+/// Returns the cached catalog of installed font family names.
+fn system_font_families() -> &'static [String] {
+    SYSTEM_FONT_FAMILY_CACHE.get_or_init(scan_system_font_families)
+}
+
 /// Returns installed font family names discovered from standard system folders.
+///
+/// This copies the whole catalog, which on a well-stocked machine is thousands
+/// of names. Callers that only need a membership test should use
+/// [`system_font_family_installed`] instead - export validation asks once per
+/// text clip, and a copy per question is pure waste.
 pub fn list_system_font_families() -> Vec<String> {
-    SYSTEM_FONT_FAMILY_CACHE
-        .get_or_init(scan_system_font_families)
-        .clone()
+    system_font_families().to_vec()
+}
+
+/// Returns whether `family` names an installed font, ignoring case.
+pub fn system_font_family_installed(family: &str) -> bool {
+    let family = family.trim();
+
+    system_font_families()
+        .iter()
+        .any(|installed| installed.eq_ignore_ascii_case(family))
 }
 
 /// Returns standard OS font directories that currently exist.
@@ -205,6 +228,116 @@ pub fn font_family_names(bytes: &[u8]) -> Vec<String> {
     parse_font_families(bytes)
 }
 
+/// The identity a font declares, split by the fields a matcher reads.
+///
+/// The split matters because libass does not treat these interchangeably: it
+/// matches a requested family against `name` ID 1 and `name` ID 4 only, and
+/// decides whether a face is bold from the `OS/2` and `head` bold bits rather
+/// than from the subfamily string. A face whose only spelling of its family
+/// lives in ID 16 is unreachable by that name however correct ID 16 looks, and
+/// a bold face with the bits unset can never win a bold request.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FontFaceInfo {
+    /// `name` ID 1 - the family name.
+    pub family_names: Vec<String>,
+    /// `name` ID 4 - the full name.
+    pub full_names: Vec<String>,
+    /// `name` ID 16 - the typographic family. libass never reads this.
+    pub typographic_family_names: Vec<String>,
+    /// `OS/2` `usWeightClass`, if the table is readable.
+    pub weight_class: Option<u16>,
+    /// `OS/2` `fsSelection` bit 5.
+    pub fs_selection_bold: bool,
+    /// `head` `macStyle` bit 0.
+    pub mac_style_bold: bool,
+}
+
+impl FontFaceInfo {
+    /// Returns whether `family` is a name libass can match this face by.
+    pub fn matches_family(&self, family: &str) -> bool {
+        let family = family.trim();
+
+        self.family_names
+            .iter()
+            .chain(&self.full_names)
+            .any(|name| name.eq_ignore_ascii_case(family))
+    }
+
+    /// Returns whether both bold bits are set.
+    pub fn declares_bold(&self) -> bool {
+        self.fs_selection_bold && self.mac_style_bold
+    }
+}
+
+/// Reads the name-table identity and weight bits of an in-memory font.
+pub fn font_face_info(bytes: &[u8]) -> FontFaceInfo {
+    let font_offset = if bytes.starts_with(b"ttcf") {
+        read_u32(bytes, 12).unwrap_or(0) as usize
+    } else {
+        0
+    };
+
+    let mut info = FontFaceInfo::default();
+
+    if let Some((table_offset, table_length)) = find_table(bytes, font_offset, b"name") {
+        for_each_name_record(bytes, table_offset, table_length, |name_id, name| {
+            let bucket = match name_id {
+                1 => &mut info.family_names,
+                4 => &mut info.full_names,
+                16 => &mut info.typographic_family_names,
+                _ => return,
+            };
+            if !bucket.contains(&name) {
+                bucket.push(name);
+            }
+        });
+    }
+
+    if let Some((table_offset, _)) = find_table(bytes, font_offset, b"OS/2") {
+        info.weight_class = read_u16(bytes, table_offset + 4);
+        info.fs_selection_bold =
+            read_u16(bytes, table_offset + 62).is_some_and(|bits| bits & FS_SELECTION_BOLD != 0);
+    }
+
+    if let Some((table_offset, _)) = find_table(bytes, font_offset, b"head") {
+        info.mac_style_bold =
+            read_u16(bytes, table_offset + 44).is_some_and(|bits| bits & MAC_STYLE_BOLD != 0);
+    }
+
+    info
+}
+
+/// Returns the offset and length of `tag`'s table in the font at `font_offset`.
+fn find_table(bytes: &[u8], font_offset: usize, tag: &[u8; 4]) -> Option<(usize, usize)> {
+    if font_offset + 12 > bytes.len() {
+        return None;
+    }
+
+    let signature = &bytes[font_offset..font_offset + 4];
+    if !matches!(signature, b"\x00\x01\x00\x00" | b"OTTO" | b"true" | b"typ1") {
+        return None;
+    }
+
+    let table_count = read_u16(bytes, font_offset + 4)?;
+    for table_index in 0..table_count as usize {
+        let record_offset = font_offset + 12 + table_index * 16;
+        if record_offset + 16 > bytes.len() {
+            return None;
+        }
+
+        if &bytes[record_offset..record_offset + 4] != tag {
+            continue;
+        }
+
+        return Some((
+            read_u32(bytes, record_offset + 8)? as usize,
+            read_u32(bytes, record_offset + 12)? as usize,
+        ));
+    }
+
+    None
+}
+
 fn parse_font_families(bytes: &[u8]) -> Vec<String> {
     let mut families = BTreeSet::new();
 
@@ -283,6 +416,20 @@ fn parse_name_table(
     table_length: usize,
     families: &mut BTreeSet<String>,
 ) {
+    for_each_name_record(bytes, table_offset, table_length, |name_id, name| {
+        if name_id == 1 || name_id == 16 {
+            families.insert(name);
+        }
+    });
+}
+
+/// Calls `visit` with every decodable `(name ID, value)` pair in a name table.
+fn for_each_name_record(
+    bytes: &[u8],
+    table_offset: usize,
+    table_length: usize,
+    mut visit: impl FnMut(u16, String),
+) {
     if table_offset + table_length > bytes.len() || table_length < 6 {
         return;
     }
@@ -309,9 +456,6 @@ fn parse_name_table(
         let platform_id = read_u16(bytes, record_offset).unwrap_or(0);
         let encoding_id = read_u16(bytes, record_offset + 2).unwrap_or(0);
         let name_id = read_u16(bytes, record_offset + 6).unwrap_or(0);
-        if name_id != 1 && name_id != 16 {
-            continue;
-        }
 
         let length = read_u16(bytes, record_offset + 8).unwrap_or(0) as usize;
         let string_offset = read_u16(bytes, record_offset + 10).unwrap_or(0) as usize;
@@ -321,10 +465,10 @@ fn parse_name_table(
             continue;
         }
 
-        if let Some(family) =
+        if let Some(name) =
             decode_font_name(platform_id, encoding_id, &bytes[string_start..string_end])
         {
-            families.insert(family);
+            visit(name_id, name);
         }
     }
 }

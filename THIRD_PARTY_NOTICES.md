@@ -16,7 +16,7 @@ their upstream license files live under `src-tauri/fonts/`.
 | Family | License | Files |
 | --- | --- | --- |
 | TikTok Sans | OFL-1.1 | `src-tauri/fonts/tiktok-sans/TikTokSans-Regular.ttf`<br>`src-tauri/fonts/tiktok-sans/TikTokSans-Bold.ttf` |
-| Montserrat | OFL-1.1 | `src-tauri/fonts/montserrat/Montserrat-Regular.ttf`<br>`src-tauri/fonts/montserrat/Montserrat-ExtraBold.ttf` |
+| Montserrat | OFL-1.1 | `src-tauri/fonts/montserrat/Montserrat-Regular.ttf`<br>`src-tauri/fonts/montserrat/Montserrat-Bold.ttf` |
 | Anton | OFL-1.1 | `src-tauri/fonts/anton/Anton-Regular.ttf` |
 | Archivo Black | OFL-1.1 | `src-tauri/fonts/archivo-black/ArchivoBlack-Regular.ttf` |
 | Bebas Neue | OFL-1.1 | `src-tauri/fonts/bebas-neue/BebasNeue-Regular.ttf` |
@@ -31,7 +31,8 @@ Copyright 2024 TikTok Inc. (https://github.com/tiktok/TikTokSans)
 
 - License: OFL-1.1 (full text below)
 - Upstream license file: `src-tauri/fonts/tiktok-sans/OFL.txt`
-- Note: Static Regular (400) and Bold (700) instances generated from the upstream variable font.
+- Note: Static Regular (400) and Bold (700) instances generated from the upstream variable font
+  by `scripts/instance-bundled-fonts.py`.
 
 
 ### Montserrat
@@ -40,7 +41,8 @@ Copyright 2011 The Montserrat Project Authors (https://github.com/JulietaUla/Mon
 
 - License: OFL-1.1 (full text below)
 - Upstream license file: `src-tauri/fonts/montserrat/OFL.txt`
-- Note: Static Regular (400) and ExtraBold (800) instances generated from the upstream variable font.
+- Note: Static Regular (400) and Bold (700) instances generated from the upstream variable font
+  by `scripts/instance-bundled-fonts.py`.
 
 
 ### Anton
