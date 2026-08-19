@@ -8100,7 +8100,6 @@ fn text_column_extent(frame: &[u8], width: u32, height: u32) -> Option<(u32, u32
 #[test]
 fn test_burned_in_caption_wraps_inside_the_safe_box() {
     let Some(ffmpeg_path) = available_ffmpeg_path() else {
-        eprintln!("Skipping caption burn-in test: ffmpeg is unavailable");
         return;
     };
 
@@ -8117,7 +8116,7 @@ fn test_burned_in_caption_wraps_inside_the_safe_box() {
     );
 
     let Some(frame) = render_ass_over_black(&ffmpeg_path, &script, width, height) else {
-        eprintln!("Skipping caption burn-in test: ffmpeg could not render the overlay");
+        skip_without_ffmpeg("ffmpeg could not burn the ASS overlay in");
         return;
     };
 
@@ -8158,7 +8157,6 @@ fn test_burned_in_caption_wraps_inside_the_safe_box() {
 #[test]
 fn test_bundled_font_is_delivered_through_the_ass_fonts_section() {
     let Some(ffmpeg_path) = available_ffmpeg_path() else {
-        eprintln!("Skipping embedded font test: ffmpeg is unavailable");
         return;
     };
 
@@ -8181,7 +8179,7 @@ fn test_bundled_font_is_delivered_through_the_ass_fonts_section() {
     .replace("Luckiest Guy", "OpenReelio Absent Family");
 
     let Some(with_embed) = render_ass_over_black(&ffmpeg_path, &embedded, width, height) else {
-        eprintln!("Skipping embedded font test: ffmpeg could not render the overlay");
+        skip_without_ffmpeg("ffmpeg could not burn the ASS overlay in");
         return;
     };
     let without_embed = render_ass_over_black(&ffmpeg_path, &without_font, width, height)
@@ -8282,7 +8280,7 @@ fn test_bundled_family_renders_at_both_weights_through_the_embedded_faces() {
         .map(|script| render_ass_over_black(&ffmpeg_path, script, width, height))
         .collect();
     let [Some(regular_frame), Some(bold_frame)] = renders.as_slice() else {
-        skip_without_ffmpeg("ffmpeg could not burn in the ASS overlay");
+        skip_without_ffmpeg("ffmpeg could not burn the ASS overlay in");
         return;
     };
 
