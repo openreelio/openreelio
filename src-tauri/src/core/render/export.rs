@@ -2747,6 +2747,7 @@ pub(super) fn append_video_transform_composition(
 ) {
     let staged_label = format!("{}_tx", output_label);
     let canvas_label = format!("{}_bg", output_label);
+    let (alpha_format, overlay_format) = transform_composition_formats(pixel_format);
 
     filter_complex.push_str(&format!(
         "[{}]scale={}:{},setsar=1",
@@ -2757,7 +2758,7 @@ pub(super) fn append_video_transform_composition(
     // a translucent one needs an alpha channel to attenuate. Either way the pixel
     // format has to carry alpha before the filter that uses it.
     if layout.is_rotated() || layout.is_translucent() {
-        filter_complex.push_str(",format=rgba");
+        filter_complex.push_str(&format!(",format={}", alpha_format));
     }
 
     if layout.is_rotated() {
@@ -2778,10 +2779,17 @@ pub(super) fn append_video_transform_composition(
 
     filter_complex.push_str(&format!("[{}];", staged_label));
 
+    // `shortest=1` ends the composite with whichever input runs out first, so the
+    // canvas has to last at least one frame or the segment renders empty.
+    let minimum_duration_sec = if fps.is_finite() && fps > 0.0 {
+        1.0 / fps
+    } else {
+        TIMELINE_EPSILON_SEC
+    };
     append_black_video_gap(
         filter_complex,
         &canvas_label,
-        duration_sec,
+        duration_sec.max(minimum_duration_sec),
         width,
         height,
         fps,
@@ -2789,15 +2797,29 @@ pub(super) fn append_video_transform_composition(
     );
 
     filter_complex.push_str(&format!(
-        "[{}][{}]overlay=x={}:y={}:shortest=1,setsar=1,fps={},format={}[{}];",
+        "[{}][{}]overlay=x={}:y={}:shortest=1:format={},setsar=1,fps={},format={}[{}];",
         canvas_label,
         staged_label,
         layout.overlay_x,
         layout.overlay_y,
+        overlay_format,
         format_speed_number(fps),
         pixel_format,
         output_label
     ));
+}
+
+/// The working format and `overlay` mode that keep a composite at the output's
+/// bit depth.
+///
+/// `overlay` defaults to 8-bit `yuv420`, so a 10-bit export whose clip happened
+/// to be transformed would quietly lose two bits per channel on the way through.
+fn transform_composition_formats(pixel_format: &str) -> (&'static str, &'static str) {
+    match pixel_format {
+        "yuv422p10le" => ("yuva422p10le", "yuv422p10"),
+        "yuv420p10le" => ("yuva420p10le", "yuv420p10"),
+        _ => ("yuva420p", "yuv420"),
+    }
 }
 
 pub(super) fn append_black_video_gap(
@@ -9272,6 +9294,38 @@ mod tests {
     }
 
     /// Feature: Transformed clips in the final render
+    /// Scenario: a 10-bit export composites at 10 bits
+    ///
+    /// `overlay` defaults to 8-bit `yuv420`. Leaving it there would mean a clip
+    /// quietly lost two bits per channel for no reason other than having been
+    /// moved, which is the kind of loss nobody would think to look for.
+    #[test]
+    fn test_build_filter_keeps_a_ten_bit_export_at_ten_bits() {
+        let (sequence, assets) = sequence_with_one_transformed_clip(Transform::default(), 0.5);
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings {
+                bit_depth: Some(10),
+                ..ExportSettings::default()
+            },
+        )
+        .expect("a ten-bit transformed clip should build a filtergraph");
+        let filter_complex = filter_complex_of(&args);
+
+        assert!(
+            filter_complex.contains("format=yuva420p10le,colorchannelmixer=aa=0.5"),
+            "the alpha stage must keep the output's bit depth. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("shortest=1:format=yuv420p10,"),
+            "the composite must not downconvert the canvas. Got: {filter_complex}"
+        );
+    }
+
+    /// Feature: Transformed clips in the final render
     /// Scenario: a scaled, repositioned clip is composited onto the canvas
     ///
     /// 1280x720 fits a 1920x1080 canvas at 1.5x, halved by the clip scale to
@@ -9301,7 +9355,7 @@ mod tests {
         );
         assert!(
             filter_complex.contains(
-                "[vnorm0_bg][vnorm0_tx]overlay=x=96:y=540:shortest=1,setsar=1,fps=30,format=yuv420p[vnorm0];"
+                "[vnorm0_bg][vnorm0_tx]overlay=x=96:y=540:shortest=1:format=yuv420,setsar=1,fps=30,format=yuv420p[vnorm0];"
             ),
             "the clip must be placed at the transformed corner. Got: {filter_complex}"
         );
@@ -9319,7 +9373,7 @@ mod tests {
 
         assert!(
             filter_complex.contains(
-                "scale=1920:1080,setsar=1,format=rgba,colorchannelmixer=aa=0.5[vnorm0_tx];"
+                "scale=1920:1080,setsar=1,format=yuva420p,colorchannelmixer=aa=0.5[vnorm0_tx];"
             ),
             "a faded clip must be attenuated before compositing. Got: {filter_complex}"
         );
@@ -9350,7 +9404,7 @@ mod tests {
 
         assert!(
             filter_complex.contains(
-                "scale=960:540,setsar=1,format=rgba,rotate=1.570796:ow=540:oh=960:c=black@0[vnorm0_tx];"
+                "scale=960:540,setsar=1,format=yuva420p,rotate=1.570796:ow=540:oh=960:c=black@0[vnorm0_tx];"
             ),
             "the rotation must be given a box that fits the turned frame. Got: {filter_complex}"
         );
