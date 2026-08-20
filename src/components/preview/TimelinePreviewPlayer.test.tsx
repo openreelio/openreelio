@@ -306,6 +306,18 @@ describe('TimelinePreviewPlayer', () => {
     expect(screen.getByTestId('transform-bounds')).toBeInTheDocument();
   });
 
+  it('renders exactly one transform overlay in canvas mode', () => {
+    // The player used to mount its own overlay on top of the one the wrapper
+    // already rendered, which stacked two independent moveable instances and
+    // let the stale one win the gesture.
+    useTimelineStore.setState({ selectedClipIds: ['clip-1'] });
+
+    render(<TimelinePreviewPlayer showControls={false} />);
+
+    expect(screen.getAllByTestId('transform-overlay')).toHaveLength(1);
+    expect(screen.getAllByTestId('transform-bounds')).toHaveLength(1);
+  });
+
   it('does not render the transform overlay when nothing is selected', () => {
     useTimelineStore.setState({ selectedClipIds: [] });
 
