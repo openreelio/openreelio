@@ -299,6 +299,19 @@ pub struct InterchangeExportResult {
     pub track_count: u32,
     /// Sequence duration in seconds
     pub duration_sec: f64,
+    /// Structural notes about what the export had to change: skipped tracks,
+    /// missing media, trimmed overlaps.
+    ///
+    /// Empty for formats that report nothing; never omitted, so a caller can
+    /// tell "checked and clean" from "not reported".
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// Editorial detail the format cannot carry.
+    ///
+    /// Interchange is lossy by nature, and a caller that hands the file to
+    /// another tool needs to know what will not arrive with it.
+    #[serde(default)]
+    pub unsupported: Vec<String>,
 }
 
 // =============================================================================

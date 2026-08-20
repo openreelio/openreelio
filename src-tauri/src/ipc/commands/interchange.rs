@@ -1,12 +1,17 @@
 //! Interchange export commands
 //!
-//! Tauri IPC commands for exporting sequences to EDL and FCPXML formats.
+//! Tauri IPC commands for exporting sequences to EDL, FCPXML and OTIO.
+//!
+//! Import is deliberately absent: an OTIO file proposes a whole timeline, and
+//! that proposal runs through the plan machinery so it is atomic and undoable.
+//! The CLI (`openreelio-cli otio import`) is that surface today; a GUI import
+//! wants a review step in front of it and is a follow-up.
 
 use tauri::State;
 
 use crate::core::{
     fs::{export_allowed_roots, validate_scoped_output_path, write_bytes_atomic_no_symlink},
-    interchange::{edl, models::InterchangeExportResult, xml},
+    interchange::{edl, models::InterchangeExportResult, otio, xml},
     CoreError,
 };
 use crate::AppState;
@@ -157,6 +162,91 @@ pub async fn export_fcpxml(
         event_count,
         track_count,
         duration_sec
+    );
+
+    Ok(result)
+}
+
+/// Exports a sequence to OpenTimelineIO (OTIO).
+///
+/// OTIO is the Academy Software Foundation's editorial interchange format, and
+/// DaVinci Resolve imports it natively — including on the free tier — which
+/// makes this the "assemble here, finish there" path.
+///
+/// The export is a **cut interchange**: tracks, clips, gaps, two-input
+/// transitions and markers survive; effects, transforms, captions, text, speed,
+/// opacity and blend modes do not. The result's `unsupported` list names
+/// everything that was left behind rather than dropping it silently.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state), fields(sequence_id = %sequence_id, output_path = %output_path))]
+pub async fn export_otio(
+    sequence_id: String,
+    output_path: String,
+    state: State<'_, AppState>,
+) -> Result<InterchangeExportResult, String> {
+    tracing::info!("Exporting sequence to OTIO format");
+
+    // Get sequence, assets and effects from project state
+    let (sequence, assets, effects, project_path) = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        let sequence = project
+            .state
+            .sequences
+            .get(&sequence_id)
+            .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
+            .clone();
+
+        let assets = project
+            .state
+            .assets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        let effects = project
+            .state
+            .effects
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        (sequence, assets, effects, project.path.clone())
+    };
+
+    // Validate output path
+    let approved_dirs = state.approved_export_dirs_snapshot().await;
+    let roots = export_allowed_roots(&project_path, &approved_dirs);
+    let root_refs: Vec<&std::path::Path> = roots.iter().map(|p| p.as_path()).collect();
+    let validated_path = validate_scoped_output_path(&output_path, "OTIO output path", &root_refs)?;
+
+    // Generate OTIO content
+    let duration_sec = sequence.duration();
+    let export = otio::export_otio(&sequence, &assets, &effects)?;
+
+    let write_path = validated_path.clone();
+    let bytes = export.json.clone().into_bytes();
+    tokio::task::spawn_blocking(move || {
+        write_bytes_atomic_no_symlink(&write_path, &bytes, "OTIO output path")
+    })
+    .await
+    .map_err(|e| format!("OTIO write task failed: {e}"))?
+    .map_err(|e| format!("Failed to write OTIO file: {e}"))?;
+
+    let result =
+        otio::build_export_result(&validated_path.to_string_lossy(), &export, duration_sec);
+
+    tracing::info!(
+        "OTIO export complete: {} clips, {} tracks, {:.1}s duration, {} warning(s), {} unsupported",
+        export.clip_count,
+        export.track_count,
+        duration_sec,
+        export.warnings.len(),
+        export.unsupported.len()
     );
 
     Ok(result)

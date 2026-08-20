@@ -774,6 +774,25 @@ async exportFcpxml(sequenceId: string, outputPath: string) : Promise<Result<Inte
 }
 },
 /**
+ * Exports a sequence to OpenTimelineIO (OTIO).
+ * 
+ * OTIO is the Academy Software Foundation's editorial interchange format, and
+ * DaVinci Resolve imports it natively — including on the free tier — which
+ * makes this the "assemble here, finish there" path.
+ * 
+ * The export is a **cut interchange**: tracks, clips, gaps, two-input
+ * transitions and markers survive; effects, transforms, captions, text, speed,
+ * opacity and blend modes do not. The result's `unsupported` list names
+ * everything that was left behind rather than dropping it silently.
+ */
+async exportOtio(sequenceId: string, outputPath: string) : Promise<Result<InterchangeExportResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_otio", { sequenceId, outputPath }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Opens a native save dialog for an export destination.
  * 
  * On confirmation, the parent directory of the chosen path is normalized and added
@@ -5935,7 +5954,22 @@ trackCount: number;
 /**
  * Sequence duration in seconds
  */
-durationSec: number }
+durationSec: number; 
+/**
+ * Structural notes about what the export had to change: skipped tracks,
+ * missing media, trimmed overlaps.
+ * 
+ * Empty for formats that report nothing; never omitted, so a caller can
+ * tell "checked and clean" from "not reported".
+ */
+warnings?: string[]; 
+/**
+ * Editorial detail the format cannot carry.
+ * 
+ * Interchange is lossy by nature, and a caller that hands the file to
+ * another tool needs to know what will not arrive with it.
+ */
+unsupported?: string[] }
 /**
  * Supported interchange export formats
  */

@@ -1527,9 +1527,10 @@ mod tauri_app {
                 $crate::ipc::smart_reframe,
                 // Point tracking command
                 $crate::ipc::track_point,
-                // Interchange export commands (EDL, FCPXML)
+                // Interchange export commands (EDL, FCPXML, OTIO)
                 $crate::ipc::export_edl,
                 $crate::ipc::export_fcpxml,
+                $crate::ipc::export_otio,
                 // Export destination picker (native save dialog + allow-list)
                 $crate::ipc::pick_export_destination,
                 // AI commands
@@ -2057,9 +2058,10 @@ mod tauri_app {
             ipc::smart_reframe,
             // Point tracking command
             ipc::track_point,
-            // Interchange export commands (EDL, FCPXML)
+            // Interchange export commands (EDL, FCPXML, OTIO)
             ipc::export_edl,
             ipc::export_fcpxml,
+            ipc::export_otio,
             // Export destination picker (native save dialog + allow-list)
             ipc::pick_export_destination,
             // AI commands

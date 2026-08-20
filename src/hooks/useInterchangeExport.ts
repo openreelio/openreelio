@@ -54,6 +54,9 @@ const FORMAT_CONFIG: Record<
     supported: true,
     label: 'FCPXML',
   },
+  // The backend command exists (`commands.exportOtio`) and the CLI ships
+  // `otio export`/`otio import`; this hook stays closed until the app grows a
+  // menu entry for it, so the dialog cannot offer a format with no way in.
   otio: {
     extension: 'otio',
     filterName: 'OpenTimelineIO',

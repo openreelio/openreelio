@@ -80,6 +80,10 @@ pub fn build_export_result(
         event_count,
         track_count,
         duration_sec,
+        // FCPXML's losses are structural and documented at the module level
+        // rather than discovered per sequence.
+        warnings: Vec::new(),
+        unsupported: Vec::new(),
     }
 }
 
