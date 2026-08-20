@@ -42,6 +42,27 @@ pub const CAPTION_SIDE_MARGIN_PERCENT: f64 = 10.0;
 /// Width of the box a preset caption wraps inside, as a canvas percentage.
 pub const CAPTION_WRAP_BOX_WIDTH_PERCENT: f64 = 100.0 - 2.0 * CAPTION_SIDE_MARGIN_PERCENT;
 
+/// Vertical margin a preset caption is held off its edge by when nothing else
+/// says otherwise, as a canvas percentage.
+///
+/// A caption can be created with no stored position at all (`CreateCaptionCommand`
+/// leaves `caption_position` as `None`), so every surface that draws one has to
+/// pick the same height for it or the caption moves between the preview and the
+/// exported file. The single Rust definition; the burn-in, the `drawtext`
+/// fallback and the render graph all read it from here.
+///
+/// The preview holds the same number in `DEFAULT_CAPTION_POSITION.marginPercent`
+/// (`src/types/index.ts`); the two must move together.
+pub const CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT: f64 = 5.0;
+
+/// Vertical position a custom caption anchor falls back to, as a canvas
+/// percentage from the top.
+///
+/// A custom anchor names a point rather than a margin, so an anchor that names
+/// only an x lands here. Mirrors `DEFAULT_CAPTION_POSITION` handling in
+/// `src/utils/captionStyle.ts`, which reads an absent `yPercent` as 90.
+pub const CAPTION_CUSTOM_DEFAULT_Y_PERCENT: f64 = 90.0;
+
 /// Vertical position of caption on screen
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -82,7 +103,7 @@ impl Default for CustomPosition {
     fn default() -> Self {
         Self {
             x_percent: 50.0,
-            y_percent: 90.0, // Near bottom
+            y_percent: CAPTION_CUSTOM_DEFAULT_Y_PERCENT, // Near bottom
         }
     }
 }
@@ -106,7 +127,7 @@ impl Default for CaptionPosition {
     fn default() -> Self {
         Self::Preset {
             vertical: VerticalPosition::Bottom,
-            margin_percent: 5.0,
+            margin_percent: CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
         }
     }
 }

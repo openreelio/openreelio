@@ -14,7 +14,10 @@ use tokio::sync::mpsc::Sender;
 
 use crate::core::{
     assets::{Asset, AssetKind},
-    captions::CAPTION_SIDE_MARGIN_PERCENT,
+    captions::{
+        CAPTION_CUSTOM_DEFAULT_Y_PERCENT, CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
+        CAPTION_SIDE_MARGIN_PERCENT,
+    },
     commands::TEXT_ASSET_PREFIX,
     effects::{
         effect_capability, effect_type_label, Effect, EffectType, FilterGraph, IntoFFmpegFilter,
@@ -3888,7 +3891,7 @@ fn normalized_caption_margin_percent(margin_percent: f64) -> f64 {
     (if margin_percent.is_finite() {
         margin_percent
     } else {
-        5.0
+        CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT
     })
     .clamp(0.0, 50.0)
 }
@@ -3919,12 +3922,6 @@ enum CaptionAnchor {
     Custom { x: f64, y: f64 },
 }
 
-/// Vertical margin a caption with no stored position is held off the bottom by.
-///
-/// Numerically the same as the side margin today, but the two answer different
-/// questions and are free to diverge.
-const CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT: f64 = 10.0;
-
 /// Horizontal anchor a preset caption uses for the given alignment.
 ///
 /// Left-aligned text grows right from the left margin, right-aligned text grows
@@ -3942,7 +3939,10 @@ pub(crate) fn caption_preset_anchor_x(alignment: &str) -> f64 {
 
 fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> CaptionAnchor {
     // No stored position renders where a caption always has: along the bottom,
-    // a tenth of the canvas clear of the edge.
+    // `CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT` of the canvas clear of the edge.
+    // The preview draws a positionless caption from the same number, so the two
+    // have to read it from one definition or a caption created without a
+    // position sits at one height on screen and another in the file.
     let mut anchor = CaptionAnchor::Preset {
         vertical: CaptionVertical::Bottom,
         margin_percent: CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
@@ -3952,7 +3952,7 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> Ca
         if let Some(preset) = position_value.as_str() {
             return CaptionAnchor::Preset {
                 vertical: CaptionVertical::parse(preset),
-                margin_percent: 5.0,
+                margin_percent: CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
             };
         }
 
@@ -3968,7 +3968,7 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> Ca
                 let margin_percent =
                     get_json_field(position_object, &["marginPercent", "margin_percent"])
                         .and_then(parse_json_number)
-                        .unwrap_or(5.0);
+                        .unwrap_or(CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT);
                 return CaptionAnchor::Preset {
                     vertical: CaptionVertical::parse(vertical),
                     margin_percent,
@@ -3990,7 +3990,9 @@ fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> Ca
             if custom_x.is_some() || custom_y.is_some() {
                 anchor = CaptionAnchor::Custom {
                     x: custom_x.map(normalize_caption_axis).unwrap_or(0.5),
-                    y: custom_y.map(normalize_caption_axis).unwrap_or(0.9),
+                    y: custom_y
+                        .map(normalize_caption_axis)
+                        .unwrap_or(CAPTION_CUSTOM_DEFAULT_Y_PERCENT / 100.0),
                 };
             }
         }
@@ -7539,10 +7541,74 @@ mod tests {
                 "{position} must not pin the caption. Got: {script}"
             );
             assert!(
-                script.contains(",2,192,192,108,"),
+                script.contains(",2,192,192,54,"),
                 "{position} must keep the default bottom margins. Got: {script}"
             );
         }
+    }
+
+    #[test]
+    fn test_a_positionless_caption_burns_in_at_the_preview_default_margin() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // A caption can be created with no stored position at all, and the
+        // preview draws that caption `DEFAULT_CAPTION_POSITION.marginPercent`
+        // (`src/types/index.ts`) of the canvas off the bottom. The burn-in used
+        // to carry its own default of twice that, so the very same caption sat
+        // at one height on screen and another in the exported file.
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut caption_track = Track::new_caption("Captions");
+        let mut caption_clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        caption_clip.label = Some("Positionless".to_string());
+        assert!(
+            caption_clip.caption_position.is_none(),
+            "the fixture has to exercise the no-stored-position path"
+        );
+        caption_track.add_clip(caption_clip);
+        sequence.add_track(caption_track);
+
+        let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+            .expect("script result")
+            .expect("script exists");
+
+        let expected_margin_v =
+            (CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT / 100.0 * 1080.0).round() as i32;
+        assert_eq!(
+            expected_margin_v, 54,
+            "the shared default is 5% of a 1080-line canvas"
+        );
+        assert!(
+            !script.contains("\\pos("),
+            "a positionless caption keeps its margins rather than being pinned. Got: {script}"
+        );
+        assert!(
+            script.contains(&format!(",,192,192,{expected_margin_v},,")),
+            "the event's MarginV must be the preview's default, not the burn-in's own. \
+             Got: {script}"
+        );
+        assert!(
+            script.contains(&format!(",2,192,192,{expected_margin_v},1\n")),
+            "the style must carry the same MarginV as the event. Got: {script}"
+        );
+    }
+
+    #[test]
+    fn test_the_burn_in_and_the_render_graph_agree_on_the_default_caption_height() {
+        // The ASS path expresses the default as a margin off the bottom edge
+        // and the render graph as a distance down from the top, so the one
+        // number they share only stays shared if both are read from the same
+        // constant. `resolve_caption_position_percent` in `graph.rs` is the
+        // other half of this pairing.
+        let anchor = resolve_caption_anchor(None, None);
+        let (_, y) = caption_anchor_position(anchor, "center");
+
+        assert_eq!(
+            y * 100.0,
+            100.0 - CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
+            "a positionless caption sits one default margin above the bottom edge"
+        );
     }
 
     #[test]

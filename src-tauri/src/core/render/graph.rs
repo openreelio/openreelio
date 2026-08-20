@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 use specta::Type;
 
 use crate::core::{
+    captions::{CAPTION_CUSTOM_DEFAULT_Y_PERCENT, CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT},
     commands::{get_text_data, is_text_clip},
     project::ProjectState,
     text::{TextAlignment, TextClipData},
@@ -694,11 +695,13 @@ fn resolve_caption_position_percent(
         TextAlignment::Right => 90.0,
         TextAlignment::Center => 50.0,
     };
-    let mut y = 90.0;
+    // A caption with no stored position sits on the shared default margin, the
+    // same one the preview and the ASS burn-in read.
+    let mut y = vertical_position_to_y_percent("bottom", CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT);
 
     if let Some(position_value) = position {
         if let Some(preset) = position_value.as_str() {
-            y = vertical_position_to_y_percent(preset, 5.0);
+            y = vertical_position_to_y_percent(preset, CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT);
             return (x, y);
         }
 
@@ -710,8 +713,10 @@ fn resolve_caption_position_percent(
                     .unwrap_or_else(|| "bottom".to_string());
                 let margin_percent =
                     json_number(position_object, &["marginPercent", "margin_percent"])
-                        .map(|value| clamp_finite(value, 0.0, 50.0, 5.0))
-                        .unwrap_or(5.0);
+                        .map(|value| {
+                            clamp_finite(value, 0.0, 50.0, CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT)
+                        })
+                        .unwrap_or(CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT);
                 return (x, vertical_position_to_y_percent(&vertical, margin_percent));
             }
 
@@ -727,11 +732,15 @@ fn resolve_caption_position_percent(
                 {
                     x = normalize_caption_axis(custom_x, 50.0);
                 }
-                if let Some(custom_y) =
-                    json_number(position_object, &["yPercent", "y_percent", "y"])
-                {
-                    y = normalize_caption_axis(custom_y, 90.0);
-                }
+                // A custom anchor names a point, so an anchor that names only an
+                // x falls back to the custom default rather than to the preset
+                // margin the positionless case uses. `resolve_caption_anchor` in
+                // `export.rs` reads it the same way.
+                y = json_number(position_object, &["yPercent", "y_percent", "y"])
+                    .map(|custom_y| {
+                        normalize_caption_axis(custom_y, CAPTION_CUSTOM_DEFAULT_Y_PERCENT)
+                    })
+                    .unwrap_or(CAPTION_CUSTOM_DEFAULT_Y_PERCENT);
                 return (x, y);
             }
         }
@@ -749,7 +758,12 @@ fn resolve_caption_position_percent(
 }
 
 fn vertical_position_to_y_percent(vertical: &str, margin_percent: f64) -> f64 {
-    let margin = clamp_finite(margin_percent, 0.0, 50.0, 5.0);
+    let margin = clamp_finite(
+        margin_percent,
+        0.0,
+        50.0,
+        CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT,
+    );
     match vertical.trim().to_ascii_lowercase().as_str() {
         "top" => margin,
         "center" | "middle" => 50.0,
@@ -1080,5 +1094,30 @@ mod tests {
                 "textData": null
             })
         );
+    }
+
+    #[test]
+    fn positionless_caption_sits_on_the_shared_default_margin() {
+        // The render graph, the ASS burn-in and the preview all draw a caption
+        // that carries no stored position, and they only agree on where if all
+        // three read one number. The graph used to hold its own copy of 10%
+        // while the preview used 5%.
+        let (_, y) = resolve_caption_position_percent(None, None, &TextAlignment::Center);
+
+        assert_eq!(y, 100.0 - CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT);
+        assert_eq!(y, 95.0, "the shared default is a 5% bottom margin");
+    }
+
+    #[test]
+    fn custom_caption_anchor_naming_only_an_x_keeps_the_custom_default_height() {
+        // A custom anchor names a point, so an absent y falls back to the
+        // custom default rather than to the preset margin - the same reading
+        // `resolve_caption_anchor` in `export.rs` gives the identical blob.
+        let position = serde_json::json!({ "type": "custom", "xPercent": 20.0 });
+        let (x, y) =
+            resolve_caption_position_percent(Some(&position), None, &TextAlignment::Center);
+
+        assert_eq!(x, 20.0);
+        assert_eq!(y, CAPTION_CUSTOM_DEFAULT_Y_PERCENT);
     }
 }
