@@ -875,7 +875,113 @@ landed on the hand-measured speech onset to within the 10 ms analysis hop.
 That is clean speech with a clear attack; noisy or overlapping dialogue will do
 worse. Verify anything you are going to cut against.
 
-## 8. MCP server
+## 8. Interchange: OpenTimelineIO
+
+`otio export` writes [OpenTimelineIO](https://opentimeline.io/), the Academy
+Software Foundation's editorial interchange format; `otio import` reads one back
+into a sequence. DaVinci Resolve imports OTIO natively on the free tier, which
+makes this the "assemble headless here, finish there" path.
+
+```bash
+openreelio-cli otio export --path ./demo --out cut.otio [--sequence <SEQUENCE_ID>]
+openreelio-cli otio import --path ./demo --file cut.otio [--sequence <SEQUENCE_ID>] [--dry-run]
+```
+
+### It is a cut interchange, and it says what it drops
+
+**Survives:** video and audio tracks · clips, with their media file and source
+in-point · gaps · two-input transitions (cross dissolve, wipe, slide) · sequence
+markers.
+
+**Does not survive:** effects and colour grading · transforms, motion keyframes,
+opacity, blend modes · caption tracks and text clips · clip audio settings
+(levels, pan, fades) · speed, reverse, freeze frames, time remapping · compound
+clips and adjustment layers.
+
+Neither verb drops any of that quietly. Both print `warnings` (structural changes
+— skipped tracks, offline media, trimmed overlaps) and `unsupported` (editorial
+detail that could not cross), and both arrays are always present, so a caller can
+tell "checked and clean" from "not reported".
+
+```json
+{
+  "status": "ok",
+  "output": "/abs/path/cut.otio",
+  "trackCount": 2,
+  "clipCount": 4,
+  "warnings": ["clip 'c7' is disabled and was exported as a gap"],
+  "unsupported": [
+    "caption track 'Subtitles' was not exported: OTIO has no caption track kind…",
+    "3 clip(s) carry effects that were dropped: c1, c2, c5"
+  ]
+}
+```
+
+### What the export does to keep the cut exact
+
+Every boundary is computed in frames at the sequence rate and only converted to
+seconds at the edges, so a long timeline does not accumulate drift.
+
+- **Gaps are explicit.** An OTIO track is a contiguous child list, so every hole
+  becomes a `Gap`. Nothing is written after the last clip: a track ends where its
+  last shot ends, and OTIO permits tracks of different lengths.
+- **A speed-changed clip keeps its slot, not its speed.** It is written occupying
+  the same timeline span from the same source in-point, so every later cut stays
+  on its frame, and it plays unmodified in the importing tool. The clip is named
+  in `unsupported`. (This is also the OTIO-correct shape: a speed change is a
+  separate `LinearTimeWarp` effect that scales the media read without changing
+  `source_range.duration`.)
+- **Caption, text, compound and adjustment clips become gaps**, so the shots
+  around them do not slide.
+- **A wipe or slide exports as `"Custom"`** — OTIO only standardises a dissolve —
+  with the real type preserved under `metadata.openreelio`.
+
+### Importing
+
+An import builds an edit plan and runs it through the same machinery as
+`plan execute`: one atomic, undoable unit that rolls back on failure, with the
+same exit codes — `0` applied and saved, `1` rejected or rolled back cleanly,
+`2` tool failure or an incomplete rollback.
+
+Dry-run first on any file you did not write. `--dry-run` prints the plan, its
+warnings and the media it would import, and stops without touching the project.
+
+Media resolves in order: the asset id in `metadata.openreelio` (our own files),
+then the file path, then the file name. Anything still unmatched becomes an
+`ImportAsset` step and appears in `assetImports`.
+
+Times are converted through each node's own rate, never the sequence rate, so a
+file that mixes rates imports correctly.
+
+**Refused outright:** an `OTIO_SCHEMA` version this build does not read (the
+error names it), image-sequence references, and a file needing more plan steps
+than the cap allows — chunking it would give up atomicity, so split the timeline
+instead.
+
+**Reported but not fatal:** nested stacks, non-editorial track kinds, offline
+clips, asymmetric transitions (OpenReelio stores one duration, so the blend is
+re-centred on the cut), and transitions whose handles cannot be verified. Handle
+checking mirrors the render engine's own test — see
+[Transitions and when they render](#transitions-and-when-they-render) — so an
+import tells you up front which cuts the renderer would later refuse to blend.
+
+### The `metadata.openreelio` namespace
+
+Exports stash detail the standard schema cannot carry — exact track kind,
+original ids, mute state, the real transition type behind a `"Custom"`, a
+marker's exact colour — under `metadata.openreelio` on the relevant node. Foreign
+tools ignore it and see ordinary OTIO; our own import reads it to restore what it
+can. It never changes where a clip sits.
+
+### Verifying a Resolve round trip
+
+CI cannot run Resolve, so this is a manual check. Export, then in Resolve use
+**File → Import → Timeline → Import AAF, EDL, XML…** and pick the `.otio` file.
+Confirm the track count, that each cut lands on the frame the export named, that
+media links resolve, and that any dissolve sits on the boundary it was reported
+on. Anything in `unsupported` will be missing — that is the format, not a bug.
+
+## 9. MCP server
 
 The same binary is an MCP server over stdio. `--stdio` is required to actually
 serve; without it the command prints the tool list, resources and policy as JSON
@@ -954,7 +1060,7 @@ Notes that matter:
 - Images come back as JPEG. Every other tool's reply is unchanged — a lone
   `text` block.
 
-## 9. Environment variables
+## 10. Environment variables
 
 | Variable                        | Purpose                                                      |
 | ------------------------------- | ------------------------------------------------------------ |
@@ -963,7 +1069,7 @@ Notes that matter:
 | `OPENREELIO_FFPROBE_PATH`       | Explicit FFprobe binary                                      |
 | `OPENREELIO_MCP_APPROVAL_TOKEN` | Host-issued single-call write approval for the MCP server    |
 
-## 10. See also
+## 11. See also
 
 - [`AGENT_PERCEPTION_CLI_PLAN.md`](./AGENT_PERCEPTION_CLI_PLAN.md) — design
   rationale and accepted deviations for the perception and verify surfaces

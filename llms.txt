@@ -20,7 +20,7 @@ which binaries were picked and from where.
 
 ## Docs
 
-- [Agent Guide](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/AGENT_GUIDE.md): The canonical agent-facing reference — install, the JSON/exit-code contract, project lifecycle, editing verbs, the perception loop (analysis, frame extraction, proxy renders), the verify QC loop, and the MCP server.
+- [Agent Guide](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/AGENT_GUIDE.md): The canonical agent-facing reference — install, the JSON/exit-code contract, project lifecycle, editing verbs, the perception loop (analysis, frame extraction, proxy renders), the verify QC loop, OpenTimelineIO interchange with DaVinci Resolve, and the MCP server.
 - [Agent Perception CLI Plan](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/AGENT_PERCEPTION_CLI_PLAN.md): Design rationale for the perception and verify surfaces, including accepted deviations such as the `analysis silence` cache-persistence contract and the proxy render preset.
 - [Architecture](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/ARCHITECTURE.md): System architecture — event sourcing, worker separation, the Rust core, and the Tauri/React frontend.
 - [Command Reference](https://raw.githubusercontent.com/openreelio/openreelio/main/docs/COMMAND_REFERENCE.md): The backend edit commands that `command execute` and `plan execute` accept.

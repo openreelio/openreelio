@@ -24,7 +24,9 @@ distribution/skills/
         ├── editing/REFERENCE.md
         ├── captions/REFERENCE.md
         ├── render/REFERENCE.md
-        └── verify/REFERENCE.md
+        ├── interchange/REFERENCE.md
+        ├── verify/REFERENCE.md
+        └── judging/REFERENCE.md
 ```
 
 ## Authoring rules
