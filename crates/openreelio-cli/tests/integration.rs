@@ -6233,6 +6233,97 @@ fn bundle_path(project_path: &str, asset_id: &str) -> PathBuf {
         .join("bundle.json")
 }
 
+/// Rewrites every occurrence of an asset id in a project's persisted state.
+///
+/// Stands in for the threat this guards against: an operation log or snapshot
+/// that reached the machine from somewhere other than this CLI. Nothing on the
+/// load path validates the ids inside one, so a project file is free to name an
+/// asset `../../../secret`.
+fn rewrite_persisted_asset_id(project_path: &str, from: &str, to: &str) {
+    let state_dir = PathBuf::from(project_path)
+        .join(".openreelio")
+        .join("state");
+    for file in ["ops.jsonl", "snapshot.json"] {
+        let path = state_dir.join(file);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            std::fs::write(&path, content.replace(from, to)).unwrap();
+        }
+    }
+}
+
+#[test]
+fn test_analysis_report_refuses_an_asset_id_that_names_a_path() {
+    // The report opens two files named after the asset id — the cached bundle
+    // at `.openreelio/analysis/<id>/bundle.json` and the annotation at
+    // `.openreelio/annotations/<id>.json` — so the id decides which file the
+    // process opens. An id that walks out of those directories reads an
+    // arbitrary JSON file and prints its contents straight back to the caller.
+    let (dir, path, asset_id) = create_project_with_analysis("analysis_report_traversal");
+
+    // A file outside the project, at exactly the place the annotation lookup
+    // lands for `../../../secret`, and shaped so its text would be echoed
+    // verbatim into the report's `annotations.ocrPreview`.
+    std::fs::write(
+        dir.path().join("secret.json"),
+        serde_json::json!({
+            "analysis": {
+                "textOcr": {
+                    "provider": "outside",
+                    "results": [{ "text": "OUTSIDE-THE-PROJECT-SECRET" }],
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // The exploit needs the hostile id to survive the state lookup, which is
+    // what a project file that was not written by this CLI provides.
+    rewrite_persisted_asset_id(&path, &asset_id, "../../../secret");
+
+    for hostile in [
+        "../../../secret",
+        r"..\..\..\secret",
+        "..",
+        "nested/secret",
+        r"nested\secret",
+        "C:",
+    ] {
+        let (stdout, stderr) =
+            run_cli_err(&["analysis", "report", "--path", &path, "--id", hostile]);
+
+        assert!(
+            stderr.contains("path traversal") || stderr.contains("assetId"),
+            "'{hostile}' must be refused as an unusable id, not attempted.\n\
+             stdout: {stdout}\nstderr: {stderr}"
+        );
+        assert!(
+            !stdout.contains("OUTSIDE-THE-PROJECT-SECRET")
+                && !stderr.contains("OUTSIDE-THE-PROJECT-SECRET"),
+            "'{hostile}' must never disclose a file outside the project.\n\
+             stdout: {stdout}\nstderr: {stderr}"
+        );
+    }
+
+    // The same guard covers the search verb, which builds the very same report.
+    let (stdout, stderr) = run_cli_err(&[
+        "analysis",
+        "search",
+        "--path",
+        &path,
+        "--id",
+        "../../../secret",
+        "--query",
+        "secret",
+    ]);
+    assert!(
+        !stdout.contains("OUTSIDE-THE-PROJECT-SECRET")
+            && !stderr.contains("OUTSIDE-THE-PROJECT-SECRET"),
+        "search must not disclose a file outside the project.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
 #[test]
 fn test_analysis_shots_detects_and_persists_scene_change() {
     let Some((_dir, path, asset_id)) = create_project_with_media(
