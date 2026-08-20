@@ -10,9 +10,36 @@
  * The DOM the gesture drives is written imperatively: `executeCommand` triggers
  * a full project-state refresh, so dispatching per pointer move would both spam
  * the ops log and fight moveable's own rect cache.
+ *
+ * ---------------------------------------------------------------------------
+ * Intentional behavior changes vs. the hand-rolled overlay this replaced:
+ *
+ * 1. A gesture that ends without moving no longer dispatches a command. The old
+ *    overlay committed an identical transform on every mouse-up, which pushed a
+ *    no-op op onto the log and consumed an undo step.
+ * 2. Holding Shift now forces a uniform resize on the EDGE handles too, not
+ *    only on the corners. Text clips remain uniform-only regardless of Shift.
+ * 3. Rotation snaps to 15 degree steps only while Shift is held. Rotation is
+ *    free by default, matching the convention every other NLE uses; the old
+ *    overlay was free-only and an intermediate revision of this one was
+ *    snap-only.
+ * 4. A clip driven by motion keyframes is read-only here (dashed box, gestures
+ *    refused). Its transform is sampled from the motion curve, so a
+ *    `SetClipTransform` written from a gesture would be overwritten on the next
+ *    frame. Routing gestures to `SetClipMotionKeyframes` is task_2d85b37a.
+ * ---------------------------------------------------------------------------
  */
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react';
 import Moveable, {
   type OnDrag,
   type OnResize,
@@ -21,8 +48,9 @@ import Moveable, {
 import { useProjectStore } from '@/stores/projectStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
+import { createLogger } from '@/services/logger';
 import type { Asset, Sequence, Transform } from '@/types';
-import { getClipMotionTransformAtTime } from '@/utils/clipMotion';
+import { getClipMotionTransformAtTime, hasActiveMotionKeyframes } from '@/utils/clipMotion';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 import {
   clipBoundsFromTransform,
@@ -33,8 +61,10 @@ import {
   type PreviewSource,
   type PreviewViewport,
 } from '@/utils/previewCoords';
-import { getDefaultTransform, resolveOverlayGeometry } from './transformOverlayGeometry';
+import { resolveOverlayGeometry } from './transformOverlayGeometry';
 import { RENDER_DIRECTIONS, stampControlTestIds } from './transformOverlayHandles';
+
+const logger = createLogger('MoveableTransformOverlay');
 
 // =============================================================================
 // Types
@@ -77,10 +107,20 @@ interface OverlayContext {
   isKeyframed: boolean;
 }
 
+/** Which scale axes the active gesture is allowed to rewrite. */
+interface ScaleAxes {
+  x: boolean;
+  y: boolean;
+}
+
 interface GestureState {
   context: OverlayContext;
+  /** Screen rectangle the gesture started from; never mutated. */
+  startRect: ClipScreenRect;
+  /** Screen rectangle as of the latest pointer move. */
   rect: ClipScreenRect;
   transform: Transform;
+  scaleAxes: ScaleAxes;
   moved: boolean;
 }
 
@@ -92,6 +132,12 @@ interface GestureState {
 const ROTATION_SNAP_DEG = 15;
 /** Vertical offset of the scale readout above the box, in screen pixels. */
 const INFO_OFFSET_PX = 24;
+/**
+ * Accent colour moveable paints its control box with, exposed as the
+ * `--moveable-color` custom property it reads. Kept equal to the Tailwind
+ * `border-blue-500` the overlay box itself uses so the two agree.
+ */
+const OVERLAY_ACCENT_COLOR = '#3b82f6';
 /** Shown instead of the scale readout while a clip is driven by motion keyframes. */
 const KEYFRAMED_HINT = 'Keyframed - edit motion in the Inspector';
 
@@ -115,6 +161,39 @@ function boundsToRect(bounds: ClipScreenBounds): ClipScreenRect {
   };
 }
 
+/**
+ * Size for a uniform (keepRatio) resize, held exactly on the starting aspect.
+ *
+ * moveable rounds both axes to whole CSS pixels, so replaying its width AND its
+ * height drifts the aspect ratio by up to ~0.05% per gesture. The axis that
+ * moved further is taken as authoritative and the other one is derived from it,
+ * which keeps `scale.x / scale.y` bit-stable across repeated resizes.
+ *
+ * @param startRect - Rectangle the gesture started from.
+ * @param width - Width moveable reported.
+ * @param height - Height moveable reported.
+ */
+function uniformResizeSize(
+  startRect: ClipScreenRect,
+  width: number,
+  height: number,
+): { width: number; height: number } {
+  if (!(startRect.width > 0) || !(startRect.height > 0)) {
+    return { width, height };
+  }
+
+  const aspect = startRect.width / startRect.height;
+  const widthDelta = Math.abs(width - startRect.width);
+  // Compare both deltas in width units so the dominant axis is picked fairly.
+  const heightDelta = Math.abs(height - startRect.height) * aspect;
+
+  if (widthDelta >= heightDelta) {
+    return { width, height: width / aspect };
+  }
+
+  return { width: height * aspect, height };
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -131,7 +210,7 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
   panY,
   className = '',
   zIndex,
-}: TransformOverlayProps) {
+}: TransformOverlayProps): JSX.Element | null {
   const targetRef = useRef<HTMLDivElement>(null);
   const infoRef = useRef<HTMLDivElement>(null);
   const moveableRef = useRef<Moveable>(null);
@@ -164,8 +243,7 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
     if (!selectedClip || !sequence) return null;
 
     const { clip, trackId } = selectedClip;
-    const sampledTransform =
-      getClipMotionTransformAtTime(clip, currentTime) ?? getDefaultTransform();
+    const sampledTransform = getClipMotionTransformAtTime(clip, currentTime);
     const { transform, source, isText } = resolveOverlayGeometry(
       clip,
       sampledTransform,
@@ -197,8 +275,9 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
       // Keyframed clips resolve their transform from the motion curve, so a
       // SetClipTransform written here would be overwritten on the next frame.
       // Editing is disabled until drags route to SetClipMotionKeyframes
-      // (follow-up task task_2d85b37a).
-      isKeyframed: (clip.motionKeyframes?.length ?? 0) > 0,
+      // (follow-up task task_2d85b37a). The predicate must agree with the
+      // sampler: keyframes the sampler discards do not drive anything.
+      isKeyframed: hasActiveMotionKeyframes(clip),
     };
   }, [
     selectedClip,
@@ -215,7 +294,12 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
     panY,
   ]);
 
-  const applyBounds = useCallback((bounds: ClipScreenBounds, label: string) => {
+  const isInteractive = context !== null && !context.isKeyframed;
+  // Text scale is stored as a transform but rendered as a font-size change, so
+  // text may only resize uniformly. Shift forces uniform resizing otherwise.
+  const keepRatio = context !== null && (context.isText || shiftHeld);
+
+  const applyBounds = useCallback((bounds: ClipScreenBounds, label: string): void => {
     const target = targetRef.current;
     if (target) {
       target.style.width = `${bounds.width}px`;
@@ -236,12 +320,17 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
   // writes go through `applyBounds` instead, which never re-renders.
   useLayoutEffect(() => {
     contextRef.current = context;
+    keepRatioRef.current = keepRatio;
     if (!context || gestureRef.current) return;
 
     moveableRef.current?.updateRect();
-  }, [context]);
+  }, [context, keepRatio]);
 
   // Re-attach the overlay's stable handle testids to moveable's controls.
+  // Keyed off identity rather than `context`, which is rebuilt on every
+  // playhead tick: re-subscribing a MutationObserver 60 times a second during
+  // playback is pure churn, and moveable only rebuilds its controls when the
+  // selection or the interactive flag changes.
   useEffect(() => {
     const controlBox = moveableRef.current?.getControlBoxElement?.();
     if (!controlBox) return;
@@ -250,7 +339,7 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
     const observer = new MutationObserver(() => stampControlTestIds(controlBox));
     observer.observe(controlBox, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [context]);
+  }, [context?.clipId, isInteractive]);
 
   useEffect(() => {
     const sync = (event: KeyboardEvent) => setShiftHeld(event.shiftKey);
@@ -268,29 +357,46 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
       return false;
     }
 
+    const rect = boundsToRect(active.bounds);
     gestureRef.current = {
       context: active,
-      rect: boundsToRect(active.bounds),
+      startRect: rect,
+      rect,
       transform: active.transform,
+      // A gesture only earns the right to rewrite a scale axis by resizing it.
+      scaleAxes: { x: false, y: false },
       moved: false,
     };
     return true;
   }, []);
 
   const updateGesture = useCallback(
-    (patch: Partial<ClipScreenRect>) => {
+    (patch: Partial<ClipScreenRect>): void => {
       const gesture = gestureRef.current;
       if (!gesture) return;
 
       const { context: active } = gesture;
       gesture.rect = { ...gesture.rect, ...patch };
       gesture.moved = true;
-      gesture.transform = transformFromScreenRect(
+
+      const recovered = transformFromScreenRect(
         gesture.rect,
         active.source,
         active.viewport,
         active.transform,
       );
+
+      // Scale is recovered from the rectangle, which is only meaningful for the
+      // axes a resize actually dragged. Drag and rotate carry the committed
+      // scale through byte-for-byte so they can never nudge it — or, for a clip
+      // scaled below the clamp floor, snap it back up on the first pointer move.
+      gesture.transform = {
+        ...recovered,
+        scale: {
+          x: gesture.scaleAxes.x ? recovered.scale.x : active.transform.scale.x,
+          y: gesture.scaleAxes.y ? recovered.scale.y : active.transform.scale.y,
+        },
+      };
 
       // Re-derive the box from the clamped transform so the preview never
       // shows a position the command would refuse to store.
@@ -302,15 +408,24 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
     [applyBounds],
   );
 
-  const endGesture = useCallback(() => {
+  const endGesture = useCallback((): void => {
     const gesture = gestureRef.current;
     gestureRef.current = null;
     if (!gesture) return;
 
     const { context: active } = gesture;
-    if (!gesture.moved) {
+
+    /** Snaps the box back to the last transform the project actually accepted. */
+    const restoreCommitted = (): void => {
+      // Another gesture or another selection owns the box now; leave it alone.
+      if (gestureRef.current || contextRef.current?.clipId !== active.clipId) return;
+
       applyBounds(active.bounds, formatScaleLabel(active.transform));
       moveableRef.current?.updateRect();
+    };
+
+    if (!gesture.moved) {
+      restoreCommitted();
       return;
     }
 
@@ -320,19 +435,30 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
     );
     moveableRef.current?.updateRect();
 
-    void executeCommand({
-      type: 'SetClipTransform',
-      payload: {
-        sequenceId: active.sequenceId,
-        trackId: active.trackId,
+    void Promise.resolve(
+      executeCommand({
+        type: 'SetClipTransform',
+        payload: {
+          sequenceId: active.sequenceId,
+          trackId: active.trackId,
+          clipId: active.clipId,
+          transform: gesture.transform,
+        },
+      }),
+    ).catch((error: unknown) => {
+      // The final geometry was written imperatively, so a rejected command
+      // would otherwise leave the box parked at a position the store never
+      // took - and no state change means no re-derive to correct it.
+      logger.error('Failed to commit clip transform from preview gesture', {
         clipId: active.clipId,
-        transform: gesture.transform,
-      },
+        error: error instanceof Error ? error.message : String(error),
+      });
+      restoreCommitted();
     });
   }, [applyBounds, executeCommand]);
 
   const handleDrag = useCallback(
-    (event: OnDrag) => {
+    (event: OnDrag): void => {
       updateGesture({
         left: event.beforeTranslate[0],
         top: event.beforeTranslate[1],
@@ -342,21 +468,32 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
   );
 
   const handleResize = useCallback(
-    (event: OnResize) => {
+    (event: OnResize): void => {
+      const gesture = gestureRef.current;
+      if (!gesture) return;
+
       const patch: Partial<ClipScreenRect> = {
         left: event.drag.beforeTranslate[0],
         top: event.drag.beforeTranslate[1],
       };
 
-      // moveable reports both axes on every resize, rounded to CSS pixels. For
-      // an edge handle without keepRatio only the dragged axis may change, so
-      // the other one is left alone rather than absorbing the rounding error.
-      const keepRatio = keepRatioRef.current;
-      if (keepRatio || event.direction[0] !== 0) {
-        patch.width = event.width;
-      }
-      if (keepRatio || event.direction[1] !== 0) {
-        patch.height = event.height;
+      if (keepRatioRef.current) {
+        const uniform = uniformResizeSize(gesture.startRect, event.width, event.height);
+        patch.width = uniform.width;
+        patch.height = uniform.height;
+        gesture.scaleAxes = { x: true, y: true };
+      } else {
+        // moveable reports both axes on every resize, rounded to CSS pixels.
+        // For an edge handle only the dragged axis may change, so the other one
+        // is left alone rather than absorbing the rounding error.
+        if (event.direction[0] !== 0) {
+          patch.width = event.width;
+          gesture.scaleAxes.x = true;
+        }
+        if (event.direction[1] !== 0) {
+          patch.height = event.height;
+          gesture.scaleAxes.y = true;
+        }
       }
 
       updateGesture(patch);
@@ -365,7 +502,7 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
   );
 
   const handleRotate = useCallback(
-    (event: OnRotate) => {
+    (event: OnRotate): void => {
       updateGesture({ rotationDeg: event.beforeRotate });
     },
     [updateGesture],
@@ -375,17 +512,11 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
     return null;
   }
 
-  const isInteractive = !context.isKeyframed;
-  // Text scale is stored as a transform but rendered as a font-size change, so
-  // text may only resize uniformly. Shift forces uniform resizing otherwise.
-  const keepRatio = context.isText || shiftHeld;
-  keepRatioRef.current = keepRatio;
-
   return (
     <div
       className={`absolute inset-0 pointer-events-none ${className}`}
       data-testid="transform-overlay"
-      style={{ zIndex }}
+      style={{ zIndex, '--moveable-color': OVERLAY_ACCENT_COLOR } as CSSProperties}
     >
       <div
         ref={targetRef}
@@ -428,7 +559,10 @@ export const MoveableTransformOverlay = memo(function MoveableTransformOverlay({
         keepRatio={keepRatio}
         renderDirections={MOVEABLE_DIRECTIONS}
         rotationPosition="top"
-        throttleRotate={ROTATION_SNAP_DEG}
+        // moveable throttles the ABSOLUTE angle, so a non-zero value here would
+        // yank a clip already sitting at 7 degrees onto the grid the moment a
+        // rotation starts. Rotation stays free unless Shift asks for the snap.
+        throttleRotate={shiftHeld ? ROTATION_SNAP_DEG : 0}
         transformOrigin={`${context.bounds.anchor.x * 100}% ${context.bounds.anchor.y * 100}%`}
         onDragStart={beginGesture}
         onDrag={handleDrag}

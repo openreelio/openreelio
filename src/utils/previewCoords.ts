@@ -31,8 +31,17 @@ import type { Point2D, Transform } from '@/types';
  */
 export const PLAY_RES_Y = 1080;
 
-/** Lower bound applied to `Transform.scale` so a clip can never collapse. */
-export const MIN_TRANSFORM_SCALE = 0.1;
+/**
+ * Lower bound applied to `Transform.scale`.
+ *
+ * Mirrors the backend sanitizer (`SetClipTransformCommand::sanitize_transform`
+ * and `render::transform_layout::sanitize_scale`, both `clamp(0.01, 100.0)`) so
+ * the preview never shows a scale the command would rewrite.
+ */
+export const MIN_TRANSFORM_SCALE = 0.01;
+
+/** Upper bound applied to `Transform.scale`; mirrors the backend sanitizer. */
+export const MAX_TRANSFORM_SCALE = 100;
 
 // =============================================================================
 // Types
@@ -117,6 +126,19 @@ export function clamp01(value: number): number {
     return 0;
   }
   return Math.min(1, Math.max(0, value));
+}
+
+/**
+ * Clamps a scale factor into the range the backend sanitizer accepts.
+ *
+ * @param value - Raw scale factor; a non-finite value falls back to 1, matching
+ *   the backend.
+ */
+export function clampTransformScale(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 1;
+  }
+  return Math.min(MAX_TRANSFORM_SCALE, Math.max(MIN_TRANSFORM_SCALE, value));
 }
 
 /**
@@ -313,8 +335,14 @@ export function clipBoundsFromTransform(
  * Inverse map: screen rectangle -> clip transform.
  *
  * The anchor is not editable through the overlay, so it is carried over from
- * `baseTransform`. `position` is clamped to 0..1 (matching the backend
- * sanitizer) and `scale` is floored at {@link MIN_TRANSFORM_SCALE}.
+ * `baseTransform`. `position` is clamped to 0..1 and `scale` to
+ * [{@link MIN_TRANSFORM_SCALE}, {@link MAX_TRANSFORM_SCALE}]; both ranges match
+ * the backend sanitizer exactly, so a rectangle this function accepts survives
+ * the round trip through `SetClipTransform` unchanged.
+ *
+ * Note that both scale axes are always recomputed from the rectangle. A caller
+ * driving a gesture that does not resize (drag, rotate) must carry the original
+ * scale through itself rather than adopting the recovered value.
  */
 export function transformFromScreenRect(
   rect: ClipScreenRect,
@@ -342,8 +370,8 @@ export function transformFromScreenRect(
       y: clamp01(anchorCanvasY / canvasHeight),
     },
     scale: {
-      x: Math.max(MIN_TRANSFORM_SCALE, clipCanvasWidth / fitted.width),
-      y: Math.max(MIN_TRANSFORM_SCALE, clipCanvasHeight / fitted.height),
+      x: clampTransformScale(clipCanvasWidth / fitted.width),
+      y: clampTransformScale(clipCanvasHeight / fitted.height),
     },
     rotationDeg: Number.isFinite(rect.rotationDeg) ? rect.rotationDeg : 0,
     anchor: { x: baseTransform.anchor.x, y: baseTransform.anchor.y },

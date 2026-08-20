@@ -14,6 +14,7 @@ import { describe, it, expect } from 'vitest';
 import type { Transform } from '@/types';
 import {
   PLAY_RES_Y,
+  MAX_TRANSFORM_SCALE,
   MIN_TRANSFORM_SCALE,
   clamp01,
   scaleFontSizeToCanvas,
@@ -386,7 +387,7 @@ describe('previewCoords', () => {
       expect(far.position.y).toBe(0);
     });
 
-    it('should floor the recovered scale at the minimum', () => {
+    it('should clamp the recovered scale to the range the backend accepts', () => {
       const viewport = makeViewport();
       const transform = makeTransform();
       const bounds = clipBoundsFromTransform(transform, landscapeSource, viewport);
@@ -400,6 +401,41 @@ describe('previewCoords', () => {
 
       expect(tiny.scale.x).toBe(MIN_TRANSFORM_SCALE);
       expect(tiny.scale.y).toBe(MIN_TRANSFORM_SCALE);
+
+      const huge = transformFromScreenRect(
+        { ...bounds, width: bounds.width * 1000, height: bounds.height * 1000 },
+        landscapeSource,
+        viewport,
+        transform,
+      );
+
+      expect(huge.scale.x).toBe(MAX_TRANSFORM_SCALE);
+      expect(huge.scale.y).toBe(MAX_TRANSFORM_SCALE);
+    });
+
+    it('should match the backend sanitize range exactly', () => {
+      // src-tauri/src/core/commands/clip.rs sanitize_transform and
+      // src-tauri/src/core/render/transform_layout.rs both clamp(0.01, 100.0).
+      expect(MIN_TRANSFORM_SCALE).toBe(0.01);
+      expect(MAX_TRANSFORM_SCALE).toBe(100);
+    });
+
+    it('should round-trip a legal small scale without hitting the floor', () => {
+      const viewport = makeViewport();
+      const transform = makeTransform({ scale: { x: 0.01, y: 0.02 } });
+      const bounds = clipBoundsFromTransform(transform, landscapeSource, viewport);
+
+      const recovered = transformFromScreenRect(
+        bounds,
+        landscapeSource,
+        viewport,
+        transform,
+      );
+
+      expect(recovered.scale.x).toBeCloseTo(0.01, 12);
+      expect(recovered.scale.y).toBeCloseTo(0.02, 12);
+      expect(recovered.position.x).toBeCloseTo(0.5, 12);
+      expect(recovered.position.y).toBeCloseTo(0.5, 12);
     });
 
     it('should keep scale.y untouched for a width-only (edge) resize', () => {

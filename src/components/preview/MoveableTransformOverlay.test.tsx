@@ -8,15 +8,27 @@
  *
  * - exactly one `SetClipTransform` per gesture, on the *End callback only
  * - the committed transform is the one `previewCoords` derives from the rect
- * - position clamping, minimum scale, non-uniform vs uniform resize config
+ * - position clamping, scale clamping, non-uniform vs uniform resize config
+ * - rotation snapping only while Shift is held
  * - no command when the viewport is unmeasured or nothing moved
+ * - the box is restored when the command is rejected
+ *
+ * Everything else runs for real: the project / timeline / playback stores are
+ * driven through `setState`, and the text clip payloads arrive through the real
+ * `useSequenceTextClipData` hook over the globally mocked Tauri IPC boundary.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act, cleanup, render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { invoke } from '@tauri-apps/api/core';
 import type { Sequence, Clip, Track, Asset, TextClipData, Transform } from '@/types';
+import { useProjectStore } from '@/stores/projectStore';
+import { useTimelineStore } from '@/stores/timelineStore';
+import { usePlaybackStore } from '@/stores/playbackStore';
 import {
   clipBoundsFromTransform,
+  MAX_TRANSFORM_SCALE,
+  MIN_TRANSFORM_SCALE,
   type PreviewSource,
   type PreviewViewport,
 } from '@/utils/previewCoords';
@@ -67,25 +79,7 @@ vi.mock('react-moveable', async () => {
   };
 });
 
-const mockExecuteCommand = vi.fn();
-let mockSelectedClipIds: string[] = ['clip-1'];
-let mockTextClipDataById = new Map<string, TextClipData>();
-
-vi.mock('@/stores/projectStore', () => ({
-  useProjectStore: (selector: (state: { executeCommand: typeof mockExecuteCommand }) => unknown) =>
-    selector({ executeCommand: mockExecuteCommand }),
-}));
-
-vi.mock('@/stores/timelineStore', () => ({
-  useTimelineStore: (selector: (state: { selectedClipIds: string[] }) => unknown) =>
-    selector({ selectedClipIds: mockSelectedClipIds }),
-}));
-
-vi.mock('@/hooks/useSequenceTextClipData', () => ({
-  useSequenceTextClipData: () => mockTextClipDataById,
-}));
-
-// Imported after the mocks so the component picks up the mocked moveable.
+// Imported after the moveable mock so the component picks up the stub.
 const { MoveableTransformOverlay } = await import('./MoveableTransformOverlay');
 
 // =============================================================================
@@ -106,6 +100,9 @@ const defaultProps = {
 
 const viewport: PreviewViewport = { ...defaultProps };
 const videoSource: PreviewSource = { width: 1920, height: 1080 };
+
+const realExecuteCommand = useProjectStore.getState().executeCommand;
+const mockExecuteCommand = vi.fn();
 
 function identityTransform(): Transform {
   return {
@@ -156,12 +153,8 @@ function makeSequence(): Sequence {
   };
 }
 
-function makeTextSequence(alignment: 'left' | 'center' | 'right'): Sequence {
-  const sequence = makeSequence();
-  const clip = sequence.tracks[0].clips[0];
-  clip.assetId = '__text__clip-1';
-  clip.label = 'Text: Anchored title';
-  mockTextClipDataById.set(clip.id, {
+function makeTextClipData(alignment: 'left' | 'center' | 'right'): TextClipData {
+  return {
     content: 'Anchored title',
     style: {
       fontFamily: 'Arial',
@@ -179,7 +172,28 @@ function makeTextSequence(alignment: 'left' | 'center' | 'right'): Sequence {
     position: { x: 0.25, y: 0.5 },
     rotation: 0,
     opacity: 1,
-  });
+  };
+}
+
+/**
+ * Builds a text-clip sequence and arms the Tauri IPC boundary with the payload
+ * the real `useSequenceTextClipData` hook fetches for it.
+ */
+function makeTextSequence(alignment: 'left' | 'center' | 'right'): Sequence {
+  const sequence = makeSequence();
+  const clip = sequence.tracks[0].clips[0];
+  clip.assetId = '__text__clip-1';
+  clip.label = 'Text: Anchored title';
+
+  vi.mocked(invoke).mockResolvedValue([
+    {
+      sequenceId: sequence.id,
+      trackId: 'track-1',
+      clipId: clip.id,
+      textData: makeTextClipData(alignment),
+    },
+  ]);
+
   return sequence;
 }
 
@@ -227,6 +241,17 @@ function startBounds() {
   return clipBoundsFromTransform(identityTransform(), videoSource, viewport);
 }
 
+/** The inline transform the overlay box currently draws. */
+function boxTransformStyle(): string {
+  return screen.getByTestId('transform-bounds').style.transform;
+}
+
+function renderOverlay(sequence: Sequence = makeSequence()) {
+  return render(
+    <MoveableTransformOverlay sequence={sequence} assets={makeAssets()} {...defaultProps} />,
+  );
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -234,9 +259,26 @@ function startBounds() {
 describe('MoveableTransformOverlay', () => {
   beforeEach(() => {
     mockExecuteCommand.mockReset();
-    mockSelectedClipIds = ['clip-1'];
-    mockTextClipDataById = new Map<string, TextClipData>();
+    mockExecuteCommand.mockResolvedValue({ ok: true });
     lastMoveableProps = null;
+
+    useProjectStore.setState({ executeCommand: mockExecuteCommand });
+    useTimelineStore.setState({ selectedClipIds: ['clip-1'] });
+    usePlaybackStore.setState({ currentTime: 0 });
+
+    // The real text-clip hook only fetches inside the Tauri runtime.
+    (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  });
+
+  afterEach(() => {
+    // Unmount before restoring the stores: a store write while the overlay is
+    // still mounted is an un-acted React update.
+    cleanup();
+    act(() => {
+      useProjectStore.setState({ executeCommand: realExecuteCommand });
+      useTimelineStore.setState({ selectedClipIds: [] });
+    });
+    delete (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 
   describe('selection gating', () => {
@@ -245,15 +287,9 @@ describe('MoveableTransformOverlay', () => {
       ['multiple clips are selected', ['clip-1', 'clip-2']],
       ['the selected clip is missing', ['ghost-clip']],
     ])('should render nothing when %s', (_label, selection) => {
-      mockSelectedClipIds = selection;
+      useTimelineStore.setState({ selectedClipIds: selection });
 
-      render(
-        <MoveableTransformOverlay
-          sequence={makeSequence()}
-          assets={makeAssets()}
-          {...defaultProps}
-        />,
-      );
+      renderOverlay();
 
       expect(screen.queryByTestId('transform-overlay')).not.toBeInTheDocument();
     });
@@ -269,13 +305,7 @@ describe('MoveableTransformOverlay', () => {
 
   describe('moveable configuration', () => {
     it('should enable drag, resize and rotate with the 8 resize directions', () => {
-      render(
-        <MoveableTransformOverlay
-          sequence={makeSequence()}
-          assets={makeAssets()}
-          {...defaultProps}
-        />,
-      );
+      renderOverlay();
 
       const props = moveable();
       expect(props.draggable).toBe(true);
@@ -285,18 +315,6 @@ describe('MoveableTransformOverlay', () => {
       expect(props.renderDirections).toEqual([...RENDER_DIRECTIONS]);
     });
 
-    it('should snap rotation to 15 degree steps', () => {
-      render(
-        <MoveableTransformOverlay
-          sequence={makeSequence()}
-          assets={makeAssets()}
-          {...defaultProps}
-        />,
-      );
-
-      expect(moveable().throttleRotate).toBe(15);
-    });
-
     it('should rotate about the anchor rather than the box center', () => {
       const sequence = makeSequence();
       sequence.tracks[0].clips[0].transform = {
@@ -304,38 +322,24 @@ describe('MoveableTransformOverlay', () => {
         anchor: { x: 0, y: 1 },
       };
 
-      render(
-        <MoveableTransformOverlay
-          sequence={sequence}
-          assets={makeAssets()}
-          {...defaultProps}
-        />,
-      );
+      renderOverlay(sequence);
 
       expect(moveable().transformOrigin).toBe('0% 100%');
     });
 
     it('should allow non-uniform resizing for a video clip', () => {
-      render(
-        <MoveableTransformOverlay
-          sequence={makeSequence()}
-          assets={makeAssets()}
-          {...defaultProps}
-        />,
-      );
+      renderOverlay();
 
       expect(moveable().keepRatio).toBe(false);
     });
 
-    it('should force uniform resizing for a text clip', () => {
-      render(
-        <MoveableTransformOverlay
-          sequence={makeTextSequence('center')}
-          assets={makeAssets()}
-          {...defaultProps}
-        />,
-      );
+    it('should force uniform resizing for a text clip', async () => {
+      renderOverlay(makeTextSequence('right'));
 
+      expect(moveable().keepRatio).toBe(true);
+      // Settle the text payload the real hook fetches so the assertion also
+      // holds once the resolved alignment has been applied.
+      await waitFor(() => expect(moveable().transformOrigin).toBe('100% 50%'));
       expect(moveable().keepRatio).toBe(true);
     });
 
@@ -345,13 +349,7 @@ describe('MoveableTransformOverlay', () => {
         { timeOffset: 0, interpolation: 'linear', transform: identityTransform() },
       ];
 
-      render(
-        <MoveableTransformOverlay
-          sequence={sequence}
-          assets={makeAssets()}
-          {...defaultProps}
-        />,
-      );
+      renderOverlay(sequence);
 
       const props = moveable();
       expect(props.draggable).toBe(false);
@@ -364,17 +362,59 @@ describe('MoveableTransformOverlay', () => {
 
       expect(mockExecuteCommand).not.toHaveBeenCalled();
     });
+
+    it('should stay editable when every motion keyframe is invalid', () => {
+      const sequence = makeSequence();
+      // The motion sampler discards non-finite / negative offsets, so these
+      // keyframes drive nothing and must not lock the overlay.
+      sequence.tracks[0].clips[0].motionKeyframes = [
+        { timeOffset: Number.NaN, interpolation: 'linear', transform: identityTransform() },
+        { timeOffset: -2, interpolation: 'linear', transform: identityTransform() },
+      ];
+
+      renderOverlay(sequence);
+
+      const props = moveable();
+      expect(props.draggable).toBe(true);
+      expect(props.onDragStart()).toBe(true);
+
+      const bounds = startBounds();
+      props.onDrag({ beforeTranslate: [bounds.left + 96, bounds.top] });
+      props.onDragEnd();
+
+      expect(mockExecuteCommand).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('rotation snapping', () => {
+    it('should rotate freely when Shift is not held', () => {
+      renderOverlay();
+
+      expect(moveable().throttleRotate).toBe(0);
+    });
+
+    it('should snap to 15 degree steps while Shift is held', () => {
+      renderOverlay();
+
+      fireEvent.keyDown(window, { key: 'Shift', shiftKey: true });
+      expect(moveable().throttleRotate).toBe(15);
+
+      fireEvent.keyUp(window, { key: 'Shift', shiftKey: false });
+      expect(moveable().throttleRotate).toBe(0);
+    });
+
+    it('should force uniform resizing while Shift is held', () => {
+      renderOverlay();
+
+      expect(moveable().keepRatio).toBe(false);
+      fireEvent.keyDown(window, { key: 'Shift', shiftKey: true });
+      expect(moveable().keepRatio).toBe(true);
+    });
   });
 
   describe('drag gesture', () => {
     beforeEach(() => {
-      render(
-        <MoveableTransformOverlay
-          sequence={makeSequence()}
-          assets={makeAssets()}
-          {...defaultProps}
-        />,
-      );
+      renderOverlay();
     });
 
     it('should commit exactly one SetClipTransform, and only on drag end', () => {
@@ -439,15 +479,54 @@ describe('MoveableTransformOverlay', () => {
     });
   });
 
+  describe('scale is owned by resize alone', () => {
+    it('should carry a tiny scale through a drag untouched', () => {
+      const sequence = makeSequence();
+      sequence.tracks[0].clips[0].transform = {
+        ...identityTransform(),
+        scale: { x: 0.02, y: 0.02 },
+      };
+
+      renderOverlay(sequence);
+      const bounds = clipBoundsFromTransform(
+        sequence.tracks[0].clips[0].transform,
+        videoSource,
+        viewport,
+      );
+
+      const props = moveable();
+      props.onDragStart();
+      props.onDrag({ beforeTranslate: [bounds.left + 96, bounds.top + 27] });
+      props.onDragEnd();
+
+      const transform = committedTransform();
+      expect(transform.scale).toEqual({ x: 0.02, y: 0.02 });
+      expect(transform.position.x).toBeCloseTo(0.6);
+    });
+
+    it('should carry scale through a rotation untouched', () => {
+      const sequence = makeSequence();
+      sequence.tracks[0].clips[0].transform = {
+        ...identityTransform(),
+        scale: { x: 0.02, y: 1.75 },
+      };
+
+      renderOverlay(sequence);
+
+      const props = moveable();
+      props.onRotateStart();
+      props.onRotate({ beforeRotate: 33 });
+      props.onRotateEnd();
+
+      const transform = committedTransform();
+      expect(transform.scale).toEqual({ x: 0.02, y: 1.75 });
+      expect(transform.rotationDeg).toBe(33);
+    });
+  });
+
   describe('resize gesture', () => {
     beforeEach(() => {
-      render(
-        <MoveableTransformOverlay
-          sequence={makeSequence()}
-          assets={makeAssets()}
-          {...defaultProps}
-        />,
-      );
+      renderOverlay();
     });
 
     it('should scale only the X axis for an east-edge resize', () => {
@@ -523,7 +602,7 @@ describe('MoveableTransformOverlay', () => {
       expect(transform.scale.y).toBeGreaterThan(1);
     });
 
-    it('should enforce the minimum scale of 0.1', () => {
+    it('should clamp a collapsed resize to the backend minimum scale', () => {
       const bounds = startBounds();
       const props = moveable();
 
@@ -537,20 +616,35 @@ describe('MoveableTransformOverlay', () => {
       props.onResizeEnd();
 
       const transform = committedTransform();
-      expect(transform.scale.x).toBeGreaterThanOrEqual(0.1);
-      expect(transform.scale.y).toBeGreaterThanOrEqual(0.1);
+      expect(transform.scale.x).toBe(MIN_TRANSFORM_SCALE);
+      expect(transform.scale.y).toBe(MIN_TRANSFORM_SCALE);
+    });
+
+    it('should clamp a runaway resize to the backend maximum scale', () => {
+      const bounds = startBounds();
+      const props = moveable();
+
+      props.onResizeStart();
+      props.onResize({
+        direction: [1, 1],
+        width: bounds.width * 500,
+        height: bounds.height * 500,
+        drag: { beforeTranslate: [bounds.left, bounds.top] },
+      });
+      props.onResizeEnd();
+
+      const transform = committedTransform();
+      expect(transform.scale.x).toBe(MAX_TRANSFORM_SCALE);
+      expect(transform.scale.y).toBe(MAX_TRANSFORM_SCALE);
     });
   });
 
   describe('text clip anchoring', () => {
-    it('should keep a left-aligned text anchor fixed while the right edge grows', () => {
-      render(
-        <MoveableTransformOverlay
-          sequence={makeTextSequence('left')}
-          assets={makeAssets()}
-          {...defaultProps}
-        />,
-      );
+    it('should keep a left-aligned text anchor fixed while the right edge grows', async () => {
+      renderOverlay(makeTextSequence('left'));
+
+      // The anchor follows the alignment once the payload resolves.
+      await waitFor(() => expect(moveable().transformOrigin).toBe('0% 50%'));
 
       const boxElement = screen.getByTestId('transform-bounds');
       const startWidth = Number.parseFloat(boxElement.style.width);
@@ -584,17 +678,46 @@ describe('MoveableTransformOverlay', () => {
       expect(transform.scale.x).toBeGreaterThan(1);
       expect(transform.scale.y).toBeCloseTo(transform.scale.x, 6);
     });
+
+    it('should stay exactly proportional when moveable rounds a uniform resize', async () => {
+      renderOverlay(makeTextSequence('center'));
+      await waitFor(() => expect(moveable().keepRatio).toBe(true));
+
+      const boxElement = screen.getByTestId('transform-bounds');
+      const startWidth = Number.parseFloat(boxElement.style.width);
+      const startHeight = Number.parseFloat(boxElement.style.height);
+      const startRatio = startWidth / startHeight;
+
+      const props = moveable();
+      props.onResizeStart();
+
+      // Replay a sequence of moveable payloads whose height is rounded to whole
+      // CSS pixels: the drifting axis must be re-derived, not adopted.
+      for (const grow of [17, 41, 96]) {
+        const width = startWidth + grow;
+        props.onResize({
+          direction: [1, 1],
+          width,
+          height: Math.round(width / startRatio),
+          drag: { beforeTranslate: [0, 0] },
+        });
+
+        const ratio =
+          Number.parseFloat(boxElement.style.width) /
+          Number.parseFloat(boxElement.style.height);
+        expect(ratio).toBeCloseTo(startRatio, 12);
+      }
+
+      props.onResizeEnd();
+
+      const transform = committedTransform();
+      expect(transform.scale.x / transform.scale.y).toBeCloseTo(1, 12);
+    });
   });
 
   describe('rotate gesture', () => {
     it('should commit the rotation reported by moveable', () => {
-      render(
-        <MoveableTransformOverlay
-          sequence={makeSequence()}
-          assets={makeAssets()}
-          {...defaultProps}
-        />,
-      );
+      renderOverlay();
 
       const props = moveable();
       props.onRotateStart();
@@ -605,6 +728,44 @@ describe('MoveableTransformOverlay', () => {
       expect(transform.rotationDeg).toBe(45);
       expect(transform.position.x).toBeCloseTo(0.5);
       expect(transform.scale).toEqual({ x: 1, y: 1 });
+    });
+  });
+
+  describe('rejected command', () => {
+    it('should restore the pre-gesture box when the command fails', async () => {
+      mockExecuteCommand.mockRejectedValue(new Error('Clip not found'));
+
+      renderOverlay();
+      const committedBox = boxTransformStyle();
+
+      const bounds = startBounds();
+      const props = moveable();
+      props.onDragStart();
+      props.onDrag({ beforeTranslate: [bounds.left + 240, bounds.top + 120] });
+      props.onDragEnd();
+
+      // The gesture leaves the box at the position it dragged to...
+      expect(boxTransformStyle()).not.toBe(committedBox);
+
+      // ...until the rejection lands, which snaps it back to the stored state.
+      await waitFor(() => expect(boxTransformStyle()).toBe(committedBox));
+    });
+
+    it('should keep the box where the gesture left it when the command succeeds', async () => {
+      renderOverlay();
+      const committedBox = boxTransformStyle();
+
+      const bounds = startBounds();
+      const props = moveable();
+      props.onDragStart();
+      props.onDrag({ beforeTranslate: [bounds.left + 240, bounds.top + 120] });
+      props.onDragEnd();
+
+      const draggedBox = boxTransformStyle();
+      expect(draggedBox).not.toBe(committedBox);
+
+      await Promise.resolve();
+      expect(boxTransformStyle()).toBe(draggedBox);
     });
   });
 
