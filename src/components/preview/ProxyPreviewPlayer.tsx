@@ -42,7 +42,7 @@ import {
   isClipActiveAtTime,
 } from '@/utils/clipTiming';
 import { getClipMotionTransformAtTime } from '@/utils/clipMotion';
-import { scaleFontSizeToCanvas } from '@/utils/previewCoords';
+import { computeContainFit, scaleFontSizeToCanvas } from '@/utils/previewCoords';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { TextPlacementOverlay, type TextPlacementCommitPayload } from './TextPlacementOverlay';
 import { TransformOverlay } from './TransformOverlay';
@@ -1460,13 +1460,12 @@ export function ProxyPreviewPlayer({
       : CONTROLS_Z_INDEX_OFFSET;
   const transformOverlayZIndex = Math.max(1, controlsZIndex - 2);
   const textPlacementOverlayZIndex = Math.max(1, controlsZIndex - 1);
-  const overlayDisplayScale =
-    containerSize.width <= 0 || containerSize.height <= 0
-      ? 1
-      : Math.min(
-          containerSize.width / previewCanvasWidth,
-          containerSize.height / previewCanvasHeight,
-        );
+  const overlayDisplayScale = computeContainFit(
+    previewCanvasWidth,
+    previewCanvasHeight,
+    containerSize.width,
+    containerSize.height,
+  );
 
   // Empty state
   if (!sequence) {

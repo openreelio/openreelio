@@ -847,13 +847,10 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     };
   }, [pause]);
 
-  const overlayDisplayScale = useMemo(() => {
-    if (width <= 0 || height <= 0 || containerSize.width <= 0 || containerSize.height <= 0) {
-      return 1;
-    }
-
-    return Math.min(containerSize.width / width, containerSize.height / height);
-  }, [containerSize.width, containerSize.height, width, height]);
+  const overlayDisplayScale = useMemo(
+    () => computeContainFit(width, height, containerSize.width, containerSize.height),
+    [containerSize.width, containerSize.height, width, height],
+  );
 
   // ===========================================================================
   // Render Empty State
