@@ -819,6 +819,25 @@ openreelio-cli transcription generate --path ./demo --asset <ASSET_ID> --import
 openreelio-cli transcription generate-sequence --path ./demo --import
 ```
 
+**Word timings are DTW-derived on supported models.** Whisper's cheap heuristic
+token timestamps are replaced by whisper.cpp's dynamic-time-warping alignment of
+the decoder's cross-attention, which is what drives where each cue starts and
+ends. This applies to `tiny`, `base`, `small`, `medium`, `large-v3`,
+`large-v3-turbo` and their quantized variants. `large` (`ggml-large.bin`) is
+excluded: the plain filename is version-ambiguous upstream, and a mismatched
+alignment-head preset makes model loading fail outright, so that model keeps the
+heuristic timings. If DTW initialization fails for any other reason,
+transcription silently continues without it.
+
+DTW timestamps land on whisper.cpp's ~20 ms encoder frame grid and are written
+only where the alignment path transitions, so a deterministic repair pass runs
+afterwards: gaps are interpolated, word starts are kept ordered and inside their
+segment, collapsed words are grown back to at least 40 ms, a word that would
+otherwise stretch across a pause is released after at most 350 ms per
+syllable-ish unit, and each start is snapped to the nearest short-time-energy
+onset within 80 ms when that does not disturb its neighbours. Expect word
+boundaries accurate to a few tens of milliseconds, not to the sample.
+
 ## 8. MCP server
 
 The same binary is an MCP server over stdio. `--stdio` is required to actually

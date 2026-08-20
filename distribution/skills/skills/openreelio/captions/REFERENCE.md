@@ -245,6 +245,25 @@ into a caption track; without it, use `--output <FILE>` and import later.
 `generate-sequence` transcribes the audible mix of a sequence instead of a single
 asset.
 
+**Word timings come from DTW alignment on supported models.** Cue boundaries are
+derived from whisper.cpp's dynamic-time-warping alignment of decoder
+cross-attention rather than Whisper's cheap heuristic token timestamps, on
+`tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo` and their
+quantized variants. `large` (`ggml-large.bin`) is excluded because the plain
+filename is version-ambiguous upstream and a mismatched alignment-head preset
+makes the model fail to load; it keeps the heuristic timings, as does any model
+whose DTW initialization fails.
+
+DTW timestamps are quantized to whisper.cpp's ~20 ms encoder frames and are
+emitted only at alignment transitions, so a deterministic repair pass follows:
+gaps are interpolated, starts stay ordered and inside their segment, collapsed
+words are grown back to at least 40 ms, a word that would otherwise span a pause
+is released after at most 350 ms per syllable-ish unit, and starts are snapped to
+the nearest short-time-energy onset within 80 ms when ordering allows. Word
+boundaries are accurate to a few tens of milliseconds; do not treat them as
+frame-exact. Nothing here changes the CLI surface — there are no timing knobs to
+pass.
+
 After generating captions, run `verify` — `caption.overlap`,
 `caption.out_of_bounds`, `caption.reading_rate`, and `caption.safe_area` catch
 the failures auto-generated subtitles actually produce. See
