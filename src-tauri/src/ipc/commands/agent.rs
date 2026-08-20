@@ -316,10 +316,11 @@ pub async fn read_agent_trace(
         project.path.clone()
     };
 
-    // Sanitize trace_id to prevent path traversal
-    if trace_id.contains('/') || trace_id.contains('\\') || trace_id.contains("..") {
-        return Err("Invalid trace_id: contains path separators or '..'".to_string());
-    }
+    // Use the same allowlist the write path applies. The inline check this replaces
+    // missed `:`, so a `trace_id` of `C:secret` escaped the traces directory on Windows
+    // (`Path::join` drops the base path for a disk-prefixed component) and returned the
+    // file's contents to the renderer.
+    validate_trace_id(&trace_id)?;
 
     let file_path = project_path
         .join(".openreelio")

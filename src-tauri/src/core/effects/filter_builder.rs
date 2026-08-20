@@ -128,7 +128,17 @@ fn luma_sat_factor_expr(points: &[CurvePoint], luma_expr: &str) -> String {
 // FFmpeg Utility Functions
 // =============================================================================
 
-fn escape_ffmpeg_filter_value(raw: &str) -> String {
+/// Escapes a value for embedding inside a single-quoted FFmpeg filtergraph argument.
+///
+/// This is the single canonical filtergraph quoting rule for the whole crate; any
+/// other escaping of a value that ends up inside `option='<value>'` must delegate
+/// here rather than re-deriving the rules (see the rationale in the body).
+///
+/// For a **filesystem path**, prefer [`escape_ffmpeg_filter_path`], which normalizes
+/// separators before applying this rule so that a path is spelled identically in every
+/// filter. Both functions provide the same security property; see that function for why
+/// the normalization is worth doing anyway.
+pub(crate) fn escape_ffmpeg_filter_value(raw: &str) -> String {
     // FFmpeg filtergraphs treat `:` and `,` as separators and `\` as an escape character.
     // Windows paths also contain `\` and `:` (drive letter), so we must escape them to
     // keep filter strings replayable and safe against filtergraph injection.
@@ -145,6 +155,49 @@ fn escape_ffmpeg_filter_value(raw: &str) -> String {
         .replace(':', r"\:")
         .replace(',', r"\,")
         .replace('\'', r"'\''")
+}
+
+/// Escapes a filesystem path for embedding inside a single-quoted FFmpeg filter argument.
+///
+/// Windows separators are normalized to `/` before the canonical quoting rule is
+/// applied. This is a consistency measure, not the security boundary. FFmpeg accepts
+/// `/` as a path separator on Windows, and normalizing first means the emitted path is
+/// spelled the same way no matter how many unescaping passes a particular filter's
+/// option parser happens to apply to its value — so a path that works in one filter
+/// works in all of them.
+///
+/// The security property — that no input can terminate the quoted region and open a new
+/// filter node — comes entirely from the single-quote wrapping applied by
+/// [`escape_ffmpeg_filter_value`], which this function delegates to. Normalizing
+/// separators neither adds to nor subtracts from that.
+///
+/// The drive colon must still be escaped: a raw `:` is read as an option separator
+/// even inside a single-quoted region.
+///
+/// Known limitation: a path containing a literal `'` cannot be represented faithfully.
+/// The `'\''` idiom keeps the parse inside the quoted region (so the security property
+/// holds) but the quote is dropped from the resulting value, yielding a path that does
+/// not exist. Callers that generate their own paths must reject apostrophes up front —
+/// see `core::fs::validate_filter_safe_path`.
+pub(crate) fn escape_ffmpeg_filter_path(raw: &str) -> String {
+    escape_ffmpeg_filter_value(&raw.replace('\\', "/"))
+}
+
+/// Builds the `vidstabdetect` analysis filter that writes motion transforms to `transforms_path`.
+///
+/// This is the analysis half of stabilization; [`FilterBuilder::build_stabilize_filter`]
+/// consumes the resulting `.trf` file in the apply pass. The path is emitted inside a
+/// single-quoted filter argument and therefore goes through [`escape_ffmpeg_filter_path`]:
+/// the transforms file is named after a clip id that originates in the project file, which
+/// is untrusted input.
+// The only production caller is the `stabilize_clip` IPC command, which is compiled
+// out without the `gui` feature; the tests below still exercise it in every config.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub(crate) fn build_vidstabdetect_filter(transforms_path: &std::path::Path) -> String {
+    format!(
+        "vidstabdetect=shakiness=10:accuracy=15:result='{}'",
+        escape_ffmpeg_filter_path(&transforms_path.to_string_lossy())
+    )
 }
 
 fn escape_drawtext_value(raw: &str) -> String {
@@ -1094,7 +1147,12 @@ impl Effect {
                     // Fallback to anlmdn if no model path provided
                     self.build_anlmdn_filter(strength)
                 } else {
-                    let escaped = model_path.replace('\\', "/").replace('\'', "'\\''");
+                    // Shared path rule: normalize separators, then apply the
+                    // canonical filtergraph quoting. This also escapes `:`, which
+                    // the previous ad-hoc escaping omitted — a raw `:` inside the
+                    // quoted region is still read as an option separator, so a
+                    // Windows drive-letter model path failed to parse.
+                    let escaped = escape_ffmpeg_filter_path(&model_path);
                     format!("arnndn=m='{}'", escaped)
                 }
             }
@@ -1419,11 +1477,8 @@ impl Effect {
 
         // Emitted inside a single-quoted region (`input='<path>'`); a literal `'`
         // must be closed-escaped-reopened as `'\''` so it cannot terminate the
-        // quote and inject additional filter nodes. See escape_ffmpeg_filter_value.
-        let escaped_path = analysis_path
-            .replace('\\', "/")
-            .replace(':', "\\:")
-            .replace('\'', "'\\''");
+        // quote and inject additional filter nodes. See escape_ffmpeg_filter_path.
+        let escaped_path = escape_ffmpeg_filter_path(&analysis_path);
 
         format!(
             "vidstabtransform=input='{}':smoothing={}:crop={}:optzoom={}:zoom={:.1}:interpol=bilinear",
@@ -5245,6 +5300,63 @@ mod tests {
     }
 
     #[test]
+    fn test_vidstabdetect_single_quote_cannot_break_out_of_filter() {
+        // The transforms file is named `<clipId>.trf`, and clip ids come from the
+        // project file. The id gate rejects separators and `..` but not `'`, so the
+        // quoting rule is what stops a crafted id from closing `result='...'` and
+        // having the remainder parsed as filtergraph syntax (`;[in]movie=...` gives
+        // arbitrary file read/write).
+        let filter = build_vidstabdetect_filter(std::path::Path::new(
+            "/proj/.openreelio/stabilize/x';[in]movie=filename=/etc/passwd[out];[out].trf",
+        ));
+
+        assert!(
+            !filter.contains("x';"),
+            "Single quote must not terminate the quoted region: {filter}"
+        );
+        assert!(
+            filter.contains(
+                "result='/proj/.openreelio/stabilize/x'\\'';[in]movie=filename=/etc/passwd[out];[out].trf'"
+            ),
+            "Expected close-escape-reopen quoting of the injected value, got: {filter}"
+        );
+    }
+
+    #[test]
+    fn test_vidstabdetect_normalizes_windows_separators_and_escapes_the_drive_colon() {
+        // Separators are normalized so a path is spelled the same way regardless of
+        // how many unescaping passes a given filter's option parser applies. The
+        // drive colon still has to be escaped or it is read as an option separator
+        // even inside the quoted region.
+        let filter = build_vidstabdetect_filter(std::path::Path::new(
+            r"D:\proj\.openreelio\stabilize\clip1.trf",
+        ));
+
+        assert_eq!(
+            filter,
+            "vidstabdetect=shakiness=10:accuracy=15:result='D\\:/proj/.openreelio/stabilize/clip1.trf'"
+        );
+    }
+
+    #[test]
+    fn test_arnndn_model_path_escapes_the_drive_colon() {
+        // A raw `:` is still read as an option separator inside a quoted region, so
+        // a Windows drive-letter model path has to be escaped like any other path.
+        let mut effect = Effect::new(EffectType::NoiseReduction);
+        effect.set_param("algorithm", ParamValue::String("arnndn".to_string()));
+        effect.set_param(
+            "model_path",
+            ParamValue::String(r"D:\models\rnnoise.onnx".to_string()),
+        );
+
+        let filter = effect.to_filter_string("0:a", "aout");
+        assert!(
+            filter.contains("m='D\\:/models/rnnoise.onnx'"),
+            "Expected normalized and escaped model path, got: {filter}"
+        );
+    }
+
+    #[test]
     fn test_stabilize_filter_with_analysis_path() {
         let mut effect = Effect::new(EffectType::Stabilize);
         effect.set_param(
@@ -5656,5 +5768,162 @@ mod tests {
         );
         assert!(result.contains("null"), "Should produce null filter");
         assert!(!result.contains("eq="), "Should NOT apply effect globally");
+    }
+
+    // =========================================================================
+    // Empirical filtergraph injection tests
+    //
+    // The string assertions above encode a *belief* about how FFmpeg's filtergraph
+    // parser reads a quoted option value. These tests encode the security property
+    // itself: they hand the real parser a hostile path and count how many filter
+    // nodes it built. Exactly one means the payload never left the quoted region.
+    //
+    // Ignored by default because they need an `ffmpeg` binary. Run with:
+    //   cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored injection
+    // =========================================================================
+
+    /// Resolves an ffmpeg binary for the empirical tests.
+    fn ffmpeg_binary_for_tests() -> std::path::PathBuf {
+        std::env::var_os("OPENREELIO_FFMPEG_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"))
+    }
+
+    /// Parses a filtergraph with the real FFmpeg and returns the node names it built.
+    ///
+    /// The graph is passed via `-/filter_complex <file>` so that nothing in the payload
+    /// has to survive an extra round of shell or argv quoting — what FFmpeg's parser
+    /// sees is byte-for-byte what the escaper produced. `-v debug` makes the parser name
+    /// every node it creates as `Parsed_<filter>_<index>`.
+    ///
+    /// The input is a generated file rather than `-f lavfi`, because a lavfi input is
+    /// itself a filtergraph and contributes its own `Parsed_*` node to the log — which
+    /// would be counted as if the payload had produced it.
+    ///
+    /// Returns `None` when ffmpeg could not be launched at all.
+    fn parsed_filter_node_names(filtergraph: &str) -> Option<Vec<String>> {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let graph_file = dir.path().join("graph.txt");
+        std::fs::write(&graph_file, filtergraph).expect("write filtergraph");
+
+        let input_file = dir.path().join("input.mp4");
+        let fixture = std::process::Command::new(ffmpeg_binary_for_tests())
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:r=5:d=0.4",
+                "-pix_fmt",
+                "yuv420p",
+                "-frames:v",
+                "2",
+            ])
+            .arg(&input_file)
+            .output()
+            .ok()?;
+        if !fixture.status.success() || !input_file.exists() {
+            return None;
+        }
+
+        let output = std::process::Command::new(ffmpeg_binary_for_tests())
+            .args(["-hide_banner", "-v", "debug", "-nostdin", "-i"])
+            .arg(&input_file)
+            .arg("-/filter_complex")
+            .arg(&graph_file)
+            .args(["-map", "[out]", "-frames:v", "1", "-f", "null", "-"])
+            .output()
+            .ok()?;
+
+        // Collect distinct `Parsed_*` identifiers. The exit status is deliberately
+        // ignored: a node that fails to *initialize* (a missing subtitle file, say)
+        // still tells us how many nodes the parser *created*, which is the property
+        // under test.
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let mut names: Vec<String> = Vec::new();
+        for (index, _) in stderr.match_indices("Parsed_") {
+            let name: String = stderr[index..]
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .collect();
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        Some(names)
+    }
+
+    /// Whether the local ffmpeg advertises `filter_name`.
+    fn ffmpeg_has_filter(filter_name: &str) -> bool {
+        std::process::Command::new(ffmpeg_binary_for_tests())
+            .args(["-hide_banner", "-filters"])
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout).contains(&format!(" {filter_name} "))
+            })
+    }
+
+    /// A path carrying a filtergraph-injection payload, as a crafted project file
+    /// could produce by naming a clip or a subtitle asset.
+    ///
+    /// Measured negative control (ffmpeg 9.0.1, `-/filter_complex` + `-v debug`): escaping
+    /// the quote naively as `\'` instead of `'\''` makes this exact payload parse as a
+    /// *second* filter node — `Parsed_anullsrc_1` — for both `subtitles=filename=` and
+    /// `vidstabdetect=result=`. So the `== 1` assertions below genuinely discriminate;
+    /// they are not satisfied by every possible input.
+    const INJECTION_PAYLOAD: &str = "/proj/x';anullsrc=r=48000";
+
+    #[test]
+    #[ignore = "requires an ffmpeg binary; run with --ignored"]
+    fn subtitles_path_injection_creates_exactly_one_filter_node() {
+        // Built exactly as `append_ass_text_overlay` builds it.
+        let escaped = escape_ffmpeg_filter_value(&format!("{INJECTION_PAYLOAD}.ass"));
+        let graph = format!("[0:v]subtitles=filename='{escaped}'[out]");
+
+        let Some(nodes) = parsed_filter_node_names(&graph) else {
+            eprintln!("Skipping: ffmpeg could not be launched");
+            return;
+        };
+
+        assert_eq!(
+            nodes.len(),
+            1,
+            "The payload escaped the quoted region and built extra filter nodes: {nodes:?}"
+        );
+        assert!(
+            nodes[0].starts_with("Parsed_subtitles_"),
+            "Expected the single node to be the subtitles filter, got {nodes:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an ffmpeg binary built with libvidstab; run with --ignored"]
+    fn vidstabdetect_path_injection_creates_exactly_one_filter_node() {
+        if !ffmpeg_has_filter("vidstabdetect") {
+            eprintln!("Skipping: this ffmpeg has no vidstabdetect filter");
+            return;
+        }
+
+        let detect =
+            build_vidstabdetect_filter(std::path::Path::new(&format!("{INJECTION_PAYLOAD}.trf")));
+        let graph = format!("[0:v]{detect}[out]");
+
+        let Some(nodes) = parsed_filter_node_names(&graph) else {
+            eprintln!("Skipping: ffmpeg could not be launched");
+            return;
+        };
+
+        assert_eq!(
+            nodes.len(),
+            1,
+            "The payload escaped the quoted region and built extra filter nodes: {nodes:?}"
+        );
+        assert!(
+            nodes[0].starts_with("Parsed_vidstabdetect_"),
+            "Expected the single node to be the vidstabdetect filter, got {nodes:?}"
+        );
     }
 }

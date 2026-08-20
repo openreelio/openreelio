@@ -45,10 +45,11 @@ pub use plan::{
 // Render cache re-exports
 pub use cache::{
     cleanup_stale_files, clear_sequence_cache, compute_plan_segment_fingerprint,
-    compute_segment_fingerprint, enforce_cache_limit, load_manifest, manifest_path,
-    refresh_manifest_plan_fingerprints, render_cache_dir, save_manifest, segment_cache_file,
-    sequence_cache_dir, CacheSegmentState, CacheSegmentStatusDto, RenderCacheConfig,
-    RenderCacheManifest, RenderCacheSegment, RenderCacheStatus, SegmentFingerprint,
+    compute_segment_fingerprint, enforce_cache_limit, is_cached_segment_name, load_manifest,
+    manifest_path, refresh_manifest_plan_fingerprints, render_cache_dir,
+    resolve_cached_segment_path, save_manifest, segment_cache_file, sequence_cache_dir,
+    CacheSegmentState, CacheSegmentStatusDto, RenderCacheConfig, RenderCacheManifest,
+    RenderCacheSegment, RenderCacheStatus, SegmentFingerprint,
 };
 
 // Smart render re-exports

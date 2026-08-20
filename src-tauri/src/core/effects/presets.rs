@@ -76,20 +76,15 @@ pub fn get_presets_dir(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("presets").join("effects")
 }
 
-/// Validates that a preset ID contains only safe characters (alphanumeric, hyphens, underscores).
-/// Prevents path traversal attacks via crafted IDs.
+/// Validates that a preset ID is safe to use as a file name component.
+///
+/// Delegates to the canonical validator rather than re-deriving the rules. The previous
+/// hand-rolled check missed `:`, and on Windows `Path::join` with a disk-prefixed
+/// component discards the base path entirely — a `presetId` of `C:secret` escaped the
+/// presets directory without containing a separator or `..`, and `delete_effect_preset`
+/// takes the id straight from IPC and calls `remove_file` on the result.
 fn validate_preset_id(preset_id: &str) -> Result<(), String> {
-    if preset_id.is_empty() {
-        return Err("Preset ID is empty".to_string());
-    }
-    if preset_id.contains('/')
-        || preset_id.contains('\\')
-        || preset_id.contains("..")
-        || preset_id.contains('\0')
-    {
-        return Err(format!("Invalid preset ID: {}", preset_id));
-    }
-    Ok(())
+    crate::core::fs::validate_path_id_component(preset_id, "presetId")
 }
 
 /// Returns the file path for a specific preset
@@ -446,15 +441,35 @@ mod tests {
         // Given a fresh directory
         let tmp = setup();
 
-        // When loading with a path traversal ID
-        let result = load_effect_preset(tmp.path(), "../../etc/passwd");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Invalid preset ID"));
+        // Given a file a hostile preset id would resolve to. `C:secret` matters on
+        // Windows specifically: `Path::join` drops the base path for a disk-prefixed
+        // component, so the id escapes the presets directory without a separator or
+        // `..` anywhere in it.
+        let victim = tmp.path().join("secrets.json");
+        std::fs::write(&victim, b"{}").unwrap();
 
-        // And deleting with a path traversal ID
-        let result = delete_effect_preset(tmp.path(), "../secrets");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Invalid preset ID"));
+        // When loading or deleting with any of these ids
+        for preset_id in [
+            "../../etc/passwd",
+            "..\\..\\secrets",
+            "../secrets",
+            "C:secrets",
+            "pre\0set",
+            "pre\nset",
+            "",
+        ] {
+            assert!(
+                load_effect_preset(tmp.path(), preset_id).is_err(),
+                "load accepted {preset_id:?}"
+            );
+            assert!(
+                delete_effect_preset(tmp.path(), preset_id).is_err(),
+                "delete accepted {preset_id:?}"
+            );
+        }
+
+        // Then nothing outside the presets directory was removed
+        assert!(victim.exists());
     }
 
     #[test]

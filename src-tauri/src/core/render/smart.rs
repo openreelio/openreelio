@@ -129,22 +129,18 @@ pub fn plan_smart_render(
 
     if !config.smart_render_enabled || manifest.segments.is_empty() {
         // Smart render disabled — re-encode everything
-        return SmartRenderPlan {
-            segments: manifest
-                .segments
-                .iter()
-                .map(|s| SmartRenderSegment {
-                    index: s.index,
-                    start_sec: s.start_sec,
-                    end_sec: s.end_sec,
-                    action: SegmentAction::ReEncode,
-                })
-                .collect(),
-            total_duration_sec: total_duration,
-        };
+        return reencode_every_segment(manifest, total_duration);
     }
 
-    let seq_dir = super::cache::sequence_cache_dir(project_dir, &manifest.sequence_id);
+    // Fail closed: without a usable cache directory there is nothing to copy from, so
+    // re-encode rather than resolving segment paths against an unvalidated id.
+    let seq_dir = match super::cache::sequence_cache_dir(project_dir, &manifest.sequence_id) {
+        Ok(dir) => dir,
+        Err(error) => {
+            tracing::warn!("Smart render falling back to a full re-encode: {error}");
+            return reencode_every_segment(manifest, total_duration);
+        }
+    };
 
     let segments = manifest
         .segments
@@ -166,6 +162,26 @@ pub fn plan_smart_render(
     }
 }
 
+/// Builds a plan that re-encodes every segment, ignoring the cache entirely.
+fn reencode_every_segment(
+    manifest: &RenderCacheManifest,
+    total_duration_sec: f64,
+) -> SmartRenderPlan {
+    SmartRenderPlan {
+        segments: manifest
+            .segments
+            .iter()
+            .map(|s| SmartRenderSegment {
+                index: s.index,
+                start_sec: s.start_sec,
+                end_sec: s.end_sec,
+                action: SegmentAction::ReEncode,
+            })
+            .collect(),
+        total_duration_sec,
+    }
+}
+
 /// Decides the action for a single segment based on its cache state.
 fn decide_segment_action(segment: &RenderCacheSegment, seq_cache_dir: &Path) -> SegmentAction {
     if segment.state != CacheSegmentState::Cached {
@@ -176,7 +192,13 @@ fn decide_segment_action(segment: &RenderCacheSegment, seq_cache_dir: &Path) -> 
         return SegmentAction::ReEncode;
     };
 
-    let cache_path = seq_cache_dir.join(file_name);
+    // `cached_file` comes out of the on-disk manifest, and the resulting path becomes a
+    // `fs::copy` source. Only names this crate writes are honoured; anything else is
+    // treated as a cache miss.
+    let Some(cache_path) = super::cache::resolve_cached_segment_path(seq_cache_dir, file_name)
+    else {
+        return SegmentAction::ReEncode;
+    };
 
     // Verify the file actually exists on disk
     if !cache_path.exists() {
@@ -308,13 +330,13 @@ mod tests {
         let mut manifest = RenderCacheManifest::new("seq1", 15.0, 5.0, &seq, &effects);
 
         // Create actual cache files on disk
-        let seg_dir = super::super::cache::sequence_cache_dir(tmp.path(), "seq1");
+        let seg_dir = super::super::cache::sequence_cache_dir(tmp.path(), "seq1").unwrap();
         std::fs::create_dir_all(&seg_dir).unwrap();
-        std::fs::write(seg_dir.join("s0.mp4"), b"cached0").unwrap();
-        std::fs::write(seg_dir.join("s1.mp4"), b"cached1").unwrap();
+        std::fs::write(seg_dir.join("segment_0000.mp4"), b"cached0").unwrap();
+        std::fs::write(seg_dir.join("segment_0001.mp4"), b"cached1").unwrap();
 
-        manifest.mark_segment_cached(0, "s0.mp4".to_string(), 100);
-        manifest.mark_segment_cached(1, "s1.mp4".to_string(), 100);
+        manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 100);
+        manifest.mark_segment_cached(1, "segment_0001.mp4".to_string(), 100);
 
         // When planning smart render
         let plan = plan_smart_render(&mut manifest, &seq, &effects, &config, tmp.path());
@@ -340,7 +362,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
 
         let mut manifest = RenderCacheManifest::new("seq1", 10.0, 5.0, &seq, &effects);
-        manifest.mark_segment_cached(0, "s0.mp4".to_string(), 100);
+        manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 100);
 
         // When planning
         let plan = plan_smart_render(&mut manifest, &seq, &effects, &config, tmp.path());
@@ -359,7 +381,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
 
         let mut manifest = RenderCacheManifest::new("seq1", 5.0, 5.0, &seq, &effects);
-        manifest.mark_segment_cached(0, "missing.mp4".to_string(), 100);
+        manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 100);
         // File NOT created on disk
 
         // When planning
@@ -378,12 +400,12 @@ mod tests {
         let config = RenderCacheConfig::default();
         let tmp = tempfile::tempdir().unwrap();
 
-        let seg_dir = super::super::cache::sequence_cache_dir(tmp.path(), "seq1");
+        let seg_dir = super::super::cache::sequence_cache_dir(tmp.path(), "seq1").unwrap();
         std::fs::create_dir_all(&seg_dir).unwrap();
-        std::fs::write(seg_dir.join("s0.mp4"), b"data").unwrap();
+        std::fs::write(seg_dir.join("segment_0000.mp4"), b"data").unwrap();
 
         let mut manifest = RenderCacheManifest::new("seq1", 10.0, 5.0, &seq, &effects);
-        manifest.mark_segment_cached(0, "s0.mp4".to_string(), 100);
+        manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 100);
 
         // When the sequence changes (different clip)
         let mut modified_seq = make_sequence(10.0);
@@ -404,16 +426,16 @@ mod tests {
         let config = RenderCacheConfig::default();
         let tmp = tempfile::tempdir().unwrap();
 
-        let seg_dir = super::super::cache::sequence_cache_dir(tmp.path(), "seq1");
+        let seg_dir = super::super::cache::sequence_cache_dir(tmp.path(), "seq1").unwrap();
         std::fs::create_dir_all(&seg_dir).unwrap();
         for i in 0..3 {
-            let name = format!("s{i}.mp4");
+            let name = format!("segment_{i:04}.mp4");
             std::fs::write(seg_dir.join(&name), b"data").unwrap();
         }
 
         let mut manifest = RenderCacheManifest::new("seq1", 20.0, 5.0, &seq, &effects);
         for i in 0..3 {
-            manifest.mark_segment_cached(i, format!("s{i}.mp4"), 100);
+            manifest.mark_segment_cached(i, format!("segment_{i:04}.mp4"), 100);
         }
 
         let plan = plan_smart_render(&mut manifest, &seq, &effects, &config, tmp.path());

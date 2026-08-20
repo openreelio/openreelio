@@ -470,10 +470,11 @@ pub async fn transcribe_asset(
             .get(&asset_id)
             .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
 
-        // Security: the asset URI can be set via UpdateAsset without validation, and
-        // this synchronous path feeds it straight to ffmpeg. Re-validate to reject
-        // `..`/URL/protocol strings and non-existent files, preventing path traversal
-        // and ffmpeg-protocol handling of a caller-controlled input.
+        // Security: asset URIs from a loaded project file have not passed the
+        // command-layer validation, and this synchronous path feeds them straight to
+        // ffmpeg. Re-validate to reject `..`/URL/protocol strings and non-existent
+        // files, preventing path traversal and ffmpeg-protocol handling of a
+        // caller-controlled input.
         let validated =
             crate::core::fs::validate_local_input_path(&asset.uri, "transcription source")
                 .map_err(|e| format!("Invalid source media path: {}", e))?;
@@ -513,6 +514,11 @@ pub async fn transcribe_asset(
     tokio::fs::create_dir_all(&temp_dir)
         .await
         .map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    // The asset id names a file in the shared temp directory and is later removed by
+    // the guard below. Membership in `project.state.assets` is not a path check — a
+    // crafted project can key an asset as `../../evil` and satisfy the lookup — so
+    // validate it here, as the other command handlers in this file already do.
+    validate_path_id_component(&asset_id, "Asset ID")?;
     let audio_path = temp_dir.join(format!("{}.wav", asset_id));
 
     // RAII guard for temp file cleanup (ensures cleanup on both success and error)
@@ -650,6 +656,9 @@ pub async fn transcribe_sequence(
     tokio::fs::create_dir_all(&temp_dir)
         .await
         .map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    // Same reasoning as the per-asset path above: a `HashMap` hit does not make the key
+    // safe as a path component, and this file is removed by the guard below.
+    validate_path_id_component(&resolved_sequence_id, "Sequence ID")?;
     let audio_path = temp_dir.join(format!("sequence-{}.wav", resolved_sequence_id));
 
     struct TempFileGuard(std::path::PathBuf);
