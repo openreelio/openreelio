@@ -133,6 +133,11 @@ fn luma_sat_factor_expr(points: &[CurvePoint], luma_expr: &str) -> String {
 /// This is the single canonical filtergraph quoting rule for the whole crate; any
 /// other escaping of a value that ends up inside `option='<value>'` must delegate
 /// here rather than re-deriving the rules (see the rationale in the body).
+///
+/// For a **filesystem path**, prefer [`escape_ffmpeg_filter_path`]: the `\` -> `\\`
+/// rule below is not sufficient for a native Windows path, because several filters
+/// unescape the option value a second time and consume the doubled backslash. See
+/// that function for the details.
 pub(crate) fn escape_ffmpeg_filter_value(raw: &str) -> String {
     // FFmpeg filtergraphs treat `:` and `,` as separators and `\` as an escape character.
     // Windows paths also contain `\` and `:` (drive letter), so we must escape them to
@@ -155,12 +160,17 @@ pub(crate) fn escape_ffmpeg_filter_value(raw: &str) -> String {
 /// Escapes a filesystem path for embedding inside a single-quoted FFmpeg filter argument.
 ///
 /// Windows separators are normalized to `/` before the canonical quoting rule is
-/// applied. This is deliberate and load-bearing: a filtergraph option value is
-/// unescaped twice (once by the filtergraph parser, once by the option parser), so
-/// the single `\` -> `\\` doubling in [`escape_ffmpeg_filter_value`] is consumed
-/// entirely and a native Windows path loses all of its separators. Normalizing
-/// first removes every backslash, leaving only the `:`/`,`/`'` rules to apply —
-/// and FFmpeg accepts `/` as a separator on Windows.
+/// applied. This is deliberate and load-bearing, not cosmetic: several filters
+/// unescape their path option a second time, so the `\` -> `\\` doubling in
+/// [`escape_ffmpeg_filter_value`] is consumed and the path loses every separator.
+/// Verified against ffmpeg: `vidstabdetect=result='D\:\\dir\\a.trf'` silently
+/// writes a file literally named `Ddira.trf` in the working directory, and
+/// `subtitles=filename='D\:\\dir\\a.ass'` fails with `Unable to open D:dira.ass`.
+/// Normalizing first removes every backslash, leaving only the `:`/`,`/`'` rules to
+/// apply — and FFmpeg accepts `/` as a separator on Windows.
+///
+/// The drive colon must still be escaped: a raw `:` is read as an option separator
+/// even inside a single-quoted region.
 pub(crate) fn escape_ffmpeg_filter_path(raw: &str) -> String {
     escape_ffmpeg_filter_value(&raw.replace('\\', "/"))
 }
