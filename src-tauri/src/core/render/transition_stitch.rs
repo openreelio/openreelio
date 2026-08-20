@@ -349,6 +349,53 @@ fn picture_refusal_reason(clip: &Clip, track: &Track) -> Option<&'static str> {
     None
 }
 
+/// Clip ids that more than one of the clips in this render answers to.
+///
+/// Every map in a [`TransitionPlan`] is keyed by clip id, and a video segment
+/// carries nothing but that id, so the plan has no way to tell two clips with
+/// one id apart. The consequences are not cosmetic: the second clip to be
+/// planned overwrites the first's entry in `by_outgoing`, the handles widened
+/// for one clip's source window are applied to the other's trim and `adelay`,
+/// and the fold either blends the wrong pair or refuses the render for an orphan
+/// the planner created itself.
+///
+/// Nothing this engine mints produces a duplicate id, but an operation log or
+/// snapshot restored from elsewhere is not checked for one, so the planner has
+/// to assume it can happen. Repairing the ids belongs to whatever wrote them;
+/// what the planner owes the caller is to leave that boundary as a clean cut and
+/// say which id made it ambiguous.
+///
+/// Scoped to the clips the export actually collects, which is the same set the
+/// segments are built from - a duplicate on a track that is not in the file
+/// cannot be confused with anything that is.
+fn duplicated_clip_ids(sequence: &Sequence) -> HashSet<&str> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut duplicated: HashSet<&str> = HashSet::new();
+
+    for track in &sequence.tracks {
+        if !track.contributes_to_output() {
+            continue;
+        }
+        for clip in track.clips.iter().filter(|clip| clip.enabled) {
+            if !seen.insert(clip.id.as_str()) {
+                duplicated.insert(clip.id.as_str());
+            }
+        }
+    }
+
+    duplicated
+}
+
+/// The refusal reason for a boundary whose clip id names more than one clip.
+fn duplicate_id_refusal_reason(clip_id: &str, side: &str) -> String {
+    format!(
+        "duplicate clip id at a transition boundary: more than one clip in this render is \
+         called '{clip_id}', and the render addresses a clip only by its id, so the handles \
+         and fades meant for the {side} clip could be applied to the other one; give the \
+         clips distinct ids"
+    )
+}
+
 /// Whether a clip's render window can be moved into unused source media at all.
 ///
 /// A frozen, reversed or time-remapped clip does not map timeline seconds onto
@@ -409,6 +456,7 @@ pub(crate) fn plan_sequence_transitions(
 
     let frame_sec = 1.0 / fps;
     let mut candidates: Vec<Candidate> = Vec::new();
+    let duplicated_ids = duplicated_clip_ids(sequence);
 
     for track in &sequence.tracks {
         let mut clips: Vec<&Clip> = track.clips.iter().filter(|clip| clip.enabled).collect();
@@ -460,6 +508,12 @@ pub(crate) fn plan_sequence_transitions(
                 continue;
             }
 
+            if duplicated_ids.contains(clip.id.as_str()) {
+                plan.refusals
+                    .push(refuse(duplicate_id_refusal_reason(&clip.id, "outgoing")));
+                continue;
+            }
+
             let Some(next) = clips.get(index + 1).copied().filter(|next| {
                 (next.place.timeline_in_sec - clip.place.timeline_out_sec()).abs()
                     <= TIMELINE_EPSILON_SEC
@@ -476,6 +530,12 @@ pub(crate) fn plan_sequence_transitions(
                     "the incoming clip '{}' contributes no picture to blend into: {reason}",
                     next.id
                 )));
+                continue;
+            }
+
+            if duplicated_ids.contains(next.id.as_str()) {
+                plan.refusals
+                    .push(refuse(duplicate_id_refusal_reason(&next.id, "incoming")));
                 continue;
             }
 
@@ -1454,6 +1514,122 @@ mod tests {
             refusal.reason.contains("muted"),
             "the refusal must name muting as the cause: {}",
             refusal.reason
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_boundary_whose_clip_id_names_more_than_one_clip() {
+        // Every map in the plan is keyed by clip id, and a video segment carries
+        // nothing but that id, so two clips answering to one id make the plan
+        // ambiguous: the handles widened for the boundary's incoming clip would
+        // also be applied to an unrelated clip elsewhere in the render, whose
+        // source window would then be trimmed to media the edit never asked for.
+        // Nothing this engine mints produces a duplicate id, but a snapshot
+        // restored from elsewhere is not checked for one.
+        let (mut sequence, assets, effects, lengths) = build(vec![
+            with_handles(0.0, 5.0, Some(dissolve(1.0))),
+            with_handles(5.0, 5.0, None),
+        ]);
+
+        let mut other = Track::new_video("V2");
+        let mut collision = Clip::new("asset1")
+            .with_source_range(2.0, 7.0)
+            .place_at(20.0);
+        collision.id = "clip1".to_string();
+        other.add_clip(collision);
+        sequence.add_track(other);
+
+        let plan = plan_sequence_transitions(&sequence, &assets, &effects, FPS, |asset| {
+            lengths.get(&asset.id).copied()
+        });
+
+        assert!(
+            plan.is_empty(),
+            "an ambiguous boundary must be left as a clean cut"
+        );
+        assert_eq!(
+            plan.handles("clip1"),
+            ClipHandles::default(),
+            "neither clip called 'clip1' may have a handle applied to it"
+        );
+        assert!(
+            plan.audio_fades("clip1").is_none(),
+            "neither clip called 'clip1' may have a fade applied to it"
+        );
+        assert!(!plan.touches("clip0") && !plan.touches("clip1"));
+
+        let refusal = &plan.refusals()[0];
+        assert_eq!(refusal.clip_id, "clip0");
+        assert!(
+            refusal
+                .reason
+                .contains("duplicate clip id at a transition boundary"),
+            "the refusal must name the cause: {}",
+            refusal.reason
+        );
+        assert!(
+            refusal.reason.contains("clip1"),
+            "the refusal must name the id that is ambiguous: {}",
+            refusal.reason
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_boundary_whose_outgoing_clip_id_is_duplicated() {
+        // The same ambiguity on the side that carries the effect. Its entry in
+        // `by_outgoing` would be overwritten by whichever clip of that id was
+        // planned last, so the render could blend a boundary nobody authored.
+        let (mut sequence, assets, effects, lengths) = build(vec![
+            with_handles(0.0, 5.0, Some(dissolve(1.0))),
+            with_handles(5.0, 5.0, None),
+        ]);
+
+        let mut other = Track::new_video("V2");
+        let mut collision = Clip::new("asset0")
+            .with_source_range(2.0, 7.0)
+            .place_at(20.0);
+        collision.id = "clip0".to_string();
+        other.add_clip(collision);
+        sequence.add_track(other);
+
+        let plan = plan_sequence_transitions(&sequence, &assets, &effects, FPS, |asset| {
+            lengths.get(&asset.id).copied()
+        });
+
+        assert!(plan.is_empty());
+        assert_eq!(plan.handles("clip0"), ClipHandles::default());
+        assert!(plan.refusals()[0]
+            .reason
+            .contains("duplicate clip id at a transition boundary"));
+    }
+
+    #[test]
+    fn should_still_plan_a_boundary_when_the_duplicate_is_on_a_track_that_is_not_in_the_file() {
+        // A muted track is not in the render, so its clips never become segments
+        // and its id cannot be confused with anything that does. Refusing here
+        // would cost a caller a perfectly renderable transition.
+        let (mut sequence, assets, effects, lengths) = build(vec![
+            with_handles(0.0, 5.0, Some(dissolve(1.0))),
+            with_handles(5.0, 5.0, None),
+        ]);
+
+        let mut muted = Track::new_video("V2");
+        muted.muted = true;
+        let mut collision = Clip::new("asset1")
+            .with_source_range(2.0, 7.0)
+            .place_at(20.0);
+        collision.id = "clip1".to_string();
+        muted.add_clip(collision);
+        sequence.add_track(muted);
+
+        let plan = plan_sequence_transitions(&sequence, &assets, &effects, FPS, |asset| {
+            lengths.get(&asset.id).copied()
+        });
+
+        assert!(
+            plan.transition_after("clip0").is_some(),
+            "{:?}",
+            plan.refusals()
         );
     }
 
