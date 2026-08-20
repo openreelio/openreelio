@@ -7,7 +7,10 @@ use specta::Type;
 use tauri::State;
 
 use crate::core::{
-    fs::{export_allowed_roots, validate_local_input_path, validate_scoped_output_path},
+    fs::{
+        export_allowed_roots, validate_local_input_path, validate_path_id_component,
+        validate_scoped_output_path,
+    },
     render::{
         cancel_render_job, register_render_job, unregister_render_job, AudioExportFormat,
         ExportError, ExportPreset, ImageFormat, VideoExportRequest,
@@ -1608,6 +1611,12 @@ pub async fn stabilize_clip(
         zoom: _,
     } = args;
 
+    // Security: `clip_id` is used as a file name component below
+    // (`.openreelio/stabilize/<clipId>.trf`). Clip ids come from the project file,
+    // which is untrusted input, so reject separators and `..` before they can
+    // escape the stabilization directory.
+    validate_path_id_component(&clip_id, "clipId")?;
+
     // Validate crop_mode
     let valid_modes = ["none", "crop", "dynamic"];
     if !valid_modes.contains(&crop_mode.as_str()) {
@@ -1651,10 +1660,10 @@ pub async fn stabilize_clip(
         (asset.uri.clone(), project.path.clone())
     };
 
-    // Security: the asset URI can be set via UpdateAsset without validation, so
-    // re-validate before handing it to ffmpeg. This rejects `..`/URL/protocol
-    // strings and non-existent files, preventing path traversal, ffmpeg-protocol
-    // SSRF, and argument injection at the input arg.
+    // Security: asset URIs from a loaded project file have not passed the
+    // command-layer validation, so re-validate before handing it to ffmpeg. This
+    // rejects `..`/URL/protocol strings and non-existent files, preventing path
+    // traversal, ffmpeg-protocol SSRF, and argument injection at the input arg.
     let source_path = validate_local_input_path(&source_path, "stabilize source")
         .map_err(|e| format!("Invalid source media path: {}", e))?
         .to_string_lossy()
@@ -1688,17 +1697,7 @@ pub async fn stabilize_clip(
     let mut cmd = tokio::process::Command::new(&ffmpeg.info().ffmpeg_path);
     crate::core::process::configure_tokio_command(&mut cmd);
 
-    // FFmpeg filter escaping: backslashes to forward slashes, then escape
-    // special characters (\, :, ') per FFmpeg's libavfilter quoting rules.
-    let escaped_path = transforms_path
-        .to_string_lossy()
-        .replace('\\', "/")
-        .replace(':', "\\:")
-        .replace('\'', "\\'");
-    let detect_filter = format!(
-        "vidstabdetect=shakiness=10:accuracy=15:result='{}'",
-        escaped_path
-    );
+    let detect_filter = crate::core::effects::build_vidstabdetect_filter(&transforms_path);
 
     let output = cmd
         .args([
@@ -1898,12 +1897,12 @@ pub async fn smart_reframe(
         asset.uri.clone()
     };
 
-    // Security: the asset URI can be set via UpdateAsset without validation, so
-    // re-validate before handing it to ffprobe/ffmpeg. This rejects `..`/URL/
-    // protocol strings and non-existent files, preventing path traversal,
-    // ffmpeg-protocol SSRF, and ffprobe argument injection (the URI is passed as a
-    // bare positional arg below, so a leading `-` would otherwise be parsed as an
-    // option; an absolute validated path cannot).
+    // Security: asset URIs from a loaded project file have not passed the
+    // command-layer validation, so re-validate before handing it to ffprobe/ffmpeg.
+    // This rejects `..`/URL/protocol strings and non-existent files, preventing path
+    // traversal, ffmpeg-protocol SSRF, and ffprobe argument injection (the URI is
+    // passed as a bare positional arg below, so a leading `-` would otherwise be
+    // parsed as an option; an absolute validated path cannot).
     let source_path = validate_local_input_path(&source_path, "reframe source")
         .map_err(|e| format!("Invalid source media path: {}", e))?
         .to_string_lossy()

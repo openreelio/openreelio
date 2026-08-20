@@ -152,6 +152,33 @@ pub(crate) fn escape_ffmpeg_filter_value(raw: &str) -> String {
         .replace('\'', r"'\''")
 }
 
+/// Escapes a filesystem path for embedding inside a single-quoted FFmpeg filter argument.
+///
+/// Windows separators are normalized to `/` before the canonical quoting rule is
+/// applied. This is deliberate and load-bearing: a filtergraph option value is
+/// unescaped twice (once by the filtergraph parser, once by the option parser), so
+/// the single `\` -> `\\` doubling in [`escape_ffmpeg_filter_value`] is consumed
+/// entirely and a native Windows path loses all of its separators. Normalizing
+/// first removes every backslash, leaving only the `:`/`,`/`'` rules to apply —
+/// and FFmpeg accepts `/` as a separator on Windows.
+pub(crate) fn escape_ffmpeg_filter_path(raw: &str) -> String {
+    escape_ffmpeg_filter_value(&raw.replace('\\', "/"))
+}
+
+/// Builds the `vidstabdetect` analysis filter that writes motion transforms to `transforms_path`.
+///
+/// This is the analysis half of stabilization; [`FilterBuilder::build_stabilize_filter`]
+/// consumes the resulting `.trf` file in the apply pass. The path is emitted inside a
+/// single-quoted filter argument and therefore goes through [`escape_ffmpeg_filter_path`]:
+/// the transforms file is named after a clip id that originates in the project file, which
+/// is untrusted input.
+pub(crate) fn build_vidstabdetect_filter(transforms_path: &std::path::Path) -> String {
+    format!(
+        "vidstabdetect=shakiness=10:accuracy=15:result='{}'",
+        escape_ffmpeg_filter_path(&transforms_path.to_string_lossy())
+    )
+}
+
 fn escape_drawtext_value(raw: &str) -> String {
     // drawtext expands `%{...}` expressions; treat user-provided text as literal.
     let normalized = raw
@@ -1099,7 +1126,12 @@ impl Effect {
                     // Fallback to anlmdn if no model path provided
                     self.build_anlmdn_filter(strength)
                 } else {
-                    let escaped = model_path.replace('\\', "/").replace('\'', "'\\''");
+                    // Shared path rule: normalize separators, then apply the
+                    // canonical filtergraph quoting. This also escapes `:`, which
+                    // the previous ad-hoc escaping omitted — a raw `:` inside the
+                    // quoted region is still read as an option separator, so a
+                    // Windows drive-letter model path failed to parse.
+                    let escaped = escape_ffmpeg_filter_path(&model_path);
                     format!("arnndn=m='{}'", escaped)
                 }
             }
@@ -1424,11 +1456,8 @@ impl Effect {
 
         // Emitted inside a single-quoted region (`input='<path>'`); a literal `'`
         // must be closed-escaped-reopened as `'\''` so it cannot terminate the
-        // quote and inject additional filter nodes. See escape_ffmpeg_filter_value.
-        let escaped_path = analysis_path
-            .replace('\\', "/")
-            .replace(':', "\\:")
-            .replace('\'', "'\\''");
+        // quote and inject additional filter nodes. See escape_ffmpeg_filter_path.
+        let escaped_path = escape_ffmpeg_filter_path(&analysis_path);
 
         format!(
             "vidstabtransform=input='{}':smoothing={}:crop={}:optzoom={}:zoom={:.1}:interpol=bilinear",
@@ -5247,6 +5276,63 @@ mod tests {
         // Default analysis_path is empty → should return null
         let filter = effect.to_filter_body();
         assert_eq!(filter, "null");
+    }
+
+    #[test]
+    fn test_vidstabdetect_single_quote_cannot_break_out_of_filter() {
+        // The transforms file is named `<clipId>.trf`, and clip ids come from the
+        // project file. The id gate rejects separators and `..` but not `'`, so the
+        // quoting rule is what stops a crafted id from closing `result='...'` and
+        // having the remainder parsed as filtergraph syntax (`;[in]movie=...` gives
+        // arbitrary file read/write).
+        let filter = build_vidstabdetect_filter(std::path::Path::new(
+            "/proj/.openreelio/stabilize/x';[in]movie=filename=/etc/passwd[out];[out].trf",
+        ));
+
+        assert!(
+            !filter.contains("x';"),
+            "Single quote must not terminate the quoted region: {filter}"
+        );
+        assert!(
+            filter.contains(
+                "result='/proj/.openreelio/stabilize/x'\\'';[in]movie=filename=/etc/passwd[out];[out].trf'"
+            ),
+            "Expected close-escape-reopen quoting of the injected value, got: {filter}"
+        );
+    }
+
+    #[test]
+    fn test_vidstabdetect_normalizes_windows_separators_and_escapes_the_drive_colon() {
+        // A filtergraph option value is unescaped twice, so a doubled backslash is
+        // consumed entirely and a native Windows path would lose its separators.
+        // Normalizing to `/` avoids that; the drive colon still has to be escaped
+        // or it is read as an option separator even inside the quoted region.
+        let filter = build_vidstabdetect_filter(std::path::Path::new(
+            r"D:\proj\.openreelio\stabilize\clip1.trf",
+        ));
+
+        assert_eq!(
+            filter,
+            "vidstabdetect=shakiness=10:accuracy=15:result='D\\:/proj/.openreelio/stabilize/clip1.trf'"
+        );
+    }
+
+    #[test]
+    fn test_arnndn_model_path_escapes_the_drive_colon() {
+        // A raw `:` is still read as an option separator inside a quoted region, so
+        // a Windows drive-letter model path has to be escaped like any other path.
+        let mut effect = Effect::new(EffectType::NoiseReduction);
+        effect.set_param("algorithm", ParamValue::String("arnndn".to_string()));
+        effect.set_param(
+            "model_path",
+            ParamValue::String(r"D:\models\rnnoise.onnx".to_string()),
+        );
+
+        let filter = effect.to_filter_string("0:a", "aout");
+        assert!(
+            filter.contains("m='D\\:/models/rnnoise.onnx'"),
+            "Expected normalized and escaped model path, got: {filter}"
+        );
     }
 
     #[test]
