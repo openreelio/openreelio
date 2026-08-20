@@ -3781,12 +3781,23 @@ fn get_json_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&
     keys.iter().find_map(|key| object.get(*key))
 }
 
+/// Reads a caption's numeric field, refusing anything that is not a real number.
+///
+/// `f64::from_str` accepts `"NaN"`, `"inf"` and `"-Infinity"`, and every consumer
+/// of this value goes on to `clamp` it — which returns NaN unchanged rather than
+/// pulling it into range. A style blob carrying `{"fontSize": "NaN"}` therefore
+/// used to reach `format!("{:.2}")` and put the literal text `NaN` in an ASS
+/// style column, which libass reads as a parse failure for the whole line. A
+/// non-finite field is treated as absent, so the caller's `unwrap_or` default
+/// applies exactly as it would for a missing key.
 fn parse_json_number(value: &Value) -> Option<f64> {
-    match value {
+    let parsed = match value {
         Value::Number(number) => number.as_f64(),
         Value::String(raw) => raw.trim().parse::<f64>().ok(),
         _ => None,
-    }
+    };
+
+    parsed.filter(|number| number.is_finite())
 }
 
 fn parse_json_bool(value: &Value) -> Option<bool> {
@@ -4782,8 +4793,24 @@ fn effect_int_param(effect: &Effect, name: &str, fallback: i64) -> i64 {
         .unwrap_or(fallback)
 }
 
+/// Reads a float parameter, treating a non-finite one as unset.
+///
+/// The last line of defence for the numeric columns of an ASS script. Every
+/// caller clamps what it gets here, and `f64::clamp` returns NaN unchanged, so
+/// without this a NaN or infinity that reached an effect param from *any*
+/// source - a hand-written plan, a plugin, a future parser - would be formatted
+/// straight into a style or an override tag as `NaN` or `inf` and cost libass
+/// the whole line. `parse_json_number` already rejects them at the caption
+/// parser; this makes the property hold no matter which path set the param.
 fn effect_float_param(effect: &Effect, name: &str, fallback: f64) -> f64 {
-    effect.get_float(name).unwrap_or(fallback)
+    debug_assert!(
+        fallback.is_finite(),
+        "the fallback for '{name}' must itself be a real number"
+    );
+    effect
+        .get_float(name)
+        .filter(|value| value.is_finite())
+        .unwrap_or(fallback)
 }
 
 fn effect_bool_param(effect: &Effect, name: &str, fallback: bool) -> bool {
@@ -7545,6 +7572,138 @@ mod tests {
                 "{position} must keep the default bottom margins. Got: {script}"
             );
         }
+    }
+
+    #[test]
+    fn test_a_non_finite_caption_number_never_reaches_the_ass_script() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // `"NaN"`, `"inf"` and friends parse as perfectly good `f64`s, and every
+        // consumer of a caption number goes on to `clamp` it - which returns NaN
+        // unchanged rather than pulling it into range. A style blob carrying one
+        // used to be formatted straight into an ASS style column as the literal
+        // text `NaN`, and libass drops a line it cannot parse, so the caption
+        // silently vanished from the render.
+        for hostile in [
+            "NaN",
+            "nan",
+            "inf",
+            "-inf",
+            "Infinity",
+            "-Infinity",
+            "infinity",
+        ] {
+            let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+            let mut track = Track::new_caption("Captions");
+            let mut clip = Clip::new("caption-asset")
+                .with_source_range(0.0, 2.0)
+                .place_at(0.0);
+            clip.label = Some("Hostile numbers".to_string());
+            clip.caption_style = Some(serde_json::json!({
+                "fontSize": hostile,
+                "lineHeight": hostile,
+                "letterSpacing": hostile,
+                "opacity": hostile,
+                "outlineWidth": hostile,
+                "backgroundPadding": hostile,
+            }));
+            clip.caption_position = Some(serde_json::json!({
+                "type": "preset",
+                "vertical": "bottom",
+                "marginPercent": hostile,
+            }));
+            track.add_clip(clip);
+            sequence.add_track(track);
+
+            let script = build_ass_text_overlay_script(&sequence, &HashMap::new())
+                .expect("script result")
+                .expect("script exists");
+
+            // Rust formats the two as `NaN` and `inf`/`-inf`. `Inf` with a
+            // capital I is not checked because the script's own
+            // `[Script Info]` header contains it.
+            for poison in ["NaN", "nan", "inf"] {
+                assert!(
+                    !script.contains(poison),
+                    "'{hostile}' must not survive into the script as '{poison}'. Got: {script}"
+                );
+            }
+            // And the field falls back to the default rather than to something
+            // arbitrary: 48pt type, held off the bottom by the shared margin.
+            assert!(
+                script.contains(",48.00,"),
+                "a refused font size must fall back to the default. Got: {script}"
+            );
+            assert!(
+                script.contains(",2,192,192,54,1\n"),
+                "a refused margin must fall back to the shared default. Got: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_non_finite_effect_param_cannot_be_formatted_into_an_ass_field() {
+        use crate::core::effects::ParamValue;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // Defence in depth for the formatters themselves: whatever put a
+        // non-finite number on an effect param - a hand-written plan, a plugin,
+        // a parser that has not been written yet - the ASS emitter must still
+        // produce a script libass can read. `rotation` is the sharp case,
+        // because it is the one float the emitter never clamped at all.
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_caption("Captions");
+        let mut clip = Clip::new("caption-asset")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.0);
+        clip.label = Some("Poisoned params".to_string());
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let mut effect = build_caption_text_effect(&sequence.tracks[0].clips[0])
+            .expect("a caption clip builds a text effect");
+        for param in ["font_size", "rotation", "opacity", "x", "y"] {
+            effect.set_param(param, ParamValue::Float(f64::NAN));
+        }
+        effect.set_param("scale_x_percent", ParamValue::Float(f64::INFINITY));
+        effect.set_param("scale_y_percent", ParamValue::Float(f64::NEG_INFINITY));
+
+        let mut styles = String::new();
+        let mut events = String::new();
+        append_ass_text_style_and_event(
+            &mut styles,
+            &mut events,
+            &AssEventContext {
+                style_name: "OpenReelioText0",
+                layer: 0,
+                font_family: "Arial",
+                anchor: ass_text_anchor(
+                    &sequence.tracks[0].clips[0],
+                    &TrackKind::Caption,
+                    &effect,
+                    1920,
+                    1080,
+                ),
+            },
+            &sequence.tracks[0].clips[0],
+            &effect,
+        );
+
+        let emitted = format!("{styles}{events}");
+        for poison in ["NaN", "nan", "inf"] {
+            assert!(
+                !emitted.contains(poison),
+                "a non-finite param must not be formatted as '{poison}'. Got: {emitted}"
+            );
+        }
+        assert!(
+            emitted.contains("\\frz0.00"),
+            "an unusable rotation falls back to no rotation. Got: {emitted}"
+        );
+        assert!(
+            emitted.contains(",100.00,100.00,"),
+            "unusable scales fall back to unscaled type. Got: {emitted}"
+        );
     }
 
     #[test]

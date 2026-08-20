@@ -595,13 +595,23 @@ fn json_bool(object: &Map<String, Value>, keys: &[&str]) -> Option<bool> {
     json_value(object, keys).and_then(parse_json_bool)
 }
 
+/// Reads a numeric field, refusing anything that is not a real number.
+///
+/// `f64::from_str` accepts `"NaN"`, `"inf"` and `"-Infinity"`, and a NaN that
+/// reached a `TextRenderSpec` would serialise to `null` and break the typed
+/// contract the renderers read. A non-finite field is treated as absent, so the
+/// caller's default applies exactly as it would for a missing key. Mirrors
+/// `parse_json_number` in `export.rs`, which reads the same style blobs.
 fn parse_json_number(value: &Value) -> Option<f64> {
-    value.as_f64().or_else(|| {
-        value
-            .as_str()
-            .map(str::trim)
-            .and_then(|raw| raw.parse::<f64>().ok())
-    })
+    value
+        .as_f64()
+        .or_else(|| {
+            value
+                .as_str()
+                .map(str::trim)
+                .and_then(|raw| raw.parse::<f64>().ok())
+        })
+        .filter(|number| number.is_finite())
 }
 
 fn parse_json_bool(value: &Value) -> Option<bool> {
@@ -1094,6 +1104,33 @@ mod tests {
                 "textData": null
             })
         );
+    }
+
+    #[test]
+    fn a_non_finite_caption_number_is_read_as_absent() {
+        // `"NaN"` and `"inf"` both parse as real `f64` values, and a NaN that
+        // reached a `TextRenderSpec` would serialise to `null` and break the
+        // typed contract the renderers read.
+        for hostile in ["NaN", "inf", "-Infinity"] {
+            let value = serde_json::json!(hostile);
+            assert_eq!(
+                parse_json_number(&value),
+                None,
+                "'{hostile}' is not a number a renderer can use"
+            );
+        }
+
+        // A refused margin falls back to the shared default, exactly as a
+        // missing one does.
+        let position = serde_json::json!({
+            "type": "preset",
+            "vertical": "bottom",
+            "marginPercent": "NaN",
+        });
+        let (_, y) =
+            resolve_caption_position_percent(Some(&position), None, &TextAlignment::Center);
+
+        assert_eq!(y, 100.0 - CAPTION_DEFAULT_VERTICAL_MARGIN_PERCENT);
     }
 
     #[test]
