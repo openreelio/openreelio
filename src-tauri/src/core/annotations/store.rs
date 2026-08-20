@@ -64,13 +64,22 @@ impl AnnotationStore {
     }
 
     /// Returns the file path for an asset's annotation
-    pub fn annotation_path(&self, asset_id: &str) -> PathBuf {
-        self.annotations_dir.join(format!("{}.json", asset_id))
+    ///
+    /// # Security
+    /// `asset_id` arrives here straight from IPC arguments and from project state, and
+    /// no caller looks it up in `project.state.assets` first — `delete_annotation` in
+    /// particular takes a bare string and reaches `fs::remove_file`. Because every read,
+    /// write and delete in this store derives its path from this one method, validating
+    /// here confines all of them to the annotations directory.
+    pub fn annotation_path(&self, asset_id: &str) -> CoreResult<PathBuf> {
+        crate::core::fs::validate_path_id_component(asset_id, "assetId")
+            .map_err(CoreError::ValidationError)?;
+        Ok(self.annotations_dir.join(format!("{}.json", asset_id)))
     }
 
     /// Loads annotation for an asset
     pub fn load(&self, asset_id: &str) -> CoreResult<Option<AssetAnnotation>> {
-        let path = self.annotation_path(asset_id);
+        let path = self.annotation_path(asset_id)?;
 
         if !path.exists() {
             return Ok(None);
@@ -97,9 +106,12 @@ impl AnnotationStore {
 
     /// Saves annotation for an asset (atomic write via temp file + rename)
     pub fn save(&self, annotation: &AssetAnnotation) -> CoreResult<()> {
+        // Resolve (and thereby validate) the destination before creating anything: the
+        // temp file below interpolates the same id into a second file name.
+        let path = self.annotation_path(&annotation.asset_id)?;
+
         self.ensure_dir()?;
 
-        let path = self.annotation_path(&annotation.asset_id);
         let temp_path = self.annotations_dir.join(format!(
             ".{}.json.tmp.{}",
             annotation.asset_id,
@@ -136,7 +148,7 @@ impl AnnotationStore {
 
     /// Deletes annotation for an asset
     pub fn delete(&self, asset_id: &str) -> CoreResult<()> {
-        let path = self.annotation_path(asset_id);
+        let path = self.annotation_path(asset_id)?;
 
         if path.exists() {
             fs::remove_file(&path).map_err(|e| {
@@ -153,7 +165,8 @@ impl AnnotationStore {
 
     /// Checks if annotation exists for an asset
     pub fn exists(&self, asset_id: &str) -> bool {
-        self.annotation_path(asset_id).exists()
+        self.annotation_path(asset_id)
+            .is_ok_and(|path| path.exists())
     }
 
     /// Checks if annotation is stale (asset hash changed)
@@ -392,8 +405,39 @@ mod tests {
     #[test]
     fn test_annotation_path() {
         let (_temp_dir, store) = create_test_store();
-        let path = store.annotation_path("asset_001");
+        let path = store.annotation_path("asset_001").unwrap();
         assert!(path.ends_with("asset_001.json"));
+    }
+
+    #[test]
+    fn should_reject_traversing_asset_id_without_removing_anything() {
+        // Given a file that sits one level above the annotations directory, which a
+        // traversing asset id would resolve to
+        let (_temp_dir, store) = create_test_store();
+        store.ensure_dir().unwrap();
+        let outside = store
+            .annotations_dir()
+            .parent()
+            .unwrap()
+            .join("secret.json");
+        std::fs::write(&outside, b"{}").unwrap();
+
+        // When any store operation is asked for that id
+        for asset_id in ["../secret", "..\\secret", "sub/secret", "C:secret"] {
+            assert!(
+                store.annotation_path(asset_id).is_err(),
+                "annotation_path accepted {asset_id:?}"
+            );
+            assert!(
+                store.delete(asset_id).is_err(),
+                "delete accepted {asset_id:?}"
+            );
+            assert!(store.load(asset_id).is_err(), "load accepted {asset_id:?}");
+            assert!(!store.exists(asset_id), "exists accepted {asset_id:?}");
+        }
+
+        // Then the file outside the annotations directory is untouched
+        assert!(outside.exists());
     }
 
     #[test]

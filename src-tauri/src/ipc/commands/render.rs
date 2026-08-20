@@ -1683,6 +1683,13 @@ pub async fn stabilize_clip(
 
     let transforms_path = stab_dir.join(format!("{}.trf", clip_id));
 
+    // `vidstabdetect=result='<path>'` and the `vidstabtransform` apply pass both carry
+    // this path as a quoted filter option, and FFmpeg's filtergraph grammar cannot
+    // represent a literal `'` in one. The path derives from the project directory, which
+    // can legitimately sit under a profile like `C:\Users\Ben's PC\`. Without this guard
+    // pass 1 writes its transforms somewhere else and pass 2 stabilizes against nothing.
+    crate::core::fs::validate_filter_safe_path(&transforms_path, "Stabilization data path")?;
+
     // Emit initial progress
     let _ = app_handle.emit(
         "stabilize-progress",
@@ -2381,9 +2388,20 @@ fn cleanup_orphaned_cache_files(
         return;
     }
 
-    let seq_dir = crate::core::render::sequence_cache_dir(project_path, sequence_id);
+    // `sequence_id` and every entry in `files` originate in the on-disk manifest, so
+    // both are validated before this reaches `remove_file`.
+    let seq_dir = match crate::core::render::sequence_cache_dir(project_path, sequence_id) {
+        Ok(dir) => dir,
+        Err(error) => {
+            tracing::warn!("Skipping orphaned render cache cleanup: {error}");
+            return;
+        }
+    };
     for file in files {
-        let file_path = seq_dir.join(file);
+        let Some(file_path) = crate::core::render::resolve_cached_segment_path(&seq_dir, file)
+        else {
+            continue;
+        };
         if let Err(error) = std::fs::remove_file(&file_path) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!(
@@ -2804,7 +2822,13 @@ pub async fn render_preview_cache(
 
             // Build segment export settings
             let seg_output =
-                crate::core::render::segment_cache_file(&project_path, &job_seq_id, *idx);
+                match crate::core::render::segment_cache_file(&project_path, &job_seq_id, *idx) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        tracing::warn!("Skipping cache segment {idx}: {error}");
+                        continue;
+                    }
+                };
 
             if let Some(parent) = seg_output.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {

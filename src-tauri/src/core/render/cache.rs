@@ -21,6 +21,7 @@ use specta::Type;
 
 use crate::core::assets::Asset;
 use crate::core::effects::Effect;
+use crate::core::fs::validate_path_id_component;
 use crate::core::render::{build_render_plan, ExportSettings, RenderGraph};
 use crate::core::timeline::{Clip, Sequence, Track};
 use crate::core::types::SequenceId;
@@ -309,7 +310,8 @@ pub fn refresh_manifest_plan_fingerprints(
     let mut changed = false;
 
     for segment in &mut manifest.segments {
-        let segment_output = segment_cache_file(project_path, &manifest.sequence_id, segment.index);
+        let segment_output =
+            segment_cache_file(project_path, &manifest.sequence_id, segment.index)?;
         let settings = ExportSettings::preview(
             segment_output,
             Some(segment.start_sec),
@@ -837,19 +839,83 @@ pub fn render_cache_dir(project_dir: &Path) -> PathBuf {
         .join("renders")
 }
 
-/// Returns the cache directory for a specific sequence
-pub fn sequence_cache_dir(project_dir: &Path, sequence_id: &str) -> PathBuf {
-    render_cache_dir(project_dir).join(sequence_id)
+/// Returns the cache directory for a specific sequence.
+///
+/// # Security
+/// `sequence_id` reaches this function from the project file and from IPC arguments,
+/// neither of which is trusted, and the directory it names is passed to
+/// `remove_dir_all` by [`clear_sequence_cache`] without the id ever being looked up in
+/// `project.state.sequences`. Validation lives here, at the single choke point every
+/// cache path helper funnels through, so no caller can construct an unvalidated one.
+pub fn sequence_cache_dir(project_dir: &Path, sequence_id: &str) -> Result<PathBuf, String> {
+    validate_path_id_component(sequence_id, "sequenceId")?;
+    Ok(render_cache_dir(project_dir).join(sequence_id))
 }
 
 /// Returns the manifest file path for a sequence
-pub fn manifest_path(project_dir: &Path, sequence_id: &str) -> PathBuf {
-    sequence_cache_dir(project_dir, sequence_id).join(CACHE_MANIFEST_FILENAME)
+pub fn manifest_path(project_dir: &Path, sequence_id: &str) -> Result<PathBuf, String> {
+    Ok(sequence_cache_dir(project_dir, sequence_id)?.join(CACHE_MANIFEST_FILENAME))
 }
 
 /// Returns the cache file path for a segment
-pub fn segment_cache_file(project_dir: &Path, sequence_id: &str, index: u32) -> PathBuf {
-    sequence_cache_dir(project_dir, sequence_id).join(format!("segment_{index:04}.mp4"))
+pub fn segment_cache_file(
+    project_dir: &Path,
+    sequence_id: &str,
+    index: u32,
+) -> Result<PathBuf, String> {
+    Ok(sequence_cache_dir(project_dir, sequence_id)?.join(segment_cache_file_name(index)))
+}
+
+/// Builds the on-disk name for a cached segment.
+///
+/// This is the sole writer of the naming scheme; [`is_cached_segment_name`] mirrors it.
+fn segment_cache_file_name(index: u32) -> String {
+    format!("segment_{index:04}.mp4")
+}
+
+/// Reports whether `name` is a file name this module could have produced.
+///
+/// # Security
+/// `RenderCacheSegment::cached_file` is deserialized from `manifest.json` inside the
+/// project directory, so it is attacker-controlled whenever the project is. It is then
+/// joined onto the sequence cache directory and handed to `remove_file` or `fs::copy`.
+/// A value such as `../../../snapshot.json` would escape the cache directory entirely.
+/// Rather than blocklisting traversal, this allowlists exactly what
+/// [`segment_cache_file_name`] emits: a name that does not round-trip through the
+/// writer's own formatting was not written by us and is never touched.
+pub fn is_cached_segment_name(name: &str) -> bool {
+    let Some(digits) = name
+        .strip_prefix("segment_")
+        .and_then(|rest| rest.strip_suffix(".mp4"))
+    else {
+        return false;
+    };
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    digits
+        .parse::<u32>()
+        .is_ok_and(|index| segment_cache_file_name(index) == name)
+}
+
+/// Resolves a manifest-recorded segment file name to a path inside `seq_cache_dir`.
+///
+/// Returns `None` when the recorded name is not one this module writes; see
+/// [`is_cached_segment_name`]. Every consumer of `cached_file` must go through here
+/// before touching the filesystem.
+pub fn resolve_cached_segment_path(seq_cache_dir: &Path, cached_file: &str) -> Option<PathBuf> {
+    if !is_cached_segment_name(cached_file) {
+        tracing::warn!(
+            "Ignoring render cache entry with an unrecognized file name: {cached_file:?}"
+        );
+        return None;
+    }
+    Some(seq_cache_dir.join(cached_file))
+}
+
+/// Wraps a path-validation failure as an `io::Error` for the `io::Result` helpers.
+fn invalid_input(message: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
 }
 
 // =============================================================================
@@ -858,7 +924,7 @@ pub fn segment_cache_file(project_dir: &Path, sequence_id: &str, index: u32) -> 
 
 /// Saves a cache manifest to disk (JSON)
 pub fn save_manifest(project_dir: &Path, manifest: &RenderCacheManifest) -> std::io::Result<()> {
-    let dir = sequence_cache_dir(project_dir, &manifest.sequence_id);
+    let dir = sequence_cache_dir(project_dir, &manifest.sequence_id).map_err(invalid_input)?;
     std::fs::create_dir_all(&dir)?;
 
     let path = dir.join(CACHE_MANIFEST_FILENAME);
@@ -878,7 +944,7 @@ pub fn load_manifest(
     project_dir: &Path,
     sequence_id: &str,
 ) -> std::io::Result<Option<RenderCacheManifest>> {
-    let path = manifest_path(project_dir, sequence_id);
+    let path = manifest_path(project_dir, sequence_id).map_err(invalid_input)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -898,12 +964,28 @@ pub fn load_manifest(
 /// Returns the total bytes freed.
 pub fn cleanup_stale_files(project_dir: &Path, manifest: &mut RenderCacheManifest) -> u64 {
     let mut freed = 0u64;
-    let seq_dir = sequence_cache_dir(project_dir, &manifest.sequence_id);
+    // Fail closed: an unusable sequence id means no file here can be identified, so
+    // remove nothing rather than guessing at a path.
+    let seq_dir = match sequence_cache_dir(project_dir, &manifest.sequence_id) {
+        Ok(dir) => dir,
+        Err(error) => {
+            tracing::warn!("Skipping render cache cleanup: {error}");
+            return 0;
+        }
+    };
 
     for segment in &mut manifest.segments {
         if segment.state == CacheSegmentState::Stale {
             if let Some(ref file) = segment.cached_file {
-                let full_path = seq_dir.join(file);
+                let resolved = resolve_cached_segment_path(&seq_dir, file);
+                let Some(full_path) = resolved else {
+                    // The manifest names a file we never wrote. Drop the entry instead
+                    // of deleting whatever it points at.
+                    segment.cached_file = None;
+                    segment.file_size_bytes = 0;
+                    segment.state = CacheSegmentState::Empty;
+                    continue;
+                };
                 if full_path.exists() {
                     match std::fs::remove_file(&full_path) {
                         Ok(()) => {
@@ -942,7 +1024,7 @@ pub fn cleanup_stale_files(project_dir: &Path, manifest: &mut RenderCacheManifes
 
 /// Removes the entire cache directory for a sequence.
 pub fn clear_sequence_cache(project_dir: &Path, sequence_id: &str) -> std::io::Result<()> {
-    let dir = sequence_cache_dir(project_dir, sequence_id);
+    let dir = sequence_cache_dir(project_dir, sequence_id).map_err(invalid_input)?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
     }
@@ -960,7 +1042,14 @@ pub fn enforce_cache_limit(
         return 0;
     }
 
-    let seq_dir = sequence_cache_dir(project_dir, &manifest.sequence_id);
+    // Fail closed, as in `cleanup_stale_files`.
+    let seq_dir = match sequence_cache_dir(project_dir, &manifest.sequence_id) {
+        Ok(dir) => dir,
+        Err(error) => {
+            tracing::warn!("Skipping render cache eviction: {error}");
+            return 0;
+        }
+    };
     let mut evicted = 0;
 
     // Evict from the end (highest index) first — user is more likely to play from the start
@@ -980,12 +1069,19 @@ pub fn enforce_cache_limit(
         if let Some(segment) = manifest.segments.iter_mut().find(|s| s.index == idx) {
             let mut file_removed = false;
             if let Some(ref file) = segment.cached_file {
-                let full_path = seq_dir.join(file);
-                match std::fs::remove_file(&full_path) {
-                    Ok(()) => file_removed = true,
-                    Err(e) => {
-                        tracing::warn!("Failed to evict cache file {}: {e}", full_path.display());
-                    }
+                match resolve_cached_segment_path(&seq_dir, file) {
+                    Some(full_path) => match std::fs::remove_file(&full_path) {
+                        Ok(()) => file_removed = true,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to evict cache file {}: {e}",
+                                full_path.display()
+                            );
+                        }
+                    },
+                    // Unrecognized name: nothing of ours to remove, so drop the entry
+                    // and let the accounting below reclaim its recorded size.
+                    None => file_removed = true,
                 }
             } else {
                 file_removed = true; // No file to remove
@@ -1483,9 +1579,9 @@ mod tests {
 
         // When getting cache paths
         let cache_dir = render_cache_dir(project_dir);
-        let seq_dir = sequence_cache_dir(project_dir, "seq-001");
-        let manifest = manifest_path(project_dir, "seq-001");
-        let seg_file = segment_cache_file(project_dir, "seq-001", 3);
+        let seq_dir = sequence_cache_dir(project_dir, "seq-001").unwrap();
+        let manifest = manifest_path(project_dir, "seq-001").unwrap();
+        let seg_file = segment_cache_file(project_dir, "seq-001", 3).unwrap();
 
         // Then paths should follow the convention
         assert_eq!(
@@ -1616,7 +1712,7 @@ mod tests {
         manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 1024);
 
         // Create the actual file on disk
-        let seg_dir = sequence_cache_dir(tmp.path(), "seq1");
+        let seg_dir = sequence_cache_dir(tmp.path(), "seq1").unwrap();
         std::fs::create_dir_all(&seg_dir).unwrap();
         std::fs::write(seg_dir.join("segment_0000.mp4"), vec![0u8; 1024]).unwrap();
 
@@ -1637,7 +1733,7 @@ mod tests {
     fn should_clear_entire_sequence_cache() {
         // Given a sequence cache directory with files
         let tmp = tempfile::tempdir().unwrap();
-        let dir = sequence_cache_dir(tmp.path(), "seq1");
+        let dir = sequence_cache_dir(tmp.path(), "seq1").unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("segment_0000.mp4"), b"test").unwrap();
         std::fs::write(dir.join("manifest.json"), b"{}").unwrap();
@@ -1650,6 +1746,134 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_traversing_sequence_id_before_removing_anything() {
+        // Given a directory that a traversing sequence id would resolve to. The render
+        // cache lives at `<project>/.openreelio/cache/renders/<sequenceId>`, and
+        // `clear_sequence_cache` calls `remove_dir_all` on it without ever looking the
+        // id up in `project.state.sequences`.
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), b"keep").unwrap();
+
+        // When a hostile id reaches any cache path helper
+        for sequence_id in [
+            "../../../../victim",
+            "..\\..\\..\\..\\victim",
+            "seq/../../victim",
+            "C:",
+            "",
+            " seq1 ",
+        ] {
+            assert!(
+                sequence_cache_dir(tmp.path(), sequence_id).is_err(),
+                "sequence_cache_dir accepted {sequence_id:?}"
+            );
+            assert!(
+                manifest_path(tmp.path(), sequence_id).is_err(),
+                "manifest_path accepted {sequence_id:?}"
+            );
+            assert!(
+                segment_cache_file(tmp.path(), sequence_id, 0).is_err(),
+                "segment_cache_file accepted {sequence_id:?}"
+            );
+            assert!(
+                clear_sequence_cache(tmp.path(), sequence_id).is_err(),
+                "clear_sequence_cache accepted {sequence_id:?}"
+            );
+            assert!(
+                load_manifest(tmp.path(), sequence_id).is_err(),
+                "load_manifest accepted {sequence_id:?}"
+            );
+        }
+
+        // Then nothing outside the cache directory was removed
+        assert!(victim.join("keep.txt").exists());
+    }
+
+    #[test]
+    fn should_only_accept_segment_names_the_writer_produces() {
+        // Given the exact names `segment_cache_file` emits
+        for index in [0u32, 1, 42, 9999, 10_000, u32::MAX] {
+            let name = segment_cache_file_name(index);
+            assert!(
+                is_cached_segment_name(&name),
+                "rejected own output {name:?}"
+            );
+        }
+
+        // Then everything else is rejected — most importantly anything that escapes the
+        // sequence cache directory, since `cached_file` comes from the on-disk manifest
+        // and is handed to `remove_file` and `fs::copy`.
+        for name in [
+            "../../../../snapshot.json",
+            "..\\..\\snapshot.json",
+            "segment_0000.mp4/../../evil.mp4",
+            "segment_0.mp4",     // width below the writer's `{:04}`
+            "segment_00000.mp4", // padded past what `{:04}` emits for 0
+            "segment_0000.mkv",
+            "segment_00a0.mp4",
+            "s0.mp4",
+            "manifest.json",
+            "",
+        ] {
+            assert!(!is_cached_segment_name(name), "accepted {name:?}");
+        }
+    }
+
+    #[test]
+    fn should_not_remove_a_manifest_named_file_outside_the_cache_dir() {
+        // Given a manifest whose `cached_file` traverses out of the cache directory
+        let clip = make_test_clip("c1", "a1", 0.0, 10.0);
+        let track = make_test_track("t1", TrackKind::Video, vec![clip]);
+        let seq = make_test_sequence("seq1", vec![track]);
+        let effects = HashMap::new();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let seq_dir = sequence_cache_dir(tmp.path(), "seq1").unwrap();
+        std::fs::create_dir_all(&seq_dir).unwrap();
+        let victim = seq_dir.join("..").join("victim.mp4");
+        std::fs::write(&victim, vec![0u8; 1024]).unwrap();
+
+        let mut manifest = RenderCacheManifest::new("seq1", 10.0, 5.0, &seq, &effects);
+        manifest.mark_segment_cached(0, "../victim.mp4".to_string(), 1024);
+        manifest.segments[0].state = CacheSegmentState::Stale;
+
+        // When the stale-file sweep runs
+        let freed = cleanup_stale_files(tmp.path(), &mut manifest);
+
+        // Then nothing was deleted and the poisoned entry was dropped
+        assert_eq!(freed, 0);
+        assert!(victim.exists());
+        assert!(manifest.segments[0].cached_file.is_none());
+        assert_eq!(manifest.segments[0].state, CacheSegmentState::Empty);
+    }
+
+    #[test]
+    fn should_not_evict_a_manifest_named_file_outside_the_cache_dir() {
+        // Given an over-limit manifest whose `cached_file` traverses out of the cache dir
+        let clip = make_test_clip("c1", "a1", 0.0, 10.0);
+        let track = make_test_track("t1", TrackKind::Video, vec![clip]);
+        let seq = make_test_sequence("seq1", vec![track]);
+        let effects = HashMap::new();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let seq_dir = sequence_cache_dir(tmp.path(), "seq1").unwrap();
+        std::fs::create_dir_all(&seq_dir).unwrap();
+        let victim = seq_dir.join("..").join("victim.mp4");
+        std::fs::write(&victim, vec![0u8; 4096]).unwrap();
+
+        let mut manifest = RenderCacheManifest::new("seq1", 10.0, 5.0, &seq, &effects);
+        manifest.mark_segment_cached(0, "../victim.mp4".to_string(), 4096);
+
+        // When the size limit forces an eviction
+        enforce_cache_limit(tmp.path(), &mut manifest, 0);
+
+        // Then the file outside the cache directory survives
+        assert!(victim.exists());
+    }
+
+    #[test]
     fn should_evict_segments_when_cache_exceeds_limit() {
         // Given a manifest where total size exceeds the limit
         let clip = make_test_clip("c1", "a1", 0.0, 20.0);
@@ -1658,7 +1882,7 @@ mod tests {
         let effects = HashMap::new();
 
         let tmp = tempfile::tempdir().unwrap();
-        let seg_dir = sequence_cache_dir(tmp.path(), "seq1");
+        let seg_dir = sequence_cache_dir(tmp.path(), "seq1").unwrap();
         std::fs::create_dir_all(&seg_dir).unwrap();
 
         let mut manifest = RenderCacheManifest::new("seq1", 20.0, 5.0, &seq, &effects);
@@ -1694,7 +1918,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let mut manifest = RenderCacheManifest::new("seq1", 10.0, 5.0, &seq, &effects);
-        manifest.mark_segment_cached(0, "s0.mp4".to_string(), 100);
+        manifest.mark_segment_cached(0, "segment_0000.mp4".to_string(), 100);
 
         // When enforcing a large limit
         let evicted = enforce_cache_limit(tmp.path(), &mut manifest, 10_000);
