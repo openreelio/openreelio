@@ -38,22 +38,60 @@ use crate::core::{CoreError, CoreResult};
 /// that will be used as part of a file path MUST be validated through this function.
 pub fn validate_path_id_component(id: &str, label: &str) -> Result<(), String> {
     // Check for empty or whitespace-only identifiers
-    let trimmed = id.trim();
-    if trimmed.is_empty() {
+    if id.trim().is_empty() {
         return Err(format!("{label} is empty or contains only whitespace"));
     }
-    if trimmed.contains("..")
-        || trimmed.contains('/')
-        || trimmed.contains('\\')
-        || trimmed.contains(':')
-    {
+    // Reject surrounding whitespace instead of silently trimming it. Callers validate
+    // one string and then interpolate that same string into a path, so validating a
+    // trimmed copy would leave the untrimmed original unchecked. No well-formed
+    // identifier (ULID, UUID, slug) carries padding, so a padded id is already malformed.
+    if id != id.trim() {
+        return Err(format!(
+            "Invalid {label}: contains leading or trailing whitespace"
+        ));
+    }
+    if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains(':') {
         return Err(format!(
             "Invalid {label}: contains path traversal characters"
         ));
     }
     // Additional validation: reject control characters and null bytes
-    if trimmed.chars().any(|c| c.is_control()) {
+    if id.chars().any(|c| c.is_control()) {
         return Err(format!("Invalid {label}: contains control characters"));
+    }
+    Ok(())
+}
+
+/// Validates that a path can be embedded faithfully in an FFmpeg filtergraph option.
+///
+/// FFmpeg's filtergraph parser has no representation for a literal `'` inside an
+/// option value. The canonical `'\''` idiom (close quote, escaped quote, reopen quote)
+/// is what keeps a hostile value from breaking out of the quoted region and injecting
+/// new filter nodes, and that property holds for every input — but the quote itself is
+/// consumed by the parser rather than delivered, so the filter receives a path with the
+/// apostrophe missing. The filter then silently reads or writes the wrong file, or
+/// produces an empty result with no error.
+///
+/// Escaping cannot fix this; it is a limit of the option-value grammar. So any path the
+/// application *generates* for a quoted filter option — a temporary `.ass` subtitle
+/// file, a stabilization `.trf` directory, a `fontsdir` — must be rejected up front with
+/// an actionable message rather than silently producing a broken render. Such paths are
+/// derived from the project directory or the system temp directory, either of which can
+/// legitimately sit under a profile like `C:\Users\Ben's PC\`.
+///
+/// This is a fidelity guard, not a security boundary: the security boundary is the
+/// quoting itself, in `core::effects::escape_ffmpeg_filter_value`.
+///
+/// # Arguments
+/// * `path` - The generated path that will be interpolated into a filter option
+/// * `label` - A descriptive label for error messages (e.g., "subtitle overlay path")
+pub fn validate_filter_safe_path(path: &Path, label: &str) -> Result<(), String> {
+    if path.to_string_lossy().contains('\'') {
+        return Err(format!(
+            "{label} contains an apostrophe, which FFmpeg's filter parser cannot \
+             represent in an option value. Move the project to a path without an \
+             apostrophe (') and retry."
+        ));
     }
     Ok(())
 }
@@ -1057,6 +1095,51 @@ mod tests {
         // Newline
         let result = validate_path_id_component("foo\nbar", "assetId");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_reject_ids_that_differ_from_their_trimmed_form() {
+        // Given ids that only differ from a valid id by surrounding whitespace.
+        // The validator used to check a trimmed copy while callers went on to
+        // interpolate the original, so the padding was never actually checked.
+        for id in [
+            " asset_001",
+            "asset_001 ",
+            "\tasset_001",
+            "asset_001\n",
+            "asset_001\r\n",
+            " asset_001 ",
+        ] {
+            let result = validate_path_id_component(id, "assetId");
+            assert!(result.is_err(), "accepted padded id {id:?}");
+        }
+
+        // And the unpadded form still passes
+        assert!(validate_path_id_component("asset_001", "assetId").is_ok());
+    }
+
+    #[test]
+    fn should_reject_generated_filter_paths_containing_an_apostrophe() {
+        // Given a project directory under a profile name with an apostrophe.
+        // FFmpeg's `'\''` idiom keeps the parse inside the quoted region, so nothing
+        // can inject a filter node, but the quote itself never reaches the filter —
+        // the path silently becomes one that does not exist.
+        let hostile = Path::new(r"C:\Users\Ben's PC\project\.openreelio\overlay.ass");
+        let result = validate_filter_safe_path(hostile, "Text overlay path");
+        assert!(result.is_err());
+        let message = result.unwrap_err();
+        assert!(message.contains("apostrophe"));
+        assert!(message.contains("Text overlay path"));
+
+        // And an ordinary path is accepted
+        assert!(validate_filter_safe_path(
+            Path::new(r"C:\Users\Ben\project\.openreelio\overlay.ass"),
+            "Text overlay path"
+        )
+        .is_ok());
+        assert!(
+            validate_filter_safe_path(Path::new("/home/ben/project/overlay.ass"), "path").is_ok()
+        );
     }
 
     #[test]

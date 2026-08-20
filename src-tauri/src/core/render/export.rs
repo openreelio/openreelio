@@ -5142,6 +5142,20 @@ pub(super) fn append_ass_text_overlay(
     // first meant a per-user font folder could shadow the system one; naming
     // the platform's primary folder makes the choice deterministic.
     let fonts_dir_option = crate::core::text::fonts::primary_system_font_directory()
+        .filter(|directory| {
+            // Same apostrophe limit as the `.ass` path: FFmpeg cannot carry a literal
+            // `'` into an option value. Unlike the script path, this option is purely
+            // additive — libass still consults the host font provider without it — and
+            // the user cannot relocate the system font directory. So drop the option
+            // instead of failing the export.
+            match crate::core::fs::validate_filter_safe_path(directory, "System font directory") {
+                Ok(()) => true,
+                Err(message) => {
+                    tracing::warn!("{message} Continuing without the fontsdir option.");
+                    false
+                }
+            }
+        })
         .map(|directory| {
             let directory_text = directory.to_string_lossy();
             format!(
@@ -5689,6 +5703,14 @@ impl ExportEngine {
                     .tempdir()
                     .map_err(ExportError::IoError)?;
                 let ass_path = temp_dir.path().join("text-overlays.ass");
+                // The `subtitles` filter takes this path as a quoted option value, and
+                // FFmpeg's filtergraph grammar cannot carry a literal `'` through to the
+                // filter. The temp directory inherits the system temp root, which on
+                // Windows sits under the user profile (`C:\Users\Ben's PC\...`), so this
+                // is reachable without anything malformed. Fail loudly with a fixable
+                // instruction rather than rendering a video with every caption missing.
+                crate::core::fs::validate_filter_safe_path(&ass_path, "Text overlay path")
+                    .map_err(ExportError::InvalidSettings)?;
                 tokio::fs::write(&ass_path, ass_script)
                     .await
                     .map_err(ExportError::IoError)?;
