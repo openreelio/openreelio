@@ -33,7 +33,7 @@ use serde_json::{json, Value as JsonValue};
 use crate::core::ai::MAX_PLAN_STEPS;
 use crate::core::assets::Asset;
 
-use super::models::file_url_to_path;
+use super::models::{file_url_to_path, strip_verbatim_prefix};
 use super::otio_schema::{
     openreelio_meta_str, OtioClip, OtioComposable, OtioMarker, OtioMediaRef, OtioTimeline,
     OtioTrack, OtioTrackOrItem, OtioTransition,
@@ -611,14 +611,22 @@ fn track_name(track: &OtioTrack, index: usize) -> String {
     }
 }
 
-/// Normalises a path for comparison: forward slashes, case-folded.
+/// Normalises a path for comparison: no Windows verbatim prefix, forward
+/// slashes, case-folded.
+///
+/// The prefix matters here as much as in the URL: an imported asset's stored
+/// URI reads `\\?\C:\…` while the path decoded out of a `target_url` reads
+/// `C:\…`, and without stripping it the two never compare equal, so every clip
+/// would re-import media the project already has.
 ///
 /// Case folding is not correct on a case-sensitive filesystem, but a false
 /// match here reuses an asset the user already has rather than importing a
 /// duplicate, and the alternative — two assets for one file — is the worse
 /// failure.
 fn normalize_path(path: &str) -> String {
-    path.replace('\\', "/").to_lowercase()
+    strip_verbatim_prefix(path)
+        .replace('\\', "/")
+        .to_lowercase()
 }
 
 fn base_name(path: &str) -> String {

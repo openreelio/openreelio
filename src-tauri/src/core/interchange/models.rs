@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Write;
 
@@ -22,7 +23,7 @@ pub enum InterchangeFormat {
     Edl,
     /// Final Cut Pro XML (FCPXML v1.11)
     Fcpxml,
-    /// OpenTimelineIO (not yet implemented)
+    /// OpenTimelineIO cut interchange
     Otio,
 }
 
@@ -348,6 +349,26 @@ fn encode_file_url_path(path: &str) -> String {
     encoded
 }
 
+/// Strips the Windows extended-length ("verbatim") prefix from a path.
+///
+/// `std::fs::canonicalize` returns verbatim paths on Windows, so an imported
+/// asset's URI routinely reads `\\?\C:\media\clip.mp4`. That prefix is
+/// meaningful to the Win32 API and meaningless to every NLE that reads a
+/// `file://` URL — left in place it percent-encodes to `file:////%3F/C:/…`,
+/// which resolves to nothing and shows up as offline media in the other tool.
+///
+/// `\\?\UNC\server\share` is the verbatim spelling of the share `\\server\share`
+/// and is restored to it.
+pub fn strip_verbatim_prefix(path: &str) -> Cow<'_, str> {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return Cow::Owned(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return Cow::Borrowed(rest);
+    }
+    Cow::Borrowed(path)
+}
+
 /// Converts an asset URI into the `file://` URL every interchange format wants.
 ///
 /// Shared by FCPXML's `src` attribute and OTIO's `ExternalReference.target_url`
@@ -358,10 +379,15 @@ pub fn asset_src_url(uri: &str) -> String {
         return uri.to_string();
     }
 
-    let normalized = uri.replace('\\', "/");
+    let plain = strip_verbatim_prefix(uri);
+    let normalized = plain.replace('\\', "/");
     let encoded = encode_file_url_path(&normalized);
 
-    if normalized.starts_with('/') {
+    if let Some(share) = normalized.strip_prefix("//") {
+        // A UNC share is the one case where a file URL carries an authority:
+        // `\\server\share\x` is `file://server/share/x`.
+        format!("file://{}", encode_file_url_path(share))
+    } else if normalized.starts_with('/') {
         format!("file://{}", encoded)
     } else if normalized.as_bytes().get(1) == Some(&b':') {
         format!("file:///{}", encoded)
@@ -378,14 +404,15 @@ pub fn asset_src_url(uri: &str) -> String {
 /// including the remote URLs OTIO also permits.
 pub fn file_url_to_path(url: &str) -> Option<String> {
     let rest = url.strip_prefix("file://")?;
-    // `file:///C:/x` and `file:///media/x` both leave a leading slash here; a
-    // Windows drive letter follows it, a POSIX absolute path is the slash.
-    let trimmed = match rest.strip_prefix('/') {
-        Some(after) if after.as_bytes().get(1) == Some(&b':') => after,
-        _ => rest,
-    };
 
-    Some(percent_decode(trimmed))
+    match rest.strip_prefix('/') {
+        // `file:///C:/x` — a Windows drive letter follows the slash.
+        Some(after) if after.as_bytes().get(1) == Some(&b':') => Some(percent_decode(after)),
+        // `file:///media/x` — a POSIX absolute path; the slash is part of it.
+        Some(_) => Some(percent_decode(rest)),
+        // `file://server/share/x` — an authority, so a UNC share.
+        None => Some(format!("//{}", percent_decode(rest))),
+    }
 }
 
 /// Reverses [`encode_file_url_path`]. Invalid escapes are kept verbatim.
@@ -552,11 +579,49 @@ mod tests {
             "/media/My Clip #1.mp4",
             r#"C:\Projects\My Clip.mp4"#,
             "/media/한글.mp4",
+            r#"\\server\share\My Clip.mp4"#,
         ] {
             let url = asset_src_url(path);
             let recovered = file_url_to_path(&url).expect("a file URL should decode");
             assert_eq!(recovered, path.replace('\\', "/"));
         }
+    }
+
+    #[test]
+    fn should_drop_the_windows_verbatim_prefix_from_a_media_url() {
+        // Given: the path shape `std::fs::canonicalize` returns on Windows,
+        // which is what an imported asset's URI actually holds
+        let verbatim = r#"\\?\C:\Media\My Clip.mp4"#;
+
+        // Then: the URL names the file, not the Win32 escape hatch. Left in,
+        // `\\?\` encodes to `file:////%3F/C:/…` and every NLE reads it as
+        // offline media.
+        assert_eq!(asset_src_url(verbatim), "file:///C:/Media/My%20Clip.mp4");
+        assert_eq!(
+            file_url_to_path(&asset_src_url(verbatim)).as_deref(),
+            Some("C:/Media/My Clip.mp4")
+        );
+    }
+
+    #[test]
+    fn should_restore_a_share_from_the_verbatim_unc_spelling() {
+        assert_eq!(
+            asset_src_url(r#"\\?\UNC\server\share\clip.mp4"#),
+            "file://server/share/clip.mp4"
+        );
+        assert_eq!(
+            file_url_to_path("file://server/share/clip.mp4").as_deref(),
+            Some("//server/share/clip.mp4")
+        );
+    }
+
+    #[test]
+    fn should_leave_a_path_without_a_verbatim_prefix_alone() {
+        assert_eq!(strip_verbatim_prefix("/media/clip.mp4"), "/media/clip.mp4");
+        assert_eq!(
+            strip_verbatim_prefix(r#"C:\Media\clip.mp4"#),
+            r#"C:\Media\clip.mp4"#
+        );
     }
 
     #[test]

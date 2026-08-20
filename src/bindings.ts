@@ -5983,7 +5983,7 @@ export type InterchangeFormat =
  */
 "fcpxml" | 
 /**
- * OpenTimelineIO (not yet implemented)
+ * OpenTimelineIO cut interchange
  */
 "otio"
 /**
