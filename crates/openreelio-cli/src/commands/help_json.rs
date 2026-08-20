@@ -402,10 +402,10 @@ pub(crate) fn build_schema() -> serde_json::Value {
             "transcription.install": {
                 "description": "Download and install a local Whisper model",
                 "params": {
-                    "model": { "type": "string", "required": false, "desc": "Whisper model: tiny, base, small, medium, large, large-v3, or large-v3-turbo. Defaults to large-v3-turbo" },
+                    "model": { "type": "string", "required": false, "desc": "Whisper model: tiny, base, small, medium, large, large-v3, large-v3-turbo, large-v3-turbo-q5_0, large-v3-turbo-q8_0, or large-v3-q5_0. Defaults to large-v3-turbo-q5_0. Every model except large gets DTW-aligned word timings; large (ggml-large.bin) does not, because the filename does not pin a version" },
                     "force": { "type": "boolean", "required": false, "desc": "Replace an existing model file" }
                 },
-                "example": "openreelio-cli transcription install --model large-v3-turbo"
+                "example": "openreelio-cli transcription install --model large-v3-turbo-q5_0"
             },
             "transcription.generate": {
                 "description": "Generate speech-to-text transcript segments for an audio or video asset, with optional caption import",
@@ -413,7 +413,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "asset": { "type": "string", "required": true, "desc": "Asset ID to transcribe" },
                     "language": { "type": "string", "required": false, "desc": "Language code, or auto for detection" },
-                    "model": { "type": "string", "required": false, "desc": "Whisper model, or auto to use the best installed model" },
+                    "model": { "type": "string", "required": false, "desc": "Whisper model, or auto to use the best installed model. Prefer any model except large: large keeps Whisper's heuristic word timings instead of DTW-aligned ones" },
                     "translate": { "type": "boolean", "required": false, "desc": "Translate recognized speech to English when supported" },
                     "output": { "type": "string", "required": false, "desc": "Write transcript JSON to this file in addition to stdout" },
                     "import": { "type": "boolean", "required": false, "desc": "Import generated captions into the active or selected sequence" },
@@ -429,7 +429,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID; defaults to active sequence" },
                     "language": { "type": "string", "required": false, "desc": "Language code, or auto for detection" },
-                    "model": { "type": "string", "required": false, "desc": "Whisper model, or auto to use the best installed model" },
+                    "model": { "type": "string", "required": false, "desc": "Whisper model, or auto to use the best installed model. Prefer any model except large: large keeps Whisper's heuristic word timings instead of DTW-aligned ones" },
                     "translate": { "type": "boolean", "required": false, "desc": "Translate recognized speech to English when supported" },
                     "output": { "type": "string", "required": false, "desc": "Write transcript JSON to this file in addition to stdout" },
                     "import": { "type": "boolean", "required": false, "desc": "Import generated captions into the selected sequence" },

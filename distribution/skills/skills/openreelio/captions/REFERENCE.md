@@ -245,24 +245,41 @@ into a caption track; without it, use `--output <FILE>` and import later.
 `generate-sequence` transcribes the audible mix of a sequence instead of a single
 asset.
 
-**Word timings come from DTW alignment on supported models.** Cue boundaries are
-derived from whisper.cpp's dynamic-time-warping alignment of decoder
-cross-attention rather than Whisper's cheap heuristic token timestamps, on
-`tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo` and their
-quantized variants. `large` (`ggml-large.bin`) is excluded because the plain
-filename is version-ambiguous upstream and a mismatched alignment-head preset
-makes the model fail to load; it keeps the heuristic timings, as does any model
-whose DTW initialization fails.
+**Caption cue boundaries come from DTW-aligned word timings.** Cue starts and
+ends — including on a cue short enough to need no splitting — are derived from
+whisper.cpp's dynamic-time-warping alignment of decoder cross-attention rather
+than Whisper's cheap heuristic token timestamps. This covers caption cues only:
+the transcript editor and the analysis word surfaces still estimate word times by
+dividing each segment equally among its words.
 
-DTW timestamps are quantized to whisper.cpp's ~20 ms encoder frames and are
-emitted only at alignment transitions, so a deterministic repair pass follows:
-gaps are interpolated, starts stay ordered and inside their segment, collapsed
-words are grown back to at least 40 ms, a word that would otherwise span a pause
-is released after at most 350 ms per syllable-ish unit, and starts are snapped to
-the nearest short-time-energy onset within 80 ms when ordering allows. Word
-boundaries are accurate to a few tens of milliseconds; do not treat them as
-frame-exact. Nothing here changes the CLI surface — there are no timing knobs to
-pass.
+Supported on `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo` and
+their quantized variants. A model file OpenReelio does not recognize by name runs
+without DTW — that is the usual skip. `large` (`ggml-large.bin`) is deliberately
+excluded because the plain filename is version-ambiguous upstream. The filename
+is trusted, not verified: weights renamed to a same-shaped model pass the bounds
+check and misalign silently. A preset that does not match the loaded weights is
+caught when whisper.cpp creates its first state; the engine probes for that up
+front and falls back to heuristic timings with a warning rather than failing the
+transcription. Flash attention stays off globally because it disables DTW.
+
+A deterministic repair pass then runs **on every transcription, DTW or not** —
+DTW improves its input rather than replacing it. The first word's start is
+recovered from the audio (DTW stamps where the alignment *leaves* a token, so the
+first token has an end and no start, and Whisper's fallback for it is just the
+segment start — silence, when the segment opens before anyone speaks). Starts
+stay ordered, non-overlapping and inside their segment; collapsed words are grown
+back toward at least 40 ms where the surrounding audio allows (a dense run with
+no room to give is spread evenly and stays under 40 ms); a word that would
+otherwise span a pause is released after at most 350 ms per syllable-ish unit,
+except the segment's last word, whose end anchors the tail cue; and starts are
+snapped to the nearest short-time-energy onset within 80 ms when that neither
+reorders nor starves a neighbour.
+
+Accuracy is indicative, not contractual: on English and Korean test clips whose
+speech is preceded by silence, the leading cue edge landed on the hand-measured
+onset to within the 10 ms analysis hop. That is clean speech with a clear attack.
+Do not treat cue boundaries as frame-exact. Nothing here changes the CLI surface
+— there are no timing knobs to pass.
 
 After generating captions, run `verify` — `caption.overlap`,
 `caption.out_of_bounds`, `caption.reading_rate`, and `caption.safe_area` catch

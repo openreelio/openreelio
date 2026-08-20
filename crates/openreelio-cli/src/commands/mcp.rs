@@ -662,8 +662,8 @@ fn build_tools(state: &McpServerState) -> Vec<Value> {
                     },
                     "model": {
                         "type": "string",
-                        "enum": ["auto", "tiny", "base", "small", "medium", "large", "large-v3", "large-v3-turbo"],
-                        "description": "Whisper model to use. Defaults to auto, which selects the best installed model."
+                        "enum": ["auto", "tiny", "base", "small", "medium", "large", "large-v3", "large-v3-turbo", "large-v3-turbo-q5_0", "large-v3-turbo-q8_0", "large-v3-q5_0"],
+                        "description": "Whisper model to use. Defaults to auto, which selects the best installed model. Every model except large produces DTW-aligned word timings; large (ggml-large.bin) keeps the cheaper heuristic ones because its filename does not pin a version."
                     },
                     "translate": { "type": "boolean" }
                 },
@@ -1696,7 +1696,7 @@ fn build_command_schema() -> Value {
             ],
             "timedSubtitles": [
                 "Call openreelio.transcription.status first and explain missing model installation before attempting automatic subtitles.",
-                "If no model is installed, tell the user to install one through the OpenReelio UI or `openreelio-cli transcription install --model large-v3-turbo` before transcription.generate.",
+                "If no model is installed, tell the user to install one through the OpenReelio UI or `openreelio-cli transcription install --model large-v3-turbo-q5_0` before transcription.generate.",
                 "Prefer openreelio.transcription.generate(sequenceAudio=true, sequenceId, language=\"auto\", model=\"auto\") as the default captioning path: its segment times are TIMELINE-relative and reflect cuts, trims, overlaps, and volume, so they pass straight to ImportGeneratedCaptions.",
                 "Use openreelio.transcription.generate(assetId, language=\"auto\", model=\"auto\") for source-asset analysis only: its times are SOURCE-relative (0-based to the asset) and must be mapped to the placed clip before ImportGeneratedCaptions, not used as direct timeline caption times.",
                 "Use ImportGeneratedCaptions for AI transcript segments or CreateCaption/UpdateCaption for individual caption lines.",
