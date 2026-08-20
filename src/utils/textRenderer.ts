@@ -6,6 +6,7 @@
 
 import type { TextClipData, TextStyle, Clip, Transform } from '@/types';
 import { isTextClip } from '@/types';
+import { scaleFontSizeToCanvas } from './previewCoords';
 
 // =============================================================================
 // Text Data Extraction
@@ -254,8 +255,8 @@ export function renderTextToCanvas(
   // Build font string
   const fontStyle = style.italic ? 'italic ' : '';
   const fontWeight = `${getTextFontWeightNumber(style)} `;
-  // Scale font size relative to canvas (assuming 1080p reference)
-  const scaledFontSize = (style.fontSize * canvasHeight) / 1080;
+  // Scale font size relative to the shared reference canvas height.
+  const scaledFontSize = scaleFontSizeToCanvas(style.fontSize, canvasHeight);
   ctx.font = `${fontStyle}${fontWeight}${scaledFontSize}px ${style.fontFamily}`;
 
   // Set text alignment

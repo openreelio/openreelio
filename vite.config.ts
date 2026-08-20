@@ -126,6 +126,27 @@ export default defineConfig(({ mode }) => {
               if (normalizedId.includes('/lucide-react/')) {
                 return 'vendor-icons';
               }
+              // react-moveable pulls in the whole @daybrush/@scena tree; keep
+              // it out of the main chunk since only the preview overlay uses it.
+              if (
+                normalizedId.includes('/react-moveable/') ||
+                normalizedId.includes('/react-selecto/') ||
+                normalizedId.includes('/selecto/') ||
+                normalizedId.includes('/@daybrush/') ||
+                normalizedId.includes('/@scena/') ||
+                normalizedId.includes('/@egjs/') ||
+                normalizedId.includes('/@cfcs/') ||
+                normalizedId.includes('/css-styled/') ||
+                normalizedId.includes('/css-to-mat/') ||
+                normalizedId.includes('/framework-utils/') ||
+                normalizedId.includes('/gesto/') ||
+                normalizedId.includes('/keycon/') ||
+                normalizedId.includes('/keycode/') ||
+                normalizedId.includes('/overlap-area/') ||
+                normalizedId.includes('/react-css-styled/')
+              ) {
+                return 'vendor-moveable';
+              }
               if (normalizedId.includes('/@tauri-apps/')) {
                 return 'vendor-tauri';
               }

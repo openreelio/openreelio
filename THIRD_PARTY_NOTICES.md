@@ -93,6 +93,44 @@ Copyright (c) 2010 by Brian J. Bonislawsky DBA Astigmatic (AOETI). All rights re
 - Upstream license file: `src-tauri/fonts/luckiest-guy/LICENSE.txt`
 
 
+## Bundled JavaScript Libraries
+
+These packages are compiled into the OpenReelio application bundle.
+
+### react-moveable
+
+- Version: 0.56.0
+- Copyright: (c) 2019 Daybrush
+- License: MIT
+- Source: https://github.com/daybrush/moveable
+
+Used for the preview transform overlay (drag / resize / rotate of the
+selected clip).
+
+react-moveable pulls the following transitive dependencies into the bundle. All
+are MIT licensed:
+
+| Package | Version | Copyright |
+|---------|---------|-----------|
+| @daybrush/utils | 1.13.0 | (c) Daybrush |
+| @egjs/agent | 2.4.4 | (c) NAVER Corp. |
+| @egjs/children-differ | 1.0.1 | (c) NAVER Corp. |
+| @egjs/list-differ | 1.0.1 | (c) NAVER Corp. |
+| @scena/dragscroll | 1.4.0 | (c) Daybrush |
+| @scena/event-emitter | 1.0.5 | (c) Daybrush |
+| @scena/matrix | 1.1.1 | (c) Daybrush |
+| css-styled | 1.0.8 | (c) Daybrush |
+| css-to-mat | 1.1.1 | (c) Daybrush |
+| framework-utils | 1.1.0 | (c) Daybrush |
+| gesto | 1.19.4 | (c) Daybrush |
+| overlap-area | 1.1.0 | (c) Daybrush |
+| react-css-styled | 1.1.9 | (c) Daybrush |
+
+`react-selecto`, `selecto`, `keycon`, `keycode`, `@cfcs/core` and
+`@egjs/component` are installed as transitive dependencies of react-moveable but
+no module OpenReelio imports ever reaches them, so they are absent from the
+shipped bundle and are deliberately not listed above.
+
 ## SIL Open Font License 1.1
 
 Applies to TikTok Sans, Montserrat, Anton, Archivo Black, Bebas Neue,
@@ -398,4 +436,35 @@ Apache License
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+```
+
+## MIT License
+
+Applies to react-moveable and its transitive dependencies listed above. The
+copyright line below is react-moveable's own; each transitive dependency keeps
+the copyright holder named in the table above, reproduced here as required by
+the MIT terms.
+
+```
+MIT License
+
+Copyright (c) 2019 Daybrush
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```

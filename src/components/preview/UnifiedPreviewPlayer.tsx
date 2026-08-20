@@ -8,11 +8,10 @@
  * This provides the best viewing experience based on available resources.
  */
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Check, Gauge, Grid3X3, Music, Shield } from 'lucide-react';
 import { TimelinePreviewPlayer } from './TimelinePreviewPlayer';
 import { ProxyPreviewPlayer } from './ProxyPreviewPlayer';
-import { TransformOverlay } from './TransformOverlay';
 import type { TextPlacementCommitPayload } from './TextPlacementOverlay';
 import { TrackingOverlay } from './TrackingOverlay';
 import { usePreviewMode } from '@/hooks/usePreviewMode';
@@ -69,7 +68,6 @@ const MEDIA_PREFERENCE_OPTIONS: Array<{ value: PreviewMediaPreference; label: st
 ];
 const AUDIO_DRIFT_WARNING_MS = 50;
 const AUDIO_DRIFT_CRITICAL_MS = 500;
-const DEFAULT_PREVIEW_CONTAINER_SIZE = { width: 1, height: 1 };
 
 // =============================================================================
 // Component
@@ -593,8 +591,6 @@ export const UnifiedPreviewPlayer = memo(function UnifiedPreviewPlayer({
   const setMediaPreference = usePreviewStore((state) => state.setMediaPreference);
   const setProgramPreviewCanvas = usePreviewStore((state) => state.setProgramPreviewCanvas);
   const { syncState } = usePlaybackController();
-  const canvasPreviewRef = useRef<HTMLDivElement | null>(null);
-  const [canvasPreviewSize, setCanvasPreviewSize] = useState(DEFAULT_PREVIEW_CONTAINER_SIZE);
 
   const sequence = useMemo(() => {
     if (sequenceProp !== undefined) {
@@ -646,46 +642,6 @@ export const UnifiedPreviewPlayer = memo(function UnifiedPreviewPlayer({
     sequenceCanvas && sequenceCanvas.width > 0 && sequenceCanvas.height > 0
       ? sequenceCanvas.width / sequenceCanvas.height
       : undefined;
-  const canvasOverlayDisplayScale = useMemo(() => {
-    if (!previewCanvas || previewCanvas.width <= 0 || previewCanvas.height <= 0) {
-      return 1;
-    }
-
-    const width = canvasPreviewSize.width > 0 ? canvasPreviewSize.width : previewCanvas.width;
-    const height = canvasPreviewSize.height > 0 ? canvasPreviewSize.height : previewCanvas.height;
-    return Math.min(width / previewCanvas.width, height / previewCanvas.height);
-  }, [canvasPreviewSize.height, canvasPreviewSize.width, previewCanvas]);
-
-  useEffect(() => {
-    const element = canvasPreviewRef.current;
-    if (!element) {
-      return;
-    }
-
-    const updateSize = () => {
-      const rect = element.getBoundingClientRect();
-      const fallbackWidth = previewCanvas?.width ?? DEFAULT_PREVIEW_CONTAINER_SIZE.width;
-      const fallbackHeight = previewCanvas?.height ?? DEFAULT_PREVIEW_CONTAINER_SIZE.height;
-      setCanvasPreviewSize({
-        width: rect.width > 0 ? rect.width : fallbackWidth,
-        height: rect.height > 0 ? rect.height : fallbackHeight,
-      });
-    };
-
-    updateSize();
-
-    if (typeof ResizeObserver === 'undefined') {
-      return;
-    }
-
-    const observer = new ResizeObserver(updateSize);
-    observer.observe(element);
-
-    return () => {
-      observer.disconnect();
-    };
-  }, [previewCanvas?.height, previewCanvas?.width]);
-
   const isAudioOnlySequence = useMemo(() => {
     if (!sequence) {
       return false;
@@ -799,7 +755,6 @@ export const UnifiedPreviewPlayer = memo(function UnifiedPreviewPlayer({
   // Render canvas-based player for canvas mode
   return (
     <div
-      ref={canvasPreviewRef}
       className={`relative ${className}`}
       data-testid="unified-preview-player"
       data-mode="canvas"
@@ -820,21 +775,6 @@ export const UnifiedPreviewPlayer = memo(function UnifiedPreviewPlayer({
         textPlacementModeActive={textPlacementModeActive}
         onTextPlacementCommit={onTextPlacementCommit}
       />
-
-      {sequence && previewCanvas && !isAudioOnlySequence && (
-        <TransformOverlay
-          sequence={sequence}
-          assets={assets}
-          canvasWidth={previewCanvas.width}
-          canvasHeight={previewCanvas.height}
-          containerWidth={canvasPreviewSize.width}
-          containerHeight={canvasPreviewSize.height}
-          displayScale={canvasOverlayDisplayScale}
-          panX={0}
-          panY={0}
-          zIndex={18}
-        />
-      )}
 
       <PreviewGuideOverlay showSafeMargins={showSafeMargins} showGuides={showGuides} />
       <PreviewDiagnosticsOverlay syncState={syncState} />

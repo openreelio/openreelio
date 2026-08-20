@@ -30,6 +30,7 @@ import {
 } from '@/utils/textRenderer';
 import { getClipSourceTimeAtTimelineTime, isClipActiveAtTime } from '@/utils/clipTiming';
 import { getClipMotionTransformAtTime } from '@/utils/clipMotion';
+import { computeContainFit, scaleFontSizeToCanvas } from '@/utils/previewCoords';
 import { getActiveVisualLayers } from '@/utils/renderGraphLayers';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { getEffectiveBlendMode } from '@/utils/blendModes';
@@ -148,9 +149,7 @@ function drawVisualWithClipTransform(
   ctx.globalAlpha = clip.opacity;
   ctx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] || 'source-over';
 
-  const baseScaleX = canvasWidth / sourceWidth;
-  const baseScaleY = canvasHeight / sourceHeight;
-  const baseScale = Math.min(baseScaleX, baseScaleY);
+  const baseScale = computeContainFit(sourceWidth, sourceHeight, canvasWidth, canvasHeight);
 
   const scaledWidth = sourceWidth * baseScale * transform.scale.x;
   const scaledHeight = sourceHeight * baseScale * transform.scale.y;
@@ -848,13 +847,10 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     };
   }, [pause]);
 
-  const overlayDisplayScale = useMemo(() => {
-    if (width <= 0 || height <= 0 || containerSize.width <= 0 || containerSize.height <= 0) {
-      return 1;
-    }
-
-    return Math.min(containerSize.width / width, containerSize.height / height);
-  }, [containerSize.width, containerSize.height, width, height]);
+  const overlayDisplayScale = useMemo(
+    () => computeContainFit(width, height, containerSize.width, containerSize.height),
+    [containerSize.width, containerSize.height, width, height],
+  );
 
   // ===========================================================================
   // Render Empty State
@@ -1121,7 +1117,7 @@ function renderCaptionClipToCanvas(
     return;
   }
 
-  const fontSizePx = Math.max(12, (style.fontSize * canvasHeight) / 1080);
+  const fontSizePx = scaleFontSizeToCanvas(style.fontSize, canvasHeight, 12);
   const fontWeight = String(getCaptionFontWeightNumber(style));
   const fontStyle = style.italic ? 'italic ' : '';
   const lineHeight = fontSizePx * (style.lineHeight ?? 1.2);
