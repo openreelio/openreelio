@@ -7,6 +7,7 @@ import {
   type KeyboardEvent,
   type PointerEvent,
 } from 'react';
+import { computeContainFit } from '@/utils/previewCoords';
 
 export interface TextPlacementCommitPayload {
   content: string;
@@ -60,23 +61,14 @@ function resolveContainedPosition(
   aspectRatio: number,
 ): DraftTextPlacement {
   const safeAspectRatio = Number.isFinite(aspectRatio) && aspectRatio > 0 ? aspectRatio : 16 / 9;
-  const containerRatio =
-    rect.width > 0 && rect.height > 0 ? rect.width / rect.height : safeAspectRatio;
 
-  let contentWidth = Math.max(MIN_CONTENT_SIZE_PX, rect.width);
-  let contentHeight = Math.max(MIN_CONTENT_SIZE_PX, rect.height);
-  let contentLeft = 0;
-  let contentTop = 0;
-
-  if (containerRatio > safeAspectRatio) {
-    contentHeight = Math.max(MIN_CONTENT_SIZE_PX, rect.height);
-    contentWidth = Math.max(MIN_CONTENT_SIZE_PX, contentHeight * safeAspectRatio);
-    contentLeft = (rect.width - contentWidth) / 2;
-  } else {
-    contentWidth = Math.max(MIN_CONTENT_SIZE_PX, rect.width);
-    contentHeight = Math.max(MIN_CONTENT_SIZE_PX, contentWidth / safeAspectRatio);
-    contentTop = (rect.height - contentHeight) / 2;
-  }
+  // The letterboxed content box is the shared contain-fit of an
+  // `aspectRatio : 1` source inside the container rect.
+  const fitScale = computeContainFit(safeAspectRatio, 1, rect.width, rect.height);
+  const contentHeight = Math.max(MIN_CONTENT_SIZE_PX, fitScale);
+  const contentWidth = Math.max(MIN_CONTENT_SIZE_PX, fitScale * safeAspectRatio);
+  const contentLeft = (rect.width - contentWidth) / 2;
+  const contentTop = (rect.height - contentHeight) / 2;
 
   const relativeX = clientX - rect.left - contentLeft;
   const relativeY = clientY - rect.top - contentTop;

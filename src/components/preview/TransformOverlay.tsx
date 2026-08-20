@@ -15,6 +15,12 @@ import type { Asset, Transform, Sequence, TextClipAlignment, TextClipData } from
 import { getClipMotionTransformAtTime } from '@/utils/clipMotion';
 import { extractTextDataFromClipWithMap, getTextFontWeightNumber } from '@/utils/textRenderer';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
+import {
+  clipBoundsFromTransform,
+  scaleFontSizeToCanvas,
+  type PreviewSource,
+  type PreviewViewport,
+} from '@/utils/previewCoords';
 
 // =============================================================================
 // Types
@@ -172,7 +178,7 @@ function measureTextBounds(
     return DEFAULT_TEXT_BOUNDS;
   }
 
-  const scaledFontSize = Math.max(1, (textData.style.fontSize * canvasHeight) / 1080);
+  const scaledFontSize = scaleFontSizeToCanvas(textData.style.fontSize, canvasHeight, 1);
   const fontStyle = textData.style.italic ? 'italic ' : '';
   const fontWeight = `${getTextFontWeightNumber(textData.style)} `;
   ctx.font = `${fontStyle}${fontWeight}${scaledFontSize}px ${textData.style.fontFamily}`;
@@ -275,62 +281,28 @@ export const TransformOverlay = memo(function TransformOverlay({
     const measuredTextBounds = textData ? measureTextBounds(textData, canvasHeight) : null;
 
     // Get source dimensions from asset, fallback to canvas dimensions.
-    const sourceWidth = Math.max(
-      1,
-      measuredTextBounds?.width ?? asset?.video?.width ?? canvasWidth,
-    );
-    const sourceHeight = Math.max(
-      1,
-      measuredTextBounds?.height ?? asset?.video?.height ?? canvasHeight,
-    );
+    // Text bounds are already in canvas-space pixels, so they skip letterbox fitting.
+    const source: PreviewSource = {
+      width: Math.max(1, measuredTextBounds?.width ?? asset?.video?.width ?? canvasWidth),
+      height: Math.max(1, measuredTextBounds?.height ?? asset?.video?.height ?? canvasHeight),
+      isCanvasSpace: measuredTextBounds !== null,
+    };
 
-    // Text bounds are already in canvas-space pixels, so skip letterbox fitting.
-    let baseScale = 1;
-    if (!measuredTextBounds) {
-      const sourceAspect = sourceWidth / sourceHeight;
-      const canvasAspect = canvasWidth / canvasHeight;
+    const viewport: PreviewViewport = {
+      canvasWidth,
+      canvasHeight,
+      containerWidth,
+      containerHeight,
+      displayScale,
+      panX,
+      panY,
+    };
 
-      if (sourceAspect > canvasAspect) {
-        baseScale = canvasWidth / sourceWidth;
-      } else {
-        baseScale = canvasHeight / sourceHeight;
-      }
-    }
-
-    // Calculate the fitted source size (before clip transform)
-    const fittedWidth = sourceWidth * baseScale;
-    const fittedHeight = sourceHeight * baseScale;
-
-    // Apply clip's additional scale transform
-    const clipWidth = fittedWidth * transform.scale.x;
-    const clipHeight = fittedHeight * transform.scale.y;
-
-    // Position is normalized canvas space. For text, the horizontal anchor
-    // follows text alignment so left/right aligned text stays under the box.
-    const anchorCanvasX = transform.position.x * canvasWidth;
-    const anchorCanvasY = transform.position.y * canvasHeight;
-
-    // Calculate top-left corner based on anchor point
-    const left = anchorCanvasX - clipWidth * transform.anchor.x;
-    const top = anchorCanvasY - clipHeight * transform.anchor.y;
-
-    // Convert to container coordinates with zoom and pan
-    const containerCenterX = containerWidth / 2;
-    const containerCenterY = containerHeight / 2;
-
-    const scaledLeft = containerCenterX + (left - canvasWidth / 2) * displayScale + panX;
-    const scaledTop = containerCenterY + (top - canvasHeight / 2) * displayScale + panY;
-    const scaledWidth = clipWidth * displayScale;
-    const scaledHeight = clipHeight * displayScale;
+    const bounds = clipBoundsFromTransform(transform, source, viewport);
 
     return {
-      left: scaledLeft,
-      top: scaledTop,
-      width: scaledWidth,
-      height: scaledHeight,
-      rotation: transform.rotationDeg,
-      centerX: scaledLeft + scaledWidth / 2,
-      centerY: scaledTop + scaledHeight / 2,
+      ...bounds,
+      rotation: bounds.rotationDeg,
     };
   }, [
     selectedClip,

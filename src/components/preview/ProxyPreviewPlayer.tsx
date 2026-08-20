@@ -42,6 +42,7 @@ import {
   isClipActiveAtTime,
 } from '@/utils/clipTiming';
 import { getClipMotionTransformAtTime } from '@/utils/clipMotion';
+import { scaleFontSizeToCanvas } from '@/utils/previewCoords';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { TextPlacementOverlay, type TextPlacementCommitPayload } from './TextPlacementOverlay';
 import { TransformOverlay } from './TransformOverlay';
@@ -1627,7 +1628,8 @@ export function ProxyPreviewPlayer({
             const textDecoration = style.underline ? 'underline' : 'none';
             const captionFontSize = Math.max(
               1,
-              Math.max(12, (style.fontSize * previewCanvasHeight) / 1080) * overlayDisplayScale,
+              scaleFontSizeToCanvas(style.fontSize, previewCanvasHeight, 12) *
+                overlayDisplayScale,
             );
             const backgroundPadding = Math.max(
               0,
@@ -1700,7 +1702,8 @@ export function ProxyPreviewPlayer({
             const rotation = Number.isFinite(textData.rotation) ? textData.rotation : 0;
             const fontSize = Math.max(
               1,
-              ((textData.style.fontSize * previewCanvasHeight) / 1080) * overlayDisplayScale,
+              scaleFontSizeToCanvas(textData.style.fontSize, previewCanvasHeight) *
+                overlayDisplayScale,
             );
             const opacity = Math.max(0, Math.min(1, textData.opacity));
             const textShadow = buildTextOverlayShadow(textData, overlayDisplayScale);

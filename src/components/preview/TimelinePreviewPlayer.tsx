@@ -30,6 +30,7 @@ import {
 } from '@/utils/textRenderer';
 import { getClipSourceTimeAtTimelineTime, isClipActiveAtTime } from '@/utils/clipTiming';
 import { getClipMotionTransformAtTime } from '@/utils/clipMotion';
+import { computeContainFit, scaleFontSizeToCanvas } from '@/utils/previewCoords';
 import { getActiveVisualLayers } from '@/utils/renderGraphLayers';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { getEffectiveBlendMode } from '@/utils/blendModes';
@@ -148,9 +149,7 @@ function drawVisualWithClipTransform(
   ctx.globalAlpha = clip.opacity;
   ctx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] || 'source-over';
 
-  const baseScaleX = canvasWidth / sourceWidth;
-  const baseScaleY = canvasHeight / sourceHeight;
-  const baseScale = Math.min(baseScaleX, baseScaleY);
+  const baseScale = computeContainFit(sourceWidth, sourceHeight, canvasWidth, canvasHeight);
 
   const scaledWidth = sourceWidth * baseScale * transform.scale.x;
   const scaledHeight = sourceHeight * baseScale * transform.scale.y;
@@ -1121,7 +1120,7 @@ function renderCaptionClipToCanvas(
     return;
   }
 
-  const fontSizePx = Math.max(12, (style.fontSize * canvasHeight) / 1080);
+  const fontSizePx = scaleFontSizeToCanvas(style.fontSize, canvasHeight, 12);
   const fontWeight = String(getCaptionFontWeightNumber(style));
   const fontStyle = style.italic ? 'italic ' : '';
   const lineHeight = fontSizePx * (style.lineHeight ?? 1.2);
